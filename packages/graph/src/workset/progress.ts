@@ -1,5 +1,6 @@
 import {Clock, Console, Effect, Ref, Semaphore} from 'effect';
 import type {CodeGraphWorksetPrepareProgressV1} from '../workset_catalog/workset.js';
+import {Array as EffectArray} from 'effect';
 
 export const CODE_GRAPH_WORKSET_JSON_PROGRESS_INTERVAL_MILLISECONDS = 2_000;
 
@@ -15,14 +16,20 @@ export function codeGraphWorksetJsonProgressDecision(
   nowMilliseconds: number,
   intervalMilliseconds = CODE_GRAPH_WORKSET_JSON_PROGRESS_INTERVAL_MILLISECONDS,
 ): {readonly emit: boolean; readonly state: CodeGraphWorksetJsonProgressState} {
-  const signature = [
-    progress.phase,
-    progress.project,
-    progress.attempt,
-    progress.activity?.phase,
-    progress.activity?.subphase,
-    progress.activity?.reason,
-  ].join('/');
+  const signature = EffectArray.join(
+    EffectArray.map(
+      [
+        progress.phase,
+        progress.project,
+        progress.attempt,
+        progress.activity?.phase,
+        progress.activity?.subphase,
+        progress.activity?.reason,
+      ],
+      item => (item === null || item === undefined ? '' : String(item)),
+    ),
+    '/',
+  );
   const intervalElapsed =
     state.lastEmittedAtMilliseconds === undefined ||
     nowMilliseconds < state.lastEmittedAtMilliseconds ||

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -113,8 +115,13 @@ export const recordActivationUndoCompletionV1 = Effect.fn('activation.undoStore.
       if (current.revision !== input.expectedRevision) throw new Error('Activation undo receipt changed concurrently.');
       if (!current.operationIds.includes(input.operationId))
         throw new Error('Activation undo operation is not planned.');
-      const completedOperationIds = current.operationIds.filter(
-        operationId => current.completedOperationIds.includes(operationId) || operationId === input.operationId,
+      const completedOperationIds = EffectArrayPipe(current.operationIds, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (operationId, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues &&
+            (current.completedOperationIds.includes(operationId) || operationId === input.operationId),
+        ),
       );
       const next = receiptWithRevision({
         activationId: current.activationId,
@@ -139,7 +146,7 @@ function parseReceipt(value: unknown, activationId: string): ActivationUndoRecei
   if (new Set(receipt.operationIds).size !== receipt.operationIds.length) throw new Error('Duplicate undo operations.');
   if (new Set(receipt.completedOperationIds).size !== receipt.completedOperationIds.length)
     throw new Error('Duplicate completed undo operations.');
-  if (receipt.completedOperationIds.some(operationId => !receipt.operationIds.includes(operationId)))
+  if (EffectArray.some(receipt.completedOperationIds, operationId => !receipt.operationIds.includes(operationId)))
     throw new Error('Completed undo operation is not planned.');
   const expectedStatus =
     receipt.completedOperationIds.length === receipt.operationIds.length ? 'completed' : 'in-progress';

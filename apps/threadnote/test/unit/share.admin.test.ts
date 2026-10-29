@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import {access, mkdir, mkdtemp, readFile, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -11,7 +12,7 @@ import {
   syncSharedReposBeforeAgentRead,
 } from '@threadnote/threadnote/effect/share';
 import type {CommandResult} from '@threadnote/platform/command';
-import type {ShareRuntime, ShareTeamsFile} from '@threadnote/threadnote/types';
+import type {ShareRuntime} from '@threadnote/threadnote/types';
 import * as utils from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
@@ -79,8 +80,36 @@ async function makeRuntime(): Promise<ShareRuntime> {
   return {account: 'local', agentContextHome: home, agentId: 'threadnote', user: 'denys'};
 }
 
-async function readTeams(config: ShareRuntime): Promise<ShareTeamsFile> {
-  return JSON.parse(await readFile(join(config.agentContextHome, 'share', 'teams.json'), 'utf8')) as ShareTeamsFile;
+async function readTeams(config: ShareRuntime): Promise<ShareTeamsProjection> {
+  const value: unknown = JSON.parse(await readFile(join(config.agentContextHome, 'share', 'teams.json'), 'utf8'));
+  if (!isShareTeamsProjection(value)) throw new Error('The share administration file is missing its team projection.');
+  return value;
+}
+
+interface ShareTeamsProjection {
+  readonly defaultTeam?: string;
+  readonly teams: Readonly<
+    Record<string, {readonly name?: string; readonly remote?: string; readonly worktree?: string}>
+  >;
+}
+
+const ShareTeamsProjectionSchema = Schema.StructWithRest(
+  Schema.Struct({
+    defaultTeam: Schema.optionalKey(Schema.String),
+    teams: Schema.Record(
+      Schema.String,
+      Schema.Struct({
+        name: Schema.optionalKey(Schema.String),
+        remote: Schema.optionalKey(Schema.String),
+        worktree: Schema.optionalKey(Schema.String),
+      }),
+    ),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+
+function isShareTeamsProjection(value: unknown): value is ShareTeamsProjection {
+  return Schema.is(ShareTeamsProjectionSchema)(value);
 }
 
 describe('share administration', () => {
@@ -97,7 +126,7 @@ describe('share administration', () => {
   afterEach(async () => {
     clearAutoShareStateForTest();
     vi.restoreAllMocks();
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('renames a share team, moves its worktree/gitdir, and updates teams.json', async () => {
@@ -146,22 +175,22 @@ describe('share administration', () => {
     const teams = await readTeams(config);
     expect(teams.teams.default?.remote).toBe('git@example.com:new/memories.git');
     expect(
-      vi
-        .mocked(utils.runCommand)
-        .mock.calls.some(
-          ([executable, args]) =>
-            executable === 'git' &&
-            args[0] === '-C' &&
-            args[2] === 'remote' &&
-            args[3] === 'set-url' &&
-            args[5] === '--' &&
-            args[6] === 'git@example.com:new/memories.git',
-        ),
+      EffectArray.some(
+        vi.mocked(utils.runCommand).mock.calls,
+        ([executable, args]) =>
+          executable === 'git' &&
+          args[0] === '-C' &&
+          args[2] === 'remote' &&
+          args[3] === 'set-url' &&
+          args[5] === '--' &&
+          args[6] === 'git@example.com:new/memories.git',
+      ),
     ).toBe(true);
     expect(
-      vi
-        .mocked(utils.runCommand)
-        .mock.calls.some(([executable, args]) => executable === 'git' && args.includes('fetch')),
+      EffectArray.some(
+        vi.mocked(utils.runCommand).mock.calls,
+        ([executable, args]) => executable === 'git' && args.includes('fetch'),
+      ),
     ).toBe(true);
   });
 
@@ -213,7 +242,7 @@ describe('share administration', () => {
     );
     expect(preview.output).not.toContain('git commit');
     expect(messages).toContain('git commit: nothing to commit (requested paths already absent)');
-    expect(vi.mocked(utils.runCommand).mock.calls.some(([, args]) => args.includes('commit'))).toBe(false);
+    expect(EffectArray.some(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args.includes('commit'))).toBe(false);
   });
 
   it('commits only staged members of a mixed ignored-removal path set', async () => {
@@ -291,8 +320,8 @@ describe('share administration', () => {
     }
 
     const commands = vi.mocked(utils.runCommand).mock.calls;
-    const fetches = commands.filter(([, args]) => args[2] === 'fetch');
-    const inspections = commands.filter(([, args]) => args[2] === 'rev-list');
+    const fetches = EffectArray.filter(commands, ([, args]) => args[2] === 'fetch');
+    const inspections = EffectArray.filter(commands, ([, args]) => args[2] === 'rev-list');
     expect(fetches).toHaveLength(1);
     expect(inspections).toHaveLength(1);
     expect(commands).toHaveLength(2);
@@ -332,8 +361,8 @@ describe('share administration', () => {
     const results = await Promise.all([first, second]);
 
     const commands = vi.mocked(utils.runCommand).mock.calls;
-    expect(commands.filter(([, args]) => args[2] === 'fetch')).toHaveLength(1);
-    expect(commands.filter(([, args]) => args[2] === 'rev-list')).toHaveLength(1);
+    expect(EffectArray.filter(commands, ([, args]) => args[2] === 'fetch')).toHaveLength(1);
+    expect(EffectArray.filter(commands, ([, args]) => args[2] === 'rev-list')).toHaveLength(1);
     expect(results).toEqual([
       {syncedTeams: [], warnings: []},
       {syncedTeams: [], warnings: []},
@@ -349,7 +378,9 @@ describe('share administration', () => {
 
     await runEffect(syncSharedReposBeforeAgentRead(config));
 
-    expect(vi.mocked(utils.runCommand).mock.calls.filter(([, args]) => args[2] === 'fetch')).toHaveLength(1);
+    expect(EffectArray.filter(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args[2] === 'fetch')).toHaveLength(
+      1,
+    );
     await expect(readFile(receipt, 'utf8').then(content => JSON.parse(content))).resolves.toMatchObject({
       succeeded: true,
       team: 'default',

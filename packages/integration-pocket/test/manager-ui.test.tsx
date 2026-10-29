@@ -6,6 +6,9 @@ import {ManagerDialogProvider} from '@threadnote/manager/dialog';
 import {IntegrationsPanel} from '@threadnote/manager/integrations-view';
 import {pocketIntegration} from '../src/manager-ui/index.js';
 import {PocketConnectionForm} from '../src/manager-ui/connection-form.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 let root: Root | undefined;
 afterEach(async () => {
@@ -16,14 +19,29 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 async function render(node: React.ReactNode): Promise<void> {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
   await act(async () => root?.render(<ManagerDialogProvider>{node}</ManagerDialogProvider>));
 }
 function button(label: string): HTMLButtonElement {
-  const match = [...document.querySelectorAll('button')].find(item => item.textContent?.trim().startsWith(label));
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(
+            item.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!match) throw new Error('Button not found: ' + label);
   return match;
 }
@@ -160,7 +178,9 @@ describe('Pocket connection', () => {
         confirm: true,
       },
     ]);
-    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
+    const passwordInput = document.querySelector('input[type="password"]');
+    if (!(passwordInput instanceof HTMLInputElement)) throw new Error('Expected the Pocket API key input.');
+    expect(passwordInput.value).toBe('');
   });
   it('retains the local key on a blank settings edit', async () => {
     const calls: Record<string, unknown>[] = [];

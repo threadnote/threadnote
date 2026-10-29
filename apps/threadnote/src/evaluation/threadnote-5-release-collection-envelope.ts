@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -13,6 +14,7 @@ import {
   threadnote5LocalSubsystemReceiptDigest,
   type Threadnote5LocalSubsystemReceiptRecordV1,
 } from './threadnote-5-release-readiness-receipts.js';
+import * as EffectRecord from 'effect/Record';
 
 export function deriveThreadnote5PrivateCollection(
   planValue: unknown,
@@ -21,13 +23,13 @@ export function deriveThreadnote5PrivateCollection(
 ) {
   const plan = parseThreadnote5CollectionPlan(planValue);
   if (
-    !Array.isArray(transcriptsValue) ||
+    !EffectArray.isArray(transcriptsValue) ||
     new TextEncoder().encode(canonicalJson(transcriptsValue)).byteLength > 64 * 1024 * 1024
   )
     throw new Error('Private transcript set is missing or exceeds its bound.');
   const runtimeBoundaries = canonicalizeThreadnote5ScenarioRuntimeBoundariesV1(
     plan.candidate,
-    plan.recipes.map(recipe => recipe.scenario),
+    EffectArray.map(plan.recipes, recipe => recipe.scenario),
     boundariesValue,
   );
   const records: Threadnote5LocalSubsystemReceiptRecordV1[] = [];
@@ -39,8 +41,10 @@ export function deriveThreadnote5PrivateCollection(
   const seen = new Map<string, string>();
   let cursor = 0;
   for (const recipe of plan.recipes) {
-    const matrix = THREADNOTE_5_COLLECTION_MATRIX.find(item => item[0] === recipe.scenario)!;
-    const count = matrix[1].some(item => item[1] > 1) ? plan.measuredTrials : 1;
+    const matrix = EffectOption.getOrUndefined(
+      EffectArray.findFirst(THREADNOTE_5_COLLECTION_MATRIX, item => item[0] === recipe.scenario),
+    )!;
+    const count = EffectArray.some(matrix[1], item => item[1] > 1) ? plan.measuredTrials : 1;
     const trials = Array.from({length: count}, (_, index) => {
       const value = exact(transcriptsValue[cursor++], ['identity', 'scenario', 'steps', 'mcpStderr']);
       const identity = collectionTrialIdentity(plan.runId, recipe.scenario, index);
@@ -48,11 +52,12 @@ export function deriveThreadnote5PrivateCollection(
         throw new Error('Transcript identity/scenario order is duplicated, missing, or drifting.');
       const stderr = object(value.mcpStderr);
       if (
-        Object.entries(stderr).some(
+        EffectArray.some(
+          EffectRecord.toEntries(stderr),
           ([key, value]) =>
             !['primary', 'secondary'].includes(key) ||
-            !Array.isArray(value) ||
-            value.some(item => typeof item !== 'string'),
+            !EffectArray.isArray(value) ||
+            EffectArray.some(value, item => typeof item !== 'string'),
         )
       )
         throw new Error('Invalid private MCP stderr capture.');
@@ -141,7 +146,7 @@ function transcriptOutputs(
   value: unknown,
   identity: ReturnType<typeof collectionTrialIdentity>,
 ): Record<string, unknown> {
-  if (!Array.isArray(value) || value.length !== recipe.steps.length)
+  if (!EffectArray.isArray(value) || value.length !== recipe.steps.length)
     throw new Error('Transcript steps do not exactly cover the reviewed recipe.');
   const outputs: Record<string, unknown> = {};
   for (const [index, raw] of value.entries()) {
@@ -162,9 +167,9 @@ function transcriptOutputs(
       'secondaryRepo',
       'remote',
     ]);
-    if (Object.values(bindings).some(value => typeof value !== 'string'))
+    if (EffectArray.some(EffectRecord.values(bindings), value => typeof value !== 'string'))
       throw new Error('Invalid private transcript bindings.');
-    if (Object.entries(identity).some(([key, value]) => bindings[key] !== value))
+    if (EffectArray.some(EffectRecord.toEntries(identity), ([key, value]) => bindings[key] !== value))
       throw new Error('Private transcript bindings reuse another trial identity.');
     if (step.type === 'write') {
       if (item.output !== null) throw new Error('Synthetic writes cannot supply native observations.');
@@ -198,11 +203,12 @@ function transcriptOutputs(
 }
 
 export function assertUniqueNativeIdentities(value: unknown, trial: string, seen: Map<string, string>): void {
-  if (Array.isArray(value)) {
-    value.forEach(item => assertUniqueNativeIdentities(item, trial, seen));
+  if (EffectArray.isArray(value)) {
+    EffectArray.forEach(value, item => assertUniqueNativeIdentities(item, trial, seen));
     return;
   }
   if (typeof value !== 'object' || value === null) return;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This recursively validated input is an arbitrary object.
   for (const [key, item] of Object.entries(value)) {
     if (
       ['laneId', 'trialId', 'reviewId', 'proposalId', 'activationId'].includes(key) &&
@@ -223,13 +229,12 @@ function hash(value: unknown): boolean {
   return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
 }
 function object(value: unknown): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('Private collection field must be an object.');
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error('Private collection field must be an object.');
+  return value;
 }
 function exact(value: unknown, keys: readonly string[]): Record<string, unknown> {
   const result = object(value);
-  if (canonicalJson(Object.keys(result).sort()) !== canonicalJson([...keys].sort()))
+  if (canonicalJson(EffectRecord.keys(result).sort()) !== canonicalJson([...keys].sort()))
     throw new Error('Private collection object has missing or extra fields.');
   return result;
 }

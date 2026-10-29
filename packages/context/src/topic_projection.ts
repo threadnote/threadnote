@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Predicate} from 'effect';
 import {
   CONTEXT_BRIEF_LEGACY_PROJECTOR_VERSION,
@@ -15,6 +16,7 @@ import {
   type ContextBriefResponseVersion,
   type ContextBriefTopicMaintenanceV1,
 } from './types.js';
+import * as EffectRecord from 'effect/Record';
 
 const TOPIC_FIELDS = new Set([
   'coverage',
@@ -26,14 +28,17 @@ const TOPIC_FIELDS = new Set([
   'attention',
   'reviewId',
 ]);
-const REQUIRED = [...TOPIC_FIELDS].filter(field => field !== 'reviewId');
+const REQUIRED = EffectArray.filter([...TOPIC_FIELDS], field => field !== 'reviewId');
 const count = (value: unknown): value is number =>
   Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 64;
 
 /** Closed wire contract shared by the structured and agent-view decoders. */
 export function isContextBriefTopicField(value: unknown): value is ContextBriefTopicMaintenanceV1 {
-  if (!Predicate.isObject(value) || Array.isArray(value)) return false;
-  if (Object.keys(value).some(key => !TOPIC_FIELDS.has(key)) || REQUIRED.some(key => !Object.hasOwn(value, key)))
+  if (!Predicate.isObject(value) || EffectArray.isArray(value)) return false;
+  if (
+    EffectArray.some(EffectRecord.keys(value), key => !TOPIC_FIELDS.has(key)) ||
+    EffectArray.some(REQUIRED, key => !EffectRecord.has(value, key))
+  )
     return false;
   const pending = value.attention === 'pending-review';
   return (
@@ -54,8 +59,8 @@ export function isContextBriefTopicField(value: unknown): value is ContextBriefT
 
 export function topicProjectionError(value: Record<string, unknown>, topicVersion: boolean): string | undefined {
   for (const field of ['activeHandoffs', 'durableDecisions']) {
-    for (const memory of Array.isArray(value[field]) ? value[field] : []) {
-      if (!Predicate.isObject(memory) || !Object.hasOwn(memory, 'topicMaintenance')) continue;
+    for (const memory of EffectArray.isArray(value[field]) ? value[field] : []) {
+      if (!Predicate.isObject(memory) || !EffectRecord.has(memory, 'topicMaintenance')) continue;
       if (!isContextBriefTopicField(memory.topicMaintenance)) return `${field}.topicMaintenance is invalid`;
     }
   }
@@ -66,13 +71,16 @@ export function topicProjectionError(value: Record<string, unknown>, topicVersio
 
 function hasTopicMarker(value: Record<string, unknown>): boolean {
   const memories = [
-    ...(Array.isArray(value.activeHandoffs) ? value.activeHandoffs : []),
-    ...(Array.isArray(value.durableDecisions) ? value.durableDecisions : []),
+    ...(EffectArray.isArray(value.activeHandoffs) ? value.activeHandoffs : []),
+    ...(EffectArray.isArray(value.durableDecisions) ? value.durableDecisions : []),
   ];
   return (
-    memories.some(memory => Predicate.isObject(memory) && Object.hasOwn(memory, 'topicMaintenance')) ||
-    (Array.isArray(value.stalenessAndConflicts) &&
-      value.stalenessAndConflicts.some(issue => Predicate.isObject(issue) && issue.kind === 'topic-support'))
+    EffectArray.some(memories, memory => Predicate.isObject(memory) && EffectRecord.has(memory, 'topicMaintenance')) ||
+    (EffectArray.isArray(value.stalenessAndConflicts) &&
+      EffectArray.some(
+        value.stalenessAndConflicts,
+        issue => Predicate.isObject(issue) && issue.kind === 'topic-support',
+      ))
   );
 }
 

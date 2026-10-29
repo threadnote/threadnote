@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {managerHomeLanes, type ManagerHomeLaneInput} from '@threadnote/manager/home';
@@ -9,21 +10,31 @@ describe('Manager project home', () => {
       reviews: {pendingCount: 2},
       value: {applied: 1, reviewed: 2, useful: 3},
     });
-    expect(lanes.map(lane => lane.id)).toEqual(['reviews', 'health', 'value']);
-    expect(lanes.map(lane => lane.status)).toEqual(['attention', 'clear', 'clear']);
+    expect(EffectArray.map(lanes, lane => lane.id)).toEqual(['reviews', 'health', 'value']);
+    expect(EffectArray.map(lanes, lane => lane.status)).toEqual(['attention', 'clear', 'clear']);
   });
 
   it('counts decision memories independently of diagnostic and incomplete coverage counts', () => {
-    const health = managerHomeLanes({
-      health: {findingCount: 2_013, status: 'unknown', decisionMemories: 3, automaticCount: 4, coverage: 'partial'},
-    }).find(item => item.id === 'health');
+    const health = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        managerHomeLanes({
+          health: {findingCount: 2_013, status: 'unknown', decisionMemories: 3, automaticCount: 4, coverage: 'partial'},
+        }),
+        item => item.id === 'health',
+      ),
+    );
     expect(health).toMatchObject({count: 3, status: 'attention'});
     expect(health?.detail).toContain('3 memories need your decision');
     expect(health?.detail).toContain('evidence checks incomplete');
     expect(
-      managerHomeLanes({
-        health: {findingCount: 2_013, status: 'unknown', decisionMemories: 0, coverage: 'partial'},
-      }).find(item => item.id === 'health'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          managerHomeLanes({
+            health: {findingCount: 2_013, status: 'unknown', decisionMemories: 0, coverage: 'partial'},
+          }),
+          item => item.id === 'health',
+        ),
+      ),
     ).toMatchObject({count: 0, status: 'unavailable'});
   });
 

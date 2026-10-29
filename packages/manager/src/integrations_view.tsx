@@ -1,3 +1,5 @@
+import {isJsonRecord} from './api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useState} from 'react';
 import {Plus, RefreshCw, Search} from 'lucide-react';
 import {filteredIntegrationProducts, IntegrationLogo} from './integration_catalog.js';
@@ -49,7 +51,12 @@ export function IntegrationsPanel({
     const controller = new AbortController();
     setLoading(true);
     setError('');
-    void api<Readonly<Record<string, unknown>>>('/api/integrations', undefined, {signal: controller.signal})
+    void api<Readonly<Record<string, unknown>>>(
+      '/api/integrations',
+      undefined,
+      {signal: controller.signal},
+      isJsonRecord,
+    )
       .then(value => {
         if (!controller.signal.aborted) setData(value);
       })
@@ -68,20 +75,23 @@ export function IntegrationsPanel({
     await onChanged();
   }
 
-  const integrationProducts = integrations.map(integration => integration.product);
-  const connectionCount = integrations.reduce(
-    (sum, integration) => sum + integration.count(data[integration.product.id], ''),
+  const integrationProducts = EffectArray.map(integrations, integration => integration.product);
+  const connectionCount = EffectArray.reduce(
+    integrations,
     0,
+    (sum, integration) => sum + integration.count(data[integration.product.id], ''),
   );
-  const filteredCount = integrations.reduce(
+  const filteredCount = EffectArray.reduce(
+    integrations,
+    0,
     (sum, integration) =>
       sum +
       (productFilter === 'all' || productFilter === integration.product.id
         ? integration.count(data[integration.product.id], query)
         : 0),
-    0,
   );
-  const products = filteredIntegrationProducts(integrationProducts, query).filter(
+  const products = EffectArray.filter(
+    filteredIntegrationProducts(integrationProducts, query),
     product => productFilter === 'all' || product.id === productFilter,
   );
   const showConnections = !loading && activeTab === 'connections';
@@ -154,7 +164,7 @@ export function IntegrationsPanel({
                 <button aria-pressed={productFilter === 'all'} onClick={() => setProductFilter('all')}>
                   All
                 </button>
-                {integrationProducts.map(product => (
+                {EffectArray.map(integrationProducts, product => (
                   <button
                     key={product.id}
                     aria-pressed={productFilter === product.id}
@@ -176,7 +186,7 @@ export function IntegrationsPanel({
                   <p className="muted">Connect a product to choose its permitted data and actions.</p>
                 </header>
                 <div className="integration-product-grid">
-                  {products.map(product => (
+                  {EffectArray.map(products, product => (
                     <article className="integration-product" key={product.id}>
                       <div className="integration-product-title">
                         <IntegrationLogo product={product} decorative />
@@ -185,20 +195,23 @@ export function IntegrationsPanel({
                       </div>
                       <p>{product.description}</p>
                       <div className="integration-capabilities">
-                        {product.capabilities.map(value => (
+                        {EffectArray.map(product.capabilities, value => (
                           <span key={value}>{value}</span>
                         ))}
                       </div>
                       <div className="integration-product-actions">
-                        {(product.setupActions ?? [{id: 'connect', label: product.setupLabel}]).map(action => (
-                          <button
-                            key={action.id}
-                            disabled={busy}
-                            onClick={() => setSetup({product: product.id, action: action.id})}
-                          >
-                            {'icon' in action ? action.icon : null} {action.label}
-                          </button>
-                        ))}
+                        {EffectArray.map(
+                          product.setupActions ?? [{id: 'connect', label: product.setupLabel}],
+                          action => (
+                            <button
+                              key={action.id}
+                              disabled={busy}
+                              onClick={() => setSetup({product: product.id, action: action.id})}
+                            >
+                              {'icon' in action ? action.icon : null} {action.label}
+                            </button>
+                          ),
+                        )}
                       </div>
                     </article>
                   ))}
@@ -235,7 +248,7 @@ export function IntegrationsPanel({
               ) : null}
             </>
           ) : null}
-          {integrations.map(({product, View}) => (
+          {EffectArray.map(integrations, ({product, View}) => (
             <View
               key={product.id}
               data={data[product.id]}

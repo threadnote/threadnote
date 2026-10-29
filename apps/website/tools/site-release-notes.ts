@@ -1,5 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from './effect/errors.js';
 import {websiteReleaseSocialImageTemplateRevision} from './site-release-social-image.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export interface StableReleaseVersion {
   readonly version: string;
   readonly major: number;
@@ -34,7 +38,7 @@ export function parseStableReleaseVersion(version: string): StableReleaseVersion
   const major = Number(match[1]);
   const minor = Number(match[2]);
   const patch = Number(match[3]);
-  if (![major, minor, patch].every(Number.isSafeInteger)) return undefined;
+  if (!EffectArray.every([major, minor, patch], Number.isSafeInteger)) return undefined;
   return {major, minor, patch, version};
 }
 
@@ -44,7 +48,7 @@ function compareReleasesDescending(left: StableReleaseVersion, right: StableRele
 
 export function selectLatestMajorReleases(releases: readonly PublishedReleaseRef[]): readonly PublishedReleaseRef[] {
   if (releases.length === 0) return [];
-  const latestMajor = Math.max(...releases.map(release => release.major));
+  const latestMajor = Math.max(...EffectArray.map(releases, release => release.major));
   const byVersion = new Map<string, PublishedReleaseRef>();
   for (const release of releases) {
     if (release.major === latestMajor) byVersion.set(release.version, release);
@@ -56,7 +60,7 @@ export function selectPublishedReleaseRefs<T extends PublishedReleaseRef>(
   tagged: readonly T[],
   publishedAtByTag: ReadonlyMap<string, string>,
 ): readonly T[] {
-  return tagged.flatMap(release => {
+  return EffectArray.flatMap(tagged, release => {
     const publishedAt = publishedAtByTag.get(release.version);
     return publishedAt === undefined ? [] : [{...release, publishedAt}];
   });
@@ -69,7 +73,7 @@ export function parsePublishedWebsiteReleases(manifestJson: string): ReadonlyMap
   } catch {
     throw ScriptError.make({message: 'Published website release metadata is not valid JSON.'});
   }
-  if (!Array.isArray(parsed) || parsed.length === 0) {
+  if (!EffectArray.isArray(parsed) || parsed.length === 0) {
     throw ScriptError.make({message: 'Published website release metadata must contain releases.'});
   }
   const publishedAtByTag = new Map<string, string>();
@@ -77,6 +81,8 @@ export function parsePublishedWebsiteReleases(manifestJson: string): ReadonlyMap
     if (
       typeof entry !== 'object' ||
       entry === null ||
+      !('tagName' in entry) ||
+      !('publishedAt' in entry) ||
       typeof entry.tagName !== 'string' ||
       typeof entry.publishedAt !== 'string' ||
       Number.isNaN(Date.parse(entry.publishedAt))
@@ -94,43 +100,58 @@ export function parsePublishedWebsiteReleases(manifestJson: string): ReadonlyMap
 }
 
 function plainText(markdown: string): string {
-  return markdown
-    .replace(/\[([^\]]+)]\([^\s)]+(?:\s+"[^"]*")?\)/g, '$1')
-    .replace(/[`*_~]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return Effect.pipe(
+    markdown,
+    EffectString.replace(/\[([^\]]+)]\([^\s)]+(?:\s+"[^"]*")?\)/g, '$1'),
+    EffectString.replace(/[`*_~]/g, ''),
+    EffectString.replace(/\s+/g, ' '),
+    EffectString.trim,
+  );
 }
 
 export function summarizeReleaseNote(markdown: string): {
   readonly summary: string;
   readonly highlights: readonly string[];
 } {
-  const normalized = markdown.replace(/\r\n?/g, '\n');
-  const body = normalized.replace(/^## What's new\s*/i, '');
-  const lines = body.split('\n');
+  const normalized = Effect.pipe(markdown, EffectString.replace(/\r\n?/g, '\n'));
+  const body = Effect.pipe(normalized, EffectString.replace(/^## What's new\s*/i, ''));
+  const lines = Effect.pipe(body, EffectString.split('\n'));
   const summaryLines: string[] = [];
   let startedSummary = false;
 
   for (const line of lines) {
-    const trimmed = line.trim();
-    if (!startedSummary && (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('- '))) continue;
+    const trimmed = Effect.pipe(line, EffectString.trim);
+    if (
+      !startedSummary &&
+      (!trimmed ||
+        Effect.pipe(trimmed, EffectString.startsWith('#')) ||
+        Effect.pipe(trimmed, EffectString.startsWith('- ')))
+    )
+      continue;
     if (startedSummary && !trimmed) break;
-    if (trimmed.startsWith('#') || trimmed.startsWith('- ')) break;
+    if (Effect.pipe(trimmed, EffectString.startsWith('#')) || Effect.pipe(trimmed, EffectString.startsWith('- ')))
+      break;
     startedSummary = true;
     summaryLines.push(trimmed);
   }
 
-  const sectionHeadings = lines
-    .map(line => /^###\s+(.+)$/.exec(line.trim())?.[1])
-    .filter((heading): heading is string => Boolean(heading))
-    .map(plainText);
-  const bulletHeadings = lines
-    .map(line => /^-\s+\*\*(.+?)\.?\*\*/.exec(line.trim())?.[1])
-    .filter((heading): heading is string => Boolean(heading))
-    .map(plainText);
+  const sectionHeadings = EffectArray.map(
+    EffectArray.filter(
+      EffectArray.map(lines, line => /^###\s+(.+)$/.exec(Effect.pipe(line, EffectString.trim))?.[1]),
+      (heading): heading is string => Boolean(heading),
+    ),
+    plainText,
+  );
+  const bulletHeadings = EffectArray.map(
+    EffectArray.filter(
+      EffectArray.map(lines, line => /^-\s+\*\*(.+?)\.?\*\*/.exec(Effect.pipe(line, EffectString.trim))?.[1]),
+      (heading): heading is string => Boolean(heading),
+    ),
+    plainText,
+  );
 
   return {
-    summary: plainText(summaryLines.join(' ')),
+    summary: plainText(EffectArray.join(summaryLines, ' ')),
     highlights: [...new Set(sectionHeadings.length > 0 ? sectionHeadings : bulletHeadings)],
   };
 }
@@ -139,10 +160,12 @@ export function releaseHeadlineFromSummary(summary: string): string {
   const sentence = /^.*?[.!?](?=\s|$)/u.exec(summary)?.[0];
   if (!sentence)
     throw ScriptError.make({message: 'The release-note opening summary must contain a complete first sentence.'});
-  const withoutProductVersion = sentence.replace(/^Threadnote\s+\d+(?:\.\d+){0,2}\s+/u, '');
-  const withoutCopula = withoutProductVersion.replace(/^is\s+/u, '');
-  const headline = withoutCopula ? `${withoutCopula[0].toUpperCase()}${withoutCopula.slice(1)}` : sentence;
-  if (!headline.trim())
+  const withoutProductVersion = Effect.pipe(sentence, EffectString.replace(/^Threadnote\s+\d+(?:\.\d+){0,2}\s+/u, ''));
+  const withoutCopula = Effect.pipe(withoutProductVersion, EffectString.replace(/^is\s+/u, ''));
+  const headline = withoutCopula
+    ? `${Effect.pipe(withoutCopula[0], EffectString.toUpperCase)}${Effect.pipe(withoutCopula, EffectString.slice(1))}`
+    : sentence;
+  if (!Effect.pipe(headline, EffectString.trim))
     throw ScriptError.make({message: 'The release-note opening sentence must contain a social-card headline.'});
   if (headline.length > releaseHeadlineMaximumLength) {
     throw ScriptError.make({
@@ -153,10 +176,12 @@ export function releaseHeadlineFromSummary(summary: string): string {
 }
 
 function releaseSocialImage(version: string, headline: string): string {
-  const digest = new Bun.CryptoHasher('sha256')
-    .update(`${websiteReleaseSocialImageTemplateRevision}\0${version}\0${headline}`)
-    .digest('hex')
-    .slice(0, 12);
+  const digest = Effect.pipe(
+    new Bun.CryptoHasher('sha256')
+      .update(`${websiteReleaseSocialImageTemplateRevision}\0${version}\0${headline}`)
+      .digest('hex'),
+    EffectString.slice(0, 12),
+  );
   return `whats-new/releases/${version}/social-card.${digest}.png`;
 }
 
@@ -168,7 +193,7 @@ function runGit(repositoryRoot: string, arguments_: readonly string[]): string {
     stdout: 'pipe',
   });
   if (result.exitCode !== 0) {
-    const detail = result.stderr.toString().trim();
+    const detail = Effect.pipe(result.stderr.toString(), EffectString.trim);
     throw ScriptError.make({message: `Could not load website release notes${detail ? `: ${detail}` : '.'}`});
   }
   return result.stdout.toString();
@@ -181,22 +206,34 @@ export function loadLatestMajorWebsiteReleases(
   if (process.env.THREADNOTE_SITE_PUBLIC_BUILD === '1' && publishedReleaseManifest === undefined) {
     throw ScriptError.make({message: 'Public website builds require published GitHub release metadata.'});
   }
-  const tagged = runGit(repositoryRoot, [
-    'for-each-ref',
-    '--format=%(refname:short)|%(creatordate:iso-strict)',
-    'refs/tags/v*',
-  ])
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .flatMap(line => {
-      const separator = line.indexOf('|');
-      if (separator < 0) return [];
-      const version = line.slice(0, separator);
-      const parsed = parseStableReleaseVersion(version);
-      if (!parsed) return [];
-      return [{...parsed, noteRef: version, publishedAt: line.slice(separator + 1)} satisfies WebsiteReleaseSource];
-    });
+  const nonEmptyLines: ReadonlyArray<string> = EffectArray.filter(
+    EffectArray.map(
+      Effect.pipe(
+        runGit(repositoryRoot, ['for-each-ref', '--format=%(refname:short)|%(creatordate:iso-strict)', 'refs/tags/v*']),
+        EffectString.split('\n'),
+      ),
+      line => Effect.pipe(line, EffectString.trim),
+    ),
+    (line): line is string => typeof line === 'string' && line.length > 0,
+  );
+  const tagged = EffectArray.flatMap(nonEmptyLines, line => {
+    const separator = Effect.pipe(
+      line,
+      EffectString.indexOf('|'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    if (separator < 0) return [];
+    const version = Effect.pipe(line, EffectString.slice(0, separator));
+    const parsed = parseStableReleaseVersion(version);
+    if (!parsed) return [];
+    return [
+      {
+        ...parsed,
+        noteRef: version,
+        publishedAt: Effect.pipe(line, EffectString.slice(separator + 1)),
+      } satisfies WebsiteReleaseSource,
+    ];
+  });
   const refs =
     publishedReleaseManifest === undefined
       ? tagged
@@ -205,9 +242,9 @@ export function loadLatestMajorWebsiteReleases(
   const selected = selectLatestMajorReleases(refs);
   if (selected.length === 0)
     throw ScriptError.make({message: 'The website needs at least one published stable release.'});
-  const sourcesByVersion = new Map(refs.map(release => [release.version, release]));
+  const sourcesByVersion = new Map(EffectArray.map(refs, release => [release.version, release]));
 
-  return selected.map(release => {
+  return EffectArray.map(selected, release => {
     const releaseNotePath = `.github/release-notes/${release.version}.md`;
     const source = sourcesByVersion.get(release.version);
     if (source === undefined)
@@ -224,7 +261,7 @@ export function loadLatestMajorWebsiteReleases(
       highlights,
       releaseUrl: `https://github.com/threadnote/threadnote/releases/tag/${release.version}`,
       socialImage,
-      socialImageAlt: `Threadnote ${release.version.replace(/^v/, '')} — ${headline}`,
+      socialImageAlt: `Threadnote ${Effect.pipe(release.version, EffectString.replace(/^v/, ''))} — ${headline}`,
       summary,
     };
   });

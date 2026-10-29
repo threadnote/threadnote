@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, DateTime, Deferred, Effect, FileSystem, Path, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -19,6 +20,8 @@ import {ManagerConsumerClockHints} from '../../src/manager/live_consumer_sources
 import {ManagerHealthObservationHints} from '../../src/manager/live_health_sources.js';
 import {handleManagerHomeRequest} from '../../src/manager/home.js';
 import {makeManagerGraphLiveObservation} from '../../src/manager/live_graph_observation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const registrationFixture = Effect.fn('managerProjectRegistration.fixture')(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -80,8 +83,8 @@ describe('Manager project live integration', () => {
     Effect.gen(function* () {
       const f = yield* registrationFixture();
       const selector = (index: number) => ({
-        repositoryId: 'a'.repeat(64),
-        sourceCommit: index.toString(16).padStart(40, '0'),
+        repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+        sourceCommit: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
       });
       yield* f.register(Array.from({length: 32}, (_, index) => selector(index)));
       expect(f.latest()?.citations).toHaveLength(32);
@@ -111,9 +114,9 @@ describe('Manager project live integration', () => {
     ({entries}) =>
       Effect.gen(function* () {
         const f = yield* registrationFixture();
-        const inputs = entries.map((entry, index) => ({
-          repositoryId: 'a'.repeat(64),
-          sourceCommit: entry.toString(16).padStart(40, '0'),
+        const inputs = EffectArray.map(entries, (entry, index) => ({
+          repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+          sourceCommit: Effect2.pipe(entry.toString(16), EffectString.padStart(40, '0')),
           path: `irrelevant-${index}.ts`,
           sourceSnapshotId: `snapshot-${index}`,
         }));
@@ -121,9 +124,13 @@ describe('Manager project live integration', () => {
         for (const input of inputs) yield* f.register([input]);
         const settledUnavailable = f.unavailableEvents();
         for (const input of [...inputs].reverse()) yield* f.register([input]);
-        const expected = [...new Set(entries)]
-          .sort((a, b) => a - b)
-          .map(entry => ({repositoryId: 'a'.repeat(64), sourceCommit: entry.toString(16).padStart(40, '0')}));
+        const expected = EffectArray.map(
+          [...new Set(entries)].sort((a, b) => a - b),
+          entry => ({
+            repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+            sourceCommit: Effect2.pipe(entry.toString(16), EffectString.padStart(40, '0')),
+          }),
+        );
         expect(f.latest()?.citations).toEqual(expected);
         expect(f.unavailableEvents()).toBe(settledUnavailable);
         expect(JSON.stringify(inputs)).toBe(before);
@@ -224,8 +231,8 @@ describe('Manager project live integration', () => {
       const home = yield* fs
         .makeTempDirectoryScoped({prefix: 'manager-graph-worktree-'})
         .pipe(Effect.flatMap(fs.realPath));
-      const checkoutId = 'a'.repeat(64),
-        worktreeId = 'b'.repeat(64);
+      const checkoutId = Effect2.pipe('a', EffectString.repeat(64)),
+        worktreeId = Effect2.pipe('b', EffectString.repeat(64));
       const context = path.join(home, 'indexes', 'code-graph', 'repositories', checkoutId, 'local-context');
       const directory = path.join(context, 'worktrees');
       yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
@@ -238,7 +245,7 @@ describe('Manager project live integration', () => {
           schemaVersion: 2,
           checkoutId,
           worktreeId,
-          repositoryId: 'c'.repeat(64),
+          repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
           canonicalWorktreePath: worktree,
           observedAt: DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis)),
           registration: {kind: 'main'},
@@ -371,8 +378,8 @@ describe('Manager project live integration', () => {
         const modelPaths = yield* selectedGenerationObservationPaths(home);
         const sources = [
           path.join(queue, 'queue.json'),
-          path.join(queue, `target-${'a'.repeat(64)}.json`),
-          path.join(preparation, `${'b'.repeat(64)}.json`),
+          path.join(queue, `target-${Effect2.pipe('a', EffectString.repeat(64))}.json`),
+          path.join(preparation, `${Effect2.pipe('b', EffectString.repeat(64))}.json`),
           modelPaths.at(-1)!,
         ];
         for (const file of sources) {

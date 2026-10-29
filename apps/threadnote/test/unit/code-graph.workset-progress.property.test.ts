@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -10,16 +11,18 @@ import {
   codeGraphWorksetJsonProgressDecision,
 } from '@threadnote/graph/workset/progress';
 import {codeGraphWorksetTelemetryFields} from '@threadnote/threadnote/code_graph/workset/telemetry';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph workset progress properties', () => {
   it('partitions every member receipt exactly and marks only all-ready coverage complete', () => {
     fc.assert(
       fc.property(fc.array(fc.constantFrom('excluded', 'failed', 'missing', 'ready'), {maxLength: 128}), states => {
-        const members = states.map((state, index) => member(state, index));
+        const members = EffectArray.map(states, (state, index) => member(state, index));
         const coverage = codeGraphWorksetPrepareCoverage(members);
         expect(coverage.ready + coverage.failed + coverage.missing + coverage.excluded).toBe(members.length);
         expect(coverage.requested).toBe(members.length);
-        expect(coverage.complete).toBe(states.every(state => state === 'ready'));
+        expect(coverage.complete).toBe(EffectArray.every(states, state => state === 'ready'));
       }),
     );
   });
@@ -43,10 +46,11 @@ describe('code graph workset progress properties', () => {
   it('never regresses the coalescer completed-member high-water mark', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({min: 0, max: 4_096}), {maxLength: 256}), samples => {
-        const final = samples.reduce(
+        const final = EffectArray.reduce(
+          samples,
+          {completed: 0},
           (state, completed, index) =>
             codeGraphWorksetJsonProgressDecision(state, progressEvent(completed), index).state,
-          {completed: 0},
         );
         expect(final.completed).toBe(Math.max(0, ...samples));
       }),
@@ -68,9 +72,9 @@ function member(state: 'excluded' | 'failed' | 'missing' | 'ready', index: numbe
     case 'ready':
       return {
         project,
-        projectionDigest: 'a'.repeat(64),
-        repositoryId: 'b'.repeat(64),
-        snapshotId: `cgsn_${'c'.repeat(40)}-direct`,
+        projectionDigest: Effect.pipe('a', EffectString.repeat(64)),
+        repositoryId: Effect.pipe('b', EffectString.repeat(64)),
+        snapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}-direct`,
         state,
         symbolCount: index,
       };

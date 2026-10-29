@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {normalizeWorksetScopeReceipt, worksetScopeDigestFields} from './scope_receipt.js';
 import {
@@ -16,6 +17,8 @@ import {
   type CodeGraphWorksetRoutingProjectionV1,
   type CodeGraphWorksetRoutingSymbolV1,
 } from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
 const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
@@ -65,7 +68,7 @@ export function codeGraphWorksetRoutingProjectionDigestAppend(
   readonly state: CodeGraphWorksetRoutingProjectionDigestStateV1;
   readonly symbols: readonly CodeGraphWorksetRoutingSymbolV1[];
 } {
-  const symbols = page.map(normalizeCodeGraphWorksetRoutingSymbol);
+  const symbols = EffectArray.map(page, normalizeCodeGraphWorksetRoutingSymbol);
   return {state: appendCanonicalSymbols(state, symbols, false), symbols};
 }
 
@@ -154,7 +157,7 @@ export function codeGraphWorksetCatalogGenerationIdentity(
   if (input.members.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.membersPerGeneration) {
     throw invalid('Workset catalog generation has too many members.');
   }
-  const members = input.members.map(normalizeGenerationMember).sort(compareMember);
+  const members = EffectArray.map(input.members, normalizeGenerationMember).sort(compareMember);
   const seenKeys = new Set<string>();
   for (const member of members) {
     if (seenKeys.has(member.repositoryKey)) {
@@ -165,7 +168,7 @@ export function codeGraphWorksetCatalogGenerationIdentity(
   const digest = codeGraphWorksetCatalogGenerationDigest(
     worksetName,
     input.manifestDigest,
-    members.map(member => ({
+    EffectArray.map(members, member => ({
       ...normalizeWorksetScopeReceipt(member.projection),
       projectionDigest: member.projection.projectionDigest,
       repositoryId: member.projection.repositoryId,
@@ -173,7 +176,7 @@ export function codeGraphWorksetCatalogGenerationIdentity(
       snapshotId: member.projection.snapshotId,
     })),
   );
-  return {digest, id: `cgwg_${digest.slice(0, 40)}`, members};
+  return {digest, id: `cgwg_${Effect.pipe(digest, EffectString.slice(0, 40))}`, members};
 }
 
 export function codeGraphWorksetCatalogGenerationDigest(
@@ -186,7 +189,7 @@ export function codeGraphWorksetCatalogGenerationDigest(
   if (members.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.membersPerGeneration) {
     throw invalid('Workset catalog generation has too many members.');
   }
-  const normalizedMembers = members.map(normalizeGenerationDigestMember).sort(compareDigestMember);
+  const normalizedMembers = EffectArray.map(members, normalizeGenerationDigestMember).sort(compareDigestMember);
   for (let index = 1; index < normalizedMembers.length; index += 1) {
     if (normalizedMembers[index - 1].repositoryKey === normalizedMembers[index].repositoryKey) {
       throw invalid(`Workset catalog repository key ${normalizedMembers[index].repositoryKey} is duplicated.`);
@@ -197,7 +200,7 @@ export function codeGraphWorksetCatalogGenerationDigest(
       'threadnote-workset-catalog-generation-v1',
       normalizedName,
       manifestDigest,
-      normalizedMembers.map(member => [
+      EffectArray.map(normalizedMembers, member => [
         member.repositoryKey,
         member.repositoryId,
         member.snapshotId,
@@ -214,9 +217,9 @@ export function codeGraphWorksetCatalogGenerationReceiptIdentity(
   if (input.members.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.membersPerGeneration) {
     throw invalid('Workset catalog generation has too many members.');
   }
-  const members = input.members.map(normalizeGenerationDigestMember).sort(compareDigestMember);
+  const members = EffectArray.map(input.members, normalizeGenerationDigestMember).sort(compareDigestMember);
   const digest = codeGraphWorksetCatalogGenerationDigest(input.worksetName, input.manifestDigest, members);
-  return {digest, id: `cgwg_${digest.slice(0, 40)}`, members};
+  return {digest, id: `cgwg_${Effect.pipe(digest, EffectString.slice(0, 40))}`, members};
 }
 
 function normalizeGenerationMember(
@@ -249,9 +252,9 @@ function normalizeProjectionDraft(
   if (input.symbols.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.symbolsPerProjection) {
     throw invalid('Workset routing projection has too many symbols.');
   }
-  const symbols = input.symbols
-    .map(normalizeCodeGraphWorksetRoutingSymbol)
-    .sort((left, right) => compareText(left.nodeId, right.nodeId));
+  const symbols = EffectArray.map(input.symbols, normalizeCodeGraphWorksetRoutingSymbol).sort((left, right) =>
+    compareText(left.nodeId, right.nodeId),
+  );
   for (let index = 1; index < symbols.length; index += 1) {
     if (symbols[index - 1].nodeId === symbols[index].nodeId) {
       throw invalid(`Workset routing symbol ${symbols[index].nodeId} is duplicated.`);
@@ -277,9 +280,9 @@ export function normalizeCodeGraphWorksetRoutingSymbol(
 ): CodeGraphWorksetRoutingSymbolV1 {
   if (!NODE_ID.test(symbol.nodeId)) throw invalid('Workset routing node identity is invalid.');
   const path = repositoryRelativePath(symbol.path);
-  const lookupKeys = [...new Set(symbol.lookupKeys.map(key => boundedText(key, 'lookup key', 2_048)))].sort(
-    compareText,
-  );
+  const lookupKeys = [
+    ...new Set(EffectArray.map(symbol.lookupKeys, key => boundedText(key, 'lookup key', 2_048))),
+  ].sort(compareText);
   if (lookupKeys.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.lookupKeysPerSymbol) {
     throw invalid(`Workset routing symbol ${symbol.nodeId} has too many lookup keys.`);
   }
@@ -296,7 +299,10 @@ export function normalizeCodeGraphWorksetRoutingSymbol(
   }
   const span = symbol.span;
   if (
-    ![span.line, span.column, span.endLine, span.endColumn].every(value => Number.isSafeInteger(value) && value >= 0) ||
+    !EffectArray.every(
+      [span.line, span.column, span.endLine, span.endColumn],
+      value => Number.isSafeInteger(value) && value >= 0,
+    ) ||
     span.endLine < span.line ||
     (span.endLine === span.line && span.endColumn < span.column)
   ) {
@@ -313,7 +319,10 @@ export function normalizeCodeGraphWorksetRoutingSymbol(
     path,
     qualifiedName: boundedText(symbol.qualifiedName, 'qualified symbol name', 4_096),
     span: {...span},
-    terms: [...terms].sort(([left], [right]) => compareText(left, right)).map(([term, weight]) => ({term, weight})),
+    terms: EffectArray.map(
+      [...terms].sort(([left], [right]) => compareText(left, right)),
+      ([term, weight]) => ({term, weight}),
+    ),
   };
 }
 
@@ -347,17 +356,20 @@ function symbolDigestRecord(symbol: CodeGraphWorksetRoutingSymbolV1): readonly u
     symbol.span.endLine,
     symbol.span.endColumn,
     symbol.lookupKeys,
-    symbol.terms.map(term => [term.term, term.weight]),
+    EffectArray.map(symbol.terms, term => [term.term, term.weight]),
   ];
 }
 
 function repositoryRelativePath(value: string): string {
   const path = boundedText(value, 'evidence path', 4_096);
   if (
-    path.startsWith('/') ||
-    path.includes('\\') ||
+    Effect.pipe(path, EffectString.startsWith('/')) ||
+    Effect.pipe(path, EffectString.includes('\\')) ||
     /^[A-Za-z]:/u.test(path) ||
-    path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw invalid('Workset routing evidence path must be repository-relative and slash-normalized.');
   }
@@ -382,7 +394,11 @@ function boundedText(value: string, label: string, maximumBytes: number): string
 
 function containsControlCharacter(value: string): boolean {
   for (const character of value) {
-    const code = character.codePointAt(0)!;
+    const code = Effect.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect.Option.getOrElse(() => undefined),
+    )!;
     if (code <= 0x1f || code === 0x7f) return true;
   }
   return false;

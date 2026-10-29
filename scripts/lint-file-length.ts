@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import {BunRuntime} from '@effect/platform-bun';
 import {Console, Effect, Result} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const PRODUCTION_FILE_LINE_LIMIT = 2_000;
 export const PRODUCTION_CODE_ROOTS = ['packages', 'apps/website/src', 'apps/threadnote/src'] as const;
@@ -29,12 +32,15 @@ function comparePaths(left: string, right: string): number {
 }
 
 export function normalizeRepositoryPath(path: string): string | undefined {
-  const normalized = path.replaceAll('\\', '/').replace(/^\.\/+/, '');
+  const normalized = Effect2.pipe(path, EffectString.replaceAll('\\', '/'), EffectString.replace(/^\.\/+/, ''));
   if (
     normalized.length === 0 ||
-    normalized.startsWith('/') ||
-    normalized.includes('\0') ||
-    normalized.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect2.pipe(normalized, EffectString.startsWith('/')) ||
+    Effect2.pipe(normalized, EffectString.includes('\0')) ||
+    EffectArray.some(
+      Effect2.pipe(normalized, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     return undefined;
   }
@@ -42,11 +48,11 @@ export function normalizeRepositoryPath(path: string): string | undefined {
 }
 
 function normalizedProductionRoots(roots: readonly string[]): readonly string[] {
-  const normalized = roots.map(root => normalizeRepositoryPath(root));
-  if (normalized.some(root => root === undefined)) {
+  const normalized = EffectArray.map(roots, root => normalizeRepositoryPath(root));
+  if (EffectArray.some(normalized, root => root === undefined)) {
     throw ScriptError.make({message: 'Production lint roots must be repository paths.'});
   }
-  const validRoots = normalized as string[];
+  const validRoots = EffectArray.filter(normalized, (root): root is string => root !== undefined);
   for (const root of validRoots) {
     if (!(PRODUCTION_CODE_ROOTS as readonly string[]).includes(root)) {
       throw ScriptError.make({message: `Unsupported production lint root: ${root}`});
@@ -58,8 +64,12 @@ function normalizedProductionRoots(roots: readonly string[]): readonly string[] 
 export function isProductionCodePath(path: string, roots: readonly string[] = PRODUCTION_CODE_ROOTS): boolean {
   const normalized = normalizeRepositoryPath(path);
   if (!normalized || !CODE_FILE_PATTERN.test(normalized) || TEST_FILE_PATTERN.test(normalized)) return false;
-  if (normalized.split('/').some(segment => TEST_DIRECTORY_NAMES.has(segment))) return false;
-  return roots.some(root => normalized === root || normalized.startsWith(`${root}/`));
+  if (EffectArray.some(Effect2.pipe(normalized, EffectString.split('/')), segment => TEST_DIRECTORY_NAMES.has(segment)))
+    return false;
+  return EffectArray.some(
+    roots,
+    root => normalized === root || Effect2.pipe(normalized, EffectString.startsWith(`${root}/`)),
+  );
 }
 
 /** Return every unique production source path, independent of Git change state or iteration order. */
@@ -76,7 +86,9 @@ export function productionCodeFiles(
 }
 
 function decodeNullSeparated(output: Uint8Array | undefined): readonly string[] {
-  return output ? new TextDecoder().decode(output).split('\0').filter(Boolean) : [];
+  return output
+    ? EffectArray.filter(Effect2.pipe(new TextDecoder().decode(output), EffectString.split('\0')), Boolean)
+    : [];
 }
 
 function gitPaths(repositoryRoot: string, arguments_: readonly string[]): readonly string[] {
@@ -87,8 +99,8 @@ function gitPaths(repositoryRoot: string, arguments_: readonly string[]): readon
     stdout: 'pipe',
   });
   if (result.exitCode !== 0) {
-    const detail = result.stderr ? new TextDecoder().decode(result.stderr).trim() : '';
-    throw ScriptError.make({message: `git ${arguments_.join(' ')} failed${detail ? `: ${detail}` : '.'}`});
+    const detail = result.stderr ? Effect2.pipe(new TextDecoder().decode(result.stderr), EffectString.trim) : '';
+    throw ScriptError.make({message: `git ${EffectArray.join(arguments_, ' ')} failed${detail ? `: ${detail}` : '.'}`});
   }
   return decodeNullSeparated(result.stdout);
 }
@@ -100,14 +112,10 @@ export function collectProductionCodeFiles(
   const normalizedRoots = normalizedProductionRoots(roots);
   const pathspec = ['--', ...normalizedRoots];
   const deletedFiles = new Set(gitPaths(repositoryRoot, ['ls-files', '--deleted', '-z', ...pathspec]));
-  const files = gitPaths(repositoryRoot, [
-    'ls-files',
-    '--cached',
-    '--others',
-    '--exclude-standard',
-    '-z',
-    ...pathspec,
-  ]).filter(path => !deletedFiles.has(path));
+  const files = EffectArray.filter(
+    gitPaths(repositoryRoot, ['ls-files', '--cached', '--others', '--exclude-standard', '-z', ...pathspec]),
+    path => !deletedFiles.has(path),
+  );
   return productionCodeFiles(files, normalizedRoots);
 }
 
@@ -146,7 +154,7 @@ export function runProductionFileLengthLint(options: RunProductionFileLengthLint
 }
 
 function parseArguments(arguments_: readonly string[]): readonly string[] {
-  if (arguments_.some(argument => argument.startsWith('-'))) {
+  if (EffectArray.some(arguments_, argument => Effect2.pipe(argument, EffectString.startsWith('-')))) {
     throw ScriptError.make({message: 'Production file lint accepts only optional production roots.'});
   }
   return normalizedProductionRoots(arguments_.length === 0 ? PRODUCTION_CODE_ROOTS : arguments_);

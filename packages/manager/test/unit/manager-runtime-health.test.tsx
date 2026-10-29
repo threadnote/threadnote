@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot} from 'react-dom/client';
@@ -19,14 +20,23 @@ it('preserves every diagnostic exactly once and never reports success over a fai
       checks => {
         const before = structuredClone(checks);
         const groups = runtimeHealthGroups(checks);
-        expect(groups.flatMap(group => group.checks)).toHaveLength(checks.length);
+        expect(EffectArray.flatMap(groups, group => group.checks)).toHaveLength(checks.length);
         for (const check of checks)
-          expect(groups.flatMap(group => group.checks).filter(item => item === check)).toHaveLength(1);
+          expect(
+            EffectArray.filter(
+              EffectArray.flatMap(groups, group => group.checks),
+              item => item === check,
+            ),
+          ).toHaveLength(1);
         const severity = {ok: 0, warn: 1, fail: 2};
         for (const group of groups)
-          expect(severity[group.status]).toBe(Math.max(...group.checks.map(check => severity[check.status])));
+          expect(severity[group.status]).toBe(
+            Math.max(...EffectArray.map(group.checks, check => severity[check.status])),
+          );
         expect(checks).toEqual(before);
-        expect(runtimeHealthGroups(checks).map(group => group.label)).toEqual(groups.map(group => group.label));
+        expect(EffectArray.map(runtimeHealthGroups(checks), group => group.label)).toEqual(
+          EffectArray.map(groups, group => group.label),
+        );
       },
     ),
     {numRuns: 60},
@@ -56,7 +66,10 @@ it('enables repair only after a successful preview and exposes actual diagnostic
     );
     expect(container.textContent).toContain('Failed');
     expect(container.querySelector('.runtime-check-details')?.textContent).toContain('Synthetic missing index');
-    const button = (text: string) => [...container.querySelectorAll('button')].find(item => item.textContent === text)!;
+    const button = (text: string) =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst([...container.querySelectorAll('button')], item => item.textContent === text),
+      )!;
     await act(async () => button('Repair').click());
     await act(async () => button('Preview repair').click());
     expect(button('Apply repair…').disabled).toBe(true);

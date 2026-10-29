@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import {describe, expect} from 'vitest';
@@ -24,12 +25,15 @@ describe('Bun build diagnostics', () => {
       expect(failure).toBeInstanceOf(ScriptError);
       expect(failure.cause).toBe(cause);
       expect(failure.message).toBe(
-        [
-          'Bun could not build the standalone artifact.',
-          'Build diagnostics:',
-          '/workspace/src/fixture.ts:7:3: Browser build cannot import Bun builtin: "bun:sqlite".',
-          "  import {Database} from 'bun:sqlite';",
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'Bun could not build the standalone artifact.',
+            'Build diagnostics:',
+            '/workspace/src/fixture.ts:7:3: Browser build cannot import Bun builtin: "bun:sqlite".',
+            "  import {Database} from 'bun:sqlite';",
+          ],
+          '\n',
+        ),
       );
     }),
   );

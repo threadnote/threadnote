@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import {it as effectIt} from '@effect/vitest';
@@ -29,9 +30,12 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {EffectMcpServerAdapter, type EffectMcpServer} from '../../src/effect/ai/mcp.js';
+import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {registerCodeGraphTool} from '../../src/mcp/server/code_graph.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fixtureLayer, manifest} from '../fixtures/code-graph-embedding-worker-child.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Real registered route, real discovery/index/query/storage; only model and process boundaries are held in-process. */
 for (const scoped of [false, true])
@@ -53,8 +57,11 @@ for (const scoped of [false, true])
               inference++;
               yield* Deferred.succeed(inferenceStarted, undefined);
               yield* Deferred.await(releaseInference);
-              return inputs.map(input =>
-                input.includes('alpha') || input.includes('celestial orchard') ? [1, 0] : [0, 1],
+              return EffectArray.map(inputs, input =>
+                Effect2.pipe(input, EffectString.includes('alpha')) ||
+                Effect2.pipe(input, EffectString.includes('celestial orchard'))
+                  ? [1, 0]
+                  : [0, 1],
               );
             }),
           generate: () => Effect.die('unexpected generation'),
@@ -111,18 +118,21 @@ for (const scoped of [false, true])
         yield* fs.writeFileString(
           manifestPath,
           scoped
-            ? [
-                'version: 1',
-                'projects:',
-                '  - name: web',
-                `    path: ${repository}`,
-                '    seed: []',
-                '    uri: threadnote://resources/repos/web',
-                '    graph:',
-                '      closure: dependencies',
-                '      roots: [apps/web]',
-                '',
-              ].join('\n')
+            ? EffectArray.join(
+                [
+                  'version: 1',
+                  'projects:',
+                  '  - name: web',
+                  `    path: ${repository}`,
+                  '    seed: []',
+                  '    uri: threadnote://resources/repos/web',
+                  '    graph:',
+                  '      closure: dependencies',
+                  '      roots: [apps/web]',
+                  '',
+                ],
+                '\n',
+              )
             : 'version: 1\nprojects: []\n',
         );
         if (scoped) {
@@ -227,21 +237,32 @@ for (const scoped of [false, true])
         });
         type AddedTool = Parameters<EffectMcpServer['addTool']>[0];
         let handler: AddedTool['handle'] | undefined;
-        const mcp = Layer.succeed(McpServer.McpServer, {
+        const mcp = Layer.mock(McpServer.McpServer, {
+          notifications: {
+            'notifications/cancelled': () => Effect.die('Unexpected MCP cancellation notification.'),
+            'notifications/message': () => Effect.die('Unexpected MCP logging notification.'),
+            'notifications/progress': () => Effect.die('Unexpected MCP progress notification.'),
+            'notifications/prompts/list_changed': () => Effect.die('Unexpected MCP prompts notification.'),
+            'notifications/resources/list_changed': () => Effect.die('Unexpected MCP resources notification.'),
+            'notifications/resources/updated': () => Effect.die('Unexpected MCP resource update notification.'),
+            'notifications/tools/list_changed': () => Effect.die('Unexpected MCP tools notification.'),
+          },
+          prompts: [],
+          resourceTemplates: [],
+          resources: [],
+          tools: [],
           addTool: (tool: AddedTool) =>
             Effect.sync(() => {
               if (tool.tool.name === 'inspect_code_graph') handler = tool.handle;
             }),
-        } as unknown as EffectMcpServer);
-        // The registry's application-wide requirement is conservative; these registered handlers use the supplied graph context.
-        // oxlint-disable effecttsgo/unsafe-effect-type-assertion -- registered graph-only test handlers use the actual supplied graph services
-        const registration = server.registrationLayer() as Layer.Layer<
-          never,
-          never,
-          McpServer.McpServer | Layer.Success<typeof graph>
-        >;
-        // oxlint-enable effecttsgo/unsafe-effect-type-assertion
-        yield* Layer.build(registration.pipe(Layer.provide(mcp), Layer.provide(Layer.succeedContext(context))));
+        });
+        const registration = server.registrationLayer();
+        yield* Layer.build(
+          registration.pipe(
+            Layer.provide(mcp),
+            Layer.provide(Layer.merge(ApplicationLayer, Layer.succeedContext(context))),
+          ),
+        );
         const client = McpSchema.McpServerClient.of({
           clientCapabilities: {},
           clientId: 0,
@@ -310,8 +331,12 @@ for (const scoped of [false, true])
 
         const lexical = yield* invoke({operation: 'query', query: 'alpha'});
         expect(JSON.stringify(lexical)).toContain('alpha');
-        const lexicalResult = lexical.structuredContent as {nodes: {id: string; name: string}[]};
-        const alpha = lexicalResult.nodes.find(node => node.name === 'alpha');
+        const lexicalResult = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({nodes: Schema.Array(Schema.Struct({id: Schema.String, name: Schema.String}))}),
+        )(lexical.structuredContent).pipe(Effect.orDie);
+        const alpha = EffectOption.getOrUndefined(
+          EffectArray.findFirst(lexicalResult.nodes, node => node.name === 'alpha'),
+        );
         expect(alpha).toBeDefined();
         const neighbors = yield* invoke({operation: 'neighbors', nodeId: alpha!.id});
         expect(JSON.stringify(neighbors)).toContain('beta');
@@ -321,7 +346,10 @@ for (const scoped of [false, true])
           nodeLimit: 20,
           budgetTokens: 1500,
         });
-        expect((before.structuredContent as {nodes: unknown[]}).nodes).toEqual([]);
+        const beforeResult = yield* Schema.decodeUnknownEffect(Schema.Struct({nodes: Schema.Array(Schema.Unknown)}))(
+          before.structuredContent,
+        ).pipe(Effect.orDie);
+        expect(beforeResult.nodes).toEqual([]);
         const beforeInference = inference;
         const beforeWakes = wakes;
         yield* Deferred.succeed(releaseInference, undefined);
@@ -345,7 +373,11 @@ for (const scoped of [false, true])
           get: (id: string) =>
             catalog
               .get(id)
-              .pipe(Effect.map(value => (++catalogReads === 1 ? value : {...value, sha256: 'f'.repeat(64)}))),
+              .pipe(
+                Effect.map(value =>
+                  ++catalogReads === 1 ? value : {...value, sha256: Effect2.pipe('f', EffectString.repeat(64))},
+                ),
+              ),
         };
         const checkContext = yield* Layer.build(Layer.fresh(CodeGraphEmbeddingIndex.layer)).pipe(
           Effect.provideService(LocalModelStore, readOnlyStore),
@@ -387,8 +419,11 @@ for (const scoped of [false, true])
           nodeLimit: 20,
           budgetTokens: 1500,
         });
+        const semanticResult = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({nodes: Schema.Array(Schema.Struct({name: Schema.String}))}),
+        )(semantic.structuredContent).pipe(Effect.orDie);
         expect(
-          (semantic.structuredContent as {nodes: {name: string}[]}).nodes.some(node => node.name === 'alpha'),
+          EffectArray.some(semanticResult.nodes, node => node.name === 'alpha'),
           JSON.stringify(semantic),
         ).toBe(true);
         expect(inference).toBeGreaterThan(beforeInference);
@@ -401,7 +436,7 @@ for (const scoped of [false, true])
           {readOnly: true},
         );
         expect(
-          (yield* readOriginalLanes).map(lane => lane.state),
+          EffectArray.map(yield* readOriginalLanes, lane => lane.state),
           'after worker before no-op',
         ).toEqual(['ready']);
 
@@ -413,7 +448,7 @@ for (const scoped of [false, true])
         });
         expect(noop.snapshot.id).toBe(pending.readySnapshot?.id);
         expect(
-          (yield* readOriginalLanes).map(lane => lane.state),
+          EffectArray.map(yield* readOriginalLanes, lane => lane.state),
           'after no-op',
         ).toEqual(['ready']);
         expect(wakes).toBe(beforeWakes);
@@ -449,9 +484,13 @@ for (const scoped of [false, true])
           query: 'structuralOnly',
         });
         expect(structuralRead.isError, JSON.stringify(structuralRead)).not.toBe(true);
-        const read = structuralRead.structuredContent as {nodes: {name: string; id: string}[]};
-        expect(read.nodes.some(node => node.name === 'structuralOnly')).toBe(true);
-        const node = read.nodes.find(node => node.name === 'structuralOnly')!;
+        const read = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({nodes: Schema.Array(Schema.Struct({id: Schema.String, name: Schema.String}))}),
+        )(structuralRead.structuredContent).pipe(Effect.orDie);
+        expect(EffectArray.some(read.nodes, node => node.name === 'structuralOnly')).toBe(true);
+        const node = EffectOption.getOrUndefined(
+          EffectArray.findFirst(read.nodes, node => node.name === 'structuralOnly'),
+        )!;
         const structuralNode = yield* invoke({callerCwd: structuralRepository, operation: 'node', nodeId: node.id});
         expect(structuralNode.isError, JSON.stringify(structuralNode)).not.toBe(true);
         const linked = path.join(home, 'structural-linked');
@@ -469,7 +508,7 @@ for (const scoped of [false, true])
           }),
           {readOnly: true},
         );
-        expect(originalLanes.map(lane => ({state: lane.state, reason: lane.reason}))).toEqual([
+        expect(EffectArray.map(originalLanes, lane => ({state: lane.state, reason: lane.reason}))).toEqual([
           {state: 'ready', reason: undefined},
         ]);
         yield* resumeExistingCodeGraphEmbeddingDemand(home);

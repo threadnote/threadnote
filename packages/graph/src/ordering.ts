@@ -18,10 +18,10 @@ export function compareNaturalCodeUnits(left: string, right: string): number {
   let rightIndex = 0;
 
   while (leftIndex < left.length && rightIndex < right.length) {
-    const leftCodeUnit = left.charCodeAt(leftIndex);
-    const rightCodeUnit = right.charCodeAt(rightIndex);
-    const leftIsDigit = isAsciiDigit(leftCodeUnit);
-    const rightIsDigit = isAsciiDigit(rightCodeUnit);
+    const leftCharacter = left[leftIndex];
+    const rightCharacter = right[rightIndex];
+    const leftIsDigit = isAsciiDigit(leftCharacter);
+    const rightIsDigit = isAsciiDigit(rightCharacter);
 
     if (leftIsDigit && rightIsDigit) {
       const leftRunEnd = digitRunEnd(left, leftIndex);
@@ -35,9 +35,9 @@ export function compareNaturalCodeUnits(left: string, right: string): number {
         return leftSignificantLength < rightSignificantLength ? -1 : 1;
       }
       for (let offset = 0; offset < leftSignificantLength; offset += 1) {
-        const difference =
-          left.charCodeAt(leftSignificantStart + offset) - right.charCodeAt(rightSignificantStart + offset);
-        if (difference !== 0) return difference < 0 ? -1 : 1;
+        const leftDigit = left[leftSignificantStart + offset];
+        const rightDigit = right[rightSignificantStart + offset];
+        if (leftDigit !== rightDigit) return leftDigit < rightDigit ? -1 : 1;
       }
 
       leftIndex = leftRunEnd;
@@ -45,7 +45,7 @@ export function compareNaturalCodeUnits(left: string, right: string): number {
       continue;
     }
 
-    if (leftCodeUnit !== rightCodeUnit) return leftCodeUnit < rightCodeUnit ? -1 : 1;
+    if (leftCharacter !== rightCharacter) return leftCharacter < rightCharacter ? -1 : 1;
     leftIndex += 1;
     rightIndex += 1;
   }
@@ -57,16 +57,16 @@ export function compareNaturalCodeUnits(left: string, right: string): number {
 
 function digitRunEnd(value: string, start: number): number {
   let end = start;
-  while (end < value.length && isAsciiDigit(value.charCodeAt(end))) end += 1;
+  while (end < value.length && isAsciiDigit(value[end])) end += 1;
   return end;
 }
 
 function significantDigitStart(value: string, start: number, end: number): number {
   let significantStart = start;
-  while (significantStart + 1 < end && value.charCodeAt(significantStart) === 0x30) significantStart += 1;
+  while (significantStart + 1 < end && value[significantStart] === '0') significantStart += 1;
   return significantStart;
 }
 
-function isAsciiDigit(codeUnit: number): boolean {
-  return codeUnit >= 0x30 && codeUnit <= 0x39;
+function isAsciiDigit(character: string): boolean {
+  return character >= '0' && character <= '9';
 }

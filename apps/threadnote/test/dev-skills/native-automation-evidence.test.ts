@@ -14,6 +14,34 @@ const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.w
 const failure = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.result);
 const errorShape = {failure: {code: 'evidence-busy', retryable: true}};
 
+const assertArtifactUri: (value: unknown) => asserts value is {readonly artifact: {readonly uri: string}} = value => {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('artifact' in value) ||
+    typeof value.artifact !== 'object' ||
+    value.artifact === null ||
+    !('uri' in value.artifact) ||
+    typeof value.artifact.uri !== 'string'
+  ) {
+    throw new Error('Expected a native artifact result with a URI');
+  }
+};
+
+const assertArtifactContent: (value: unknown) => asserts value is {
+  readonly artifact: {readonly uri: string; readonly body: string; readonly revision: string};
+} = value => {
+  assertArtifactUri(value);
+  if (
+    !('body' in value.artifact) ||
+    typeof value.artifact.body !== 'string' ||
+    !('revision' in value.artifact) ||
+    typeof value.artifact.revision !== 'string'
+  ) {
+    throw new Error('Expected a native artifact result with content and revision');
+  }
+};
+
 const readyFixture = Effect.fn('test.nativeAutomationEvidence.fixture')(function* () {
   const f = yield* nativeFixture();
   const config = {
@@ -34,7 +62,8 @@ const readyFixture = Effect.fn('test.nativeAutomationEvidence.fixture')(function
   if (!('bindingId' in initialized)) throw new Error('Expected initialized native run');
   const rootRequest = f.write({operationId: 'old-root', artifactKey: 'old-root', body: 'Existing project root.\n'});
   const rootResult = yield* f.call(rootRequest, config);
-  const rootUri = (rootResult as {artifact: {uri: string}}).artifact.uri;
+  assertArtifactUri(rootResult);
+  const rootUri = rootResult.artifact.uri;
   const rootBytes = yield* f.store.read(f.location, rootUri);
   yield* (yield* CodeGraphIndexer).index({threadnoteHome: f.home, cwd: f.repo, ensureVectors: false});
   return {f, config, initialized, rootUri, rootBytes};
@@ -181,9 +210,8 @@ describe('native workflow graph evidence contention', () => {
           intent: {operationId: 'resume-citations', codeRefs: ['source.ts']},
         });
         expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
-        const recovered = (yield* f.f.call({...f.f.base('recover'), operationId: 'resume-citations'}, f.config)) as {
-          artifact: {uri: string; body: string; revision: string};
-        };
+        const recovered = yield* f.f.call({...f.f.base('recover'), operationId: 'resume-citations'}, f.config);
+        assertArtifactContent(recovered);
         expect(recovered.artifact.body).toBe(request.body);
         const content = yield* f.f.store.read(f.f.location, recovered.artifact.uri);
         const citation = checkedCitations(content)!;
@@ -227,7 +255,7 @@ describe('native workflow graph evidence contention', () => {
         read: (location: Parameters<typeof store.read>[0], uri: string, options?: Parameters<typeof store.read>[2]) => {
           if (wrote && uri === targetUri && busyReads < 2) {
             busyReads++;
-            return Effect.fail(CodeGraphStoreBusyError.of('synthetic post-write graph contention') as never);
+            return Effect.fail(CodeGraphStoreBusyError.of('synthetic post-write graph contention'));
           }
           return store.read(location, uri, options);
         },
@@ -244,9 +272,8 @@ describe('native workflow graph evidence contention', () => {
       expect(pending).toHaveLength(1);
       expect(pending[0]).toMatchObject({status: 'prepared', intent: {operationId: 'readback-citations'}});
       expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
-      const recovered = (yield* f.f.call({...f.f.base('recover'), operationId: 'readback-citations'}, f.config)) as {
-        artifact: {uri: string; body: string; revision: string};
-      };
+      const recovered = yield* f.f.call({...f.f.base('recover'), operationId: 'readback-citations'}, f.config);
+      assertArtifactContent(recovered);
       expect(recovered.artifact.body).toBe(request.body);
       const content = yield* f.f.store.read(f.f.location, recovered.artifact.uri);
       checkedCitations(content);

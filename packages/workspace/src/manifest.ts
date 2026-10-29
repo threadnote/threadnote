@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import type {JsonObject} from '@threadnote/platform/json';
@@ -11,13 +12,19 @@ import type {
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {escapeRegExp} from '@threadnote/platform/glob';
 import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export {uriSegment} from '@threadnote/store/resource-segment';
 
-class ManifestOperationError extends Schema.TaggedError<ManifestOperationError>()('ManifestOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ManifestOperationError extends Schema.TaggedError<ManifestOperationError, {readonly brand: unique symbol}>()(
+  'ManifestOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const GENERIC_PROJECT_NAME_SEGMENTS = new Set([
   'application',
@@ -48,12 +55,14 @@ export const inferProjectFromQuery = Effect.fn('manifest.inferProjectFromQuery')
 });
 
 export function inferProjectFromManifest(manifest: SeedManifest, query: string): ProjectManifest | undefined {
-  const exactMentions = manifest.projects.flatMap(project =>
-    nameTokenSpans(query, project.name).map(span => ({...span, project})),
+  const exactMentions = EffectArray.flatMap(manifest.projects, project =>
+    EffectArray.map(nameTokenSpans(query, project.name), span => ({...span, project})),
   );
-  const maximalMentions = exactMentions.filter(
+  const maximalMentions = EffectArray.filter(
+    exactMentions,
     mention =>
-      !exactMentions.some(
+      !EffectArray.some(
+        exactMentions,
         other =>
           other.project !== mention.project &&
           other.start <= mention.start &&
@@ -61,14 +70,26 @@ export function inferProjectFromManifest(manifest: SeedManifest, query: string):
           other.end - other.start > mention.end - mention.start,
       ),
   );
-  const exactProjects = new Set(maximalMentions.map(mention => mention.project));
+  const exactProjects = new Set(EffectArray.map(maximalMentions, mention => mention.project));
   if (exactProjects.size > 0) {
     return exactProjects.size === 1 ? [...exactProjects][0] : undefined;
   }
-  const queryTerms = new Set(query.toLowerCase().match(/[a-z0-9]+/g) ?? []);
+  const queryTerms = new Set(
+    Effect2.pipe(query, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.toLowerCase);
+      const __effectPipeStage1 = Effect2.pipe(
+        __effectPipeStage0,
+        EffectString.match(/[a-z0-9]+/g),
+        Effect2.Option.getOrElse(() => null),
+      );
+      return __effectPipeStage1;
+    }) ?? [],
+  );
   const projectsBySegment = new Map<string, ProjectManifest[]>();
   for (const project of manifest.projects) {
-    for (const segment of new Set(project.name.toLowerCase().split(/[^a-z0-9]+/))) {
+    for (const segment of new Set(
+      Effect2.pipe(project.name, EffectString.toLowerCase, EffectString.split(/[^a-z0-9]+/)),
+    )) {
       if (segment.length < 4 || GENERIC_PROJECT_NAME_SEGMENTS.has(segment)) {
         continue;
       }
@@ -95,11 +116,13 @@ export function inferProjectFromManifest(manifest: SeedManifest, query: string):
  * projects that recall expands into one multi-repo working set.
  */
 function resolveWorksetProjects(manifest: SeedManifest, workset: WorksetManifest): ResolvedWorkset {
-  const byName = new Map(manifest.projects.map(project => [project.name.toLowerCase(), project]));
+  const byName = new Map(
+    EffectArray.map(manifest.projects, project => [Effect2.pipe(project.name, EffectString.toLowerCase), project]),
+  );
   const projects: ProjectManifest[] = [];
   const unresolvedProjects: string[] = [];
   for (const name of workset.projects) {
-    const project = byName.get(name.toLowerCase());
+    const project = byName.get(Effect2.pipe(name, EffectString.toLowerCase));
     if (project === undefined) unresolvedProjects.push(name);
     else projects.push(project);
   }
@@ -115,7 +138,17 @@ export const resolveWorkset = Effect.fn('manifest.resolveWorkset')(function* (
   if (manifest._tag === 'None') {
     return undefined;
   }
-  const workset = manifest.value.worksets?.find(entry => entry.name.toLowerCase() === worksetName.toLowerCase());
+  const workset = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(manifest.value.worksets), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          __effectArrayReceiver,
+          entry =>
+            Effect2.pipe(entry.name, EffectString.toLowerCase) === Effect2.pipe(worksetName, EffectString.toLowerCase),
+        ),
+      ),
+    ),
+  );
   return workset ? resolveWorksetProjects(manifest.value, workset) : undefined;
 });
 
@@ -137,14 +170,24 @@ export function requireManifestWorkset(
   worksetName: string,
   manifestPath = 'manifest',
 ): ResolvedWorkset {
-  const workset = manifest.worksets?.find(entry => entry.name.toLowerCase() === worksetName.toLowerCase());
+  const workset = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(manifest.worksets), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          __effectArrayReceiver,
+          entry =>
+            Effect2.pipe(entry.name, EffectString.toLowerCase) === Effect2.pipe(worksetName, EffectString.toLowerCase),
+        ),
+      ),
+    ),
+  );
   if (!workset) {
     throw ManifestOperationError.make({message: `No workset named "${worksetName}" in ${manifestPath}.`});
   }
   const resolved = resolveWorksetProjects(manifest, workset);
   if (resolved.unresolvedProjects.length > 0) {
     throw ManifestOperationError.make({
-      message: `Workset "${worksetName}" contains unknown projects: ${resolved.unresolvedProjects.join(', ')}.`,
+      message: `Workset "${worksetName}" contains unknown projects: ${EffectArray.join(resolved.unresolvedProjects, ', ')}.`,
     });
   }
   return resolved;
@@ -162,7 +205,12 @@ export const inferWorksetFromQuery = Effect.fn('manifest.inferWorksetFromQuery')
   if (!manifest.value.worksets || manifest.value.worksets.length === 0) {
     return undefined;
   }
-  const workset = manifest.value.worksets.find(entry => containsNameToken(query, entry.name));
+  const workset = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      manifest.value.worksets,
+      __effectArrayValue => !!(entry => containsNameToken(query, entry.name))(__effectArrayValue),
+    ),
+  );
   return workset ? resolveWorksetProjects(manifest.value, workset) : undefined;
 });
 
@@ -171,9 +219,16 @@ function containsNameToken(query: string, name: string): boolean {
 }
 
 function nameTokenSpans(query: string, name: string): readonly {readonly end: number; readonly start: number}[] {
-  const escaped = escapeRegExp(name.toLowerCase());
+  const escaped = escapeRegExp(Effect2.pipe(name, EffectString.toLowerCase));
   const spans: Array<{end: number; start: number}> = [];
-  for (const match of query.toLowerCase().matchAll(new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'g'))) {
+  for (const match of Effect2.pipe(query, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.toLowerCase);
+    const __effectPipeStage1 = Effect2.pipe(
+      __effectPipeStage0,
+      EffectString.matchAll(new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'g')),
+    );
+    return __effectPipeStage1;
+  })) {
     const start = (match.index ?? 0) + (match[1]?.length ?? 0);
     spans.push({end: start + name.length, start});
   }
@@ -199,7 +254,7 @@ export function parseSeedManifest(raw: string, path: string): SeedManifest {
   }
   const version = readNumber(loaded, 'version');
   const projectsValue = loaded.projects;
-  if (!Array.isArray(projectsValue)) {
+  if (!EffectArray.isArray(projectsValue)) {
     throw ManifestOperationError.make({message: `Manifest projects must be an array: ${path}`});
   }
   const projects: ProjectManifest[] = [];
@@ -228,10 +283,10 @@ export function parseSeedManifest(raw: string, path: string): SeedManifest {
 
   let worksets: readonly WorksetManifest[] | undefined;
   if (loaded.worksets !== undefined) {
-    if (!Array.isArray(loaded.worksets)) {
+    if (!EffectArray.isArray(loaded.worksets)) {
       throw ManifestOperationError.make({message: `Manifest worksets must be an array: ${path}`});
     }
-    worksets = loaded.worksets.map(worksetValue => {
+    worksets = EffectArray.map(loaded.worksets, worksetValue => {
       if (!isJsonObject(worksetValue)) {
         throw ManifestOperationError.make({message: `Manifest workset must be an object: ${path}`});
       }
@@ -265,7 +320,7 @@ function readProjectGraph(project: JsonObject): ProjectGraphManifest | undefined
 
 function readRepositoryPathArray(object: JsonObject, key: string): readonly string[] {
   const values = readStringArray(object, key);
-  const normalized = values.map(value => normalizeRepositoryPath(value, key));
+  const normalized = EffectArray.map(values, value => normalizeRepositoryPath(value, key));
   if (new Set(normalized).size !== normalized.length) {
     throw ManifestOperationError.make({message: `Project graph ${key} must not contain duplicate paths`});
   }
@@ -273,18 +328,33 @@ function readRepositoryPathArray(object: JsonObject, key: string): readonly stri
 }
 
 function normalizeRepositoryPath(value: string, key: string): string {
-  if (value.length === 0 || value.startsWith('/') || value.includes('\\') || hasControlCharacter(value)) {
+  if (
+    value.length === 0 ||
+    Effect2.pipe(value, EffectString.startsWith('/')) ||
+    Effect2.pipe(value, EffectString.includes('\\')) ||
+    hasControlCharacter(value)
+  ) {
     throw ManifestOperationError.make({message: `Project graph ${key} contains an invalid repository-relative path`});
   }
-  if (value.split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..')) {
+  if (
+    EffectArray.some(
+      Effect2.pipe(value, EffectString.split('/')),
+      segment => segment.length === 0 || segment === '.' || segment === '..',
+    )
+  ) {
     throw ManifestOperationError.make({message: `Project graph ${key} contains an invalid repository-relative path`});
   }
   return value;
 }
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 31 || code === 127;
   });
 }
@@ -318,7 +388,7 @@ function readNumber(object: JsonObject, key: string): number {
 
 function readStringArray(object: JsonObject, key: string): readonly string[] {
   const value = object[key];
-  if (!Array.isArray(value) || !value.every(item => typeof item === 'string')) {
+  if (!EffectArray.isArray(value) || !EffectArray.every(value, item => typeof item === 'string')) {
     throw ManifestOperationError.make({message: `Expected string array for ${key}`});
   }
   return value;

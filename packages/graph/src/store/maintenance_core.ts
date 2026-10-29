@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -19,6 +20,8 @@ import {CODE_GRAPH_EXTRACTOR_GENERATION, CodeGraphStoreError} from '../types.js'
 import {codeGraphPersistentSchemaIsCurrent} from './schema/revision.js';
 import {type CodeGraphActivationLease, type PersistentBuildOwnerCandidate} from './internal_models.js';
 import {lastStatementChangeCount} from './activation/core.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CODE_GRAPH_ROUTINE_EXPIRED_LEASE_PAGE_SIZE = 100;
 
@@ -52,11 +55,14 @@ export function codeGraphRoutineFileBlobCleanupPageStatement(
   }
   return {
     parameters: [
-      ...candidates.flatMap(candidate => [candidate.contentHash, candidate.extractorSet, candidate.path]),
+      ...EffectArray.flatMap(candidates, candidate => [candidate.contentHash, candidate.extractorSet, candidate.path]),
       eligibleBefore,
     ],
     text: `DELETE FROM file_blobs
-      WHERE (content_hash, extractor_set, path_hint) IN (${candidates.map(() => '(?, ?, ?)').join(', ')})
+      WHERE (content_hash, extractor_set, path_hint) IN (${EffectArray.join(
+        EffectArray.map(candidates, () => '(?, ?, ?)'),
+        ', ',
+      )})
         AND created_at <= ?
         AND NOT EXISTS (
           SELECT 1
@@ -94,7 +100,10 @@ export function codeGraphRoutineMaterializedShardCleanupPageStatement(
   return {
     parameters: [...candidates, eligibleBefore],
     text: `DELETE FROM materialized_file_shards
-      WHERE id IN (${candidates.map(() => '?').join(', ')})
+      WHERE id IN (${EffectArray.join(
+        EffectArray.map(candidates, () => '?'),
+        ', ',
+      )})
         AND last_used_at <= ?
         AND NOT EXISTS (
           SELECT 1
@@ -132,8 +141,8 @@ const routineMaintenanceColumnsAvailable = Effect.fn('codeGraph.routineMaintenan
 ) {
   if (!/^[a-z_]+$/u.test(table)) return false;
   const columns = yield* sql.unsafe<{readonly name: string}>(`PRAGMA table_info("${table}")`);
-  const available = new Set(columns.map(column => column.name));
-  return required.every(column => available.has(column));
+  const available = new Set(EffectArray.map(columns, column => column.name));
+  return EffectArray.every(required, column => available.has(column));
 });
 
 const selectPersistentBuildOwnerCandidates = Effect.fn('codeGraph.selectPersistentBuildOwnerCandidates')(function* (
@@ -201,7 +210,8 @@ const selectPersistentBuildOwnerCandidates = Effect.fn('codeGraph.selectPersiste
       return candidates;
     }),
   );
-  return rows.map(
+  return EffectArray.map(
+    rows,
     row =>
       ({
         buildId: row.build_id,
@@ -294,11 +304,11 @@ function decodeSnapshotLeaseManifest(row: BoundedSnapshotLeaseRow): SnapshotLeas
     typeof row.token !== 'string' ||
     row.token.length === 0 ||
     row.token.length > 1_024 ||
-    row.token.includes('\0') ||
+    Effect2.pipe(row.token, EffectString.includes('\0')) ||
     typeof row.snapshot_id !== 'string' ||
     row.snapshot_id.length === 0 ||
     row.snapshot_id.length > 1_024 ||
-    row.snapshot_id.includes('\0') ||
+    Effect2.pipe(row.snapshot_id, EffectString.includes('\0')) ||
     typeof row.expires_at !== 'number' ||
     !Number.isSafeInteger(row.expires_at) ||
     row.expires_at < 0 ||
@@ -366,7 +376,7 @@ function validRoutineCacheCursorText(value: unknown, maximumBytes = 16_384): val
     typeof value === 'string' &&
     value.length > 0 &&
     value.length <= maximumBytes &&
-    !value.includes('\0') &&
+    !Effect2.pipe(value, EffectString.includes('\0')) &&
     Buffer.byteLength(value, 'utf8') <= maximumBytes
   );
 }

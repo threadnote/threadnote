@@ -12,7 +12,8 @@ import {
   removePreparedCodeGraphWorksetFixture,
 } from '../../../../scripts/support/code-graph-workset-fixture.js';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
+import type {CodeGraphDatabaseSessionOptions, CodeGraphStoreShape} from '@threadnote/graph/store/shape';
+import type * as SqlClient from 'effect/sql/SqlClient';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
 import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -116,7 +117,7 @@ describe('Context Brief published Workset citation validation', () => {
                   const read = ++activeFenceReads;
                   if (mutateBeforeActiveFence) {
                     mutateBeforeActiveFence = false;
-                    yield* fs.writeFileString(citedPath, `${citedSource}\n// closing-fence mutation\n`);
+                    yield* Effect.orDie(fs.writeFileString(citedPath, `${citedSource}\n// closing-fence mutation\n`));
                   }
                   const fence = yield* baseStore.loadActiveViewFence(...args);
                   if (fence !== undefined && read === changedActivationFenceRead) {
@@ -128,11 +129,17 @@ describe('Context Brief published Workset citation validation', () => {
                   }
                   return fence;
                 }),
-              withSession: (...args: Parameters<CodeGraphStoreShape['withSession']>) => {
-                expect(args[2]).toMatchObject({existingOnly: true});
-                return Effect.sync(() => void ++sessions).pipe(Effect.andThen(baseStore.withSession(...args)));
+              withSession: <A, E, R>(
+                databasePath: string,
+                effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
+                options?: CodeGraphDatabaseSessionOptions,
+              ) => {
+                expect(options).toMatchObject({existingOnly: true});
+                return Effect.sync(() => void ++sessions).pipe(
+                  Effect.andThen(baseStore.withSession(databasePath, effect, options)),
+                );
               },
-            } as CodeGraphStoreShape);
+            });
             const validate = () =>
               validateContextBriefMemoryCitations(config, {kind: 'workset', name: fixture.identity.worksetName}, [
                 candidate,

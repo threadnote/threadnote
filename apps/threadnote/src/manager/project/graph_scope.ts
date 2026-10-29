@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {Effect, Schema} from 'effect';
 import {isMap, isScalar, isSeq, parseDocument, type YAMLMap} from 'yaml';
 import {previewCodeGraphProjectScope, type CodeGraphProjectScopePreview} from '@threadnote/graph/scope/preview';
@@ -7,11 +8,14 @@ import {expandPath} from '@threadnote/platform/paths';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {ApplicationServices} from '../../effect/runtime.js';
 import {managerProjectPathIsForeign} from './roots.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
-export class ManagerProjectGraphScopeError extends Schema.TaggedError<ManagerProjectGraphScopeError>()(
-  'ManagerProjectGraphScopeError',
-  {code: Schema.String, message: Schema.String, status: Schema.Finite},
-) {
+export class ManagerProjectGraphScopeError extends Schema.TaggedError<
+  ManagerProjectGraphScopeError,
+  {readonly brand: unique symbol}
+>()('ManagerProjectGraphScopeError', {code: Schema.String, message: Schema.String, status: Schema.Finite}) {
   static of(code: string, message: string, status: number): ManagerProjectGraphScopeError {
     return ManagerProjectGraphScopeError.make({code, message, status});
   }
@@ -21,8 +25,8 @@ export function validateManagerProjectGraphInput(
   value: unknown,
   maximumPaths: number,
 ): NonNullable<ProjectManifest['graph']> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('graph must be an object.');
-  const graph = value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error('graph must be an object.');
+  const graph = value;
   if (graph.closure !== 'dependencies') throw new Error('graph closure must be dependencies.');
   const roots = graphPaths(graph.roots, 'graph roots', true, maximumPaths);
   const include =
@@ -53,7 +57,13 @@ export const previewConfiguredManagerProjectGraphScope = Effect.fn('managerProje
         ManagerProjectGraphScopeError.of('manifest-unavailable', 'The seed manifest could not be read.', 500),
       ),
     );
-    const project = manifest.projects.find(item => item.name.toLowerCase() === projectName.toLowerCase());
+    const project = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        manifest.projects,
+        item =>
+          Effect2.pipe(item.name, EffectString.toLowerCase) === Effect2.pipe(projectName, EffectString.toLowerCase),
+      ),
+    );
     if (!project)
       return yield* ManagerProjectGraphScopeError.of(
         'project-not-found',
@@ -119,7 +129,7 @@ export function managerProjectGraphIdentityEqual(left: ProjectManifest, right: P
 }
 
 export function managerProjectSeedsEqual(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+  return left.length === right.length && EffectArray.every(left, (value, index) => value === right[index]);
 }
 
 export function managerProjectGraphYamlSupported(item: YAMLMap): boolean {
@@ -135,22 +145,25 @@ export function managerProjectGraphYamlSupported(item: YAMLMap): boolean {
     !hasYamlAnchor(closure) &&
     isSeq(roots) &&
     !hasYamlAnchor(roots) &&
-    !roots.items.some(root => !isScalar(root) || typeof root.value !== 'string' || hasYamlAnchor(root)) &&
+    !EffectArray.some(roots.items, root => !isScalar(root) || typeof root.value !== 'string' || hasYamlAnchor(root)) &&
     (include === undefined ||
       (isSeq(include) &&
         !hasYamlAnchor(include) &&
-        !include.items.some(value => !isScalar(value) || typeof value.value !== 'string' || hasYamlAnchor(value))))
+        !EffectArray.some(
+          include.items,
+          value => !isScalar(value) || typeof value.value !== 'string' || hasYamlAnchor(value),
+        )))
   );
 }
 
 export function managerProjectYamlDocumentSupported(document: ReturnType<typeof parseDocument>): boolean {
   const projects = document.get('projects', true);
   if (!isSeq(projects) || hasYamlAnchor(projects)) return false;
-  return projects.items.every(item => {
+  return EffectArray.every(projects.items, item => {
     if (!isMap(item) || hasYamlAnchor(item)) return false;
     const requiredFields = ['name', 'path', 'uri'] as const;
     if (
-      requiredFields.some(field => {
+      EffectArray.some(requiredFields, field => {
         const value = item.get(field, true);
         return !isScalar(value) || typeof value.value !== 'string' || hasYamlAnchor(value);
       })
@@ -161,23 +174,34 @@ export function managerProjectYamlDocumentSupported(document: ReturnType<typeof 
     return (
       isSeq(seed) &&
       !hasYamlAnchor(seed) &&
-      !seed.items.some(pattern => !isScalar(pattern) || typeof pattern.value !== 'string' || hasYamlAnchor(pattern)) &&
+      !EffectArray.some(
+        seed.items,
+        pattern => !isScalar(pattern) || typeof pattern.value !== 'string' || hasYamlAnchor(pattern),
+      ) &&
       managerProjectGraphYamlSupported(item)
     );
   });
 }
 
 function graphPaths(value: unknown, field: string, required: boolean, maximumPaths: number): readonly string[] {
-  if (!Array.isArray(value) || (required && value.length === 0)) {
+  if (!EffectArray.isArray(value) || (required && value.length === 0)) {
     throw new Error(`${field} must be a${required ? ' non-empty' : ''} string array.`);
   }
   if (value.length > maximumPaths) throw new Error(`${field} has too many paths.`);
-  const paths = value.map(item => {
-    if (typeof item !== 'string' || item.length === 0 || item.startsWith('/') || item.includes('\\')) {
+  const paths = EffectArray.map(value, item => {
+    if (
+      typeof item !== 'string' ||
+      item.length === 0 ||
+      Effect2.pipe(item, EffectString.startsWith('/')) ||
+      Effect2.pipe(item, EffectString.includes('\\'))
+    ) {
       throw new Error(`${field} must contain repository-relative paths.`);
     }
     if (
-      item.split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..') ||
+      EffectArray.some(
+        Effect2.pipe(item, EffectString.split('/')),
+        segment => segment.length === 0 || segment === '.' || segment === '..',
+      ) ||
       hasControlCharacter(item)
     ) {
       throw new Error(`${field} must contain repository-relative paths.`);
@@ -189,8 +213,13 @@ function graphPaths(value: unknown, field: string, required: boolean, maximumPat
 }
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 31 || code === 127;
   });
 }
@@ -202,7 +231,7 @@ function hasYamlAnchor(node: {readonly anchor?: string}): boolean {
 function unorderedStringsEqual(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
   const values = new Set(left);
-  return values.size === right.length && right.every(value => values.has(value));
+  return values.size === right.length && EffectArray.every(right, value => values.has(value));
 }
 
 function reconcileYamlStringSequence(map: YAMLMap, key: string, values: readonly string[]): void {

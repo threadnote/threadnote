@@ -1,11 +1,19 @@
+import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 
 describe('remote memory reference deployment', () => {
   it('resolves Fly build files from the configuration directory', async () => {
     const directory = 'deploy/threadnote-org';
-    const config = Bun.TOML.parse(await Bun.file(`${directory}/fly.toml`).text()) as {
-      build: {dockerfile: string; ignorefile: string};
-    };
+    const config = Schema.decodeUnknownSync(
+      Schema.StructWithRest(
+        Schema.Struct({
+          build: Schema.StructWithRest(Schema.Struct({dockerfile: Schema.String, ignorefile: Schema.String}), [
+            Schema.Record(Schema.String, Schema.Unknown),
+          ]),
+        }),
+        [Schema.Record(Schema.String, Schema.Unknown)],
+      ),
+    )(Bun.TOML.parse(await Bun.file(`${directory}/fly.toml`).text()));
     expect(await Bun.file(`${directory}/${config.build.dockerfile}`).exists()).toBe(true);
     expect(await Bun.file(`${directory}/${config.build.ignorefile}`).exists()).toBe(true);
   });
@@ -48,7 +56,16 @@ describe('remote memory reference deployment', () => {
   it('installs the source entrypoint runtime dependencies in the production image', async () => {
     const [dockerfile, packageJson] = await Promise.all([
       Bun.file('deploy/remote-memory/Dockerfile').text(),
-      Bun.file('package.json').json() as Promise<{readonly dependencies?: Readonly<Record<string, string>>}>,
+      Bun.file('package.json')
+        .json()
+        .then(packageJson =>
+          Schema.decodeUnknownSync(
+            Schema.StructWithRest(
+              Schema.Struct({dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String))}),
+              [Schema.Record(Schema.String, Schema.Unknown)],
+            ),
+          )(packageJson),
+        ),
     ]);
 
     expect(dockerfile).toContain('FROM oven/bun:1.4.4-alpine AS dependencies');

@@ -1,6 +1,8 @@
 import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 /** A valid existing shared enrollment for legacy-publication boundary tests, with no live enrollment API. */
 export function enrolledGitTarget(memoryId: string): string {
@@ -9,13 +11,13 @@ export function enrolledGitTarget(memoryId: string): string {
     version: 1,
     evidenceRetention: 'capsule-retained',
     extractorSet: 'test',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
     path: 'source.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
   });
   return formatMemoryDocument(

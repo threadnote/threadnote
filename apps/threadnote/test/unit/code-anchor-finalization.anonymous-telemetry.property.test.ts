@@ -12,6 +12,7 @@ import {
   withCodeAnchorFinalizationAnonymousTelemetry,
 } from '@threadnote/threadnote/telemetry/code_anchor_finalization';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
 
 describe('deferred code-anchor finalization anonymous telemetry', () => {
   it('projects only a closed result and monotone power-of-two work buckets', () => {
@@ -30,7 +31,7 @@ describe('deferred code-anchor finalization anonymous telemetry', () => {
             items: [{memoryUri: privateSentinel}],
             pendingCount: result === 'pending' ? scannedCount : 0,
             scannedCount,
-          } as never;
+          };
           const fields = codeAnchorFinalizationTelemetryFields(receipt, elapsedMilliseconds);
           expect(fields).toMatchObject({
             codeAnchorFinalizationConflictBucket: telemetryQuantityBucket(result === 'conflict' ? scannedCount : 0),
@@ -129,7 +130,7 @@ function capturingTracer(): {readonly spans: CapturedSpan[]; readonly tracer: Tr
 }
 
 function spanAttributes(captured: CapturedSpan): Record<string, unknown> {
-  return Object.fromEntries(captured.span.attributes);
+  return EffectRecord.fromEntries(captured.span.attributes);
 }
 
 function systemInfoStub(): SystemInfoShape {

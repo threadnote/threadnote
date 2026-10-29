@@ -1,15 +1,18 @@
+import {Array as EffectArray} from 'effect';
 // Compiled test provider/proxy; copied outside the checkout before release isolation.
 // Bun 1.4.2 compile cannot bundle the testing node-fs export-star wrapper.
 // oxlint-disable-next-line effecttsgo/node-builtin-import
 import {closeSync, existsSync, openSync, writeSync} from 'node:fs';
 import {join} from '@threadnote/testing/node-path';
 import {parseMemoryDocument} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const root = process.env.THREADNOTE_RELEASE_FIXTURE_ROOT;
 if (!root) throw new Error('Missing extracted-release fixture root.');
-const name = process.execPath
-  .split(/[\\/]/u)
-  .at(-1)
-  ?.replace(/\.exe$/u, '');
+const name = Effect.pipe(Effect.pipe(process.execPath, EffectString.split(/[\\/]/u)).at(-1), effectOptionalString =>
+  effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.replace(/\.exe$/u, '')),
+);
 const args = process.argv.slice(2);
 if (name === 'memory-read') {
   const uri = args[0];
@@ -57,7 +60,7 @@ if (name === 'git' || name === 'rg') {
     }
   };
   const category = (value: Uint8Array) => {
-    const error = Buffer.from(value.subarray(0, 8192)).toString('utf8').toLowerCase();
+    const error = Effect.pipe(Buffer.from(value.subarray(0, 8192)).toString('utf8'), EffectString.toLowerCase);
     if (!error) return 'none';
     for (const [token, label] of [
       ['does not exist in', 'missing-path'],
@@ -71,7 +74,7 @@ if (name === 'git' || name === 'rg') {
       ['permission denied', 'permission'],
       ['index.lock', 'index-lock'],
     ])
-      if (token && error.includes(token)) return label;
+      if (token && Effect.pipe(error, EffectString.includes(token))) return label;
     return 'unknown';
   };
   let phase = 'load';
@@ -80,9 +83,13 @@ if (name === 'git' || name === 'rg') {
     const executable = paths[name];
     if (!executable) throw new Error('Missing native fixture tool.');
     const spec = verb === 'show' ? (args[commandIndex + 1] ?? '') : '';
-    const colon = spec.indexOf(':');
-    const revision = colon >= 0 ? spec.slice(0, colon) : spec;
-    const relative = colon >= 0 ? spec.slice(colon + 1) : '';
+    const colon = Effect.pipe(
+      spec,
+      EffectString.indexOf(':'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const revision = colon >= 0 ? Effect.pipe(spec, EffectString.slice(0, colon)) : spec;
+    const relative = colon >= 0 ? Effect.pipe(spec, EffectString.slice(colon + 1)) : '';
     const form =
       verb !== 'show'
         ? 'other'
@@ -101,10 +108,21 @@ if (name === 'git' || name === 'rg') {
       specForm: form,
       pathCharacters: relative.length,
       pathBytes: Buffer.byteLength(relative),
-      pathControl: Array.from(relative).some(
-        character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+      pathControl: EffectArray.some(
+        Array.from(relative),
+        character =>
+          Effect.pipe(
+            character,
+            EffectString.charCodeAt(0),
+            Effect.Option.getOrElse(() => NaN),
+          ) < 32 ||
+          Effect.pipe(
+            character,
+            EffectString.charCodeAt(0),
+            Effect.Option.getOrElse(() => NaN),
+          ) === 127,
       ),
-      pathBackslash: relative.includes('\\'),
+      pathBackslash: Effect.pipe(relative, EffectString.includes('\\')),
       timeMs: started,
     });
     const child = Bun.spawnSync([executable, ...args], {env: process.env, stdin: 'inherit'});
@@ -182,7 +200,11 @@ const body =
           rateLimit: {cost: 1, remaining: 5000, resetAt: '2099-01-01T00:00:00Z'},
         },
       }
-    : endpoint?.includes('/comments')
+    : Effect.pipe(endpoint, effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect.pipe(effectOptionalString, EffectString.includes('/comments')),
+        )
       ? [
           {
             id: 1,
@@ -191,9 +213,17 @@ const body =
             html_url: 'https://github.com/fixture/repo/pull/1#issuecomment-1',
           },
         ]
-      : endpoint?.includes('/reviews')
+      : Effect.pipe(endpoint, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('/reviews')),
+          )
         ? []
-        : endpoint?.includes('/check-runs')
+        : Effect.pipe(endpoint, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('/check-runs')),
+            )
           ? {
               check_runs: [
                 {
@@ -206,7 +236,11 @@ const body =
                 },
               ],
             }
-          : endpoint?.includes('/status')
+          : Effect.pipe(endpoint, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect.pipe(effectOptionalString, EffectString.includes('/status')),
+              )
             ? {statuses: []}
             : {state: state.terminal ? 'closed' : 'open', merged: state.terminal, head: {sha: state.head}};
 await Bun.write(

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {parseCapacityFailure} from '../build_status/codec.js';
 import type {
   CodeGraphBuildActivity,
@@ -8,6 +9,8 @@ import type {ObsoleteCodeGraphStoreInventory} from '../maintenance.js';
 import type {CodeGraphStorage} from '../storage.js';
 import type {CodeGraphStatus} from '../types.js';
 import {parseCodeGraphBuildScheduling, type CodeGraphBuildScheduling} from '../build_status/scheduling.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_STATUS_DEFAULT_BUILD_LIMIT = 4;
 export const CODE_GRAPH_STATUS_MINIMUM_BUILD_LIMIT = 1;
@@ -144,13 +147,19 @@ export function projectCodeGraphStatusActivityV5(
 ): CodeGraphStatusActivityProjectionV5 {
   const boundedLimit = codeGraphStatusBuildLimit(limit);
   if (boundedLimit === undefined) throw new RangeError('Invalid code graph status build limit.');
-  const exactCurrent = selection.builds.find(status => status.identity.worktreeId === currentWorktreeId);
+  const exactCurrent = EffectOption.getOrUndefined(
+    EffectArray.findFirst(selection.builds, status => status.identity.worktreeId === currentWorktreeId),
+  );
   const selectedBuild =
-    exactCurrent ?? selection.builds.find(status => status.observation.liveness === 'active') ?? null;
+    exactCurrent ??
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(selection.builds, status => status.observation.liveness === 'active'),
+    ) ??
+    null;
   const selectedBuilds = boundedPrefixPreserving(selection.builds, selectedBuild, boundedLimit);
-  const builds = selectedBuilds.map(projectCodeGraphStatusBuildSummaryV5);
-  const waiters = selection.waiters.slice(0, boundedLimit).map(projectCodeGraphStatusBuildSummaryV5);
-  const allQueuedWorktreeIds = stableUnique(selection.waiters.map(status => status.identity.worktreeId));
+  const builds = EffectArray.map(selectedBuilds, projectCodeGraphStatusBuildSummaryV5);
+  const waiters = EffectArray.map(selection.waiters.slice(0, boundedLimit), projectCodeGraphStatusBuildSummaryV5);
+  const allQueuedWorktreeIds = stableUnique(EffectArray.map(selection.waiters, status => status.identity.worktreeId));
   const queuedWorktreeIds = allQueuedWorktreeIds.slice(0, boundedLimit);
   return {
     build:
@@ -336,7 +345,7 @@ function boundedText(value: string, maximumBytes: number): string {
     bytes += codePointBytes;
     end += codePoint.length;
   }
-  return value.slice(0, end);
+  return Effect.pipe(value, EffectString.slice(0, end));
 }
 
 function definedProperties<T extends object, K extends keyof T>(value: T, keys: readonly K[]): Partial<Pick<T, K>> {

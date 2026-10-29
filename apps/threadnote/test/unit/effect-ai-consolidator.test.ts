@@ -31,14 +31,14 @@ describe('Effect AI consolidator', () => {
 
   it('reports provider totals only when both counters were actually supplied', () => {
     expect(topicDraftProviderUsage(12, 3)).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
-    for (const counters of [
+    const counterCases: ReadonlyArray<readonly [unknown, unknown]> = [
       [undefined, 3],
       [12, undefined],
       [-1, 3],
       [12, NaN],
       [1.5, 2],
-    ])
-      expect(topicDraftProviderUsage(...(counters as [unknown, unknown]))).toEqual({status: 'unavailable'});
+    ];
+    for (const counters of counterCases) expect(topicDraftProviderUsage(...counters)).toEqual({status: 'unavailable'});
   });
 
   it.effect('keeps application code provider-independent', () =>

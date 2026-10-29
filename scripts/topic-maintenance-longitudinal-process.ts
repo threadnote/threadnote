@@ -1,3 +1,6 @@
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 /** Bound child output while reading, before it can exhaust the evaluation process. */
 export async function readBoundedChildOutput(
   stream: ReadableStream<Uint8Array>,
@@ -33,10 +36,10 @@ export async function readBoundedChildOutput(
 /** Caller Git controls are never allowed to redirect fixture operations or load hooks/config. */
 export function topicStudyEnvironment(input: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input))
+  for (const [key, value] of EffectRecord.toEntries(input))
     if (
       value !== undefined &&
-      !key.toUpperCase().startsWith('GIT_') &&
+      !Effect.pipe(key, EffectString.toUpperCase, EffectString.startsWith('GIT_')) &&
       ![
         'NODE_OPTIONS',
         'NODE_PATH',
@@ -44,7 +47,7 @@ export function topicStudyEnvironment(input: Readonly<Record<string, string | un
         'LD_PRELOAD',
         'DYLD_INSERT_LIBRARIES',
         'DYLD_LIBRARY_PATH',
-      ].includes(key.toUpperCase())
+      ].includes(Effect.pipe(key, EffectString.toUpperCase))
     )
       env[key] = value;
   return {

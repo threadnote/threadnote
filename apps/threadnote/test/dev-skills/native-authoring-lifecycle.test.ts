@@ -1,4 +1,5 @@
-import {Effect, FileSystem, Result} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {Effect, FileSystem, Result, Schema} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -20,13 +21,58 @@ import {
   type AuthoringReference,
   type AuthoringRoot,
 } from '../../src/workflow_automation/authoring_artifacts.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 const failure = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.result);
-type ObjectValue = Record<string, unknown>;
+type ObjectValue = Readonly<Record<string, unknown>>;
+
+const ObjectRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const OperationIntentSchema = Schema.StructWithRest(
+  Schema.Struct({
+    artifactKey: Schema.optionalKey(Schema.String),
+    operationId: Schema.String,
+    role: Schema.optionalKey(Schema.String),
+    body: Schema.optionalKey(Schema.String),
+    expectedRevision: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+    relations: Schema.optionalKey(
+      Schema.Array(Schema.StructWithRest(Schema.Struct({uri: Schema.String}), [ObjectRecordSchema])),
+    ),
+  }),
+  [ObjectRecordSchema],
+);
+const OperationSchema = Schema.StructWithRest(
+  Schema.Struct({
+    status: Schema.optionalKey(Schema.String),
+    intent: OperationIntentSchema,
+  }),
+  [ObjectRecordSchema],
+);
+const PendingAuthoringStateSchema = Schema.StructWithRest(
+  Schema.Struct({
+    operations: Schema.Array(OperationSchema),
+    authoringSave: Schema.optionalKey(
+      Schema.StructWithRest(
+        Schema.Struct({
+          intentDigest: Schema.optionalKey(Schema.String),
+          operationStart: Schema.optionalKey(Schema.Finite),
+          operationLimit: Schema.optionalKey(Schema.Finite),
+          reservedBytes: Schema.optionalKey(Schema.Finite),
+        }),
+        [ObjectRecordSchema],
+      ),
+    ),
+  }),
+  [ObjectRecordSchema],
+);
+function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown): S['Type'] {
+  return Schema.decodeUnknownSync(schema)(value);
+}
+
 const object = (value: unknown): ObjectValue => {
   if (typeof value !== 'object' || value === null) throw new Error('Expected an object response');
-  return value as ObjectValue;
+  return decodeJson(ObjectRecordSchema, value);
 };
 const authoring = (value: unknown): ObjectValue => object(object(value).authoring);
 const reference = (value: unknown): {uri: string; memoryId: string; revision: string} => {
@@ -84,12 +130,35 @@ const interruptNativeReceipt = (
         return originalFs.readFileString(from).pipe(
           Effect.flatMap(raw => {
             try {
-              const candidate = JSON.parse(raw) as {
-                operations?: {
-                  status?: string;
-                  intent?: {artifactKey?: string; role?: string; body?: string; expectedRevision?: string | null};
-                }[];
-              };
+              const candidate = decodeJson(
+                Schema.StructWithRest(
+                  Schema.Struct({
+                    operations: Schema.optionalKey(
+                      Schema.Array(
+                        Schema.StructWithRest(
+                          Schema.Struct({
+                            status: Schema.optionalKey(Schema.String),
+                            intent: Schema.optionalKey(
+                              Schema.StructWithRest(
+                                Schema.Struct({
+                                  artifactKey: Schema.optionalKey(Schema.String),
+                                  role: Schema.optionalKey(Schema.String),
+                                  body: Schema.optionalKey(Schema.String),
+                                  expectedRevision: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+                                }),
+                                [ObjectRecordSchema],
+                              ),
+                            ),
+                          }),
+                          [ObjectRecordSchema],
+                        ),
+                      ),
+                    ),
+                  }),
+                  [ObjectRecordSchema],
+                ),
+                JSON.parse(raw),
+              );
               const last = candidate.operations?.at(-1);
               if (last?.status === 'verified' && last.intent && matches(last.intent)) {
                 interrupted = true;
@@ -124,10 +193,25 @@ const interruptReservationAcknowledgement = (
         return originalFs.readFileString(from).pipe(
           Effect.flatMap(raw => {
             try {
-              const candidate = JSON.parse(raw) as {
-                authoringSave?: {operationStart?: number; operationLimit?: number; reservedBytes?: number};
-                operations?: unknown[];
-              };
+              const candidate = decodeJson(
+                Schema.StructWithRest(
+                  Schema.Struct({
+                    authoringSave: Schema.optionalKey(
+                      Schema.StructWithRest(
+                        Schema.Struct({
+                          operationStart: Schema.optionalKey(Schema.Finite),
+                          operationLimit: Schema.optionalKey(Schema.Finite),
+                          reservedBytes: Schema.optionalKey(Schema.Finite),
+                        }),
+                        [ObjectRecordSchema],
+                      ),
+                    ),
+                    operations: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+                  }),
+                  [ObjectRecordSchema],
+                ),
+                JSON.parse(raw),
+              );
               if (candidate.authoringSave !== undefined && candidate.operations?.length === operationCount) {
                 observedReservation = candidate.authoringSave;
                 return originalFs.rename(from, to).pipe(
@@ -167,9 +251,33 @@ const interruptAfterVerifiedNativeReceipt = (
         return originalFs.readFileString(from).pipe(
           Effect.flatMap(raw => {
             try {
-              const candidate = JSON.parse(raw) as {
-                operations?: {status?: string; intent?: {artifactKey?: string; role?: string}}[];
-              };
+              const candidate = decodeJson(
+                Schema.StructWithRest(
+                  Schema.Struct({
+                    operations: Schema.optionalKey(
+                      Schema.Array(
+                        Schema.StructWithRest(
+                          Schema.Struct({
+                            status: Schema.optionalKey(Schema.String),
+                            intent: Schema.optionalKey(
+                              Schema.StructWithRest(
+                                Schema.Struct({
+                                  artifactKey: Schema.optionalKey(Schema.String),
+                                  role: Schema.optionalKey(Schema.String),
+                                }),
+                                [ObjectRecordSchema],
+                              ),
+                            ),
+                          }),
+                          [ObjectRecordSchema],
+                        ),
+                      ),
+                    ),
+                  }),
+                  [ObjectRecordSchema],
+                ),
+                JSON.parse(raw),
+              );
               const last = candidate.operations?.at(-1);
               if (last?.status === 'verified' && last.intent && matches(last.intent))
                 return originalFs.rename(from, to).pipe(
@@ -233,7 +341,8 @@ const specDocument = (changes: ObjectValue = {}) =>
 const largePlan = (revision: number): NativeAuthoringDocument => {
   const stableComponents = Array.from(
     {length: 45},
-    (_, index) => `component-${index.toString().padStart(2, '0')} ${'x'.repeat(990)}`,
+    (_, index) =>
+      `component-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))} ${Effect2.pipe('x', EffectString.repeat(990))}`,
   );
   return decodeNativeAuthoringDocument({
     format: 'threadnote-native-authoring',
@@ -242,7 +351,7 @@ const largePlan = (revision: number): NativeAuthoringDocument => {
     id: 'feature',
     project: 'fixture',
     title: 'Lifecycle plan',
-    objective: `Implement lifecycle behavior; revision ${revision.toString().padStart(3, '0')}.`,
+    objective: `Implement lifecycle behavior; revision ${Effect2.pipe(revision.toString(), EffectString.padStart(3, '0'))}.`,
     requirements: [{id: 'req-read', behavior: 'A reader receives the saved document.'}],
     context,
     source: null,
@@ -365,9 +474,22 @@ describe('native authoring lifecycle', () => {
       yield* f.init();
       const seed = object(yield* f.call(f.write({operationId: 'reservation-seed', artifactKey: 'reservation-seed'})));
       const seedRef = reference(seed.artifact);
-      const before = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {
-        operations: {intent: {operationId: string}}[];
-      };
+      const before = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  intent: Schema.StructWithRest(Schema.Struct({operationId: Schema.String}), [ObjectRecordSchema]),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       const fault = yield* interruptReservationAcknowledgement(f, before.operations.length);
       const document = specDocument();
       const save = {document, ready: false, expectedRevision: null};
@@ -381,25 +503,58 @@ describe('native authoring lifecycle', () => {
       expect(fault.observedReservation()).toMatchObject({operationStart: 1, operationLimit: 6});
       expect(fault.observedReservation()?.reservedBytes).toBeGreaterThan(0);
       expect(Result.isFailure(interrupted)).toBe(true);
-      const cleaned = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {
-        operations: {intent: {operationId: string}; status: string}[];
-        authoringSave?: unknown;
-      };
+      const cleaned = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  intent: Schema.StructWithRest(Schema.Struct({operationId: Schema.String}), [ObjectRecordSchema]),
+                  status: Schema.String,
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+            authoringSave: Schema.optionalKey(Schema.Unknown),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(cleaned.operations).toHaveLength(before.operations.length);
       expect(cleaned.authoringSave).toBeUndefined();
       expect(
-        cleaned.operations.some(item => item.intent.operationId === 'reservation-seed' && item.status === 'verified'),
+        EffectArray.some(
+          cleaned.operations,
+          item => item.intent.operationId === 'reservation-seed' && item.status === 'verified',
+        ),
       ).toBe(true);
 
       const saved = authoring(
         yield* authoringRequest(f, 'save', save).pipe(Effect.provideService(CurrentNativeOperationLimit, 6)),
       );
-      const state = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {
-        operations: {intent: {operationId: string}; status: string}[];
-        authoringSave?: unknown;
-      };
+      const state = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  intent: Schema.StructWithRest(Schema.Struct({operationId: Schema.String}), [ObjectRecordSchema]),
+                  status: Schema.String,
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+            authoringSave: Schema.optionalKey(Schema.Unknown),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(reference(saved.root).memoryId).toMatch(/^tn_/u);
-      expect(state.operations.filter(item => item.intent.operationId === 'reservation-seed')).toHaveLength(1);
+      expect(EffectArray.filter(state.operations, item => item.intent.operationId === 'reservation-seed')).toHaveLength(
+        1,
+      );
       expect(state.authoringSave).toBeUndefined();
       expect(state.operations.length).toBeGreaterThan(before.operations.length);
       expect(state.operations.length).toBeLessThanOrEqual(6);
@@ -440,19 +595,41 @@ describe('native authoring lifecycle', () => {
       expect(Result.isFailure(interrupted)).toBe(true);
       const stateFile = fault.stateFile;
       const pendingBytes = yield* f.fs.readFileString(stateFile);
-      const pending = JSON.parse(pendingBytes) as {
-        authoringSave: {
-          intentDigest: string;
-          operationStart: number;
-          operationLimit: number;
-          reservedBytes: number;
-        };
-        operations: {status: string; intent: {operationId: string; role: string; artifactKey: string}}[];
-      };
+      const pending = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            authoringSave: Schema.StructWithRest(
+              Schema.Struct({
+                intentDigest: Schema.String,
+                operationStart: Schema.Finite,
+                operationLimit: Schema.Finite,
+                reservedBytes: Schema.Finite,
+              }),
+              [ObjectRecordSchema],
+            ),
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({operationId: Schema.String, role: Schema.String, artifactKey: Schema.String}),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(pendingBytes),
+      );
       expect(pending.authoringSave).toMatchObject({operationStart: 1, operationLimit: 6});
       expect(pending.authoringSave.reservedBytes).toBeGreaterThan(0);
       expect(pending.operations).toHaveLength(2);
-      const sourceChild = pending.operations.find(item => item.status === 'prepared');
+      const sourceChild = EffectOption.getOrUndefined(
+        EffectArray.findFirst(pending.operations, item => item.status === 'prepared'),
+      );
       expect(sourceChild?.intent.role).toBe('authoring-child');
       const journalBytes = yield* f.fs.readFileString(journalFile);
 
@@ -478,18 +655,40 @@ describe('native authoring lifecycle', () => {
         yield* authoringRequest(f, 'save', save).pipe(Effect.provideService(CurrentNativeOperationLimit, 6)),
       );
       expect(recovered).toMatchObject({readiness: 'draft', changed: true});
-      const recoveredState = JSON.parse(yield* f.fs.readFileString(stateFile)) as {
-        authoringSave?: unknown;
-        operations: {status: string; intent: {operationId: string; role: string; artifactKey: string}}[];
-      };
+      const recoveredState = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            authoringSave: Schema.optionalKey(Schema.Unknown),
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({operationId: Schema.String, role: Schema.String, artifactKey: Schema.String}),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(yield* f.fs.readFileString(stateFile)),
+      );
       expect(recoveredState.authoringSave).toBeUndefined();
       expect(recoveredState.operations.length).toBeGreaterThan(2);
       expect(recoveredState.operations.length).toBeLessThanOrEqual(6);
-      const operationIds = recoveredState.operations.map(item => item.intent.operationId);
+      const operationIds = EffectArray.map(recoveredState.operations, item => item.intent.operationId);
       expect(new Set(operationIds).size).toBe(operationIds.length);
-      expect(operationIds.filter(id => id === sourceChild?.intent.operationId)).toHaveLength(1);
+      expect(EffectArray.filter(operationIds, id => id === sourceChild?.intent.operationId)).toHaveLength(1);
       expect(
-        recoveredState.operations.find(item => item.intent.operationId === sourceChild?.intent.operationId)?.status,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            recoveredState.operations,
+            item => item.intent.operationId === sourceChild?.intent.operationId,
+          ),
+        )?.status,
       ).toBe('verified');
       const root = reference(recovered.root);
       expect(yield* f.store.read(f.location, seedRef.uri)).toContain('unrelated native write');
@@ -536,10 +735,30 @@ describe('native authoring lifecycle', () => {
       expect(fault.interrupted()).toBe(true);
       expect(Result.isFailure(failed)).toBe(true);
       const stateBytes = yield* f.fs.readFileString(fault.stateFile);
-      const pending = JSON.parse(stateBytes) as {
-        authoringSave: {operationStart: number; operationLimit: number};
-        operations: {status: string; intent: {operationId: string; role: string; artifactKey: string}}[];
-      };
+      const pending = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            authoringSave: Schema.StructWithRest(
+              Schema.Struct({operationStart: Schema.Finite, operationLimit: Schema.Finite}),
+              [ObjectRecordSchema],
+            ),
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({operationId: Schema.String, role: Schema.String, artifactKey: Schema.String}),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(stateBytes),
+      );
       expect(pending.authoringSave).toMatchObject({operationStart: 1, operationLimit: 6});
       expect(pending.operations).toHaveLength(2);
       const verifiedChild = pending.operations.at(-1);
@@ -558,17 +777,38 @@ describe('native authoring lifecycle', () => {
       );
       const root = reference(completed.root);
       expect(completed).toMatchObject({readiness: 'draft', changed: true});
-      const stateAfter = JSON.parse(yield* f.fs.readFileString(fault.stateFile)) as {
-        authoringSave?: unknown;
-        operations: {status: string; intent: {operationId: string; role: string}}[];
-      };
+      const stateAfter = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            authoringSave: Schema.optionalKey(Schema.Unknown),
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(Schema.Struct({operationId: Schema.String, role: Schema.String}), [
+                    ObjectRecordSchema,
+                  ]),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(yield* f.fs.readFileString(fault.stateFile)),
+      );
       expect(stateAfter.authoringSave).toBeUndefined();
       expect(stateAfter.operations.length).toBeLessThanOrEqual(6);
-      const operationIds = stateAfter.operations.map(item => item.intent.operationId);
+      const operationIds = EffectArray.map(stateAfter.operations, item => item.intent.operationId);
       expect(new Set(operationIds).size).toBe(operationIds.length);
-      expect(operationIds.filter(id => id === verifiedChild?.intent.operationId)).toHaveLength(1);
+      expect(EffectArray.filter(operationIds, id => id === verifiedChild?.intent.operationId)).toHaveLength(1);
       expect(
-        stateAfter.operations.find(item => item.intent.operationId === verifiedChild?.intent.operationId)?.status,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            stateAfter.operations,
+            item => item.intent.operationId === verifiedChild?.intent.operationId,
+          ),
+        )?.status,
       ).toBe('verified');
       expect(yield* f.store.read(f.location, seedRef.uri)).toContain('predating this reservation');
       expect(yield* f.store.read(f.location, root.uri)).toContain('Readiness: draft.');
@@ -598,10 +838,34 @@ describe('native authoring lifecycle', () => {
           return originalFs.readFileString(from).pipe(
             Effect.flatMap(raw => {
               try {
-                const candidate = JSON.parse(raw) as {
-                  authoringSave?: unknown;
-                  operations?: {status?: string; intent?: {artifactKey?: string; expectedRevision?: string | null}}[];
-                };
+                const candidate = decodeJson(
+                  Schema.StructWithRest(
+                    Schema.Struct({
+                      authoringSave: Schema.optionalKey(Schema.Unknown),
+                      operations: Schema.optionalKey(
+                        Schema.Array(
+                          Schema.StructWithRest(
+                            Schema.Struct({
+                              status: Schema.optionalKey(Schema.String),
+                              intent: Schema.optionalKey(
+                                Schema.StructWithRest(
+                                  Schema.Struct({
+                                    artifactKey: Schema.optionalKey(Schema.String),
+                                    expectedRevision: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+                                  }),
+                                  [ObjectRecordSchema],
+                                ),
+                              ),
+                            }),
+                            [ObjectRecordSchema],
+                          ),
+                        ),
+                      ),
+                    }),
+                    [ObjectRecordSchema],
+                  ),
+                  JSON.parse(raw),
+                );
                 const last = candidate.operations?.at(-1);
                 if (
                   candidate.authoringSave === undefined &&
@@ -627,12 +891,35 @@ describe('native authoring lifecycle', () => {
       expect(interrupted).toBe(true);
       expect(Result.isFailure(failed)).toBe(true);
       const pendingBytes = yield* f.fs.readFileString(stateFile);
-      const pending = JSON.parse(pendingBytes) as {
-        authoringSave?: {operationStart: number; operationLimit: number};
-        operations: {status: string; intent: {artifactKey: string; operationId: string}}[];
-      };
+      const pending = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            authoringSave: Schema.optionalKey(
+              Schema.StructWithRest(Schema.Struct({operationStart: Schema.Finite, operationLimit: Schema.Finite}), [
+                ObjectRecordSchema,
+              ]),
+            ),
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({artifactKey: Schema.String, operationId: Schema.String}),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(pendingBytes),
+      );
       expect(pending.authoringSave).toMatchObject({operationStart: 0, operationLimit: 5});
-      expect(pending.operations.filter(item => item.intent.artifactKey === 'author-root-spec')).toHaveLength(1);
+      expect(
+        EffectArray.filter(pending.operations, item => item.intent.artifactKey === 'author-root-spec'),
+      ).toHaveLength(1);
       expect(pending.operations.at(-1)).toMatchObject({status: 'verified', intent: {artifactKey: 'author-root-spec'}});
       const journalFile = f.journalPath(initialized.bindingId);
       const journalBytes = yield* f.fs.readFileString(journalFile);
@@ -641,13 +928,31 @@ describe('native authoring lifecycle', () => {
       expect(recovered).toMatchObject({readiness: 'draft', changed: false});
       expect(reference(recovered.root).memoryId).toMatch(/^tn_/u);
       const stableBytes = yield* f.fs.readFileString(stateFile);
-      const final = JSON.parse(stableBytes) as {
-        authoringSave?: unknown;
-        operations: {intent: {artifactKey: string; operationId: string}}[];
-      };
+      const final = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            authoringSave: Schema.optionalKey(Schema.Unknown),
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({artifactKey: Schema.String, operationId: Schema.String}),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(stableBytes),
+      );
       expect(final.authoringSave).toBeUndefined();
       expect(final.operations).toHaveLength(pending.operations.length);
-      expect(final.operations.filter(item => item.intent.artifactKey === 'author-root-spec')).toHaveLength(1);
+      expect(EffectArray.filter(final.operations, item => item.intent.artifactKey === 'author-root-spec')).toHaveLength(
+        1,
+      );
       expect(yield* f.fs.readFileString(stateFile)).toBe(stableBytes);
       expect(yield* f.fs.readFileString(journalFile)).toBe(journalBytes);
       expect(rootOp.intent.operationId).toBe(final.operations.at(-1)?.intent.operationId);
@@ -768,7 +1073,7 @@ describe('native authoring lifecycle', () => {
         const specPin = object(importedDocument.spec);
         const originalPin = object(specPin.root);
         for (const changedRoot of [
-          {...originalPin, revision: '0'.repeat(64)},
+          {...originalPin, revision: Effect2.pipe('0', EffectString.repeat(64))},
           {...originalPin, memoryId: 'tn_changed-root-pin'},
         ]) {
           const changedLink = decodeNativeAuthoringDocument({
@@ -947,12 +1252,33 @@ describe('native authoring lifecycle', () => {
           return originalFs.readFileString(from).pipe(
             Effect.flatMap(raw => {
               try {
-                const candidate = JSON.parse(raw) as {
-                  operations?: {
-                    status?: string;
-                    intent?: {artifactKey?: string; expectedRevision?: string | null};
-                  }[];
-                };
+                const candidate = decodeJson(
+                  Schema.StructWithRest(
+                    Schema.Struct({
+                      operations: Schema.optionalKey(
+                        Schema.Array(
+                          Schema.StructWithRest(
+                            Schema.Struct({
+                              status: Schema.optionalKey(Schema.String),
+                              intent: Schema.optionalKey(
+                                Schema.StructWithRest(
+                                  Schema.Struct({
+                                    artifactKey: Schema.optionalKey(Schema.String),
+                                    expectedRevision: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+                                  }),
+                                  [ObjectRecordSchema],
+                                ),
+                              ),
+                            }),
+                            [ObjectRecordSchema],
+                          ),
+                        ),
+                      ),
+                    }),
+                    [ObjectRecordSchema],
+                  ),
+                  JSON.parse(raw),
+                );
                 const last = candidate.operations?.at(-1);
                 if (
                   last?.status === 'verified' &&
@@ -978,16 +1304,57 @@ describe('native authoring lifecycle', () => {
       expect(interrupted).toBe(true);
       expect(Result.isFailure(failedPromotion)).toBe(true);
       const pendingBytes = yield* f.fs.readFileString(stateFile);
-      const pendingState = JSON.parse(pendingBytes) as {
-        operations: {status: string; intent: {artifactKey: string; operationId: string}}[];
-      };
-      const pendingRoot = pendingState.operations.filter(item => item.intent.artifactKey === 'author-root-spec').at(-1);
+      const pendingState = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({artifactKey: Schema.String, operationId: Schema.String}),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(pendingBytes),
+      );
+      const pendingRoot = EffectArray.filter(
+        pendingState.operations,
+        item => item.intent.artifactKey === 'author-root-spec',
+      ).at(-1);
       expect(pendingRoot).toMatchObject({status: 'prepared'});
       const verifiedJournalBytes = yield* f.fs.readFileString(journalFile);
-      const verifiedJournal = JSON.parse(verifiedJournalBytes) as {
-        operations?: Record<string, {status: string}>;
-        journal?: {operations: Record<string, {status: string}>};
-      };
+      const verifiedJournal = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.optionalKey(
+              Schema.Record(
+                Schema.String,
+                Schema.StructWithRest(Schema.Struct({status: Schema.String}), [ObjectRecordSchema]),
+              ),
+            ),
+            journal: Schema.optionalKey(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  operations: Schema.Record(
+                    Schema.String,
+                    Schema.StructWithRest(Schema.Struct({status: Schema.String}), [ObjectRecordSchema]),
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(verifiedJournalBytes),
+      );
       const journalOperations = verifiedJournal.journal?.operations ?? verifiedJournal.operations;
       expect(journalOperations?.[pendingRoot!.intent.operationId]).toMatchObject({status: 'verified'});
 
@@ -1001,14 +1368,33 @@ describe('native authoring lifecycle', () => {
       expect(recovered).toMatchObject({readiness: 'ready', recovered: true, changed: false});
       expect(reference(recovered.root)).toMatchObject({uri: draftRef.uri, memoryId: draftRef.memoryId});
       const recoveredBytes = yield* f.fs.readFileString(stateFile);
-      const finalState = JSON.parse(yield* f.fs.readFileString(stateFile)) as {
-        operations: {status: string; intent: {artifactKey: string}}[];
-      };
+      const finalState = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(Schema.Struct({artifactKey: Schema.String}), [ObjectRecordSchema]),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(yield* f.fs.readFileString(stateFile)),
+      );
       expect(finalState.operations).toHaveLength(pendingState.operations.length);
-      expect(finalState.operations.filter(item => item.intent.artifactKey === 'author-root-spec')).toHaveLength(2);
       expect(
-        finalState.operations.find(
-          item => item.intent.artifactKey === 'author-root-spec' && item.status === 'prepared',
+        EffectArray.filter(finalState.operations, item => item.intent.artifactKey === 'author-root-spec'),
+      ).toHaveLength(2);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            finalState.operations,
+            item => item.intent.artifactKey === 'author-root-spec' && item.status === 'prepared',
+          ),
         ),
       ).toBeUndefined();
       const finalJournalBytes = yield* f.fs.readFileString(journalFile);
@@ -1054,22 +1440,47 @@ describe('native authoring lifecycle', () => {
 
       const journalFile = f.journalPath(initialized.bindingId);
       const pendingBytes = yield* f.fs.readFileString(fault.stateFile);
-      const pending = JSON.parse(pendingBytes) as {
-        operations: {
-          status: string;
-          intent: {
-            artifactKey: string;
-            operationId: string;
-            role: string;
-            relations?: {uri: string}[];
-          };
-        }[];
-      };
-      const pendingRoot = pending.operations.find(
-        item => item.intent.artifactKey === 'author-root-spec' && item.status === 'prepared',
+      const pending = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({
+                      artifactKey: Schema.String,
+                      operationId: Schema.String,
+                      role: Schema.String,
+                      relations: Schema.optionalKey(
+                        Schema.Array(Schema.StructWithRest(Schema.Struct({uri: Schema.String}), [ObjectRecordSchema])),
+                      ),
+                    }),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(pendingBytes),
+      );
+      const pendingRoot = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          pending.operations,
+          item => item.intent.artifactKey === 'author-root-spec' && item.status === 'prepared',
+        ),
       );
       expect(pendingRoot?.intent.role).toBe('authoring-root');
-      expect(pendingRoot?.intent.relations?.map(item => item.uri)).toContain(evidence.uri);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(pendingRoot?.intent.relations), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, item => item.uri),
+          ),
+        ),
+      ).toContain(evidence.uri);
       const journalBytes = yield* f.fs.readFileString(journalFile);
       const replacedRootBytes = yield* f.store.read(f.location, originalRoot.uri);
 
@@ -1089,12 +1500,20 @@ describe('native authoring lifecycle', () => {
       const replayed = authoring(yield* authoringRequest(f, 'save', replacement));
       expect(replayed.changed).toBe(false);
       expect(reference(replayed.root)).toEqual(reference(recovered.root));
-      const finalState = JSON.parse(yield* f.fs.readFileString(fault.stateFile)) as typeof pending;
-      expect(finalState.operations.map(item => item.intent.operationId)).toEqual(
-        pending.operations.map(item => item.intent.operationId),
+      const finalState = decodeJson(
+        PendingAuthoringStateSchema,
+        JSON.parse(yield* f.fs.readFileString(fault.stateFile)),
+      );
+      expect(EffectArray.map(finalState.operations, item => item.intent.operationId)).toEqual(
+        EffectArray.map(pending.operations, item => item.intent.operationId),
       );
       expect(
-        finalState.operations.find(item => item.intent.operationId === pendingRoot?.intent.operationId)?.status,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            finalState.operations,
+            item => item.intent.operationId === pendingRoot?.intent.operationId,
+          ),
+        )?.status,
       ).toBe('verified');
       const loaded = authoring(yield* authoringRequest(f, 'load', {uri: originalRoot.uri, detail: 'document'}));
       expect(loaded.document).toEqual(replacementDocument);
@@ -1132,26 +1551,51 @@ describe('native authoring lifecycle', () => {
 
       const journalFile = f.journalPath(initialized.bindingId);
       const pendingBytes = yield* f.fs.readFileString(fault.stateFile);
-      const pending = JSON.parse(pendingBytes) as {
-        operations: {
-          status: string;
-          intent: {
-            artifactKey: string;
-            operationId: string;
-            role: string;
-            body: string;
-            relations?: {uri: string}[];
-          };
-        }[];
-      };
-      const navigation = pending.operations.find(item => item.intent.role === 'authoring-context');
+      const pending = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({
+                      artifactKey: Schema.String,
+                      operationId: Schema.String,
+                      role: Schema.String,
+                      body: Schema.String,
+                      relations: Schema.optionalKey(
+                        Schema.Array(Schema.StructWithRest(Schema.Struct({uri: Schema.String}), [ObjectRecordSchema])),
+                      ),
+                    }),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(pendingBytes),
+      );
+      const navigation = EffectOption.getOrUndefined(
+        EffectArray.findFirst(pending.operations, item => item.intent.role === 'authoring-context'),
+      );
       for (const evidence of evidenceRefs) expect(navigation?.intent.body).toContain(evidence.uri);
-      const pendingRoot = pending.operations.find(
-        item => item.intent.artifactKey === 'author-root-spec' && item.status === 'prepared',
+      const pendingRoot = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          pending.operations,
+          item => item.intent.artifactKey === 'author-root-spec' && item.status === 'prepared',
+        ),
       );
-      expect(pendingRoot?.intent.relations?.map(item => item.uri)).toContain(
-        'threadnote://user/tester/memories/durable/projects/fixture/workflow-feature-context.md',
-      );
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(pendingRoot?.intent.relations), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, item => item.uri),
+          ),
+        ),
+      ).toContain('threadnote://user/tester/memories/durable/projects/fixture/workflow-feature-context.md');
       const journalBytes = yield* f.fs.readFileString(journalFile);
       const replacedRootBytes = yield* f.store.read(f.location, originalRoot.uri);
 
@@ -1171,12 +1615,20 @@ describe('native authoring lifecycle', () => {
       expect(reloaded.document).toEqual(replacementDocument);
       const replay = authoring(yield* authoringRequest(f, 'save', replacement));
       expect(replay.changed).toBe(false);
-      const finalState = JSON.parse(yield* f.fs.readFileString(fault.stateFile)) as typeof pending;
-      expect(finalState.operations.map(item => item.intent.operationId)).toEqual(
-        pending.operations.map(item => item.intent.operationId),
+      const finalState = decodeJson(
+        PendingAuthoringStateSchema,
+        JSON.parse(yield* f.fs.readFileString(fault.stateFile)),
+      );
+      expect(EffectArray.map(finalState.operations, item => item.intent.operationId)).toEqual(
+        EffectArray.map(pending.operations, item => item.intent.operationId),
       );
       expect(
-        finalState.operations.find(item => item.intent.operationId === pendingRoot?.intent.operationId)?.status,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            finalState.operations,
+            item => item.intent.operationId === pendingRoot?.intent.operationId,
+          ),
+        )?.status,
       ).toBe('verified');
       expect(yield* f.fs.readFileString(journalFile)).toBe(journalBytes);
     }).pipe(run),
@@ -1191,7 +1643,12 @@ describe('native authoring lifecycle', () => {
       const fault = yield* interruptNativeReceipt(
         f,
         intent =>
-          intent.role === 'authoring-child' && intent.body?.includes('threadnote-native-authoring-data') === true,
+          intent.role === 'authoring-child' &&
+          Effect2.pipe(intent.body, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.includes('threadnote-native-authoring-data')),
+          ) === true,
       );
       const failed = yield* failure(
         authoringRequest(f, 'save', save).pipe(Effect.provideService(FileSystem.FileSystem, fault.failingFs)),
@@ -1201,10 +1658,34 @@ describe('native authoring lifecycle', () => {
 
       const journalFile = f.journalPath(initialized.bindingId);
       const pendingBytes = yield* f.fs.readFileString(fault.stateFile);
-      const pending = JSON.parse(pendingBytes) as {
-        operations: {status: string; intent: {artifactKey: string; operationId: string; role: string; body: string}}[];
-      };
-      const sourceChild = pending.operations.find(item => item.status === 'prepared');
+      const pending = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({
+                      artifactKey: Schema.String,
+                      operationId: Schema.String,
+                      role: Schema.String,
+                      body: Schema.String,
+                    }),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(pendingBytes),
+      );
+      const sourceChild = EffectOption.getOrUndefined(
+        EffectArray.findFirst(pending.operations, item => item.status === 'prepared'),
+      );
       expect(sourceChild?.intent).toMatchObject({role: 'authoring-child'});
       expect(sourceChild?.intent.artifactKey).toMatch(/^author-[a-f0-9]{64}$/u);
       expect(sourceChild?.intent.body).toContain('threadnote-native-authoring-data');
@@ -1218,12 +1699,20 @@ describe('native authoring lifecycle', () => {
 
       const recovered = authoring(yield* authoringRequest(f, 'save', save));
       expect(recovered).toMatchObject({readiness: 'draft', changed: true});
-      const recoveredState = JSON.parse(yield* f.fs.readFileString(fault.stateFile)) as typeof pending;
-      const operationIds = recoveredState.operations.map(item => item.intent.operationId);
+      const recoveredState = decodeJson(
+        PendingAuthoringStateSchema,
+        JSON.parse(yield* f.fs.readFileString(fault.stateFile)),
+      );
+      const operationIds = EffectArray.map(recoveredState.operations, item => item.intent.operationId);
       expect(new Set(operationIds).size).toBe(operationIds.length);
-      expect(operationIds.filter(id => id === sourceChild?.intent.operationId)).toHaveLength(1);
+      expect(EffectArray.filter(operationIds, id => id === sourceChild?.intent.operationId)).toHaveLength(1);
       expect(
-        recoveredState.operations.find(item => item.intent.operationId === sourceChild?.intent.operationId)?.status,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            recoveredState.operations,
+            item => item.intent.operationId === sourceChild?.intent.operationId,
+          ),
+        )?.status,
       ).toBe('verified');
       const reloaded = authoring(
         yield* authoringRequest(f, 'load', {uri: reference(recovered.root).uri, detail: 'document'}),
@@ -1232,8 +1721,11 @@ describe('native authoring lifecycle', () => {
       const replay = authoring(yield* authoringRequest(f, 'save', save));
       expect(replay.changed).toBe(false);
       expect(reference(replay.root)).toEqual(reference(recovered.root));
-      const finalState = JSON.parse(yield* f.fs.readFileString(fault.stateFile)) as typeof pending;
-      expect(finalState.operations.map(item => item.intent.operationId)).toEqual(operationIds);
+      const finalState = decodeJson(
+        PendingAuthoringStateSchema,
+        JSON.parse(yield* f.fs.readFileString(fault.stateFile)),
+      );
+      expect(EffectArray.map(finalState.operations, item => item.intent.operationId)).toEqual(operationIds);
     }).pipe(run),
   );
 
@@ -1245,9 +1737,9 @@ describe('native authoring lifecycle', () => {
       if (sourcePlan.kind !== 'plan') throw new Error('Expected a plan fixture.');
       const originalDocument = decodeNativeAuthoringDocument({
         ...sourcePlan,
-        phases: sourcePlan.phases.map(phase => ({
+        phases: EffectArray.map(sourcePlan.phases, phase => ({
           ...phase,
-          acceptance: phase.acceptance.map(({scenarioIds: _scenarioIds, ...item}) => item),
+          acceptance: EffectArray.map(phase.acceptance, ({scenarioIds: _scenarioIds, ...item}) => item),
         })),
       });
       const initial = authoring(
@@ -1278,10 +1770,29 @@ describe('native authoring lifecycle', () => {
 
       const journalFile = f.journalPath(initialized.bindingId);
       const pendingBytes = yield* f.fs.readFileString(fault.stateFile);
-      const pending = JSON.parse(pendingBytes) as {
-        operations: {status: string; intent: {artifactKey: string; operationId: string; role: string}}[];
-      };
-      const historyChild = pending.operations.find(item => item.status === 'prepared');
+      const pending = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            operations: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  status: Schema.String,
+                  intent: Schema.StructWithRest(
+                    Schema.Struct({artifactKey: Schema.String, operationId: Schema.String, role: Schema.String}),
+                    [ObjectRecordSchema],
+                  ),
+                }),
+                [ObjectRecordSchema],
+              ),
+            ),
+          }),
+          [ObjectRecordSchema],
+        ),
+        JSON.parse(pendingBytes),
+      );
+      const historyChild = EffectOption.getOrUndefined(
+        EffectArray.findFirst(pending.operations, item => item.status === 'prepared'),
+      );
       expect(historyChild?.intent.role).toBe('authoring-history');
       const journalBytes = yield* f.fs.readFileString(journalFile);
       const changed = decodeNativeAuthoringDocument({
@@ -1296,19 +1807,30 @@ describe('native authoring lifecycle', () => {
       const recovered = authoring(yield* authoringRequest(f, 'save', replacement));
       expect(recovered).toMatchObject({readiness: 'draft', changed: true});
       expect(reference(recovered.root)).toMatchObject({uri: originalRoot.uri, memoryId: originalRoot.memoryId});
-      const recoveredState = JSON.parse(yield* f.fs.readFileString(fault.stateFile)) as typeof pending;
-      const operationIds = recoveredState.operations.map(item => item.intent.operationId);
+      const recoveredState = decodeJson(
+        PendingAuthoringStateSchema,
+        JSON.parse(yield* f.fs.readFileString(fault.stateFile)),
+      );
+      const operationIds = EffectArray.map(recoveredState.operations, item => item.intent.operationId);
       expect(new Set(operationIds).size).toBe(operationIds.length);
-      expect(operationIds.filter(id => id === historyChild?.intent.operationId)).toHaveLength(1);
+      expect(EffectArray.filter(operationIds, id => id === historyChild?.intent.operationId)).toHaveLength(1);
       expect(
-        recoveredState.operations.find(item => item.intent.operationId === historyChild?.intent.operationId)?.status,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            recoveredState.operations,
+            item => item.intent.operationId === historyChild?.intent.operationId,
+          ),
+        )?.status,
       ).toBe('verified');
       const recoveredStateBytes = yield* f.fs.readFileString(fault.stateFile);
       const loaded = authoring(yield* authoringRequest(f, 'load', {uri: originalRoot.uri, detail: 'document'}));
       expect(loaded.document).toEqual(replacementDocument);
       const recoveredMemory = parseMemoryDocument(originalRoot.uri, yield* f.store.read(f.location, originalRoot.uri));
       if (!recoveredMemory) throw new Error('Expected the replaced plan root to remain readable.');
-      const newRoot = decodeAuthoringArtifact(recoveredMemory.body.trimEnd() + '\n', AuthoringRootSchema);
+      const newRoot = decodeAuthoringArtifact(
+        Effect2.pipe(recoveredMemory.body, EffectString.trimEnd) + '\n',
+        AuthoringRootSchema,
+      );
       expect(newRoot.previous).toBeDefined();
       const priorMemory = parseMemoryDocument(
         newRoot.previous!.uri,
@@ -1354,7 +1876,7 @@ describe('native authoring lifecycle', () => {
       expect(yield* f.store.read(f.location, committed.uri)).toBe(committed.content);
       expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
       const recalled = yield* loadRecallIndexData(f.config, {includeInactive: false});
-      expect(recalled.candidates.some(candidate => candidate.uri === committed.uri)).toBe(true);
+      expect(EffectArray.some(recalled.candidates, candidate => candidate.uri === committed.uri)).toBe(true);
     }).pipe(run),
   );
 
@@ -1371,7 +1893,7 @@ describe('native authoring lifecycle', () => {
       // Check readiness before querying, so lazy recall repair cannot hide a missed batch flush.
       expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
       const recalled = yield* loadRecallIndexData(f.config, {includeInactive: false, query: document.title});
-      expect(recalled.candidates.some(candidate => candidate.uri === originalRoot.uri)).toBe(true);
+      expect(EffectArray.some(recalled.candidates, candidate => candidate.uri === originalRoot.uri)).toBe(true);
       const rootBytes = yield* f.store.read(f.location, originalRoot.uri);
       const statePath = f.statePath();
       const stateBytes = yield* f.fs.readFileString(statePath);
@@ -1495,7 +2017,7 @@ describe('native authoring lifecycle', () => {
       const storedApprovedMemory = parseMemoryDocument(staleRoot.uri, yield* f.store.read(f.location, staleRoot.uri));
       if (!storedApprovedMemory) throw new Error('Expected saved root memory content');
       const storedApprovedRoot = decodeAuthoringArtifact(
-        storedApprovedMemory.body.trimEnd() + '\n',
+        Effect2.pipe(storedApprovedMemory.body, EffectString.trimEnd) + '\n',
         AuthoringRootSchema,
       );
       expect(storedApprovedRoot.confirmation).toEqual(changedConfirmation);
@@ -1661,7 +2183,10 @@ describe('native authoring lifecycle', () => {
 
         const currentMemory = parseMemoryDocument(root.uri, yield* f.store.read(f.location, root.uri));
         if (!currentMemory) throw new Error('Expected final root memory content');
-        const currentEnvelope = decodeAuthoringArtifact(currentMemory.body.trimEnd() + '\n', AuthoringRootSchema);
+        const currentEnvelope = decodeAuthoringArtifact(
+          Effect2.pipe(currentMemory.body, EffectString.trimEnd) + '\n',
+          AuthoringRootSchema,
+        );
         if (!currentEnvelope.previous) throw new Error('Expected the immediately preceding root snapshot');
         const publicPrevious = authoring(yield* authoringRequest(f, 'load', {uri: currentEnvelope.previous.uri}));
         expect(publicPrevious.root).toMatchObject({
@@ -1681,7 +2206,10 @@ describe('native authoring lifecycle', () => {
           historyUris.add(cursor.uri);
           const memory = parseMemoryDocument(cursor.uri, yield* f.store.read(f.location, cursor.uri));
           if (!memory) throw new Error('Expected a saved history root memory');
-          const savedRoot: AuthoringRoot = decodeAuthoringArtifact(memory.body.trimEnd() + '\n', AuthoringRootSchema);
+          const savedRoot: AuthoringRoot = decodeAuthoringArtifact(
+            Effect2.pipe(memory.body, EffectString.trimEnd) + '\n',
+            AuthoringRootSchema,
+          );
           expect(savedRoot.featureId).toBe('feature');
           historyHashes.add(savedRoot.documentHash);
           const previous: AuthoringReference | undefined = savedRoot.previous;
@@ -1693,7 +2221,7 @@ describe('native authoring lifecycle', () => {
         expect(history).toHaveLength(99);
         expect(yield* f.fs.readFileString(statePath)).toBe(stateBeforeHistory);
         const inspection = object(yield* f.call(f.base('inspect')));
-        if (!Array.isArray(inspection.operations)) throw new Error('Expected inspected operation receipts');
+        if (!EffectArray.isArray(inspection.operations)) throw new Error('Expected inspected operation receipts');
         expect(inspection.operations.length).toBeLessThanOrEqual(512);
       }).pipe(run),
     // Full-history retention stress; the measured save profile is recorded separately.

@@ -1,7 +1,12 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
 import {describe, expect, it} from 'vitest';
+import {Schema} from 'effect';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface PackageManifest {
   readonly dependencies?: Readonly<Record<string, string>>;
@@ -13,9 +18,27 @@ interface PackageManifest {
   readonly trustedDependencies?: readonly string[];
 }
 
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const PackageManifestSchema = Schema.StructWithRest(
+  Schema.Struct({
+    dependencies: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    devDependencies: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    engines: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    overrides: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    packageManager: Schema.optionalKey(Schema.String),
+    scripts: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    trustedDependencies: Schema.optionalKey(Schema.Array(Schema.String)),
+  }),
+  [JsonRecordSchema],
+);
+
+function parsePackageManifest(value: unknown): PackageManifest {
+  return Schema.decodeUnknownSync(PackageManifestSchema)(value);
+}
+
 describe('Bun distribution contract', () => {
   it('uses Bun as the only application runtime and build toolchain', async () => {
-    const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')) as PackageManifest;
+    const manifest = parsePackageManifest(JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')));
     const allDependencies = {...manifest.dependencies, ...manifest.devDependencies};
     const effectVersion = '4.0.7';
 
@@ -39,7 +62,7 @@ describe('Bun distribution contract', () => {
     expect(manifest.engines?.node).toBeUndefined();
     expect(manifest.scripts?.build).toMatch(/^bun /);
     expect(manifest.scripts?.test).toMatch(/^bun /);
-    expect(Object.values(manifest.scripts ?? {}).join('\n')).not.toMatch(/\b(?:node|npm|npx)\b/);
+    expect(EffectArray.join(EffectRecord.values(manifest.scripts ?? {}), '\n')).not.toMatch(/\b(?:node|npm|npx)\b/);
   });
 
   it('patches only the vulnerable PostCSS Nano ID edge', async () => {
@@ -47,7 +70,7 @@ describe('Bun distribution contract', () => {
       readFile(join(process.cwd(), 'package.json'), 'utf8'),
       readFile(join(process.cwd(), 'bun.lock'), 'utf8'),
     ]);
-    const manifest = JSON.parse(manifestText) as PackageManifest;
+    const manifest = parsePackageManifest(JSON.parse(manifestText));
 
     expect(manifest.dependencies?.nanoid).toBeUndefined();
     expect(manifest.devDependencies?.nanoid).toBeUndefined();
@@ -62,7 +85,7 @@ describe('Bun distribution contract', () => {
       readFile(join(process.cwd(), 'package.json'), 'utf8'),
       readFile(join(process.cwd(), 'bun.lock'), 'utf8'),
     ]);
-    const manifest = JSON.parse(manifestText) as PackageManifest;
+    const manifest = parsePackageManifest(JSON.parse(manifestText));
 
     expect(manifest.overrides?.['fast-uri']).toBe('3.1.9');
     expect(lockfile).toContain('"fast-uri": ["fast-uri@3.1.9"');
@@ -89,12 +112,18 @@ describe('Bun distribution contract', () => {
       readFile(join(process.cwd(), 'package.json'), 'utf8'),
       readFile(join(process.cwd(), 'bun.lock'), 'utf8'),
     ]);
-    const manifest = JSON.parse(manifestText) as PackageManifest;
+    const manifest = parsePackageManifest(JSON.parse(manifestText));
     const vitestVersion = manifest.devDependencies?.vitest;
     const coverageVersion = manifest.devDependencies?.['@vitest/coverage-istanbul'];
-    const vitestLockEntry = lockfile.match(/^\s+"vitest": \["vitest@([^"\r\n]+)"[^\r\n]*$/mu);
-    const coverageLockEntry = lockfile.match(
-      /^\s+"@vitest\/coverage-istanbul": \["@vitest\/coverage-istanbul@([^"\r\n]+)"[^\r\n]*$/mu,
+    const vitestLockEntry = Effect.pipe(
+      lockfile,
+      EffectString.match(/^\s+"vitest": \["vitest@([^"\r\n]+)"[^\r\n]*$/mu),
+      Effect.Option.getOrElse(() => null),
+    );
+    const coverageLockEntry = Effect.pipe(
+      lockfile,
+      EffectString.match(/^\s+"@vitest\/coverage-istanbul": \["@vitest\/coverage-istanbul@([^"\r\n]+)"[^\r\n]*$/mu),
+      Effect.Option.getOrElse(() => null),
     );
 
     expect(vitestVersion).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u);
@@ -109,8 +138,12 @@ describe('Bun distribution contract', () => {
       readFile(join(process.cwd(), 'package.json'), 'utf8'),
       readFile(join(process.cwd(), 'THIRD_PARTY.md'), 'utf8'),
     ]);
-    const manifest = JSON.parse(manifestText) as PackageManifest;
-    const noticeVersion = thirdPartyNotice.match(/^- `jose` ([^\s]+) \(MIT\),/mu)?.[1];
+    const manifest = parsePackageManifest(JSON.parse(manifestText));
+    const noticeVersion = Effect.pipe(
+      thirdPartyNotice,
+      EffectString.match(/^- `jose` ([^\s]+) \(MIT\),/mu),
+      Effect.Option.getOrElse(() => null),
+    )?.[1];
 
     expect(manifest.dependencies?.jose).toMatch(/^\d+\.\d+\.\d+$/u);
     expect(noticeVersion).toBe(manifest.dependencies?.jose);
@@ -121,8 +154,12 @@ describe('Bun distribution contract', () => {
       readFile(join(process.cwd(), 'package.json'), 'utf8'),
       readFile(join(process.cwd(), 'THIRD_PARTY.md'), 'utf8'),
     ]);
-    const manifest = JSON.parse(manifestText) as PackageManifest;
-    const noticeVersion = thirdPartyNotice.match(/^- `pxpipe-proxy` ([^\s]+) \(MIT\),/mu)?.[1];
+    const manifest = parsePackageManifest(JSON.parse(manifestText));
+    const noticeVersion = Effect.pipe(
+      thirdPartyNotice,
+      EffectString.match(/^- `pxpipe-proxy` ([^\s]+) \(MIT\),/mu),
+      Effect.Option.getOrElse(() => null),
+    )?.[1];
 
     expect(manifest.dependencies?.['pxpipe-proxy']).toMatch(/^\d+\.\d+\.\d+$/u);
     expect(noticeVersion).toBe(manifest.dependencies?.['pxpipe-proxy']);
@@ -134,11 +171,19 @@ describe('Bun distribution contract', () => {
       readFile(join(process.cwd(), 'bun.lock'), 'utf8'),
       readFile(join(process.cwd(), 'THIRD_PARTY.md'), 'utf8'),
     ]);
-    const manifest = JSON.parse(manifestText) as PackageManifest;
+    const manifest = parsePackageManifest(JSON.parse(manifestText));
     const nodeLlamaCppVersion = manifest.dependencies?.['node-llama-cpp'];
     const postgresVersion = manifest.dependencies?.postgres;
     const bunTypesVersion = manifest.devDependencies?.['@types/bun'];
-    const bunRuntimeVersion = manifest.packageManager?.match(/^bun@(.+)$/u)?.[1];
+    const bunRuntimeVersion = Effect.pipe(manifest.packageManager, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(
+            effectOptionalString,
+            EffectString.match(/^bun@(.+)$/u),
+            Effect.Option.getOrElse(() => null),
+          ),
+    )?.[1];
     const exactVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 
     for (const version of [nodeLlamaCppVersion, postgresVersion, bunTypesVersion]) {
@@ -162,7 +207,9 @@ describe('Bun distribution contract', () => {
       expect(lockfile).toContain(`"${packageName}": ["${packageName}@${nodeLlamaCppVersion}"`);
     }
     expect(
-      BUILTIN_MODEL_MANIFESTS.find(manifest => manifest.id === CORE_EMBEDDING_MODEL_ID)?.runtime.nodeLlamaCpp,
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, manifest => manifest.id === CORE_EMBEDDING_MODEL_ID),
+      )?.runtime.nodeLlamaCpp,
     ).toBe(nodeLlamaCppVersion);
   });
 });

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Option, Path, PlatformError, Result} from 'effect';
@@ -21,6 +22,8 @@ import {resourceStoreLocation} from '@threadnote/threadnote/mcp/server/memory';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NOW = '2026-10-03T15:00:00.000Z';
 const ROOT = 'threadnote://user/tester/memories/durable/projects/threadnote';
@@ -108,11 +111,16 @@ function makeFixture() {
       ],
       status: 'findings' as const,
     };
-    const proposal = previewContextHealthRepairPlanV1(report, records).proposals.find(
-      item => item.category === 'exact-duplicate' && item.mutation.kind === 'archive-memory',
+    const proposal = Option.getOrUndefined(
+      EffectArray.findFirst(
+        previewContextHealthRepairPlanV1(report, records).proposals,
+        item => item.category === 'exact-duplicate' && item.mutation.kind === 'archive-memory',
+      ),
     );
     expect(proposal).toBeDefined();
-    const subject = records.find(item => item.uri === proposal!.mutation.subjectUri)!;
+    const subject = Option.getOrUndefined(
+      EffectArray.findFirst(records, item => item.uri === proposal!.mutation.subjectUri),
+    )!;
     const store = yield* ResourceStore;
     for (const item of records) yield* store.write(location, item.uri, item.content, {mode: 'create'});
     const archived = previewAutomaticContextHealthArchiveReceipt(config, proposal!, subject, NOW);
@@ -133,7 +141,7 @@ function makeFixture() {
       config,
       location,
       subject,
-      survivor: records.find(item => item !== subject)!,
+      survivor: Option.getOrUndefined(EffectArray.findFirst(records, item => item !== subject))!,
       proposal: proposal!,
       archived,
       incoming,
@@ -350,7 +358,7 @@ describe('atomic context-health archive retirement', () => {
           'durable',
           'projects',
           'threadnote',
-          fixture.subject.uri.split('/').at(-1)!,
+          Effect2.pipe(fixture.subject.uri, EffectString.split('/')).at(-1)!,
         ),
       );
       let failed = false;

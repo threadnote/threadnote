@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -21,6 +22,11 @@ import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
+import {Option as EffectOption} from 'effect';
 
 const systemLayer = TestSystemInfoLayer;
 const layer = Layer.merge(systemLayer, TestCommandExecutorLayer.pipe(Layer.provide(systemLayer))).pipe(
@@ -82,7 +88,7 @@ const fixture = Effect.fn('test.auth0Registry.fixture')(function* () {
     dockerConfigPath,
     JSON.stringify({auths: {other: {auth: 'keep'}}, credHelpers: {other: 'existing'}}),
   );
-  const runtime = {agentContextHome: home} as RuntimeConfig;
+  const runtime = runtimeConfigForTest({agentContextHome: home});
   const configure = (input = registry) =>
     configureRegistryAuth0User(runtime, input).pipe(
       Effect.provideService(SystemInfo, {
@@ -118,7 +124,7 @@ const fixture = Effect.fn('test.auth0Registry.fixture')(function* () {
       Effect.sync(() => {
         expect(config.audience).toBe(registry.audience);
         expect(config.clientId).toBe(registry.clientId);
-        expect(Object.keys(form)).not.toContain('client_secret');
+        expect(EffectRecord.keys(form)).not.toContain('client_secret');
         if (endpoint === 'device') {
           expect(form.audience).toBe(registry.audience);
           expect(form.scope).toBe('offline_access registry:read');
@@ -170,7 +176,7 @@ describe('Auth0 user Zot registry reader', () => {
     {hosts: FC.uniqueArray(FC.stringMatching(/^[a-z]{1,8}\.test$/u), {minLength: 1, maxLength: 8})},
     ({hosts}) =>
       Effect.sync(() => {
-        const existing = Object.fromEntries(hosts.map((host, index) => [host, `helper-${index}`]));
+        const existing = EffectRecord.fromEntries(EffectArray.map(hosts, (host, index) => [host, `helper-${index}`]));
         const config = {auths: {unrelated: {auth: 'opaque'}}, credHelpers: existing, credsStore: 'native'};
         const result = withRegistryReaderHelper(config, 'registry.example.test');
         expect(result).toEqual({
@@ -197,7 +203,10 @@ describe('Auth0 user Zot registry reader', () => {
       expect(yield* fs.readFileString(f.dockerConfigPath)).toBe(before);
       expect(yield* fs.exists(path.join(f.home, 'graph-sharing', 'auth0-user-registry.json'))).toBe(false);
       expect(
-        (yield* fs.readDirectory(path.join(f.home, 'graph-sharing'))).filter(name => name.endsWith('.pending')),
+        EffectArray.filter(
+          yield* fs.readDirectory(path.join(f.home, 'graph-sharing')),
+          __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.pending')))(__effectArrayValue),
+        ),
       ).toEqual([]);
       yield* fs.writeFileString(
         f.dockerConfigPath,
@@ -230,7 +239,7 @@ describe('Auth0 user Zot registry reader', () => {
   effectIt.effect('configures a separate audience, logs in, serves the exact Docker host, and logs out', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      yield* configureGraphAuth0User({agentContextHome: f.home} as RuntimeConfig, {
+      yield* configureGraphAuth0User(runtimeConfigForTest({agentContextHome: f.home}), {
         audience: 'https://graph.example.test',
         clientId: registry.clientId,
         coordinatorUrl: 'https://graph.example.test',
@@ -303,7 +312,7 @@ describe('Auth0 user Zot registry reader', () => {
         issuer: registry.issuer,
         organization: registry.organization,
       };
-      yield* configureGraphAuth0User({agentContextHome: f.home} as RuntimeConfig, graph);
+      yield* configureGraphAuth0User(runtimeConfigForTest({agentContextHome: f.home}), graph);
       yield* f.configure();
       const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
       const graphBackend: Auth0UserBackend = {
@@ -346,7 +355,9 @@ describe('Auth0 user Zot registry reader', () => {
       yield* loginRegistryAuth0User(f.home, f.backend);
       expect(f.values.size).toBe(2);
       expect(new Set(f.values.keys()).size).toBe(2);
-      const entry = [...f.values.entries()].find(([, value]) => JSON.parse(value).audience === registry.audience);
+      const entry = EffectOption.getOrUndefined(
+        EffectArray.findFirst([...f.values.entries()], ([, value]) => JSON.parse(value).audience === registry.audience),
+      );
       expect(entry).toBeDefined();
       const [registryAccount, stored] = entry!;
       f.values.set(registryAccount, JSON.stringify({...JSON.parse(stored), expiresAt: now + 5}));
@@ -384,7 +395,7 @@ describe('Auth0 user Zot registry reader', () => {
   effectIt.effect('rejects audience reuse, mismatched subject, and elevated registry scopes', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      yield* configureGraphAuth0User({agentContextHome: f.home} as RuntimeConfig, {
+      yield* configureGraphAuth0User(runtimeConfigForTest({agentContextHome: f.home}), {
         audience: registry.audience,
         clientId: registry.clientId,
         coordinatorUrl: 'https://graph.example.test',
@@ -399,7 +410,7 @@ describe('Auth0 user Zot registry reader', () => {
       yield* another.configure();
       expect(
         (yield* Effect.result(
-          configureGraphAuth0User({agentContextHome: another.home} as RuntimeConfig, {
+          configureGraphAuth0User(runtimeConfigForTest({agentContextHome: another.home}), {
             audience: registry.audience,
             clientId: registry.clientId,
             coordinatorUrl: 'https://graph.example.test',

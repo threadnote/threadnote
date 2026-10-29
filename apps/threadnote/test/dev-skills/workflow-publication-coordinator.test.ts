@@ -1,3 +1,5 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -23,6 +25,21 @@ import {
 import type {WorkflowBinding, WorkflowReadResult} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {publicationDiagnostics} from './workflow-publication-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function assertWorkflowReadResult(
+  value: unknown,
+): asserts value is Pick<WorkflowReadResult, 'canonicalUri' | 'revision'> {
+  if (
+    !isJsonObject(value) ||
+    value.status !== 'ok' ||
+    typeof value.canonicalUri !== 'string' ||
+    typeof value.revision !== 'string'
+  )
+    throw new Error('Expected a successful workflow read result.');
+}
 
 const graph: readonly WorkflowPublicationNode[] = [
   {
@@ -64,7 +81,7 @@ const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(functio
   yield* fs.writeFileString(path.join(repo, 'src/value.ts'), 'export const value = 1;\n');
   yield* git(repo, ['add', '.']);
   yield* git(repo, ['commit', '-m', 'source']);
-  const sourceCommit = (yield* git(repo, ['rev-parse', 'HEAD'])).stdout.trim();
+  const sourceCommit = Effect2.pipe((yield* git(repo, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
   yield* git(root, ['init', '--bare', '--initial-branch=main', remote]);
   yield* git(root, ['clone', remote, worktree]);
   yield* git(worktree, ['config', 'user.email', 'test@example.invalid']);
@@ -95,7 +112,12 @@ const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(functio
     ...system,
     currentDirectory: () => repo,
     environment: () =>
-      Object.fromEntries(Object.entries(system.environment()).filter(([key]) => !key.startsWith('THREADNOTE_'))),
+      EffectRecord.fromEntries(
+        EffectArray.filter(
+          EffectRecord.toEntries(system.environment()),
+          ([key]) => !Effect2.pipe(key, EffectString.startsWith('THREADNOTE_')),
+        ),
+      ),
   };
   const binding = yield* resolveWorkflowBinding(config, {
     protocolVersion: 1,
@@ -187,8 +209,9 @@ describe('approved workflow graph publication', () => {
               kind: 'durable' as const,
               status: 'active' as const,
               project: 'fixture',
+              // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
               topic: 'e'.repeat(length - 3),
-              memoryId: `tn_${sha256HexSync(`external-${length}`).slice(0, 20)}`,
+              memoryId: `tn_${Effect2.pipe(sha256HexSync(`external-${length}`), EffectString.slice(0, 20))}`,
               timestamp: '2026-10-20T00:00:00.000Z',
               sourceAgentClient: 'test',
             },
@@ -198,6 +221,7 @@ describe('approved workflow graph publication', () => {
           expect((yield* writeCursorCloudSharedMemory(f.config, scope, input)).isError).not.toBe(true);
           const node = {
             ...graph[0],
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
             topic: 'x'.repeat(length - 20),
             body: 'Independent final body — 仕様.\n',
             relations: [{type: 'depends_on', uri: external.memoryUri}],
@@ -205,7 +229,7 @@ describe('approved workflow graph publication', () => {
           const preview = yield* f.preview([node]);
           if (!('nodes' in preview)) return yield* Effect.die('Expected publication preview');
           for (const uri of [external.memoryUri, preview.nodes[0].canonicalUri]) {
-            const relative = uri.split('/shared/default/')[1];
+            const relative = Effect2.pipe(uri, EffectString.split('/shared/default/'))[1];
             expect(Buffer.byteLength(f.path.basename(relative))).toBe(length);
             if (process.platform === 'win32') {
               const absolute = f.path.join(f.worktree, relative);
@@ -222,31 +246,51 @@ describe('approved workflow graph publication', () => {
           expect(yield* f.guard).toEqual(published);
           expect(yield* f.publish(preview.approvalDigest)).toEqual(published);
           const relevant = reads.slice(before);
-          expect(relevant.some(read => read.spec.endsWith(external.memoryUri.split('/shared/default/')[1]))).toBe(true);
           expect(
-            relevant.some(read => read.spec.endsWith(preview.nodes[0].canonicalUri.split('/shared/default/')[1])),
+            EffectArray.some(relevant, read =>
+              Effect2.pipe(
+                read.spec,
+                EffectString.endsWith(Effect2.pipe(external.memoryUri, EffectString.split('/shared/default/'))[1]),
+              ),
+            ),
           ).toBe(true);
-          expect(relevant.every(read => read.separated)).toBe(true);
+          expect(
+            EffectArray.some(relevant, read =>
+              Effect2.pipe(
+                read.spec,
+                EffectString.endsWith(
+                  Effect2.pipe(preview.nodes[0].canonicalUri, EffectString.split('/shared/default/'))[1],
+                ),
+              ),
+            ),
+          ).toBe(true);
+          expect(EffectArray.every(relevant, read => read.separated)).toBe(true);
           expect(yield* readOptionalResource(f.config, external.memoryUri)).toBe(external.memory);
-          const remoteCommit = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
+          const remoteCommit = Effect2.pipe((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout, EffectString.trim);
           for (const uri of [external.memoryUri, preview.nodes[0].canonicalUri]) {
-            const relative = uri.split('/shared/default/')[1];
+            const relative = Effect2.pipe(uri, EffectString.split('/shared/default/'))[1];
             expect((yield* f.git(f.remote, ['show', `${remoteCommit}:${relative}`, '--'])).stdout).toBe(
               yield* readOptionalResource(f.config, uri),
             );
           }
           expect(
-            parseMemoryDocument(
-              external.memoryUri,
-              (yield* readOptionalResource(f.config, external.memoryUri))!,
-            )?.body.trim(),
-          ).toBe(input.bodyText.trim());
+            Effect2.pipe(
+              parseMemoryDocument(external.memoryUri, (yield* readOptionalResource(f.config, external.memoryUri))!)
+                ?.body,
+              effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            ),
+          ).toBe(Effect2.pipe(input.bodyText, EffectString.trim));
           expect(
-            parseMemoryDocument(
-              preview.nodes[0].canonicalUri,
-              (yield* readOptionalResource(f.config, preview.nodes[0].canonicalUri))!,
-            )?.body.trim(),
-          ).toBe(node.body.trim());
+            Effect2.pipe(
+              parseMemoryDocument(
+                preview.nodes[0].canonicalUri,
+                (yield* readOptionalResource(f.config, preview.nodes[0].canonicalUri))!,
+              )?.body,
+              effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            ),
+          ).toBe(Effect2.pipe(node.body, EffectString.trim));
         }).pipe(Effect.provideService(CommandExecutor, observed));
       }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
     );
@@ -271,8 +315,10 @@ describe('approved workflow graph publication', () => {
         const preview = yield* f.preview();
         if (!('stages' in preview)) return yield* Effect.die('Expected preview');
         expect(preview.stages).toHaveLength(3);
-        expect(preview.nodes.every(node => node.relations.length === 1)).toBe(true);
-        expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+        expect(EffectArray.every(preview.nodes, node => node.relations.length === 1)).toBe(true);
+        expect(Effect2.pipe((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe(
+          '1',
+        );
         diagnostics.phase('approval-refusal');
         expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
           _tag: 'Failure',
@@ -288,7 +334,9 @@ describe('approved workflow graph publication', () => {
         diagnostics.phase('retirement-guard');
         expect(yield* f.guard).toEqual(result);
         diagnostics.phase('remote-verification');
-        expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
+        expect(Effect2.pipe((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe(
+          '4',
+        );
         const files = (yield* f.git(f.remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout;
         expect(files).not.toMatch(/handoff|workflow-memory|\.publication/);
         diagnostics.phase('canonical-readback');
@@ -352,7 +400,9 @@ describe('approved workflow graph publication', () => {
           diagnostics.phase('resume');
           expect(yield* f.publish(preview.approvalDigest)).toMatchObject({status: 'ok', verifiedReadback: true});
           diagnostics.phase('remote-verification');
-          expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
+          expect(
+            Effect2.pipe((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout, EffectString.trim),
+          ).toBe('4');
           diagnostics.phase('retirement-guard');
           expect(yield* f.guard).toMatchObject({verifiedReadback: true});
         }).pipe(
@@ -393,7 +443,9 @@ describe('approved workflow graph publication', () => {
       }
       yield* f.approve(changed.approvalDigest);
       expect(yield* f.publish(changed.approvalDigest)).toMatchObject({status: 'ok', verifiedReadback: true});
-      expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('2');
+      expect(Effect2.pipe((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe(
+        '2',
+      );
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
@@ -410,7 +462,9 @@ describe('approved workflow graph publication', () => {
         _tag: 'Failure',
         failure: {code: 'publication-source-changed'},
       });
-      expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+      expect(Effect2.pipe((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe(
+        '1',
+      );
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
@@ -426,7 +480,9 @@ describe('approved workflow graph publication', () => {
       yield* f.approve(preview.approvalDigest);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'src/value.ts'), 'export const value = 2;\n');
       expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
-      expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+      expect(Effect2.pipe((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe(
+        '1',
+      );
       yield* f.fs.writeFileString(f.path.join(f.repo, 'src/value.ts'), 'export const value = 1;\n');
       expect(yield* f.publish(preview.approvalDigest)).toMatchObject({verifiedReadback: true});
       const content = yield* readOptionalResource(f.config, preview.nodes[0].canonicalUri);
@@ -443,7 +499,7 @@ describe('approved workflow graph publication', () => {
       if (!('stages' in preview)) return yield* Effect.die('Expected preview');
       yield* f.approve(preview.approvalDigest);
       yield* f.publish(preview.approvalDigest);
-      const relative = preview.nodes[0].canonicalUri.split('/shared/default/')[1];
+      const relative = Effect2.pipe(preview.nodes[0].canonicalUri, EffectString.split('/shared/default/'))[1];
       yield* f.fs.writeFileString(f.path.join(f.worktree, relative), 'Concurrent shared edit\n');
       yield* f.git(f.worktree, ['add', relative]);
       yield* f.git(f.worktree, ['commit', '-m', 'concurrent edit']);
@@ -476,7 +532,10 @@ describe('approved workflow graph publication', () => {
           return yield* Effect.gen(function* () {
             diagnostics.phase('fixture');
             const f = yield* fixture();
-            const remoteBefore = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
+            const remoteBefore = Effect2.pipe(
+              (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout,
+              EffectString.trim,
+            );
             diagnostics.phase('first-preview');
             const first = yield* f.preview([graph[0]]);
             if (!('stages' in first)) return yield* Effect.die('Expected preview');
@@ -487,7 +546,10 @@ describe('approved workflow graph publication', () => {
             diagnostics.phase('first-blocked-push');
             const pending = yield* f.publish(first.approvalDigest);
             expect(pending).toMatchObject({status: 'pending', committed: {version: 1}});
-            const firstCommit = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+            const firstCommit = Effect2.pipe(
+              (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout,
+              EffectString.trim,
+            );
             diagnostics.phase('first-revoke');
             yield* f.approve(first.approvalDigest, decision);
             yield* f.fs.remove(hook);
@@ -533,11 +595,13 @@ describe('approved workflow graph publication', () => {
               }),
             ).toMatchObject({status: 'pending'});
             diagnostics.phase('revoked-approval-check');
-            expect((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim()).toBe(remoteBefore);
+            expect(Effect2.pipe((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout, EffectString.trim)).toBe(
+              remoteBefore,
+            );
             expect(
               (yield* f.git(f.worktree, [
                 'show',
-                `${firstCommit}:${first.nodes[0].canonicalUri.split('/shared/default/')[1]}`,
+                `${firstCommit}:${Effect2.pipe(first.nodes[0].canonicalUri, EffectString.split('/shared/default/'))[1]}`,
               ])).stdout,
             ).toBe(first.stages[0].content);
             expect(yield* f.publish(first.approvalDigest).pipe(Effect.result)).toMatchObject({
@@ -614,7 +678,7 @@ describe('approved workflow graph publication', () => {
             expect((yield* writeCursorCloudSharedMemory(f.config, scope, input)).isError).not.toBe(true);
             diagnostics.phase('preview');
             const body = 'Private draft retained until the complete approved graph is remotely verified.\n';
-            const draft = (yield* runWorkflowMemory(f.config, {
+            const draft: unknown = yield* runWorkflowMemory(f.config, {
               protocolVersion: 1,
               bindingId: f.binding.bindingId,
               action: 'create',
@@ -625,7 +689,8 @@ describe('approved workflow graph publication', () => {
               body,
               bodySha256: sha256HexSync(body),
               expectedRevision: null,
-            }).pipe(Effect.provideService(SystemInfo, f.context))) as WorkflowReadResult;
+            }).pipe(Effect.provideService(SystemInfo, f.context));
+            assertWorkflowReadResult(draft);
             const draftBefore = yield* readOptionalResource(f.config, draft.canonicalUri);
             const preview = yield* f.preview([
               {...graph[0], relations: [{type: 'depends_on', uri: external.memoryUri}]},
@@ -638,7 +703,7 @@ describe('approved workflow graph publication', () => {
             yield* f.git(f.home, ['clone', f.remote, peer]);
             yield* f.git(peer, ['config', 'user.email', 'peer@example.invalid']);
             yield* f.git(peer, ['config', 'user.name', 'External Target Peer']);
-            const path = external.memoryUri.split('/shared/default/')[1];
+            const path = Effect2.pipe(external.memoryUri, EffectString.split('/shared/default/'))[1];
             if (change === 'delete') yield* f.git(peer, ['rm', path]);
             else {
               const record = parseMemoryDocument(external.memoryUri, external.memory)!;
@@ -704,7 +769,21 @@ describe('approved workflow graph publication', () => {
     );
 
   it('rejects private references through bounded JSON and URL encoding layers', () => {
-    const binding = {home: '/Users/private/threadnote', repo: '/work/project'} as WorkflowBinding;
+    const binding: WorkflowBinding = {
+      bindingId: 'publication-text-fixture',
+      workflowRunId: 'publication-text-fixture',
+      profile: 'desktop',
+      project: 'fixture',
+      featureId: 'publication-text',
+      generation: '1',
+      home: '/Users/private/threadnote',
+      repo: '/work/project',
+      account: 'local',
+      user: 'tester',
+      agentId: 'test',
+      sharedRoots: [],
+      artifactLifetime: 'local-home',
+    };
     fc.assert(
       fc.property(
         fc.constantFrom(
@@ -716,14 +795,40 @@ describe('approved workflow graph publication', () => {
         fc.array(fc.constantFrom('unicode', 'percent', 'slash'), {minLength: 0, maxLength: 3}),
         (privateText, encodings) => {
           const encode = (value: string) =>
-            encodings.reduce<string>(
-              (text, encoding) =>
-                encoding === 'unicode'
-                  ? [...text].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`).join('')
-                  : encoding === 'percent'
-                    ? [...text].map(character => `%${character.charCodeAt(0).toString(16).padStart(2, '0')}`).join('')
-                    : text.replace(/[\\/]/gu, '\\$&'),
-              value,
+            EffectArray.reduce(encodings, value, (text, encoding) =>
+              encoding === 'unicode'
+                ? EffectArray.join(
+                    EffectArray.map(
+                      [...text],
+                      character =>
+                        `\\u${Effect2.pipe(
+                          Effect2.pipe(
+                            character,
+                            EffectString.charCodeAt(0),
+                            Effect2.Option.getOrElse(() => NaN),
+                          ).toString(16),
+                          EffectString.padStart(4, '0'),
+                        )}`,
+                    ),
+                    '',
+                  )
+                : encoding === 'percent'
+                  ? EffectArray.join(
+                      EffectArray.map(
+                        [...text],
+                        character =>
+                          `%${Effect2.pipe(
+                            Effect2.pipe(
+                              character,
+                              EffectString.charCodeAt(0),
+                              Effect2.Option.getOrElse(() => NaN),
+                            ).toString(16),
+                            EffectString.padStart(2, '0'),
+                          )}`,
+                      ),
+                      '',
+                    )
+                  : Effect2.pipe(text, EffectString.replace(/[\\/]/gu, '\\$&')),
             );
           const inspect = (value: string) =>
             assertPublicationText(

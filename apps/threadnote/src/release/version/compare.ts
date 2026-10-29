@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 /**
  * Compare two semver-ish / PEP 440 versions. Returns positive if `left > right`,
  * negative if `left < right`, and zero if they are equivalent. This module is
@@ -14,7 +16,7 @@ export function compareVersions(leftVersion: string, rightVersion: string): numb
   const rankDelta = suffixRank(left.suffix) - suffixRank(right.suffix);
   if (rankDelta !== 0) return rankDelta;
   if (left.suffix === right.suffix) return 0;
-  return (left.suffix ?? '').localeCompare(right.suffix ?? '', 'en', {numeric: true});
+  return Effect.pipe(left.suffix ?? '', EffectString.localeCompare(right.suffix ?? '', ['en'], {numeric: true}));
 }
 
 const DEVELOPMENT_BUILD_VERSION_PATTERN =
@@ -33,11 +35,17 @@ function parseVersion(version: string): {
   readonly numbers: readonly [number, number, number];
   readonly suffix?: string;
 } {
-  const normalized = version.trim().replace(/^v/, '').split('+', 1)[0];
-  const core = normalized.match(/^\d+(?:\.\d+){0,2}/)?.[0] ?? '';
-  const rawSuffix = normalized.slice(core.length).replace(/^[-_.]/, '');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  const normalized = Effect.pipe(version, EffectString.trim, EffectString.replace(/^v/, '')).split('+', 1)[0];
+  const core =
+    Effect.pipe(
+      normalized,
+      EffectString.match(/^\d+(?:\.\d+){0,2}/),
+      Effect.Option.getOrElse(() => null),
+    )?.[0] ?? '';
+  const rawSuffix = Effect.pipe(normalized, EffectString.slice(core.length), EffectString.replace(/^[-_.]/, ''));
   const suffix = core.length > 0 && rawSuffix.length > 0 ? rawSuffix : undefined;
-  const parts = core.split('.');
+  const parts = Effect.pipe(core, EffectString.split('.'));
   return {
     numbers: [
       safeVersionNumber(Number.parseInt(parts[0] ?? '', 10)),

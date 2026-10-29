@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -5,7 +6,10 @@ import {testHttpFetch} from '@threadnote/testing/http-fetch';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
 import {parseSourceConfiguration} from '@threadnote/threadnote/integrations/config';
+import {isJsonObject} from '@threadnote/platform/json';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let home: string;
 let server: ManagerTestServer;
@@ -29,13 +33,15 @@ afterEach(async () => {
   delete process.env[envName];
 });
 
-async function request(path: string, body?: Record<string, unknown>, authorized = true) {
+async function request(path: string, requestBody?: Record<string, unknown>, authorized = true) {
   const response = await testHttpFetch(server.url + path, {
-    method: body ? 'POST' : 'GET',
+    method: requestBody ? 'POST' : 'GET',
     headers: {...(authorized ? {authorization: `Bearer ${auth}`} : {}), 'content-type': 'application/json'},
-    ...(body ? {body: JSON.stringify(body)} : {}),
+    ...(requestBody ? {body: JSON.stringify(requestBody)} : {}),
   });
-  return {status: response.status, body: (await response.json()) as Record<string, unknown>};
+  const body: unknown = await response.json();
+  if (!isJsonObject(body)) throw new Error('Expected an integration response object.');
+  return {status: response.status, body};
 }
 
 describe('Manager GitHub integration HTTP boundary', () => {
@@ -61,7 +67,7 @@ describe('Manager GitHub integration HTTP boundary', () => {
         version: 1,
         provider: 'github',
         sourceId: 'recordings',
-        accessEpoch: 'a'.repeat(64),
+        accessEpoch: Effect.pipe('a', EffectString.repeat(64)),
         status: 'active',
         nextAttemptAt,
       }),
@@ -69,8 +75,24 @@ describe('Manager GitHub integration HTTP boundary', () => {
     expect((await request('/api/integrations', undefined, false)).status).toBe(401);
     const response = await request('/api/integrations');
     expect(response.status).toBe(200);
-    expect((response.body.obsidian as {sources: {id: string}[]}).sources.map(source => source.id)).toEqual(['vault']);
-    expect((response.body.github as {sources: Record<string, unknown>[]}).sources[0]).toMatchObject({
+    const obsidian = response.body.obsidian;
+    if (!isJsonObject(obsidian) || !EffectArray.isArray(obsidian.sources))
+      throw new Error('Expected the Obsidian integration source list.');
+    const obsidianSources = EffectArray.filter(
+      obsidian.sources,
+      (source): source is Record<string, unknown> & {id: string} =>
+        isJsonObject(source) && typeof source.id === 'string',
+    );
+    if (obsidianSources.length !== obsidian.sources.length) throw new Error('Expected identified Obsidian sources.');
+    expect(EffectArray.map(obsidianSources, source => source.id)).toEqual(['vault']);
+    const github = response.body.github;
+    if (
+      !isJsonObject(github) ||
+      !EffectArray.isArray(github.sources) ||
+      !EffectArray.every(github.sources, isJsonObject)
+    )
+      throw new Error('Expected the GitHub integration source list.');
+    expect(github.sources[0]).toMatchObject({
       id: 'recordings',
       credentialConfigured: false,
       conversations: 0,
@@ -118,8 +140,12 @@ describe('Manager GitHub integration HTTP boundary', () => {
       ).status,
     ).toBe(200);
     expect(
-      parseSourceConfiguration(await readFile(configPath, 'utf8')).sources.find(source => source.id === 'recordings')
-        ?.enabled,
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          parseSourceConfiguration(await readFile(configPath, 'utf8')).sources,
+          source => source.id === 'recordings',
+        ),
+      )?.enabled,
     ).toBe(false);
     expect(
       (
@@ -131,9 +157,9 @@ describe('Manager GitHub integration HTTP boundary', () => {
         })
       ).status,
     ).toBe(200);
-    expect(parseSourceConfiguration(await readFile(configPath, 'utf8')).sources.map(source => source.id)).toEqual([
-      'vault',
-    ]);
+    expect(
+      EffectArray.map(parseSourceConfiguration(await readFile(configPath, 'utf8')).sources, source => source.id),
+    ).toEqual(['vault']);
   });
 
   it('previews a new source or token edit without persisting a submitted token', async () => {

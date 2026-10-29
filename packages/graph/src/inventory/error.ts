@@ -1,5 +1,8 @@
 import {Schema} from 'effect';
-export class CodeGraphInventoryError extends Schema.TaggedError<CodeGraphInventoryError>()('CodeGraphInventoryError', {
+export class CodeGraphInventoryError extends Schema.TaggedError<
+  CodeGraphInventoryError,
+  {readonly brand: unique symbol}
+>()('CodeGraphInventoryError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {

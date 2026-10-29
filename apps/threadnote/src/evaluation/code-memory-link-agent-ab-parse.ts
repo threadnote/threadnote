@@ -1,4 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 export function record(value: unknown, label: string): Record<string, unknown> {
   if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
@@ -6,9 +8,9 @@ export function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 export function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -50,7 +52,7 @@ export function assertUnique(values: readonly string[], label: string): void {
 }
 
 export function assertCanonicalOrder(values: readonly string[], label: string): void {
-  if (values.some((value, index) => value !== [...values].sort()[index]))
+  if (EffectArray.some(values, (value, index) => value !== [...values].sort()[index]))
     invalid(`${label} must be sorted canonically`);
 }
 

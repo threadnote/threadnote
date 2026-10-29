@@ -1,4 +1,5 @@
 import type {CodeGraphWorksetRouterRepositoryCandidateV1} from './router.js';
+import {Array as EffectArray} from 'effect';
 
 export const CODE_GRAPH_WORKSET_EXPANSION_VERSION = 1 as const;
 export const CODE_GRAPH_WORKSET_EXPANSION_SCHEDULE = [4, 4, 16] as const;
@@ -38,7 +39,7 @@ export function selectCodeGraphWorksetAdaptiveExpansionBatch(
   const activeGraphBuilds = boundedInteger(input.activeGraphBuilds ?? 0, 'active graph build count', 0, 10_000);
   const memoryPressure = input.memoryPressure ?? 'normal';
   const selected = input.alreadySelectedRepositoryKeys ?? new Set<string>();
-  const remaining = input.repositories.filter(repository => !selected.has(repository.repositoryKey));
+  const remaining = EffectArray.filter(input.repositories, repository => !selected.has(repository.repositoryKey));
   const concurrency = adaptiveConcurrency(openDatabaseBudget, activeGraphBuilds, memoryPressure);
   const requestedBatchSize = scheduledBatchSize(phase, memoryPressure);
   const perWaveMilliseconds = conservativeRecentLatency(input.recentQueryMilliseconds);
@@ -83,9 +84,11 @@ function scheduledBatchSize(phase: number, memoryPressure: 'elevated' | 'high' |
 
 function conservativeRecentLatency(samples: readonly number[] | undefined): number {
   if (samples === undefined || samples.length === 0) return 250;
-  const valid = samples
-    .filter(sample => Number.isFinite(sample) && sample >= 1 && sample <= 60_000)
-    .sort((a, b) => a - b);
+  const valid = EffectArray.filter(
+    samples,
+    (sample, __effectArrayIndex) =>
+      __effectArrayIndex in samples && Number.isFinite(sample) && sample >= 1 && sample <= 60_000,
+  ).sort((a, b) => a - b);
   if (valid.length === 0) return 250;
   return Math.ceil(valid[Math.min(valid.length - 1, Math.ceil(valid.length * 0.95) - 1)]);
 }

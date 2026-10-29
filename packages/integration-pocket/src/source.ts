@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   SourceCoordinator,
   SourceCoordinatorError,
@@ -41,6 +42,9 @@ import {
   storePocketCredential,
   validPocketApiToken,
 } from './credentials.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface PocketSourceAddOptions {
   readonly id: string;
@@ -80,13 +84,38 @@ export interface PocketSyncResult {
   readonly warnings: readonly string[];
   readonly progress?: {readonly page: number; readonly offset: number};
 }
-class PocketSourceError extends Schema.TaggedError<PocketSourceError>()('PocketSourceError', {
-  message: Schema.String,
-}) {}
-export class PocketSourceConflictError extends Schema.TaggedError<PocketSourceConflictError>()(
-  'PocketSourceConflictError',
-  {},
+const isPocketSyncResult = (value: unknown): value is PocketSyncResult => {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('sourceId' in value) ||
+    typeof value.sourceId !== 'string' ||
+    !('syncedDocuments' in value) ||
+    !Schema.is(Schema.Array(Schema.String))(value.syncedDocuments) ||
+    !('warnings' in value) ||
+    !Schema.is(Schema.Array(Schema.String))(value.warnings)
+  )
+    return false;
+  if (!('progress' in value) || value.progress === undefined) return true;
+  return (
+    typeof value.progress === 'object' &&
+    value.progress !== null &&
+    'page' in value.progress &&
+    typeof value.progress.page === 'number' &&
+    'offset' in value.progress &&
+    typeof value.progress.offset === 'number'
+  );
+};
+class PocketSourceError extends Schema.TaggedError<PocketSourceError, {readonly brand: unique symbol}>()(
+  'PocketSourceError',
+  {
+    message: Schema.String,
+  },
 ) {}
+export class PocketSourceConflictError extends Schema.TaggedError<
+  PocketSourceConflictError,
+  {readonly brand: unique symbol}
+>()('PocketSourceConflictError', {}) {}
 const error = (message: string) => PocketSourceError.make({message});
 const loc = (config: RuntimeConfig) => ({account: config.account, home: config.agentContextHome, user: config.user});
 const root = (id: string) => `threadnote://resources/external/pocket/${id}`;
@@ -101,7 +130,9 @@ const configFence = Effect.fn('pocket.configFence')(function* (
   fingerprint: string,
   enabled = true,
 ) {
-  const source = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  const source = Option.getOrUndefined(
+    EffectArray.findFirst((yield* readSourceConfiguration(config)).sources, item => item.id === id),
+  );
   if (
     !source ||
     !isPocketSource(source) ||
@@ -111,10 +142,12 @@ const configFence = Effect.fn('pocket.configFence')(function* (
     return yield* error('Pocket source configuration changed during refresh.');
 });
 function containsCredential(value: unknown, secret: string): boolean {
-  if (typeof value === 'string') return value.includes(secret);
-  if (Array.isArray(value)) return value.some(item => containsCredential(item, secret));
+  if (typeof value === 'string') return Effect2.pipe(value, EffectString.includes(secret));
+  if (EffectArray.isArray(value)) return EffectArray.some(value, item => containsCredential(item, secret));
   return (
-    value !== null && typeof value === 'object' && Object.values(value).some(item => containsCredential(item, secret))
+    value !== null &&
+    typeof value === 'object' &&
+    EffectArray.some(EffectRecord.values(value), item => containsCredential(item, secret))
   );
 }
 const checkCredentialSafety = Effect.fn('pocket.checkCredentialSafety')(function* (
@@ -176,7 +209,7 @@ export const runPocketSourceAdd = Effect.fn('pocket.add')(function* (
   if (options.apiToken !== undefined && !validPocketApiToken(options.apiToken))
     return yield* error('Invalid Pocket API key.');
   const initialConfiguration = yield* readSourceConfiguration(config);
-  const initial = initialConfiguration.sources.find(item => item.id === id);
+  const initial = Option.getOrUndefined(EffectArray.findFirst(initialConfiguration.sources, item => item.id === id));
   const previewReuse =
     initial === undefined && options.apiToken === undefined && options.credentialEnv === undefined
       ? yield* reusableExternalCredential(config, initialConfiguration.sources, 'pocket', id, validPocketApiToken)
@@ -212,7 +245,9 @@ export const runPocketSourceAdd = Effect.fn('pocket.add')(function* (
     id,
     Effect.gen(function* () {
       const currentConfiguration = yield* readSourceConfiguration(config);
-      const existing = currentConfiguration.sources.find(item => item.id === id);
+      const existing = Option.getOrUndefined(
+        EffectArray.findFirst(currentConfiguration.sources, item => item.id === id),
+      );
       expected(existing);
       if (existing && !isPocketSource(existing)) return yield* error(`Source "${id}" already has another type.`);
       const reuse =
@@ -256,7 +291,7 @@ export const runPocketSourceAdd = Effect.fn('pocket.add')(function* (
         yield* storePocketCredential(config, id, reuse.token);
       else if (source.credentialStorage !== 'local') yield* removePocketCredential(config, id);
       yield* mutateSourceConfiguration(config, current => {
-        const latest = current.sources.find(item => item.id === id);
+        const latest = Option.getOrUndefined(EffectArray.findFirst(current.sources, item => item.id === id));
         if (
           (latest !== undefined && isPocketSource(latest) ? sourceConfigurationFingerprint(latest) : undefined) !==
           previousFingerprint
@@ -309,7 +344,10 @@ const listLocalDocs = Effect.fn('pocket.localDocs')(function* (config: RuntimeCo
     'docs',
   );
   const names = yield* fs.readDirectory(directory).pipe(Effect.orElseSucceed(() => [] as string[]));
-  return names.filter(name => /^(?:r-[a-f0-9]{40}|catalog-(?:folders|tags))$/.test(name)).sort();
+  return EffectArray.filter(
+    names,
+    __effectArrayValue => !!(name => /^(?:r-[a-f0-9]{40}|catalog-(?:folders|tags))$/.test(name))(__effectArrayValue),
+  ).sort();
 });
 
 export const runPocketSourceSync = Effect.fn('pocket.sync')(function* (
@@ -330,7 +368,9 @@ export const runPocketSourceSync = Effect.fn('pocket.sync')(function* (
     const reply = yield* coordinator.value.sync(config, source.id);
     if (reply.value === undefined)
       return yield* SourceCoordinatorError.make({message: 'Source sync reply expired. Retry the source sync.'});
-    coordinatedResult = reply.value as PocketSyncResult;
+    if (!isPocketSyncResult(reply.value))
+      return yield* SourceCoordinatorError.make({message: 'Source sync reply was invalid. Retry the source sync.'});
+    coordinatedResult = reply.value;
   }
   const result = coordinatedResult ?? (yield* syncPocketSource(config, source.id, options.clientOptions));
   yield* Console.log(`Pocket source "${source.id}": ${result.syncedDocuments.length} recording(s) refreshed.`);
@@ -353,14 +393,14 @@ export const runPocketSourceInventory = Effect.fn('pocket.inventory')(function* 
           : now - state.fetchedAt > source.maxStaleHours * 3_600_000
             ? 'stale'
             : state.status,
-      chunks: Object.keys(state?.chunks ?? {}).length,
+      chunks: EffectRecord.keys(state?.chunks ?? {}).length,
       ...(state?.nextAttemptAt ? {nextAttemptAt: state.nextAttemptAt} : {}),
     });
   }
   const markers = yield* listPocketIdMarkers(config, id);
   if (markers)
     for (const marker of markers) {
-      if (entries.some(entry => entry.documentId === marker.documentId)) continue;
+      if (EffectArray.some(entries, entry => entry.documentId === marker.documentId)) continue;
       entries.push({
         documentId: marker.documentId,
         status: 'pending',
@@ -434,7 +474,7 @@ export const runPocketSourceRemove = Effect.fn('pocket.remove')(function* (
       yield* mutateSourceConfiguration(config, configuration => ({
         version: 2,
         projections: configuration.projections,
-        sources: configuration.sources.filter(item => item.id !== source.id),
+        sources: EffectArray.filter(configuration.sources, item => item.id !== source.id),
       }));
       yield* removeSourceEvidencePins(loc(config), 'pocket', source.id);
     }),
@@ -448,7 +488,8 @@ export const syncPocketSourcesBeforeRecall = Effect.fn('pocket.beforeRecall')(fu
 ) {
   const syncedSources: string[] = [];
   const warnings: string[] = [];
-  const sources = (yield* readSourceConfiguration(config)).sources.filter(
+  const sources = EffectArray.filter(
+    (yield* readSourceConfiguration(config)).sources,
     (source): source is PocketSourceConfig => isPocketSource(source) && source.enabled,
   );
   const budget = makePocketClientBudget(20_000, 16);
@@ -488,7 +529,8 @@ export const pocketSourceWork = {
   provider: 'pocket',
   admission: {limit: 16, windowMs: 20000},
   list: Effect.fn('pocket.workDescriptors')(function* (config: RuntimeConfig) {
-    const sources = (yield* readSourceConfiguration(config)).sources.filter(
+    const sources = EffectArray.filter(
+      (yield* readSourceConfiguration(config)).sources,
       (source): source is PocketSourceConfig => isPocketSource(source) && source.enabled,
     );
     return yield* Effect.forEach(sources, source =>
@@ -522,7 +564,7 @@ export const pocketSourceWork = {
         );
         const inventory = yield* runPocketSourceInventory(config, sourceId);
         const now = yield* Clock.currentTimeMillis;
-        const retryTimes = inventory.entries.flatMap(entry =>
+        const retryTimes = EffectArray.flatMap(inventory.entries, entry =>
           entry.nextAttemptAt !== undefined && entry.nextAttemptAt > now ? [entry.nextAttemptAt] : [],
         );
         const nextAttemptAt =

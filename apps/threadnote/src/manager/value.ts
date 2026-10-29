@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, DateTime, Effect, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -8,6 +9,9 @@ import {
 } from '../value_report/commands.js';
 import {deleteValueReportData, pruneValueReportData} from '../value_report/storage.js';
 import {handleManagerContextRequest, type ManagerContextApiRequest} from './context.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ManagerValueApiRequest {
   readonly body: Effect.Effect<Record<string, unknown>, unknown>;
@@ -24,11 +28,14 @@ export interface ManagerValueApiResponse {
   readonly status: number;
 }
 
-class ManagerValueApiError extends Schema.TaggedError<ManagerValueApiError>()('ManagerValueApiError', {
-  code: Schema.String,
-  message: Schema.String,
-  status: Schema.Finite,
-}) {
+class ManagerValueApiError extends Schema.TaggedError<ManagerValueApiError, {readonly brand: unique symbol}>()(
+  'ManagerValueApiError',
+  {
+    code: Schema.String,
+    message: Schema.String,
+    status: Schema.Finite,
+  },
+) {
   static of(code: string, message: string, status: number): ManagerValueApiError {
     return ManagerValueApiError.make({code, message, status});
   }
@@ -132,9 +139,7 @@ function response(status: number, body: unknown): ManagerValueApiResponse {
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>, label: string): void {
-  const unsupported = Object.keys(value)
-    .filter(key => !allowed.has(key))
-    .sort();
+  const unsupported = EffectArray.filter(EffectRecord.keys(value), key => !allowed.has(key)).sort();
   if (unsupported.length > 0) {
     throw ManagerValueApiError.of('invalid-request', `${label} has unsupported field ${unsupported[0]}.`, 400);
   }
@@ -165,7 +170,12 @@ function optionalText(value: unknown, label: string, maximumBytes: number): stri
   if (typeof value !== 'string') {
     throw ManagerValueApiError.of('invalid-request', `${label} must be text.`, 400);
   }
-  const normalized = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const normalized = Effect2.pipe(
+    value,
+    EffectString.normalize('NFKC'),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
   if (!normalized || new TextEncoder().encode(normalized).byteLength > maximumBytes || hasControl(normalized)) {
     throw ManagerValueApiError.of('invalid-request', `${label} must be bounded text without control characters.`, 400);
   }
@@ -173,8 +183,13 @@ function optionalText(value: unknown, label: string, maximumBytes: number): stri
 }
 
 function hasControl(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code < 0x20 || code === 0x7f;
   });
 }

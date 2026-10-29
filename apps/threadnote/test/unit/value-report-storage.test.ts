@@ -19,6 +19,9 @@ import {
   VALUE_REPORT_STORAGE_DELETE_BATCH_SIZE,
 } from '@threadnote/threadnote/value_report/storage';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 describe('local value-report storage controls', () => {
   effectIt.effect('retains the privacy-safe continuation evidence classification', () =>
@@ -56,7 +59,8 @@ describe('local value-report storage controls', () => {
   it('selects every export deterministically beyond one deletion batch', () => {
     const exports = Array.from(
       {length: VALUE_REPORT_STORAGE_DELETE_BATCH_SIZE + 1},
-      (_, index) => `threadnote-value-report-export-v1-${index.toString(16).padStart(24, '0')}.json`,
+      (_, index) =>
+        `threadnote-value-report-export-v1-${Effect2.pipe(index.toString(16), EffectString.padStart(24, '0'))}.json`,
     );
     const entries = ['notes.txt', ...exports].reverse();
 
@@ -66,15 +70,13 @@ describe('local value-report storage controls', () => {
   it('selects staged and complete managed artifacts independently of input order', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.nat({max: 100_000}), {maxLength: 40}), ids => {
-        const expected = ids
-          .flatMap(id => {
-            const digest = id.toString(16).padStart(24, '0');
-            return [
-              `threadnote-value-pilot-report-v1-${digest}.json`,
-              `.threadnote-value-report-export-v1-${digest}.staging`,
-            ];
-          })
-          .sort();
+        const expected = EffectArray.flatMap(ids, id => {
+          const digest = Effect2.pipe(id.toString(16), EffectString.padStart(24, '0'));
+          return [
+            `threadnote-value-pilot-report-v1-${digest}.json`,
+            `.threadnote-value-report-export-v1-${digest}.staging`,
+          ];
+        }).sort();
         const input = [...expected, 'caller-copy.json', '.unrelated.staging', 'report.json'].reverse();
         expect(selectValueReportExportNames(input)).toEqual(expected);
         expect(selectValueReportExportNames(selectValueReportExportNames(input))).toEqual(expected);

@@ -6,6 +6,8 @@ import {
   VECTOR_DATABASE_INCREMENTAL_COMPACTED_BYTES_MAXIMUM,
 } from '../../../../scripts/recall-vector-storage-budget.js';
 import {join, mkdtemp, rm, stat} from '../helpers/effect-filesystem.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('recall vector storage budget', () => {
   it('separates copy-on-write file growth from compacted database growth', async () => {
@@ -27,7 +29,7 @@ describe('recall vector storage budget', () => {
       const insert = database.prepare('INSERT INTO chunks (generation, key, payload) VALUES (?, ?, ?)');
       const insertGeneration = database.transaction((generation: string) => {
         for (let index = 0; index < 1_000; index += 1) {
-          insert.run(generation, String(index).padStart(6, '0'), new Uint8Array(512));
+          insert.run(generation, Effect.pipe(String(index), EffectString.padStart(6, '0')), new Uint8Array(512));
         }
       });
 

@@ -8,6 +8,8 @@ export {
 } from '@threadnote/integration-core/manager-inputs';
 import type {ConsolidationAgent} from '@threadnote/integrations/agents';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function requiredQuery(url: URL, name: string): string {
   const value = url.searchParams.get(name);
@@ -31,7 +33,7 @@ export function optionalNonNegativeIntegerQuery(url: URL, name: string): Option.
 
 export function optionalNonEmptyQuery(url: URL, name: string): Option.Option<string> {
   return Option.fromNullishOr(url.searchParams.get(name)).pipe(
-    Option.map(value => value.trim()),
+    Option.map(value => Effect.pipe(value, EffectString.trim)),
     Option.filter(value => value.length > 0),
   );
 }

@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {Sha256Digest} from './digest.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type GraphShareFrontierPhase =
   'assembling' | 'collecting' | 'failed' | 'frozen' | 'idle' | 'published' | 'verifying';
@@ -196,5 +199,8 @@ export function lateResultAdmitted(state: GraphShareFrontierMachineV1, batchId: 
 }
 
 export function graphShareBatchId(head: string, range: readonly string[]): string {
-  return sha256HexSync(['threadnote-graph-batch-v1', head, ...range].join('\0')).slice(0, 40);
+  return Effect.pipe(
+    sha256HexSync(EffectArray.join(['threadnote-graph-batch-v1', head, ...range], '\0')),
+    EffectString.slice(0, 40),
+  );
 }

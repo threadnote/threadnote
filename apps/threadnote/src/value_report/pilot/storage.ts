@@ -5,6 +5,9 @@ import {ValueArtifactError, writeValueArtifactUnderLock} from '../artifact.js';
 import {parsePilotReport, serializePilotReport} from '../pilot.js';
 import {PILOT_RETENTION_DAYS, type PilotReport} from './contract.js';
 import {VALUE_REPORT_EXPORT_DIRECTORY, PILOT_REPORT_STAGING_FILENAME, withValueReportStorageLock} from '../storage.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export const PILOT_EXPORT_FILENAME = /^threadnote-value-pilot-report-v1-[a-f0-9]{24}\.json$/u;
 const MAX_EXPORTS = 100;
@@ -26,7 +29,7 @@ export const exportPilotReport = Effect.fn('valueReport.pilot.export')(function*
       Effect.gen(function* () {
         yield* pruneExports(home, now, true);
         const names = yield* pilotExportNames(home);
-        const filename = `threadnote-value-pilot-report-v1-${sha256HexSync(serialized).slice(0, 24)}.json`;
+        const filename = `threadnote-value-pilot-report-v1-${Effect2.pipe(sha256HexSync(serialized), EffectString.slice(0, 24))}.json`;
         if (names.length >= MAX_EXPORTS && !names.includes(filename)) {
           return yield* ValueArtifactError.make({
             message: 'Pilot export capacity reached; reset managed exports before continuing.',
@@ -83,11 +86,13 @@ export const managePilotReports = Effect.fn('valueReport.pilot.manage')(function
 const pilotExportNames = Effect.fn('valueReport.pilot.exportNames')(function* (home: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const directory = path.join(home, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'));
+  const directory = path.join(home, ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')));
   if (!(yield* fs.exists(directory))) return [];
-  return (yield* fs.readDirectory(directory))
-    .filter(name => PILOT_EXPORT_FILENAME.test(name) || PILOT_REPORT_STAGING_FILENAME.test(name))
-    .sort();
+  return EffectArray.filter(
+    yield* fs.readDirectory(directory),
+    __effectArrayValue =>
+      !!(name => PILOT_EXPORT_FILENAME.test(name) || PILOT_REPORT_STAGING_FILENAME.test(name))(__effectArrayValue),
+  ).sort();
 });
 
 const expiredNames = Effect.fn('valueReport.pilot.expiredNames')(function* (home: string, now: number) {
@@ -101,7 +106,9 @@ const expiredNames = Effect.fn('valueReport.pilot.expiredNames')(function* (home
       expired.push(name);
       continue;
     }
-    const raw = yield* readOperatorJson<unknown>(path.join(home, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'), name));
+    const raw = yield* readOperatorJson(
+      path.join(home, ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')), name),
+    );
     const report = yield* Effect.try(() => parsePilotReport(raw));
     if (now >= reportEnd(report) + PILOT_RETENTION_DAYS * 86_400_000) expired.push(name);
   }
@@ -114,7 +121,10 @@ const removeExports = Effect.fn('valueReport.pilot.removeExports')(function* (ho
   yield* Effect.forEach(
     names,
     name =>
-      fs.remove(path.join(home, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'), name), {force: true, recursive: true}),
+      fs.remove(path.join(home, ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')), name), {
+        force: true,
+        recursive: true,
+      }),
     {concurrency: 4, discard: true},
   );
 });

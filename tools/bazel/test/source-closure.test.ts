@@ -1,6 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {collectSourceClosure, sourceImports} from '../source-closure.mjs';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const collect = (files: Record<string, string>, entries = ['src/0.ts'], workspaces = new Map()) =>
   collectSourceClosure(entries, {
@@ -30,9 +34,9 @@ it('retains namespace dependencies after interpolated templates', () => {
         {maxLength: 8},
       ),
       prefixes => {
-        expect(sourceImports('file.ts', `${prefixes.join('\n')}\nexport * as ns from './value.js';`)).toEqual([
-          './value.js',
-        ]);
+        expect(
+          sourceImports('file.ts', `${EffectArray.join(prefixes, '\n')}\nexport * as ns from './value.js';`),
+        ).toEqual(['./value.js']);
       },
     ),
     {numRuns: 50},
@@ -47,14 +51,16 @@ it('recognizes namespace exports across arbitrary bounded trivia', () => {
         maxLength: 8,
       }),
       trivia => {
-        expect(sourceImports('file.ts', `export${trivia.join('')}* as domain from './value.js';`)).toEqual([
-          './value.js',
-        ]);
+        expect(sourceImports('file.ts', `export${EffectArray.join(trivia, '')}* as domain from './value.js';`)).toEqual(
+          ['./value.js'],
+        );
       },
     ),
     {numRuns: 50},
   );
-  expect(sourceImports('file.ts', `export ${'/* *//* */'.repeat(2_000)}const value = 1;`)).toEqual([]);
+  expect(
+    sourceImports('file.ts', `export ${Effect.pipe('/* *//* */', EffectString.repeat(2_000))}const value = 1;`),
+  ).toEqual([]);
 });
 
 it('follows source additions, removals, and changed import edges', () => {
@@ -94,21 +100,24 @@ it('matches a bounded graph model and ignores input enumeration order', () => {
     fc.property(
       fc.array(fc.tuple(fc.integer({min: 0, max: 7}), fc.integer({min: 0, max: 7})), {maxLength: 24}),
       edges => {
-        const files = Object.fromEntries(
+        const files = EffectRecord.fromEntries(
           Array.from({length: 8}, (_, node) => [
             `src/${node}.ts`,
-            edges
-              .filter(([from]) => from === node)
-              .map(([, to]) => `import "./${to}.js";`)
-              .join('\n'),
+            EffectArray.join(
+              EffectArray.map(
+                EffectArray.filter(edges, ([from]) => from === node),
+                ([, to]) => `import "./${to}.js";`,
+              ),
+              '\n',
+            ),
           ]),
         );
         const reachable = new Set([0]);
         for (let count = 0; count < 8; count++)
           for (const [from, to] of edges) if (reachable.has(from)) reachable.add(to);
-        const expected = [...reachable].map(node => `src/${node}.ts`).sort();
+        const expected = EffectArray.map([...reachable], node => `src/${node}.ts`).sort();
         expect(collect(files).files).toEqual(expected);
-        expect(collect(Object.fromEntries(Object.entries(files).reverse())).files).toEqual(expected);
+        expect(collect(EffectRecord.fromEntries(EffectRecord.toEntries(files).reverse())).files).toEqual(expected);
       },
     ),
     {numRuns: 50},
@@ -133,7 +142,7 @@ it('exposes resolved direct edges from the closure resolver without changing its
     virtualModules: ['virtual:test'],
     graph,
   });
-  expect(Object.keys(result).sort()).toEqual(['files', 'npm']);
+  expect(EffectRecord.keys(result).sort()).toEqual(['files', 'npm']);
   expect(result.npm).toEqual(['left-pad']);
   expect(graph.get('src/root.ts')).toEqual({
     files: ['packages/domain/package.json', 'packages/domain/src/value.ts'],
@@ -193,7 +202,7 @@ it('reuses direct edges only within a fixed model across shared entry closures',
     });
   expect(first).toEqual(fresh('src/first.ts'));
   expect(second).toEqual(fresh('src/second.ts'));
-  expect(Object.keys(second).sort()).toEqual(['files', 'npm']);
+  expect(EffectRecord.keys(second).sort()).toEqual(['files', 'npm']);
   expect(second.npm).toEqual(['runtime-npm']);
   for (const path of ['packages/domain/src/value.ts', 'packages/domain/src/leaf.ts', 'packages/domain/package.json']) {
     expect(reads.get(path)).toBe(snapshot.reads.get(path));

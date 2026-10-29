@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {
   createReviewedSupportSnapshot,
   currentMemoryCodeCitations,
@@ -41,26 +43,29 @@ import type {MemoryKind} from '@threadnote/memory/types';
 import {buildContextHealthReport} from '../../src/health.js';
 import {contextHealthCitationCaseSlotV2, contextHealthCitationCoverageV2} from '../../src/health_maintenance.js';
 import type {ContextBriefCitationValidationReceiptV2} from '../../src/types.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const uri = 'threadnote://user/test/memories/durable/projects/threadnote/target.md';
 const origin = createMemoryCodeCitation({
   version: 1,
   evidenceRetention: 'capsule-retained',
   extractorSet: 'native-code-graph-13',
-  fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
   path: 'packages/memory/src/document.ts',
-  repositoryId: 'b'.repeat(64),
+  repositoryId: Effect.pipe('b', EffectString.repeat(64)),
   repositoryIdentityKind: 'remote',
-  sourceCommit: 'c'.repeat(40),
+  sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
   target: {kind: 'file'},
 });
 const {id: _originId, ...originInput} = origin;
 const accepted = createMemoryCodeCitation({
   ...originInput,
-  fileContentHash: {algorithm: 'sha256', value: 'e'.repeat(64)},
-  sourceCommit: 'f'.repeat(40),
+  fileContentHash: {algorithm: 'sha256', value: Effect.pipe('e', EffectString.repeat(64))},
+  sourceCommit: Effect.pipe('f', EffectString.repeat(40)),
 });
 function record(
   body = 'Same paragraph.\n\nSame paragraph.\n\nPolicy is protected.',
@@ -86,13 +91,17 @@ function record(
 }
 function freeze<T>(value: T): T {
   if (typeof value === 'object' && value !== null) {
-    Object.values(value).forEach(freeze);
+    EffectArray.forEach(EffectRecord.values(value), freeze);
     Object.freeze(value);
   }
   return value;
 }
 function currentEvidence(
-  sourceRecord = record('Current source claim.', {memoryId: 'tn_support'}, uri.replace('target.md', 'support.md')),
+  sourceRecord = record(
+    'Current source claim.',
+    {memoryId: 'tn_support'},
+    Effect.pipe(uri, EffectString.replace('target.md', 'support.md')),
+  ),
 ): AutomaticMaintenanceEvidenceV1 {
   const source = memoryMaintenanceFragmentSource(sourceRecord, 0);
   return {
@@ -137,20 +146,19 @@ function legacyCode(version: 1 | 2 | 3): MemoryRecord {
             dependencyExpansions: [
               {
                 version: 1,
-                revision: '1'.repeat(64),
-                proofDigest: '2'.repeat(64),
-                requestDigest: '3'.repeat(64),
-                previousManifestHash: '4'.repeat(64),
-                sourceCommit: 'c'.repeat(40),
+                revision: Effect.pipe('1', EffectString.repeat(64)),
+                proofDigest: Effect.pipe('2', EffectString.repeat(64)),
+                requestDigest: Effect.pipe('3', EffectString.repeat(64)),
+                previousManifestHash: Effect.pipe('4', EffectString.repeat(64)),
+                sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
                 citationIds: [origin.id],
               },
             ],
           };
-  const content = formatMemoryDocument(
-    'MEMORY',
-    {...initial.metadata, topicMaintenance: manifest},
-    initial.body,
-  ).replace('\n\n', '\nopaque_header: preserve exactly\n\n');
+  const content = Effect.pipe(
+    formatMemoryDocument('MEMORY', {...initial.metadata, topicMaintenance: manifest}, initial.body),
+    EffectString.replace('\n\n', '\nopaque_header: preserve exactly\n\n'),
+  );
   return parseMemoryDocument(uri, content)!;
 }
 
@@ -163,7 +171,7 @@ describe('automatic memory maintenance evidence projection', () => {
       const current = currentEvidence();
       const basis = prepareMemoryMaintenanceBasis(original, {
         evidence: [current],
-        inferences: [0, 1, 2].map(ordinal => ({
+        inferences: EffectArray.map([0, 1, 2], ordinal => ({
           ordinal,
           role: 'descriptive',
           support: 'direct',
@@ -177,8 +185,12 @@ describe('automatic memory maintenance evidence projection', () => {
       expect(basis.record.body).toBe(original.body);
       expect(assessment.target).toMatchObject({uri, memoryId: 'tn_target', kind: 'durable'});
       expect(assessment.preparation).toMatchObject({kind: 'legacy-approved', manifestVersion: version});
-      expect(assessment.paragraphs.map(item => item.role)).toEqual(['descriptive', 'historical', 'normative']);
-      expect(assessment.paragraphs.map(item => item.roleAuthority)).toEqual([
+      expect(EffectArray.map(assessment.paragraphs, item => item.role)).toEqual([
+        'descriptive',
+        'historical',
+        'normative',
+      ]);
+      expect(EffectArray.map(assessment.paragraphs, item => item.roleAuthority)).toEqual([
         'legacy-approved',
         'legacy-approved',
         'legacy-approved',
@@ -207,17 +219,20 @@ describe('automatic memory maintenance evidence projection', () => {
       const alteredCaches = [
         {
           ...assessment,
-          paragraphs: assessment.paragraphs.map(item =>
+          paragraphs: EffectArray.map(assessment.paragraphs, item =>
             item.ordinal === 1 || item.ordinal === 2 ? {...item, role: 'descriptive' as const} : item,
           ),
         },
         {
           ...assessment,
-          paragraphs: assessment.paragraphs.map(item =>
+          paragraphs: EffectArray.map(assessment.paragraphs, item =>
             item.ordinal === 0 ? {...item, support: 'contextual' as const} : item,
           ),
         },
-        {...assessment, dependencies: assessment.dependencies.map(item => ({...item, kind: 'dependency' as const}))},
+        {
+          ...assessment,
+          dependencies: EffectArray.map(assessment.dependencies, item => ({...item, kind: 'dependency' as const})),
+        },
       ];
       for (const altered of alteredCaches) {
         // These are valid closed values with the *same* manifestHash; canonical binding must reject them.
@@ -231,7 +246,7 @@ describe('automatic memory maintenance evidence projection', () => {
 
   it('retains valid legacy Unicode and tab-bearing scope/validity verbatim', () => {
     const initial = record('Legacy claim.', {codeCitations: [origin]});
-    const scope = '界'.repeat(512);
+    const scope = Effect.pipe('界', EffectString.repeat(512));
     const validity = 'Reviewed\tcontext';
     const manifest = buildTopicMaintenanceManifest(initial, {
       paragraphs: [{role: 'normative', support: 'direct', citationIds: [origin.id], scope, validity}],
@@ -255,14 +270,16 @@ describe('automatic memory maintenance evidence projection', () => {
       ...v1,
       version: 2 as const,
       originCitationIds: ids,
-      acceptedSources: ids.map(citationId => ({citationId, acceptedCitationId: accepted.id})),
+      acceptedSources: EffectArray.map(ids, citationId => ({citationId, acceptedCitationId: accepted.id})),
     };
     const manifest: TopicMaintenanceManifest = version === 2 ? v2 : {...v2, version: 3, sourceKind: 'code'};
     const original = freeze(record(initial.body, {...initial.metadata, topicMaintenance: manifest}));
     const before = JSON.stringify(original);
     const basis = prepareMemoryMaintenanceBasis(original);
     expect(basis.assessment.paragraphs[0].historicalEvidenceIds).toEqual(
-      ids.map(id => automaticMaintenanceEvidenceId({kind: 'code', citation: id === origin.id ? origin : accepted})),
+      EffectArray.map(ids, id =>
+        automaticMaintenanceEvidenceId({kind: 'code', citation: id === origin.id ? origin : accepted}),
+      ),
     );
     expect(basis.assessment.paragraphs[0].acceptedEvidenceIds).toEqual([
       automaticMaintenanceEvidenceId({kind: 'code', citation: accepted}),
@@ -276,13 +293,13 @@ describe('automatic memory maintenance evidence projection', () => {
       version: 1,
       sourceId: 'notes',
       sourceInstanceId: '11111111-1111-4111-8111-111111111111',
-      vaultHash: 'a'.repeat(64),
-      accessHash: 'b'.repeat(64),
+      vaultHash: Effect.pipe('a', EffectString.repeat(64)),
+      accessHash: Effect.pipe('b', EffectString.repeat(64)),
       noteId: '22222222-2222-4222-8222-222222222222',
       relativePath: 'Decision.md',
-      revisionHash: 'c'.repeat(64),
+      revisionHash: Effect.pipe('c', EffectString.repeat(64)),
       sanitizerVersion: 'scrubber-redact-v1',
-      fragmentHash: 'd'.repeat(64),
+      fragmentHash: Effect.pipe('d', EffectString.repeat(64)),
       fragmentStart: 0,
       fragmentEnd: 12,
       pinId: '33333333-3333-4333-8333-333333333333',
@@ -290,7 +307,7 @@ describe('automatic memory maintenance evidence projection', () => {
     };
     const active = {
       ...pin,
-      revisionHash: 'e'.repeat(64),
+      revisionHash: Effect.pipe('e', EffectString.repeat(64)),
       pinId: '44444444-4444-4444-8444-444444444444',
       expiresAt: '2027-01-02T00:00:00.000Z',
     };
@@ -305,7 +322,7 @@ describe('automatic memory maintenance evidence projection', () => {
       activeEvidence: active,
     };
     if (converges)
-      manifest.paragraphs = manifest.paragraphs.map(paragraph => ({
+      manifest.paragraphs = EffectArray.map(manifest.paragraphs, paragraph => ({
         ...paragraph,
         citationIds: [topicMaintenanceObsidianCitationId(pin), topicMaintenanceObsidianCitationId(active)],
       }));
@@ -322,7 +339,7 @@ describe('automatic memory maintenance evidence projection', () => {
       automaticMaintenanceEvidenceId({kind: 'obsidian', evidence: active}),
     ]);
     expect(assessment.paragraphs[0].currentEvidenceIds).toEqual([]);
-    expect(assessment.evidence.map(item => item.availability)).toEqual(['unknown', 'unknown']);
+    expect(EffectArray.map(assessment.evidence, item => item.availability)).toEqual(['unknown', 'unknown']);
     expect(assessment.capabilities.draft).toBe(false);
     expect(projectShareableAutomaticMaintenanceAssessment(assessment)).toBeUndefined();
     expect(JSON.stringify(original)).toBe(before);
@@ -396,19 +413,19 @@ describe('automatic memory maintenance evidence projection', () => {
           const roles = reverse
             ? ['historical', 'historical', 'normative', 'unknown']
             : ['unknown', 'normative', 'historical', 'historical'];
-          const input = freeze(record((reverse ? [...texts].reverse() : texts).join('\n\n')));
+          const input = freeze(record(EffectArray.join(reverse ? [...texts].reverse() : texts, '\n\n')));
           const before = JSON.stringify(input);
           const evidence = currentEvidence();
           const assessment = prepareMemoryMaintenanceBasis(input, {
             evidence: [evidence],
-            inferences: [0, 1, 2, 3].map(ordinal => ({
+            inferences: EffectArray.map([0, 1, 2, 3], ordinal => ({
               ordinal,
               role: 'unknown',
               support: 'unresolved',
               currentEvidenceIds: [],
             })),
           }).assessment;
-          expect(assessment.paragraphs.map(p => p.role)).toEqual(roles);
+          expect(EffectArray.map(assessment.paragraphs, p => p.role)).toEqual(roles);
           for (const p of assessment.paragraphs) {
             expect(p.roleAuthority).toBe('provisional');
             expect(p.currentEvidenceIds).toEqual([]);
@@ -433,7 +450,7 @@ describe('automatic memory maintenance evidence projection', () => {
     const shared = record(
       'Shared claim.',
       {visibility: 'shared'},
-      uri.replace('/memories/', '/memories/shared/default/'),
+      Effect.pipe(uri, EffectString.replace('/memories/', '/memories/shared/default/')),
     );
     expect(prepareMemoryMaintenanceBasis(shared, options).assessment.capabilities).toMatchObject({
       assess: true,
@@ -469,7 +486,14 @@ describe('automatic memory maintenance evidence projection', () => {
   });
 
   it('reports unavailable geometry for oversized/empty bodies without silently dropping accepted text', () => {
-    for (const body of ['x'.repeat(32769), Array.from({length: 65}, () => 'Paragraph.').join('\n\n'), '']) {
+    for (const body of [
+      Effect.pipe('x', EffectString.repeat(32769)),
+      EffectArray.join(
+        Array.from({length: 65}, () => 'Paragraph.'),
+        '\n\n',
+      ),
+      '',
+    ]) {
       const input = record(body);
       const basis = prepareMemoryMaintenanceBasis(input);
       expect(basis.record.body).toBe(input.body);
@@ -485,11 +509,19 @@ describe('automatic memory maintenance evidence projection', () => {
     fc.assert(
       fc.property(
         fc.array(
-          fc.string({minLength: 1, maxLength: 12}).filter(text => text.trim().length > 0 && !text.includes('\n')),
+          fc
+            .string({minLength: 1, maxLength: 12})
+            .filter(
+              text =>
+                Effect.pipe(text, EffectString.trim).length > 0 && !Effect.pipe(text, EffectString.includes('\n')),
+            ),
           {minLength: 1, maxLength: 8},
         ),
         pieces => {
-          const text = pieces.map(piece => piece.trim()).join(' ');
+          const text = EffectArray.join(
+            EffectArray.map(pieces, piece => Effect.pipe(piece, EffectString.trim)),
+            ' ',
+          );
           const original = freeze(record(`${text}\n\n${text}`));
           const before = JSON.stringify(original);
           const first = memoryMaintenanceFragmentSource(original, 0);
@@ -506,7 +538,9 @@ describe('automatic memory maintenance evidence projection', () => {
           expect(automaticMaintenanceSourceIdentity(first)).toBe(automaticMaintenanceSourceIdentity(second));
           expect(automaticMaintenanceEvidenceId(first)).not.toBe(automaticMaintenanceEvidenceId(second));
           for (const source of [first, second])
-            expect(original.body.slice(source.fragment.startOffset, source.fragment.endOffset)).toBe(text);
+            expect(
+              Effect.pipe(original.body, EffectString.slice(source.fragment.startOffset, source.fragment.endOffset)),
+            ).toBe(text);
           const assessment = prepareMemoryMaintenanceBasis(original).assessment;
           expect(parseAutomaticMaintenanceAssessment(encodeAutomaticMaintenanceAssessment(assessment))).toEqual(
             assessment,
@@ -579,7 +613,7 @@ describe('preparation from canonical approved ordinary support', () => {
       version: 1 as const,
       active: createReviewedSupportSnapshot({
         bodyHash: consolidationRevision(body),
-        paragraphs: body.split('\n\n').map((paragraph, ordinal) => ({
+        paragraphs: EffectArray.map(Effect.pipe(body, EffectString.split('\n\n')), (paragraph, ordinal) => ({
           ordinal,
           hash: consolidationRevision(paragraph),
           role: ordinal === 2 ? ('normative' as const) : ('descriptive' as const),
@@ -590,9 +624,9 @@ describe('preparation from canonical approved ordinary support', () => {
         acceptance: {
           reviewId: 'review-canonical-context',
           approvedAt: '2026-10-21T00:00:00.000Z',
-          targetBeforeHash: '1'.repeat(64),
-          preparationDigest: '2'.repeat(64),
-          sourceVectorDigest: '3'.repeat(64),
+          targetBeforeHash: Effect.pipe('1', EffectString.repeat(64)),
+          preparationDigest: Effect.pipe('2', EffectString.repeat(64)),
+          sourceVectorDigest: Effect.pipe('3', EffectString.repeat(64)),
         },
       }),
     };
@@ -631,14 +665,14 @@ it('rebuilds eight immutable roots plus eight approved sources and accounts for 
       createMemoryCodeCitation({
         ...originInput,
         // Real canonical envelopes exercise the serialized budget, rather than padding an invalid assessment.
-        path: `${'nested/'.repeat(500)}${group}-${index}.ts`,
+        path: `${Effect.pipe('nested/', EffectString.repeat(500))}${group}-${index}.ts`,
         fileContentHash: {algorithm: 'sha256', value: consolidationRevision(`${group}-${index}`)},
       }),
     );
   const roots = citations('root');
   const active = citations('active');
   const current = citations('current');
-  const approvedSources = active.map(citation => {
+  const approvedSources = EffectArray.map(active, citation => {
     const source = {kind: 'code' as const, citation};
     return {id: automaticMaintenanceEvidenceId(source), source, scope: 'repository' as const};
   });
@@ -647,20 +681,20 @@ it('rebuilds eight immutable roots plus eight approved sources and accounts for 
     version: 1 as const,
     active: createReviewedSupportSnapshot({
       bodyHash: consolidationRevision(body),
-      paragraphs: body.split('\n\n').map((section, ordinal) => ({
+      paragraphs: EffectArray.map(Effect.pipe(body, EffectString.split('\n\n')), (section, ordinal) => ({
         ordinal,
         hash: consolidationRevision(section),
         role: (['descriptive', 'normative', 'historical'] as const)[ordinal],
         support: 'direct' as const,
-        evidenceIds: approvedSources.map(source => source.id),
+        evidenceIds: EffectArray.map(approvedSources, source => source.id),
       })),
       sources: approvedSources,
       acceptance: {
         reviewId: 'review-root-active-budget',
         approvedAt: '2026-10-21T00:00:00.000Z',
-        targetBeforeHash: '1'.repeat(64),
-        preparationDigest: '2'.repeat(64),
-        sourceVectorDigest: '3'.repeat(64),
+        targetBeforeHash: Effect.pipe('1', EffectString.repeat(64)),
+        preparationDigest: Effect.pipe('2', EffectString.repeat(64)),
+        sourceVectorDigest: Effect.pipe('3', EffectString.repeat(64)),
       },
     }),
   };
@@ -672,12 +706,13 @@ it('rebuilds eight immutable roots plus eight approved sources and accounts for 
   const rebuilt = prepareMemoryMaintenanceBasis(canonical).assessment;
   expect(rebuilt.evidence).toHaveLength(16);
   expect(
-    rebuilt.evidence
-      .filter(item => item.source.kind === 'code')
-      .map(item => (item.source.kind === 'code' ? item.source.citation : undefined)),
+    EffectArray.map(
+      EffectArray.filter(rebuilt.evidence, item => item.source.kind === 'code'),
+      item => (item.source.kind === 'code' ? item.source.citation : undefined),
+    ),
   ).toEqual([...roots, ...active]);
   expect(
-    rebuilt.paragraphs.map(item => [
+    EffectArray.map(rebuilt.paragraphs, item => [
       item.role,
       item.roleAuthority,
       item.support,
@@ -685,9 +720,15 @@ it('rebuilds eight immutable roots plus eight approved sources and accounts for 
       item.acceptedEvidenceIds,
     ]),
   ).toEqual(
-    approved.active.paragraphs.map(item => [item.role, 'reviewed', item.support, 'reviewed', item.evidenceIds]),
+    EffectArray.map(approved.active.paragraphs, item => [
+      item.role,
+      'reviewed',
+      item.support,
+      'reviewed',
+      item.evidenceIds,
+    ]),
   );
-  const currentEvidence: AutomaticMaintenanceEvidenceV1[] = current.map(citation => {
+  const currentEvidence: AutomaticMaintenanceEvidenceV1[] = EffectArray.map(current, citation => {
     const source = {kind: 'code' as const, citation};
     return {
       id: automaticMaintenanceEvidenceId(source),
@@ -700,13 +741,18 @@ it('rebuilds eight immutable roots plus eight approved sources and accounts for 
   const assessment = prepareMemoryMaintenanceBasis(canonical, {
     evidence: currentEvidence,
     inferences: [
-      {ordinal: 0, role: 'descriptive', support: 'direct', currentEvidenceIds: currentEvidence.map(item => item.id)},
+      {
+        ordinal: 0,
+        role: 'descriptive',
+        support: 'direct',
+        currentEvidenceIds: EffectArray.map(currentEvidence, item => item.id),
+      },
     ],
   }).assessment;
   expect(assessment.version).toBe(2);
   expect(assessment.evidence).toHaveLength(24);
-  expect(assessment.paragraphs[0].currentEvidenceIds).toEqual(currentEvidence.map(item => item.id));
-  expect(assessment.paragraphs[0].acceptedEvidenceIds).toEqual(approvedSources.map(item => item.id));
+  expect(assessment.paragraphs[0].currentEvidenceIds).toEqual(EffectArray.map(currentEvidence, item => item.id));
+  expect(assessment.paragraphs[0].acceptedEvidenceIds).toEqual(EffectArray.map(approvedSources, item => item.id));
   expect(assessment.capabilities.draft).toBe(true);
   const encoded = encodeAutomaticMaintenanceAssessment(assessment);
   expect(new TextEncoder().encode(encoded).byteLength).toBeGreaterThan(MAX_AUTOMATIC_MAINTENANCE_BYTES);
@@ -735,9 +781,9 @@ describe('health readers of approved ordinary support', () => {
   const acceptance = {
     reviewId: 'review-current-health',
     approvedAt: now.toISOString(),
-    targetBeforeHash: '1'.repeat(64),
-    preparationDigest: '2'.repeat(64),
-    sourceVectorDigest: '3'.repeat(64),
+    targetBeforeHash: Effect.pipe('1', EffectString.repeat(64)),
+    preparationDigest: Effect.pipe('2', EffectString.repeat(64)),
+    sourceVectorDigest: Effect.pipe('3', EffectString.repeat(64)),
   };
   function approved(referenced: readonly MemoryCodeCitationV1[] = [accepted, second]): MemoryRecord {
     const body = 'Approved current claim.';
@@ -761,9 +807,9 @@ describe('health readers of approved ordinary support', () => {
         version: 1,
         active: createReviewedSupportSnapshot({
           bodyHash: consolidationRevision(body),
-          paragraphs: [{...paragraph, evidenceIds: [...referenced.map(c => descriptor(c).id), memory.id]}],
+          paragraphs: [{...paragraph, evidenceIds: [...EffectArray.map(referenced, c => descriptor(c).id), memory.id]}],
           sources: [
-            ...[accepted, second, unused].map(descriptor),
+            ...EffectArray.map([accepted, second, unused], descriptor),
             {id: memory.id, source: memory.source, scope: memory.scope},
           ],
           acceptance,
@@ -833,7 +879,13 @@ describe('health readers of approved ordinary support', () => {
       citationValidations: [{uri, receipts: [...historical, receipt(accepted, 'changed'), receipt(second, 'exact')]}],
       includeCitationCoverageFindings: true,
     });
-    const findings = result.findings.filter(item => item.category.startsWith('citation-'));
+    const findings = EffectArrayPipe(result.findings, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (item, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && Effect.pipe(item.category, EffectString.startsWith('citation-')),
+      ),
+    );
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
       category: 'citation-changed',
@@ -866,7 +918,7 @@ describe('health readers of approved ordinary support', () => {
     const canonical = approved();
     const invalid = parseMemoryDocument(
       uri,
-      canonical.content.replace(/^reviewed_support:.*$/mu, 'reviewed_support: {invalid}'),
+      Effect.pipe(canonical.content, EffectString.replace(/^reviewed_support:.*$/mu, 'reviewed_support: {invalid}')),
     )!;
     expect(invalid.metadata.reviewedSupportError).toBeDefined();
     const stripped = {...canonical, metadata: {...canonical.metadata, reviewedSupport: undefined}};

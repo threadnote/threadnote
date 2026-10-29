@@ -13,6 +13,8 @@ import {
   type createGraphWorkerResultArtifact,
   type GraphWorkerResultAuthority,
 } from './result.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type Artifact = Effect.Success<ReturnType<typeof createGraphWorkerResultArtifact>>;
 type Writer<E, R> = Pick<
@@ -91,13 +93,13 @@ export function graphWorkerRegistryForProfile(
   const workerRegistry = profile.registry.worker;
   const canonicalRegistry = profile.registry.canonical;
   if (
-    !workerRegistry.startsWith('oci://') ||
+    !Effect2.pipe(workerRegistry, EffectString.startsWith('oci://')) ||
     profile.repositoryId !== authority.repositoryId ||
     graphShareProfileDigest(profile) !== authority.profileDigest
   )
     throw graphSharingFailure('Graph worker registry is outside its enrolled scope.');
   const workerTarget = parseGraphShareRegistryTarget(workerRegistry);
-  if (canonicalRegistry.startsWith('oci://')) {
+  if (Effect2.pipe(canonicalRegistry, EffectString.startsWith('oci://'))) {
     const canonicalTarget = parseGraphShareRegistryTarget(canonicalRegistry);
     if (workerTarget.origin === canonicalTarget.origin && workerTarget.repository === canonicalTarget.repository)
       throw graphSharingFailure('Graph worker registry overlaps the canonical namespace.');

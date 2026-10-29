@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {Database} from 'bun:sqlite';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../../disk/capacity.js';
 import {saturatingCapacityAdd} from '../../disk/capacity.js';
@@ -16,13 +17,12 @@ export function codeGraphSpoolSortCapacityBoundary(
   loads: readonly CodeGraphSpoolSortSurfaceLoad[],
 ): CodeGraphDirectPersistentCapacityBoundary {
   return {
-    finalFactBytes: loads.reduce((largest, load) => Math.max(largest, load.bytes), 0),
-    mainSortPayloadBytes: loads.reduce(
-      (largest, load) => Math.max(largest, saturatingCapacityAdd(load.bytes, load.lexicalTermBytesUpperBound ?? 0)),
-      0,
+    finalFactBytes: EffectArray.reduce(loads, 0, (largest, load) => Math.max(largest, load.bytes)),
+    mainSortPayloadBytes: EffectArray.reduce(loads, 0, (largest, load) =>
+      Math.max(largest, saturatingCapacityAdd(load.bytes, load.lexicalTermBytesUpperBound ?? 0)),
     ),
     operation: 'sort persistent code graph materialization spool',
-    rowCount: loads.reduce((largest, load) => Math.max(largest, load.rows), 0),
+    rowCount: EffectArray.reduce(loads, 0, (largest, load) => Math.max(largest, load.rows)),
     transientFilesystem: 'temporary',
   };
 }
@@ -30,12 +30,15 @@ export function codeGraphSpoolSortCapacityBoundary(
 /** Read the append-time counters for the raw surfaces that have not been sorted yet. */
 export function observeCodeGraphSpoolSortCapacity(database: Database): CodeGraphDirectPersistentCapacityBoundary {
   const pending = new Set(
-    codeGraphSqliteAll<{readonly name: string}>(
-      database,
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'materialization_raw_%'",
-    ).map(row => row.name),
+    EffectArray.map(
+      codeGraphSqliteAll<{readonly name: string}>(
+        database,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'materialization_raw_%'",
+      ),
+      row => row.name,
+    ),
   );
-  const loads = readCodeGraphMaterializationSpoolSurfaceCapacities(database).flatMap(surface =>
+  const loads = EffectArray.flatMap(readCodeGraphMaterializationSpoolSurfaceCapacities(database), surface =>
     pending.has(`materialization_raw_${surface.name}`)
       ? [{bytes: surface.bytes, lexicalTermBytesUpperBound: surface.lexicalTermBytes, rows: surface.rows}]
       : [],

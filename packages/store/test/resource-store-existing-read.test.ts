@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Effect, FileSystem, Layer, Option, Path, Result} from 'effect';
@@ -223,7 +224,7 @@ fcEffectProp(
       const user = `user-${suffix}`;
       const location = {...f.location, account, user};
       const segments = personal ? ['user', user, 'memories', 'durable', 'entry.md'] : ['resources', 'entry.md'];
-      const uri = `threadnote://${segments.join('/')}`;
+      const uri = `threadnote://${EffectArray.join(segments, '/')}`;
       if (depth >= 1) yield* f.fs.makeDirectory(f.home);
       if (depth >= 2) yield* f.fs.makeDirectory(f.path.join(f.home, 'data'));
       if (depth >= 3) yield* f.fs.makeDirectory(f.path.join(f.home, 'data', account));

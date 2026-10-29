@@ -7,6 +7,9 @@ import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memor
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {loadRecallExactMatches, loadRecallIndexData} from '@threadnote/recall/index';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 describe('recall exact-search citation privacy', () => {
   effectIt.effect('indexes body and discovery metadata without machine citation headers', () =>
@@ -18,13 +21,13 @@ describe('recall exact-search citation privacy', () => {
       yield* fs.makeDirectory(memoryRoot, {recursive: true});
       const citation = createMemoryCodeCitation({
         extractorSet: 'native-code-graph-13',
-        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
         path: 'src/private.ts',
-        repositoryId: 'b'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
         repositoryIdentityKind: 'remote',
-        sourceCommit: 'c'.repeat(40),
+        sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
         sourceDirty: false,
-        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+        sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
         target: {kind: 'file'},
         version: 1,
       });
@@ -61,7 +64,7 @@ describe('recall exact-search citation privacy', () => {
         terms: [...searchable, ...privateMachineValues],
         uriScopes: ['threadnote://user/privacy-user/memories'],
       });
-      const matchedTerms = new Set(matches.flatMap(match => match.terms));
+      const matchedTerms = new Set(EffectArray.flatMap(matches, match => match.terms));
 
       expect(matchedTerms).toEqual(new Set(searchable));
       for (const privateValue of privateMachineValues) expect(matchedTerms).not.toContain(privateValue);
@@ -90,13 +93,13 @@ describe('recall exact-search citation privacy', () => {
       );
       const citation = createMemoryCodeCitation({
         extractorSet: 'native-code-graph-13',
-        fileContentHash: {algorithm: 'sha256', value: 'e'.repeat(64)},
+        fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('e', EffectString.repeat(64))},
         path: 'src/archive-private.ts',
-        repositoryId: 'f'.repeat(64),
+        repositoryId: Effect2.pipe('f', EffectString.repeat(64)),
         repositoryIdentityKind: 'remote',
-        sourceCommit: '1'.repeat(40),
+        sourceCommit: Effect2.pipe('1', EffectString.repeat(40)),
         sourceDirty: false,
-        sourceSnapshotId: `cgsn_${'2'.repeat(40)}`,
+        sourceSnapshotId: `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`,
         target: {kind: 'file'},
         version: 1,
       });
@@ -152,7 +155,9 @@ describe('recall exact-search citation privacy', () => {
       expect(bodyPostings.candidates).toHaveLength(1);
       expect(bodyPostings.candidates[0]?.text).toContain('Archived source prose sentinel');
       expect(privatePostings.candidates).toHaveLength(0);
-      expect(new Set(exact.flatMap(match => match.terms))).toEqual(new Set(['Archived source prose sentinel']));
+      expect(new Set(EffectArray.flatMap(exact, match => match.terms))).toEqual(
+        new Set(['Archived source prose sentinel']),
+      );
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 });

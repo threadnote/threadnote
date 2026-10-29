@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Context, DateTime, Effect, FileSystem, Scope} from 'effect';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
@@ -36,6 +37,8 @@ import {
   type ContextBriefCitationScalePreparedFixture,
   type ContextBriefCitationScalePreparedProfile,
 } from './context-brief-citation-scale-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ContextBriefCitationScaleRunOptions {
   readonly budget: ContextBriefCitationScaleBudgetV1;
@@ -261,14 +264,16 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
     }
     timingProfiles.set(profileId, {cold, observations});
   }
-  const rssById = new Map(rssEvidence.observations.map(observation => [observation.observationId, observation]));
-  const expectedRssIds = options.profileIds.flatMap(profileId =>
+  const rssById = new Map(
+    EffectArray.map(rssEvidence.observations, observation => [observation.observationId, observation]),
+  );
+  const expectedRssIds = EffectArray.flatMap(options.profileIds, profileId =>
     Array.from({length: options.samples}, (_, index) => rssObservationId(profileId, index)),
   );
   if (
     rssEvidence.observations.length !== expectedRssIds.length ||
-    expectedRssIds.some(id => !rssById.has(id)) ||
-    rssEvidence.observations.some(observation => !expectedRssIds.includes(observation.observationId))
+    EffectArray.some(expectedRssIds, id => !rssById.has(id)) ||
+    EffectArray.some(rssEvidence.observations, observation => !expectedRssIds.includes(observation.observationId))
   ) {
     failures.push('external RSS observations do not match the complete profile/sample schedule');
   }
@@ -282,7 +287,7 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
     );
   }
   const retainedRootRssGrowthBytes = contextBriefCitationScaleRetainedRootRssGrowthBytes([
-    ...rssEvidence.observations.map(observation => observation.rootRssBaselineBytes),
+    ...EffectArray.map(rssEvidence.observations, observation => observation.rootRssBaselineBytes),
     rssEvidence.finalSample.rootRssBytes,
   ]);
   if (retainedRootRssGrowthBytes > options.budget.maximumObservedAddedProcessTreeRssBytes) {
@@ -293,7 +298,7 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
   const profileResults: ContextBriefCitationScaleArtifactV2['profiles'][number][] = [];
   for (const profileId of options.profileIds) {
     const timing = timingProfiles.get(profileId)!;
-    const observations = timing.observations.map((observation, index) => {
+    const observations = EffectArray.map(timing.observations, (observation, index) => {
       const observationId = rssObservationId(profileId, index);
       return {
         ...observation,
@@ -305,7 +310,7 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
     profileResults.push(evaluated.result);
     failures.push(...evaluated.failures);
   }
-  const reviewedProfiles = options.budget.profiles.map(profile => profile.id);
+  const reviewedProfiles = EffectArray.map(options.budget.profiles, profile => profile.id);
   if (JSON.stringify(options.profileIds) !== JSON.stringify(reviewedProfiles)) {
     failures.push('reviewed scale evidence must execute local-100k, workset-50, and workset-128 in order');
   }
@@ -450,10 +455,16 @@ const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservatio
           const validations = yield* validateContextBriefMemoryCitations(fixture.config, scope, candidates, fence);
           const phaseFinished = yield* Clock.currentTimeNanos;
           validationMilliseconds = Number(phaseFinished - phaseStarted) / 1_000_000;
-          validationReceipts = validations.reduce((total, validation) => total + validation.receipts.length, 0);
-          exactValidationReceipts = validations.reduce(
-            (total, validation) => total + validation.receipts.filter(receipt => receipt.status === 'exact').length,
+          validationReceipts = EffectArray.reduce(
+            validations,
             0,
+            (total, validation) => total + validation.receipts.length,
+          );
+          exactValidationReceipts = EffectArray.reduce(
+            validations,
+            0,
+            (total, validation) =>
+              total + EffectArray.filter(validation.receipts, receipt => receipt.status === 'exact').length,
           );
           observeRss();
           return validations;
@@ -666,7 +677,7 @@ export function makeContextBriefCitationScaleGraphInstrumentation(): ContextBrie
 }
 
 function scaleGraphEvidence(prepared: ContextBriefCitationScalePreparedProfile): ContextBriefGraphEvidenceV1 {
-  const resolvedSnapshots = prepared.repositories.map(repository => ({
+  const resolvedSnapshots = EffectArray.map(prepared.repositories, repository => ({
     commit: repository.status.identity.headCommit,
     dirty: false,
     freshness: 'fresh' as const,
@@ -733,6 +744,6 @@ function gitObservation(arguments_: readonly string[]): {readonly success: boole
   const result = Bun.spawnSync({cmd: ['git', ...arguments_], stderr: 'ignore', stdout: 'pipe'});
   return {
     success: result.exitCode === 0,
-    text: result.stdout ? new TextDecoder().decode(result.stdout).trim() : '',
+    text: result.stdout ? Effect2.pipe(new TextDecoder().decode(result.stdout), EffectString.trim) : '',
   };
 }

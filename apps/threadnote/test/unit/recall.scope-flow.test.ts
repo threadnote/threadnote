@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -12,6 +13,8 @@ import {runRecall} from '../../src/memory/commands.js';
 import {EffectMcpServerRegistry} from '../../src/effect/ai/mcp.js';
 import {registerSearchTool} from '../../src/mcp/server/recall.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 // This composes both public entrypoints, storage, indexing, and canonical rereads.
 effectIt.effect(
@@ -40,7 +43,7 @@ effectIt.effect(
         config.manifestPath,
         JSON.stringify({
           version: 1,
-          projects: ['product', 'product-mobile'].map(name => ({
+          projects: EffectArray.map(['product', 'product-mobile'], name => ({
             name,
             path: repo,
             seed: [],
@@ -66,7 +69,7 @@ effectIt.effect(
       const store = yield* ResourceStore;
       yield* store.mutate(
         {account: config.account, home, user: config.user},
-        records.map(record => ({
+        EffectArray.map(records, record => ({
           type: 'write' as const,
           uri: record.uri,
           options: {mode: 'create' as const},
@@ -98,8 +101,12 @@ effectIt.effect(
         'web-only orbital gearbox calibration',
       ]) {
         const cli = yield* captureConsole(runRecall(config, {...base, query}));
-        expect(cli.value.ranked.map(hit => hit.uri)).toEqual(expect.arrayContaining([mobileUri, legacyUri]));
-        expect(cli.value.ranked.some(hit => hit.uri.includes('/foreign/'))).toBe(false);
+        expect(EffectArray.map(cli.value.ranked, hit => hit.uri)).toEqual(
+          expect.arrayContaining([mobileUri, legacyUri]),
+        );
+        expect(
+          EffectArray.some(cli.value.ranked, hit => Effect2.pipe(hit.uri, EffectString.includes('/foreign/'))),
+        ).toBe(false);
         expect(cli.output).toContain('workspace-checkout');
         const mcp = yield* registry.invokeTool('recall_context', {
           ...base,
@@ -108,8 +115,12 @@ effectIt.effect(
           responseFormat: 'dual',
         });
         expect(mcp.isError).not.toBe(true);
-        expect(JSON.stringify(mcp.structuredContent)).toContain(mobileUri.split('/memories/')[1]);
-        expect(JSON.stringify(mcp.structuredContent)).toContain(legacyUri.split('/memories/')[1]);
+        expect(JSON.stringify(mcp.structuredContent)).toContain(
+          Effect2.pipe(mobileUri, EffectString.split('/memories/'))[1],
+        );
+        expect(JSON.stringify(mcp.structuredContent)).toContain(
+          Effect2.pipe(legacyUri, EffectString.split('/memories/'))[1],
+        );
         expect(JSON.stringify(mcp.structuredContent)).not.toContain('/foreign/');
         expect(mcp.structuredContent).toMatchObject({projectBoundary: {reason: 'workspace-checkout'}});
       }
@@ -119,7 +130,7 @@ effectIt.effect(
         {uri: mobileUri, project: 'product'},
       ]) {
         const cli = yield* captureConsole(runRecall(config, {...base, ...options}));
-        expect(cli.value.ranked.map(hit => hit.uri)).toEqual([mobileUri]);
+        expect(EffectArray.map(cli.value.ranked, hit => hit.uri)).toEqual([mobileUri]);
         const mcp = yield* registry.invokeTool('recall_context', {
           ...base,
           ...options,
@@ -127,8 +138,12 @@ effectIt.effect(
           responseFormat: 'dual',
         });
         expect(mcp.isError).not.toBe(true);
-        expect(JSON.stringify(mcp.structuredContent)).toContain(mobileUri.split('/memories/')[1]);
-        expect(JSON.stringify(mcp.structuredContent)).not.toContain(legacyUri.split('/memories/')[1]);
+        expect(JSON.stringify(mcp.structuredContent)).toContain(
+          Effect2.pipe(mobileUri, EffectString.split('/memories/'))[1],
+        );
+        expect(JSON.stringify(mcp.structuredContent)).not.toContain(
+          Effect2.pipe(legacyUri, EffectString.split('/memories/'))[1],
+        );
       }
       for (const options of [
         {workset: 'empty'},
@@ -141,12 +156,18 @@ effectIt.effect(
         expect(cli.output).toContain('Project boundary:');
         const mcp = yield* registry.invokeTool('recall_context', {...base, ...options, nodeLimit: 3});
         expect(mcp.isError).not.toBe(true);
-        expect(mcp.content.some(content => content.type === 'text' && content.text.includes('Project boundary:'))).toBe(
-          true,
-        );
+        expect(
+          EffectArray.some(
+            mcp.content,
+            content =>
+              content.type === 'text' && Effect2.pipe(content.text, EffectString.includes('Project boundary:')),
+          ),
+        ).toBe(true);
       }
       const global = yield* captureConsole(runRecall(config, {...base, inferScope: false}));
-      expect(global.value.ranked.some(hit => hit.uri.includes('/foreign/'))).toBe(true);
+      expect(
+        EffectArray.some(global.value.ranked, hit => Effect2.pipe(hit.uri, EffectString.includes('/foreign/'))),
+      ).toBe(true);
       const globalMcp = yield* registry.invokeTool('recall_context', {
         ...base,
         nodeLimit: 3,

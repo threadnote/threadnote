@@ -6,6 +6,8 @@ import {readBoundedPrivateBytes, writePrivateJsonFile} from '../atomic.js';
 import {sha256Digest, SHA256_DIGEST, SHA256_HEX} from '../digest.js';
 import {graphSharingFailure} from '../errors.js';
 import {graphSharingLayout} from '../layout.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const Key = Schema.Struct({
   fingerprint: Schema.String.check(Schema.isPattern(SHA256_DIGEST)),
@@ -24,7 +26,11 @@ export const makeGraphWorkerSigner = Effect.fn('codeGraph.sharing.workerSigner')
   if (!SHA256_DIGEST.test(credentialIdentity)) return yield* failure();
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const target = path.join(graphSharingLayout(path, home).root, 'worker-keys', credentialIdentity.slice(7) + '.json');
+  const target = path.join(
+    graphSharingLayout(path, home).root,
+    'worker-keys',
+    Effect2.pipe(credentialIdentity, EffectString.slice(7)) + '.json',
+  );
   yield* fs.makeDirectory(path.dirname(target), {recursive: true, mode: 0o700});
   return yield* withExclusiveFileLock(
     fs,

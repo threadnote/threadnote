@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
 import {readSeedManifest, requireWorkset} from '@threadnote/workspace/manifest';
 import type {ProjectManifest, ResolvedWorkset, RuntimeConfig, SeedManifest} from '@threadnote/workspace/config';
@@ -52,6 +53,9 @@ import {
   type CodeGraphWorksetRouterRepositoryCandidateV1,
   type CodeGraphWorksetRouterResultV1,
 } from './router.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_WORKSET_QUERY_V2_VERSION = 1 as const;
 
@@ -189,7 +193,7 @@ export const runCodeGraphWorksetQueryV2Core = Effect.fn('codeGraphWorksetV2.runC
   const bridgeExpansion = yield* dependencies.readBridgeExpansion(catalogRouter);
   const router = expandCodeGraphWorksetRouterWithBridges(catalogRouter, prepared.published, bridgeExpansion);
 
-  const membersByKey = new Map(prepared.members.map(member => [member.repositoryKey, member]));
+  const membersByKey = new Map(EffectArray.map(prepared.members, member => [member.repositoryKey, member]));
   const selectedRepositoryKeys = new Set<string>();
   const attemptedRepositoryKeys = new Set<string>();
   const failures = new Set<string>();
@@ -238,7 +242,7 @@ export const runCodeGraphWorksetQueryV2Core = Effect.fn('codeGraphWorksetV2.runC
       },
       {concurrency: expansion.concurrency},
     );
-    const batchTimedOut = outcomes.some(outcome => outcome.state === 'timed-out');
+    const batchTimedOut = EffectArray.some(outcomes, outcome => outcome.state === 'timed-out');
     for (const outcome of outcomes) {
       if (outcome.state === 'ready') {
         validateDeepQueryResult(membersByKey.get(outcome.repository.repositoryKey), outcome.repository, outcome.graph);
@@ -290,13 +294,15 @@ export const runCodeGraphWorksetQueryV2Core = Effect.fn('codeGraphWorksetV2.runC
   }
 
   const usableRepositoryKeys = new Set(
-    prepared.members
-      .filter(
+    EffectArray.map(
+      EffectArray.filter(
+        prepared.members,
         member =>
           !failures.has(member.repositoryKey) &&
           (member.receipt.state === 'current' || member.receipt.state === 'stale'),
-      )
-      .map(member => member.repositoryKey),
+      ),
+      member => member.repositoryKey,
+    ),
   );
   const localCards = rankSuccessfulResults(router, successful, MAXIMUM_EVIDENCE_CARDS);
   const bridgeCards = materializeCodeGraphWorksetBridgeEndpointCards(
@@ -353,7 +359,7 @@ export const runCodeGraphWorksetQueryV2Core = Effect.fn('codeGraphWorksetV2.runC
       deepQueryFailures: failures.size,
       deepQueriedRepositories: attemptedRepositoryKeys.size,
       expansionBatches,
-      relationships: logicalResult.cards.reduce((total, card) => total + card.relationships.length, 0),
+      relationships: EffectArray.reduce(logicalResult.cards, 0, (total, card) => total + card.relationships.length),
       repositoriesConsidered: coverage.consideredRepositories,
       responseStructuredBytes: projected.measurement.structuredBytes,
       responseTextBytes: projected.measurement.textBytes,
@@ -491,13 +497,13 @@ export const resolveCodeGraphQualifiedRefTargets = Effect.fn('codeGraphWorksetV2
       ref => resolveCodeGraphQualifiedRef(config.agentContextHome, {ref}),
       {concurrency: 4},
     );
-    const recordsByRef = new Map(records.map(record => [record.ref, record]));
+    const recordsByRef = new Map(EffectArray.map(records, record => [record.ref, record]));
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const queryService = yield* CodeGraphQueryService;
     const manifest = yield* readSeedManifest(config.manifestPath);
     const caller = callerCwd === undefined ? undefined : yield* expandPath(callerCwd);
-    const requestedRepositoryIds = new Set(records.map(record => record.repositoryId));
+    const requestedRepositoryIds = new Set(EffectArray.map(records, record => record.repositoryId));
     const publishedRoutes = yield* Effect.forEach(
       resolveManifestWorksets(manifest),
       workset =>
@@ -506,15 +512,15 @@ export const resolveCodeGraphQualifiedRefTargets = Effect.fn('codeGraphWorksetV2
         ),
       {concurrency: 4},
     );
-    const publishedPaths = publishedRoutes.flatMap(({published, workset}) => {
+    const publishedPaths = EffectArray.flatMap(publishedRoutes, ({published, workset}) => {
       if (
         published === undefined ||
         !codeGraphWorksetCatalogGenerationMatches(workset, codeGraphWorksetManifestDigest(workset), published)
       ) {
         return [];
       }
-      const projectsByKey = new Map(workset.projects.map(project => [safeLabel(project.name), project]));
-      return published.members.flatMap(member => {
+      const projectsByKey = new Map(EffectArray.map(workset.projects, project => [safeLabel(project.name), project]));
+      return EffectArray.flatMap(published.members, member => {
         if (!requestedRepositoryIds.has(member.repositoryId)) return [];
         const project = projectsByKey.get(member.repositoryKey);
         return project === undefined
@@ -554,7 +560,7 @@ export const resolveCodeGraphQualifiedRefTargets = Effect.fn('codeGraphWorksetV2
         }).pipe(Effect.orElseSucceed(() => undefined)),
       {concurrency: 4},
     );
-    const available = matches.filter((value): value is NonNullable<typeof value> => value !== undefined);
+    const available = EffectArray.filter(matches, (value): value is NonNullable<typeof value> => value !== undefined);
     const availableByRepository = new Map<string, typeof available>();
     for (const candidate of available) {
       const repositoryId = candidate.status.identity.repositoryId;
@@ -562,12 +568,16 @@ export const resolveCodeGraphQualifiedRefTargets = Effect.fn('codeGraphWorksetV2
       group.push(candidate);
       availableByRepository.set(repositoryId, group);
     }
-    return refs.map(ref => {
+    return EffectArray.map(refs, ref => {
       const record = recordsByRef.get(ref)!;
       const repositoryMatches = availableByRepository.get(record.repositoryId) ?? [];
       const selected =
-        repositoryMatches.find(candidate => candidate.cwd === caller && candidate.route.kind === 'caller') ??
-        (repositoryMatches.length === 1 ? repositoryMatches[0] : undefined);
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            repositoryMatches,
+            candidate => candidate.cwd === caller && candidate.route.kind === 'caller',
+          ),
+        ) ?? (repositoryMatches.length === 1 ? repositoryMatches[0] : undefined);
       if (selected === undefined) {
         throw new Error(
           repositoryMatches.length === 0
@@ -589,12 +599,14 @@ export const resolveCodeGraphQualifiedRefTargets = Effect.fn('codeGraphWorksetV2
 );
 
 function resolveManifestWorksets(manifest: SeedManifest): readonly ResolvedWorkset[] {
-  const projectsByName = new Map(manifest.projects.map(project => [project.name.toLowerCase(), project]));
-  return (manifest.worksets ?? []).map(workset => {
+  const projectsByName = new Map(
+    EffectArray.map(manifest.projects, project => [Effect2.pipe(project.name, EffectString.toLowerCase), project]),
+  );
+  return EffectArray.map(manifest.worksets ?? [], workset => {
     const projects: ProjectManifest[] = [];
     const unresolvedProjects: string[] = [];
     for (const name of workset.projects) {
-      const project = projectsByName.get(name.toLowerCase());
+      const project = projectsByName.get(Effect2.pipe(name, EffectString.toLowerCase));
       if (project === undefined) unresolvedProjects.push(name);
       else projects.push(project);
     }
@@ -715,7 +727,7 @@ function rankSuccessfulResults(
 ) {
   return rankCodeGraphWorksetEvidenceCards({
     maximumCards,
-    repositories: router.repositories.flatMap(repository => {
+    repositories: EffectArray.flatMap(router.repositories, repository => {
       const graph = successful.get(repository.repositoryKey);
       return graph === undefined ? [] : [{graph, repositoryKey: repository.repositoryKey}];
     }),
@@ -729,8 +741,8 @@ function materializeRepositoryReceipts(
   failures: ReadonlySet<string>,
   routingComplete: boolean,
 ): Readonly<Record<string, RepositoryEvidenceReceiptV1>> {
-  return Object.fromEntries(
-    members.map(member => {
+  return EffectRecord.fromEntries(
+    EffectArray.map(members, member => {
       const failed = failures.has(member.repositoryKey);
       const snapshot = member.receipt.snapshot;
       const considered = routingComplete && snapshot !== undefined;
@@ -753,24 +765,30 @@ function materializeCoverage(
   repositories: Readonly<Record<string, RepositoryEvidenceReceiptV1>>,
   stopReason: WorksetCoverageV2['stopReason'],
 ): WorksetCoverageV2 {
-  const receipts = Object.values(repositories);
+  const receipts = EffectRecord.values(repositories);
   const states = {
-    current: receipts.filter(receipt => receipt.state === 'current').length,
-    deferred: receipts.filter(receipt => receipt.state === 'deferred').length,
-    excluded: receipts.filter(receipt => receipt.state === 'excluded').length,
-    failed: receipts.filter(receipt => receipt.state === 'failed').length,
-    missing: receipts.filter(receipt => receipt.state === 'missing').length,
-    stale: receipts.filter(receipt => receipt.state === 'stale').length,
+    current: EffectArray.filter(receipts, receipt => receipt.state === 'current').length,
+    deferred: EffectArray.filter(receipts, receipt => receipt.state === 'deferred').length,
+    excluded: EffectArray.filter(receipts, receipt => receipt.state === 'excluded').length,
+    failed: EffectArray.filter(receipts, receipt => receipt.state === 'failed').length,
+    missing: EffectArray.filter(receipts, receipt => receipt.state === 'missing').length,
+    stale: EffectArray.filter(receipts, receipt => receipt.state === 'stale').length,
   };
-  const cataloguedRepositories = receipts.filter(receipt => receipt.snapshot !== undefined).length;
-  const consideredRepositories = receipts.filter(receipt => receipt.considered).length;
+  const cataloguedRepositories = EffectArray.filter(receipts, receipt => receipt.snapshot !== undefined).length;
+  const consideredRepositories = EffectArray.filter(
+    receipts,
+    __effectArrayValue => !!(receipt => receipt.considered)(__effectArrayValue),
+  ).length;
   return {
     cataloguedRepositories,
     complete:
       cataloguedRepositories === consideredRepositories &&
-      receipts.every(receipt => receipt.projectCoverage?.completeness !== 'partial'),
+      EffectArray.every(receipts, receipt => receipt.projectCoverage?.completeness !== 'partial'),
     consideredRepositories,
-    deepQueriedRepositories: receipts.filter(receipt => receipt.deepQueried).length,
+    deepQueriedRepositories: EffectArray.filter(
+      receipts,
+      __effectArrayValue => !!(receipt => receipt.deepQueried)(__effectArrayValue),
+    ).length,
     requestedRepositories: receipts.length,
     states,
     stopReason,
@@ -784,13 +802,13 @@ function worksetWarnings(
   bridgeWarnings: readonly string[],
 ): readonly string[] {
   return [
-    ...(members.some(member => member.receipt.projectCoverage?.kind === 'project')
+    ...(EffectArray.some(members, member => member.receipt.projectCoverage?.kind === 'project')
       ? ['Workset results cover the configured project graphs; absence does not establish repository-wide absence.']
       : []),
-    ...(members.some(member => member.receipt.projectCoverage?.completeness === 'partial')
+    ...(EffectArray.some(members, member => member.receipt.projectCoverage?.completeness === 'partial')
       ? ['One or more project graphs have partial dependency coverage and cannot provide authoritative negative proof.']
       : []),
-    ...(members.some(member => member.receipt.state !== 'current')
+    ...(EffectArray.some(members, member => member.receipt.state !== 'current')
       ? ['One or more workset members are not current in the published generation.']
       : []),
     ...(failures.size > 0 ? [`${failures.size} repository deep read${failures.size === 1 ? '' : 's'} failed.`] : []),
@@ -818,8 +836,8 @@ function referencedQualifiedRefs(
   }
   const required = new Set<string>();
   const preparedBridgeRefs = new Set(
-    bridges.flatMap(bridge =>
-      [bridge.source.reference, bridge.target.reference].flatMap(reference =>
+    EffectArray.flatMap(bridges, bridge =>
+      EffectArray.flatMap([bridge.source.reference, bridge.target.reference], reference =>
         reference.kind === 'qualified-ref' ? [reference.ref] : [],
       ),
     ),
@@ -831,7 +849,7 @@ function referencedQualifiedRefs(
       required.add(relationship.target.ref);
     }
   }
-  return [...required].sort(compareText).flatMap(ref => {
+  return EffectArray.flatMap([...required].sort(compareText), ref => {
     const candidate = candidates.get(ref);
     if (candidate !== undefined) return [candidate];
     // Protobuf bridge refs are registered from canonical monikers before the
@@ -898,15 +916,15 @@ function prepareRuntimeQuery(
         `The published routing catalog for ${workset.name} is stale; run \`threadnote workset prepare ${workset.name}\`.`,
       );
     }
-    const publishedByKey = new Map(published.members.map(member => [member.repositoryKey, member]));
+    const publishedByKey = new Map(EffectArray.map(published.members, member => [member.repositoryKey, member]));
     const observed = yield* Effect.forEach(
       workset.projects,
       project => observeRuntimeMember(config, project, publishedByKey.get(safeLabel(project.name)), fs, queryService),
       {concurrency: 8},
     );
-    const members = observed.map(value => value.member);
+    const members = EffectArray.map(observed, value => value.member);
     const deepMembers = new Map(
-      observed.flatMap(value =>
+      EffectArray.flatMap(observed, value =>
         'deep' in value && value.deep !== undefined ? [[value.member.repositoryKey, value.deep] as const] : [],
       ),
     );
@@ -939,7 +957,7 @@ function observeRuntimeMember(
   queryService: RuntimeQueryStatusService,
 ) {
   const repositoryKey = safeLabel(project.name);
-  const fallbackRepositoryId = published?.repositoryId ?? '0'.repeat(64);
+  const fallbackRepositoryId = published?.repositoryId ?? Effect2.pipe('0', EffectString.repeat(64));
   return Effect.gen(function* () {
     const cwd = yield* expandPath(project.path);
     if (!(yield* fs.exists(cwd))) {
@@ -1049,17 +1067,32 @@ function observeRuntimeMember(
 }
 
 function safeLabel(value: string): string {
-  return [...value]
-    .filter(character => (character.codePointAt(0) ?? 0) > 0x1f)
-    .join('')
-    .slice(0, 256);
+  return Effect2.pipe(
+    EffectArray.join(
+      EffectArray.filter(
+        [...value],
+        character =>
+          (Effect2.pipe(
+            character,
+            EffectString.codePointAt(0),
+            Effect2.Option.getOrElse(() => undefined),
+          ) ?? 0) > 0x1f,
+      ),
+      '',
+    ),
+    EffectString.slice(0, 256),
+  );
 }
 
 function boundedText(value: string, label: string, maximumBytes: number): string {
-  if (typeof value !== 'string' || value.trim().length === 0 || Buffer.byteLength(value, 'utf8') > maximumBytes) {
+  if (
+    typeof value !== 'string' ||
+    Effect2.pipe(value, EffectString.trim).length === 0 ||
+    Buffer.byteLength(value, 'utf8') > maximumBytes
+  ) {
     throw new Error(`Workset ${label} is invalid.`);
   }
-  return value.trim();
+  return Effect2.pipe(value, EffectString.trim);
 }
 
 function boundedInteger(value: number, label: string, minimum: number, maximum: number): number {

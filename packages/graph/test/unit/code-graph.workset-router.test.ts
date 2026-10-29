@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {Effect} from 'effect';
 import {it as effectIt} from '@effect/vitest';
@@ -17,6 +18,8 @@ import type {
   CodeGraphWorksetCatalogPublishedGenerationV1,
   CodeGraphWorksetCatalogRoutingSymbolRecordV1,
 } from '@threadnote/graph/workset_catalog/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph workset router', () => {
   it('gives exact identities a versioned, inspectable score advantage', () => {
@@ -68,12 +71,16 @@ describe('code graph workset router', () => {
 
   it('keeps the lexical projection of plain task text token-bounded', () => {
     const query = normalizeCodeGraphWorksetRouterQuery(
-      `${'oversized'.repeat(40)} ${Array.from({length: 40}, (_, index) => `term${index}`).join(' ')}`,
+      `${Effect2.pipe('oversized', EffectString.repeat(40))} ${EffectArray.join(
+        Array.from({length: 40}, (_, index) => `term${index}`),
+        ' ',
+      )}`,
     );
 
     expect(query.terms).toHaveLength(CODE_GRAPH_WORKSET_ROUTER_LIMITS.queryTokensMaximum);
     expect(
-      query.terms.every(
+      EffectArray.every(
+        query.terms,
         term => Buffer.byteLength(term, 'utf8') <= CODE_GRAPH_WORKSET_ROUTER_LIMITS.queryTermBytesMaximum,
       ),
     ).toBe(true);
@@ -96,12 +103,14 @@ describe('code graph workset router', () => {
       query,
     });
 
-    expect(ranked.symbols.slice(0, 3).map(entry => entry.symbol.repositoryKey)).toEqual([
+    expect(EffectArray.map(ranked.symbols.slice(0, 3), entry => entry.symbol.repositoryKey)).toEqual([
       'repository-0',
       'repository-1',
       'repository-2',
     ]);
-    expect(ranked.symbols.slice(0, 3).every(entry => entry.selectionReason === 'repository-diversity')).toBe(true);
+    expect(
+      EffectArray.every(ranked.symbols.slice(0, 3), entry => entry.selectionReason === 'repository-diversity'),
+    ).toBe(true);
     expect(ranked.symbols[3]?.symbol.repositoryKey).toBe('repository-0');
     expect(ranked.symbols[3]?.selectionReason).toBe('global-score');
   });
@@ -110,7 +119,7 @@ describe('code graph workset router', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 200}), {maxLength: 50}), seeds => {
         const query = normalizeCodeGraphWorksetRouterQuery('service');
-        const hits = seeds.map(seed => ({catalogRank: seed + 1, symbol: symbol(seed + 20, seed % 11)}));
+        const hits = EffectArray.map(seeds, seed => ({catalogRank: seed + 1, symbol: symbol(seed + 20, seed % 11)}));
         const limits = {
           candidateLimitPerLane: 64,
           diversityRepositoryLimit: 5,
@@ -315,13 +324,13 @@ function page(
 function generation(memberCount: number): CodeGraphWorksetCatalogPublishedGenerationV1 {
   return {
     digest: digest('generation'),
-    id: `cgwg_${digest('generation-id').slice(0, 40)}`,
+    id: `cgwg_${Effect2.pipe(digest('generation-id'), EffectString.slice(0, 40))}`,
     manifestDigest: digest('manifest'),
     members: Array.from({length: memberCount}, (_, repository) => {
       const entry = symbol(repository + 1, repository);
       return {
         checkoutId: digest(`checkout-${repository}`),
-        commitId: digest(`commit-${repository}`).slice(0, 40),
+        commitId: Effect2.pipe(digest(`commit-${repository}`), EffectString.slice(0, 40)),
         ordinal: repository,
         projectionDigest: entry.projectionDigest,
         repositoryId: entry.repositoryId,
@@ -347,7 +356,7 @@ function symbol(
     language: 'typescript',
     lookupKeys: [`symbol-${seed}`],
     name: `symbol-${seed}`,
-    nodeId: `cgs_${digest(`node-${seed}`).slice(0, 40)}`,
+    nodeId: `cgs_${Effect2.pipe(digest(`node-${seed}`), EffectString.slice(0, 40))}`,
     ordinal: repository,
     packageName: `@fixture/repository-${repository}`,
     path: `src/service-${seed}.ts`,
@@ -355,7 +364,7 @@ function symbol(
     qualifiedName: `fixture.repository${repository}.symbol${seed}`,
     repositoryId: digest(`repository-${repository}`),
     repositoryKey: `repository-${repository}`,
-    snapshotId: `cgsn_${digest(`snapshot-${repository}`).slice(0, 40)}`,
+    snapshotId: `cgsn_${Effect2.pipe(digest(`snapshot-${repository}`), EffectString.slice(0, 40))}`,
     span: {column: 1, endColumn: 10, endLine: seed + 1, line: seed + 1},
     terms: [{term: 'service', weight: 1}],
     ...overrides,

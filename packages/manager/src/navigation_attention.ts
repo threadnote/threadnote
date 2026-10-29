@@ -1,3 +1,6 @@
+import {isConflictsResponse2, isManagerContextMaintenanceStatusV2} from './api/response_guards.js';
+import {Array as EffectArray} from 'effect';
+import {isReadonlyArray} from '@threadnote/platform/readonly-array';
 import {useCallback, useEffect, useState} from 'react';
 import type {ManagerContextMaintenanceStatusV2} from './attention/contracts.js';
 import type {SharingConflict} from './sharing_contracts.js';
@@ -9,6 +12,7 @@ const readMaintenance = (project: string) => (signal: AbortSignal) =>
     `/api/attention/context-maintenance?project=${encodeURIComponent(project)}`,
     undefined,
     {signal, timeoutMilliseconds: 10_000},
+    isManagerContextMaintenanceStatusV2,
   );
 
 export interface NavigationAttention {
@@ -51,11 +55,17 @@ export function useNavigationAttention(
 ): NavigationAttention {
   const [snapshot, setSnapshot] = useState<{project: string; counts: NavigationAttention}>();
   const reader = useCallback(readMaintenance(project), [project]);
-  const live = useManagerLiveResource('context-maintenance', enabled ? project : '', reader);
+  const live = useManagerLiveResource(
+    'context-maintenance',
+    enabled ? project : '',
+    reader,
+    isManagerContextMaintenanceStatusV2,
+  );
   const sharesLive = useManagerLiveQuery<{readonly conflicts: readonly SharingConflict[]}>(
     enabled ? {topic: 'share-conflicts', scope: 'account'} : undefined,
     'conflicts',
-    signal => api('/api/shares/conflicts', undefined, {signal, timeoutMilliseconds: 10_000}),
+    signal => api('/api/shares/conflicts', undefined, {signal, timeoutMilliseconds: 10_000}, isConflictsResponse2),
+    isConflictsResponse2,
   );
   const legacyShares = !sharesLive.active || sharesLive.snapshot.status === 'unsupported';
   const legacyHealth = !live.active || live.snapshot.status === 'unsupported';
@@ -69,13 +79,19 @@ export function useNavigationAttention(
       const options = {signal: controller.signal, timeoutMilliseconds: 10_000};
       const [shares, health] = await Promise.allSettled([
         legacyShares
-          ? api<{readonly conflicts: readonly SharingConflict[]}>('/api/shares/conflicts', undefined, options)
+          ? api<{readonly conflicts: readonly SharingConflict[]}>(
+              '/api/shares/conflicts',
+              undefined,
+              options,
+              isConflictsResponse2,
+            )
           : Promise.resolve(undefined),
         project && legacyHealth
           ? api<ManagerContextMaintenanceStatusV2>(
               `/api/attention/context-maintenance?project=${encodeURIComponent(project)}`,
               undefined,
               options,
+              isManagerContextMaintenanceStatusV2,
             )
           : Promise.resolve(undefined),
       ]);
@@ -84,8 +100,8 @@ export function useNavigationAttention(
           project,
           counts: {
             shares:
-              shares.status === 'fulfilled' && shares.value && Array.isArray(shares.value.conflicts)
-                ? new Set(shares.value.conflicts.map(item => item.id)).size
+              shares.status === 'fulfilled' && shares.value && isReadonlyArray(shares.value.conflicts)
+                ? new Set(EffectArray.map(shares.value.conflicts, item => item.id)).size
                 : undefined,
             'context-health': health.status === 'fulfilled' ? health.value?.counts?.decisionMemories : undefined,
           },
@@ -108,8 +124,8 @@ export function useNavigationAttention(
   const counts = snapshot?.project === project ? snapshot.counts : {};
   const liveCount = !legacyHealth && 'data' in live.snapshot ? live.snapshot.data?.counts?.decisionMemories : undefined;
   const liveShares =
-    !legacyShares && 'data' in sharesLive.snapshot && Array.isArray(sharesLive.snapshot.data?.conflicts)
-      ? new Set(sharesLive.snapshot.data.conflicts.map(item => item.id)).size
+    !legacyShares && 'data' in sharesLive.snapshot && isReadonlyArray(sharesLive.snapshot.data?.conflicts)
+      ? new Set(EffectArray.map(sharesLive.snapshot.data.conflicts, item => item.id)).size
       : undefined;
   const projected = {
     ...counts,

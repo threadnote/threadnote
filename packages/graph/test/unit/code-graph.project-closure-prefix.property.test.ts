@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {Database} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
@@ -6,6 +7,8 @@ import {
   boundedSnapshotProjectPrefixes,
   codeGraphSnapshotProjectClosureStatement,
 } from '@threadnote/graph/store/project_closure';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('bounded snapshot project prefixes', () => {
   fcProp(
@@ -21,21 +24,45 @@ describe('bounded snapshot project prefixes', () => {
       ),
     },
     ({reverse, roots}) => {
-      const withAncestors = roots.flatMap((root, index) =>
-        index % 3 === 0 ? [root, root.slice(0, root.lastIndexOf('/'))] : [root],
+      const withAncestors = EffectArray.flatMap(roots, (root, index) =>
+        index % 3 === 0
+          ? [
+              root,
+              Effect.pipe(
+                root,
+                EffectString.slice(
+                  0,
+                  Effect.pipe(
+                    root,
+                    EffectString.lastIndexOf('/'),
+                    Effect.Option.getOrElse(() => -1),
+                  ),
+                ),
+              ),
+            ]
+          : [root],
       );
       const input = reverse ? [...withAncestors].reverse() : withAncestors;
       const canonical = boundedSnapshotProjectPrefixes(input);
       const repeated = boundedSnapshotProjectPrefixes([...(canonical ?? [])].reverse());
 
       expect(canonical).toBeDefined();
+      if (canonical === undefined) return;
       expect(repeated).toEqual(canonical);
       for (const root of roots) {
-        expect(canonical!.some(prefix => root === prefix || root.startsWith(`${prefix}/`))).toBe(true);
+        expect(
+          EffectArray.some(
+            canonical,
+            prefix => root === prefix || Effect.pipe(root, EffectString.startsWith(`${prefix}/`)),
+          ),
+        ).toBe(true);
       }
       expect(
-        canonical!.some((prefix, index) =>
-          canonical!.some((other, otherIndex) => otherIndex !== index && prefix.startsWith(`${other}/`)),
+        EffectArray.some(canonical, (prefix, index) =>
+          EffectArray.some(
+            canonical,
+            (other, otherIndex) => otherIndex !== index && Effect.pipe(prefix, EffectString.startsWith(`${other}/`)),
+          ),
         ),
       ).toBe(false);
     },
@@ -63,13 +90,19 @@ describe('bounded snapshot project prefixes', () => {
         PRIMARY KEY (snapshot_id, path)
       ) WITHOUT ROWID`);
       const statement = codeGraphSnapshotProjectClosureStatement('snapshot', ['packages/app', 'packages/core']);
-      const plan = database
-        .query(`EXPLAIN QUERY PLAN ${statement.text}`)
-        .all(...statement.parameters)
-        .map(row => (row as {readonly detail: string}).detail);
+      const plan = EffectArray.map(
+        database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters),
+        row => {
+          if (!Predicate.isObject(row) || typeof row.detail !== 'string')
+            throw new Error('SQLite query plan row is missing its detail.');
+          return row.detail;
+        },
+      );
 
       expect(plan).toContain('SEARCH file USING PRIMARY KEY (snapshot_id=? AND path>? AND path<?)');
-      expect(plan.some(detail => detail.includes('USE TEMP B-TREE'))).toBe(false);
+      expect(EffectArray.some(plan, detail => Effect.pipe(detail, EffectString.includes('USE TEMP B-TREE')))).toBe(
+        false,
+      );
     } finally {
       database.close(false);
     }

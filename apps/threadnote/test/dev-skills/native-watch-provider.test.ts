@@ -1,5 +1,7 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Effect, Predicate} from 'effect';
 import {describe, expect} from 'vitest';
 import {CommandExecutor, type CommandOptions, type CommandResult} from '@threadnote/platform/command';
 import {initializeNativeWatch, reconcileNativeWatch} from '@threadnote/workflow-automations/watch';
@@ -8,10 +10,13 @@ import {
   NativeWatchProviderNow,
   type NativeWatchProviderCache,
 } from '../../src/workflow_automation/watch_provider.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const pr = 'https://github.com/example/project/pull/7';
-const head = 'a'.repeat(40);
-const pushedHead = 'b'.repeat(40);
+const head = Effect2.pipe('a', EffectString.repeat(40));
+const pushedHead = Effect2.pipe('b', EffectString.repeat(40));
 const secretBody = 'PRIVATE-REVIEW-BODY-SENTINEL-DO-NOT-RETURN';
 
 interface Request {
@@ -26,10 +31,23 @@ interface Reply {
 }
 type ReplyFor = (args: readonly string[], input: unknown, call: number, now: number) => Reply;
 
+type GraphqlPayload = {readonly query: string; readonly variables: Record<string, unknown>};
+
+const graphqlPayload = (input: unknown): GraphqlPayload => {
+  if (!Predicate.isObject(input) || typeof input.query !== 'string' || !Predicate.isObject(input.variables)) {
+    throw new Error('Expected a GraphQL request payload with query and variables.');
+  }
+  return {query: input.query, variables: input.variables};
+};
+
+const graphqlQuery = (input: unknown): string | undefined =>
+  Predicate.isObject(input) && typeof input.query === 'string' ? input.query : undefined;
+
 const frame = (reply: Reply): string => {
-  const headers = Object.entries(reply.headers ?? {})
-    .map(([key, value]) => `${key}: ${value}`)
-    .join('\r\n');
+  const headers = EffectArray.join(
+    EffectArray.map(EffectRecord.toEntries(reply.headers ?? {}), ([key, value]) => `${key}: ${value}`),
+    '\r\n',
+  );
   const body = typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body);
   return `HTTP/2.0 ${reply.status ?? 200} ${reply.status === 304 ? 'Not Modified' : 'OK'}\r\n${headers}\r\n\r\n${body}`;
 };
@@ -56,7 +74,15 @@ const status = (context: string, state = 'success') => ({
 });
 const pull = (sha = head) => ({state: 'open', merged: false, head: {sha}});
 const apiEndpoint = (args: readonly string[]) =>
-  args.find(argument => argument === 'graphql' || argument.startsWith('repos/')) ?? '';
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      args,
+      __effectArrayValue =>
+        !!(argument => argument === 'graphql' || Effect2.pipe(argument, EffectString.startsWith('repos/')))(
+          __effectArrayValue,
+        ),
+    ),
+  ) ?? '';
 const pageNumber = (endpoint: string) => Number(/(?:[?&])page=(\d+)/u.exec(endpoint)?.[1] ?? 0);
 
 const threadComment = (id: number) => ({
@@ -69,8 +95,8 @@ const threadComment = (id: number) => ({
 const defaultReply: ReplyFor = (args, input) => {
   const endpoint = apiEndpoint(args);
   if (endpoint === 'graphql') {
-    const payload = input as {readonly query: string; readonly variables: Record<string, unknown>};
-    if (payload.query.includes('reviewThreads(first:20'))
+    const payload = graphqlPayload(input);
+    if (Effect2.pipe(payload.query, EffectString.includes('reviewThreads(first:20')))
       return {
         body: {
           data: {
@@ -88,11 +114,14 @@ const defaultReply: ReplyFor = (args, input) => {
       },
     };
   }
-  if (endpoint.includes('/pulls/7/reviews')) return {headers: {etag: '"reviews-v1"'}, body: [review(21)]};
-  if (endpoint.endsWith('/pulls/7')) return {headers: {etag: '"pull-v1"'}, body: pull()};
-  if (endpoint.includes('/issues/7/comments')) return {headers: {etag: '"comments-v1"'}, body: [comment(11)]};
-  if (endpoint.includes('/check-runs')) return {headers: {etag: '"checks-v1"'}, body: {check_runs: [check(31)]}};
-  if (endpoint.includes('/status?'))
+  if (Effect2.pipe(endpoint, EffectString.includes('/pulls/7/reviews')))
+    return {headers: {etag: '"reviews-v1"'}, body: [review(21)]};
+  if (Effect2.pipe(endpoint, EffectString.endsWith('/pulls/7'))) return {headers: {etag: '"pull-v1"'}, body: pull()};
+  if (Effect2.pipe(endpoint, EffectString.includes('/issues/7/comments')))
+    return {headers: {etag: '"comments-v1"'}, body: [comment(11)]};
+  if (Effect2.pipe(endpoint, EffectString.includes('/check-runs')))
+    return {headers: {etag: '"checks-v1"'}, body: {check_runs: [check(31)]}};
+  if (Effect2.pipe(endpoint, EffectString.includes('/status?')))
     return {headers: {etag: '"statuses-v1"'}, body: {statuses: [status('build/linux')]}};
   return {status: 404, body: {message: 'unknown fixture route'}};
 };
@@ -164,10 +193,11 @@ describe('native GitHub watch provider', () => {
         const threadReply: ReplyFor = (args, input) => {
           const endpoint = apiEndpoint(args);
           if (endpoint !== 'graphql') return defaultReply(args, input, 0, 0);
-          const payload = input as {readonly query: string; readonly variables: Record<string, unknown>};
-          if (payload.query.includes('reviewThreads(first:20')) {
+          const payload = graphqlPayload(input);
+          if (Effect2.pipe(payload.query, EffectString.includes('reviewThreads(first:20'))) {
             const cursor = payload.variables.after;
-            const start = typeof cursor === 'string' ? Number(cursor.replace('threads-', '')) : 0;
+            const start =
+              typeof cursor === 'string' ? Number(Effect2.pipe(cursor, EffectString.replace('threads-', ''))) : 0;
             const nodes = Array.from({length: Math.min(20, totalThreads - start)}, (_, offset) => {
               const ordinal = start + offset + 1;
               return {
@@ -211,7 +241,7 @@ describe('native GitHub watch provider', () => {
         };
         const pagedReply: ReplyFor = (args, input, call, now) => {
           const endpoint = apiEndpoint(args);
-          if (endpoint.includes('/issues/7/comments')) {
+          if (Effect2.pipe(endpoint, EffectString.includes('/issues/7/comments'))) {
             if (pageNumber(endpoint) === 1)
               return {
                 headers: {etag: '"comments-page-1"'},
@@ -223,34 +253,71 @@ describe('native GitHub watch provider', () => {
         };
         const h = harness(pagedReply);
         const result = yield* h.sweep();
-        const comments = result.sweep.sources.find(source => source.source === 'comments');
-        const reviews = result.sweep.sources.find(source => source.source === 'reviews');
-        const threads = result.sweep.sources.find(source => source.source === 'threads');
-        expect(comments?.complete && comments.items.map(item => item.id)).toEqual(
+        const comments = EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.sweep.sources, source => source.source === 'comments'),
+        );
+        const reviews = EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.sweep.sources, source => source.source === 'reviews'),
+        );
+        const threads = EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.sweep.sources, source => source.source === 'threads'),
+        );
+        expect(comments?.complete && EffectArray.map(comments.items, item => item.id)).toEqual(
           Array.from({length: 101}, (_, i) => String(i + 1)),
         );
-        expect(reviews?.complete && reviews.items.map(item => item.id)).toEqual(['21']);
+        expect(reviews?.complete && EffectArray.map(reviews.items, item => item.id)).toEqual(['21']);
         expect(threads?.complete).toBe(true);
         if (threads?.complete) {
-          const ids = threads.items.map(item => item.id).sort();
+          const ids = EffectArray.map(threads.items, item => item.id).sort();
           expect(ids).toEqual(
             [
               ...Array.from({length: 101}, (_, index) => `review-comment-${index + 1}`),
               ...Array.from({length: 101}, (_, index) => `thread-${index + 1}`),
             ].sort(),
           );
-          expect(threads.items.find(item => item.id === 'thread-1')?.bootstrap).toBe(true);
-          expect(threads.items.find(item => item.id === 'review-comment-6')?.bootstrap).toBe(true);
+          expect(
+            EffectOption.getOrUndefined(EffectArray.findFirst(threads.items, item => item.id === 'thread-1'))
+              ?.bootstrap,
+          ).toBe(true);
+          expect(
+            EffectOption.getOrUndefined(EffectArray.findFirst(threads.items, item => item.id === 'review-comment-6'))
+              ?.bootstrap,
+          ).toBe(true);
         }
-        expect(h.calls.filter(call => call.args.at(-1)?.includes('/issues/7/comments'))).toHaveLength(2);
         expect(
-          h.calls.filter(
-            call => call.input && (call.input as {query: string}).query.includes('reviewThreads(first:20'),
+          EffectArrayPipe(h.calls, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (call, __effectArrayIndex) =>
+                __effectArrayIndex in __effectArrayValues &&
+                Boolean(
+                  Effect2.pipe(call.args.at(-1), effectOptionalString =>
+                    effectOptionalString == null
+                      ? undefined
+                      : Effect2.pipe(effectOptionalString, EffectString.includes('/issues/7/comments')),
+                  ),
+                ),
+            ),
+          ),
+        ).toHaveLength(2);
+        expect(
+          EffectArrayPipe(h.calls, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (call, __effectArrayIndex) =>
+                __effectArrayIndex in __effectArrayValues &&
+                Effect2.pipe(graphqlQuery(call.input) ?? '', EffectString.includes('reviewThreads(first:20')),
+            ),
           ),
         ).toHaveLength(6);
         expect(
-          h.calls.filter(
-            call => call.input && (call.input as {query: string}).query.includes('comments(first:100,after:$after)'),
+          EffectArrayPipe(h.calls, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (call, __effectArrayIndex) =>
+                __effectArrayIndex in __effectArrayValues &&
+                Effect2.pipe(graphqlQuery(call.input) ?? '', EffectString.includes('comments(first:100,after:$after)')),
+            ),
           ),
         ).toHaveLength(1);
         expect(JSON.stringify({sweep: result.sweep, cache: result.cache, blockers: result.blockers})).not.toContain(
@@ -272,20 +339,21 @@ describe('native GitHub watch provider', () => {
             return {status: 304, headers: {etag: '"comments-page-1"'}, body: ''};
           if (args.includes('If-None-Match: "comments-page-2"'))
             return {status: 304, headers: {etag: '"comments-page-2"'}, body: ''};
-          if (endpoint.includes('/issues/7/comments') && pageNumber(endpoint) === 1)
+          if (Effect2.pipe(endpoint, EffectString.includes('/issues/7/comments')) && pageNumber(endpoint) === 1)
             return {headers: {etag: '"comments-page-1"'}, body: Array.from({length: 100}, (_, i) => comment(i + 1))};
-          if (endpoint.includes('/issues/7/comments') && pageNumber(endpoint) === 2)
+          if (Effect2.pipe(endpoint, EffectString.includes('/issues/7/comments')) && pageNumber(endpoint) === 2)
             return {headers: {etag: '"comments-page-2"'}, body: [comment(101)]};
           const base = defaultReply(args, input, call, now);
-          return args.includes('If-None-Match: "pull-v1"') || args.some(arg => arg.startsWith('If-None-Match: "'))
+          return args.includes('If-None-Match: "pull-v1"') ||
+            EffectArray.some(args, arg => Effect2.pipe(arg, EffectString.startsWith('If-None-Match: "')))
             ? {status: 304, headers: base.headers, body: ''}
             : base;
         };
         const first = harness((args, input, call, now) => {
           const endpoint = apiEndpoint(args);
-          if (endpoint.includes('/issues/7/comments') && pageNumber(endpoint) === 1)
+          if (Effect2.pipe(endpoint, EffectString.includes('/issues/7/comments')) && pageNumber(endpoint) === 1)
             return {headers: {etag: '"comments-page-1"'}, body: Array.from({length: 100}, (_, i) => comment(i + 1))};
-          if (endpoint.includes('/issues/7/comments') && pageNumber(endpoint) === 2)
+          if (Effect2.pipe(endpoint, EffectString.includes('/issues/7/comments')) && pageNumber(endpoint) === 2)
             return {headers: {etag: '"comments-page-2"'}, body: [comment(101)]};
           return defaultReply(args, input, call, now);
         });
@@ -298,8 +366,19 @@ describe('native GitHub watch provider', () => {
         expect(replay.metrics.graphqlCost).toBe(1);
         expect(replay.metrics.requests).toBe(second.calls.length);
         expect(replay.metrics.responseBytes).toBeLessThan(original.metrics.responseBytes);
-        expect(second.calls.filter(call => apiEndpoint(call.args).includes('/issues/7/comments'))).toHaveLength(2);
-        expect(second.calls.some(call => apiEndpoint(call.args).includes('page=2'))).toBe(true);
+        expect(
+          EffectArrayPipe(second.calls, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (call, __effectArrayIndex) =>
+                __effectArrayIndex in __effectArrayValues &&
+                Effect2.pipe(apiEndpoint(call.args), EffectString.includes('/issues/7/comments')),
+            ),
+          ),
+        ).toHaveLength(2);
+        expect(
+          EffectArray.some(second.calls, call => Effect2.pipe(apiEndpoint(call.args), EffectString.includes('page=2'))),
+        ).toBe(true);
       }),
   );
 
@@ -309,17 +388,27 @@ describe('native GitHub watch provider', () => {
       Effect.gen(function* () {
         const failedComments = harness((args, input, call, now) => {
           const endpoint = apiEndpoint(args);
-          if (endpoint.includes('/issues/7/comments'))
+          if (Effect2.pipe(endpoint, EffectString.includes('/issues/7/comments')))
             return {status: 500, body: {message: 'private transport failure'}};
           return defaultReply(args, input, call, now);
         });
         const partial = yield* failedComments.sweep();
-        expect(partial.sweep.sources.find(source => source.source === 'comments')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(partial.sweep.sources, source => source.source === 'comments'),
+          ),
+        ).toMatchObject({
           complete: false,
           error: {code: 'provider-server', retryable: true},
         });
-        expect(partial.sweep.sources.find(source => source.source === 'reviews')?.complete).toBe(true);
-        expect(partial.cache.pages.some(page => page.key.startsWith('reviews:'))).toBe(true);
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(partial.sweep.sources, source => source.source === 'reviews'),
+          )?.complete,
+        ).toBe(true);
+        expect(
+          EffectArray.some(partial.cache.pages, page => Effect2.pipe(page.key, EffectString.startsWith('reviews:'))),
+        ).toBe(true);
         expect(JSON.stringify(partial)).not.toContain('private transport failure');
 
         const graphqlFailure = harness((args, input, call, now) => {
@@ -328,7 +417,11 @@ describe('native GitHub watch provider', () => {
           return defaultReply(args, input, call, now);
         });
         const rejected = yield* graphqlFailure.sweep();
-        expect(rejected.sweep.sources.find(source => source.source === 'threads')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(rejected.sweep.sources, source => source.source === 'threads'),
+          ),
+        ).toMatchObject({
           complete: false,
           error: {code: 'provider-graphql'},
         });
@@ -350,12 +443,16 @@ describe('native GitHub watch provider', () => {
           return defaultReply(args, input, call, now);
         });
         const cycled = yield* cursorCycle.sweep();
-        expect(cycled.sweep.sources.find(source => source.source === 'threads')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(cycled.sweep.sources, source => source.source === 'threads'),
+          ),
+        ).toMatchObject({
           complete: false,
           error: {code: 'provider-pagination-race', retryable: true},
         });
         expect(cycled.sweep.ci.complete).toBe(false);
-        expect(cursorCycle.calls.filter(call => apiEndpoint(call.args) === 'graphql')).toHaveLength(2);
+        expect(EffectArray.filter(cursorCycle.calls, call => apiEndpoint(call.args) === 'graphql')).toHaveLength(2);
       }),
   );
 
@@ -364,27 +461,32 @@ describe('native GitHub watch provider', () => {
       let pullCount = 0;
       const pushed = harness((args, input, call, now) => {
         const endpoint = apiEndpoint(args);
-        if (endpoint.endsWith('/pulls/7')) return {body: pull(++pullCount === 1 ? head : pushedHead)};
+        if (Effect2.pipe(endpoint, EffectString.endsWith('/pulls/7')))
+          return {body: pull(++pullCount === 1 ? head : pushedHead)};
         return defaultReply(args, input, call, now);
       });
       const raced = yield* pushed.sweep();
       expect(raced.sweep.head).toBe(pushedHead);
       expect(raced.sweep.startedHead).toBe(head);
       expect(raced.sweep.ci).toMatchObject({head, complete: false});
-      expect(raced.sweep.sources.find(source => source.source === 'checks')).toMatchObject({complete: true, head});
-      expect(raced.sweep.sources.find(source => source.source === 'statuses')).toMatchObject({complete: true, head});
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(raced.sweep.sources, source => source.source === 'checks')),
+      ).toMatchObject({complete: true, head});
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(raced.sweep.sources, source => source.source === 'statuses')),
+      ).toMatchObject({complete: true, head});
 
       const empty = harness((args, input, call, now) => {
         const endpoint = apiEndpoint(args);
-        if (endpoint.includes('/check-runs')) return {body: {check_runs: []}};
-        if (endpoint.includes('/status?')) return {body: {statuses: []}};
+        if (Effect2.pipe(endpoint, EffectString.includes('/check-runs'))) return {body: {check_runs: []}};
+        if (Effect2.pipe(endpoint, EffectString.includes('/status?'))) return {body: {statuses: []}};
         return defaultReply(args, input, call, now);
       });
       const emptySweep = yield* empty.sweep();
       expect(emptySweep.sweep.ci).toMatchObject({complete: true, count: 0});
       const state = reconcileNativeWatch(initializeNativeWatch('watch-1', pr, 0), emptySweep.sweep);
       expect(state.ci).toBeNull();
-      expect(state.events.some(event => event.kind === 'ci_complete')).toBe(false);
+      expect(EffectArray.some(state.events, event => event.kind === 'ci_complete')).toBe(false);
     }),
   );
 
@@ -395,7 +497,7 @@ describe('native GitHub watch provider', () => {
         let rateDeadline = 0;
         const limited = harness((args, input, call, now) => {
           const endpoint = apiEndpoint(args);
-          if (endpoint.includes('/issues/7/comments')) {
+          if (Effect2.pipe(endpoint, EffectString.includes('/issues/7/comments'))) {
             rateDeadline = now + 20 + 120_000;
             return {
               status: 429,
@@ -412,28 +514,46 @@ describe('native GitHub watch provider', () => {
         const rate = yield* limited.sweep();
         expect(limited.calls).toHaveLength(2); // pull before comments, then rate limit blocks every later API request
         expect(rate.retryAt).toBeGreaterThanOrEqual(rateDeadline);
-        expect(rate.blockers.some(blocker => blocker.code === 'provider-rate-limit' && blocker.retryable)).toBe(true);
+        expect(
+          EffectArray.some(rate.blockers, blocker => blocker.code === 'provider-rate-limit' && blocker.retryable),
+        ).toBe(true);
         expect(JSON.stringify(rate)).not.toContain('private rate response');
 
         const unauthorized = harness((args, input, call, now) =>
-          args.at(-1)?.includes('/issues/7/comments')
+          Effect2.pipe(args.at(-1), effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.includes('/issues/7/comments')),
+          )
             ? {status: 401, body: {message: 'private auth response'}}
             : defaultReply(args, input, call, now),
         );
         const auth = yield* unauthorized.sweep();
-        expect(auth.sweep.sources.find(source => source.source === 'comments')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(auth.sweep.sources, source => source.source === 'comments'),
+          ),
+        ).toMatchObject({
           complete: false,
           error: {code: 'provider-authentication', retryable: false},
         });
         expect(unauthorized.calls).toHaveLength(2);
 
         const forbidden = harness((args, input, call, now) =>
-          args.at(-1)?.includes('/issues/7/comments')
+          Effect2.pipe(args.at(-1), effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.includes('/issues/7/comments')),
+          )
             ? {status: 403, body: {message: 'private permission response'}}
             : defaultReply(args, input, call, now),
         );
         const permission = yield* forbidden.sweep();
-        expect(permission.sweep.sources.find(source => source.source === 'comments')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(permission.sweep.sources, source => source.source === 'comments'),
+          ),
+        ).toMatchObject({
           complete: false,
           error: {code: 'provider-permission', retryable: false},
         });
@@ -442,7 +562,7 @@ describe('native GitHub watch provider', () => {
         let run = 0;
         const rerun = harness((args, input, call, now) => {
           const endpoint = apiEndpoint(args);
-          if (endpoint.includes('/check-runs')) {
+          if (Effect2.pipe(endpoint, EffectString.includes('/check-runs'))) {
             run++;
             return {body: {check_runs: [check(run === 1 ? 31 : 32, run === 1 ? 'success' : 'failure')]}};
           }
@@ -450,12 +570,16 @@ describe('native GitHub watch provider', () => {
         });
         const first = yield* rerun.sweep();
         const updated = yield* rerun.sweep(first.cache);
-        const firstChecks = first.sweep.sources.find(source => source.source === 'checks');
-        const updatedChecks = updated.sweep.sources.find(source => source.source === 'checks');
-        expect(firstChecks?.complete && firstChecks.items.map(item => [item.id, item.kind])).toEqual([
+        const firstChecks = EffectOption.getOrUndefined(
+          EffectArray.findFirst(first.sweep.sources, source => source.source === 'checks'),
+        );
+        const updatedChecks = EffectOption.getOrUndefined(
+          EffectArray.findFirst(updated.sweep.sources, source => source.source === 'checks'),
+        );
+        expect(firstChecks?.complete && EffectArray.map(firstChecks.items, item => [item.id, item.kind])).toEqual([
           ['31', 'ci_update'],
         ]);
-        expect(updatedChecks?.complete && updatedChecks.items.map(item => [item.id, item.kind])).toEqual([
+        expect(updatedChecks?.complete && EffectArray.map(updatedChecks.items, item => [item.id, item.kind])).toEqual([
           ['32', 'ci_error'],
         ]);
         expect(updated.sweep.ci.count).toBe(2);
@@ -467,29 +591,47 @@ describe('native GitHub watch provider', () => {
   effectIt.effect('turns malformed or unknown responses into bounded errors without exposing bodies', () =>
     Effect.gen(function* () {
       const malformed = harness((args, input, call, now) =>
-        args.at(-1)?.includes('/issues/7/comments') ? {body: secretBody} : defaultReply(args, input, call, now),
+        Effect2.pipe(args.at(-1), effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect2.pipe(effectOptionalString, EffectString.includes('/issues/7/comments')),
+        )
+          ? {body: secretBody}
+          : defaultReply(args, input, call, now),
       );
       const result = yield* malformed.sweep();
-      expect(result.sweep.sources.find(source => source.source === 'comments')).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.sweep.sources, source => source.source === 'comments'),
+        ),
+      ).toMatchObject({
         complete: false,
         error: {code: 'provider-json'},
       });
       expect(JSON.stringify(result)).not.toContain(secretBody);
 
       const unknown = harness((args, input, call, now) =>
-        args.at(-1)?.includes('/issues/7/comments')
+        Effect2.pipe(args.at(-1), effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect2.pipe(effectOptionalString, EffectString.includes('/issues/7/comments')),
+        )
           ? {body: {unexpected: secretBody}}
           : defaultReply(args, input, call, now),
       );
       const unknownResult = yield* unknown.sweep();
-      expect(unknownResult.sweep.sources.find(source => source.source === 'comments')).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(unknownResult.sweep.sources, source => source.source === 'comments'),
+        ),
+      ).toMatchObject({
         complete: false,
         error: {code: 'provider-shape'},
       });
       expect(JSON.stringify(unknownResult)).not.toContain(secretBody);
-      expect(unknownResult.blockers.every(blocker => blocker.code.length <= 64 && blocker.source.length <= 32)).toBe(
-        true,
-      );
+      expect(
+        EffectArray.every(unknownResult.blockers, blocker => blocker.code.length <= 64 && blocker.source.length <= 32),
+      ).toBe(true);
     }),
   );
 });
@@ -499,19 +641,23 @@ describe('native pull mergeability projection', () => {
     Effect.gen(function* () {
       let reads = 0;
       const fake = harness((args, input, call, now) =>
-        apiEndpoint(args).endsWith('/pulls/7')
+        Effect2.pipe(apiEndpoint(args), EffectString.endsWith('/pulls/7'))
           ? {
               headers: {etag: '"new-pull"'},
               body: {
                 ...pull(),
-                base: {sha: (++reads === 1 ? 'c' : 'd').repeat(40)},
+                base: {sha: Effect2.pipe(++reads === 1 ? 'c' : 'd', EffectString.repeat(40))},
                 mergeable: reads === 1 ? true : false,
               },
             }
           : defaultReply(args, input, call, now),
       );
       const result = yield* fake.sweep();
-      expect(result.sweep).toMatchObject({base: 'd'.repeat(40), startedBase: 'c'.repeat(40), mergeable: false});
+      expect(result.sweep).toMatchObject({
+        base: Effect2.pipe('d', EffectString.repeat(40)),
+        startedBase: Effect2.pipe('c', EffectString.repeat(40)),
+        mergeable: false,
+      });
       expect(fake.calls).toHaveLength(7);
       expect(result.metrics.requests).toBe(7);
     }),
@@ -520,29 +666,47 @@ describe('native pull mergeability projection', () => {
     Effect.gen(function* () {
       const seeded = yield* harness().sweep();
       const legacy: NativeWatchProviderCache = {
-        pages: seeded.cache.pages.map(page =>
+        pages: EffectArray.map(seeded.cache.pages, page =>
           page.key === 'pull' ? {...page, projection: {...page.projection, pull: {head, state: 'open'}}} : page,
         ),
       };
       let reads = 0;
       const fake = harness((args, input, call, now) => {
-        if (!apiEndpoint(args).endsWith('/pulls/7')) return defaultReply(args, input, call, now);
+        if (!Effect2.pipe(apiEndpoint(args), EffectString.endsWith('/pulls/7')))
+          return defaultReply(args, input, call, now);
         reads++;
         if (reads === 1) {
-          expect(args.some(arg => arg.startsWith('If-None-Match:') || arg.startsWith('If-Modified-Since:'))).toBe(
-            false,
-          );
-          return {headers: {etag: '"fresh"'}, body: {...pull(), base: {sha: 'c'.repeat(40)}}};
+          expect(
+            EffectArray.some(
+              args,
+              arg =>
+                Effect2.pipe(arg, EffectString.startsWith('If-None-Match:')) ||
+                Effect2.pipe(arg, EffectString.startsWith('If-Modified-Since:')),
+            ),
+          ).toBe(false);
+          return {
+            headers: {etag: '"fresh"'},
+            body: {...pull(), base: {sha: Effect2.pipe('c', EffectString.repeat(40))}},
+          };
         }
         expect(args).toContain('If-None-Match: "fresh"');
         return {status: 304, body: ''};
       });
       const result = yield* fake.sweep(legacy);
       expect(fake.calls).toHaveLength(7);
-      expect(result.sweep).toMatchObject({base: 'c'.repeat(40), startedBase: 'c'.repeat(40), mergeable: null});
-      expect(result.cache.pages.find(page => page.key === 'pull')?.projection.pull).toMatchObject({mergeable: null});
+      expect(result.sweep).toMatchObject({
+        base: Effect2.pipe('c', EffectString.repeat(40)),
+        startedBase: Effect2.pipe('c', EffectString.repeat(40)),
+        mergeable: null,
+      });
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(result.cache.pages, page => page.key === 'pull'))?.projection
+          .pull,
+      ).toMatchObject({mergeable: null});
       const cached = harness((args, input, call, now) =>
-        apiEndpoint(args).endsWith('/pulls/7') ? {status: 304, body: ''} : defaultReply(args, input, call, now),
+        Effect2.pipe(apiEndpoint(args), EffectString.endsWith('/pulls/7'))
+          ? {status: 304, body: ''}
+          : defaultReply(args, input, call, now),
       );
       const next = yield* cached.sweep(result.cache);
       expect(next.sweep.mergeable).toBeNull();
@@ -553,7 +717,7 @@ describe('native pull mergeability projection', () => {
     effectIt.effect('rejects malformed PR metadata ' + JSON.stringify(metadata), () =>
       Effect.gen(function* () {
         const fake = harness((args, input, call, now) =>
-          apiEndpoint(args).endsWith('/pulls/7')
+          Effect2.pipe(apiEndpoint(args), EffectString.endsWith('/pulls/7'))
             ? {body: {...pull(), ...metadata}}
             : defaultReply(args, input, call, now),
         );

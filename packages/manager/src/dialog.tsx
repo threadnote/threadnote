@@ -1,4 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import React, {createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState} from 'react';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type ManagerDialogTone = 'default' | 'danger';
 
@@ -80,14 +84,14 @@ export function managerAutocompleteEntries(
 function prepareManagerAutocompleteOptions(options: readonly string[]): readonly PreparedManagerAutocompleteOption[] {
   const unique = new Map<string, string>();
   for (const option of options) {
-    const trimmed = option.trim();
+    const trimmed = Effect.pipe(option, EffectString.trim);
     if (!trimmed) continue;
-    const normalized = trimmed.toLocaleLowerCase();
+    const normalized = Effect.pipe(trimmed, EffectString.toLocaleLowerCase());
     if (!unique.has(normalized)) unique.set(normalized, trimmed);
   }
-  return [...unique.entries()]
-    .map(([normalized, value]) => ({normalized, value}))
-    .sort((left, right) => left.value.localeCompare(right.value));
+  return EffectArray.map([...unique.entries()], ([normalized, value]) => ({normalized, value})).sort((left, right) =>
+    Effect.pipe(left.value, EffectString.localeCompare(right.value)),
+  );
 }
 
 function managerAutocompleteEntriesFromPrepared(
@@ -95,12 +99,18 @@ function managerAutocompleteEntriesFromPrepared(
   query: string,
   allowCreate: boolean,
 ): readonly ManagerAutocompleteEntry[] {
-  const trimmedQuery = query.trim();
-  const normalizedQuery = trimmedQuery.toLocaleLowerCase();
-  const existing = options
-    .filter(option => option.normalized.includes(normalizedQuery))
-    .map(({value}): ManagerAutocompleteEntry => ({kind: 'existing', label: value, value}));
-  if (!allowCreate || !trimmedQuery || options.some(option => option.normalized === normalizedQuery)) return existing;
+  const trimmedQuery = Effect.pipe(query, EffectString.trim);
+  const normalizedQuery = Effect.pipe(trimmedQuery, EffectString.toLocaleLowerCase());
+  const existing = EffectArray.map(
+    EffectArray.filter(
+      options,
+      (option, __effectArrayIndex) =>
+        __effectArrayIndex in options && Effect.pipe(option.normalized, EffectString.includes(normalizedQuery)),
+    ),
+    ({value}): ManagerAutocompleteEntry => ({kind: 'existing', label: value, value}),
+  );
+  if (!allowCreate || !trimmedQuery || EffectArray.some(options, option => option.normalized === normalizedQuery))
+    return existing;
   return [{kind: 'create', label: `Create “${trimmedQuery}”`, value: trimmedQuery}, ...existing];
 }
 
@@ -183,7 +193,7 @@ export function ManagerAutocompleteInput(props: ManagerAutocompleteInputProps): 
       />
       {open && entries.length > 0 ? (
         <div className="manager-autocomplete-menu" id={listboxId} role="listbox">
-          {entries.map((entry, index) => (
+          {EffectArray.map(entries, (entry, index) => (
             <button
               aria-selected={index === activeIndex}
               className={`${entry.kind === 'create' ? 'is-create' : ''} ${index === activeIndex ? 'is-active' : ''}`}
@@ -211,7 +221,7 @@ export function validateManagerDialogValues(
 ): ManagerDialogValidation {
   const values: Record<string, string> = {};
   for (const field of fields) {
-    const value = (input[field.id] ?? '').trim();
+    const value = Effect.pipe(input[field.id] ?? '', EffectString.trim);
     if (field.required && value.length === 0) {
       return {fieldId: field.id, ok: false};
     }
@@ -363,7 +373,7 @@ function ManagerDialog(props: {
           {options.detail ? <code className="manager-dialog-detail">{options.detail}</code> : null}
           {fields.length > 0 ? (
             <div className="manager-dialog-fields">
-              {fields.map((field, index) => {
+              {EffectArray.map(fields, (field, index) => {
                 const inputId = `${dialogId}-${field.id}`;
                 return (
                   <div className="manager-dialog-field" key={field.id}>
@@ -434,5 +444,5 @@ function ManagerDialog(props: {
 }
 
 function initialDialogValues(fields: readonly ManagerDialogField[]): Record<string, string> {
-  return Object.fromEntries(fields.map(field => [field.id, field.initialValue ?? '']));
+  return EffectRecord.fromEntries(EffectArray.map(fields, field => [field.id, field.initialValue ?? '']));
 }

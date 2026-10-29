@@ -1,6 +1,8 @@
 import {compareCodeUnits} from '../ordering.js';
 import {type CodeGraphVisualizationScope, type CodeGraphVisualizationScopeEdge} from './models.js';
 import {type CodeGraphProvenance} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MANAGER_SCOPE_SAMPLE_SYMBOLS_PER_SCOPE = 6;
 
@@ -25,7 +27,7 @@ export function codeGraphVisualizationCatalogComponentStatement(
   limit: number,
   offset: number,
 ): CodeGraphSqlQueryStatement {
-  const query = projectQuery.trim();
+  const query = Effect.pipe(projectQuery, EffectString.trim);
   const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
   const safeOffset = Math.max(0, Math.min(1_000_000, Math.floor(offset)));
   const componentQuery = visualizationCatalogComponentQueryPredicate(query);
@@ -163,17 +165,21 @@ function visualizationScopeIdForSymbol(
   if (symbol.language === 'markdown' || ['document', 'heading', 'section'].includes(symbol.kind)) {
     return 'facet:unscoped-documentation';
   }
-  const packageName = symbol.packageName?.trim();
+  const packageName = Effect.pipe(symbol.packageName, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if (packageName) return `package:${packageName}`;
-  return `path:${symbol.path.split('/')[0] || '(root)'}`;
+  return `path:${Effect.pipe(symbol.path, EffectString.split('/'))[0] || '(root)'}`;
 }
 
 function visualizationScopeFromProjectId(projectId: string): CodeGraphVisualizationScope {
-  if (projectId.startsWith('cgp_')) return {type: 'component', value: projectId};
+  if (Effect.pipe(projectId, EffectString.startsWith('cgp_'))) return {type: 'component', value: projectId};
   if (projectId === 'facet:unscoped') return {type: 'unscoped'};
   if (projectId === 'facet:unscoped-documentation') return {type: 'documentation-facet'};
-  if (projectId.startsWith('package:')) return {type: 'package', value: projectId.slice('package:'.length)};
-  if (projectId.startsWith('path:')) return {type: 'path', value: projectId.slice('path:'.length)};
+  if (Effect.pipe(projectId, EffectString.startsWith('package:')))
+    return {type: 'package', value: Effect.pipe(projectId, EffectString.slice('package:'.length))};
+  if (Effect.pipe(projectId, EffectString.startsWith('path:')))
+    return {type: 'path', value: Effect.pipe(projectId, EffectString.slice('path:'.length))};
   return {type: 'all'};
 }
 

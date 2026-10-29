@@ -7,9 +7,11 @@ import {
   type CodeGraphCliFreshnessPolicy,
 } from '@threadnote/threadnote/code_graph/commands';
 import type {CodeGraphSnapshot} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const readySnapshot: CodeGraphSnapshot = {
-  commit: 'a'.repeat(40),
+  commit: Effect.pipe('a', EffectString.repeat(40)),
   dirty: false,
   edgeCount: 1,
   extractorSet: 'extractor',
@@ -101,7 +103,9 @@ describe('code graph CLI freshness properties', () => {
         fc.boolean(),
         fc.boolean(),
         (operation, borrowedSnapshot, stale, sameCommit, worktreeClean) => {
-          const identity = sameCommit ? currentIdentity : {...currentIdentity, headCommit: 'b'.repeat(40)};
+          const identity = sameCommit
+            ? currentIdentity
+            : {...currentIdentity, headCommit: Effect.pipe('b', EffectString.repeat(40))};
           const continuity = codeGraphCliUsesBorrowedContinuity(
             'current',
             operation,

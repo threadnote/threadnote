@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {createHash} from '@threadnote/testing/node-crypto';
@@ -7,6 +8,7 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {describe, expect, it} from 'vitest';
+import * as EffectRecord from 'effect/Record';
 
 const execFilePromise = promisify(execFile);
 const CLOUD_TOOL_NAMES = [
@@ -221,7 +223,7 @@ describe('Cursor Cloud integration', () => {
     try {
       await withCloudMcp(fixture, ['engineering', 'docs'], async client => {
         const tools = await client.listTools();
-        expect(tools.tools.map(tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
+        expect(EffectArray.map(tools.tools, tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
         const recallError = await callError(client, 'recall_context', {
           callerCwd: process.cwd(),
           query: 'bootstrap race sentinel',
@@ -284,7 +286,7 @@ describe('Cursor Cloud integration', () => {
       'threadnote://user/cloud-user/memories/shared/engineering/durable/projects/threadnote/late-bootstrap.md';
     try {
       await withCloudMcp(fixture, [], async client => {
-        expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
+        expect(EffectArray.map((await client.listTools()).tools, tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
         await expect(client.readResource({uri})).rejects.toThrow('No writable Cursor Cloud memory shares');
         const handoff = await client.callTool({
           name: 'remember_context',
@@ -345,7 +347,7 @@ describe('Cursor Cloud integration', () => {
         join(fixture.home, 'share', 'teams.json'),
         JSON.stringify({
           version: 1,
-          teams: Object.fromEntries(
+          teams: EffectRecord.fromEntries(
             Array.from({length: 17}, (_, index) => [`team-${index}`, {remote: fixture.remote}]),
           ),
         }),
@@ -573,7 +575,7 @@ describe('Cursor Cloud integration', () => {
           'threadnote-memory': {headers: {'threadnote-share-id': shareId}, url: endpoint},
         },
       });
-      expect(Object.keys(JSON.parse(config.stdout).mcpServers['threadnote-memory'].headers)).toEqual([
+      expect(EffectRecord.keys(JSON.parse(config.stdout).mcpServers['threadnote-memory'].headers)).toEqual([
         'threadnote-share-id',
       ]);
 
@@ -649,8 +651,8 @@ describe('Cursor Cloud integration', () => {
 
       await withLocalMcp(home, endpoint, shareId, async client => {
         const tools = await client.listTools();
-        expect(tools.tools.map(tool => tool.name)).toEqual(CLOUD_LOCAL_TOOL_NAMES);
-        expect(tools.tools.map(tool => tool.name)).not.toContain('recall_context');
+        expect(EffectArray.map(tools.tools, tool => tool.name)).toEqual(CLOUD_LOCAL_TOOL_NAMES);
+        expect(EffectArray.map(tools.tools, tool => tool.name)).not.toContain('recall_context');
         expect((await client.listResourceTemplates()).resourceTemplates).toEqual([]);
 
         const status = await client.callTool({
@@ -688,7 +690,7 @@ describe('Cursor Cloud integration', () => {
           fixture,
           ['engineering'],
           async client => {
-            expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
+            expect(EffectArray.map((await client.listTools()).tools, tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
             await expect(
               callError(client, 'read_context', {
                 uri: 'threadnote://user/cloud-user/memories/durable/projects/threadnote/private.md',
@@ -794,7 +796,7 @@ describe('Cursor Cloud integration', () => {
 
       await withCloudMcp(fixture, async client => {
         const tools = await client.listTools();
-        expect(tools.tools.map(tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
+        expect(EffectArray.map(tools.tools, tool => tool.name)).toEqual(CLOUD_TOOL_NAMES);
 
         await expect(
           callError(client, 'read_context', {
@@ -1043,17 +1045,20 @@ async function pushRemoteMemory(root: string, remote: string, relativePath: stri
 }
 
 function memoryDocument(topic: string, body: string, reference?: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    ...(reference ? [`references: ${reference}`] : []),
-    '',
-    body,
-    '',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      ...(reference ? [`references: ${reference}`] : []),
+      '',
+      body,
+      '',
+    ],
+    '\n',
+  );
 }
 
 function bootstrap(fixture: CloudFixture, team = 'engineering', remote = fixture.remote) {
@@ -1174,16 +1179,30 @@ async function withLocalMcp<T>(
   }
 }
 
+const cursorToolContentSchema = Schema.Array(
+  Schema.StructWithRest(Schema.Struct({text: Schema.optional(Schema.String), type: Schema.String}), [
+    Schema.Record(Schema.String, Schema.Unknown),
+  ]),
+);
+
 async function callText(client: Client, name: string, args: Record<string, unknown>): Promise<string> {
   const result = await client.callTool({arguments: args, name});
-  return (result.content as Array<{text?: string; type: string}>)
-    .filter(content => content.type === 'text')
-    .map(content => content.text ?? '')
-    .join('\n');
+  const content = Schema.decodeUnknownSync(cursorToolContentSchema)(result.content);
+  return EffectArray.join(
+    EffectArray.map(
+      EffectArray.filter(content, item => item.type === 'text'),
+      item => item.text ?? '',
+    ),
+    '\n',
+  );
 }
 
 async function callError(client: Client, name: string, args: Record<string, unknown>): Promise<string> {
   const result = await client.callTool({arguments: args, name});
   expect(result.isError).toBe(true);
-  return (result.content as Array<{text?: string; type: string}>).map(content => content.text ?? '').join('\n');
+  const content = Schema.decodeUnknownSync(cursorToolContentSchema)(result.content);
+  return EffectArray.join(
+    EffectArray.map(content, item => item.text ?? ''),
+    '\n',
+  );
 }

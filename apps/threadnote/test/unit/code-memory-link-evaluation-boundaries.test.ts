@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   chmod,
   link,
@@ -24,14 +25,20 @@ import {
   type CodeMemoryLinkRepositorySnapshotV1,
 } from '../../../../scripts/code-memory-link-repository-snapshot.js';
 import {collectCodeMemoryLinkPublicArtifacts} from '../../../../scripts/code-memory-link-codex-judge.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Code Memory Link evaluation boundaries', () => {
   const roots: string[] = [];
   const snapshots: CodeMemoryLinkRepositorySnapshotV1[] = [];
 
   afterEach(async () => {
-    await Promise.all(snapshots.splice(0).map(snapshot => removeCodeMemoryLinkRepositorySnapshot(snapshot)));
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, maxRetries: 3, recursive: true})));
+    await Promise.all(
+      EffectArray.map(snapshots.splice(0), snapshot => removeCodeMemoryLinkRepositorySnapshot(snapshot)),
+    );
+    await Promise.all(
+      EffectArray.map(roots.splice(0), root => rm(root, {force: true, maxRetries: 3, recursive: true})),
+    );
   });
 
   it('kills and observes an empty process group after a successful leader leaves a SIGTERM-resistant child', async () => {
@@ -50,8 +57,8 @@ describe('Code Memory Link evaluation boundaries', () => {
       timeoutMilliseconds: 5_000,
     });
 
-    const groupId = Number(result.stdout.trim());
-    const descendantId = Number((await readFile(marker, 'utf8')).trim());
+    const groupId = Number(Effect.pipe(result.stdout, EffectString.trim));
+    const descendantId = Number(Effect.pipe(await readFile(marker, 'utf8'), EffectString.trim));
     expect(groupId).toBeGreaterThan(0);
     expect(descendantId).toBeGreaterThan(0);
     expect(descendantId).not.toBe(groupId);
@@ -90,7 +97,7 @@ describe('Code Memory Link evaluation boundaries', () => {
         environment: {PATH: process.env.PATH ?? '/usr/bin:/bin'},
         label: 'oversized stdin fixture',
         maxOutputBytes: 4_096,
-        stdin: 'x'.repeat(1 * 1_024 * 1_024 + 1),
+        stdin: Effect.pipe('x', EffectString.repeat(1 * 1_024 * 1_024 + 1)),
         timeoutMilliseconds: 5_000,
       }),
     ).rejects.toThrow('stdin exceeded its byte limit');
@@ -112,7 +119,7 @@ describe('Code Memory Link evaluation boundaries', () => {
     await writeFile(join(source, 'src/service.ts'), 'export const value = 2;\n');
     const files = await assertCodeMemoryLinkRepositorySnapshot(snapshot);
     const artifacts = await collectCodeMemoryLinkPublicArtifacts(snapshot);
-    expect(files.map(file => file.relativePath)).toEqual(['src/service.ts']);
+    expect(EffectArray.map(files, file => file.relativePath)).toEqual(['src/service.ts']);
     expect(new TextDecoder().decode(files[0].bytes)).toContain('value = 1');
     expect(artifacts).toHaveLength(1);
     expect(snapshot.repositorySnapshotHash).toMatch(/^[0-9a-f]{64}$/u);

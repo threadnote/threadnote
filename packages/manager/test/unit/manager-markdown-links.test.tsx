@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -7,6 +8,8 @@ import {defaultUrlTransform} from 'react-markdown';
 import {MemoryBody} from '../../src/detail_modal.js';
 import {MemoryExcerpt} from '../../src/review_presentation.js';
 import {MarkdownViewer} from '../../src/ui/controls.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let host: HTMLDivElement;
 let root: Root;
@@ -34,8 +37,8 @@ it('retains canonical destinations for labeled memory links and intercepts their
   await render(`- [current](<${canonical}>)\n- [stable alias](<${alias}>)`, open);
 
   const links = [...host.querySelectorAll<HTMLAnchorElement>('a')];
-  expect(links.map(link => link.getAttribute('href'))).toEqual([canonical, alias]);
-  expect(links.map(link => link.textContent)).toEqual(['current', 'stable alias']);
+  expect(EffectArray.map(links, link => link.getAttribute('href'))).toEqual([canonical, alias]);
+  expect(EffectArray.map(links, link => link.textContent)).toEqual(['current', 'stable alias']);
   const event = new MouseEvent('click', {bubbles: true, cancelable: true});
   await act(async () => links[0].dispatchEvent(event));
   expect(event.defaultPrevented).toBe(true);
@@ -52,10 +55,15 @@ it('retains the default URL policy for other anchors and without a navigation ca
     ['unsafe', 'javascript:alert(1)'],
     ['threadnote-other', 'threadnote://source/github/repo'],
   ] as const;
-  const markdown = links.map(([label, href]) => `[${label}](<${href}>)`).join('\n\n');
+  const markdown = EffectArray.join(
+    EffectArray.map(links, ([label, href]) => `[${label}](<${href}>)`),
+    '\n\n',
+  );
   await render(markdown, () => undefined);
   const rendered = [...host.querySelectorAll<HTMLAnchorElement>('a')];
-  expect(rendered.map(link => link.getAttribute('href'))).toEqual(links.map(([, href]) => defaultUrlTransform(href)));
+  expect(EffectArray.map(rendered, link => link.getAttribute('href'))).toEqual(
+    EffectArray.map(links, ([, href]) => defaultUrlTransform(href)),
+  );
 
   await render(`[memory](<threadnote://user/test/memories/durable/projects/demo/target.md>)`);
   expect(host.querySelector('a')?.getAttribute('href')).toBe(
@@ -66,7 +74,7 @@ it('retains the default URL policy for other anchors and without a navigation ca
 it('preserves generated canonical and stable memory targets independently of escaped labels', async () => {
   const segment = fc
     .array(fc.constantFrom('a', 'Z', '0', '_', '-', 'é', '雪', ' ', '/', '?', '%', '#'), {minLength: 1, maxLength: 12})
-    .map(parts => encodeURIComponent(parts.join('')));
+    .map(parts => encodeURIComponent(EffectArray.join(parts, '')));
   const href = fc.oneof(
     fc
       .tuple(segment, segment, segment)
@@ -75,14 +83,14 @@ it('preserves generated canonical and stable memory targets independently of esc
       ),
     fc
       .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 32, maxLength: 32})
-      .map(id => `threadnote://memory/tn_${id.join('')}`),
+      .map(id => `threadnote://memory/tn_${EffectArray.join(id, '')}`),
   );
   const label = fc.stringMatching(/^[a-zA-Z0-9 &<>]{1,16}$/);
 
   await fc.assert(
     fc.asyncProperty(href, label, async (target, text) => {
       const open = vi.fn();
-      await render(`[${text.replace(/[\\[\]]/g, '\\$&')}](<${target}>)`, open);
+      await render(`[${Effect.pipe(text, EffectString.replace(/[\\[\]]/g, '\\$&'))}](<${target}>)`, open);
       const link = host.querySelector<HTMLAnchorElement>('a');
       expect(link?.getAttribute('href')).toBe(target);
       const event = new MouseEvent('click', {bubbles: true, cancelable: true});
@@ -136,7 +144,7 @@ it('preserves authorized memory navigation through review body and excerpt wrapp
     ),
   );
   const links = [...host.querySelectorAll<HTMLAnchorElement>('a')];
-  expect(links.map(link => link.getAttribute('href'))).toEqual([target, target]);
+  expect(EffectArray.map(links, link => link.getAttribute('href'))).toEqual([target, target]);
   for (const link of links)
     await act(async () => link.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
   expect(open.mock.calls).toEqual([[target], [target]]);

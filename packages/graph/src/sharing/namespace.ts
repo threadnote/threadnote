@@ -1,12 +1,14 @@
 import type {Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {GraphShareActionKey} from './action.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const GRAPH_SHARE_CAS_CANONICAL = 'cas://local';
 export const GRAPH_SHARE_CAS_WORKER = 'cas://local/worker';
 
 export function graphShareFrontierDiscoveryTag(repositoryId: string, branchRef: string): string {
-  return `tn-frontier-${sha256HexSync(`${repositoryId}${branchRef}`).slice(0, 40)}`;
+  return `tn-frontier-${Effect.pipe(sha256HexSync(`${repositoryId}${branchRef}`), EffectString.slice(0, 40))}`;
 }
 
 export function graphShareActionDiscoveryTag(actionKey: GraphShareActionKey): string {
@@ -14,7 +16,7 @@ export function graphShareActionDiscoveryTag(actionKey: GraphShareActionKey): st
 }
 
 export function graphShareWorkDiscoveryTag(batchId: string): string {
-  return `tn-work-${batchId.slice(0, 40)}`;
+  return `tn-work-${Effect.pipe(batchId, EffectString.slice(0, 40))}`;
 }
 
 export function graphShareWorkerCasRoot(path: Path.Path, casRoot: string): string {
@@ -26,9 +28,9 @@ export function graphShareCanonicalCasRoot(path: Path.Path, casRoot: string): st
 }
 
 export function isGraphShareWorkerRegistry(value: string): boolean {
-  return value === GRAPH_SHARE_CAS_WORKER || value.endsWith('/worker');
+  return value === GRAPH_SHARE_CAS_WORKER || Effect.pipe(value, EffectString.endsWith('/worker'));
 }
 
 export function isGraphShareCanonicalRegistry(value: string): boolean {
-  return value === GRAPH_SHARE_CAS_CANONICAL || value.endsWith('/canonical');
+  return value === GRAPH_SHARE_CAS_CANONICAL || Effect.pipe(value, EffectString.endsWith('/canonical'));
 }

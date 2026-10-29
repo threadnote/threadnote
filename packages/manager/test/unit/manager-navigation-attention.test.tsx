@@ -4,8 +4,51 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {ManagerNavigation, sidebarWidthForKey} from '../../src/navigation.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import type {
+  ManagerContextMaintenanceCaseV2,
+  ManagerContextMaintenanceStatusV2,
+} from '../../src/attention/contracts.js';
+import type {SharingConflict} from '../../src/sharing_contracts.js';
 
 let root: Root | undefined;
+const maintenanceCase = (caseId: string, memoryId: string): ManagerContextMaintenanceCaseV2 => ({
+  caseId,
+  project: 'demo',
+  memoryId,
+  family: 'citation',
+  slot: 'anchor',
+  evidenceRevision: 'revision',
+  disposition: 'needs-decision',
+  reason: 'source-changed',
+  firstSeen: 'now',
+  lastSeen: 'now',
+  lastChecked: 'now',
+  attemptCount: 1,
+  events: [],
+});
+const maintenanceStatus = (decisionMemories: number): ManagerContextMaintenanceStatusV2 => ({
+  version: 2,
+  paused: false,
+  state: 'idle',
+  generation: 'fixture',
+  projects: [],
+  cases: [],
+  receipts: [],
+  counts: {decisionMemories},
+});
+const conflict = (id: string): SharingConflict => ({
+  id,
+  team: 'default',
+  uri: `threadnote://user/test/memories/durable/projects/demo/${id}.md`,
+  relativePath: `${id}.md`,
+  reason: 'conflicting shared revision',
+  status: 'unresolved',
+  hasLocalContent: true,
+  hasSharedContent: true,
+});
 afterEach(async () => {
   await act(async () => root?.unmount());
   root = undefined;
@@ -51,12 +94,11 @@ it('shows conflict and distinct-memory totals, including memories beyond the fir
       async (url: string) =>
         new Response(
           JSON.stringify(
-            url.includes('/shares/')
-              ? {conflicts: cleared ? [] : [{id: 'one'}, {id: 'two'}, {id: 'one'}]}
+            Effect.pipe(url, EffectString.includes('/shares/'))
+              ? {conflicts: cleared ? [] : [conflict('one'), conflict('two'), conflict('one')]}
               : {
-                  version: 2,
-                  counts: {decisionMemories: cleared ? 0 : 42},
-                  cases: [{memoryId: 'one'}, {memoryId: 'one'}],
+                  ...maintenanceStatus(cleared ? 0 : 42),
+                  cases: [maintenanceCase('case-one', 'one'), maintenanceCase('case-two', 'one')],
                   omittedCases: 50,
                 },
           ),
@@ -74,10 +116,11 @@ it('does not retain a previous project count when the new project is unavailable
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
-      if (url.includes('other')) return new Response(JSON.stringify({error: 'Unavailable'}), {status: 503});
+      if (Effect.pipe(url, EffectString.includes('other')))
+        return new Response(JSON.stringify({error: 'Unavailable'}), {status: 503});
       return new Response(
         JSON.stringify(
-          url.includes('/shares/') ? {conflicts: [{id: 'one'}]} : {version: 2, counts: {decisionMemories: 3}},
+          Effect.pipe(url, EffectString.includes('/shares/')) ? {conflicts: [conflict('one')]} : maintenanceStatus(3),
         ),
       );
     }),
@@ -96,9 +139,9 @@ it('uses the complete reconciled Health count only for its mounted project and k
       async (url: string) =>
         new Response(
           JSON.stringify(
-            url.includes('/shares/')
-              ? {conflicts: [{id: 'one'}]}
-              : {version: 2, counts: {decisionMemories: 42}, cases: [], omittedCases: 42},
+            Effect.pipe(url, EffectString.includes('/shares/'))
+              ? {conflicts: [conflict('one')]}
+              : {...maintenanceStatus(42), omittedCases: 42},
           ),
         ),
     ),
@@ -118,8 +161,11 @@ it('uses the complete reconciled Health count only for its mounted project and k
         });
         const expected = connected ? (matchingProject && healthPanel ? count : 42) : 0;
         // Query through the section label, independent of its current count.
-        const health = [...document.querySelectorAll('.primary-nav button')].find(
-          button => button.querySelector('strong')?.textContent === 'Context Health',
+        const health = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            [...document.querySelectorAll('.primary-nav button')],
+            button => button.querySelector('strong')?.textContent === 'Context Health',
+          ),
         );
         expect(health?.querySelector('.nav-attention-badge')?.textContent ?? '0').toBe(expected.toLocaleString());
         expect(document.querySelector('[aria-label="1 unresolved sharing conflict"]') !== null).toBe(connected);

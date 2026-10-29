@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- These fixtures exercise native file modes, symlinks, and Ed25519 key material at the container boundary. */
 import {generateKeyPairSync} from 'node:crypto';
 import {chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
@@ -12,6 +13,9 @@ import {
   assertGraphPublisherDeploymentBinding,
   validateGraphPublisherDeployment,
 } from '../../../../deploy/threadnote-org-graph/preflight.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -29,7 +33,7 @@ function fixture() {
     publicKey: publicKey.toString('hex'),
     schemaVersion: 1 as const,
   };
-  const repositoryId = 'a'.repeat(64);
+  const repositoryId = Effect.pipe('a', EffectString.repeat(64));
   const profile = {
     ...defaultGraphShareProfile({
       branch: 'refs/heads/main',
@@ -91,7 +95,7 @@ function fixture() {
     return path;
   };
   write('repository/.threadnote/graph-share.json', enrollment);
-  write(`threadnote/graph-sharing/cas/sha256/${profileDigest.slice(7)}`, profile);
+  write(`threadnote/graph-sharing/cas/sha256/${Effect.pipe(profileDigest, EffectString.slice(7))}`, profile);
   write('threadnote/graph-sharing/keys/publisher.ed25519.json', key, true);
   write('control-policy.json', policy, true);
   return {env, enrollment, key, policy, profile, profileDigest, root, write};
@@ -106,8 +110,11 @@ describe('Fly graph publisher preflight', () => {
   it('accepts a custom authorization server and requires the exact explicit JWKS endpoint', () => {
     const {env, root, policy, write} = fixture();
     const issuer = 'https://example.okta.test/oauth2/threadnote';
-    const generic: NodeJS.ProcessEnv = Object.fromEntries(
-      Object.entries(env).map(([name, value]) => [name.replace('THREADNOTE_AUTH0_', 'THREADNOTE_OAUTH_'), value]),
+    const generic: NodeJS.ProcessEnv = EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(env), ([name, value]) => [
+        Effect.pipe(name, EffectString.replace('THREADNOTE_AUTH0_', 'THREADNOTE_OAUTH_')),
+        value,
+      ]),
     );
     Object.assign(generic, {
       THREADNOTE_GRAPH_OAUTH_ISSUER: issuer,
@@ -135,7 +142,11 @@ describe('Fly graph publisher preflight', () => {
   it('accepts an offline-pinned OCI profile manifest without contacting Zot', () => {
     const {env, enrollment, profile, profileDigest, root, write} = fixture();
     const artifact = graphShareProfileOciArtifact(profile);
-    const manifestFile = join(root, 'threadnote/graph-sharing/cas/sha256', artifact.manifestDigest.slice(7));
+    const manifestFile = join(
+      root,
+      'threadnote/graph-sharing/cas/sha256',
+      Effect.pipe(artifact.manifestDigest, EffectString.slice(7)),
+    );
     mkdirSync(dirname(manifestFile), {recursive: true});
     writeFileSync(manifestFile, artifact.manifestBytes);
     write('repository/.threadnote/graph-share.json', {
@@ -175,7 +186,10 @@ describe('Fly graph publisher preflight', () => {
 
   it('refuses a profile blob whose bytes do not match its pinned digest', () => {
     const {env, profileDigest, root} = fixture();
-    writeFileSync(join(root, 'threadnote/graph-sharing/cas/sha256', profileDigest.slice(7)), '{}');
+    writeFileSync(
+      join(root, 'threadnote/graph-sharing/cas/sha256', Effect.pipe(profileDigest, EffectString.slice(7))),
+      '{}',
+    );
     expect(() => validateGraphPublisherDeployment(root, env)).toThrow();
   });
 
@@ -223,7 +237,7 @@ describe('Fly graph publisher preflight', () => {
       () => ({profile: {...profile, registry: {...profile.registry, worker: 'oci://other.example/worker'}}}),
       () => ({profile: {...profile, source: {...profile.source, canonicalRemote: 'github.com/other/repo'}}}),
       () => ({profile: {...profile, source: {...profile.source, branches: ['refs/heads/other']}}}),
-      () => ({policy: {...policy, repositoryId: 'b'.repeat(64)}}),
+      () => ({policy: {...policy, repositoryId: Effect.pipe('b', EffectString.repeat(64))}}),
       () => ({policy: {...policy, profileDigest: sha256Digest('other')}}),
       () => ({policy: {...policy, issuer: 'https://other.example/'}}),
       () => ({enrollment: {...enrollment, publisherKeyFingerprint: sha256Digest('other')}}),

@@ -1,11 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {readJsonFile, writePrivateJsonFile} from './atomic.js';
-import {SHA256_DIGEST} from './digest.js';
+import {SHA256_DIGEST, parseSha256Digest} from './digest.js';
 import {graphSharingFailure} from './errors.js';
 import {graphSharingContributionQueuePath, graphSharingLayout} from './layout.js';
 import {GRAPH_SHARE_ACTION_KEY} from './action.js';
 import type {GraphShareResultAnnouncementV1} from './receipts.js';
+import * as EffectRecord from 'effect/Record';
 
 export const GRAPH_SHARE_CONTRIBUTION_MODES = ['off', 'passive', 'idle', 'dedicated'] as const;
 export type GraphShareContributionMode = (typeof GRAPH_SHARE_CONTRIBUTION_MODES)[number];
@@ -63,7 +65,8 @@ export function enqueueGraphShareContribution(
 ): {readonly conflict: boolean; readonly queued: boolean; readonly queue: GraphShareContributionQueueV1} {
   const mode = effectiveGraphShareContributionMode(accessMode, queue.mode);
   if (mode === 'off') return {conflict: false, queued: false, queue};
-  const duplicate = queue.announcements.some(
+  const duplicate = EffectArray.some(
+    queue.announcements,
     item =>
       item.actionKey === announcement.actionKey &&
       item.resultManifestDigest === announcement.resultManifestDigest &&
@@ -71,7 +74,8 @@ export function enqueueGraphShareContribution(
       item.semanticDigest === announcement.semanticDigest,
   );
   if (duplicate) return {conflict: false, queued: false, queue};
-  const conflict = queue.announcements.some(
+  const conflict = EffectArray.some(
+    queue.announcements,
     item => item.actionKey === announcement.actionKey && item.semanticDigest !== announcement.semanticDigest,
   );
   const timestamp = nowMilliseconds ?? queue.queuedAtMilliseconds?.at(-1);
@@ -86,7 +90,7 @@ export function enqueueGraphShareContribution(
         ? {}
         : {
             queuedAtMilliseconds: [
-              ...(queue.queuedAtMilliseconds ?? queue.announcements.map(() => timestamp)),
+              ...(queue.queuedAtMilliseconds ?? EffectArray.map(queue.announcements, () => timestamp)),
               timestamp,
             ],
           }),
@@ -98,15 +102,18 @@ export function pruneGraphShareContributionQueue(
   queue: GraphShareContributionQueueV1,
   nowMilliseconds: number,
 ): GraphShareContributionQueueV1 {
-  const timestamps = queue.queuedAtMilliseconds ?? queue.announcements.map(() => nowMilliseconds);
-  let retained = queue.announcements
-    .map((announcement, index) => ({announcement, timestamp: Math.min(nowMilliseconds, timestamps[index])}))
-    .filter(item => item.timestamp >= nowMilliseconds - GRAPH_SHARE_QUEUE_MAXIMUM_AGE_MILLISECONDS)
-    .slice(-GRAPH_SHARE_QUEUE_MAXIMUM_ANNOUNCEMENTS);
+  const timestamps = queue.queuedAtMilliseconds ?? EffectArray.map(queue.announcements, () => nowMilliseconds);
+  let retained = EffectArray.filter(
+    EffectArray.map(queue.announcements, (announcement, index) => ({
+      announcement,
+      timestamp: Math.min(nowMilliseconds, timestamps[index]),
+    })),
+    item => item.timestamp >= nowMilliseconds - GRAPH_SHARE_QUEUE_MAXIMUM_AGE_MILLISECONDS,
+  ).slice(-GRAPH_SHARE_QUEUE_MAXIMUM_ANNOUNCEMENTS);
   const materialize = (): GraphShareContributionQueueV1 => ({
     ...queue,
-    announcements: retained.map(item => item.announcement),
-    queuedAtMilliseconds: retained.map(item => item.timestamp),
+    announcements: EffectArray.map(retained, item => item.announcement),
+    queuedAtMilliseconds: EffectArray.map(retained, item => item.timestamp),
   });
   let result = materialize();
   while (
@@ -137,23 +144,31 @@ export function parseGraphShareContributionQueue(value: unknown): GraphShareCont
   if (!isRecord(value) || value.schemaVersion !== 1) {
     throw graphSharingFailure('Contribution queue is invalid.');
   }
-  if (!isContributionMode(value.mode) || !Array.isArray(value.announcements)) {
+  if (!isContributionMode(value.mode) || !EffectArray.isArray(value.announcements)) {
     throw graphSharingFailure('Contribution queue is invalid.');
   }
   if (
     value.queuedAtMilliseconds !== undefined &&
-    (!Array.isArray(value.queuedAtMilliseconds) ||
+    (!EffectArray.isArray(value.queuedAtMilliseconds) ||
       value.queuedAtMilliseconds.length !== value.announcements.length ||
-      value.queuedAtMilliseconds.some(
+      EffectArray.some(
+        value.queuedAtMilliseconds,
         timestamp => typeof timestamp !== 'number' || !Number.isSafeInteger(timestamp) || timestamp < 0,
       ))
   )
     throw graphSharingFailure('Contribution queue timestamps are invalid.');
   return {
-    announcements: value.announcements.map(parseQueuedAnnouncement),
+    announcements: EffectArray.map(value.announcements, parseQueuedAnnouncement),
     mode: value.mode,
     schemaVersion: 1,
-    ...(value.queuedAtMilliseconds === undefined ? {} : {queuedAtMilliseconds: value.queuedAtMilliseconds as number[]}),
+    ...(value.queuedAtMilliseconds === undefined
+      ? {}
+      : {
+          queuedAtMilliseconds: EffectArray.map(value.queuedAtMilliseconds, timestamp => {
+            if (typeof timestamp !== 'number') throw graphSharingFailure('Contribution queue timestamps are invalid.');
+            return timestamp;
+          }),
+        }),
   };
 }
 
@@ -197,7 +212,8 @@ const readContributionQueueDocument = Effect.fn('codeGraph.sharing.readContribut
   const modified = Option.isSome(stat.mtime) ? Math.min(now, stat.mtime.value.getTime()) : now;
   return {
     ...queue,
-    queuedAtMilliseconds: queue.queuedAtMilliseconds ?? queue.announcements.map(() => Math.max(0, modified)),
+    queuedAtMilliseconds:
+      queue.queuedAtMilliseconds ?? EffectArray.map(queue.announcements, () => Math.max(0, modified)),
   };
 });
 
@@ -283,16 +299,17 @@ export function removeAcknowledgedGraphShareContributions(
   queue: GraphShareContributionQueueV1,
   sent: readonly GraphShareResultAnnouncementV1[],
 ): GraphShareContributionQueueV1 {
-  const acknowledged = new Set(sent.map(announcementIdentity));
-  const retained = queue.announcements
-    .map((item, index) => ({item, index}))
-    .filter(({item}) => !acknowledged.has(announcementIdentity(item)));
+  const acknowledged = new Set(EffectArray.map(sent, announcementIdentity));
+  const retained = EffectArray.filter(
+    EffectArray.map(queue.announcements, (item, index) => ({item, index})),
+    ({item}) => !acknowledged.has(announcementIdentity(item)),
+  );
   return {
     ...queue,
-    announcements: retained.map(({item}) => item),
+    announcements: EffectArray.map(retained, ({item}) => item),
     ...(queue.queuedAtMilliseconds === undefined
       ? {}
-      : {queuedAtMilliseconds: retained.map(({index}) => queue.queuedAtMilliseconds![index])}),
+      : {queuedAtMilliseconds: EffectArray.map(retained, ({index}) => queue.queuedAtMilliseconds![index])}),
   };
 }
 
@@ -331,13 +348,6 @@ function withContributionQueueLock<A, E, R>(
 
 function parseQueuedAnnouncement(value: unknown): GraphShareResultAnnouncementV1 {
   if (!isRecord(value)) throw graphSharingFailure('Contribution announcement is invalid.');
-  const announcement: GraphShareResultAnnouncementV1 = {
-    actionKey: value.actionKey as GraphShareResultAnnouncementV1['actionKey'],
-    attestationDigest: value.attestationDigest as GraphShareResultAnnouncementV1['attestationDigest'],
-    batchId: value.batchId as string,
-    resultManifestDigest: value.resultManifestDigest as GraphShareResultAnnouncementV1['resultManifestDigest'],
-    semanticDigest: value.semanticDigest as GraphShareResultAnnouncementV1['semanticDigest'],
-  };
   if (typeof value.actionKey !== 'string' || !GRAPH_SHARE_ACTION_KEY.test(value.actionKey)) {
     throw graphSharingFailure('Contribution announcement action key is invalid.');
   }
@@ -353,7 +363,14 @@ function parseQueuedAnnouncement(value: unknown): GraphShareResultAnnouncementV1
   if (typeof value.semanticDigest !== 'string' || !SHA256_DIGEST.test(value.semanticDigest)) {
     throw graphSharingFailure('Contribution announcement semantic digest is invalid.');
   }
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(announcement).sort())) {
+  const announcement: GraphShareResultAnnouncementV1 = {
+    actionKey: value.actionKey,
+    attestationDigest: parseSha256Digest(value.attestationDigest, 'Contribution announcement attestation digest'),
+    batchId: value.batchId,
+    resultManifestDigest: parseSha256Digest(value.resultManifestDigest, 'Contribution announcement result digest'),
+    semanticDigest: parseSha256Digest(value.semanticDigest, 'Contribution announcement semantic digest'),
+  };
+  if (JSON.stringify(EffectRecord.keys(value).sort()) !== JSON.stringify(EffectRecord.keys(announcement).sort())) {
     throw graphSharingFailure('Contribution announcement contains unsupported fields.');
   }
   return announcement;
@@ -364,5 +381,5 @@ function isContributionMode(value: unknown): value is GraphShareContributionMode
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }

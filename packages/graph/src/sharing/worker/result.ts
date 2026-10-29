@@ -13,6 +13,8 @@ import {graphSharingFailure} from '../errors.js';
 import {GRAPH_SHARE_HTTP_CAS_MAX_BYTES} from '../oci.js';
 import {parseGraphShareParseResult} from '../parse/result.js';
 import {verifyGraphWorkerSignature, type makeGraphWorkerSigner} from './signing.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const Hex = Schema.String.check(Schema.isPattern(SHA256_HEX));
 const Digest = Schema.String.check(Schema.isPattern(SHA256_DIGEST));
@@ -103,7 +105,10 @@ export const createGraphWorkerResultArtifact = Effect.fn('codeGraph.sharing.crea
     resultSize: resultBytes.byteLength,
     semanticDigest: parsed.semanticDigest,
   }).pipe(Effect.mapError(failure));
-  if (claims.repositoryId !== parsed.repositoryId || claims.batchId !== claims.sourceCommit.slice(0, 40))
+  if (
+    claims.repositoryId !== parsed.repositoryId ||
+    claims.batchId !== Effect2.pipe(claims.sourceCommit, EffectString.slice(0, 40))
+  )
     return yield* failure();
   const attestationBytes = encode({
     algorithm: 'ed25519',
@@ -179,7 +184,7 @@ export const verifyGraphWorkerResultIntegrity = Effect.fn('codeGraph.sharing.ver
       attestation.publicKey !== expected.signingPublicKey ||
       claims.resultDigest !== result.digest ||
       claims.resultSize !== result.size ||
-      claims.batchId !== claims.sourceCommit.slice(0, 40)
+      claims.batchId !== Effect2.pipe(claims.sourceCommit, EffectString.slice(0, 40))
     )
       return yield* failure();
     yield* verifyGraphWorkerSignature(expected.signingPublicKey, 'attestation', encode(claims), attestation.signature);

@@ -1,3 +1,11 @@
+import {
+  isManagerContextMaintenancePacketV2,
+  isManagerMaintenanceRefreshResultV1,
+  isManagerTopicReviewRecoveryV1OrManagerTopicReviewV1,
+} from '../api/response_guards.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import React, {useEffect, useRef, useState} from 'react';
 import {Schema} from 'effect';
 import {consolidationSections} from '@threadnote/memory/consolidation';
@@ -30,6 +38,8 @@ import type {
   ManagerTopicReviewRecoveryV1,
   ManagerTopicReviewAppliedV1,
 } from './topic_contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface TopicReviewProps {
   readonly project: string;
@@ -176,6 +186,7 @@ export function TopicReviewContent(
           `/api/attention/topic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(selectedReviewId)}`,
           undefined,
           options,
+          isManagerTopicReviewRecoveryV1OrManagerTopicReviewV1,
         );
         if (
           result.project !== props.project ||
@@ -208,6 +219,7 @@ export function TopicReviewContent(
               '/api/attention/context-maintenance',
               {action: 'refresh-case', project: props.project, caseId},
               options,
+              isManagerMaintenanceRefreshResultV1,
             );
             if (refreshed.outcome !== 'ready' && refreshed.outcome !== 'resolved')
               throw new Error('reason' in refreshed ? refreshed.reason : 'Current selected evidence is unavailable.');
@@ -230,6 +242,7 @@ export function TopicReviewContent(
               `/api/attention/topic-review?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(props.caseId)}`,
               undefined,
               options,
+              isManagerTopicReviewRecoveryV1OrManagerTopicReviewV1,
             );
             if (
               qualified.kind !== 'topic-maintenance' ||
@@ -259,6 +272,7 @@ export function TopicReviewContent(
             `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(selectedCaseId)}`,
             undefined,
             options,
+            isManagerContextMaintenancePacketV2,
           );
           privateLoad ||= currentPacket.topicEvidence?.version === 2;
           if (currentPacket.project !== props.project || currentPacket.caseId !== selectedCaseId)
@@ -341,9 +355,10 @@ export function TopicReviewContent(
     (draft.outcome === 'propose-update' || draft.outcome === 'propose-revalidation') &&
     (draft.outcome !== 'propose-update' || draft.operations.length > 0) &&
     (draft.outcome !== 'propose-revalidation' || (draft.operations.length === 0 && draft.reviewedHandles.length > 0)) &&
-    draft.operations.every(
+    EffectArray.every(
+      draft.operations,
       operation =>
-        operation.text.trim() === operation.text &&
+        Effect.pipe(operation.text, EffectString.trim) === operation.text &&
         !!operation.text &&
         !/\n[\t ]*\n/u.test(operation.text) &&
         operation.supportHandles.length > 0,
@@ -469,7 +484,12 @@ export function TopicReviewContent(
       approved: true,
     };
     try {
-      const result = await api<ManagerContextMaintenancePacketV2>('/api/attention/topic-review', action);
+      const result = await api<ManagerContextMaintenancePacketV2>(
+        '/api/attention/topic-review',
+        action,
+        undefined,
+        isManagerContextMaintenancePacketV2,
+      );
       if (operationEpoch.current !== epoch) return;
       if (
         result.project !== props.project ||
@@ -516,10 +536,15 @@ export function TopicReviewContent(
     const controller = new AbortController();
     mutationController.current = controller;
     try {
-      const result = await api<ManagerTopicReviewResponseV1>('/api/attention/topic-review', action, {
-        signal: controller.signal,
-        timeoutMilliseconds: 30_000,
-      });
+      const result = await api<ManagerTopicReviewResponseV1>(
+        '/api/attention/topic-review',
+        action,
+        {
+          signal: controller.signal,
+          timeoutMilliseconds: 30_000,
+        },
+        isManagerTopicReviewRecoveryV1OrManagerTopicReviewV1,
+      );
       if (
         operationEpoch.current !== epoch ||
         result.project !== props.project ||
@@ -640,10 +665,17 @@ export function TopicReviewContent(
     if (!draft || !review || !canEditParagraph(ordinal)) return;
     const before = review.paragraphs[ordinal];
     if (!before || before.role !== 'descriptive') return;
-    const existing = draft.operations.find(item => item.ordinal === ordinal);
+    const existing = EffectOption.getOrUndefined(
+      EffectArray.findFirst(draft.operations, item => item.ordinal === ordinal),
+    );
     const accepted = originalParagraphs[ordinal] ?? '';
     if (text === accepted) {
-      const operations = draft.operations.filter(item => item.ordinal !== ordinal);
+      const operations = EffectArrayPipe(draft.operations, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (item, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && item.ordinal !== ordinal,
+        ),
+      );
       const reviewedHandles = [...new Set([...draft.reviewedHandles, ...(existing?.supportHandles ?? [])])];
       setDraft({
         ...reviseDisposition(draft, ordinal, {
@@ -656,9 +688,18 @@ export function TopicReviewContent(
       });
       return;
     }
-    const paragraphHandles = review.support
-      .filter(source => source.variant === 'current' && before.citationIds.includes(source.citationId))
-      .map(source => source.handleId);
+    const paragraphHandles = EffectArray.map(
+      EffectArrayPipe(review.support, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (source, __effectArrayIndex2) =>
+            __effectArrayIndex2 in __effectArrayValues &&
+            source.variant === 'current' &&
+            before.citationIds.includes(source.citationId),
+        ),
+      ),
+      source => source.handleId,
+    );
     const operation: TopicMaintenanceReplaceOperationV1 = existing
       ? {...existing, text}
       : {
@@ -672,27 +713,44 @@ export function TopicReviewContent(
       ...reviseDisposition(draft, ordinal, {disposition: 'update', supportHandles: operation.supportHandles}),
       outcome: 'propose-update',
       reviewedHandles: [...new Set([...draft.reviewedHandles, ...paragraphHandles])],
-      operations: [...draft.operations.filter(item => item.ordinal !== ordinal), operation].sort(
-        (a, b) => a.ordinal - b.ordinal,
-      ),
+      operations: [
+        ...EffectArrayPipe(draft.operations, __effectFilterValues =>
+          EffectArray.filter(
+            __effectFilterValues,
+            (item, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && item.ordinal !== ordinal,
+          ),
+        ),
+        operation,
+      ].sort((a, b) => a.ordinal - b.ordinal),
     });
   }
 
   function editSupport(ordinal: number, handleId: string, checked: boolean) {
     if (!draft || !review || !canEditParagraph(ordinal)) return;
-    const existing = draft.operations.find(item => item.ordinal === ordinal);
-    const disposition = draft.paragraphDispositions?.entries.find(item => item.ordinal === ordinal);
+    const existing = EffectOption.getOrUndefined(
+      EffectArray.findFirst(draft.operations, item => item.ordinal === ordinal),
+    );
+    const disposition = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(draft.paragraphDispositions?.entries), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, item => item.ordinal === ordinal)),
+      ),
+    );
     const before = review.paragraphs[ordinal];
     if (!before || before.role !== 'descriptive') return;
     if (!existing && (!disposition || disposition.disposition === 'unresolved')) return;
     const selected = existing?.supportHandles ?? disposition!.supportHandles;
     const supportHandles = checked
       ? [...new Set([...selected, handleId])]
-      : selected.filter(value => value !== handleId);
+      : EffectArray.filter(
+          selected,
+          (value, __effectArrayIndex) => __effectArrayIndex in selected && value !== handleId,
+        );
     setDraft({
       ...reviseDisposition(draft, ordinal, {supportHandles}),
       reviewedHandles: checked ? [...new Set([...draft.reviewedHandles, handleId])] : draft.reviewedHandles,
-      operations: draft.operations.map(item => (item.ordinal === ordinal ? {...item, supportHandles} : item)),
+      operations: EffectArray.map(draft.operations, item =>
+        item.ordinal === ordinal ? {...item, supportHandles} : item,
+      ),
     });
   }
 
@@ -700,19 +758,32 @@ export function TopicReviewContent(
     if (!draft || !review || !canEditParagraph(ordinal)) return;
     const paragraph = review.paragraphs[ordinal];
     if (!paragraph || !topicMaintenanceParagraphEligible(paragraph)) return;
-    if (!['', 'update', 'revalidate', 'unresolved'].includes(decision)) return;
-    const operation = draft.operations.find(item => item.ordinal === ordinal);
+    if (decision !== '' && decision !== 'update' && decision !== 'revalidate' && decision !== 'unresolved') return;
+    const operation = EffectOption.getOrUndefined(
+      EffectArray.findFirst(draft.operations, item => item.ordinal === ordinal),
+    );
     if (decision === 'update' && !operation) return;
     const operations =
       decision === 'revalidate' || decision === 'unresolved'
-        ? draft.operations.filter(item => item.ordinal !== ordinal)
+        ? EffectArrayPipe(draft.operations, __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (item, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && item.ordinal !== ordinal,
+            ),
+          )
         : draft.operations;
-    const entries = draft.paragraphDispositions?.entries.filter(item => item.ordinal !== ordinal) ?? [];
+    const paragraphDispositions = draft.paragraphDispositions;
+    const entries = paragraphDispositions
+      ? EffectArray.filter(
+          paragraphDispositions.entries,
+          (item, index) => index in paragraphDispositions.entries && item.ordinal !== ordinal,
+        )
+      : [];
     if (decision)
       entries.push({
         ordinal,
         beforeHash: paragraph.hash,
-        disposition: decision as 'update' | 'revalidate' | 'unresolved',
+        disposition: decision,
         supportHandles: decision === 'update' ? operation!.supportHandles : [],
         rationale: decision === 'unresolved' ? 'Needs manual review.' : 'Explicit paragraph review.',
       });
@@ -906,12 +977,12 @@ export function TopicReviewContent(
             </p>
           ) : null}
           <TopicReviewNotes review={review} />
-          {review.draft.unresolvedQuestions.map((question, index) => (
+          {EffectArray.map(review.draft.unresolvedQuestions, (question, index) => (
             <ReviewNotice key={`q${index}`} tone="warning" title="Unresolved question">
               {question}
             </ReviewNotice>
           ))}
-          {review.draft.removedClaims.map((claim, index) => (
+          {EffectArray.map(review.draft.removedClaims, (claim, index) => (
             <ReviewNotice key={`r${index}`} tone="warning" title="Claim removed from proposal">
               {claim}
             </ReviewNotice>
@@ -946,7 +1017,7 @@ export function TopicReviewContent(
           {review.additionalDependencies.length > 0 ? (
             <details>
               <summary>Other declared dependencies</summary>
-              {review.additionalDependencies.map(dependency => (
+              {EffectArray.map(review.additionalDependencies, dependency => (
                 <p key={dependency.citationId}>
                   {dependency.kind}: {dependency.citationId}
                 </p>
@@ -977,7 +1048,7 @@ export function TopicReviewContent(
               <details>
                 <summary>Metadata and provenance changes</summary>
                 {approval.metadataDiff.length ? (
-                  approval.metadataDiff.map(diff => (
+                  EffectArray.map(approval.metadataDiff, diff => (
                     <p key={diff.field}>
                       {diff.field} changed · previous {diff.beforeHash} · final {diff.afterHash}
                     </p>
@@ -1246,7 +1317,9 @@ function reviseDisposition(
         ...draft,
         paragraphDispositions: {
           ...accounting,
-          entries: accounting.entries.map(entry => (entry.ordinal === ordinal ? {...entry, ...changes} : entry)),
+          entries: EffectArray.map(accounting.entries, entry =>
+            entry.ordinal === ordinal ? {...entry, ...changes} : entry,
+          ),
         },
       }
     : draft;

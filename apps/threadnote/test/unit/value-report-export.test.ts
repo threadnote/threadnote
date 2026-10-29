@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -22,6 +23,9 @@ import {
 } from '@threadnote/threadnote/value_report/export';
 import {aggregateValueReportV1} from '@threadnote/threadnote/value_report/index';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const period = {from: '2026-09-01T00:00:00.000Z', to: '2026-09-30T00:00:00.000Z'} as const;
 const forbiddenKeys = new Set([
@@ -92,7 +96,9 @@ describe('redacted value-report export', () => {
           const serialized = serializeValueReportExportV1(bundle);
           expect(serialized).toBe(serializeValueReportExportV1(reordered));
           expect(serialized).not.toContain(project);
-          expect([...objectKeys(JSON.parse(serialized))].filter(key => forbiddenKeys.has(key))).toEqual([]);
+          expect(EffectArray.filter([...objectKeys(JSON.parse(serialized))], key => forbiddenKeys.has(key))).toEqual(
+            [],
+          );
         },
       ),
       {numRuns: 50},
@@ -112,13 +118,30 @@ describe('redacted value-report export', () => {
         const previewBundle = parseValueReportExportV1(JSON.parse(preview.output));
         expect(previewBundle.schema).toBe(VALUE_REPORT_EXPORT_SCHEMA);
         expect(preview.output).not.toContain('private-project');
-        expect(yield* fs.exists(path.join(home, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/')))).toBe(false);
+        expect(
+          yield* fs.exists(path.join(home, ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')))),
+        ).toBe(false);
 
         const applied = yield* captureConsole(runValueReportExport(config, {...options, apply: true}));
-        const outputPath = applied.output.match(/^Exported redacted ValueReportExportV1 to (.+)\.$/u)?.[1];
+        const outputPath = Effect2.pipe(
+          applied.output,
+          EffectString.match(/^Exported redacted ValueReportExportV1 to (.+)\.$/u),
+          Effect2.Option.getOrElse(() => null),
+        )?.[1];
         expect(outputPath).toBeDefined();
-        expect(outputPath?.startsWith(path.join(home, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/')))).toBe(true);
-        expect((yield* fs.readFileString(outputPath!)).trimEnd()).toBe(preview.output);
+        expect(
+          Effect2.pipe(outputPath, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(
+                  effectOptionalString,
+                  EffectString.startsWith(
+                    path.join(home, ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/'))),
+                  ),
+                ),
+          ),
+        ).toBe(true);
+        expect(Effect2.pipe(yield* fs.readFileString(outputPath!), EffectString.trimEnd)).toBe(preview.output);
         expect((yield* fs.stat(outputPath!)).mode & 0o077).toBe(0);
 
         const repeated = yield* captureConsole(runValueReportExport(config, {...options, apply: true}));
@@ -179,12 +202,12 @@ effectIt.effect('preserves rolling non-midnight periods and generates pilot-alig
 );
 
 function objectKeys(value: unknown, keys = new Set<string>()): ReadonlySet<string> {
-  if (Array.isArray(value)) {
+  if (EffectArray.isArray(value)) {
     for (const item of value) objectKeys(item, keys);
     return keys;
   }
   if (typeof value !== 'object' || value === null) return keys;
-  for (const [key, item] of Object.entries(value)) {
+  for (const [key, item] of EffectRecord.toEntries(value)) {
     keys.add(key);
     objectKeys(item, keys);
   }

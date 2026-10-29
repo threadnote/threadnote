@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -20,6 +21,8 @@ import {clearRecallIndexMemoryCache, loadRecallIndexData, recallIndexDatabaseFil
 import {parseResourceId} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const FIXTURE_URL = new URL('../evaluation/fixtures/memory-connections-bench-v1/fixture.json', import.meta.url);
 
@@ -47,9 +50,9 @@ describe('MemoryConnectionsBench A+B', () => {
       );
       const missingTraceOperation = {
         ...fixture,
-        projectionTraces: fixture.projectionTraces.map(trace => ({
+        projectionTraces: EffectArray.map(fixture.projectionTraces, trace => ({
           ...trace,
-          operations: trace.operations.filter(operation => operation.kind !== 'target-id-change'),
+          operations: EffectArray.filter(trace.operations, operation => operation.kind !== 'target-id-change'),
         })),
       };
       expect(() => parseMemoryConnectionsBenchFixtureV1(missingTraceOperation)).toThrow(
@@ -215,16 +218,16 @@ function activeDocumentPath(path: Path.Path, home: string, user: string, topic: 
 
 /** Independent semantic oracle: fixture target refs define selectors without calling projection code. */
 function oracleRows(rows: readonly MemoryConnectionsExpectedProjectionRowV1[]): readonly StoredProjectionRow[] {
-  return rows
-    .map(row => ({
-      relation_ordinal: row.relationOrdinal,
-      relation_origin: row.relationOrigin,
-      relation_type: row.relationType,
-      source_memory_id: row.sourceMemoryId,
-      target_locator_digest: row.targetRef.startsWith('threadnote://memory/') ? '' : oracleLocatorDigest(row.targetRef),
-      target_memory_id: row.targetMemoryId ?? '',
-    }))
-    .sort(compareStoredRows);
+  return EffectArray.map(rows, row => ({
+    relation_ordinal: row.relationOrdinal,
+    relation_origin: row.relationOrigin,
+    relation_type: row.relationType,
+    source_memory_id: row.sourceMemoryId,
+    target_locator_digest: Effect2.pipe(row.targetRef, EffectString.startsWith('threadnote://memory/'))
+      ? ''
+      : oracleLocatorDigest(row.targetRef),
+    target_memory_id: row.targetMemoryId ?? '',
+  })).sort(compareStoredRows);
 }
 
 function oracleLocatorDigest(uri: string): string {
@@ -257,10 +260,10 @@ function readProjectionRows(home: string): readonly StoredProjectionRow[] {
 function memoryLinksColumns(home: string): readonly string[] {
   const database = openRecallDatabase(home);
   try {
-    return database
-      .query('PRAGMA table_info(memory_links)')
-      .all()
-      .map(row => (row as {readonly name: string}).name);
+    return EffectArray.map(
+      database.query<{readonly name: string}, []>('PRAGMA table_info(memory_links)').all(),
+      row => row.name,
+    );
   } finally {
     database.close();
   }

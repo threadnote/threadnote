@@ -1,5 +1,7 @@
 import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import type {MemoryMetadata} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function richRemoteMemoryMetadata(): MemoryMetadata {
   const timestamp = '2026-09-01T10:00:00.000Z';
@@ -10,14 +12,14 @@ export function richRemoteMemoryMetadata(): MemoryMetadata {
     codeCitations: [
       createMemoryCodeCitation({
         extractorSet: 'native-code-graph-14',
-        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
         path: 'src/example.ts',
-        repositoryId: '1'.repeat(64),
+        repositoryId: Effect.pipe('1', EffectString.repeat(64)),
         repositoryIdentityKind: 'remote',
-        sourceCommit: '2'.repeat(40),
+        sourceCommit: Effect.pipe('2', EffectString.repeat(40)),
         sourceDirty: false,
-        sourceGraphContentId: `cgc_${'3'.repeat(40)}`,
-        sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
+        sourceGraphContentId: `cgc_${Effect.pipe('3', EffectString.repeat(40))}`,
+        sourceSnapshotId: `cgsn_${Effect.pipe('4', EffectString.repeat(40))}`,
         target: {kind: 'file'},
         version: 1,
       }),

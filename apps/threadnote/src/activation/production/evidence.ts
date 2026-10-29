@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {DateTime, Effect, Schema} from 'effect';
 import {agentAdapterStatus} from '../../agent_integration/adapter_actions.js';
 import type {AgentAdapter} from '../../agent_integration/adapters.js';
@@ -9,6 +10,7 @@ import type {KnowledgeDeltaGitProposalBuildV1} from '../../git_proposal/knowledg
 import {
   buildExactDurableCandidateReview,
   listCandidateReviews,
+  isMemoryCandidate,
   readActiveProjectMemories,
   saveCandidateReview,
   withCandidateReviewLock,
@@ -26,6 +28,8 @@ import type {SecondSurfaceSnapshotV1} from '../second/surface.js';
 import type {ActivationProductionObservationV1} from './observe.js';
 import {ActivationProductionError, activationProductionError} from './observe.js';
 import type {ActivationProposalEvidenceInputV1, ActivationProposalEvidenceV1} from './proposal_store.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface CurrentActivationSurfaceV1 {
   readonly evidenceHash: string;
@@ -116,7 +120,8 @@ const findOrCreateActivationDecisionReviewUnlocked = Effect.fn('activation.produ
   function* (config: RuntimeConfig, observation: ActivationProductionObservationV1) {
     const proposedText = activationDecisionTextV1(observation);
     const reviews = yield* listCandidateReviews(config.agentContextHome);
-    const matching = reviews.filter(
+    const matching = EffectArray.filter(
+      reviews,
       review =>
         review.sourceSessionId === observation.plan.activationId &&
         review.project === observation.request.project &&
@@ -138,7 +143,8 @@ const findOrCreateActivationDecisionReviewUnlocked = Effect.fn('activation.produ
       {
         constraints: observation.request.decision.constraints,
         decisions: [observation.request.decision.decision],
-        evidence: observation.imports.sources.map(
+        evidence: EffectArray.map(
+          observation.imports.sources,
           source => `activation-import:${source.sourceId}:${source.contentHash}`,
         ),
         outcome: 'Activate one reviewed durable decision for cross-agent reuse.',
@@ -185,7 +191,7 @@ const findOrCreateActivationImportReviewsUnlocked = Effect.fn('activation.produc
   const reviews: CandidateReview[] = [];
   for (const imported of observation.imports.candidates) {
     const sourceSessionId = activationImportSourceSessionId(observation.plan.activationId, imported.candidateId);
-    const matches = existingReviews.filter(review => review.sourceSessionId === sourceSessionId);
+    const matches = EffectArray.filter(existingReviews, review => review.sourceSessionId === sourceSessionId);
     if (matches.length > 1) {
       return yield* activationProductionError(`Activation import ${imported.candidateId} is ambiguous.`);
     }
@@ -198,13 +204,13 @@ const findOrCreateActivationImportReviewsUnlocked = Effect.fn('activation.produc
     }
     const review = yield* buildExactDurableCandidateReview(
       {
-        evidence: imported.sourceIds.map(sourceId => `activation-import:${sourceId}`),
+        evidence: EffectArray.map(imported.sourceIds, sourceId => `activation-import:${sourceId}`),
         outcome: 'Imported repository guidance or ADR requires explicit candidate apply before it becomes memory.',
         project: observation.request.project,
         sourceAgentClient: observation.primaryAdapter.catalog.agentId,
         sourceSessionId,
         task: `activation-import:${imported.candidateId}`,
-        topic: `activation-import-${imported.candidateId.slice(-24)}`,
+        topic: `activation-import-${Effect2.pipe(imported.candidateId, EffectString.slice(-24))}`,
       },
       imported.proposedText,
       existingMemories,
@@ -236,7 +242,7 @@ export const loadActivationImportReviewsV1 = Effect.fn('activation.production.lo
   const reviews: CandidateReview[] = [];
   for (const imported of observation.imports.candidates) {
     const sourceSessionId = activationImportSourceSessionId(observation.plan.activationId, imported.candidateId);
-    const matches = all.filter(review => review.sourceSessionId === sourceSessionId);
+    const matches = EffectArray.filter(all, review => review.sourceSessionId === sourceSessionId);
     if (matches.length !== 1 || onlyDecisionCandidate(matches[0]).proposedText !== imported.proposedText) {
       return yield* activationProductionError(`Activation import ${imported.candidateId} review is unavailable.`);
     }
@@ -249,7 +255,8 @@ export const loadActivationDecisionReviewV1 = Effect.fn('activation.production.l
   config: RuntimeConfig,
   activationId: string,
 ) {
-  const matches = (yield* listCandidateReviews(config.agentContextHome)).filter(
+  const matches = EffectArray.filter(
+    yield* listCandidateReviews(config.agentContextHome),
     review => review.sourceSessionId === activationId,
   );
   if (matches.length !== 1) return yield* activationProductionError('Activation decision review is unavailable.');
@@ -304,7 +311,7 @@ export const readAppliedActivationImportReviewV1 = Effect.fn('activation.product
     Effect.mapError(() => activationProductionError('Activation import no-action target is not readable.')),
   );
   const records = yield* readActiveProjectMemories(config, project);
-  const matches = records.filter(record => record.uri === resolved.canonicalUri);
+  const matches = EffectArray.filter(records, record => record.uri === resolved.canonicalUri);
   if (matches.length !== 1) {
     return yield* activationProductionError('Activation import no-action target is not unique.');
   }
@@ -328,7 +335,7 @@ const readAppliedReview = Effect.fn('activation.production.appliedReview')(funct
     Effect.mapError(() => activationProductionError('Applied activation candidate is not readable.')),
   );
   const records = yield* readActiveProjectMemories(config, project);
-  const matches = records.filter(record => record.uri === resolved.canonicalUri);
+  const matches = EffectArray.filter(records, record => record.uri === resolved.canonicalUri);
   if (matches.length !== 1) return yield* activationProductionError('Applied activation candidate is not unique.');
   const record = matches[0];
   assertAppliedActivationRecord(candidate, record);
@@ -354,7 +361,7 @@ export const readPublishedActivationDecisionV1 = Effect.fn('activation.productio
     ),
   );
   const records = yield* readActiveProjectMemories(config, observation.request.project);
-  const matches = records.filter(record => record.uri === resolved.canonicalUri);
+  const matches = EffectArray.filter(records, record => record.uri === resolved.canonicalUri);
   if (matches.length !== 1) return yield* activationProductionError('Published activation decision is not unique.');
   const record = matches[0];
   assertAppliedActivationRecord(candidate, record);
@@ -368,7 +375,7 @@ export const readOptionalPublishedActivationDecisionV1 = Effect.fn('activation.p
       Effect.catchIf(
         error =>
           Schema.is(ActivationProductionError)(error) &&
-          error.message.startsWith('Shared decision is not readable at '),
+          Effect2.pipe(error.message, EffectString.startsWith('Shared decision is not readable at ')),
         () => Effect.succeed({_tag: 'None' as const}),
       ),
     );
@@ -385,7 +392,7 @@ export function activationImportReviewsEvidenceHashV1(
 ): string {
   return sha256HexSync(
     canonicalJson({
-      reviews: reviews.map(review => activationReviewEvidenceHashV1(review)).sort(),
+      reviews: EffectArray.map(reviews, review => activationReviewEvidenceHashV1(review)).sort(),
       sourceSetHash,
     }),
   );
@@ -395,7 +402,7 @@ export function activationImportedMemoriesEvidenceHashV1(
   sourceSetHash: string,
   reviews: readonly CandidateReview[],
 ): string {
-  const memories = reviews.map(review => {
+  const memories = EffectArray.map(reviews, review => {
     const candidate = onlyDecisionCandidate(review);
     if (candidate.recommendation === 'no_action') {
       if (
@@ -605,31 +612,38 @@ export function assertActivationProposalBuildEvidenceV1(
 }
 
 export function previousPublicationReceiptHashV1(execution: ActivationOperationExecutionV1): string | undefined {
-  return execution.receipt.operations.find(
-    operation => operation.kind === 'decision.publish' || operation.kind === 'decision.propose',
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      execution.receipt.operations,
+      operation => operation.kind === 'decision.publish' || operation.kind === 'decision.propose',
+    ),
   )?.subsystemReceiptHash;
 }
 
 export function onlyDecisionCandidate(review: CandidateReview): MemoryCandidate {
-  if (review.candidates.length !== 1 || review.candidates[0] === undefined) {
-    throw activationProductionError('Activation decision review must contain exactly one candidate.');
+  const candidate = review.candidates[0];
+  if (review.candidates.length !== 1 || candidate === undefined || !isMemoryCandidate(candidate)) {
+    throw activationProductionError('Activation decision review must contain exactly one fully specified candidate.');
   }
-  return review.candidates[0];
+  return candidate;
 }
 
 function activationDecisionTextV1(observation: ActivationProductionObservationV1): string {
   const input = observation.request.decision;
-  return [
-    '# Decision',
-    input.decision.trim(),
-    '',
-    '## Rationale',
-    input.rationale.trim(),
-    ...section('Constraints', input.constraints),
-    ...section('Verification performed', input.verification),
-    ...section('Knowledge invalidated', input.invalidated),
-    ...section('Unresolved risks', input.unresolvedRisks),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      '# Decision',
+      Effect2.pipe(input.decision, EffectString.trim),
+      '',
+      '## Rationale',
+      Effect2.pipe(input.rationale, EffectString.trim),
+      ...section('Constraints', input.constraints),
+      ...section('Verification performed', input.verification),
+      ...section('Knowledge invalidated', input.invalidated),
+      ...section('Unresolved risks', input.unresolvedRisks),
+    ],
+    '\n',
+  );
 }
 
 function activationImportSourceSessionId(activationId: string, candidateId: string): string {
@@ -640,7 +654,7 @@ function assertAppliedActivationRecord(candidate: MemoryCandidate, record: Memor
   if (isSharedMemoryUri(record.uri)) {
     if (
       candidate.applyBodyText === undefined ||
-      record.body.trim() !== candidate.applyBodyText.trim() ||
+      Effect2.pipe(record.body, EffectString.trim) !== Effect2.pipe(candidate.applyBodyText, EffectString.trim) ||
       record.metadata.candidateId !== undefined ||
       record.metadata.memoryId === undefined ||
       !isMemoryId(record.metadata.memoryId)
@@ -659,7 +673,9 @@ function assertAppliedActivationRecord(candidate: MemoryCandidate, record: Memor
 }
 
 function section(title: string, items: readonly string[]): readonly string[] {
-  return items.length === 0 ? [] : ['', `## ${title}`, ...items.map(item => `- ${item.trim()}`)];
+  return items.length === 0
+    ? []
+    : ['', `## ${title}`, ...EffectArray.map(items, item => `- ${Effect2.pipe(item, EffectString.trim)}`)];
 }
 
 function compareText(left: string, right: string): number {

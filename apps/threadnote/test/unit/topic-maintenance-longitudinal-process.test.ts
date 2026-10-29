@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {
@@ -26,6 +27,8 @@ import {
   topicStudyEnvironment,
   withTopicStudyTimeline,
 } from '../../../../scripts/topic-maintenance-longitudinal-process.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function stream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream({
@@ -55,7 +58,7 @@ it('persists the failed attempt and receipts before stopping subsequent slots', 
         draftAttempted: true,
         draftCompleted: true,
         computeMilliseconds: 321,
-        commandReceiptHashes: ['a'.repeat(64)],
+        commandReceiptHashes: [Effect.pipe('a', EffectString.repeat(64))],
       };
       const row = topicStudyLedgerRowV1({
         corpusHash: topicStudyCorpusHashV1(corpus),
@@ -73,16 +76,16 @@ it('persists the failed attempt and receipts before stopping subsequent slots', 
       }
     }
     expect(slots).toBe(1);
-    const [stored] = (await readFile(ledgerPath, 'utf8'))
-      .trim()
-      .split('\n')
-      .map(line => JSON.parse(line));
+    const [stored] = EffectArray.map(
+      Effect.pipe(await readFile(ledgerPath, 'utf8'), EffectString.trim, EffectString.split('\n')),
+      line => JSON.parse(line),
+    );
     expect(stored.observation).toMatchObject({
       status: 'failed',
       draftCompleted: true,
       accepted: false,
       computeMilliseconds: 321,
-      commandReceiptHashes: ['a'.repeat(64)],
+      commandReceiptHashes: [Effect.pipe('a', EffectString.repeat(64))],
     });
   } finally {
     await rm(directory, {recursive: true, force: true});
@@ -218,7 +221,7 @@ it('executes post-review transitions in all arms even after a failed action or e
     }
     trees.push(hashes);
   }
-  expect(trees.every(tree => JSON.stringify(tree) === JSON.stringify(trees[0]))).toBe(true);
+  expect(EffectArray.every(trees, tree => JSON.stringify(tree) === JSON.stringify(trees[0]))).toBe(true);
   expect(trees[0][23]).toContain('timeoutSeconds = 90');
 });
 
@@ -277,7 +280,7 @@ it('rejects dirty/wrong source HEAD and actual dependency drift before accepting
       stderr: 'pipe',
     });
     if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr));
-    return new TextDecoder().decode(result.stdout).trim();
+    return Effect.pipe(new TextDecoder().decode(result.stdout), EffectString.trim);
   };
   try {
     await mkdir(join(directory, 'node_modules', 'native'), {recursive: true});
@@ -289,7 +292,9 @@ it('rejects dirty/wrong source HEAD and actual dependency drift before accepting
     git(['add', '.']);
     git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'source']);
     const head = git(['rev-parse', 'HEAD']);
-    await expect(captureTopicStudyRuntime(directory, '0'.repeat(40))).rejects.toThrow('exact clean');
+    await expect(captureTopicStudyRuntime(directory, Effect.pipe('0', EffectString.repeat(40)))).rejects.toThrow(
+      'exact clean',
+    );
     const pinned = await captureTopicStudyRuntime(directory, head);
     await writeFile(join(directory, 'source.ts'), 'export const version = 2;');
     await expect(assertTopicStudyRuntime(pinned)).rejects.toThrow('exact clean');
@@ -308,7 +313,10 @@ it('verifies actual model bytes and pins a private read-only path independently 
     await writeFile(source, 'GGUF-fixture-bytes');
     const expected = {id: 'fixture', sha256: await topicStudyFileHash(source), size: 18};
     await expect(
-      prepareTopicStudyModel(source, join(directory, 'private', 'wrong.gguf'), {...expected, sha256: '0'.repeat(64)}),
+      prepareTopicStudyModel(source, join(directory, 'private', 'wrong.gguf'), {
+        ...expected,
+        sha256: Effect.pipe('0', EffectString.repeat(64)),
+      }),
     ).rejects.toThrow('size/SHA');
     expected.size = (await stat(source)).size;
     const verified = await prepareTopicStudyModel(source, join(directory, 'private', 'verified.gguf'), expected);
@@ -328,9 +336,9 @@ it('matches authored Map hashes for globally ordered filesystem leaf paths', asy
       const directory = await mkdtemp(join(tmpdir(), 'topic-study-tree-'));
       try {
         const names = ['a.ts', 'a/b.ts', 'a0/c.ts', 'z.ts'];
-        const files = new Map(names.map((name, index) => [name, contents[index]]));
+        const files = new Map(EffectArray.map(names, (name, index) => [name, contents[index]]));
         for (const [name, content] of files) {
-          await mkdir(join(directory, ...name.split('/').slice(0, -1)), {recursive: true});
+          await mkdir(join(directory, ...Effect.pipe(name, EffectString.split('/')).slice(0, -1)), {recursive: true});
           await writeFile(join(directory, name), content);
         }
         expect(await topicStudySourceTreeHash(directory)).toBe(

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Record as EffectRecord} from 'effect';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import {Cause, Clock, Context, Crypto, Effect, FileSystem, Layer, Option, Path, Schema, Stream} from 'effect';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
@@ -30,8 +31,76 @@ import {
   type CoordinatorTicket,
 } from './coordinator.js';
 
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 const unavailable = () =>
   SourceCoordinatorError.make({message: 'Integration coordinator is unavailable. Retry the operation.'});
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+const isStringArray = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
+
+function endpointFrom(value: unknown): Endpoint {
+  if (
+    !isRecord(value) ||
+    value.protocol !== 1 ||
+    typeof value.home !== 'string' ||
+    typeof value.port !== 'number' ||
+    typeof value.token !== 'string' ||
+    typeof value.pid !== 'number' ||
+    (value.processStartIdentity !== undefined && typeof value.processStartIdentity !== 'string')
+  )
+    throw unavailable();
+  return {
+    protocol: 1,
+    home: value.home,
+    port: value.port,
+    token: value.token,
+    pid: value.pid,
+    ...(value.processStartIdentity === undefined ? {} : {processStartIdentity: value.processStartIdentity}),
+  };
+}
+
+function resultFrom(value: unknown): {
+  ready: boolean;
+  failed?: boolean;
+  result?: SourceWorkResult;
+  missingValue?: boolean;
+} {
+  if (!isRecord(value) || typeof value.ready !== 'boolean') throw unavailable();
+  if (value.failed !== undefined && typeof value.failed !== 'boolean') throw unavailable();
+  if (value.missingValue !== undefined && typeof value.missingValue !== 'boolean') throw unavailable();
+  let result: SourceWorkResult | undefined;
+  if (value.result !== undefined) {
+    const raw = value.result;
+    if (
+      !isRecord(raw) ||
+      typeof raw.sourceId !== 'string' ||
+      !isStringArray(raw.syncedDocuments) ||
+      !isStringArray(raw.warnings) ||
+      (raw.output !== undefined && !isStringArray(raw.output)) ||
+      (raw.nextAttemptAt !== undefined && typeof raw.nextAttemptAt !== 'number') ||
+      (raw.more !== undefined && typeof raw.more !== 'boolean')
+    )
+      throw unavailable();
+    result = {
+      sourceId: raw.sourceId,
+      syncedDocuments: raw.syncedDocuments,
+      warnings: raw.warnings,
+      ...(raw.output === undefined ? {} : {output: raw.output}),
+      ...(raw.nextAttemptAt === undefined ? {} : {nextAttemptAt: raw.nextAttemptAt}),
+      ...(raw.more === undefined ? {} : {more: raw.more}),
+      ...(EffectRecord.has(raw, 'value') ? {value: raw.value} : {}),
+    };
+  }
+  return {
+    ready: value.ready,
+    ...(value.failed === undefined ? {} : {failed: value.failed}),
+    ...(result === undefined ? {} : {result}),
+    ...(value.missingValue === undefined ? {} : {missingValue: value.missingValue}),
+  };
+}
 const workerStages = [
   'configuration',
   'HTTP client initialization',
@@ -50,7 +119,7 @@ type WorkerStage = (typeof workerStages)[number];
 const workerMessage = (stage: WorkerStage) =>
   `Integration sync coordinator stopped during ${stage}. Retry source sync to restart it.`;
 const workerFailure = (stage: WorkerStage) => SourceCoordinatorError.make({message: workerMessage(stage)});
-const workerMessages = new Set<string>(workerStages.map(workerMessage));
+const workerMessages = new Set<string>(EffectArray.map(workerStages, workerMessage));
 
 /** Only fixed runtime-owned messages may be printed by the standalone worker. */
 export function coordinatorWorkerFailureMessage(error: unknown): string {
@@ -64,7 +133,7 @@ const atWorkerStage =
   <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(
       Effect.catchCause(cause => {
-        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause as Cause.Cause<never>);
+        if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
         const error = Option.getOrUndefined(Cause.findErrorOption(cause));
         return Effect.fail(
           Schema.is(SourceCoordinatorError)(error) && workerMessages.has(error.message) ? error : workerFailure(stage),
@@ -113,9 +182,8 @@ const endpoint = Effect.fn('source.readCoordinatorEndpoint')(function* (config: 
   );
   const data = yield* Effect.try({
     try: () => {
-      const value = JSON.parse(new TextDecoder().decode(raw)) as unknown;
-      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw unavailable();
-      return value as Endpoint;
+      const value: unknown = JSON.parse(new TextDecoder().decode(raw));
+      return endpointFrom(value);
     },
     catch: unavailable,
   });
@@ -194,7 +262,8 @@ const post = Effect.fn('source.coordinatorPost')(function* (
           bytes.set(chunk, offset);
           offset += chunk.byteLength;
         }
-        return JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes)) as unknown;
+        const value: unknown = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+        return value;
       },
       catch: unavailable,
     });
@@ -244,7 +313,8 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
       const httpContext = yield* Layer.build(FetchHttpClient.layer);
       const context = Context.merge(initialContext, httpContext);
       if (
-        [options.syncTimeoutMs, options.startupTimeoutMs].some(
+        EffectArray.some(
+          [options.syncTimeoutMs, options.startupTimeoutMs],
           value => value !== undefined && (!Number.isFinite(value) || value <= 0),
         )
       )
@@ -286,18 +356,21 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
               {concurrency: 1},
             ).pipe(atClientStage('source inventory'))).flat();
             const selected =
-              sourceId === undefined ? descriptors : descriptors.filter(value => value.sourceId === sourceId);
+              sourceId === undefined
+                ? descriptors
+                : EffectArray.filter(descriptors, value => value.sourceId === sourceId);
             if (sourceId !== undefined && selected.length !== 1)
               return yield* SourceCoordinatorError.make({
-                message: `Source ${sourceId.slice(0, 128)} is unavailable or disabled.`,
+                message: `Source ${Effect2.pipe(sourceId, EffectString.slice(0, 128))} is unavailable or disabled.`,
               });
-            const bindings = selected
-              .filter(descriptor => descriptor.credentialEnv !== undefined)
-              .map(descriptor => {
+            const bindings = EffectArray.map(
+              EffectArray.filter(selected, descriptor => descriptor.credentialEnv !== undefined),
+              descriptor => {
                 const name = descriptor.credentialEnv!;
                 const value = system.environment()[name];
                 return {descriptor, values: value !== undefined && value.length <= 4_096 ? {[name]: value} : {}};
-              });
+              },
+            );
             const handoff = (target: Endpoint, timeoutMs: number) =>
               handoffBindings(target, normalized, bindings, timeoutMs).pipe(atClientStage('credential handoff'));
             // Hand off rotations before making durable work visible to a live worker.
@@ -336,14 +409,10 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
             if (!ticket) return yield* unavailable();
             for (;;) {
               const target = yield* ensureWorker(requested.config);
-              const result = (yield* post(target, 'result', {config: requested.config, ticket}, 5_000).pipe(
+              const result = yield* post(target, 'result', {config: requested.config, ticket}, 5_000).pipe(
                 atClientStage('result delivery'),
-              )) as {
-                ready: boolean;
-                failed?: boolean;
-                result?: SourceWorkResult;
-                missingValue?: boolean;
-              };
+                Effect.flatMap(reply => Effect.try({try: () => resultFrom(reply), catch: unavailable})),
+              );
               if (result.ready) {
                 if (result.failed || result.missingValue || !result.result)
                   return yield* SourceCoordinatorError.make({
@@ -385,24 +454,32 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
 }
 
 function ticketFrom(value: unknown): CoordinatorTicket {
-  if (typeof value !== 'object' || value === null) throw unavailable();
-  const ticket = value as CoordinatorTicket;
-  if (!/^[a-f0-9]{64}$/.test(ticket.key) || !Number.isSafeInteger(ticket.generation) || ticket.generation < 1)
+  if (!isRecord(value)) throw unavailable();
+  const key = value.key;
+  const generation = value.generation;
+  if (
+    typeof key !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(key) ||
+    typeof generation !== 'number' ||
+    !Number.isSafeInteger(generation) ||
+    generation < 1
+  )
     throw unavailable();
-  return {key: ticket.key, generation: ticket.generation};
+  return {key, generation};
 }
 
 function credentialValues(value: unknown): Readonly<Record<string, string>> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw unavailable();
+  if (!isRecord(value)) throw unavailable();
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- Arbitrary transport keys require own data properties.
   const entries = Object.entries(value);
   if (entries.length > 64) throw unavailable();
-  const result: Record<string, string> = Object.create(null) as Record<string, string>;
+  const safeEntries: [string, string][] = [];
   for (const [key, token] of entries) {
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) || typeof token !== 'string' || token.length > 4_096)
       throw unavailable();
-    result[key] = token;
+    safeEntries.push([key, token]);
   }
-  return result;
+  return EffectRecord.fromEntries(safeEntries);
 }
 
 export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(function* <R>(options: {
@@ -452,9 +529,12 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
           quantumTimeoutMs: options.quantumTimeoutMs,
           maxConcurrentSources: options.maxConcurrentSources,
         }).pipe(atWorkerStage('engine initialization'));
-        const token = Array.from(yield* crypto.randomBytes(32).pipe(atWorkerStage('token generation')), byte =>
-          byte.toString(16).padStart(2, '0'),
-        ).join('');
+        const token = EffectArray.join(
+          Array.from(yield* crypto.randomBytes(32).pipe(atWorkerStage('token generation')), byte =>
+            Effect2.pipe(byte.toString(16), EffectString.padStart(2, '0')),
+          ),
+          '',
+        );
         const server = yield* BunHttpServer.make({
           hostname: '127.0.0.1',
           port: 0,
@@ -489,8 +569,8 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
           )
             return HttpServerResponse.fromWeb(new Response(null, {status: 403}));
           const raw = yield* fromPromiseInterruptible(() => boundedBody(web), unavailable);
-          if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return yield* unavailable();
-          const data = raw as Record<string, unknown>;
+          if (!isRecord(raw)) return yield* unavailable();
+          const data = raw;
           const requestConfig = yield* Effect.try({
             try: () => decodeCoordinatorConfig(data.config, paths.home),
             catch: unavailable,
@@ -499,15 +579,22 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
           lastActivity = yield* Clock.currentTimeMillis;
           if (url.pathname === '/v1/wake') return HttpServerResponse.fromWeb(Response.json({ok: true}));
           if (url.pathname === '/v1/bindings') {
-            if (!Array.isArray(data.bindings) || data.bindings.length > 64) return yield* unavailable();
+            if (!EffectArray.isArray(data.bindings) || data.bindings.length > 64) return yield* unavailable();
             for (const rawBinding of data.bindings) {
-              if (typeof rawBinding !== 'object' || rawBinding === null) return yield* unavailable();
-              const binding = rawBinding as {descriptor: unknown; values: unknown};
+              if (
+                !isRecord(rawBinding) ||
+                !EffectRecord.has(rawBinding, 'descriptor') ||
+                !EffectRecord.has(rawBinding, 'values')
+              )
+                return yield* unavailable();
+              const binding = rawBinding;
               const descriptor = yield* Effect.try({
                 try: () => validatedSourceWorkDescriptor(binding.descriptor),
                 catch: unavailable,
               });
-              const registration = options.registrations.find(value => value.provider === descriptor?.provider);
+              const registration = Option.getOrUndefined(
+                EffectArray.findFirst(options.registrations, value => value.provider === descriptor?.provider),
+              );
               if (
                 !registration ||
                 !descriptor.credentialEnv ||
@@ -526,7 +613,7 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
             return HttpServerResponse.fromWeb(Response.json({ok: true, accepted: data.bindings.length}));
           }
           if (url.pathname === '/v1/credentials') {
-            if (!Array.isArray(data.tickets) || data.tickets.length > 1_024) return yield* unavailable();
+            if (!EffectArray.isArray(data.tickets) || data.tickets.length > 1_024) return yield* unavailable();
             const values = yield* Effect.try({try: () => credentialValues(data.values), catch: unavailable});
             for (const raw of data.tickets) {
               const ticket = yield* Effect.try({try: () => ticketFrom(raw), catch: unavailable});
@@ -538,12 +625,13 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
               if (rows[0]) {
                 const expected = decodeCoordinatorConfig(JSON.parse(rows[0].config_json), paths.home);
                 if (!sameCoordinatorIdentity(expected, requestConfig)) return yield* unavailable();
-                const descriptor = JSON.parse(rows[0].descriptor_json) as {credentialEnv?: string};
+                const parsedDescriptor: unknown = JSON.parse(rows[0].descriptor_json);
+                if (!isRecord(parsedDescriptor)) return yield* unavailable();
+                const credentialEnv =
+                  typeof parsedDescriptor.credentialEnv === 'string' ? parsedDescriptor.credentialEnv : undefined;
                 engine.acceptCredentials(
                   ticket,
-                  descriptor.credentialEnv && values[descriptor.credentialEnv] !== undefined
-                    ? {[descriptor.credentialEnv]: values[descriptor.credentialEnv]}
-                    : {},
+                  credentialEnv && values[credentialEnv] !== undefined ? {[credentialEnv]: values[credentialEnv]} : {},
                 );
               }
             }
@@ -573,13 +661,19 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
             );
           }
           if (url.pathname === '/v1/admit' || url.pathname === '/v1/cooldown') {
-            const request = {
+            if (
+              typeof data.provider !== 'string' ||
+              typeof data.accountKey !== 'string' ||
+              typeof data.method !== 'string'
+            )
+              return yield* unavailable();
+            const request: SourceAdmissionRequest = {
               config: requestConfig,
               provider: data.provider,
               accountKey: data.accountKey,
               method: data.method,
-            } as SourceAdmissionRequest;
-            if (!options.registrations.some(registration => registration.provider === request.provider))
+            };
+            if (!EffectArray.some(options.registrations, registration => registration.provider === request.provider))
               return yield* unavailable();
             if (url.pathname === '/v1/admit') yield* engine.admission.admit(request);
             else yield* engine.admission.cooldown({...request, retryAfterMs: Number(data.retryAfterMs)});
@@ -616,7 +710,10 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
             yield* store.cleanup.pipe(atWorkerStage('work scheduling'));
             lastCleanup = now;
           }
-          const due = (yield* store.pending.pipe(atWorkerStage('work scheduling'))).some(row => row.not_before <= now);
+          const due = EffectArray.some(
+            yield* store.pending.pipe(atWorkerStage('work scheduling')),
+            row => row.not_before <= now,
+          );
           if (!due && engine.activeCount() === 0 && now - lastActivity >= (options.idleTimeoutMs ?? 60_000)) {
             // This decision and accepting=false are synchronous: a wake either
             // extends activity before retirement or observes a retiring worker.
@@ -651,7 +748,9 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
                 catch: unavailable,
               });
               if (!descriptor.credentialEnv) continue;
-              const registration = options.registrations.find(value => value.provider === descriptor.provider);
+              const registration = Option.getOrUndefined(
+                EffectArray.findFirst(options.registrations, value => value.provider === descriptor.provider),
+              );
               if (!registration) continue;
               const groupKey = JSON.stringify([jobConfig, descriptor.provider]);
               let listed = lists.get(groupKey);
@@ -660,7 +759,8 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
                 lists.set(groupKey, listed);
               }
               if (
-                !listed.some(
+                !EffectArray.some(
+                  listed,
                   value =>
                     value.sourceId === descriptor.sourceId &&
                     value.fingerprint === descriptor.fingerprint &&

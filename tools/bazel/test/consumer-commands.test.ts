@@ -3,6 +3,8 @@ import {mkdtempSync, mkdirSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const generation = {headSha: 'head', sourceDigest: 'source', inventoryDigest: 'inventory'};
 const fixture = async (prefix = 'bazel-consumers-') => {
@@ -124,7 +126,7 @@ it.each(['legacy', 'prepared'])(
         new Response(child.stderr).text(),
       ]);
       expect(code, stderr).toBe(0);
-      return stdout.trim();
+      return Effect.pipe(stdout, EffectString.trim);
     };
     try {
       await Bun.write(join(root, 'package.json'), '{"name":"consumer-fixture","private":true}');

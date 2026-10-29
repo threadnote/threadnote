@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {readFileSync, readdirSync, statSync} from '@threadnote/testing/node-fs';
 import {join, relative} from '@threadnote/testing/node-path';
 import * as FC from 'fast-check';
@@ -18,6 +19,8 @@ import {
 import {createCachedCodeGraphFactsAttributor, deriveCachedCodeGraphFacts} from '@threadnote/graph/indexer';
 import {discoverManifestWorkspace} from '@threadnote/graph/workspace';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const REPOSITORY = join(
   import.meta.dirname,
@@ -27,8 +30,8 @@ const REPOSITORY = join(
 describe('native code graph extraction', () => {
   const files = fixtureFiles(REPOSITORY);
   const facts = extractRepositoryFacts(files);
-  const symbols = facts.flatMap(file => file.symbols);
-  const edges = facts.flatMap(file => file.edges);
+  const symbols = EffectArray.flatMap(facts, file => file.symbols);
+  const edges = EffectArray.flatMap(facts, file => file.edges);
 
   it('extracts the reviewed symbol contract with repository-relative evidence', () => {
     expect(symbols).toEqual(
@@ -41,11 +44,21 @@ describe('native code graph extraction', () => {
         expect.objectContaining({kind: 'function', name: 'runApplication', packageName: '@fixture/app'}),
       ]),
     );
-    expect(symbols.every(symbol => !symbol.path.startsWith('/') && !symbol.path.includes('\\'))).toBe(true);
+    expect(
+      EffectArray.every(
+        symbols,
+        symbol =>
+          !Effect.pipe(symbol.path, EffectString.startsWith('/')) &&
+          !Effect.pipe(symbol.path, EffectString.includes('\\')),
+      ),
+    ).toBe(true);
   });
 
   it('resolves only grounded cross-file relationships and keeps provenance explicit', () => {
-    const keys = edges.map(edge => `${edge.sourceName}:${edge.relation}:${edge.targetName}:${edge.provenance}`);
+    const keys = EffectArray.map(
+      edges,
+      edge => `${edge.sourceName}:${edge.relation}:${edge.targetName}:${edge.provenance}`,
+    );
     expect(keys).toEqual(
       expect.arrayContaining([
         'ensureVectorIndex:calls:withExclusiveFileLock:resolved',
@@ -56,25 +69,28 @@ describe('native code graph extraction', () => {
         '@fixture/search:depends_on:@fixture/core:declared',
       ]),
     );
-    expect(edges.filter(edge => edge.provenance === 'resolved').every(edge => edge.sourceId && edge.targetId)).toBe(
-      true,
-    );
-    expect(edges.some(edge => edge.targetName === 'Error' && edge.provenance === 'resolved')).toBe(false);
+    expect(
+      EffectArray.every(
+        EffectArray.filter(edges, edge => edge.provenance === 'resolved'),
+        edge => Boolean(edge.sourceId && edge.targetId),
+      ),
+    ).toBe(true);
+    expect(EffectArray.some(edges, edge => edge.targetName === 'Error' && edge.provenance === 'resolved')).toBe(false);
   });
 
   it('resolves file batches equivalently while retaining only symbols and reexports globally', () => {
     const attributePackages = createPackageAttributor(files);
-    const attributed = files.map(file => attributePackages(extractRepositoryFileFacts([file]))[0]);
+    const attributed = EffectArray.map(files, file => attributePackages(extractRepositoryFileFacts([file]))[0]);
     const resolver = createRepositoryFactResolver(
-      attributed.map(file => ({
+      EffectArray.map(attributed, file => ({
         diagnostics: [],
-        edges: file.edges.filter(edge => edge.relation === 'reexports'),
+        edges: EffectArray.filter(file.edges, edge => edge.relation === 'reexports'),
         path: file.path,
         symbols: file.symbols,
       })),
       files,
     );
-    const streamed = attributed.flatMap(file => resolver.resolve([file]));
+    const streamed = EffectArray.flatMap(attributed, file => resolver.resolve([file]));
 
     expect(streamed).toEqual(facts);
   });
@@ -91,21 +107,66 @@ describe('native code graph extraction', () => {
     ];
     const raw = extractRepositoryFileFacts(cachedFiles);
     expect(
-      raw.find(file => file.path === 'consumer.ts')?.references?.find(reference => reference.relation === 'calls')
-        ?.lookupTiers,
+      EffectOption.getOrUndefined(
+        EffectOption.map(
+          EffectOption.fromNullishOr(
+            EffectOption.getOrUndefined(EffectArray.findFirst(raw, file => file.path === 'consumer.ts'))?.references,
+          ),
+          __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(__effectArrayReceiver, reference => reference.relation === 'calls'),
+            ),
+        ),
+      )?.lookupTiers,
     ).toEqual([]);
 
     const derived = deriveCachedCodeGraphFacts(cachedFiles, discoverManifestWorkspace(cachedFiles), raw);
-    const callReference = derived
-      .find(file => file.path === 'consumer.ts')
-      ?.references?.find(reference => reference.relation === 'calls');
-    const dependency = derived.flatMap(file => file.symbols).find(symbol => symbol.name === 'dependency');
+    const callReference = EffectOption.getOrUndefined(
+      EffectOption.map(
+        EffectOption.fromNullishOr(
+          EffectOption.getOrUndefined(EffectArray.findFirst(derived, file => file.path === 'consumer.ts'))?.references,
+        ),
+        __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectArrayReceiver, reference => reference.relation === 'calls'),
+          ),
+      ),
+    );
+    const dependency = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(derived, file => file.symbols),
+        symbol => symbol.name === 'dependency',
+      ),
+    );
     const resolved = createRepositoryFactResolver(derived, cachedFiles).resolve(derived);
 
-    expect(callReference?.lookupTiers.flat().some(key => dependency?.lookupKeys?.includes(key))).toBe(true);
-    expect(callReference?.lookupTiers.flat().every(key => key.includes(':cgp_'))).toBe(true);
     expect(
-      resolved.flatMap(file => file.edges).find(edge => edge.sourceName === 'consumer' && edge.relation === 'calls'),
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(callReference?.lookupTiers.flat()), __effectArrayReceiver =>
+          EffectArray.some(
+            __effectArrayReceiver,
+            __effectArrayValue => !!(key => dependency?.lookupKeys?.includes(key))(__effectArrayValue),
+          ),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(callReference?.lookupTiers.flat()), __effectArrayReceiver =>
+          EffectArray.every(
+            __effectArrayReceiver,
+            __effectArrayValue => !!(key => Effect.pipe(key, EffectString.includes(':cgp_')))(__effectArrayValue),
+          ),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.flatMap(resolved, file => file.edges),
+          edge => edge.sourceName === 'consumer' && edge.relation === 'calls',
+        ),
+      ),
     ).toMatchObject({provenance: 'resolved', targetId: dependency?.id, targetName: 'dependency'});
   });
 
@@ -117,42 +178,70 @@ describe('native code graph extraction', () => {
     const workspace = discoverManifestWorkspace(cachedFiles);
     const raw = extractRepositoryFileFacts(cachedFiles);
     const derived = deriveCachedCodeGraphFacts(cachedFiles, workspace, raw);
-    const privateSymbol = derived.flatMap(file => file.symbols).find(symbol => symbol.name === 'privateValue');
+    const privateSymbol = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(derived, file => file.symbols),
+        symbol => symbol.name === 'privateValue',
+      ),
+    );
     const unresolved = createRepositoryFactResolver(derived, cachedFiles).resolve(derived);
 
     expect(privateSymbol).toBeDefined();
     expect(privateSymbol?.exported).toBe(false);
-    expect(privateSymbol?.lookupKeys?.some(key => key.startsWith('global:'))).toBe(false);
     expect(
-      unresolved
-        .flatMap(file => file.edges)
-        .find(edge => edge.relation === 'documents' && edge.targetName === 'privateValue')?.targetId,
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(privateSymbol?.lookupKeys), __effectArrayReceiver =>
+          EffectArray.some(
+            __effectArrayReceiver,
+            __effectArrayValue => !!(key => Effect.pipe(key, EffectString.startsWith('global:')))(__effectArrayValue),
+          ),
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.flatMap(unresolved, file => file.edges),
+          edge => edge.relation === 'documents' && edge.targetName === 'privateValue',
+        ),
+      )?.targetId,
     ).toBeUndefined();
 
-    const explicitRaw = raw.map(file => ({
+    const explicitRaw = EffectArray.map(raw, file => ({
       ...file,
-      symbols: file.symbols.map(symbol =>
+      symbols: EffectArray.map(file.symbols, symbol =>
         symbol.name === 'privateValue'
           ? {...symbol, lookupKeys: [...(symbol.lookupKeys ?? []), 'global:name:privateValue']}
           : symbol,
       ),
     }));
     const explicitDerived = deriveCachedCodeGraphFacts(cachedFiles, workspace, explicitRaw);
-    const explicitPrivateSymbol = explicitDerived
-      .flatMap(file => file.symbols)
-      .find(symbol => symbol.name === 'privateValue');
+    const explicitPrivateSymbol = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(explicitDerived, file => file.symbols),
+        symbol => symbol.name === 'privateValue',
+      ),
+    );
     const resolved = createRepositoryFactResolver(explicitDerived, cachedFiles).resolve(explicitDerived);
 
     expect(explicitPrivateSymbol?.lookupKeys).toContain('global:name:privateValue');
     expect(
-      resolved
-        .flatMap(file => file.edges)
-        .find(edge => edge.relation === 'documents' && edge.targetName === 'privateValue'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.flatMap(resolved, file => file.edges),
+          edge => edge.relation === 'documents' && edge.targetName === 'privateValue',
+        ),
+      ),
     ).toMatchObject({provenance: 'syntactic', targetId: explicitPrivateSymbol?.id, targetName: 'privateValue'});
 
     const documentationFiles = [sourceFile('docs/a.md', 'See `Target`.\n'), sourceFile('docs/b.md', '# Target\n')];
     const rawDocumentation = extractRepositoryFacts(documentationFiles);
-    const rawHeading = rawDocumentation.flatMap(file => file.symbols).find(symbol => symbol.name === 'Target');
+    const rawHeading = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(rawDocumentation, file => file.symbols),
+        symbol => symbol.name === 'Target',
+      ),
+    );
     const derivedDocumentation = deriveCachedCodeGraphFacts(
       documentationFiles,
       discoverManifestWorkspace(documentationFiles),
@@ -161,12 +250,18 @@ describe('native code graph extraction', () => {
     const resolvedDocumentation = createRepositoryFactResolver(derivedDocumentation, documentationFiles).resolve(
       derivedDocumentation,
     );
-    const rawDocumentEdge = rawDocumentation
-      .flatMap(file => file.edges)
-      .find(edge => edge.relation === 'documents' && edge.targetName === 'Target');
-    const derivedDocumentEdge = resolvedDocumentation
-      .flatMap(file => file.edges)
-      .find(edge => edge.relation === 'documents' && edge.targetName === 'Target');
+    const rawDocumentEdge = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(rawDocumentation, file => file.edges),
+        edge => edge.relation === 'documents' && edge.targetName === 'Target',
+      ),
+    );
+    const derivedDocumentEdge = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(resolvedDocumentation, file => file.edges),
+        edge => edge.relation === 'documents' && edge.targetName === 'Target',
+      ),
+    );
 
     expect(rawDocumentEdge?.targetId).toBe(rawHeading?.id);
     expect(derivedDocumentEdge?.targetId).toBe(rawHeading?.id);
@@ -187,21 +282,28 @@ describe('native code graph extraction', () => {
     const workspace = discoverManifestWorkspace(cachedFiles);
     const raw = extractRepositoryFileFacts(cachedFiles);
     const attributeFacts = createCachedCodeGraphFactsAttributor(cachedFiles, workspace);
-    const streamed = raw.flatMap(file => attributeFacts([file]));
-    const rebuiltPerBatch = raw.flatMap(file => createCachedCodeGraphFactsAttributor(cachedFiles, workspace)([file]));
+    const streamed = EffectArray.flatMap(raw, file => attributeFacts([file]));
+    const rebuiltPerBatch = EffectArray.flatMap(raw, file =>
+      createCachedCodeGraphFactsAttributor(cachedFiles, workspace)([file]),
+    );
     const repositoryOnly = createRepositoryFactAttributor(cachedFiles)(raw);
 
     expect(streamed).toEqual(rebuiltPerBatch);
     expect(
-      streamed
-        .flatMap(file => file.symbols)
-        .find(symbol => symbol.path === 'packages/app/src/deep/consumer.ts' && symbol.name === 'consumer')?.packageName,
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.flatMap(streamed, file => file.symbols),
+          symbol => symbol.path === 'packages/app/src/deep/consumer.ts' && symbol.name === 'consumer',
+        ),
+      )?.packageName,
     ).toBe('nested-package');
     expect(
-      repositoryOnly
-        .flatMap(file => file.symbols)
-        .find(symbol => symbol.path === 'packages/application/src/unrelated.ts' && symbol.name === 'unrelated')
-        ?.packageName,
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.flatMap(repositoryOnly, file => file.symbols),
+          symbol => symbol.path === 'packages/application/src/unrelated.ts' && symbol.name === 'unrelated',
+        ),
+      )?.packageName,
     ).toBe('root-package');
   });
 
@@ -223,8 +325,13 @@ describe('native code graph extraction', () => {
         const rawConsumer = extractRepositoryFileFacts([consumer]);
         const candidates = repositoryFactCandidatePaths(contextFiles, rawConsumer);
         const attribution = createRepositoryFactAttributionContext(contextFiles);
-        const repositoryPaths = new Set(repositoryFiles.map(file => file.path));
-        const existingCandidates = new Set(candidates.filter(path => repositoryPaths.has(path)));
+        const repositoryPaths = new Set(EffectArray.map(repositoryFiles, file => file.path));
+        const existingCandidates = new Set(
+          EffectArray.filter(
+            candidates,
+            (path, __effectArrayIndex) => __effectArrayIndex in candidates && repositoryPaths.has(path),
+          ),
+        );
 
         const expected = createRepositoryFactAttributor(repositoryFiles)(rawConsumer);
         expect(createRepositoryFactAttributorFromContext(contextFiles, existingCandidates)(rawConsumer)).toEqual(
@@ -265,7 +372,7 @@ describe('native code graph extraction', () => {
     const attribution = createRepositoryFactAttributionContext([manifest]);
     const parsedManifestReads = manifestReads;
     const candidates = attribution.candidatePaths(rawConsumer);
-    const existing = new Set(candidates.filter(path => path === dependency.path));
+    const existing = new Set(EffectArray.filter(candidates, path => path === dependency.path));
 
     expect(attribution.attribute(existing)(rawConsumer)).toEqual(expected);
     expect(parsedManifestReads).toBe(2);
@@ -282,24 +389,35 @@ describe('native code graph extraction', () => {
         }),
       ]),
     );
-    expect(edges.some(edge => edge.provenance === 'model' || edge.relation === 'semantic_association')).toBe(false);
+    expect(
+      EffectArray.some(edges, edge => edge.provenance === 'model' || edge.relation === 'semantic_association'),
+    ).toBe(false);
   });
 
   it('keeps explicit document and media links as resolvable graph evidence', () => {
-    const linked = extractRepositoryFacts([
-      sourceFile(
-        'docs/architecture.md',
-        '# Retry design\n\nSee [the flow](../diagrams/retry-flow.png) and `docs/reliability.pdf`.\n',
-      ),
-    ]).flatMap(file => file.edges);
+    const linked = EffectArray.flatMap(
+      extractRepositoryFacts([
+        sourceFile(
+          'docs/architecture.md',
+          '# Retry design\n\nSee [the flow](../diagrams/retry-flow.png) and `docs/reliability.pdf`.\n',
+        ),
+      ]),
+      file => file.edges,
+    );
 
-    expect(linked.map(edge => edge.targetName)).toEqual(
+    expect(EffectArray.map(linked, edge => edge.targetName)).toEqual(
       expect.arrayContaining(['diagrams/retry-flow.png', 'docs/reliability.pdf']),
     );
     expect(
-      linked
-        .filter(edge => edge.targetName.endsWith('.png') || edge.targetName.endsWith('.pdf'))
-        .every(edge => edge.relation === 'documents' && edge.provenance === 'syntactic'),
+      EffectArray.every(
+        EffectArray.filter(
+          linked,
+          edge =>
+            Effect.pipe(edge.targetName, EffectString.endsWith('.png')) ||
+            Effect.pipe(edge.targetName, EffectString.endsWith('.pdf')),
+        ),
+        edge => edge.relation === 'documents' && edge.provenance === 'syntactic',
+      ),
     ).toBe(true);
   });
 
@@ -317,14 +435,22 @@ describe('native code graph extraction', () => {
         'import {phantom} from "./does-not-exist.js";\nexport function usePhantom(): string { return phantom(); }\n',
       ),
     ]);
-    const resolvedSymbols = resolved.flatMap(file => file.symbols);
-    const resolvedEdges = resolved.flatMap(file => file.edges);
-    const collisionCall = resolvedEdges.find(
-      edge => edge.sourceName === 'useCollision' && edge.relation === 'calls' && edge.targetName === 'collision',
+    const resolvedSymbols = EffectArray.flatMap(resolved, file => file.symbols);
+    const resolvedEdges = EffectArray.flatMap(resolved, file => file.edges);
+    const collisionCall = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        resolvedEdges,
+        edge => edge.sourceName === 'useCollision' && edge.relation === 'calls' && edge.targetName === 'collision',
+      ),
     );
-    const collisionTarget = resolvedSymbols.find(symbol => symbol.id === collisionCall?.targetId);
-    const missingCall = resolvedEdges.find(
-      edge => edge.sourceName === 'usePhantom' && edge.relation === 'calls' && edge.targetName === 'phantom',
+    const collisionTarget = EffectOption.getOrUndefined(
+      EffectArray.findFirst(resolvedSymbols, symbol => symbol.id === collisionCall?.targetId),
+    );
+    const missingCall = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        resolvedEdges,
+        edge => edge.sourceName === 'usePhantom' && edge.relation === 'calls' && edge.targetName === 'phantom',
+      ),
     );
 
     expect(collisionCall).toMatchObject({provenance: 'resolved'});
@@ -346,22 +472,44 @@ describe('native code graph extraction', () => {
             sourceFile('src/overloads.ts', overloadFixture(arities)),
             sourceFile('src/use-overloads.ts', overloadUseFixture(selectedArity, secondArity)),
           ]);
-          const symbols = resolved.flatMap(file => file.symbols);
-          const edges = resolved.flatMap(file => file.edges);
-          const parseSymbols = symbols.filter(symbol => symbol.path === 'src/overloads.ts' && symbol.name === 'parse');
-          const decodeSymbols = symbols.filter(
+          const symbols = EffectArray.flatMap(resolved, file => file.symbols);
+          const edges = EffectArray.flatMap(resolved, file => file.edges);
+          const parseSymbols = EffectArray.filter(
+            symbols,
+            symbol => symbol.path === 'src/overloads.ts' && symbol.name === 'parse',
+          );
+          const decodeSymbols = EffectArray.filter(
+            symbols,
             symbol => symbol.path === 'src/overloads.ts' && symbol.name === 'decode',
           );
-          const implementation = parseSymbols.find(symbol => symbol.signature?.includes('...values'));
-          const selectedDeclaration = decodeSymbols.find(symbol => symbol.arity === selectedArity);
-          const secondDeclaration = decodeSymbols.find(symbol => symbol.arity === secondArity);
+          const implementation = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              parseSymbols,
+              __effectArrayValue =>
+                !!(symbol =>
+                  Effect.pipe(symbol.signature, effectOptionalString =>
+                    effectOptionalString == null
+                      ? undefined
+                      : Effect.pipe(effectOptionalString, EffectString.includes('...values')),
+                  ))(__effectArrayValue),
+            ),
+          );
+          const selectedDeclaration = EffectOption.getOrUndefined(
+            EffectArray.findFirst(decodeSymbols, symbol => symbol.arity === selectedArity),
+          );
+          const secondDeclaration = EffectOption.getOrUndefined(
+            EffectArray.findFirst(decodeSymbols, symbol => symbol.arity === secondArity),
+          );
           const call = (sourceName: string, targetName: string) =>
-            edges.find(
-              edge => edge.sourceName === sourceName && edge.relation === 'calls' && edge.targetName === targetName,
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                edges,
+                edge => edge.sourceName === sourceName && edge.relation === 'calls' && edge.targetName === targetName,
+              ),
             );
 
-          expect(new Set(parseSymbols.map(symbol => symbol.id)).size).toBe(arities.length + 1);
-          expect(new Set(decodeSymbols.map(symbol => symbol.id)).size).toBe(arities.length);
+          expect(new Set(EffectArray.map(parseSymbols, symbol => symbol.id)).size).toBe(arities.length + 1);
+          expect(new Set(EffectArray.map(decodeSymbols, symbol => symbol.id)).size).toBe(arities.length);
           expect(implementation).toBeDefined();
           expect(selectedDeclaration).toBeDefined();
           expect(secondDeclaration).toBeDefined();
@@ -373,12 +521,13 @@ describe('native code graph extraction', () => {
             provenance: 'resolved',
             targetId: implementation?.id,
           });
-          const declaredCalls = edges.filter(
+          const declaredCalls = EffectArray.filter(
+            edges,
             edge => edge.sourceName === 'useDeclared' && edge.relation === 'calls' && edge.targetName === 'decode',
           );
           expect(declaredCalls).toHaveLength(2);
-          expect(new Set(declaredCalls.map(edge => edge.id)).size).toBe(2);
-          expect(new Set(declaredCalls.map(edge => edge.targetId))).toEqual(
+          expect(new Set(EffectArray.map(declaredCalls, edge => edge.id)).size).toBe(2);
+          expect(new Set(EffectArray.map(declaredCalls, edge => edge.targetId))).toEqual(
             new Set([selectedDeclaration?.id, secondDeclaration?.id]),
           );
         },
@@ -408,13 +557,17 @@ describe('native code graph extraction', () => {
         'import {shared} from "@/shared";\nexport function useB(): string { return shared(); }\n',
       ),
     ]);
-    const scopedSymbols = scoped.flatMap(file => file.symbols);
-    const scopedEdges = scoped.flatMap(file => file.edges);
+    const scopedSymbols = EffectArray.flatMap(scoped, file => file.symbols);
+    const scopedEdges = EffectArray.flatMap(scoped, file => file.edges);
     const targetPath = (source: string) => {
-      const call = scopedEdges.find(
-        edge => edge.sourceName === source && edge.relation === 'calls' && edge.targetName === 'shared',
+      const call = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          scopedEdges,
+          edge => edge.sourceName === source && edge.relation === 'calls' && edge.targetName === 'shared',
+        ),
       );
-      return scopedSymbols.find(symbol => symbol.id === call?.targetId)?.path;
+      return EffectOption.getOrUndefined(EffectArray.findFirst(scopedSymbols, symbol => symbol.id === call?.targetId))
+        ?.path;
     };
 
     expect(targetPath('useA')).toBe('packages/a/src/shared.ts');
@@ -453,24 +606,30 @@ describe('native code graph extraction', () => {
       sourceFile('apps/app/modules/shared/value.ts', 'export function sharedValue(): string { return "nested"; }\n'),
       sourceFile(
         'apps/app/src/use.ts',
-        [
-          'import {sharedValue as nestedValue} from "@shared/value";',
-          'import {sharedValue as outerValue} from "@fixture/outer-shared";',
-          'export function useNested(): string { return nestedValue(); }',
-          'export function useIntegrated(): string { return outerValue(); }',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'import {sharedValue as nestedValue} from "@shared/value";',
+            'import {sharedValue as outerValue} from "@fixture/outer-shared";',
+            'export function useNested(): string { return nestedValue(); }',
+            'export function useIntegrated(): string { return outerValue(); }',
+          ],
+          '\n',
+        ),
       ),
     ]);
-    const nestedSymbols = nested.flatMap(file => file.symbols);
-    const nestedEdges = nested.flatMap(file => file.edges);
+    const nestedSymbols = EffectArray.flatMap(nested, file => file.symbols);
+    const nestedEdges = EffectArray.flatMap(nested, file => file.edges);
     const target = (sourceName: string) => {
-      const edge = nestedEdges.find(
-        candidate =>
-          candidate.sourceName === sourceName &&
-          candidate.relation === 'calls' &&
-          candidate.targetName === 'sharedValue',
+      const edge = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          nestedEdges,
+          candidate =>
+            candidate.sourceName === sourceName &&
+            candidate.relation === 'calls' &&
+            candidate.targetName === 'sharedValue',
+        ),
       );
-      return nestedSymbols.find(symbol => symbol.id === edge?.targetId);
+      return EffectOption.getOrUndefined(EffectArray.findFirst(nestedSymbols, symbol => symbol.id === edge?.targetId));
     };
 
     expect(target('useOuter')).toMatchObject({
@@ -486,20 +645,26 @@ describe('native code graph extraction', () => {
       path: 'libs/shared/value.ts',
     });
     expect(
-      nestedEdges.find(
-        edge =>
-          edge.sourceName === '@fixture/nested-app' &&
-          edge.relation === 'depends_on' &&
-          edge.targetName === '@fixture/outer-shared',
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          nestedEdges,
+          edge =>
+            edge.sourceName === '@fixture/nested-app' &&
+            edge.relation === 'depends_on' &&
+            edge.targetName === '@fixture/outer-shared',
+        ),
       ),
     ).toMatchObject({provenance: 'declared'});
-    expect(nestedSymbols.find(symbol => symbol.name === 'useNested')?.packageName).toBe('@fixture/nested-app');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(nestedSymbols, symbol => symbol.name === 'useNested'))
+        ?.packageName,
+    ).toBe('@fixture/nested-app');
   });
 
   it('selects each alias project scope once per importing source', () => {
     let scopeScans = 0;
     const projectFiles = Array.from({length: 20}, (_, index) => {
-      const root = `packages/p${String(index).padStart(2, '0')}`;
+      const root = `packages/p${Effect.pipe(String(index), EffectString.padStart(2, '0'))}`;
       return [
         sourceFile(
           `${root}/tsconfig.json`,
@@ -508,7 +673,10 @@ describe('native code graph extraction', () => {
         sourceFile(`${root}/src/shared.ts`, `export function shared${index}(): number { return ${index}; }\n`),
       ];
     }).flat();
-    const calls = Array.from({length: 50}, () => 'shared0();').join('\n');
+    const calls = EffectArray.join(
+      Array.from({length: 50}, () => 'shared0();'),
+      '\n',
+    );
     const files = [
       ...projectFiles,
       sourceFile(
@@ -530,9 +698,12 @@ describe('native code graph extraction', () => {
         'import {phantom} from "../../../src/foo";\nexport function usePhantom(): string { return phantom(); }\n',
       ),
     ]);
-    const call = escaped
-      .flatMap(file => file.edges)
-      .find(edge => edge.sourceName === 'usePhantom' && edge.relation === 'calls');
+    const call = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(escaped, file => file.edges),
+        edge => edge.sourceName === 'usePhantom' && edge.relation === 'calls',
+      ),
+    );
 
     expect(call).toMatchObject({provenance: 'syntactic'});
     expect(call?.targetId).toBeUndefined();
@@ -554,9 +725,12 @@ describe('native code graph extraction', () => {
         'import {value} from "@fixture/library";\nexport function useValue(): string { return value(); }\n',
       ),
     ]);
-    const call = ambiguous
-      .flatMap(file => file.edges)
-      .find(edge => edge.sourceName === 'useValue' && edge.relation === 'calls');
+    const call = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(ambiguous, file => file.edges),
+        edge => edge.sourceName === 'useValue' && edge.relation === 'calls',
+      ),
+    );
 
     expect(call).toMatchObject({provenance: 'syntactic'});
     expect(call?.targetId).toBeUndefined();
@@ -577,18 +751,26 @@ describe('native code graph extraction', () => {
         'import {duplicateValue} from "@fixture/duplicate";\nexport function useDuplicate(): string { return duplicateValue(); }\n',
       ),
     ]);
-    const edges = duplicate.flatMap(file => file.edges);
+    const edges = EffectArray.flatMap(duplicate, file => file.edges);
 
-    const dependency = edges.find(
-      edge => edge.sourceName === '@fixture/root' && edge.targetName === '@fixture/duplicate',
+    const dependency = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        edges,
+        edge => edge.sourceName === '@fixture/root' && edge.targetName === '@fixture/duplicate',
+      ),
     );
     expect(dependency).toMatchObject({provenance: 'declared'});
     expect(dependency?.targetId).toBeUndefined();
-    const call = edges.find(edge => edge.sourceName === 'useDuplicate' && edge.targetName === 'duplicateValue');
+    const call = EffectOption.getOrUndefined(
+      EffectArray.findFirst(edges, edge => edge.sourceName === 'useDuplicate' && edge.targetName === 'duplicateValue'),
+    );
     expect(call).toMatchObject({provenance: 'syntactic'});
     expect(call?.targetId).toBeUndefined();
     expect(
-      duplicate.flatMap(file => file.diagnostics).filter(value => value.includes('duplicate workspace')),
+      EffectArray.filter(
+        EffectArray.flatMap(duplicate, file => file.diagnostics),
+        value => Effect.pipe(value, EffectString.includes('duplicate workspace')),
+      ),
     ).toHaveLength(2);
   });
 
@@ -616,9 +798,14 @@ describe('native code graph extraction', () => {
         'import {shared} from "@/shared";\nexport function generatedUse(): string { return shared(); }\n',
       ),
     ]);
-    const edges = scoped.flatMap(file => file.edges);
+    const edges = EffectArray.flatMap(scoped, file => file.edges);
     const call = (name: string) =>
-      edges.find(edge => edge.sourceName === name && edge.relation === 'calls' && edge.targetName === 'shared');
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          edges,
+          edge => edge.sourceName === name && edge.relation === 'calls' && edge.targetName === 'shared',
+        ),
+      );
 
     expect(call('includedUse')).toMatchObject({provenance: 'resolved'});
     expect(call('excludedUse')).toMatchObject({provenance: 'syntactic'});
@@ -644,15 +831,20 @@ describe('native code graph extraction', () => {
       ),
       sourceFile(
         'src/classes.ts',
-        [
-          'export class First { invoke(): void { this.missing(); } }',
-          'export class Second { missing(): void {} }',
-        ].join('\n'),
+        EffectArray.join(
+          ['export class First { invoke(): void { this.missing(); } }', 'export class Second { missing(): void {} }'],
+          '\n',
+        ),
       ),
     ]);
-    const edges = scoped.flatMap(file => file.edges);
+    const edges = EffectArray.flatMap(scoped, file => file.edges);
     const call = (source: string, target: string) =>
-      edges.find(edge => edge.sourceName === source && edge.relation === 'calls' && edge.targetName === target);
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          edges,
+          edge => edge.sourceName === source && edge.relation === 'calls' && edge.targetName === target,
+        ),
+      );
 
     expect(call('useShared', 'shared')).toMatchObject({provenance: 'syntactic'});
     expect(call('useValue', 'value')).toMatchObject({provenance: 'syntactic'});
@@ -665,24 +857,32 @@ describe('native code graph extraction', () => {
       sourceFile('src/helper.ts', 'export function helper(): string { return "module"; }\n'),
       sourceFile(
         'src/use.ts',
-        [
-          'import {helper} from "./helper.js";',
-          'export function parameterUse(helper: () => string): string { return helper(); }',
-          'export function localUse(): string {',
-          '  const helper = (): string => "local";',
-          '  return helper();',
-          '}',
-          'export function nestedUse(): string {',
-          '  function nested(): string { return "nested"; }',
-          '  return nested();',
-          '}',
-          'export function importedUse(): string { return helper(); }',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'import {helper} from "./helper.js";',
+            'export function parameterUse(helper: () => string): string { return helper(); }',
+            'export function localUse(): string {',
+            '  const helper = (): string => "local";',
+            '  return helper();',
+            '}',
+            'export function nestedUse(): string {',
+            '  function nested(): string { return "nested"; }',
+            '  return nested();',
+            '}',
+            'export function importedUse(): string { return helper(); }',
+          ],
+          '\n',
+        ),
       ),
     ]);
-    const calls = scoped.flatMap(file => file.edges).filter(edge => edge.relation === 'calls');
+    const calls = EffectArray.filter(
+      EffectArray.flatMap(scoped, file => file.edges),
+      edge => edge.relation === 'calls',
+    );
     const call = (source: string, target: string) =>
-      calls.find(edge => edge.sourceName === source && edge.targetName === target);
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(calls, edge => edge.sourceName === source && edge.targetName === target),
+      );
 
     expect(call('parameterUse', 'helper')).toMatchObject({provenance: 'syntactic'});
     expect(call('parameterUse', 'helper')?.targetId).toBeUndefined();
@@ -698,19 +898,25 @@ describe('native code graph extraction', () => {
       sourceFile('src/helper.ts', 'export function helper(): string { return "module"; }\n'),
       sourceFile(
         'src/use.ts',
-        [
-          'import {helper} from "./helper.js";',
-          'export const namedFunction = function helper(): unknown { return helper(); };',
-          'export const namedClass = class helper { method(): unknown { return helper(); } };',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'import {helper} from "./helper.js";',
+            'export const namedFunction = function helper(): unknown { return helper(); };',
+            'export const namedClass = class helper { method(): unknown { return helper(); } };',
+          ],
+          '\n',
+        ),
       ),
     ]);
-    const selfReferences = scoped
-      .flatMap(file => file.edges)
-      .filter(edge => edge.evidencePath === 'src/use.ts' && edge.relation === 'calls' && edge.targetName === 'helper');
+    const selfReferences = EffectArray.filter(
+      EffectArray.flatMap(scoped, file => file.edges),
+      edge => edge.evidencePath === 'src/use.ts' && edge.relation === 'calls' && edge.targetName === 'helper',
+    );
 
     expect(selfReferences).toHaveLength(2);
-    expect(selfReferences.every(edge => edge.provenance === 'syntactic' && edge.targetId === undefined)).toBe(true);
+    expect(
+      EffectArray.every(selfReferences, edge => edge.provenance === 'syntactic' && edge.targetId === undefined),
+    ).toBe(true);
   });
 });
 
@@ -724,9 +930,9 @@ function fixtureFiles(root: string): readonly CodeGraphInventoryFile[] {
     }
   };
   visit(root);
-  return paths.sort().map(path => {
+  return EffectArray.map(paths.sort(), path => {
     const content = readFileSync(path, 'utf8');
-    const repositoryPath = relative(root, path).replaceAll('\\', '/');
+    const repositoryPath = Effect.pipe(relative(root, path), EffectString.replaceAll('\\', '/'));
     return {
       blobId: `fixture:${sha256HexSync(content)}`,
       content,
@@ -743,7 +949,7 @@ function fixtureFiles(root: string): readonly CodeGraphInventoryFile[] {
 function language(path: string): string {
   if (/\.tsx?$/.test(path)) return 'typescript';
   if (/\.md$/.test(path)) return 'markdown';
-  if (path.endsWith('package.json')) return 'npm-manifest';
+  if (Effect.pipe(path, EffectString.endsWith('package.json'))) return 'npm-manifest';
   return 'text';
 }
 
@@ -762,25 +968,38 @@ function sourceFile(path: string, content: string): CodeGraphInventoryFile {
 
 function overloadFixture(arities: readonly number[]): string {
   const declarations = (name: string, prefix: string) =>
-    arities.map(arity => {
-      const parameters = Array.from({length: arity}, (_, index) => `value${index}: number`).join(', ');
+    EffectArray.map(arities, arity => {
+      const parameters = EffectArray.join(
+        Array.from({length: arity}, (_, index) => `value${index}: number`),
+        ', ',
+      );
       return `${prefix} function ${name}(${parameters}): string;`;
     });
-  return [
-    ...declarations('parse', 'export'),
-    'export function parse(...values: readonly number[]): string { return values.join(","); }',
-    ...declarations('decode', 'export declare'),
-    'export function useLocal(): string { return parse(1); }',
-    '',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      ...declarations('parse', 'export'),
+      'export function parse(...values: readonly number[]): string { return values.join(","); }',
+      ...declarations('decode', 'export declare'),
+      'export function useLocal(): string { return parse(1); }',
+      '',
+    ],
+    '\n',
+  );
 }
 
 function overloadUseFixture(firstArity: number, secondArity: number): string {
-  const argumentsList = (arity: number) => Array.from({length: arity}, (_, index) => String(index)).join(', ');
-  return [
-    'import {decode, parse} from "./overloads.js";',
-    'export function useImported(): string { return parse(1); }',
-    `export function useDeclared(): string { return decode(${argumentsList(firstArity)}) + decode(${argumentsList(secondArity)}); }`,
-    '',
-  ].join('\n');
+  const argumentsList = (arity: number) =>
+    EffectArray.join(
+      Array.from({length: arity}, (_, index) => String(index)),
+      ', ',
+    );
+  return EffectArray.join(
+    [
+      'import {decode, parse} from "./overloads.js";',
+      'export function useImported(): string { return parse(1); }',
+      `export function useDeclared(): string { return decode(${argumentsList(firstArity)}) + decode(${argumentsList(secondArity)}); }`,
+      '',
+    ],
+    '\n',
+  );
 }

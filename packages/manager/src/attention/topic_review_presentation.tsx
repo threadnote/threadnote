@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import React from 'react';
 import {Check, FileCode2, History, Info, Link2, LockKeyhole, Shield, Sparkles} from 'lucide-react';
 import type {TopicMaintenanceDraftV1} from '@threadnote/memory/topic-maintenance-draft';
@@ -6,6 +8,9 @@ import {MemoryExcerpt, ReviewBadge, type ReviewTone} from '../review_presentatio
 import type {ManagerContextMaintenancePacketV2} from './contracts.js';
 import type {ManagerTopicReviewV1} from './topic_contracts.js';
 import {TopicObsidianEvidence, type TopicCaptureControls} from './topic_obsidian_evidence.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const statePresentation = {
   pending: {label: 'Awaiting review', tone: 'warning'},
@@ -63,7 +68,7 @@ export function TopicReviewNotes({review}: {readonly review: ManagerTopicReviewV
           </summary>
           <p>These checks are advisory and do not verify every claim. Review the limits before deciding.</p>
           <ul>
-            {review.warnings.map((warning, index) => (
+            {EffectArray.map(review.warnings, (warning, index) => (
               <li key={index}>{warning}</li>
             ))}
           </ul>
@@ -127,31 +132,35 @@ export function TopicSourceEvidence(props: {
           <FileCode2 size={13} aria-hidden="true" /> {topic.sources?.length ?? 0} references
         </ReviewBadge>
       </header>
-      {topic.sources?.map(source => (
-        <details key={source.citationId} className="review-source-card" open={source.status === 'changed'}>
-          <summary>
-            <FileCode2 size={16} aria-hidden="true" />
-            <code>{source.current.path}</code>
-            <ReviewBadge tone={source.status === 'changed' ? 'warning' : 'info'}>
-              {source.status.replaceAll('-', ' ')}
-            </ReviewBadge>
-          </summary>
-          <div className="health-evidence-comparison">
-            <section>
-              <h5>
-                <History size={13} aria-hidden="true" /> Original source
-              </h5>
-              <pre>{source.oldExcerpt.content}</pre>
-            </section>
-            <section>
-              <h5>
-                <FileCode2 size={13} aria-hidden="true" /> Current source
-              </h5>
-              <pre>{source.newExcerpt.content}</pre>
-            </section>
-          </div>
-        </details>
-      ))}
+      {EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(topic.sources), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, source => (
+            <details key={source.citationId} className="review-source-card" open={source.status === 'changed'}>
+              <summary>
+                <FileCode2 size={16} aria-hidden="true" />
+                <code>{source.current.path}</code>
+                <ReviewBadge tone={source.status === 'changed' ? 'warning' : 'info'}>
+                  {Effect.pipe(source.status, EffectString.replaceAll('-', ' '))}
+                </ReviewBadge>
+              </summary>
+              <div className="health-evidence-comparison">
+                <section>
+                  <h5>
+                    <History size={13} aria-hidden="true" /> Original source
+                  </h5>
+                  <pre>{source.oldExcerpt.content}</pre>
+                </section>
+                <section>
+                  <h5>
+                    <FileCode2 size={13} aria-hidden="true" /> Current source
+                  </h5>
+                  <pre>{source.newExcerpt.content}</pre>
+                </section>
+              </div>
+            </details>
+          )),
+        ),
+      )}
       {!topic.sources?.length ? <p>No bounded source excerpts are available.</p> : null}
       {!!topic.truncatedExcerpts && <p>Some source excerpts were omitted because of the view limit.</p>}
     </section>
@@ -176,11 +185,23 @@ export function TopicParagraphComparison(props: {
         </h4>
         <span>Compare with your accepted memory</span>
       </header>
-      {review.paragraphs.map((paragraph, ordinal) => {
-        const operation = props.draft?.operations.find(item => item.ordinal === ordinal);
+      {EffectArray.map(review.paragraphs, (paragraph, ordinal) => {
+        const operation = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(props.draft?.operations), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, item => item.ordinal === ordinal)),
+          ),
+        );
         const original = props.originalParagraphs[ordinal] ?? '';
         const proposed = operation?.text ?? original;
-        const disposition = props.draft?.paragraphDispositions?.entries.find(item => item.ordinal === ordinal);
+        const disposition = EffectOption.getOrUndefined(
+          EffectOption.map(
+            EffectOption.fromNullishOr(props.draft?.paragraphDispositions?.entries),
+            __effectArrayReceiver =>
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(__effectArrayReceiver, item => item.ordinal === ordinal),
+              ),
+          ),
+        );
         const eligible = topicMaintenanceParagraphEligible(paragraph);
         const preserved = paragraph.role !== 'descriptive' || (review.generation.origin === 'model' && !eligible);
         const selectedSupport = operation?.supportHandles ?? disposition?.supportHandles ?? [];
@@ -191,7 +212,9 @@ export function TopicParagraphComparison(props: {
           >
             <header>
               <div className="topic-paragraph-title">
-                <span className="topic-paragraph-number">{String(ordinal + 1).padStart(2, '0')}</span>
+                <span className="topic-paragraph-number">
+                  {Effect.pipe(String(ordinal + 1), EffectString.padStart(2, '0'))}
+                </span>
                 <h5>Paragraph {ordinal + 1}</h5>
               </div>
               <div className="review-badge-row">
@@ -253,7 +276,7 @@ export function TopicParagraphComparison(props: {
                   </div>
                   <textarea
                     aria-label={`Proposed descriptive paragraph ${ordinal + 1}`}
-                    rows={Math.max(4, Math.min(12, proposed.split('\n').length + 2))}
+                    rows={Math.max(4, Math.min(12, Effect.pipe(proposed, EffectString.split('\n')).length + 2))}
                     value={proposed}
                     disabled={props.disabled}
                     onChange={event => props.onEditParagraph(ordinal, event.target.value)}
@@ -280,15 +303,22 @@ export function TopicParagraphComparison(props: {
                 <legend>
                   <Link2 size={13} aria-hidden="true" /> Current source support for paragraph {ordinal + 1}
                 </legend>
-                {review.support
-                  .filter(
-                    source =>
-                      source.variant === 'current' &&
-                      (!props.draft?.paragraphDispositions ||
-                        paragraph.citationIds.includes(source.citationId) ||
-                        review.additionalDependencies.some(item => item.citationId === source.citationId)),
-                  )
-                  .map(source => (
+                {EffectArray.map(
+                  EffectArrayPipe(review.support, __effectArrayValues =>
+                    EffectArray.filter(
+                      __effectArrayValues,
+                      (source, __effectArrayIndex) =>
+                        __effectArrayIndex in __effectArrayValues &&
+                        source.variant === 'current' &&
+                        (!props.draft?.paragraphDispositions ||
+                          paragraph.citationIds.includes(source.citationId) ||
+                          EffectArray.some(
+                            review.additionalDependencies,
+                            item => item.citationId === source.citationId,
+                          )),
+                    ),
+                  ),
+                  source => (
                     <label key={source.handleId} className="review-confirmation">
                       <input
                         type="checkbox"
@@ -304,7 +334,8 @@ export function TopicParagraphComparison(props: {
                         </small>
                       </span>
                     </label>
-                  ))}
+                  ),
+                )}
               </fieldset>
             ) : null}
           </article>

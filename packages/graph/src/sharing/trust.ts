@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {readJsonFile, writePrivateJsonFile} from './atomic.js';
@@ -5,6 +6,8 @@ import {graphSharingFailure} from './errors.js';
 import {parseSha256Digest, SHA256_DIGEST, SHA256_HEX, type Sha256Digest} from './digest.js';
 import {graphSharingLayout} from './layout.js';
 import {parseGraphShareCoordinatorUrl, type GraphShareEnrollment, type GraphShareProfileV1} from './profile.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const GRAPH_SHARE_TRUST_LOCK_OPTIONS = {
   heartbeatIntervalMilliseconds: 10_000,
@@ -64,7 +67,9 @@ export const lookupGraphShareTrustReceipt = Effect.fn('codeGraph.sharing.lookupT
   repositoryId: string,
 ) {
   const document = yield* readGraphShareTrustDocument(threadnoteHome);
-  return document.receipts.find(receipt => receipt.repositoryId === repositoryId);
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(document.receipts, receipt => receipt.repositoryId === repositoryId),
+  );
 });
 
 export const writeGraphShareTrustReceipt = Effect.fn('codeGraph.sharing.writeTrustReceipt')(function* (
@@ -85,7 +90,9 @@ export const writeGraphShareTrustReceipt = Effect.fn('codeGraph.sharing.writeTru
       const revoked = document.autoEnrollmentRevokedRepositoryIds ?? [];
       if (options?.automatic && revoked.includes(receipt.repositoryId))
         return yield* graphSharingFailure('Automatic graph enrollment was revoked for this repository.');
-      const previous = document.receipts.find(item => item.repositoryId === receipt.repositoryId);
+      const previous = EffectOption.getOrUndefined(
+        EffectArray.findFirst(document.receipts, item => item.repositoryId === receipt.repositoryId),
+      );
       const stored =
         options?.preserveContributionMode &&
         previous?.accessMode === 'join' &&
@@ -95,13 +102,16 @@ export const writeGraphShareTrustReceipt = Effect.fn('codeGraph.sharing.writeTru
         receipt.client !== undefined
           ? {...receipt, client: {...receipt.client, contributionMode: previous.client.contributionMode}}
           : receipt;
-      const receipts = [...document.receipts.filter(item => item.repositoryId !== receipt.repositoryId), stored].sort(
-        (left, right) => (left.repositoryId < right.repositoryId ? -1 : left.repositoryId > right.repositoryId ? 1 : 0),
+      const receipts = [
+        ...EffectArray.filter(document.receipts, item => item.repositoryId !== receipt.repositoryId),
+        stored,
+      ].sort((left, right) =>
+        left.repositoryId < right.repositoryId ? -1 : left.repositoryId > right.repositoryId ? 1 : 0,
       );
       yield* writePrivateJsonFile(layout.trustReceiptsPath, {
         ...document,
         ...(options?.clearAutoEnrollmentRevocation
-          ? {autoEnrollmentRevokedRepositoryIds: revoked.filter(id => id !== receipt.repositoryId)}
+          ? {autoEnrollmentRevokedRepositoryIds: EffectArray.filter(revoked, id => id !== receipt.repositoryId)}
           : {}),
         receipts,
       } satisfies GraphShareTrustDocumentV1);
@@ -122,13 +132,17 @@ export const writeGraphShareRepositoryContributionMode = Effect.fn('codeGraph.sh
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const document = yield* readGraphShareTrustDocument(threadnoteHome);
-        const current = document.receipts.find(item => item.repositoryId === expected.repositoryId);
+        const current = EffectOption.getOrUndefined(
+          EffectArray.findFirst(document.receipts, item => item.repositoryId === expected.repositoryId),
+        );
         if (current === undefined || current.profileDigest !== expected.profileDigest) return 'off' as const;
         const mode = current.accessMode === 'join' ? requested : 'off';
         const updated = {...current, client: {...(current.client ?? client), contributionMode: mode}};
         yield* writePrivateJsonFile(graphSharingLayout(path, threadnoteHome).trustReceiptsPath, {
           ...document,
-          receipts: document.receipts.map(item => (item.repositoryId === current.repositoryId ? updated : item)),
+          receipts: EffectArray.map(document.receipts, item =>
+            item.repositoryId === current.repositoryId ? updated : item,
+          ),
         });
         return mode;
       }),
@@ -153,7 +167,7 @@ export const removeGraphShareTrustReceipt = Effect.fn('codeGraph.sharing.removeT
         ...(options?.revokeAutomatic
           ? {autoEnrollmentRevokedRepositoryIds: [...new Set([...revoked, repositoryId])].sort()}
           : {}),
-        receipts: document.receipts.filter(item => item.repositoryId !== repositoryId),
+        receipts: EffectArray.filter(document.receipts, item => item.repositoryId !== repositoryId),
       } satisfies GraphShareTrustDocumentV1);
     }),
   );
@@ -220,9 +234,9 @@ export const patchGraphShareClientState = Effect.fn('codeGraph.sharing.patchClie
       const coordinatorUrl = patch.coordinatorUrl !== undefined ? patch.coordinatorUrl : current.coordinatorUrl;
       const state: GraphShareClientStateV1 = {
         schemaVersion: 1,
-        ...(casRoot !== undefined && casRoot.trim().length > 0 ? {casRoot} : {}),
+        ...(casRoot !== undefined && Effect2.pipe(casRoot, EffectString.trim).length > 0 ? {casRoot} : {}),
         ...(contributionMode === undefined ? {} : {contributionMode}),
-        ...(coordinatorUrl === undefined || coordinatorUrl.trim().length === 0
+        ...(coordinatorUrl === undefined || Effect2.pipe(coordinatorUrl, EffectString.trim).length === 0
           ? {}
           : {coordinatorUrl: parseGraphShareCoordinatorUrl(coordinatorUrl)}),
       };
@@ -237,9 +251,11 @@ export const resolveGraphShareCasRoot = Effect.fn('codeGraph.sharing.resolveCasR
   casRoot?: string,
 ) {
   const path = yield* Path.Path;
-  if (casRoot !== undefined && casRoot.trim().length > 0) return path.resolve(casRoot.trim());
+  if (casRoot !== undefined && Effect2.pipe(casRoot, EffectString.trim).length > 0)
+    return path.resolve(Effect2.pipe(casRoot, EffectString.trim));
   const state = yield* readGraphShareClientState(threadnoteHome);
-  if (state.casRoot !== undefined && state.casRoot.trim().length > 0) return path.resolve(state.casRoot);
+  if (state.casRoot !== undefined && Effect2.pipe(state.casRoot, EffectString.trim).length > 0)
+    return path.resolve(state.casRoot);
   return graphSharingLayout(path, threadnoteHome).casRoot;
 });
 
@@ -263,7 +279,11 @@ function withGraphShareClientStateLock<A, E, R>(threadnoteHome: string, effect: 
 }
 
 function parseTrustDocument(value: unknown): GraphShareTrustDocumentV1 {
-  if (!isRecord(value) || value.schemaVersion !== GRAPH_SHARE_TRUST_SCHEMA_VERSION || !Array.isArray(value.receipts)) {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== GRAPH_SHARE_TRUST_SCHEMA_VERSION ||
+    !EffectArray.isArray(value.receipts)
+  ) {
     throw graphSharingFailure('Trust receipts file is invalid.');
   }
   return {
@@ -272,14 +292,14 @@ function parseTrustDocument(value: unknown): GraphShareTrustDocumentV1 {
       : {
           autoEnrollmentRevokedRepositoryIds: parseRevokedRepositoryIds(value.autoEnrollmentRevokedRepositoryIds),
         }),
-    receipts: value.receipts.map(parseTrustReceipt),
+    receipts: EffectArray.map(value.receipts, parseTrustReceipt),
     schemaVersion: GRAPH_SHARE_TRUST_SCHEMA_VERSION,
   };
 }
 
 function parseRevokedRepositoryIds(value: unknown): readonly string[] {
-  if (!Array.isArray(value)) throw graphSharingFailure('Graph auto-enrollment revocations are invalid.');
-  const ids = value.map(requiredHex);
+  if (!EffectArray.isArray(value)) throw graphSharingFailure('Graph auto-enrollment revocations are invalid.');
+  const ids = EffectArray.map(value, requiredHex);
   if (new Set(ids).size !== ids.length) throw graphSharingFailure('Graph auto-enrollment revocations are invalid.');
   return ids;
 }
@@ -320,7 +340,10 @@ function parseClientState(value: unknown): GraphShareClientStateV1 {
   if (!isRecord(value) || value.schemaVersion !== 1) {
     throw graphSharingFailure('Graph-sharing client state is invalid.');
   }
-  if (value.casRoot !== undefined && (typeof value.casRoot !== 'string' || value.casRoot.trim().length === 0)) {
+  if (
+    value.casRoot !== undefined &&
+    (typeof value.casRoot !== 'string' || Effect2.pipe(value.casRoot, EffectString.trim).length === 0)
+  ) {
     throw graphSharingFailure('Graph-sharing CAS root is invalid.');
   }
   const contributionMode =
@@ -344,11 +367,11 @@ function parseClientState(value: unknown): GraphShareClientStateV1 {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function requiredText(value: unknown): string {
-  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 512) {
+  if (typeof value !== 'string' || Effect2.pipe(value, EffectString.trim).length === 0 || value.length > 512) {
     throw graphSharingFailure('Trust receipt text field is invalid.');
   }
   return value;
@@ -358,7 +381,7 @@ function requiredDigest(value: unknown): Sha256Digest {
   if (typeof value !== 'string' || !SHA256_DIGEST.test(value)) {
     throw graphSharingFailure('Trust receipt digest is invalid.');
   }
-  return value as Sha256Digest;
+  return parseSha256Digest(value);
 }
 
 function requiredHex(value: unknown): string {

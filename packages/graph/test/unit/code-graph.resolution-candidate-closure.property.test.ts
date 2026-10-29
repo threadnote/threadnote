@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -32,6 +33,8 @@ import type {
   CodeGraphReference,
   CodeGraphSymbol,
 } from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('resolution-candidate closure', () => {
   fcProp(
@@ -44,8 +47,8 @@ describe('resolution-candidate closure', () => {
       reverse: FC.boolean(),
     },
     ({ids, pageMaximumFactBytes, pageMaximumFiles, reverse}) => {
-      const files = ids.map(id => inventory(`src/file-${id}.ts`, 1));
-      const bytesByPath = new Map(files.map(file => [file.path, factBytesForPath(file.path)]));
+      const files = EffectArray.map(ids, id => inventory(`src/file-${id}.ts`, 1));
+      const bytesByPath = new Map(EffectArray.map(files, file => [file.path, factBytesForPath(file.path)]));
       const inputFiles = reverse ? [...files].reverse() : files;
       const plan = planProjectResolutionCandidateScan({
         bytesByPath,
@@ -58,15 +61,17 @@ describe('resolution-candidate closure', () => {
 
       expect(plan.mode).toBe('eligible');
       if (plan.mode !== 'eligible') return;
-      const flattened = plan.pages.flatMap(page => page.files.map(file => file.path));
-      const expectedPaths = files.map(file => file.path).sort();
+      const flattened = EffectArray.flatMap(plan.pages, page => EffectArray.map(page.files, file => file.path));
+      const expectedPaths = EffectArray.map(files, file => file.path).sort();
       expect(flattened).toEqual(expectedPaths);
       expect(new Set(flattened).size).toBe(flattened.length);
       expect(plan.files).toBe(files.length);
-      expect(plan.factBytes).toBe([...bytesByPath.values()].reduce((total, bytes) => total + bytes, 0));
+      expect(plan.factBytes).toBe(EffectArray.reduce([...bytesByPath.values()], 0, (total, bytes) => total + bytes));
       for (const page of plan.pages) {
         expect(page.files.length).toBeLessThanOrEqual(pageMaximumFiles);
-        expect(page.factBytes).toBe(page.files.reduce((total, file) => total + bytesByPath.get(file.path)!, 0));
+        expect(page.factBytes).toBe(
+          EffectArray.reduce(page.files, 0, (total, file) => total + bytesByPath.get(file.path)!),
+        );
         if (page.factBytes > pageMaximumFactBytes) {
           expect(page.files).toHaveLength(1);
           expect(bytesByPath.get(page.files[0].path)).toBeGreaterThan(pageMaximumFactBytes);
@@ -96,9 +101,9 @@ describe('resolution-candidate closure', () => {
     },
     ({ids, leftPageFiles, rightPageFiles}) =>
       Effect.gen(function* () {
-        const files = ids.map(id => inventory(`src/file-${id}.ts`, 1));
+        const files = EffectArray.map(ids, id => inventory(`src/file-${id}.ts`, 1));
         const factsByPath = new Map(
-          ids.map(id => {
+          EffectArray.map(ids, id => {
             const path = `src/file-${id}.ts`;
             const group = id % 4;
             return [
@@ -132,23 +137,23 @@ describe('resolution-candidate closure', () => {
     },
     ({rows, seed, reverse}) =>
       Effect.gen(function* () {
-        const files = rows.map((_, index) => inventory(`file-${index}.ts`, 1));
+        const files = EffectArray.map(rows, (_, index) => inventory(`file-${index}.ts`, 1));
         const before = new Map(
-          rows.map((row, index) => [
+          EffectArray.map(rows, (row, index) => [
             files[index].path,
             facts(files[index].path, [reference(files[index].path, [[String(row.oldKey)]])]),
           ]),
         );
         const current = new Map(
-          rows.map((row, index) => [
+          EffectArray.map(rows, (row, index) => [
             files[index].path,
             facts(files[index].path, [reference(files[index].path, [[String(row.newKey)]])]),
           ]),
         );
-        const expected = files
-          .filter((_, index) => rows[index].oldKey === seed || rows[index].newKey === seed)
-          .map(file => file.path)
-          .sort();
+        const expected = EffectArray.map(
+          EffectArray.filter(files, (_, index) => rows[index].oldKey === seed || rows[index].newKey === seed),
+          file => file.path,
+        ).sort();
         let loaded = 0;
         const result = yield* scanProjectResolutionCandidateClosure({
           initialLookupKeys: [lookup('typescript', String(seed))],
@@ -158,7 +163,7 @@ describe('resolution-candidate closure', () => {
             loaded += page.length;
             return Effect.succeed({
               ...loadedPage(page, current),
-              previousFacts: new Map(page.map(file => [file.path, before.get(file.path)!])),
+              previousFacts: new Map(EffectArray.map(page, file => [file.path, before.get(file.path)!])),
             });
           },
         });
@@ -190,7 +195,7 @@ describe('resolution-candidate closure', () => {
           loads += 1;
           return Effect.succeed({
             ...loadedPage(page, current),
-            previousFacts: new Map(page.map(file => [file.path, before.get(file.path)!])),
+            previousFacts: new Map(EffectArray.map(page, file => [file.path, before.get(file.path)!])),
           });
         };
         const closure = yield* scanProjectResolutionCandidateClosure({
@@ -317,7 +322,7 @@ describe('resolution-candidate closure', () => {
       seedCodes: FC.array(FC.integer({max: 10_000, min: 0}), {maxLength: 20, minLength: 1}),
     },
     ({edgeCodes, nodeCount, permutationCodes, seedCodes}) => {
-      const reexports = edgeCodes.map((code, index) => {
+      const reexports = EffectArray.map(edgeCodes, (code, index) => {
         const alias = code % nodeCount;
         const candidate = Math.floor(code / nodeCount) % nodeCount;
         return reexportKeys(
@@ -326,12 +331,14 @@ describe('resolution-candidate closure', () => {
           lookup('typescript', `k${candidate}`),
         );
       });
-      const seeds = seedCodes.map(code => lookup('typescript', `k${code % nodeCount}`));
+      const seeds = EffectArray.map(seedCodes, code => lookup('typescript', `k${code % nodeCount}`));
       const expected = independentLookupClosure(seeds, reexports);
-      const permuted = [...reexports]
-        .map((value, index) => ({priority: permutationCodes[index] ?? 0, value}))
-        .sort((left, right) => left.priority - right.priority)
-        .map(entry => entry.value);
+      const permuted = EffectArray.map(
+        EffectArray.map([...reexports], (value, index) => ({priority: permutationCodes[index] ?? 0, value})).sort(
+          (left, right) => left.priority - right.priority,
+        ),
+        entry => entry.value,
+      );
 
       const canonical = resolutionCandidateLookupKeyClosure(seeds, reexports, nodeCount + 1);
       const reordered = resolutionCandidateLookupKeyClosure([...seeds].reverse(), permuted, nodeCount + 1);
@@ -341,7 +348,7 @@ describe('resolution-candidate closure', () => {
       expect([...canonical.identities].sort()).toEqual([...expected].sort());
       expect([...reordered.identities].sort()).toEqual([...expected].sort());
 
-      const fixedPointSeeds = [...canonical.identities].map(parseLookupIdentity);
+      const fixedPointSeeds = EffectArray.map([...canonical.identities], parseLookupIdentity);
       const repeated = resolutionCandidateLookupKeyClosure(fixedPointSeeds, permuted, nodeCount + 1);
       expect(repeated.mode).toBe('eligible');
       if (repeated.mode === 'eligible') {
@@ -366,12 +373,12 @@ describe('resolution-candidate closure', () => {
       seedCodes: FC.array(FC.integer({max: 10_000, min: 0}), {maxLength: 10, minLength: 1}),
     },
     ({hyperedges, nodeCount, seedCodes}) => {
-      const reexports = hyperedges.map(({aliasCodes, candidateCodes}, index) => ({
-        aliases: aliasCodes.map(code => lookup('typescript', `k${code % nodeCount}`)),
-        candidates: candidateCodes.map(code => lookup('typescript', `k${code % nodeCount}`)),
+      const reexports = EffectArray.map(hyperedges, ({aliasCodes, candidateCodes}, index) => ({
+        aliases: EffectArray.map(aliasCodes, code => lookup('typescript', `k${code % nodeCount}`)),
+        candidates: EffectArray.map(candidateCodes, code => lookup('typescript', `k${code % nodeCount}`)),
         sourcePath: `barrel-${index}.ts`,
       }));
-      const seeds = seedCodes.map(code => lookup('typescript', `k${code % nodeCount}`));
+      const seeds = EffectArray.map(seedCodes, code => lookup('typescript', `k${code % nodeCount}`));
       const expected = independentLookupClosure(seeds, reexports);
       const actual = resolutionCandidateLookupKeyClosure(seeds, reexports, nodeCount);
 
@@ -394,12 +401,12 @@ describe('resolution-candidate closure', () => {
     },
     ({aliasIds, candidateIds, duplicate, maximumRows}) => {
       const copies = duplicate ? 2 : 1;
-      const aliases = aliasIds.flatMap(id =>
+      const aliases = EffectArray.flatMap(aliasIds, id =>
         Array.from({length: copies}, () =>
           lookup('typescript', canonicalTypeScriptKey(`alias-${id}.ts`, `alias${id}`)),
         ),
       );
-      const candidates = candidateIds.flatMap(id =>
+      const candidates = EffectArray.flatMap(candidateIds, id =>
         Array.from({length: copies}, () =>
           lookup('typescript', canonicalTypeScriptKey(`target-${id}.ts`, `target${id}`)),
         ),
@@ -472,7 +479,7 @@ describe('resolution-candidate closure', () => {
     ({seed, tiers}) =>
       Effect.gen(function* () {
         const path = 'src/consumer.ts';
-        const lookupTiers = tiers.map(tier => tier.map(id => `k${id}`));
+        const lookupTiers = EffectArray.map(tiers, tier => EffectArray.map(tier, id => `k${id}`));
         const factsByPath = new Map([[path, facts(path, [reference(path, lookupTiers)])]]);
         const closure = yield* scan(
           eligiblePlan([inventory(path, 1)], 1),
@@ -480,7 +487,7 @@ describe('resolution-candidate closure', () => {
           [lookup('typescript', `k${seed}`)],
           1,
         );
-        const expected = tiers.some(tier => tier.includes(seed));
+        const expected = EffectArray.some(tiers, tier => tier.includes(seed));
 
         expect(closure.mode).toBe('eligible');
         if (closure.mode === 'eligible') expect(closure.paths).toEqual(expected ? [path] : []);
@@ -516,8 +523,8 @@ describe('resolution-candidate closure', () => {
     },
     ({additionalRows, rows, seed, seedDomain}) =>
       Effect.gen(function* () {
-        const files = rows.map((_, index) => inventory(`src/file-${index}.ts`, 1));
-        const baseReexports = rows.flatMap((row, index) =>
+        const files = EffectArray.map(rows, (_, index) => inventory(`src/file-${index}.ts`, 1));
+        const baseReexports = EffectArray.flatMap(rows, (row, index) =>
           row.reexport
             ? [
                 reexportKeys(
@@ -528,7 +535,7 @@ describe('resolution-candidate closure', () => {
               ]
             : [],
         );
-        const additionalReexports = additionalRows.map((row, index) =>
+        const additionalReexports = EffectArray.map(additionalRows, (row, index) =>
           reexportKeys(
             `candidate-${index}.ts`,
             lookup(row.domain, `k${row.alias}`),
@@ -537,7 +544,7 @@ describe('resolution-candidate closure', () => {
         );
         const allReexports = [...additionalReexports, ...baseReexports];
         const referencesByPath = new Map(
-          rows.map((row, index) => {
+          EffectArray.map(rows, (row, index) => {
             const path = `src/file-${index}.ts`;
             const midpoint = Math.ceil(row.keys.length / 2);
             const ordinary =
@@ -547,8 +554,8 @@ describe('resolution-candidate closure', () => {
                     reference(
                       path,
                       [
-                        row.keys.slice(0, midpoint).map(key => `k${key}`),
-                        row.keys.slice(midpoint).map(key => `k${key}`),
+                        EffectArray.map(row.keys.slice(0, midpoint), key => `k${key}`),
+                        EffectArray.map(row.keys.slice(midpoint), key => `k${key}`),
                       ],
                       row.domain,
                     ),
@@ -560,34 +567,47 @@ describe('resolution-candidate closure', () => {
           }),
         );
         const symbolsByPath = new Map(
-          rows.map((row, index) => {
+          EffectArray.map(rows, (row, index) => {
             const path = `src/file-${index}.ts`;
-            return [path, row.symbolKeys.map(key => symbol(path, `k${key}`, row.domain))] as const;
+            return [path, EffectArray.map(row.symbolKeys, key => symbol(path, `k${key}`, row.domain))] as const;
           }),
         );
         const factsByPath = new Map(
-          files.map(file => [
+          EffectArray.map(files, file => [
             file.path,
             facts(file.path, referencesByPath.get(file.path) ?? [], symbolsByPath.get(file.path) ?? []),
           ]),
         );
         const exactClosure = independentLookupClosure([lookup(seedDomain, `k${seed}`)], allReexports);
-        const expectedPaths = files
-          .filter(file =>
-            (referencesByPath.get(file.path) ?? []).some(candidate =>
-              candidate.lookupTiers.some(tier =>
-                tier.some(key => exactClosure.has(lookupIdentity(lookup(candidate.resolutionDomain, key)))),
-              ),
-            ),
-          )
-          .map(file => file.path)
-          .sort();
-        const allAliasIdentities = new Set(allReexports.flatMap(value => value.aliases.map(lookupIdentity)));
-        const symbolIdentities = new Set(
-          rows.flatMap(row => row.symbolKeys.map(key => lookupIdentity(lookup(row.domain, `k${key}`)))),
+        const expectedPaths = EffectArray.map(
+          EffectArray.filter(
+            files,
+            __effectArrayValue =>
+              !!(file =>
+                EffectArray.some(referencesByPath.get(file.path) ?? [], candidate =>
+                  EffectArray.some(candidate.lookupTiers, tier =>
+                    EffectArray.some(tier, key =>
+                      exactClosure.has(lookupIdentity(lookup(candidate.resolutionDomain, key))),
+                    ),
+                  ),
+                ))(__effectArrayValue),
+          ),
+          file => file.path,
+        ).sort();
+        const allAliasIdentities = new Set(
+          EffectArray.flatMap(allReexports, value => EffectArray.map(value.aliases, lookupIdentity)),
         );
-        const expectedConflicts = [...allAliasIdentities].filter(identity => symbolIdentities.has(identity)).sort();
-        const expectedAffectedAliases = [...allAliasIdentities].filter(identity => exactClosure.has(identity)).sort();
+        const symbolIdentities = new Set(
+          EffectArray.flatMap(rows, row =>
+            EffectArray.map(row.symbolKeys, key => lookupIdentity(lookup(row.domain, `k${key}`))),
+          ),
+        );
+        const expectedConflicts = EffectArray.filter([...allAliasIdentities], identity =>
+          symbolIdentities.has(identity),
+        ).sort();
+        const expectedAffectedAliases = EffectArray.filter([...allAliasIdentities], identity =>
+          exactClosure.has(identity),
+        ).sort();
         const actual = yield* scanProjectResolutionCandidateClosure({
           additionalReexports,
           initialLookupKeys: [lookup(seedDomain, `k${seed}`)],
@@ -616,8 +636,8 @@ describe('resolution-candidate closure', () => {
         if (conservative.mode === 'eligible') {
           const conservativePaths = new Set(conservative.paths);
           const conservativeConflicts = new Set(conservative.directAliasSymbolConflictIdentities);
-          expect(expectedPaths.every(path => conservativePaths.has(path))).toBe(true);
-          expect(expectedConflicts.every(identity => conservativeConflicts.has(identity))).toBe(true);
+          expect(EffectArray.every(expectedPaths, path => conservativePaths.has(path))).toBe(true);
+          expect(EffectArray.every(expectedConflicts, identity => conservativeConflicts.has(identity))).toBe(true);
           expect([...conservative.affectedAliasLookupIdentities].sort()).toEqual(expectedAffectedAliases);
           expect(canonicalProjectReexports(conservative.reexports)).toEqual(canonicalProjectReexports(baseReexports));
         }
@@ -654,7 +674,7 @@ describe('resolution-candidate closure', () => {
     const files = [inventory('a.ts', 1), inventory('b.ts', 1), inventory('c.ts', 1)];
     expect(
       planProjectResolutionCandidateScan({
-        bytesByPath: new Map(files.map(file => [file.path, 1])),
+        bytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
         files,
         maximumFiles: 2,
       }),
@@ -667,7 +687,7 @@ describe('resolution-candidate closure', () => {
     });
     expect(
       planProjectResolutionCandidateScan({
-        bytesByPath: new Map(files.map(file => [file.path, 1])),
+        bytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
         files,
         maximumFactBytes: 2,
       }),
@@ -698,7 +718,7 @@ describe('resolution-candidate closure', () => {
     const productionSurfaceBytes = 192 * 1_048_576;
     const bytesPerFile = productionSurfaceBytes / files.length;
     const plan = planProjectResolutionCandidateScan({
-      bytesByPath: new Map(files.map(file => [file.path, bytesPerFile])),
+      bytesByPath: new Map(EffectArray.map(files, file => [file.path, bytesPerFile])),
       files,
     });
 
@@ -707,9 +727,9 @@ describe('resolution-candidate closure', () => {
     expect(plan).toMatchObject({factBytes: productionSurfaceBytes, files: 48, mode: 'eligible'});
     if (plan.mode === 'eligible') {
       expect(plan.pages).toHaveLength(24);
-      expect(plan.pages.every(page => page.factBytes <= PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES)).toBe(
-        true,
-      );
+      expect(
+        EffectArray.every(plan.pages, page => page.factBytes <= PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES),
+      ).toBe(true);
     }
     const overflowFiles = [inventory('overflow-a.ts', 1), inventory('overflow-b.ts', 1)];
     expect(
@@ -778,7 +798,7 @@ describe('resolution-candidate closure', () => {
       const distinctFacts = new Map([['a.ts', facts('a.ts', [reference('a.ts', [['seed', 'other']])])]]);
       const twoFiles = [inventory('a.ts', 1), inventory('b.ts', 1)];
       const sharedFacts = new Map(
-        twoFiles.map(file => [file.path, facts(file.path, [reference(file.path, [['seed']])])]),
+        EffectArray.map(twoFiles, file => [file.path, facts(file.path, [reference(file.path, [['seed']])])]),
       );
       expect(yield* scanWith({files: twoFiles, factsByPath: sharedFacts, maximumProjectionAssociations: 1})).toEqual({
         detail: 'candidate-projection-associations',
@@ -823,7 +843,7 @@ describe('resolution-candidate closure', () => {
       expect(missing).toEqual({mode: 'fallback', reason: 'cache-incomplete'});
 
       const matchingFacts = new Map(
-        files.map(file => [file.path, facts(file.path, [reference(file.path, [['seed']])])]),
+        EffectArray.map(files, file => [file.path, facts(file.path, [reference(file.path, [['seed']])])]),
       );
       const selectedOverflow = yield* scan(plan, matchingFacts, [lookup('typescript', 'seed')], 1);
       expect(selectedOverflow).toEqual({
@@ -902,6 +922,7 @@ describe('resolution-candidate closure', () => {
         reason: 'project-closure-unbounded',
       });
 
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       const halfByteLimitKey = 'x'.repeat(PROJECT_RESOLUTION_CANDIDATE_MAX_REEXPORT_KEY_BYTES / 2);
       const keyByteOverflow = yield* scanProjectResolutionCandidateClosure({
         additionalReexports: [
@@ -990,7 +1011,7 @@ describe('resolution-candidate closure', () => {
     expect(
       reexportSafety(
         thirtyTwo,
-        thirtyTwo.map(value => value.alias),
+        EffectArray.map(thirtyTwo, value => value.alias),
       ),
     ).toEqual({
       mode: 'eligible',
@@ -999,7 +1020,7 @@ describe('resolution-candidate closure', () => {
     expect(
       reexportSafety(
         thirtyThree,
-        thirtyThree.map(value => value.alias),
+        EffectArray.map(thirtyThree, value => value.alias),
       ),
     ).toEqual({
       mode: 'fallback',
@@ -1010,7 +1031,7 @@ describe('resolution-candidate closure', () => {
     expect(
       reexportSafety(
         retainedTail,
-        retainedTail.slice(0, 1).map(value => value.alias),
+        EffectArray.map(retainedTail.slice(0, 1), value => value.alias),
       ),
     ).toEqual({
       mode: 'eligible',
@@ -1019,7 +1040,7 @@ describe('resolution-candidate closure', () => {
     expect(
       reexportSafety(
         retainedTail,
-        retainedTail.slice(0, CODE_GRAPH_RESOLUTION_PASS_MAXIMUM).map(value => value.alias),
+        EffectArray.map(retainedTail.slice(0, CODE_GRAPH_RESOLUTION_PASS_MAXIMUM), value => value.alias),
       ),
     ).toEqual({mode: 'eligible', stagedDepthMaximum: CODE_GRAPH_RESOLUTION_PASS_MAXIMUM});
   });
@@ -1051,10 +1072,10 @@ describe('resolution-candidate closure', () => {
       expect(scanned.mode).toBe('eligible');
       if (scanned.mode === 'eligible') expect(scanned.lookupKeys).toBe(count + 1);
 
-      const parsedAliases = aliases.map(({resolutionDomain}, index) =>
+      const parsedAliases = EffectArray.map(aliases, ({resolutionDomain}, index) =>
         lookup(resolutionDomain, canonicalTypeScriptKey(`alias-${index}.ts`, `alias${index}`)),
       );
-      const parsedCandidates = candidates.map(({resolutionDomain}, index) =>
+      const parsedCandidates = EffectArray.map(candidates, ({resolutionDomain}, index) =>
         lookup(resolutionDomain, canonicalTypeScriptKey(`candidate-${index}.ts`, `candidate${index}`)),
       );
       expect(
@@ -1072,7 +1093,7 @@ describe('resolution-candidate closure', () => {
     const chain = reexportChain(CODE_GRAPH_RESOLUTION_PASS_MAXIMUM);
     const consumerPath = 'consumer.ts';
     const consumer = facts(consumerPath, [reference(consumerPath, [[chain[0].alias]])]);
-    const provenance: CodeGraphReusableReexport[] = chain.map(value => ({
+    const provenance: CodeGraphReusableReexport[] = EffectArray.map(chain, value => ({
       importedName: value.targetName,
       localName: value.aliasName,
       sourcePath: value.aliasPath,
@@ -1089,7 +1110,7 @@ function inventory(path: string, size: number): CodeGraphInventoryFile {
   return {
     blobId: path,
     contentHash: path,
-    language: path.endsWith('.java') ? 'java' : 'typescript',
+    language: Effect2.pipe(path, EffectString.endsWith('.java')) ? 'java' : 'typescript',
     mode: '100644',
     path,
     size,
@@ -1135,7 +1156,7 @@ function reference(
     relation: 'references',
     resolutionDomain,
     sourceName: path,
-    targetName: lookupTiers.flat().join(','),
+    targetName: EffectArray.join(lookupTiers.flat(), ','),
   };
 }
 
@@ -1163,14 +1184,28 @@ function lookupIdentity(value: ProjectResolutionLookupKey): string {
 function partitionProjectionFingerprint(identity: string): bigint {
   let fingerprint = 0;
   for (let index = 0; index < identity.length; index += 1) {
-    fingerprint = (fingerprint * 31 + identity.charCodeAt(index)) & 3;
+    fingerprint =
+      (fingerprint * 31 +
+        Effect2.pipe(
+          identity,
+          EffectString.charCodeAt(index),
+          Effect2.Option.getOrElse(() => NaN),
+        )) &
+      3;
   }
   return BigInt(fingerprint);
 }
 
 function parseLookupIdentity(identity: string): ProjectResolutionLookupKey {
-  const separator = identity.indexOf('\0');
-  return {key: identity.slice(separator + 1), resolutionDomain: identity.slice(0, separator)};
+  const separator = Effect2.pipe(
+    identity,
+    EffectString.indexOf('\0'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return {
+    key: Effect2.pipe(identity, EffectString.slice(separator + 1)),
+    resolutionDomain: Effect2.pipe(identity, EffectString.slice(0, separator)),
+  };
 }
 
 function reexportKeys(
@@ -1185,12 +1220,12 @@ function independentLookupClosure(
   initial: readonly ProjectResolutionLookupKey[],
   reexports: readonly ProjectResolutionReexportKeys[],
 ): ReadonlySet<string> {
-  const closure = new Set(initial.map(lookupIdentity));
+  const closure = new Set(EffectArray.map(initial, lookupIdentity));
   let changed = true;
   while (changed) {
     changed = false;
     for (const reexport of reexports) {
-      if (!reexport.candidates.some(candidate => closure.has(lookupIdentity(candidate)))) continue;
+      if (!EffectArray.some(reexport.candidates, candidate => closure.has(lookupIdentity(candidate)))) continue;
       for (const alias of reexport.aliases) {
         const identity = lookupIdentity(alias);
         if (closure.has(identity)) continue;
@@ -1211,7 +1246,7 @@ function eligiblePlan(
   pageMaximumFiles: number,
 ): Extract<ProjectResolutionCandidateScanPlan, {readonly mode: 'eligible'}> {
   const plan = planProjectResolutionCandidateScan({
-    bytesByPath: new Map(files.map(file => [file.path, 1])),
+    bytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
     files,
     maximumFactBytes: Number.MAX_SAFE_INTEGER,
     maximumFiles: Math.max(files.length, 1),
@@ -1241,9 +1276,11 @@ function loadedPage(
   factsByPath: ReadonlyMap<string, CodeGraphFileFacts>,
 ): ProjectResolutionCandidateFactPage {
   return {
-    bytesByPath: new Map(files.map(file => [file.path, 1])),
+    bytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
     facts: new Map(
-      files.flatMap(file => (factsByPath.has(file.path) ? [[file.path, factsByPath.get(file.path)!]] : [])),
+      EffectArray.flatMap(files, file =>
+        factsByPath.has(file.path) ? [[file.path, factsByPath.get(file.path)!]] : [],
+      ),
     ),
   };
 }
@@ -1258,21 +1295,22 @@ function canonicalClosure(closure: ProjectResolutionCandidateClosure): unknown {
 }
 
 function canonicalReexports(reexports: readonly CodeGraphReusableReexport[]): readonly string[] {
-  return reexports
-    .map(value => [value.sourcePath, value.localName, value.targetPath, value.importedName].join('\0'))
-    .sort();
+  return EffectArray.map(reexports, value =>
+    EffectArray.join([value.sourcePath, value.localName, value.targetPath, value.importedName], '\0'),
+  ).sort();
 }
 
 function canonicalProjectReexports(reexports: readonly ProjectResolutionReexportKeys[]): readonly string[] {
-  return reexports
-    .map(value =>
+  return EffectArray.map(reexports, value =>
+    EffectArray.join(
       [
         value.sourcePath,
-        value.aliases.map(lookupIdentity).sort().join(','),
-        value.candidates.map(lookupIdentity).sort().join(','),
-      ].join('\0'),
-    )
-    .sort();
+        EffectArray.join(EffectArray.map(value.aliases, lookupIdentity).sort(), ','),
+        EffectArray.join(EffectArray.map(value.candidates, lookupIdentity).sort(), ','),
+      ],
+      '\0',
+    ),
+  ).sort();
 }
 
 function canonicalTypeScriptKey(path: string, name: string): string {
@@ -1313,8 +1351,10 @@ function reexportSafety(chain: readonly ReexportChainEntry[], stagedAliases: rea
   const safetyAliasLookupIdentities = new Set([lookupIdentity(lookup('typescript', chain[0].alias))]);
   return assessResolutionCandidateReexportSafety({
     directAliasSymbolConflictIdentities: new Set(),
-    reexports: chain.map(value => value.keys),
+    reexports: EffectArray.map(chain, value => value.keys),
     safetyAliasLookupIdentities,
-    stagedAliasLookupIdentities: new Set(stagedAliases.map(alias => lookupIdentity(lookup('typescript', alias)))),
+    stagedAliasLookupIdentities: new Set(
+      EffectArray.map(stagedAliases, alias => lookupIdentity(lookup('typescript', alias))),
+    ),
   });
 }

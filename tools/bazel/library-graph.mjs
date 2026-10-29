@@ -1,3 +1,8 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 /** Condense the resolver's direct graph into deterministic, acyclic source libraries. */
 export const buildLibraryGraph = (graph, {owner, generatedOwner}) => {
   const indices = new Map();
@@ -28,19 +33,20 @@ export const buildLibraryGraph = (graph, {owner, generatedOwner}) => {
   };
   for (const path of [...graph.keys()].sort()) if (!indices.has(path)) visit(path);
   const componentFor = new Map();
-  const components = groups
-    .map(srcs => {
-      const owners = new Set(srcs.map(owner));
-      const packagePath = owner(srcs[0]);
-      const eligible = owners.size === 1 && generatedOwner(packagePath);
-      const identity = srcs.join('\n');
-      const digest = new Bun.CryptoHasher('sha256').update(identity).digest('hex').slice(0, 24);
-      const label = `//${packagePath}:_source_${digest}`;
-      const component = {label, package: packagePath, srcs, deps: [], npm: [], eligible};
-      for (const path of srcs) componentFor.set(path, component);
-      return component;
-    })
-    .sort((left, right) => left.label.localeCompare(right.label));
+  const components = EffectArray.map(groups, srcs => {
+    const owners = new Set(srcs.map(owner));
+    const packagePath = owner(srcs[0]);
+    const eligible = owners.size === 1 && generatedOwner(packagePath);
+    const identity = srcs.join('\n');
+    const digest = Effect.pipe(
+      new Bun.CryptoHasher('sha256').update(identity).digest('hex'),
+      EffectString.slice(0, 24),
+    );
+    const label = `//${packagePath}:_source_${digest}`;
+    const component = {label, package: packagePath, srcs, deps: [], npm: [], eligible};
+    for (const path of srcs) componentFor.set(path, component);
+    return component;
+  }).sort((left, right) => Effect.pipe(left.label, EffectString.localeCompare(right.label)));
   for (const component of components) {
     const deps = new Set();
     const npm = new Set();
@@ -82,7 +88,9 @@ export const buildLibraryGraph = (graph, {owner, generatedOwner}) => {
       const child = boundary(dep);
       for (const key of ['srcs', 'deps', 'npm']) for (const value of child[key]) sets[key].add(value);
     }
-    const result = Object.fromEntries(Object.entries(sets).map(([key, values]) => [key, [...values].sort()]));
+    const result = EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(sets), ([key, values]) => [key, [...values].sort()]),
+    );
     boundaries.set(component, result);
     return result;
   };
@@ -101,7 +109,8 @@ export const buildLibraryGraph = (graph, {owner, generatedOwner}) => {
     const allowedFiles = new Set(files);
     const allowedNpm = new Set(npm);
     const protectedSet = new Set(protectedFiles);
-    const candidates = components.filter(component => {
+    const candidates = EffectArray.filter(components, (component, index) => {
+      if (!(index in components)) return false;
       const closure = expanded.get(component);
       return (
         component.eligible &&
@@ -121,7 +130,7 @@ export const buildLibraryGraph = (graph, {owner, generatedOwner}) => {
           pending.push(...child.deps);
         }
       }
-    const roots = candidates.filter(component => !covered.has(component));
+    const roots = EffectArray.filter(candidates, component => !covered.has(component));
     const remainingFiles = new Set(files);
     const remainingNpm = new Set(npm);
     for (const component of roots) {
@@ -131,7 +140,7 @@ export const buildLibraryGraph = (graph, {owner, generatedOwner}) => {
     }
     return {
       srcs: [...remainingFiles].sort(),
-      deps: roots.map(component => component.label).sort(),
+      deps: EffectArray.map(roots, component => component.label).sort(),
       npm: [...remainingNpm].sort(),
     };
   };

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -5,6 +6,10 @@ import fc from 'fast-check';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
+const activeReleasePointerSchema = Schema.StructWithRest(Schema.Struct({version: Schema.String}), [
+  Schema.Record(Schema.String, Schema.Unknown),
+]);
+
 import {
   DEVELOPMENT_INSTALL_RECEIPT_VERSION,
   collectDevelopmentPayloadManifest,
@@ -33,17 +38,20 @@ import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const sourceCommitArbitrary = fc
   .constantFrom(40, 64)
   .chain(length =>
     fc
       .array(fc.constantFrom(...'0123456789abcdef'), {maxLength: length, minLength: length})
-      .map(characters => characters.join('')),
+      .map(characters => EffectArray.join(characters, '')),
   );
 const doctorFieldArbitrary = fc
   .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz '), {maxLength: 40, minLength: 1})
-  .map(characters => characters.join('').trim())
+  .map(characters => Effect2.pipe(EffectArray.join(characters, ''), EffectString.trim))
   .filter(value => value.length > 0);
 const lexicalInvalidationDetail = 'canonical documents changed; run `threadnote repair`';
 const vectorUnavailableDetail = 'unavailable until the lexical recall index is ready';
@@ -60,7 +68,9 @@ const doctorFailureArbitrary = fc.oneof(
     .filter(detail => detail !== lexicalInvalidationDetail)
     .map(detail => ({allowed: false, detail, name: 'lexical recall index'})),
   doctorFieldArbitrary
-    .filter(detail => detail !== vectorUnavailableDetail && !detail.endsWith(vectorStaleSuffix))
+    .filter(
+      detail => detail !== vectorUnavailableDetail && !Effect2.pipe(detail, EffectString.endsWith(vectorStaleSuffix)),
+    )
     .map(detail => ({allowed: false, detail, name: 'vector recall index'})),
   fc
     .tuple(
@@ -79,12 +89,16 @@ describe('exact-head development runtime', () => {
         fc.integer({max: 7, min: 0}),
         fc.constantFrom('\n', '\r\n'),
         (failures, declaredFailureCount, lineEnding) => {
-          const output = [
-            ...failures.map(({detail, name}) => `FAIL ${name}: ${detail}`),
-            `Summary: ${declaredFailureCount} failure(s), 0 warning(s)`,
-            '',
-          ].join(lineEnding);
-          const expected = declaredFailureCount === failures.length && failures.every(({allowed}) => allowed === true);
+          const output = EffectArray.join(
+            [
+              ...EffectArray.map(failures, ({detail, name}) => `FAIL ${name}: ${detail}`),
+              `Summary: ${declaredFailureCount} failure(s), 0 warning(s)`,
+              '',
+            ],
+            lineEnding,
+          );
+          const expected =
+            declaredFailureCount === failures.length && EffectArray.every(failures, ({allowed}) => allowed === true);
           expect(developmentDoctorHasOnlyConcurrentRecallProjectionFailures(output, declaredFailureCount)).toBe(
             expected,
           );
@@ -95,12 +109,15 @@ describe('exact-head development runtime', () => {
   });
 
   it.each(['\n', '\r\n'])('recognizes bounded recall invalidation with %j line endings', lineEnding => {
-    const output = [
-      'FAIL lexical recall index: canonical documents changed; run `threadnote repair`',
-      'FAIL vector recall index: unavailable until the lexical recall index is ready',
-      'Summary: 2 failure(s), 0 warning(s)',
-      '',
-    ].join(lineEnding);
+    const output = EffectArray.join(
+      [
+        'FAIL lexical recall index: canonical documents changed; run `threadnote repair`',
+        'FAIL vector recall index: unavailable until the lexical recall index is ready',
+        'Summary: 2 failure(s), 0 warning(s)',
+        '',
+      ],
+      lineEnding,
+    );
     expect(developmentDoctorHasOnlyConcurrentRecallProjectionFailures(output, 2)).toBe(true);
     expect(developmentDoctorHasOnlyConcurrentRecallProjectionFailures(output, 1)).toBe(false);
   });
@@ -123,8 +140,8 @@ describe('exact-head development runtime', () => {
     fc.assert(
       fc.property(sourceCommitArbitrary, sourceCommit => {
         const activeVersion = developmentBuildVersion('4.0.3', sourceCommit);
-        const sourceCheckoutId = sourceCommit.padEnd(64, '0');
-        const otherSourceCheckoutId = `${sourceCheckoutId[0] === '0' ? '1' : '0'}${sourceCheckoutId.slice(1)}`;
+        const sourceCheckoutId = Effect2.pipe(sourceCommit, EffectString.padEnd(64, '0'));
+        const otherSourceCheckoutId = `${sourceCheckoutId[0] === '0' ? '1' : '0'}${Effect2.pipe(sourceCheckoutId, EffectString.slice(1))}`;
         const owner = {schemaVersion: 1 as const, sourceCheckoutId, version: activeVersion};
 
         expect(developmentRuntimeOwnershipConflict(activeVersion, owner, sourceCheckoutId)).toBeUndefined();
@@ -133,7 +150,7 @@ describe('exact-head development runtime', () => {
         );
         expect(
           developmentRuntimeOwnershipConflict(
-            developmentBuildVersion('4.0.3', otherSourceCheckoutId.slice(0, 40)),
+            developmentBuildVersion('4.0.3', Effect2.pipe(otherSourceCheckoutId, EffectString.slice(0, 40))),
             owner,
             sourceCheckoutId,
           ),
@@ -154,13 +171,13 @@ describe('exact-head development runtime', () => {
     fc.assert(
       fc.property(sourceCommitArbitrary, sourceCommit => {
         const activeVersion = developmentBuildVersion('4.0.3', sourceCommit);
-        const sourceCheckoutId = sourceCommit.padEnd(64, '0');
+        const sourceCheckoutId = Effect2.pipe(sourceCommit, EffectString.padEnd(64, '0'));
         const ownershipRevision = sourceCheckoutId;
-        const changedRevision = `${ownershipRevision[0] === '0' ? '1' : '0'}${ownershipRevision.slice(1)}`;
+        const changedRevision = `${ownershipRevision[0] === '0' ? '1' : '0'}${Effect2.pipe(ownershipRevision, EffectString.slice(1))}`;
         const authorization = {
           activeVersion,
           owner: {schemaVersion: 2 as const, sourceCheckoutId, ownershipRevision, version: activeVersion},
-          requestedSourceCheckoutId: 'f'.repeat(64),
+          requestedSourceCheckoutId: Effect2.pipe('f', EffectString.repeat(64)),
         };
 
         expect(
@@ -189,12 +206,12 @@ describe('exact-head development runtime', () => {
             const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-owner-'});
             const installRoot = path.join(root, 'install');
             const binRoot = path.join(root, 'bin');
-            const sourceCommit = '9'.repeat(40);
+            const sourceCommit = Effect2.pipe('9', EffectString.repeat(40));
             const version = developmentBuildVersion('4.0.3', sourceCommit);
             const releaseRoot = path.join(installRoot, 'versions', version);
             const executableName = baseSystem.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
-            const firstCheckoutId = '1'.repeat(64);
-            const secondCheckoutId = '2'.repeat(64);
+            const firstCheckoutId = Effect2.pipe('1', EffectString.repeat(64));
+            const secondCheckoutId = Effect2.pipe('2', EffectString.repeat(64));
             yield* writeDevelopmentReleaseFixture(
               fs,
               path,
@@ -261,11 +278,13 @@ describe('exact-head development runtime', () => {
         ).pipe(provideTestLayer(ApplicationLayer));
 
         expect(result.refusal).toContain('another source checkout owns');
-        expect(JSON.parse(result.ownerAfterRefusal)).toMatchObject({sourceCheckoutId: '1'.repeat(64)});
+        expect(JSON.parse(result.ownerAfterRefusal)).toMatchObject({
+          sourceCheckoutId: Effect2.pipe('1', EffectString.repeat(64)),
+        });
         expect(JSON.parse(result.ownerAfterTakeover)).toMatchObject({
           ownershipRevision: expect.any(String),
           schemaVersion: 2,
-          sourceCheckoutId: '2'.repeat(64),
+          sourceCheckoutId: Effect2.pipe('2', EffectString.repeat(64)),
         });
         expect(JSON.parse(result.ownerAfterReinstall)).toMatchObject({schemaVersion: 2});
         expect(JSON.parse(result.ownerAfterReinstall).ownershipRevision).not.toBe(
@@ -288,8 +307,8 @@ describe('exact-head development runtime', () => {
           const binRoot = path.join(root, 'bin');
           const versionsRoot = path.join(installRoot, 'versions');
           const executableName = baseSystem.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
-          const firstCommit = '4'.repeat(40);
-          const waitingCommit = '5'.repeat(40);
+          const firstCommit = Effect2.pipe('4', EffectString.repeat(40));
+          const waitingCommit = Effect2.pipe('5', EffectString.repeat(40));
           const firstVersion = developmentBuildVersion('4.0.1', firstCommit);
           const waitingVersion = developmentBuildVersion('4.0.2', waitingCommit);
           const firstReleaseRoot = path.join(versionsRoot, firstVersion);
@@ -317,7 +336,7 @@ describe('exact-head development runtime', () => {
           const firstPointer = `${JSON.stringify({releaseRoot: firstReleaseRoot, version: firstVersion})}\n`;
           const legacyOwner = `${JSON.stringify({
             schemaVersion: 1,
-            sourceCheckoutId: '1'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('1', EffectString.repeat(64)),
             version: firstVersion,
           })}\n`;
           yield* fs.writeFileString(activePointerPath, firstPointer, {mode: 0o600});
@@ -332,7 +351,7 @@ describe('exact-head development runtime', () => {
           });
           const authorization = yield* prepareDevelopmentRuntimeOwnershipAuthorization(
             installRoot,
-            '2'.repeat(64),
+            Effect2.pipe('2', EffectString.repeat(64)),
             true,
           ).pipe(Effect.provideService(SystemInfo, testSystem));
           const upgradedOwner = yield* fs.readFileString(ownerPath);
@@ -353,7 +372,7 @@ describe('exact-head development runtime', () => {
             ownershipAuthorization: authorization,
             releaseRoot: waitingReleaseRoot,
             reused: true,
-            sourceCheckoutId: '2'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('2', EffectString.repeat(64)),
             stagedRoot: Option.none(),
             terminateSuperseded: false,
             version: waitingVersion,
@@ -378,7 +397,7 @@ describe('exact-head development runtime', () => {
       expect(JSON.parse(result.upgradedOwner)).toMatchObject({
         ownershipRevision: expect.any(String),
         schemaVersion: 2,
-        sourceCheckoutId: '1'.repeat(64),
+        sourceCheckoutId: Effect2.pipe('1', EffectString.repeat(64)),
       });
       expect(result.failure).toContain('ownership changed after takeover authorization');
       expect(result.activePointer).toBe(result.firstPointer);
@@ -400,12 +419,12 @@ describe('exact-head development runtime', () => {
           const binRoot = path.join(root, 'bin');
           const versionsRoot = path.join(installRoot, 'versions');
           const executableName = baseSystem.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
-          const firstCheckoutId = '1'.repeat(64);
-          const waitingCheckoutId = '2'.repeat(64);
-          const winnerCheckoutId = '3'.repeat(64);
-          const firstCommit = 'a'.repeat(40);
-          const waitingCommit = 'b'.repeat(40);
-          const winnerCommit = 'c'.repeat(40);
+          const firstCheckoutId = Effect2.pipe('1', EffectString.repeat(64));
+          const waitingCheckoutId = Effect2.pipe('2', EffectString.repeat(64));
+          const winnerCheckoutId = Effect2.pipe('3', EffectString.repeat(64));
+          const firstCommit = Effect2.pipe('a', EffectString.repeat(40));
+          const waitingCommit = Effect2.pipe('b', EffectString.repeat(40));
+          const winnerCommit = Effect2.pipe('c', EffectString.repeat(40));
           const firstVersion = developmentBuildVersion('4.0.1', firstCommit);
           const waitingVersion = developmentBuildVersion('4.0.2', waitingCommit);
           const winnerVersion = developmentBuildVersion('4.0.3', winnerCommit);
@@ -543,15 +562,17 @@ describe('exact-head development runtime', () => {
 
   it('accepts only exact 40- or 64-character Git object identities', () => {
     for (const length of [40, 64]) {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       expect(developmentBuildVersion('4.0.0-beta.30', 'a'.repeat(length))).toContain(`local.g${'a'.repeat(length)}`);
     }
     for (const length of [39, 41, 63, 65]) {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       expect(() => developmentBuildVersion('4.0.0-beta.30', 'a'.repeat(length))).toThrow('exact Git commit');
     }
   });
 
   it('rejects malformed or dirty provenance receipts', () => {
-    const sourceCommit = 'a'.repeat(40);
+    const sourceCommit = Effect2.pipe('a', EffectString.repeat(40));
     const receipt = validReceipt(developmentBuildVersion('4.0.0-beta.30', sourceCommit), sourceCommit);
 
     expect(Option.isSome(parseDevelopmentInstallReceipt(receipt))).toBe(true);
@@ -568,7 +589,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-runtime-'});
-          const sourceCommit = 'b'.repeat(40);
+          const sourceCommit = Effect2.pipe('b', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const installRoot = path.join(root, 'install');
           const releaseRoot = path.join(installRoot, 'versions', version);
@@ -601,11 +622,11 @@ describe('exact-head development runtime', () => {
 
       expect(evidence).toMatchObject({
         runtime: 'bun-test',
-        sourceCommit: 'b'.repeat(40),
+        sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
         target: TEST_TARGET,
       });
-      expect(Object.keys(evidence)).not.toContain('releaseRoot');
-      expect(Object.keys(evidence)).not.toContain('executable');
+      expect(EffectRecord.keys(evidence)).not.toContain('releaseRoot');
+      expect(EffectRecord.keys(evidence)).not.toContain('executable');
     }),
   );
 
@@ -617,7 +638,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-runtime-transport-'});
-          const sourceCommit = 'd'.repeat(40);
+          const sourceCommit = Effect2.pipe('d', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const supersededVersion = '4.0.0-beta.29';
           const installRoot = path.join(root, 'install');
@@ -699,7 +720,7 @@ describe('exact-head development runtime', () => {
         }),
       ).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(result.accepted.sourceCommit).toBe('d'.repeat(40));
+      expect(result.accepted.sourceCommit).toBe(Effect2.pipe('d', EffectString.repeat(40)));
       expect(result.rejected).toContain('process pinned to a superseded release');
     }),
   );
@@ -714,7 +735,7 @@ describe('exact-head development runtime', () => {
             const path = yield* Path.Path;
             const baseSystem = yield* SystemInfo;
             const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-payload-'});
-            const sourceCommit = '7'.repeat(40);
+            const sourceCommit = Effect2.pipe('7', EffectString.repeat(40));
             const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
             const releaseRoot = path.join(root, 'release');
             const executableName = 'threadnote';
@@ -824,7 +845,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-wrong-target-'});
-          const sourceCommit = '6'.repeat(40);
+          const sourceCommit = Effect2.pipe('6', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const releaseRoot = path.join(root, 'release');
           const executableName = baseSystem.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
@@ -863,7 +884,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-release-link-'});
-          const sourceCommit = 'd'.repeat(40);
+          const sourceCommit = Effect2.pipe('d', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const installRoot = path.join(root, 'install');
           const logicalReleaseRoot = path.join(installRoot, 'versions', version);
@@ -900,7 +921,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-versions-link-'});
-          const sourceCommit = 'e'.repeat(40);
+          const sourceCommit = Effect2.pipe('e', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const installRoot = path.join(root, 'install');
           const logicalVersionsRoot = path.join(installRoot, 'versions');
@@ -968,7 +989,7 @@ describe('exact-head development runtime', () => {
             const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-parent-link-'});
             const realInstallRoot = path.join(root, 'physical-install');
             const logicalInstallRoot = path.join(root, 'logical-install');
-            const sourceCommit = '9'.repeat(40);
+            const sourceCommit = Effect2.pipe('9', EffectString.repeat(40));
             const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
             const executableName = 'threadnote';
             const realReleaseRoot = path.join(realInstallRoot, 'versions', version);
@@ -1002,7 +1023,7 @@ describe('exact-head development runtime', () => {
         ).pipe(provideTestLayer(ApplicationLayer));
 
         expect(evidence.roots.installRoot).toContain('physical-install');
-        expect(evidence.runtime.version).toContain(`local.g${'9'.repeat(40)}`);
+        expect(evidence.runtime.version).toContain(`local.g${Effect2.pipe('9', EffectString.repeat(40))}`);
       }),
   );
 
@@ -1014,7 +1035,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-version-binding-'});
-          const sourceCommit = '1'.repeat(40);
+          const sourceCommit = Effect2.pipe('1', EffectString.repeat(40));
           const pointerVersion = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const releaseVersion = developmentBuildVersion('4.0.1-beta.1', sourceCommit);
           const installRoot = path.join(root, 'install');
@@ -1058,7 +1079,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-reuse-race-'});
-          const sourceCommit = 'f'.repeat(40);
+          const sourceCommit = Effect2.pipe('f', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const installRoot = path.join(root, 'install');
           const binRoot = path.join(root, 'bin');
@@ -1096,7 +1117,7 @@ describe('exact-head development runtime', () => {
             executableName,
             releaseRoot,
             reused: true,
-            sourceCheckoutId: 'a'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
@@ -1128,7 +1149,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-concurrent-stage-'});
-          const sourceCommit = '2'.repeat(40);
+          const sourceCommit = Effect2.pipe('2', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const installRoot = path.join(root, 'install');
           const releaseRoot = path.join(installRoot, 'versions', version);
@@ -1167,7 +1188,7 @@ describe('exact-head development runtime', () => {
             executableName,
             releaseRoot,
             reused: false,
-            sourceCheckoutId: 'a'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
             stagedRoot: Option.some(stagedRoot),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
@@ -1202,7 +1223,7 @@ describe('exact-head development runtime', () => {
             const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-launcher-mode-'});
             const installRoot = path.join(root, 'install');
             const binRoot = path.join(root, 'bin');
-            const sourceCommit = '8'.repeat(40);
+            const sourceCommit = Effect2.pipe('8', EffectString.repeat(40));
             const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
             const releaseRoot = path.join(installRoot, 'versions', version);
             yield* writeDevelopmentReleaseFixture(
@@ -1255,7 +1276,7 @@ describe('exact-head development runtime', () => {
               executableName: 'threadnote',
               releaseRoot,
               reused: true,
-              sourceCheckoutId: 'a'.repeat(64),
+              sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
               stagedRoot: Option.none(),
               ownershipAuthorization: undefined,
               terminateSuperseded: false,
@@ -1276,18 +1297,29 @@ describe('exact-head development runtime', () => {
         expect(result.mcpMode).toBe(0o755);
         expect(result.invocations).toContainEqual({arguments: ['--version'], executable: result.cliLauncher});
         expect(
-          result.invocations.some(invocation => invocation.arguments.join(' ') === 'doctor --dry-run --strict'),
+          EffectArray.some(
+            result.invocations,
+            invocation => EffectArray.join(invocation.arguments, ' ') === 'doctor --dry-run --strict',
+          ),
         ).toBe(true);
-        const integrationActivationIndex = result.invocations.findIndex(invocation =>
-          invocation.arguments.includes('--activate-integrations'),
+        const integrationActivationIndex = Option.getOrElse(
+          EffectArray.findFirstIndex(result.invocations, invocation =>
+            invocation.arguments.includes('--activate-integrations'),
+          ),
+          () => -1,
         );
-        const doctorIndex = result.invocations.findIndex(
-          invocation => invocation.arguments.join(' ') === 'doctor --dry-run --strict',
+        const doctorIndex = Option.getOrElse(
+          EffectArray.findFirstIndex(
+            result.invocations,
+            invocation => EffectArray.join(invocation.arguments, ' ') === 'doctor --dry-run --strict',
+          ),
+          () => -1,
         );
         expect(integrationActivationIndex).toBeGreaterThan(-1);
         expect(integrationActivationIndex).toBeLessThan(doctorIndex);
         expect(
-          result.invocations.some(
+          EffectArray.some(
+            result.invocations,
             invocation =>
               invocation.arguments[0] === 'development-install-repair' &&
               !invocation.arguments.includes('--activate-integrations'),
@@ -1305,7 +1337,7 @@ describe('exact-head development runtime', () => {
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-doctor-repair-'});
           const installRoot = path.join(root, 'install');
-          const sourceCommit = '6'.repeat(40);
+          const sourceCommit = Effect2.pipe('6', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const executableName = baseSystem.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
           const releaseRoot = path.join(installRoot, 'versions', version);
@@ -1368,7 +1400,7 @@ describe('exact-head development runtime', () => {
             executableName,
             releaseRoot,
             reused: true,
-            sourceCheckoutId: 'a'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
@@ -1382,7 +1414,8 @@ describe('exact-head development runtime', () => {
       expect(result.repairObservedInstallationLock).toBe(true);
       expect(result.strictDoctorChecks).toBe(3);
       expect(
-        result.invocations.filter(
+        EffectArray.filter(
+          result.invocations,
           invocation =>
             invocation[0] === 'development-install-repair' && !invocation.includes('--activate-integrations'),
         ),
@@ -1403,8 +1436,8 @@ describe('exact-head development runtime', () => {
         const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-doctor-committed-'});
         const installRoot = path.join(root, 'install');
         const binRoot = path.join(root, 'bin');
-        const sourceCommit = 'd'.repeat(40);
-        const priorCommit = 'e'.repeat(40);
+        const sourceCommit = Effect2.pipe('d', EffectString.repeat(40));
+        const priorCommit = Effect2.pipe('e', EffectString.repeat(40));
         const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
         const priorVersion = developmentBuildVersion('4.0.0-beta.29', priorCommit);
         const releaseRoot = path.join(installRoot, 'versions', version);
@@ -1433,7 +1466,7 @@ describe('exact-head development runtime', () => {
         const priorPointer = `${JSON.stringify({releaseRoot: priorReleaseRoot, version: priorVersion})}\n`;
         const priorOwner = `${JSON.stringify({
           schemaVersion: 1,
-          sourceCheckoutId: 'b'.repeat(64),
+          sourceCheckoutId: Effect2.pipe('b', EffectString.repeat(64)),
           version: priorVersion,
         })}\n`;
         yield* fs.writeFileString(activePointerPath, priorPointer, {mode: 0o600});
@@ -1459,7 +1492,7 @@ describe('exact-head development runtime', () => {
         yield* fs.writeFileString(mcpLauncher, priorMcp, {mode: 0o755});
         const ownershipAuthorization = yield* prepareDevelopmentRuntimeOwnershipAuthorization(
           installRoot,
-          'a'.repeat(64),
+          Effect2.pipe('a', EffectString.repeat(64)),
           true,
         ).pipe(Effect.provideService(SystemInfo, testSystem));
         const invocations: Array<readonly string[]> = [];
@@ -1486,7 +1519,7 @@ describe('exact-head development runtime', () => {
           ownershipAuthorization,
           releaseRoot,
           reused: true,
-          sourceCheckoutId: 'a'.repeat(64),
+          sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
           stagedRoot: Option.none(),
           terminateSuperseded: true,
           version,
@@ -1504,7 +1537,7 @@ describe('exact-head development runtime', () => {
         expect(JSON.parse(yield* fs.readFileString(ownerPath))).toEqual({
           ownershipRevision: expect.any(String),
           schemaVersion: 2,
-          sourceCheckoutId: 'a'.repeat(64),
+          sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
           version,
         });
         expect(yield* fs.readFileString(cliLauncher)).toBe(activeCli);
@@ -1530,7 +1563,7 @@ describe('exact-head development runtime', () => {
             const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-real-launcher-'});
             const installRoot = path.join(root, 'install');
             const binRoot = path.join(root, 'bin');
-            const sourceCommit = '4'.repeat(40);
+            const sourceCommit = Effect2.pipe('4', EffectString.repeat(40));
             const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
             const releaseRoot = path.join(installRoot, 'versions', version);
             yield* writeDevelopmentReleaseFixture(
@@ -1545,19 +1578,22 @@ describe('exact-head development runtime', () => {
             const executable = path.join(releaseRoot, 'threadnote');
             yield* fs.writeFileString(
               executable,
-              [
-                '#!/bin/sh',
-                'if [ "$1" = "doctor" ]; then',
-                "  printf '%s\\n' 'Running Threadnote doctor checks.' 'Summary: 0 failure(s), 0 warning(s)'",
-                'elif [ "$1" = "development-install-repair" ] && [ "$2" = "--activate-integrations" ]; then',
-                '  exit 0',
-                'elif [ "$1" = "--version" ]; then',
-                `  printf '%s\\n' 'threadnote v${version}'`,
-                'else',
-                '  exit 64',
-                'fi',
-                '',
-              ].join('\n'),
+              EffectArray.join(
+                [
+                  '#!/bin/sh',
+                  'if [ "$1" = "doctor" ]; then',
+                  "  printf '%s\\n' 'Running Threadnote doctor checks.' 'Summary: 0 failure(s), 0 warning(s)'",
+                  'elif [ "$1" = "development-install-repair" ] && [ "$2" = "--activate-integrations" ]; then',
+                  '  exit 0',
+                  'elif [ "$1" = "--version" ]; then',
+                  `  printf '%s\\n' 'threadnote v${version}'`,
+                  'else',
+                  '  exit 64',
+                  'fi',
+                  '',
+                ],
+                '\n',
+              ),
               {mode: 0o755},
             );
             yield* fs.chmod(executable, 0o755);
@@ -1577,7 +1613,7 @@ describe('exact-head development runtime', () => {
               executableName: 'threadnote',
               releaseRoot,
               reused: true,
-              sourceCheckoutId: 'a'.repeat(64),
+              sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
               stagedRoot: Option.none(),
               ownershipAuthorization: undefined,
               terminateSuperseded: false,
@@ -1593,7 +1629,9 @@ describe('exact-head development runtime', () => {
 
         expect(result.installed.launchersVerified).toBe(true);
         expect(result.launcherMode).toBe(0o755);
-        expect(result.versionResult.stdout.trim()).toBe(`threadnote v${result.installed.version}`);
+        expect(Effect2.pipe(result.versionResult.stdout, EffectString.trim)).toBe(
+          `threadnote v${result.installed.version}`,
+        );
       }),
   );
 
@@ -1607,7 +1645,7 @@ describe('exact-head development runtime', () => {
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-preserved-session-'});
           const installRoot = path.join(root, 'install');
           const binRoot = path.join(root, 'bin');
-          const sourceCommit = '7'.repeat(40);
+          const sourceCommit = Effect2.pipe('7', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const supersededVersion = '4.0.0-beta.29';
           const releaseRoot = path.join(installRoot, 'versions', version);
@@ -1659,9 +1697,9 @@ describe('exact-head development runtime', () => {
             );
           }
           const identities = new Map<number, string>(
-            leases.map(lease => [lease.processId, lease.processStartIdentity]),
+            EffectArray.map(leases, lease => [lease.processId, lease.processStartIdentity]),
           );
-          const running = new Set<number>(leases.map(lease => lease.processId));
+          const running = new Set<number>(EffectArray.map(leases, lease => lease.processId));
           const signals: Array<readonly [number, NodeJS.Signals]> = [];
           let terminationRequested = false;
           const testSystem = SystemInfo.of({
@@ -1689,7 +1727,7 @@ describe('exact-head development runtime', () => {
             executableName,
             releaseRoot,
             reused: true,
-            sourceCheckoutId: 'a'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
@@ -1739,7 +1777,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-rollback-'});
-          const sourceCommit = '3'.repeat(40);
+          const sourceCommit = Effect2.pipe('3', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const installRoot = path.join(root, 'install');
           const binRoot = path.join(root, 'bin');
@@ -1801,7 +1839,7 @@ describe('exact-head development runtime', () => {
             executableName,
             releaseRoot,
             reused: true,
-            sourceCheckoutId: 'a'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
@@ -1847,7 +1885,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-rollback-aggregate-'});
-          const sourceCommit = '5'.repeat(40);
+          const sourceCommit = Effect2.pipe('5', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const installRoot = path.join(root, 'install');
           const binRoot = path.join(root, 'bin');
@@ -1893,7 +1931,7 @@ describe('exact-head development runtime', () => {
           const failingFileSystem = FileSystem.FileSystem.of({
             ...fs,
             rename: (source, target) => {
-              if (source.endsWith('.rollback')) {
+              if (Effect2.pipe(source, EffectString.endsWith('.rollback'))) {
                 rollbackAttempts.push(target);
                 if (target === cliLauncher || target === obsoleteLauncher) {
                   return fs.rename(path.join(root, `injected-missing-${path.basename(target)}`), target);
@@ -1909,7 +1947,7 @@ describe('exact-head development runtime', () => {
             executableName,
             releaseRoot,
             reused: true,
-            sourceCheckoutId: 'a'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
             stagedRoot: Option.none(),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
@@ -1931,7 +1969,13 @@ describe('exact-head development runtime', () => {
 
       expect(result.failure).toContain('rollback was incomplete');
       expect(result.rollbackAttempts).toHaveLength(3);
-      expect(result.errorMessages.filter(message => message.startsWith('Could not restore the'))).toHaveLength(2);
+      expect(
+        EffectArray.filter(
+          result.errorMessages,
+          (message, index) =>
+            index in result.errorMessages && Effect2.pipe(message, EffectString.startsWith('Could not restore the')),
+        ),
+      ).toHaveLength(2);
       expect(result.activePointer).toContain('4.0.0-beta.29');
     }),
   );
@@ -1944,7 +1988,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-cleanup-failures-'});
-          const sourceCommit = '6'.repeat(40);
+          const sourceCommit = Effect2.pipe('6', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const installRoot = path.join(root, 'install');
           const binRoot = path.join(root, 'bin');
@@ -1994,7 +2038,7 @@ describe('exact-head development runtime', () => {
             executableName,
             releaseRoot,
             reused: false,
-            sourceCheckoutId: 'a'.repeat(64),
+            sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
             stagedRoot: Option.some(stagedRoot),
             ownershipAuthorization: undefined,
             terminateSuperseded: false,
@@ -2005,9 +2049,9 @@ describe('exact-head development runtime', () => {
             Effect.provideService(SystemInfo, testSystem),
           );
           return {
-            activePointer: JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))) as {
-              readonly version: string;
-            },
+            activePointer: yield* Schema.decodeUnknownEffect(activeReleasePointerSchema)(
+              JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))),
+            ),
             installed,
             stagedExists: yield* fs.exists(stagedRoot),
           };
@@ -2034,7 +2078,7 @@ describe('exact-head development runtime', () => {
           const path = yield* Path.Path;
           const baseSystem = yield* SystemInfo;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-development-stage-'});
-          const sourceCommit = 'c'.repeat(40);
+          const sourceCommit = Effect2.pipe('c', EffectString.repeat(40));
           const version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
           const distributionRoot = path.join(root, 'dist');
           const versionsRoot = path.join(root, 'versions');
@@ -2053,7 +2097,7 @@ describe('exact-head development runtime', () => {
           const receipt = validReceipt(version, sourceCommit, {
             // A syntactically valid but intentionally wrong digest forces the
             // validation failure after the stage has been copied and written.
-            executableSha256: '0'.repeat(64),
+            executableSha256: Effect2.pipe('0', EffectString.repeat(64)),
             payloadManifest,
             payloadManifestSha256: yield* developmentPayloadManifestSha256(payloadManifest),
             releaseMetadataSha256: yield* sha256FileHex(path.join(distributionRoot, 'release.json')),
@@ -2094,16 +2138,16 @@ function validReceipt(
   return {
     builtAt: '2026-08-02T08:00:00.000Z',
     dependencyInstallation: 'bun install --frozen-lockfile',
-    executableSha256: '1'.repeat(64),
-    payloadManifest: [{mode: 0o644, path: 'release.json', sha256: '3'.repeat(64), size: 1}],
-    payloadManifestSha256: '4'.repeat(64),
-    releaseMetadataSha256: '2'.repeat(64),
+    executableSha256: Effect2.pipe('1', EffectString.repeat(64)),
+    payloadManifest: [{mode: 0o644, path: 'release.json', sha256: Effect2.pipe('3', EffectString.repeat(64)), size: 1}],
+    payloadManifestSha256: Effect2.pipe('4', EffectString.repeat(64)),
+    releaseMetadataSha256: Effect2.pipe('2', EffectString.repeat(64)),
     runtime: 'bun-test',
     schemaVersion: DEVELOPMENT_INSTALL_RECEIPT_VERSION,
     sourceCommit,
     sourceDirty: false,
-    sourceLockfileSha256: '5'.repeat(64),
-    sourcePackageManifestSha256: '6'.repeat(64),
+    sourceLockfileSha256: Effect2.pipe('5', EffectString.repeat(64)),
+    sourcePackageManifestSha256: Effect2.pipe('6', EffectString.repeat(64)),
     target: TEST_TARGET,
     version,
     ...overrides,
@@ -2126,9 +2170,15 @@ function versionCommandExecutor(version: string) {
 }
 
 function nestedErrorMessages(value: unknown): readonly string[] {
-  if (Array.isArray(value)) return value.flatMap(nestedErrorMessages);
+  if (EffectArray.isArray(value))
+    return EffectArray.flatMap(value, (__effectFlatMapValue, __effectFlatMapIndex) =>
+      __effectFlatMapIndex in value ? nestedErrorMessages(__effectFlatMapValue) : [],
+    );
   if (value instanceof AggregateError) {
-    return [value.message, ...value.errors.flatMap(nestedErrorMessages)];
+    return [
+      value.message,
+      ...EffectArray.flatMap(value.errors, (error, index) => (index in value.errors ? nestedErrorMessages(error) : [])),
+    ];
   }
   if (value instanceof Error) {
     return [value.message, ...nestedErrorMessages(value.cause)];
@@ -2197,7 +2247,7 @@ function activateWithCleanupRace(race: CleanupRace, processCount = 1) {
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cleanup-race-'});
       const installRoot = path.join(root, 'install'),
         binRoot = path.join(root, 'bin');
-      const sourceCommit = '8'.repeat(40),
+      const sourceCommit = Effect2.pipe('8', EffectString.repeat(40)),
         version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
       const oldVersion = '4.0.0-beta.29',
         releaseRoot = path.join(installRoot, 'versions', version);
@@ -2284,7 +2334,7 @@ function activateWithCleanupRace(race: CleanupRace, processCount = 1) {
         executableName,
         releaseRoot,
         reused: true,
-        sourceCheckoutId: 'a'.repeat(64),
+        sourceCheckoutId: Effect2.pipe('a', EffectString.repeat(64)),
         stagedRoot: Option.none(),
         ownershipAuthorization: undefined,
         terminateSuperseded: true,
@@ -2295,10 +2345,17 @@ function activateWithCleanupRace(race: CleanupRace, processCount = 1) {
         Effect.provideService(FileSystem.FileSystem, boundaryFileSystem),
       );
       const remainingLeaseFiles = yield* Effect.forEach(processIds, pid => fs.exists(leasePath(pid)));
-      const activeVersion = (
-        JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))) as {version: string}
-      ).version;
-      return {installed, signals, trace, observed: [...observed], remainingLeaseFiles, activeVersion};
+      const activeVersion = yield* Schema.decodeUnknownEffect(activeReleasePointerSchema)(
+        JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))),
+      );
+      return {
+        installed,
+        signals,
+        trace,
+        observed: [...observed],
+        remainingLeaseFiles,
+        activeVersion: activeVersion.version,
+      };
     }),
   ).pipe(provideTestLayer(ApplicationLayer));
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useState} from 'react';
 import type {GitHubSource} from '../manager-contracts.js';
 import {IntegrationLogo} from '@threadnote/manager/integration-catalog';
@@ -5,14 +6,17 @@ import {product} from './catalog.js';
 import {DetailModal} from '@threadnote/manager/detail-modal';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 function repositoryList(value: string): readonly string[] {
   return [
     ...new Set(
-      value
-        .split(/[\n,]/)
-        .map(item => item.trim())
-        .filter(Boolean),
+      EffectArray.filter(
+        EffectArray.map(Effect.pipe(value, EffectString.split(/[\n,]/)), item => Effect.pipe(item, EffectString.trim)),
+        Boolean,
+      ),
     ),
   ];
 }
@@ -30,7 +34,13 @@ export function GitHubConnectionForm({
 }): React.ReactElement {
   const dialogs = useManagerDialogs();
   const [id, setId] = useState(source?.id ?? '');
-  const [repositories, setRepositories] = useState(source?.repositories.join('\n') ?? '');
+  const [repositories, setRepositories] = useState(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(source?.repositories), __effectArrayJoinReceiver =>
+        EffectArray.join(__effectArrayJoinReceiver, '\n'),
+      ),
+    ) ?? '',
+  );
   const [token, setToken] = useState('');
   const [credentialMode, setCredentialMode] = useState<'reuse' | 'local' | 'environment'>(
     source ? (source.credentialStorage !== 'local' ? 'environment' : 'local') : reusableCredential ? 'reuse' : 'local',
@@ -79,7 +89,7 @@ export function GitHubConnectionForm({
       repos.length === 0 ||
       !credentialReady ||
       !projectMode ||
-      (projectMode === 'project' && !project.trim())
+      (projectMode === 'project' && !Effect.pipe(project, EffectString.trim))
     )
       return;
     setBusy(true);
@@ -91,7 +101,7 @@ export function GitHubConnectionForm({
         editing: !!source,
         repositories: repos,
         ...(credentialMode === 'environment' ? {credentialEnv} : token ? {token} : {}),
-        project: projectMode === 'projectless' ? null : project.trim(),
+        project: projectMode === 'projectless' ? null : Effect.pipe(project, EffectString.trim),
         refreshIntervalMinutes,
         maxStaleHours,
         apply: true,
@@ -272,7 +282,7 @@ export function GitHubConnectionForm({
               repos.length === 0 ||
               !credentialReady ||
               !projectMode ||
-              (projectMode === 'project' && !project.trim())
+              (projectMode === 'project' && !Effect.pipe(project, EffectString.trim))
             }
           >
             {busy ? 'Saving…' : source ? 'Save settings' : 'Connect and sync'}

@@ -14,6 +14,9 @@ import {
   graphShareParseResultSemanticDigest,
 } from '@threadnote/graph/sharing/parse/result';
 import {verifyGraphShareParseReceipt} from '@threadnote/graph/sharing/parse/cache';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const sharingLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
 
@@ -22,9 +25,9 @@ describe('graph share publisher freeze verification', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const casRoot = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-share-verify-'});
-      const repositoryId = 'b'.repeat(64);
-      const extractorSet = 'c'.repeat(64);
-      const contentHash = 'd'.repeat(64);
+      const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
+      const extractorSet = Effect2.pipe('c', EffectString.repeat(64));
+      const contentHash = Effect2.pipe('d', EffectString.repeat(64));
       const normalizedPath = 'src/index.ts';
       const languageAndRole = graphShareLanguageAndRole('typescript', 'source');
       const actionKey = graphShareParseActionKey({
@@ -39,7 +42,7 @@ describe('graph share publisher freeze verification', () => {
         contentHash,
         extractorSet,
         facts: {diagnostics: [], edges: [], path: normalizedPath, symbols: []},
-        gitBlobId: 'e'.repeat(40),
+        gitBlobId: Effect2.pipe('e', EffectString.repeat(40)),
         languageAndRole,
         normalizedPath,
         repositoryId,
@@ -54,21 +57,21 @@ describe('graph share publisher freeze verification', () => {
       const announcement = {
         actionKey,
         attestationDigest,
-        batchId: 'f'.repeat(40),
+        batchId: Effect2.pipe('f', EffectString.repeat(40)),
         resultManifestDigest,
         semanticDigest: parsed.semanticDigest,
       };
       const verified = yield* verifyGraphShareParseReceipt({
         announcement,
         casRoot,
-        graphAbi: 'a'.repeat(64),
+        graphAbi: Effect2.pipe('a', EffectString.repeat(64)),
         repositoryId,
       });
       expect(verified.parsed.semanticDigest).toBe(parsed.semanticDigest);
       const mismatched = yield* verifyGraphShareParseReceipt({
         announcement: {...announcement, semanticDigest: sha256Digest('other')},
         casRoot,
-        graphAbi: 'a'.repeat(64),
+        graphAbi: Effect2.pipe('a', EffectString.repeat(64)),
         repositoryId,
       }).pipe(Effect.option);
       expect(mismatched._tag).toBe('None');
@@ -85,10 +88,10 @@ describe('graph share publisher freeze verification', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const casRoot = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-share-digest-'});
-        const normalizedPath = `src/${pathChars.join('')}.ts`;
-        const repositoryId = 'b'.repeat(64);
-        const extractorSet = 'c'.repeat(64);
-        const contentHash = 'd'.repeat(64);
+        const normalizedPath = `src/${EffectArray.join(pathChars, '')}.ts`;
+        const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
+        const extractorSet = Effect2.pipe('c', EffectString.repeat(64));
+        const contentHash = Effect2.pipe('d', EffectString.repeat(64));
         const languageAndRole = graphShareLanguageAndRole('typescript', 'source');
         const facts = {diagnostics: [], edges: [], path: normalizedPath, symbols: []};
         const actionKey = graphShareParseActionKey({
@@ -103,7 +106,7 @@ describe('graph share publisher freeze verification', () => {
           contentHash,
           extractorSet,
           facts,
-          gitBlobId: 'e'.repeat(40),
+          gitBlobId: Effect2.pipe('e', EffectString.repeat(40)),
           languageAndRole,
           normalizedPath,
           repositoryId,
@@ -113,7 +116,7 @@ describe('graph share publisher freeze verification', () => {
           contentHash,
           extractorSet,
           facts,
-          gitBlobId: 'e'.repeat(40),
+          gitBlobId: Effect2.pipe('e', EffectString.repeat(40)),
           languageAndRole,
           normalizedPath,
           repositoryId,
@@ -131,7 +134,7 @@ describe('graph share publisher freeze verification', () => {
           announcement: {
             actionKey,
             attestationDigest,
-            batchId: 'f'.repeat(40),
+            batchId: Effect2.pipe('f', EffectString.repeat(40)),
             resultManifestDigest,
             semanticDigest: parsed.semanticDigest,
           },

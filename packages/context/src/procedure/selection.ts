@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {findAgentSurface, type AgentCatalogEntry} from '@threadnote/integrations/catalog';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -11,6 +12,10 @@ import {
   type ProcedureRollout,
   type ProcedureVerificationReceipt,
 } from './contract.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const MAXIMUM_CONTEXT_BRIEF_PROCEDURES = 4;
 
@@ -75,19 +80,25 @@ export function selectVerifiedProcedureEvidence(input: SelectVerifiedProceduresI
   );
   if (limit === 0) return {gaps: [], procedures: []};
   const conflictedKeys = conflictingCandidateKeys(input.candidates);
-  const integrityFailures = input.candidates.filter(candidate => !hasCurrentIntegrity(candidate));
-  const current = input.candidates
-    .filter(candidate => hasCurrentIntegrity(candidate) && isCompatible(candidate, surface))
-    .filter(candidate => !conflictedKeys.has(candidateKey(candidate)))
-    .sort(compareCandidate);
+  const integrityFailures = EffectArray.filter(input.candidates, candidate => !hasCurrentIntegrity(candidate));
+  const currentCandidates = input.candidates;
+  const current = EffectArray.filter(
+    EffectArray.filter(
+      currentCandidates,
+      (candidate, __effectArrayIndex) =>
+        __effectArrayIndex in currentCandidates && hasCurrentIntegrity(candidate) && isCompatible(candidate, surface),
+    ),
+    candidate => !conflictedKeys.has(candidateKey(candidate)),
+  ).sort(compareCandidate);
   const byArtifact = groupBy(current, candidate => candidate.manifest.artifact.id);
-  const roots = [...byArtifact.entries()]
-    .map(
+  const roots = EffectArray.filter(
+    EffectArray.map(
+      [...byArtifact.entries()],
       ([artifactId, candidates]) =>
-        [artifactId, candidates.filter(candidate => taskMatches(candidate.manifest, input.task))] as const,
-    )
-    .filter(([, candidates]) => candidates.length > 0)
-    .sort(([left], [right]) => compareText(left, right));
+        [artifactId, EffectArray.filter(candidates, candidate => taskMatches(candidate.manifest, input.task))] as const,
+    ),
+    ([, candidates]) => candidates.length > 0,
+  ).sort(([left], [right]) => compareText(left, right));
   const admitted = new Map<string, PublishedProcedureCandidate>();
   const visiting = new Set<string>();
   const cohort = `${input.cohort}\u0000${surface.id}`;
@@ -103,16 +114,18 @@ export function selectVerifiedProcedureEvidence(input: SelectVerifiedProceduresI
   if (conflictedKeys.size > 0) gaps.push('procedure-version-conflict');
   return {
     gaps,
-    procedures: [...admitted.values()].map(toEvidence),
+    procedures: EffectArray.map([...admitted.values()], toEvidence),
   };
 }
 
 /** Strictly validates the non-executable procedure evidence carried by public Context Brief channels. */
 export function parseVerifiedProcedureEvidenceList(value: unknown): readonly VerifiedProcedureEvidence[] {
-  if (!Array.isArray(value) || value.length > MAXIMUM_CONTEXT_BRIEF_PROCEDURES) {
+  if (!EffectArray.isArray(value) || value.length > MAXIMUM_CONTEXT_BRIEF_PROCEDURES) {
     throw new Error(`verifiedProcedures must contain at most ${MAXIMUM_CONTEXT_BRIEF_PROCEDURES} entries`);
   }
-  return value.map((entry, index) => parseVerifiedProcedureEvidence(entry, `verifiedProcedures[${index}]`));
+  return EffectArray.map(value, (entry, index) =>
+    parseVerifiedProcedureEvidence(entry, `verifiedProcedures[${index}]`),
+  );
 }
 
 function parseVerifiedProcedureEvidence(value: unknown, label: string): VerifiedProcedureEvidence {
@@ -164,7 +177,52 @@ function parseVerifiedProcedureEvidence(value: unknown, label: string): Verified
     verifiedAt: provenance.verifiedAt,
     verifier: provenance.verifier,
   });
-  return value as VerifiedProcedureEvidence;
+  if (!isVerifiedProcedureEvidence(value)) throw new Error(`${label} is not valid procedure evidence`);
+  return value;
+}
+
+function isEvidenceRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function isProcedureDependencyList(value: unknown): value is ProcedureManifest['dependencies'] {
+  return (
+    EffectArray.isArray(value) &&
+    EffectArray.every(
+      value,
+      dependency =>
+        isEvidenceRecord(dependency) &&
+        typeof dependency.artifactId === 'string' &&
+        typeof dependency.semanticVersion === 'string',
+    )
+  );
+}
+
+function isVerifiedProcedureEvidence(value: unknown): value is VerifiedProcedureEvidence {
+  if (!isEvidenceRecord(value)) return false;
+  const artifact = value.artifact;
+  const provenance = value.provenance;
+  const rollout = value.rollout;
+  return (
+    isEvidenceRecord(artifact) &&
+    typeof artifact.id === 'string' &&
+    typeof artifact.semanticVersion === 'string' &&
+    isProcedureDependencyList(value.dependencies) &&
+    typeof value.owner === 'string' &&
+    isEvidenceRecord(provenance) &&
+    typeof provenance.artifactSha256 === 'string' &&
+    provenance.kind === 'verified-procedure-git-share' &&
+    typeof provenance.manifestSha256 === 'string' &&
+    typeof provenance.team === 'string' &&
+    typeof provenance.threadnoteVersion === 'string' &&
+    typeof provenance.verifiedAt === 'string' &&
+    typeof provenance.verifier === 'string' &&
+    typeof value.reviewedOn === 'string' &&
+    isEvidenceRecord(rollout) &&
+    (rollout.channel === 'preview' || rollout.channel === 'stable') &&
+    typeof rollout.percentage === 'number' &&
+    typeof value.summary === 'string'
+  );
 }
 
 function admitWithDependencies(
@@ -182,11 +240,15 @@ function admitWithDependencies(
   const before = new Set(admitted.keys());
   visiting.add(key);
   for (const dependency of candidate.manifest.dependencies) {
-    const found = candidates.find(
-      value =>
-        value.manifest.artifact.id === dependency.artifactId &&
-        value.manifest.artifact.semanticVersion === dependency.semanticVersion &&
-        rolloutAdmits(value.manifest, channel, cohort),
+    const found = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        candidates,
+        __effectArrayValue =>
+          !!(value =>
+            value.manifest.artifact.id === dependency.artifactId &&
+            value.manifest.artifact.semanticVersion === dependency.semanticVersion &&
+            rolloutAdmits(value.manifest, channel, cohort))(__effectArrayValue),
+      ),
     );
     if (found === undefined || !admitWithDependencies(found, candidates, channel, cohort, admitted, visiting, limit)) {
       for (const admittedKey of admitted.keys()) if (!before.has(admittedKey)) admitted.delete(admittedKey);
@@ -216,14 +278,18 @@ function hasCurrentIntegrity(candidate: PublishedProcedureCandidate): boolean {
 }
 
 function isCompatible(candidate: PublishedProcedureCandidate, surface: AgentCatalogEntry): boolean {
-  const capabilities = Object.entries(surface.capabilities)
-    .filter(([, capability]) => capability.status === 'managed')
-    .map(([name]) => name);
+  const capabilities: readonly string[] = EffectArray.map(
+    EffectArray.filter(
+      EffectRecord.toEntries(surface.capabilities),
+      ([, capability]) => capability.status === 'managed',
+    ),
+    ([name]) => name,
+  );
   const surfaceIds = [...new Set([surface.id, surface.agentId, ...surface.aliases])];
   return (
-    candidate.manifest.compatible.capabilities.every(capability => capabilities.includes(capability)) &&
+    EffectArray.every(candidate.manifest.compatible.capabilities, capability => capabilities.includes(capability)) &&
     (candidate.manifest.compatible.surfaceIds.length === 0 ||
-      candidate.manifest.compatible.surfaceIds.some(id => surfaceIds.includes(id)))
+      EffectArray.some(candidate.manifest.compatible.surfaceIds, id => surfaceIds.includes(id)))
   );
 }
 
@@ -232,15 +298,18 @@ function selectVersion(
   channel: ProcedureRollout['channel'],
   cohort: string,
 ): PublishedProcedureCandidate | undefined {
-  return [...candidates]
-    .sort((left, right) => {
-      const byVersion = compareSemanticVersions(
-        right.manifest.artifact.semanticVersion,
-        left.manifest.artifact.semanticVersion,
-      );
-      return byVersion || compareCandidate(left, right);
-    })
-    .find(candidate => rolloutAdmits(candidate.manifest, channel, cohort));
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...candidates].sort((left, right) => {
+        const byVersion = compareSemanticVersions(
+          right.manifest.artifact.semanticVersion,
+          left.manifest.artifact.semanticVersion,
+        );
+        return byVersion || compareCandidate(left, right);
+      }),
+      __effectArrayValue => !!(candidate => rolloutAdmits(candidate.manifest, channel, cohort))(__effectArrayValue),
+    ),
+  );
 }
 
 function rolloutAdmits(manifest: ProcedureManifestV2, channel: ProcedureRollout['channel'], cohort: string): boolean {
@@ -248,7 +317,10 @@ function rolloutAdmits(manifest: ProcedureManifestV2, channel: ProcedureRollout[
   if (manifest.rollout.percentage === 100) return true;
   const bucket =
     Number.parseInt(
-      sha256HexSync(`${manifest.artifact.id}\u0000${manifest.artifact.semanticVersion}\u0000${cohort}`).slice(0, 8),
+      Effect.pipe(
+        sha256HexSync(`${manifest.artifact.id}\u0000${manifest.artifact.semanticVersion}\u0000${cohort}`),
+        EffectString.slice(0, 8),
+      ),
       16,
     ) % 100;
   return bucket < manifest.rollout.percentage;
@@ -256,9 +328,30 @@ function rolloutAdmits(manifest: ProcedureManifestV2, channel: ProcedureRollout[
 
 function taskMatches(manifest: ProcedureManifestV2, task: string): boolean {
   if (manifest.presentation.taskKeywords.length === 0) return true;
-  const taskTokens = new Set(task.toLowerCase().match(/[a-z0-9]+/gu) ?? []);
-  return manifest.presentation.taskKeywords.some(keyword =>
-    (keyword.toLowerCase().match(/[a-z0-9]+/gu) ?? []).every(token => taskTokens.has(token)),
+  const taskTokens = new Set(
+    Effect.pipe(task, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.toLowerCase);
+      const __effectPipeStage1 = Effect.pipe(
+        __effectPipeStage0,
+        EffectString.match(/[a-z0-9]+/gu),
+        Effect.Option.getOrElse(() => null),
+      );
+      return __effectPipeStage1;
+    }) ?? [],
+  );
+  return EffectArray.some(manifest.presentation.taskKeywords, keyword =>
+    EffectArray.every(
+      Effect.pipe(keyword, __effectPipeInput => {
+        const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.toLowerCase);
+        const __effectPipeStage1 = Effect.pipe(
+          __effectPipeStage0,
+          EffectString.match(/[a-z0-9]+/gu),
+          Effect.Option.getOrElse(() => null),
+        );
+        return __effectPipeStage1;
+      }) ?? [],
+      token => taskTokens.has(token),
+    ),
   );
 }
 
@@ -309,7 +402,12 @@ function conflictingCandidateKeys(candidates: readonly PublishedProcedureCandida
     });
     identities.set(key, new Set([...(identities.get(key) ?? []), identity]));
   }
-  return new Set([...identities.entries()].filter(([, values]) => values.size > 1).map(([key]) => key));
+  return new Set(
+    EffectArray.map(
+      EffectArray.filter([...identities.entries()], ([, values]) => values.size > 1),
+      ([key]) => key,
+    ),
+  );
 }
 
 function compareCandidate(left: PublishedProcedureCandidate, right: PublishedProcedureCandidate): number {
@@ -331,15 +429,14 @@ function compareText(left: string, right: string): number {
 }
 
 function evidenceObject(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object`);
+  return value;
 }
 
 function exactEvidenceKeys(source: Record<string, unknown>, keys: readonly string[], label: string): void {
   const expected = new Set(keys);
-  const unsupported = Object.keys(source).filter(key => !expected.has(key));
-  const missing = keys.filter(key => !(key in source));
+  const unsupported = EffectArray.filter(EffectRecord.keys(source), key => !expected.has(key));
+  const missing = EffectArray.filter(keys, key => !(key in source));
   if (unsupported.length > 0 || missing.length > 0) throw new Error(`${label} has invalid fields`);
 }
 
@@ -348,9 +445,13 @@ function boundedOpaqueText(value: unknown, label: string): string {
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > 256 ||
-    value.trim() !== value ||
-    Array.from(value).some(character => {
-      const codePoint = character.codePointAt(0);
+    Effect.pipe(value, EffectString.trim) !== value ||
+    EffectArray.some(Array.from(value), character => {
+      const codePoint = Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      );
       return codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f);
     })
   ) {

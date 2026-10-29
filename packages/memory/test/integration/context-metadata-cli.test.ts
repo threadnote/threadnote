@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -11,7 +12,7 @@ const homes: string[] = [];
 const URI = 'threadnote://user/local/memories/durable/projects/project-a/topic.md';
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('context metadata CLI', () => {

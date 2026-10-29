@@ -1,3 +1,4 @@
+import {isJsonObject} from '@threadnote/platform/json';
 import {Effect, Schema} from 'effect';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
@@ -67,12 +68,12 @@ export function workflowWriteRequest(intent: WorkflowWriteIntent): WorkflowReque
 }
 
 function artifact(result: unknown): WorkflowArtifact {
-  if (result === null || typeof result !== 'object')
+  if (!isJsonObject(result))
     throw WorkflowAutomationError.make({
       code: 'invalid-readback',
       message: 'Expected native verified artifact readback.',
     });
-  const value = result as Record<string, unknown>;
+  const value = result;
   if (
     value.status !== 'ok' ||
     value.verifiedReadback !== true ||
@@ -80,8 +81,8 @@ function artifact(result: unknown): WorkflowArtifact {
     typeof value.memoryId !== 'string' ||
     typeof value.revision !== 'string' ||
     typeof value.body !== 'string' ||
-    !['durable', 'handoff'].includes(String(value.storageKind)) ||
-    !['active', 'archived'].includes(String(value.state))
+    !isWorkflowStorageKind(value.storageKind) ||
+    !isWorkflowArtifactState(value.state)
   )
     throw WorkflowAutomationError.make({
       code: value.status === 'not-found' ? 'artifact-not-found' : 'invalid-readback',
@@ -92,9 +93,21 @@ function artifact(result: unknown): WorkflowArtifact {
     memoryId: value.memoryId,
     revision: value.revision,
     body: value.body,
-    storageKind: value.storageKind as WorkflowArtifact['storageKind'],
-    state: value.state as WorkflowArtifact['state'],
+    storageKind: value.storageKind,
+    state: value.state,
   };
+}
+
+function isWorkflowStorageKind(value: unknown): value is WorkflowArtifact['storageKind'] {
+  return value === 'durable' || value === 'handoff';
+}
+
+function isWorkflowArtifactState(value: unknown): value is WorkflowArtifact['state'] {
+  return value === 'active' || value === 'archived';
+}
+
+function isOperationState(value: unknown): value is 'absent' | 'prepared' | 'verified' {
+  return value === 'absent' || value === 'prepared' || value === 'verified';
 }
 
 /** Capture application services; an optional private call remains lock-scoped and revocable. */
@@ -167,11 +180,11 @@ export const makeWorkflowMemoryAdapter = Effect.fn('workflowAutomation.memoryAda
           typeof result === 'object' &&
           result !== null &&
           'operationState' in result &&
-          ['absent', 'prepared', 'verified'].includes(String(result.operationState)) &&
+          isOperationState(result.operationState) &&
           'intentDigest' in result &&
           typeof result.intentDigest === 'string'
             ? Effect.succeed({
-                state: result.operationState as 'absent' | 'prepared' | 'verified',
+                state: result.operationState,
                 intentDigest: result.intentDigest,
               })
             : Effect.fail(

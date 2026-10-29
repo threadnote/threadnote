@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -19,6 +20,8 @@ import {
   upsertSuperhumanSource,
   validateSuperhumanDocumentId,
 } from '@threadnote/threadnote/integrations/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Registered source configuration composition', () => {
   effectIt.effect('serializes concurrent mixed-source read-modify-write transactions', () =>
@@ -58,7 +61,7 @@ describe('Registered source configuration composition', () => {
         );
         const result = yield* readSourceConfiguration(config);
         expect(result.version).toBe(2);
-        expect(result.sources.map(source => source.id).sort()).toEqual(['docs', 'vault']);
+        expect(EffectArray.map(result.sources, source => source.id).sort()).toEqual(['docs', 'vault']);
       }).pipe(provideTestLayer(Layer.merge(BunServices.layer, TestSystemInfoLayer))),
     ),
   );
@@ -100,7 +103,16 @@ describe('Registered source configuration composition', () => {
 
   it('rejects invalid or duplicate provider IDs and cross-provider source ID replacement', () => {
     expect(() => validateSuperhumanDocumentId('Doc_Inner_S')).not.toThrow();
-    for (const invalid of ['a/b', 'a.b', 'a b', 'x'.repeat(129), 'con', 'CON', 'NUL', 'COM1']) {
+    for (const invalid of [
+      'a/b',
+      'a.b',
+      'a b',
+      Effect2.pipe('x', EffectString.repeat(129)),
+      'con',
+      'CON',
+      'NUL',
+      'COM1',
+    ]) {
       expect(() => validateSuperhumanDocumentId(invalid)).toThrow();
     }
     const source = {

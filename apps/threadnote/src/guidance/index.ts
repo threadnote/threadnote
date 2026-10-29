@@ -1,4 +1,5 @@
-import {DateTime, Effect, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {DateTime, Effect, FileSystem, Path, Predicate, Schema} from 'effect';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {readBoundedContainedStableRegularFile} from '@threadnote/graph/inventory/contained_file';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -22,6 +23,9 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readFileIfExists} from '../utils.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {USER_INSTRUCTIONS_END_MARKER, USER_INSTRUCTIONS_START_MARKER} from '../constants.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const LEGACY_GUIDANCE_SCHEMA_VERSION = 1 as const;
 export const GUIDANCE_SCHEMA_VERSION = 2 as const;
@@ -61,7 +65,10 @@ const IGNORED_RULE_FILE_SUFFIXES = [
   '.tmp',
 ] as const;
 
-export class GuidanceError extends Schema.TaggedError<GuidanceError>()('GuidanceError', {message: Schema.String}) {}
+export class GuidanceError extends Schema.TaggedError<GuidanceError, {readonly brand: unique symbol}>()(
+  'GuidanceError',
+  {message: Schema.String},
+) {}
 
 export interface GuidanceSourceV1 {
   readonly contentHash: string;
@@ -134,22 +141,33 @@ export function renderManagedGuidanceBlock(sources: readonly GuidanceSourceV1[])
     throw new Error(`Project guidance requires between 1 and ${MAX_GUIDANCE_SOURCES} unique sources.`);
   for (const source of canonical) {
     if (
-      source.uri.includes(GUIDANCE_BLOCK_START) ||
-      source.uri.includes(GUIDANCE_BLOCK_END) ||
-      source.text.includes(GUIDANCE_BLOCK_START) ||
-      source.text.includes(GUIDANCE_BLOCK_END)
+      Effect2.pipe(source.uri, EffectString.includes(GUIDANCE_BLOCK_START)) ||
+      Effect2.pipe(source.uri, EffectString.includes(GUIDANCE_BLOCK_END)) ||
+      Effect2.pipe(source.text, EffectString.includes(GUIDANCE_BLOCK_START)) ||
+      Effect2.pipe(source.text, EffectString.includes(GUIDANCE_BLOCK_END))
     )
       throw new Error('Project guidance source contains a reserved managed-block marker.');
     if (!SHA256_PATTERN.test(source.contentHash)) throw new Error('Project guidance source hash is invalid.');
   }
-  const sourceMetadata = canonical.map(({contentHash, uri}) => ({contentHash, uri}));
-  const contentHash = sha256HexSync(canonical.map(source => `${source.uri}\n${source.text}`).join('\n\n'));
-  const block = [
-    GUIDANCE_BLOCK_START,
-    `<!-- threadnote:project-guidance:metadata ${JSON.stringify({contentHash, schemaVersion: GUIDANCE_BLOCK_SCHEMA_VERSION, sources: sourceMetadata})} -->`,
-    ...canonical.map(source => `## Source ${source.uri}\n\n${source.text.trimEnd()}`),
-    GUIDANCE_BLOCK_END,
-  ].join('\n\n');
+  const sourceMetadata = EffectArray.map(canonical, ({contentHash, uri}) => ({contentHash, uri}));
+  const contentHash = sha256HexSync(
+    EffectArray.join(
+      EffectArray.map(canonical, source => `${source.uri}\n${source.text}`),
+      '\n\n',
+    ),
+  );
+  const block = EffectArray.join(
+    [
+      GUIDANCE_BLOCK_START,
+      `<!-- threadnote:project-guidance:metadata ${JSON.stringify({contentHash, schemaVersion: GUIDANCE_BLOCK_SCHEMA_VERSION, sources: sourceMetadata})} -->`,
+      ...EffectArray.map(
+        canonical,
+        source => `## Source ${source.uri}\n\n${Effect2.pipe(source.text, EffectString.trimEnd)}`,
+      ),
+      GUIDANCE_BLOCK_END,
+    ],
+    '\n\n',
+  );
   if (new TextEncoder().encode(block).byteLength > MAX_GUIDANCE_BLOCK_BYTES)
     throw new Error(`Managed project guidance exceeds ${MAX_GUIDANCE_BLOCK_BYTES} UTF-8 bytes.`);
   if (hasMalformedGuidanceBlock(block) || guidanceBlock(block) !== block)
@@ -158,23 +176,42 @@ export function renderManagedGuidanceBlock(sources: readonly GuidanceSourceV1[])
 }
 
 export function guidanceImportReviewId(surface: string, project: string, imported: string): string {
-  return `review-guidance-${sha256HexSync(`${surface}\n${project}\n${imported}`).slice(0, 16)}`;
+  return `review-guidance-${Effect2.pipe(sha256HexSync(`${surface}\n${project}\n${imported}`), EffectString.slice(0, 16))}`;
 }
 
 export function guidanceBlock(content: string): string | undefined {
-  const start = content.indexOf(GUIDANCE_BLOCK_START);
-  const end = content.indexOf(GUIDANCE_BLOCK_END);
+  const start = Effect2.pipe(
+    content,
+    EffectString.indexOf(GUIDANCE_BLOCK_START),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const end = Effect2.pipe(
+    content,
+    EffectString.indexOf(GUIDANCE_BLOCK_END),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   if (start < 0 || end < start || content.indexOf(GUIDANCE_BLOCK_START, start + 1) >= 0) return undefined;
-  return content.slice(start, end + GUIDANCE_BLOCK_END.length);
+  return Effect2.pipe(content, EffectString.slice(start, end + GUIDANCE_BLOCK_END.length));
 }
 
 export function hasMalformedGuidanceBlock(content: string): boolean {
-  const starts = content.split(GUIDANCE_BLOCK_START).length - 1;
-  const ends = content.split(GUIDANCE_BLOCK_END).length - 1;
+  const starts = Effect2.pipe(content, EffectString.split(GUIDANCE_BLOCK_START)).length - 1;
+  const ends = Effect2.pipe(content, EffectString.split(GUIDANCE_BLOCK_END)).length - 1;
   return (
     starts !== ends ||
     starts > 1 ||
-    (starts === 1 && content.indexOf(GUIDANCE_BLOCK_END) < content.indexOf(GUIDANCE_BLOCK_START))
+    (starts === 1 &&
+      Effect2.pipe(
+        content,
+        EffectString.indexOf(GUIDANCE_BLOCK_END),
+        Effect2.Option.getOrElse(() => -1),
+      ) <
+        Effect2.pipe(
+          content,
+          EffectString.indexOf(GUIDANCE_BLOCK_START),
+          Effect2.Option.getOrElse(() => -1),
+        ))
   );
 }
 
@@ -186,7 +223,7 @@ export function upsertGuidanceBlock(
   const current = content ?? '';
   if (hasMalformedGuidanceBlock(current)) throw new Error('Project guidance markers are incomplete or duplicated.');
   const existing = guidanceBlock(current);
-  if (existing !== undefined) return current.replace(existing, block);
+  if (existing !== undefined) return Effect2.pipe(current, EffectString.replace(existing, block));
   const prefix = current.length === 0 ? (wrapper?.prefix ?? '') : '';
   const suffix = current.length === 0 ? (wrapper?.suffix ?? '') : '';
   return `${current}${prefix}${block}${suffix}`;
@@ -196,8 +233,12 @@ export function removeGuidanceBlock(content: string): string | undefined {
   if (hasMalformedGuidanceBlock(content)) return undefined;
   const block = guidanceBlock(content);
   if (block === undefined) return undefined;
-  const index = content.indexOf(block);
-  const next = `${content.slice(0, index)}${content.slice(index + block.length)}`;
+  const index = Effect2.pipe(
+    content,
+    EffectString.indexOf(block),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const next = `${Effect2.pipe(content, EffectString.slice(0, index))}${Effect2.pipe(content, EffectString.slice(index + block.length))}`;
   return next.length === 0 ? '' : next;
 }
 
@@ -210,20 +251,36 @@ function removeProjectedGuidance(
   if (block === undefined) return undefined;
   if (wrapperOwned && wrapper) {
     const envelope = `${wrapper.prefix}${block}${wrapper.suffix}`;
-    const envelopeIndex = content.indexOf(envelope);
+    const envelopeIndex = Effect2.pipe(
+      content,
+      EffectString.indexOf(envelope),
+      Effect2.Option.getOrElse(() => -1),
+    );
     if (envelopeIndex >= 0)
-      return `${content.slice(0, envelopeIndex)}${content.slice(envelopeIndex + envelope.length)}`;
+      return `${Effect2.pipe(content, EffectString.slice(0, envelopeIndex))}${Effect2.pipe(content, EffectString.slice(envelopeIndex + envelope.length))}`;
   }
   return removeGuidanceBlock(content);
 }
 
 function hasMalformedBootstrapBlock(content: string): boolean {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const starts = content.split(USER_INSTRUCTIONS_START_MARKER).length - 1;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const ends = content.split(USER_INSTRUCTIONS_END_MARKER).length - 1;
   return (
     starts !== ends ||
     starts > 1 ||
-    (starts === 1 && content.indexOf(USER_INSTRUCTIONS_END_MARKER) < content.indexOf(USER_INSTRUCTIONS_START_MARKER))
+    (starts === 1 &&
+      Effect2.pipe(
+        content,
+        EffectString.indexOf(USER_INSTRUCTIONS_END_MARKER),
+        Effect2.Option.getOrElse(() => -1),
+      ) <
+        Effect2.pipe(
+          content,
+          EffectString.indexOf(USER_INSTRUCTIONS_START_MARKER),
+          Effect2.Option.getOrElse(() => -1),
+        ))
   );
 }
 
@@ -231,12 +288,22 @@ export function stripThreadnoteManagedGuidance(content: string): string {
   if (hasMalformedGuidanceBlock(content) || hasMalformedBootstrapBlock(content))
     throw new Error('Threadnote-managed guidance markers are incomplete, reversed, or duplicated.');
   const withoutProject = removeGuidanceBlock(content) ?? content;
-  const start = withoutProject.indexOf(USER_INSTRUCTIONS_START_MARKER);
-  const end = withoutProject.indexOf(USER_INSTRUCTIONS_END_MARKER);
+  const start = Effect2.pipe(
+    withoutProject,
+    EffectString.indexOf(USER_INSTRUCTIONS_START_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const end = Effect2.pipe(
+    withoutProject,
+    EffectString.indexOf(USER_INSTRUCTIONS_END_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (start < 0 || end < start) return withoutProject;
-  const before = withoutProject.slice(0, start);
-  const after = withoutProject.slice(end + USER_INSTRUCTIONS_END_MARKER.length);
-  return before.endsWith('\n') && after.startsWith('\n') ? `${before}${after.slice(1)}` : `${before}${after}`;
+  const before = Effect2.pipe(withoutProject, EffectString.slice(0, start));
+  const after = Effect2.pipe(withoutProject, EffectString.slice(end + USER_INSTRUCTIONS_END_MARKER.length));
+  return Effect2.pipe(before, EffectString.endsWith('\n')) && Effect2.pipe(after, EffectString.startsWith('\n'))
+    ? `${before}${Effect2.pipe(after, EffectString.slice(1))}`
+    : `${before}${after}`;
 }
 
 export const collectGuidanceImportSourcesAtRoot = Effect.fn('guidance.collectImportSourcesAtRoot')(function* (
@@ -268,17 +335,25 @@ export const collectGuidanceImportSourcesAtRoot = Effect.fn('guidance.collectImp
     if (entry.content !== undefined && !byPath.has(normalized)) byPath.set(normalized, entry.content);
   }
   const selectedContents = [...byPath.entries()].sort(([left], [right]) => compareText(left, right));
-  if (selectedContents.some(([, content]) => hasMalformedGuidanceBlock(content) || hasMalformedBootstrapBlock(content)))
+  if (
+    EffectArray.some(
+      selectedContents,
+      ([, content]) => hasMalformedGuidanceBlock(content) || hasMalformedBootstrapBlock(content),
+    )
+  )
     return yield* GuidanceError.make({
       message: 'Threadnote-managed guidance markers are incomplete, reversed, or duplicated; import refused.',
     });
-  const sources = selectedContents.flatMap(([relativePath, content]) => {
-    const text = stripImportedGuidance(content, contract).trim();
+  const sources = EffectArray.flatMap(selectedContents, ([relativePath, content]) => {
+    const text = Effect2.pipe(stripImportedGuidance(content, contract), EffectString.trim);
     return text.length === 0
       ? []
       : [{contentHash: sha256HexSync(content), relativePath, text} satisfies CollectedGuidanceImportSourceV1];
   });
-  const imported = sources.map(source => source.text).join('\n\n');
+  const imported = EffectArray.join(
+    EffectArray.map(sources, source => source.text),
+    '\n\n',
+  );
   if (new TextEncoder().encode(imported).byteLength > MAX_IMPORT_BYTES)
     return yield* GuidanceError.make({message: `Imported guidance exceeds ${MAX_IMPORT_BYTES} bytes.`});
   return sources;
@@ -293,14 +368,22 @@ export const collectGuidanceImportSources = Effect.fn('guidance.collectImportSou
 
 function stripImportedGuidance(content: string, contract: AgentGuidanceContract): string {
   const containedManagedContent =
-    content.includes(GUIDANCE_BLOCK_START) || content.includes(USER_INSTRUCTIONS_START_MARKER);
+    Effect2.pipe(content, EffectString.includes(GUIDANCE_BLOCK_START)) ||
+    Effect2.pipe(content, EffectString.includes(USER_INSTRUCTIONS_START_MARKER));
   const stripped = stripThreadnoteManagedGuidance(content);
   if (!containedManagedContent) return stripped;
   const wrappers = [
     ...(contract.importWrappers ?? []),
     ...(contract.projection.wrapper === undefined ? [] : [contract.projection.wrapper]),
   ];
-  return wrappers.some(wrapper => stripped.trim() === `${wrapper.prefix}${wrapper.suffix}`.trim()) ? '' : stripped;
+  return EffectArray.some(
+    wrappers,
+    wrapper =>
+      Effect2.pipe(stripped, EffectString.trim) ===
+      Effect2.pipe(`${wrapper.prefix}${wrapper.suffix}`, EffectString.trim),
+  )
+    ? ''
+    : stripped;
 }
 
 export const runGuidanceImport = Effect.fn('guidance.import')(function* (
@@ -308,7 +391,10 @@ export const runGuidanceImport = Effect.fn('guidance.import')(function* (
   adapter: AgentAdapter,
   options: GuidanceImportOptions,
 ) {
-  const imported = (yield* collectGuidanceImportSources(adapter, options.cwd)).map(source => source.text).join('\n\n');
+  const imported = EffectArray.join(
+    EffectArray.map(yield* collectGuidanceImportSources(adapter, options.cwd), source => source.text),
+    '\n\n',
+  );
   const blocker = credentialScrubberBlocker(imported);
   if (blocker)
     return yield* GuidanceError.make({message: `Imported guidance contains ${blocker}; it was not persisted.`});
@@ -321,7 +407,9 @@ export const runGuidanceImport = Effect.fn('guidance.import')(function* (
     Effect.gen(function* () {
       const existing = yield* listCandidateReviews(config.agentContextHome);
       const task = `guidance-import:${fingerprint}`;
-      const previous = existing.find(review => review.project === options.project && review.task === task);
+      const previous = EffectOption.getOrUndefined(
+        EffectArray.findFirst(existing, review => review.project === options.project && review.task === task),
+      );
       if (previous) return {mode: 'reused' as const, revision: previous.revision, reviewId: previous.reviewId};
       const records = yield* readActiveProjectMemoryRecords(config, options.project);
       const built = yield* buildExactDurableCandidateReview(
@@ -339,8 +427,8 @@ export const runGuidanceImport = Effect.fn('guidance.import')(function* (
       );
       const review = {
         ...built,
-        auditEvents: built.auditEvents.map(event => ({...event, reviewId})),
-        candidates: built.candidates.map((candidate, index) => ({
+        auditEvents: EffectArray.map(built.auditEvents, event => ({...event, reviewId})),
+        candidates: EffectArray.map(built.candidates, (candidate, index) => ({
           ...candidate,
           candidateId: `${reviewId}-${index + 1}`,
         })),
@@ -419,7 +507,7 @@ export const guidanceHealthEvidence = Effect.fn('guidance.healthEvidence')(funct
   const root = yield* projectRoot(cwd);
   const repository = yield* resolveRepositoryIdentity(root).pipe(
     Effect.catchTag('CodeGraphRepositoryError', error =>
-      error.message.startsWith('Not a Git repository') ? Effect.void : Effect.fail(error),
+      Effect2.pipe(error.message, EffectString.startsWith('Not a Git repository')) ? Effect.void : Effect.fail(error),
     ),
   );
   if (repository === undefined) return [];
@@ -446,11 +534,11 @@ export const guidanceHealthEvidence = Effect.fn('guidance.healthEvidence')(funct
           repository.worktreeId,
         ).pipe(Effect.orElseSucceed(() => ({state: 'unavailable' as const, surface: adapter.catalog.id})));
         if (!isGuidanceDriftState(status.state)) return undefined;
-        return {sourceUris: receipt.sources.map(source => source.uri), state: status.state};
+        return {sourceUris: EffectArray.map(receipt.sources, source => source.uri), state: status.state};
       }),
     {concurrency: 4},
   );
-  return evidence.filter((value): value is GuidanceHealthEvidenceV1 => value !== undefined);
+  return EffectArray.filter(evidence, (value): value is GuidanceHealthEvidenceV1 => value !== undefined);
 });
 
 /** Finite exact files read by guidanceHealthEvidence for this registered root. */
@@ -462,7 +550,7 @@ export const guidanceHealthObservationPaths = Effect.fn('guidance.healthObservat
   const root = yield* projectRoot(cwd);
   const repository = yield* resolveRepositoryIdentity(root).pipe(
     Effect.catchTag('CodeGraphRepositoryError', error =>
-      error.message.startsWith('Not a Git repository') ? Effect.void : Effect.fail(error),
+      Effect2.pipe(error.message, EffectString.startsWith('Not a Git repository')) ? Effect.void : Effect.fail(error),
     ),
   );
   if (repository === undefined)
@@ -476,7 +564,7 @@ export const guidanceHealthObservationPaths = Effect.fn('guidance.healthObservat
         receiptPaths: [
           receiptPath(path, config.agentContextHome, repository.repositoryId, identity),
           legacyConsumptionPath(path, config.agentContextHome, repository.repositoryId, identity),
-          ...(LEGACY_GUIDANCE_SURFACES_BY_TARGET[relative] ?? []).map(surface =>
+          ...EffectArray.map(LEGACY_GUIDANCE_SURFACES_BY_TARGET[relative] ?? [], surface =>
             legacyReceiptPath(path, config.agentContextHome, repository.repositoryId, project, surface),
           ),
         ],
@@ -511,8 +599,8 @@ export const guidanceSourceUrisForChangedPaths = Effect.fn('guidance.changedPath
   );
   return [
     ...new Set(
-      receipts.flatMap(receipt =>
-        receipt && changed.has(receipt.targetPath) ? receipt.sources.map(source => source.uri) : [],
+      EffectArray.flatMap(receipts, receipt =>
+        receipt && changed.has(receipt.targetPath) ? EffectArray.map(receipt.sources, source => source.uri) : [],
       ),
     ),
   ].sort(compareText);
@@ -611,10 +699,10 @@ const guidanceSources = Effect.fn('guidance.sources')(function* (
   if (new Set(uris).size !== uris.length)
     return yield* GuidanceError.make({message: 'Provide each --memory URI only once.'});
   const records = yield* readActiveProjectMemoryRecords(config, project);
-  const recordsByUri = new Map(records.map(record => [record.uri, record]));
+  const recordsByUri = new Map(EffectArray.map(records, record => [record.uri, record]));
   return yield* Effect.try({
     try: () =>
-      uris.map(uri => {
+      EffectArray.map(uris, uri => {
         const record = recordsByUri.get(uri);
         if (!record || record.metadata.kind !== 'durable')
           throw new Error(`Memory ${uri} is not an active durable project memory.`);
@@ -685,7 +773,7 @@ const guidanceProjectionPlan = Effect.fn('guidance.project.plan')(function* (
     removeTargetWhenEmpty:
       previous?.removeTargetWhenEmpty ?? (current === undefined || isThreadnoteOnlyContent(current, contract)),
     repositoryId,
-    sources: canonicalSources(sources).map(({contentHash, uri}) => ({contentHash, uri})),
+    sources: EffectArray.map(canonicalSources(sources), ({contentHash, uri}) => ({contentHash, uri})),
     state: 'pending',
     targetIdentity,
     targetPath: contract.projection.relativePath,
@@ -715,9 +803,7 @@ const guidanceProjectionPlan = Effect.fn('guidance.project.plan')(function* (
     requiredWrapperUpgrade && wrapper !== undefined
       ? `${wrapper.prefix}${block}${wrapper.suffix}`
       : previousWrapperReusable && existingBlock !== undefined && wrapper !== undefined
-        ? `${wrapper.prefix}${block}${wrapper.suffix}${current!.slice(0, previousEnvelopeIndex)}${current!.slice(
-            previousEnvelopeIndex + `${wrapper.prefix}${existingBlock}${wrapper.suffix}`.length,
-          )}`
+        ? `${wrapper.prefix}${block}${wrapper.suffix}${Effect2.pipe(current!, EffectString.slice(0, previousEnvelopeIndex))}${Effect2.pipe(current!, EffectString.slice(previousEnvelopeIndex + `${wrapper.prefix}${existingBlock}${wrapper.suffix}`.length))}`
         : wrapperOwned && existingBlock === undefined && current === `${wrapper?.prefix ?? ''}${wrapper?.suffix ?? ''}`
           ? `${wrapper?.prefix ?? ''}${block}${wrapper?.suffix ?? ''}`
           : upsertGuidanceBlock(current, block, wrapperOwned ? wrapper : undefined);
@@ -790,8 +876,8 @@ const projectStatusFromEvidence = Effect.fn('guidance.projectStatusFromEvidence'
   )
     return {state: 'locally-modified' as const, surface: adapter.catalog.id};
   const records = yield* readActiveProjectMemoryRecords(config, project);
-  const currentHashes = new Map(records.map(record => [record.uri, sha256HexSync(record.body)]));
-  if (receipt.sources.some(source => currentHashes.get(source.uri) !== source.contentHash))
+  const currentHashes = new Map(EffectArray.map(records, record => [record.uri, sha256HexSync(record.body)]));
+  if (EffectArray.some(receipt.sources, source => currentHashes.get(source.uri) !== source.contentHash))
     return {state: 'stale-sources' as const, surface: adapter.catalog.id};
   return {state: 'current' as const, surface: adapter.catalog.id};
 });
@@ -805,10 +891,14 @@ const projectRoot = Effect.fn('guidance.projectRoot')(function* (cwd?: string) {
 
 const safeTarget = Effect.fn('guidance.safeTarget')(function* (root: string, relativePath: string) {
   const path = yield* Path.Path;
-  if (relativePath.length === 0 || path.isAbsolute(relativePath) || relativePath.split(/[\\/]/u).includes('..'))
+  if (
+    relativePath.length === 0 ||
+    path.isAbsolute(relativePath) ||
+    Effect2.pipe(relativePath, EffectString.split(/[\\/]/u)).includes('..')
+  )
     return yield* GuidanceError.make({message: 'Adapter guidance target escapes the project root.'});
   const target = path.resolve(root, relativePath);
-  if (target !== root && !target.startsWith(`${root}${path.sep}`))
+  if (target !== root && !Effect2.pipe(target, EffectString.startsWith(`${root}${path.sep}`)))
     return yield* GuidanceError.make({message: 'Adapter guidance target escapes the project root.'});
   return target;
 });
@@ -856,12 +946,19 @@ const readGuidanceDirectories = Effect.fn('guidance.readDirectories')(function* 
         entryCount += names.length;
         if (entryCount > MAX_IMPORT_DIRECTORY_ENTRIES)
           return yield* GuidanceError.make({message: 'Project guidance import directory has too many entries.'});
-        pending.push(...names.map(name => ({absolute: path.join(current.absolute, name), depth: current.depth + 1})));
+        pending.push(
+          ...EffectArray.map(names, name => ({absolute: path.join(current.absolute, name), depth: current.depth + 1})),
+        );
         continue;
       }
       if (info.type !== 'File') continue;
       const relative = path.relative(root, current.absolute);
-      if (!specification.extensions.some(extension => relative.endsWith(extension))) continue;
+      if (
+        !EffectArray.some(specification.extensions, extension =>
+          Effect2.pipe(relative, EffectString.endsWith(extension)),
+        )
+      )
+        continue;
       if (discovered.length >= MAX_GUIDANCE_SOURCES)
         return yield* GuidanceError.make({message: 'Project guidance import contains too many files.'});
       if (info.size > BigInt(MAX_IMPORT_BYTES))
@@ -889,7 +986,7 @@ const readExactImportText = Effect.fn('guidance.readExactImportText')(function* 
     try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
     catch: () => GuidanceError.make({message: 'Imported guidance must be strict UTF-8 text.'}),
   });
-  if (text.includes('\u0000') || !bytesEqual(bytes, new TextEncoder().encode(text)))
+  if (Effect2.pipe(text, EffectString.includes('\u0000')) || !bytesEqual(bytes, new TextEncoder().encode(text)))
     return yield* GuidanceError.make({message: 'Imported guidance must be exact, NUL-free UTF-8 text.'});
   return text;
 });
@@ -906,7 +1003,10 @@ const assertProjectionFallbackInactive = Effect.fn('guidance.assertProjectionFal
   for (const adapter of AGENT_ADAPTERS) {
     const consumer = adapter.guidance;
     if (consumer?.importMode !== 'first-existing') continue;
-    const candidateIndex = consumer.importPaths.findIndex(path => normalizeGuidanceImportPath(path) === candidate);
+    const candidateIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(consumer.importPaths, path => normalizeGuidanceImportPath(path) === candidate),
+      () => -1,
+    );
     if (candidateIndex < 0) continue;
     let activeIndex = -1;
     for (let index = 0; index < consumer.importPaths.length; index += 1) {
@@ -965,7 +1065,11 @@ const guidanceDirectoriesContainFile = Effect.fn('guidance.directoriesContainFil
       if (info.type === 'File') {
         if (current.absolute === directory || info.size === 0n) continue;
         const basename = path.basename(current.absolute);
-        if (basename === 'Thumbs.db' || IGNORED_RULE_FILE_SUFFIXES.some(suffix => basename.endsWith(suffix))) continue;
+        if (
+          basename === 'Thumbs.db' ||
+          EffectArray.some(IGNORED_RULE_FILE_SUFFIXES, suffix => Effect2.pipe(basename, EffectString.endsWith(suffix)))
+        )
+          continue;
         return true;
       }
       if (info.type !== 'Directory') continue;
@@ -975,7 +1079,9 @@ const guidanceDirectoriesContainFile = Effect.fn('guidance.directoriesContainFil
         return yield* GuidanceError.make({message: 'Project guidance rules directory exceeds its entry limit.'});
       if (current.depth >= MAX_IMPORT_DIRECTORY_DEPTH && names.length > 0)
         return yield* GuidanceError.make({message: 'Project guidance rules directory exceeds its depth limit.'});
-      pending.push(...names.map(name => ({absolute: path.join(current.absolute, name), depth: current.depth + 1})));
+      pending.push(
+        ...EffectArray.map(names, name => ({absolute: path.join(current.absolute, name), depth: current.depth + 1})),
+      );
     }
   }
   return false;
@@ -1006,7 +1112,7 @@ function wrapperOwnershipMatches(
   if (wrapper === undefined) return false;
   if (current === undefined) return true;
   if (block === undefined) return current === `${wrapper.prefix}${wrapper.suffix}`;
-  return current.includes(`${wrapper.prefix}${block}${wrapper.suffix}`);
+  return Effect2.pipe(current, EffectString.includes(`${wrapper.prefix}${block}${wrapper.suffix}`));
 }
 
 function requiredWrapperActive(
@@ -1014,14 +1120,14 @@ function requiredWrapperActive(
   wrapper: {readonly prefix: string; readonly required?: boolean; readonly suffix: string},
 ): boolean {
   if (wrapper.required !== true) return true;
-  if (current === undefined || !current.startsWith(wrapper.prefix)) return false;
-  return wrapper.suffix.length === 0 || current.endsWith(wrapper.suffix);
+  if (current === undefined || !Effect2.pipe(current, EffectString.startsWith(wrapper.prefix))) return false;
+  return wrapper.suffix.length === 0 || Effect2.pipe(current, EffectString.endsWith(wrapper.suffix));
 }
 
 function requiredContractWrapperActive(current: string | undefined, contract: AgentGuidanceContract): boolean {
   const projected = contract.projection.wrapper;
   if (projected?.required !== true) return true;
-  return [projected, ...(contract.importWrappers ?? [])].some(wrapper =>
+  return EffectArray.some([projected, ...(contract.importWrappers ?? [])], wrapper =>
     requiredWrapperActive(current, {...wrapper, required: true}),
   );
 }
@@ -1032,23 +1138,34 @@ function ownedWrapperEnvelopeIndex(
   wrapper: {readonly prefix: string; readonly suffix: string} | undefined,
 ): number {
   if (current === undefined || wrapper === undefined) return -1;
-  return current.indexOf(
-    block === undefined ? `${wrapper.prefix}${wrapper.suffix}` : `${wrapper.prefix}${block}${wrapper.suffix}`,
+  return Effect2.pipe(
+    current,
+    EffectString.indexOf(
+      block === undefined ? `${wrapper.prefix}${wrapper.suffix}` : `${wrapper.prefix}${block}${wrapper.suffix}`,
+    ),
+    Effect2.Option.getOrElse(() => -1),
   );
 }
 
 function isThreadnoteOnlyContent(content: string, contract: AgentGuidanceContract): boolean {
-  const hadManagedContent = content.includes(GUIDANCE_BLOCK_START) || content.includes(USER_INSTRUCTIONS_START_MARKER);
-  return hadManagedContent && stripImportedGuidance(content, contract).trim().length === 0;
+  const hadManagedContent =
+    Effect2.pipe(content, EffectString.includes(GUIDANCE_BLOCK_START)) ||
+    Effect2.pipe(content, EffectString.includes(USER_INSTRUCTIONS_START_MARKER));
+  return hadManagedContent && Effect2.pipe(stripImportedGuidance(content, contract), EffectString.trim).length === 0;
 }
 
 function isRemovableGuidanceRemainder(content: string, contract: AgentGuidanceContract): boolean {
-  if (content.trim().length === 0) return true;
+  if (Effect2.pipe(content, EffectString.trim).length === 0) return true;
   const wrappers = [
     ...(contract.importWrappers ?? []),
     ...(contract.projection.wrapper === undefined ? [] : [contract.projection.wrapper]),
   ];
-  return wrappers.some(wrapper => content.trim() === `${wrapper.prefix}${wrapper.suffix}`.trim());
+  return EffectArray.some(
+    wrappers,
+    wrapper =>
+      Effect2.pipe(content, EffectString.trim) ===
+      Effect2.pipe(`${wrapper.prefix}${wrapper.suffix}`, EffectString.trim),
+  );
 }
 
 function receiptsDescribeSameProjection(left: GuidanceReceiptV2, right: GuidanceReceiptV2): boolean {
@@ -1072,7 +1189,7 @@ function pendingTargetMatchesPrevious(receipt: GuidanceReceiptV2 | undefined, bl
 }
 
 function guidanceTargetIdentity(worktreeId: string, root: string, targetPath: string): string {
-  return sha256HexSync(['guidance-target-v2', worktreeId, root, targetPath].join('\n'));
+  return sha256HexSync(EffectArray.join(['guidance-target-v2', worktreeId, root, targetPath], '\n'));
 }
 
 function receiptPath(path: Path.Path, home: string, repositoryId: string, targetIdentity: string): string {
@@ -1081,7 +1198,7 @@ function receiptPath(path: Path.Path, home: string, repositoryId: string, target
     'guidance',
     'v2',
     'receipts',
-    `${sha256HexSync([repositoryId, targetIdentity].join('\n'))}.json`,
+    `${sha256HexSync(EffectArray.join([repositoryId, targetIdentity], '\n'))}.json`,
   );
 }
 
@@ -1091,7 +1208,7 @@ function legacyConsumptionPath(path: Path.Path, home: string, repositoryId: stri
     'guidance',
     'v2',
     'legacy-consumed',
-    `${sha256HexSync([repositoryId, targetIdentity].join('\n'))}.txt`,
+    `${sha256HexSync(EffectArray.join([repositoryId, targetIdentity], '\n'))}.txt`,
   );
 }
 
@@ -1107,7 +1224,7 @@ function legacyReceiptPath(
     'guidance',
     'v1',
     'receipts',
-    `${sha256HexSync([repositoryId, project, surface].join('\n'))}.json`,
+    `${sha256HexSync(EffectArray.join([repositoryId, project, surface], '\n'))}.json`,
   );
 }
 
@@ -1147,17 +1264,19 @@ const readReceipt = Effect.fn('guidance.readReceipt')(function* (
   );
   const migrated = yield* Effect.try({
     try: () =>
-      legacyReceipts
-        .filter((entry): entry is {readonly legacy: string; readonly surface: string} => entry.legacy !== undefined)
-        .map(({legacy, surface}) =>
-          parseGuidanceReceiptV1(JSON.parse(legacy), {project, repositoryId, surface, targetPath}),
+      EffectArray.map(
+        EffectArray.filter(
+          legacyReceipts,
+          (entry): entry is {readonly legacy: string; readonly surface: string} => entry.legacy !== undefined,
         ),
+        ({legacy, surface}) => parseGuidanceReceiptV1(JSON.parse(legacy), {project, repositoryId, surface, targetPath}),
+      ),
     catch: () => GuidanceError.make({message: 'Legacy guidance receipt is invalid; migration was refused.'}),
   });
   if (migrated.length === 0) return undefined;
   if (
     migrated.length > 1 &&
-    migrated.slice(1).some(receipt => !legacyReceiptsDescribeSameProjection(receipt, migrated[0]))
+    EffectArray.some(migrated.slice(1), receipt => !legacyReceiptsDescribeSameProjection(receipt, migrated[0]))
   )
     return yield* GuidanceError.make({message: 'Legacy guidance receipts conflict; migration was refused.'});
   const legacy = migrated[0];
@@ -1186,13 +1305,12 @@ export function parseGuidanceReceiptV2(
   },
 ): GuidanceReceiptV2 {
   if (
-    !value ||
-    typeof value !== 'object' ||
-    (value as {version?: unknown}).version !== GUIDANCE_SCHEMA_VERSION ||
-    !['current', 'pending'].includes(String((value as {state?: unknown}).state))
+    !Predicate.isObject(value) ||
+    value.version !== GUIDANCE_SCHEMA_VERSION ||
+    (value.state !== 'current' && value.state !== 'pending')
   )
     throw new Error('invalid receipt');
-  const receipt = value as Partial<GuidanceReceiptV2>;
+  const receipt = value;
   if (
     !hasExactKeys(value, [
       'expectedManagedBlockHash',
@@ -1210,6 +1328,7 @@ export function parseGuidanceReceiptV2(
   )
     throw new Error('invalid receipt');
   if (
+    (receipt.state !== 'current' && receipt.state !== 'pending') ||
     typeof receipt.repositoryId !== 'string' ||
     typeof receipt.project !== 'string' ||
     typeof receipt.targetIdentity !== 'string' ||
@@ -1229,23 +1348,22 @@ export function parseGuidanceReceiptV2(
     utf8Bytes(receipt.project) > MAX_GUIDANCE_IDENTITY_BYTES ||
     !SHA256_PATTERN.test(receipt.targetIdentity) ||
     utf8Bytes(receipt.targetPath) > MAX_GUIDANCE_TARGET_BYTES ||
-    !Array.isArray(receipt.sources) ||
-    receipt.sources.length === 0 ||
-    receipt.sources.length > MAX_GUIDANCE_SOURCES ||
-    receipt.sources.some(
-      source =>
-        !source ||
-        !hasExactKeys(source, ['contentHash', 'uri']) ||
-        typeof source.uri !== 'string' ||
-        typeof source.contentHash !== 'string' ||
-        utf8Bytes(source.uri) > MAX_GUIDANCE_URI_BYTES ||
-        !SHA256_PATTERN.test(source.contentHash) ||
-        !isCanonicalThreadnoteUri(source.uri),
-    ) ||
-    new Set(receipt.sources.map(source => source.uri)).size !== receipt.sources.length
+    !validReceiptSources(receipt.sources)
   )
     throw new Error('invalid receipt');
-  return receipt as GuidanceReceiptV2;
+  return {
+    expectedManagedBlockHash: receipt.expectedManagedBlockHash,
+    previousManagedBlockHash: receipt.previousManagedBlockHash,
+    project: receipt.project,
+    removeTargetWhenEmpty: receipt.removeTargetWhenEmpty,
+    repositoryId: receipt.repositoryId,
+    sources: receipt.sources,
+    state: receipt.state,
+    targetIdentity: receipt.targetIdentity,
+    targetPath: receipt.targetPath,
+    version: GUIDANCE_SCHEMA_VERSION,
+    wrapperOwned: receipt.wrapperOwned,
+  };
 }
 
 export function parseGuidanceReceiptV1(
@@ -1258,10 +1376,9 @@ export function parseGuidanceReceiptV1(
   },
 ): GuidanceReceiptV1 {
   if (
-    !value ||
-    typeof value !== 'object' ||
-    (value as {version?: unknown}).version !== LEGACY_GUIDANCE_SCHEMA_VERSION ||
-    !['current', 'pending'].includes(String((value as {state?: unknown}).state)) ||
+    !Predicate.isObject(value) ||
+    value.version !== LEGACY_GUIDANCE_SCHEMA_VERSION ||
+    (value.state !== 'current' && value.state !== 'pending') ||
     !hasExactKeys(value, [
       'expectedManagedBlockHash',
       'previousManagedBlockHash',
@@ -1277,8 +1394,9 @@ export function parseGuidanceReceiptV1(
     ])
   )
     throw new Error('invalid receipt');
-  const receipt = value as Partial<GuidanceReceiptV1>;
+  const receipt = value;
   if (
+    (receipt.state !== 'current' && receipt.state !== 'pending') ||
     typeof receipt.repositoryId !== 'string' ||
     typeof receipt.project !== 'string' ||
     typeof receipt.surface !== 'string' ||
@@ -1301,7 +1419,19 @@ export function parseGuidanceReceiptV1(
     !validReceiptSources(receipt.sources)
   )
     throw new Error('invalid receipt');
-  return receipt as GuidanceReceiptV1;
+  return {
+    expectedManagedBlockHash: receipt.expectedManagedBlockHash,
+    previousManagedBlockHash: receipt.previousManagedBlockHash,
+    project: receipt.project,
+    removeTargetWhenEmpty: receipt.removeTargetWhenEmpty,
+    repositoryId: receipt.repositoryId,
+    sources: receipt.sources,
+    state: receipt.state,
+    surface: receipt.surface,
+    targetPath: receipt.targetPath,
+    version: LEGACY_GUIDANCE_SCHEMA_VERSION,
+    wrapperOwned: receipt.wrapperOwned,
+  };
 }
 
 function legacyReceiptsDescribeSameProjection(left: GuidanceReceiptV1, right: GuidanceReceiptV1): boolean {
@@ -1312,32 +1442,39 @@ function legacyReceiptsDescribeSameProjection(left: GuidanceReceiptV1, right: Gu
 
 function validReceiptSources(value: unknown): value is GuidanceReceiptV2['sources'] {
   return (
-    Array.isArray(value) &&
+    EffectArray.isArray(value) &&
     value.length > 0 &&
     value.length <= MAX_GUIDANCE_SOURCES &&
-    value.every(
-      source =>
-        source &&
-        hasExactKeys(source, ['contentHash', 'uri']) &&
-        typeof source.uri === 'string' &&
-        typeof source.contentHash === 'string' &&
-        utf8Bytes(source.uri) <= MAX_GUIDANCE_URI_BYTES &&
-        SHA256_PATTERN.test(source.contentHash) &&
-        isCanonicalThreadnoteUri(source.uri),
-    ) &&
-    new Set(value.map(source => source.uri)).size === value.length
+    EffectArray.every(value, isGuidanceReceiptSource) &&
+    new Set(EffectArray.map(value, source => source.uri)).size === value.length
+  );
+}
+
+function isGuidanceReceiptSource(value: unknown): value is GuidanceReceiptV2['sources'][number] {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !EffectArray.isArray(value) &&
+    'contentHash' in value &&
+    'uri' in value &&
+    hasExactKeys(value, ['contentHash', 'uri']) &&
+    typeof value.contentHash === 'string' &&
+    typeof value.uri === 'string' &&
+    utf8Bytes(value.uri) <= MAX_GUIDANCE_URI_BYTES &&
+    SHA256_PATTERN.test(value.contentHash) &&
+    isCanonicalThreadnoteUri(value.uri)
   );
 }
 
 function hasExactKeys(value: object, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort(compareText);
+  const actual = EffectRecord.keys(value).sort(compareText);
   const canonical = [...expected].sort(compareText);
-  return actual.length === canonical.length && actual.every((key, index) => key === canonical[index]);
+  return actual.length === canonical.length && EffectArray.every(actual, (key, index) => key === canonical[index]);
 }
 
 function isCanonicalThreadnoteUri(uri: string): boolean {
   try {
-    return uri.startsWith('threadnote://') && parseResourceId(uri).canonicalUri === uri;
+    return Effect2.pipe(uri, EffectString.startsWith('threadnote://')) && parseResourceId(uri).canonicalUri === uri;
   } catch {
     return false;
   }
@@ -1352,7 +1489,7 @@ function unicodeCharacters(value: string): number {
 }
 
 function targetProjectionCharacterLimit(targetPath: string): number | undefined {
-  const limits = AGENT_ADAPTERS.flatMap(adapter =>
+  const limits = EffectArray.flatMap(AGENT_ADAPTERS, adapter =>
     adapter.guidance?.projection.relativePath === targetPath && adapter.guidance.maxProjectionCharacters !== undefined
       ? [adapter.guidance.maxProjectionCharacters]
       : [],
@@ -1419,7 +1556,7 @@ export const renderGuidanceResult = (value: unknown, json: boolean) =>
   json ? JSON.stringify(value) : `Guidance ${JSON.stringify(value)}`;
 
 export function normalizeGuidanceImportPath(relativePath: string): string {
-  return relativePath.replaceAll('\\', '/');
+  return Effect2.pipe(relativePath, EffectString.replaceAll('\\', '/'));
 }
 
 function compareText(left: string, right: string): number {

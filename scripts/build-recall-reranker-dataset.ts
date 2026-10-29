@@ -7,6 +7,8 @@ import {Console, Effect, Layer, Path} from 'effect';
 import {atomicWrite, scriptArguments} from './effect/script.js';
 import {serializeRecallRerankerGroupsV1} from './training/recall-reranker-contract.js';
 import {createRecallRerankerSmokeDatasetV1} from './training/recall-reranker-smoke.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const path = yield* Path.Path;
@@ -47,7 +49,12 @@ function parseArguments(args: readonly string[], resolve: (value: string) => str
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
 

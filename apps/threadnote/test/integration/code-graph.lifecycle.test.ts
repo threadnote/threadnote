@@ -1,3 +1,6 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
@@ -20,10 +23,24 @@ import {
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {execFileSync, spawn} from '@threadnote/testing/node-child-process';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Context, Crypto, DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
+import {
+  Clock,
+  Context,
+  Crypto,
+  DateTime,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  Path,
+  Ref,
+  Schema,
+} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -84,6 +101,44 @@ import {runDoctor, runRepair} from '@threadnote/threadnote/lifecycle';
 import type {DoctorCheck} from '@threadnote/threadnote/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runEffect} from '../helpers/effect-runtime.js';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const directBuildProgressSchema = Schema.Struct({
+  batchesCompleted: Schema.Int,
+  batchTotal: Schema.Int,
+  completed: Schema.Int,
+  factsBytesCompleted: Schema.Int,
+  factsBytesTotal: Schema.optional(Schema.Int),
+});
+const groupedBuildProgressSchema = Schema.Struct({
+  batchCompleted: Schema.Int,
+  batchesCompleted: Schema.Int,
+  batchesTotal: Schema.Int,
+  snapshotMode: Schema.optional(Schema.String),
+});
+const persistentBuildProgressSchema = Schema.Struct({
+  batchesCompleted: Schema.Int,
+  batchesTotal: Schema.Int,
+  snapshotMode: Schema.optional(Schema.String),
+});
+const codeGraphProcessProgressMessageSchema = Schema.Struct({
+  progress: Schema.optional(
+    Schema.Struct({completed: Schema.optional(Schema.Int), phase: Schema.String, total: Schema.optional(Schema.Int)}),
+  ),
+});
+const codeGraphProcessSummarySchema = Schema.Struct({
+  identity: Schema.Struct({checkoutId: Schema.String, worktreeId: Schema.String}),
+  materialization: Schema.optional(Schema.Struct({mode: Schema.String, stagedFiles: Schema.Int})),
+  snapshot: Schema.Struct({baseSnapshotId: Schema.optional(Schema.String), id: Schema.String}),
+});
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const FIXTURE_REPOSITORY = join(import.meta.dirname, '../evaluation/fixtures/code-graph-v1/repository');
 const temporaryRoots: string[] = [];
@@ -161,14 +216,14 @@ describe('native code graph lifecycle', () => {
         );
       }),
     );
-    expect(definition.nodes.map(node => node.name)).toEqual(
+    expect(EffectArray.map(definition.nodes, node => node.name)).toEqual(
       expect.arrayContaining(['withExclusiveFileLock', 'FileLock']),
     );
-    expect(path.edges.map(edge => `${edge.sourceName}:${edge.targetName}`)).toEqual([
+    expect(EffectArray.map(path.edges, edge => `${edge.sourceName}:${edge.targetName}`)).toEqual([
       'runApplication:ensureVectorIndex',
       'ensureVectorIndex:withExclusiveFileLock',
     ]);
-    expect(impact.nodes.map(node => node.name)).toEqual(
+    expect(EffectArray.map(impact.nodes, node => node.name)).toEqual(
       expect.arrayContaining(['ensureVectorIndex', 'refreshRecallIndex', 'runApplication']),
     );
     expect(missing.nodes).toEqual([]);
@@ -250,7 +305,7 @@ describe('native code graph lifecycle', () => {
             );
           }),
         );
-        expect(queryBehindWriterGate.nodes.some(node => node.name === 'withExclusiveFileLock')).toBe(true);
+        expect(EffectArray.some(queryBehindWriterGate.nodes, node => node.name === 'withExclusiveFileLock')).toBe(true);
 
         const queryAfterPreferredRetirement = yield* graph.inspect({
           cwd: root,
@@ -258,13 +313,15 @@ describe('native code graph lifecycle', () => {
           query: 'withExclusiveFileLock',
           refresh: false,
           statusObservation: {
-            borrowedSnapshotId: `cgsn_${'f'.repeat(40)}`,
+            borrowedSnapshotId: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
             identity: indexed.identity,
           },
           threadnoteHome: home,
         });
         expect(queryAfterPreferredRetirement.snapshot.id).toBe(indexed.snapshot.id);
-        expect(queryAfterPreferredRetirement.nodes.some(node => node.name === 'withExclusiveFileLock')).toBe(true);
+        expect(
+          EffectArray.some(queryAfterPreferredRetirement.nodes, node => node.name === 'withExclusiveFileLock'),
+        ).toBe(true);
 
         const selected = yield* Ref.make(0);
         const allSelected = yield* Deferred.make<void>();
@@ -303,7 +360,11 @@ describe('native code graph lifecycle', () => {
           {concurrency: 'unbounded'},
         );
         expect(results).toHaveLength(8);
-        expect(results.every(result => result.nodes.some(node => node.name === 'withExclusiveFileLock'))).toBe(true);
+        expect(
+          EffectArray.every(results, result =>
+            EffectArray.some(result.nodes, node => node.name === 'withExclusiveFileLock'),
+          ),
+        ).toBe(true);
 
         const readCompleted = yield* Deferred.make<void, unknown>();
         const finish = yield* Deferred.make<void>();
@@ -381,7 +442,7 @@ describe('native code graph lifecycle', () => {
         const released = yield* Effect.sync(() => snapshotLeaseCount(databasePath));
         expect({active, released}).toEqual({active: 0, released: 0});
         expect(yield* Ref.get(retiredSnapshots)).toBeGreaterThan(0);
-        expect(queryAfterRetirement.nodes.some(node => node.name === 'withExclusiveFileLock')).toBe(true);
+        expect(EffectArray.some(queryAfterRetirement.nodes, node => node.name === 'withExclusiveFileLock')).toBe(true);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     // Suite-wide graph fixtures can delay setup; the in-test 5s barrier still
     // enforces that all eight selected readers bootstrap without contention.
@@ -439,8 +500,16 @@ describe('native code graph lifecycle', () => {
       snapshotId: first.snapshot.id,
       subphase: 'structural-ready',
     });
-    expect(backfillProgress.findIndex(progress => progress.subphase === 'structural-ready')).toBeLessThan(
-      backfillProgress.findIndex(progress => progress.subphase === 'summarizing-analysis'),
+    expect(
+      EffectOption.getOrElse(
+        EffectArray.findFirstIndex(backfillProgress, progress => progress.subphase === 'structural-ready'),
+        () => -1,
+      ),
+    ).toBeLessThan(
+      EffectOption.getOrElse(
+        EffectArray.findFirstIndex(backfillProgress, progress => progress.subphase === 'summarizing-analysis'),
+        () => -1,
+      ),
     );
     expect(second.diagnostics).toContain('Built the persisted whole-graph analysis summary for this reused snapshot.');
 
@@ -466,9 +535,13 @@ describe('native code graph lifecycle', () => {
     );
     const check = new Database(databasePath, {readonly: true});
     try {
-      const receipt = check
-        .query('SELECT COUNT(*) AS count FROM snapshot_analysis_summary_receipts WHERE snapshot_id = ?')
-        .get(first.snapshot.id) as {readonly count: number};
+      const receipt = requiredRow(
+        check
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS count FROM snapshot_analysis_summary_receipts WHERE snapshot_id = ?',
+          )
+          .get(first.snapshot.id),
+      );
       expect(receipt.count).toBe(1);
     } finally {
       check.close();
@@ -480,11 +553,14 @@ describe('native code graph lifecycle', () => {
     const sourcePath = join(root, 'packages/app/src/repeated-call.ts');
     writeFileSync(
       sourcePath,
-      [
-        'export function repeatedTarget(): number { return 1; }',
-        'export function repeatedCaller(): number { return repeatedTarget() + repeatedTarget(); }',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'export function repeatedTarget(): number { return 1; }',
+          'export function repeatedCaller(): number { return repeatedTarget() + repeatedTarget(); }',
+          '',
+        ],
+        '\n',
+      ),
     );
     git(root, ['add', 'packages/app/src/repeated-call.ts']);
     git(root, [
@@ -516,9 +592,15 @@ describe('native code graph lifecycle', () => {
 
     expect(result.indexed.snapshot.state).toBe('ready');
     expect(
-      result.query.edges.filter(
-        edge =>
-          edge.relation === 'calls' && edge.sourceName === 'repeatedCaller' && edge.targetName === 'repeatedTarget',
+      EffectArrayPipe(result.query.edges, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (edge, __effectFilterIndex) =>
+            __effectFilterIndex in __effectFilterValues &&
+            edge.relation === 'calls' &&
+            edge.sourceName === 'repeatedCaller' &&
+            edge.targetName === 'repeatedTarget',
+        ),
       ),
     ).toHaveLength(1);
   });
@@ -552,7 +634,7 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(result.freshness).toBe('current');
-    expect(result.nodes.some(node => node.name === 'ensureFreshVectorIndex')).toBe(true);
+    expect(EffectArray.some(result.nodes, node => node.name === 'ensureFreshVectorIndex')).toBe(true);
     expect(observations).toBe(3);
   });
 
@@ -586,7 +668,7 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(result.freshness).toBe('current');
-    expect(result.nodes.some(node => node.name === 'ensureObservedVectorIndex')).toBe(true);
+    expect(EffectArray.some(result.nodes, node => node.name === 'ensureObservedVectorIndex')).toBe(true);
     expect(observations).toBe(4);
   });
 
@@ -625,10 +707,10 @@ describe('native code graph lifecycle', () => {
         );
       }),
     );
-    expect(resultA.nodes.some(node => node.name === 'ensureBranchAVectorIndex')).toBe(true);
-    expect(resultA.nodes.some(node => node.name === 'ensureBranchBVectorIndex')).toBe(false);
-    expect(resultB.nodes.some(node => node.name === 'ensureBranchBVectorIndex')).toBe(true);
-    expect(resultB.nodes.some(node => node.name === 'ensureBranchAVectorIndex')).toBe(false);
+    expect(EffectArray.some(resultA.nodes, node => node.name === 'ensureBranchAVectorIndex')).toBe(true);
+    expect(EffectArray.some(resultA.nodes, node => node.name === 'ensureBranchBVectorIndex')).toBe(false);
+    expect(EffectArray.some(resultB.nodes, node => node.name === 'ensureBranchBVectorIndex')).toBe(true);
+    expect(EffectArray.some(resultB.nodes, node => node.name === 'ensureBranchAVectorIndex')).toBe(false);
     expect(resultA.snapshot.worktreeId).not.toBe(resultB.snapshot.worktreeId);
     expect(resultA.snapshot.id).not.toBe(resultB.snapshot.id);
     expect(resultA.snapshot.id).toMatch(/^cgsn_[0-9a-f]{40}$/u);
@@ -737,8 +819,8 @@ describe('native code graph lifecycle', () => {
       expect(indexed.snapshot).toMatchObject({baseSnapshotId: forced.snapshot.id, dirty: true});
       expect(effectiveDirtyGraph.symbols).toHaveLength(indexed.snapshot.symbolCount);
       expect(effectiveDirtyGraph.edges).toHaveLength(indexed.snapshot.edgeCount);
-      expect(dirty.nodes.some(node => node.name === 'ensureDirtyVectorIndex')).toBe(true);
-      expect(clean.nodes.some(node => node.name === 'ensureVectorIndex')).toBe(true);
+      expect(EffectArray.some(dirty.nodes, node => node.name === 'ensureDirtyVectorIndex')).toBe(true);
+      expect(EffectArray.some(clean.nodes, node => node.name === 'ensureVectorIndex')).toBe(true);
       expect(afterDirtyHealth).toMatchObject({
         activeSnapshots: 2,
         integrity: 'ok',
@@ -864,7 +946,7 @@ describe('native code graph lifecycle', () => {
     expect(result.after.readySnapshot?.id).toBe(result.first.snapshot.id);
     expect(result.after.stale).toBe(false);
     expect(result.found.snapshot.id).toBe(result.first.snapshot.id);
-    expect(result.found.nodes.some(node => node.name === 'ensureVectorIndex')).toBe(true);
+    expect(EffectArray.some(result.found.nodes, node => node.name === 'ensureVectorIndex')).toBe(true);
   });
 
   effectIt.effect('borrows a divergent-HEAD clean snapshot as stale evidence without promotion', () =>
@@ -939,8 +1021,8 @@ describe('native code graph lifecycle', () => {
           worktreeId: identityB.worktreeId,
         },
       });
-      expect(found.nodes.some(node => node.name === 'ensureVectorIndex')).toBe(true);
-      expect(found.nodes.some(node => node.name === 'divergentHeadOnly')).toBe(false);
+      expect(EffectArray.some(found.nodes, node => node.name === 'ensureVectorIndex')).toBe(true);
+      expect(EffectArray.some(found.nodes, node => node.name === 'divergentHeadOnly')).toBe(false);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
@@ -989,10 +1071,10 @@ describe('native code graph lifecycle', () => {
     expect(result.attached.readySnapshot?.id).toBe(result.clean.snapshot.id);
     expect(result.attached.readySnapshot?.worktreeId).toBe(result.identityB.worktreeId);
     expect(result.found.snapshot.id).toBe(result.clean.snapshot.id);
-    expect(result.found.nodes.some(node => node.name === 'ensureVectorIndex')).toBe(true);
-    expect(result.found.nodes.some(node => node.name === 'ensureSiblingDirtyVectorIndex')).toBe(false);
+    expect(EffectArray.some(result.found.nodes, node => node.name === 'ensureVectorIndex')).toBe(true);
+    expect(EffectArray.some(result.found.nodes, node => node.name === 'ensureSiblingDirtyVectorIndex')).toBe(false);
     expect(result.dirtyOnly.snapshot.id).toBe(result.dirty.snapshot.id);
-    expect(result.dirtyOnly.nodes.some(node => node.name === 'ensureSiblingDirtyVectorIndex')).toBe(true);
+    expect(EffectArray.some(result.dirtyOnly.nodes, node => node.name === 'ensureSiblingDirtyVectorIndex')).toBe(true);
   });
 
   it('aliases a graph-equivalent clean commit without reparsing or rematerializing files', async () => {
@@ -1045,7 +1127,7 @@ describe('native code graph lifecycle', () => {
     });
     expect(result.second.reusedFiles).toBe(12);
     expect(normalizeStoredGraph(result.secondGraph)).toEqual(normalizeStoredGraph(result.firstGraph));
-    expect(result.found.nodes.some(node => node.name === 'original0')).toBe(true);
+    expect(EffectArray.some(result.found.nodes, node => node.name === 'original0')).toBe(true);
 
     const database = new Database(codeGraphDatabasePath(home, result.second), {readonly: true});
     try {
@@ -1071,7 +1153,10 @@ describe('native code graph lifecycle', () => {
       yield* indexer.index({cwd: root, threadnoteHome: home});
       const committedPath = join(root, 'src/file-000.ts');
       yield* Effect.sync(() => {
-        writeFileSync(committedPath, readFileSync(committedPath, 'utf8').replace('return 0;', 'return 1000;'));
+        writeFileSync(
+          committedPath,
+          Effect2.pipe(readFileSync(committedPath, 'utf8'), EffectString.replace('return 0;', 'return 1000;')),
+        );
       });
       const dirtyRoot = yield* indexer.index({
         cwd: root,
@@ -1104,7 +1189,7 @@ describe('native code graph lifecycle', () => {
         extractorSet: dirtyRoot.snapshot.extractorSet,
         fileCount: dirtyRoot.snapshot.fileCount,
         graphContentId: dirtyRoot.snapshot.graphContentId ?? dirtyRoot.snapshot.id,
-        id: `cgsn_${'f'.repeat(40)}`,
+        id: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
         repositoryId: dirtyRoot.identity.repositoryId,
         state: 'ready' as const,
         symbolCount: dirtyRoot.snapshot.symbolCount,
@@ -1121,7 +1206,11 @@ describe('native code graph lifecycle', () => {
       const rejectedMismatchedGraph = yield* store.activateCleanSnapshotAlias!(
         databasePath,
         dirtyRoot.identity,
-        {...aliasCandidate, graphContentId: `cgc_${'e'.repeat(40)}`, id: `cgsn_${'e'.repeat(40)}`},
+        {
+          ...aliasCandidate,
+          graphContentId: `cgc_${Effect2.pipe('e', EffectString.repeat(40))}`,
+          id: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`,
+        },
         dirtyRoot.snapshot.id,
         dirtyReceipt,
         {
@@ -1156,7 +1245,10 @@ describe('native code graph lifecycle', () => {
 
       const nextPath = join(root, 'src/file-001.ts');
       yield* Effect.sync(() => {
-        writeFileSync(nextPath, readFileSync(nextPath, 'utf8').replace('return 1;', 'return 1001;'));
+        writeFileSync(
+          nextPath,
+          Effect2.pipe(readFileSync(nextPath, 'utf8'), EffectString.replace('return 1;', 'return 1001;')),
+        );
       });
       const next = yield* indexer.index({cwd: root, threadnoteHome: home});
       const nextGraph = yield* store.loadGraph(databasePath, next.snapshot.id);
@@ -1228,13 +1320,25 @@ describe('native code graph lifecycle', () => {
           const observedStore = CodeGraphStore.of({
             ...store,
             preparePersistedIncrementalActivation: (...args) =>
-              Effect.sync(() => captured.push(...args[3].flatMap(facts => facts.references ?? []))).pipe(
-                Effect.andThen(store.preparePersistedIncrementalActivation(...args)),
-              ),
+              Effect.sync(() =>
+                captured.push(
+                  ...EffectArrayPipe(args[3], __effectArrayValues2 =>
+                    EffectArray.flatMap(__effectArrayValues2, (facts, __effectArrayIndex3) =>
+                      __effectArrayIndex3 in __effectArrayValues2 ? (facts.references ?? []) : [],
+                    ),
+                  ),
+                ),
+              ).pipe(Effect.andThen(store.preparePersistedIncrementalActivation(...args))),
             replaceStagedModifiedFiles: (...args) =>
-              Effect.sync(() => captured.push(...args[3].flatMap(facts => facts.references ?? []))).pipe(
-                Effect.andThen(store.replaceStagedModifiedFiles(...args)),
-              ),
+              Effect.sync(() =>
+                captured.push(
+                  ...EffectArrayPipe(args[3], __effectArrayValues2 =>
+                    EffectArray.flatMap(__effectArrayValues2, (facts, __effectArrayIndex3) =>
+                      __effectArrayIndex3 in __effectArrayValues2 ? (facts.references ?? []) : [],
+                    ),
+                  ),
+                ),
+              ).pipe(Effect.andThen(store.replaceStagedModifiedFiles(...args))),
             loadCachedFacts: (...args) =>
               store.loadCachedFacts(...args).pipe(
                 Effect.tap(result =>
@@ -1251,14 +1355,20 @@ describe('native code graph lifecycle', () => {
                 Effect.andThen(store.stageActivationFacts(...args)),
               ),
             stageActivationFactBatches: (...args) =>
-              Effect.sync(() => captured.push(...args[1].flatMap(batch => batch.references))).pipe(
-                Effect.andThen(store.stageActivationFactBatches(...args)),
-              ),
+              Effect.sync(() =>
+                captured.push(
+                  ...EffectArrayPipe(args[1], __effectArrayValues2 =>
+                    EffectArray.flatMap(__effectArrayValues2, (batch, __effectArrayIndex3) =>
+                      __effectArrayIndex3 in __effectArrayValues2 ? batch.references : [],
+                    ),
+                  ),
+                ),
+              ).pipe(Effect.andThen(store.stageActivationFactBatches(...args))),
           });
           const canonicalMembership = (
             observations: readonly {readonly path: string; readonly file?: {readonly rawContentHash?: string}}[],
           ) =>
-            observations.map(observation => {
+            EffectArray.map(observations, observation => {
               if (!observation.file) return observation;
               const {rawContentHash, ...file} = observation.file;
               if (rawContentHash !== undefined)
@@ -1315,15 +1425,18 @@ describe('native code graph lifecycle', () => {
             full.snapshot.id,
           );
           expect(normalizeStoredGraph(actual)).toEqual(normalizeStoredGraph(expected));
-          const referencePaths = new Set(incrementalReferences.map(reference => reference.evidencePath));
+          const referencePaths = new Set(EffectArray.map(incrementalReferences, reference => reference.evidencePath));
           const canonicalReferences = (values: readonly CodeGraphReference[]) =>
-            [...values].sort((a, b) => a.edgeId.localeCompare(b.edgeId));
+            [...values].sort((a, b) => Effect2.pipe(a.edgeId, EffectString.localeCompare(b.edgeId)));
           expect(canonicalReferences(incrementalReferences)).toEqual(
-            canonicalReferences(captured.filter(reference => referencePaths.has(reference.evidencePath))),
+            canonicalReferences(EffectArray.filter(captured, reference => referencePaths.has(reference.evidencePath))),
           );
-          expect(incrementalReferences.some(reference => reference.evidencePath === 'packages/consumer/index.ts')).toBe(
-            true,
-          );
+          expect(
+            EffectArray.some(
+              incrementalReferences,
+              reference => reference.evidencePath === 'packages/consumer/index.ts',
+            ),
+          ).toBe(true);
           const membershipPaths = [
             'packages/consumer/bridge.ts',
             'packages/consumer/barrel.ts',
@@ -1371,7 +1484,8 @@ describe('native code graph lifecycle', () => {
             expect(actualLookup).toEqual(expectedLookup);
           }
           expect(
-            actual.symbols.some(
+            EffectArray.some(
+              actual.symbols,
               symbol => symbol.path === 'packages/new/index.ts' && symbol.packageName === 'membership-new',
             ),
           ).toBe(true);
@@ -1405,7 +1519,14 @@ describe('native code graph lifecycle', () => {
               layout: codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId),
               store,
             };
-            const changed = inventory.files.filter(file => !candidate.files.some(base => base.path === file.path));
+            const changed = EffectArrayPipe(inventory.files, __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (file, __effectArrayIndex2) =>
+                  __effectArrayIndex2 in __effectArrayValues &&
+                  !EffectArray.some(candidate.files, base => base.path === file.path),
+              ),
+            );
             expect((yield* assessReusableCleanBaseCompatibility(input, workspace, changed)).mode).toBe('compatible');
             const receiptInventory = candidate.receipt.inventory;
             const contexts = receiptInventory.attributionFiles;
@@ -1413,8 +1534,8 @@ describe('native code graph lifecycle', () => {
             for (const attributionFiles of [
               contexts.slice(1),
               [...contexts, first],
-              [{...first, blobId: 'f'.repeat(40)}, ...contexts.slice(1)],
-              [{...first, contentHash: 'f'.repeat(64)}, ...contexts.slice(1)],
+              [{...first, blobId: Effect2.pipe('f', EffectString.repeat(40))}, ...contexts.slice(1)],
+              [{...first, contentHash: Effect2.pipe('f', EffectString.repeat(64))}, ...contexts.slice(1)],
               [{...first, language: 'json'}, ...contexts.slice(1)],
               [{...first, mode: '100755'}, ...contexts.slice(1)],
               [{...first, size: first.size + 1}, ...contexts.slice(1)],
@@ -1441,33 +1562,38 @@ describe('native code graph lifecycle', () => {
                 loadCachedFacts: (_database, files, _extractor, options) =>
                   Effect.sync(() => {
                     if (options?.decode !== false) rawDecodes++;
-                    const entries = files
-                      .filter(file => fault !== 'missing' || file.path !== 'config-0.json')
-                      .map(
-                        file =>
-                          [
-                            file.path,
-                            file.path.startsWith('config-')
-                              ? fault === 'oversize-skipped-row'
-                                ? CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM + 1
-                                : fault === 'aggregate-skipped-bytes'
-                                  ? CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM
-                                  : 1
-                              : 1,
-                          ] as const,
-                      );
+                    const entries = EffectArray.map(
+                      EffectArray.filter(
+                        files,
+                        (file, __effectArrayIndex) =>
+                          __effectArrayIndex in files && (fault !== 'missing' || file.path !== 'config-0.json'),
+                      ),
+                      file =>
+                        [
+                          file.path,
+                          Effect2.pipe(file.path, EffectString.startsWith('config-'))
+                            ? fault === 'oversize-skipped-row'
+                              ? CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM + 1
+                              : fault === 'aggregate-skipped-bytes'
+                                ? CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM
+                                : 1
+                            : 1,
+                        ] as const,
+                    );
                     return {
                       facts: new Map(),
-                      keys: new Set(entries.map(([key]) => key)),
+                      keys: new Set(EffectArray.map(entries, ([key]) => key)),
                       bytesByPath: new Map(entries),
-                      bytes: entries.reduce((sum, [, bytes]) => sum + bytes, 0),
+                      bytes: EffectArray.reduce(entries, 0, (sum, [, bytes]) => sum + bytes),
                     };
                   }),
               });
               const extra =
                 fault === 'metadata-files'
                   ? Array.from({length: 5_001}, (_, index) => ({
-                      ...inventory.files.find(file => file.path === 'config-0.json')!,
+                      ...EffectOption.getOrUndefined(
+                        EffectArray.findFirst(inventory.files, file => file.path === 'config-0.json'),
+                      )!,
                       path: `extra-${index}.json`,
                     }))
                   : [];
@@ -1540,9 +1666,17 @@ describe('native code graph lifecycle', () => {
           );
           expect(normalizeStoredGraph(removedGraph)).toEqual(normalizeStoredGraph(removedFullGraph));
           expect(
-            removedGraph.symbols
-              .filter(symbol => symbol.path.startsWith('packages/new/'))
-              .every(symbol => symbol.packageName === 'membership-root'),
+            EffectArray.every(
+              EffectArrayPipe(removedGraph.symbols, __effectArrayValues =>
+                EffectArray.filter(
+                  __effectArrayValues,
+                  (symbol, __effectArrayIndex) =>
+                    __effectArrayIndex in __effectArrayValues &&
+                    Effect2.pipe(symbol.path, EffectString.startsWith('packages/new/')),
+                ),
+              ),
+              symbol => symbol.packageName === 'membership-root',
+            ),
           ).toBe(true);
           expect(
             canonicalMembership(
@@ -1627,7 +1761,11 @@ describe('native code graph lifecycle', () => {
             full.snapshot.id,
           );
           expect(normalizeStoredGraph(actual)).toEqual(normalizeStoredGraph(expected));
-          expect(actual.symbols.some(symbol => symbol.path.startsWith('packages/old/'))).toBe(false);
+          expect(
+            EffectArray.some(actual.symbols, symbol =>
+              Effect2.pipe(symbol.path, EffectString.startsWith('packages/old/')),
+            ),
+          ).toBe(false);
           const paths = [
             'packages/old/package.json',
             'packages/old/index.ts',
@@ -1751,8 +1889,8 @@ describe('native code graph lifecycle', () => {
                 expect(fault).toBe('publication-race');
                 expect(ready?.state).toBe('ready');
                 const complete = yield* store.loadGraph(database, ready!.id);
-                expect(complete.symbols.some(symbol => symbol.name === 'added')).toBe(true);
-                expect(complete.symbols.some(symbol => symbol.name === 'raced')).toBe(false);
+                expect(EffectArray.some(complete.symbols, symbol => symbol.name === 'added')).toBe(true);
+                expect(EffectArray.some(complete.symbols, symbol => symbol.name === 'raced')).toBe(false);
               }
               prepared = true;
               if (fault === 'publication-race' && !raced) {
@@ -1815,7 +1953,10 @@ describe('native code graph lifecycle', () => {
       const store = yield* CodeGraphStore;
       const first = yield* indexer.index({cwd: root, threadnoteHome: home});
       const changedPath = join(root, 'src/file-000.ts');
-      writeFileSync(changedPath, readFileSync(changedPath, 'utf8').replace('return 0;', 'return 1000;'));
+      writeFileSync(
+        changedPath,
+        Effect2.pipe(readFileSync(changedPath, 'utf8'), EffectString.replace('return 0;', 'return 1000;')),
+      );
       git(root, ['add', 'src/file-000.ts']);
       git(root, [
         '-c',
@@ -1853,7 +1994,7 @@ describe('native code graph lifecycle', () => {
       expect(incremental.diagnostics).toContain('Clean snapshot reused persisted base for 1 modified file(s).');
       expect(normalizeStoredGraph(incrementalGraph)).toEqual(normalizeStoredGraph(fullGraph));
       const probesPerObservation = statSync(root).dev === statSync(tmpdir()).dev ? 1 : 2;
-      expect(Object.fromEntries(probes)).toEqual({
+      expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'prepare temporary incremental code graph activation': probesPerObservation,
         'promote ready code graph snapshot': probesPerObservation,
@@ -1868,14 +2009,20 @@ describe('native code graph lifecycle', () => {
       const home = join(root, '.threadnote-test-home');
       const indexer = yield* CodeGraphIndexer;
       const first = yield* indexer.index({cwd: root, threadnoteHome: home});
-      const baseCommit = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
+      const baseCommit = Effect2.pipe(
+        execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}),
+        EffectString.trim,
+      );
       const siblingRoot = `${root}-sibling`;
       temporaryRoots.push(siblingRoot);
 
       git(root, ['worktree', 'add', '-qb', 'sibling', siblingRoot, baseCommit]);
       writeFileSync(
         join(siblingRoot, 'src/file-001.ts'),
-        readFileSync(join(siblingRoot, 'src/file-001.ts'), 'utf8').replace('return 1;', 'return 101;'),
+        Effect2.pipe(
+          readFileSync(join(siblingRoot, 'src/file-001.ts'), 'utf8'),
+          EffectString.replace('return 1;', 'return 101;'),
+        ),
       );
       git(siblingRoot, ['add', 'src/file-001.ts']);
       git(siblingRoot, [
@@ -1892,7 +2039,10 @@ describe('native code graph lifecycle', () => {
       git(root, ['checkout', '-qb', 'target']);
       writeFileSync(
         join(root, 'src/file-000.ts'),
-        readFileSync(join(root, 'src/file-000.ts'), 'utf8').replace('return 0;', 'return 100;'),
+        Effect2.pipe(
+          readFileSync(join(root, 'src/file-000.ts'), 'utf8'),
+          EffectString.replace('return 0;', 'return 100;'),
+        ),
       );
       git(root, ['add', 'src/file-000.ts']);
       git(root, [
@@ -1924,14 +2074,20 @@ describe('native code graph lifecycle', () => {
       const indexer = yield* CodeGraphIndexer;
       const store = yield* CodeGraphStore;
       const base = yield* indexer.index({cwd: root, threadnoteHome: home});
-      const baseCommit = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
+      const baseCommit = Effect2.pipe(
+        execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}),
+        EffectString.trim,
+      );
       const rightRoot = `${root}-right`;
       temporaryRoots.push(rightRoot);
 
       git(root, ['checkout', '-qb', 'left']);
       writeFileSync(
         join(root, 'src/file-000.ts'),
-        readFileSync(join(root, 'src/file-000.ts'), 'utf8').replace('return 0;', 'return 10;'),
+        Effect2.pipe(
+          readFileSync(join(root, 'src/file-000.ts'), 'utf8'),
+          EffectString.replace('return 0;', 'return 10;'),
+        ),
       );
       git(root, ['add', 'src/file-000.ts']);
       git(root, [
@@ -1948,7 +2104,10 @@ describe('native code graph lifecycle', () => {
       git(root, ['worktree', 'add', '-qb', 'right', rightRoot, baseCommit]);
       writeFileSync(
         join(rightRoot, 'src/file-001.ts'),
-        readFileSync(join(rightRoot, 'src/file-001.ts'), 'utf8').replace('return 1;', 'return 11;'),
+        Effect2.pipe(
+          readFileSync(join(rightRoot, 'src/file-001.ts'), 'utf8'),
+          EffectString.replace('return 1;', 'return 11;'),
+        ),
       );
       git(rightRoot, ['add', 'src/file-001.ts']);
       git(rightRoot, [
@@ -2170,12 +2329,22 @@ describe('native code graph lifecycle', () => {
       expect(metrics.crossGenerationShardFilesCompleted).toBe(0);
       expect(persistedReuse.associations).toBe(130);
       expect(persistedReuse.writes).toHaveLength(2);
-      expect(persistedReuse.writes.filter(write => write.operation === 'insert')).toEqual([
-        {operation: 'insert', path: partialShardState.missingPath},
-      ]);
-      expect(persistedReuse.writes.filter(write => write.operation === 'update')).toEqual([
-        {operation: 'update', path: 'src/file-128.ts'},
-      ]);
+      expect(
+        EffectArrayPipe(persistedReuse.writes, __effectFilterValues =>
+          EffectArray.filter(
+            __effectFilterValues,
+            (write, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && write.operation === 'insert',
+          ),
+        ),
+      ).toEqual([{operation: 'insert', path: partialShardState.missingPath}]);
+      expect(
+        EffectArrayPipe(persistedReuse.writes, __effectFilterValues =>
+          EffectArray.filter(
+            __effectFilterValues,
+            (write, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && write.operation === 'update',
+          ),
+        ),
+      ).toEqual([{operation: 'update', path: 'src/file-128.ts'}]);
       expect(normalizeStoredGraph(rebuiltGraph)).toEqual(normalizeStoredGraph(firstGraph));
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
@@ -2185,7 +2354,10 @@ describe('native code graph lifecycle', () => {
       const root = createManySourceRepository(2);
       const home = temporaryDirectory('threadnote-code-graph-changed-fact-overlap-');
       const changedPath = join(root, 'src/file-000.ts');
-      writeFileSync(changedPath, readFileSync(changedPath, 'utf8').replace('return 0;', 'return 100;'));
+      writeFileSync(
+        changedPath,
+        Effect2.pipe(readFileSync(changedPath, 'utf8'), EffectString.replace('return 0;', 'return 100;')),
+      );
       const indexer = yield* CodeGraphIndexer;
       const first = yield* indexer.index({cwd: root, ensureVectors: false, force: true, threadnoteHome: home});
       const databasePath = codeGraphDatabasePath(home, first);
@@ -2281,10 +2453,18 @@ describe('native code graph lifecycle', () => {
             materializedShardFacts(freshDatabasePath, 'src/caller.ts'),
           ] as const,
       );
-      const expectedTarget = freshGraph.symbols.find(
-        symbol => symbol.path === 'src/leaf.ts' && symbol.name === 'target' && symbol.arity === 2,
+      const expectedTarget = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          freshGraph.symbols,
+          symbol => symbol.path === 'src/leaf.ts' && symbol.name === 'target' && symbol.arity === 2,
+        ),
       );
-      const call = freshGraph.edges.find(edge => edge.evidencePath === 'src/caller.ts' && edge.relation === 'calls');
+      const call = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          freshGraph.edges,
+          edge => edge.evidencePath === 'src/caller.ts' && edge.relation === 'calls',
+        ),
+      );
 
       expect(expectedTarget).toBeDefined();
       expect(call).toMatchObject({confidence: 1, provenance: 'resolved', targetId: expectedTarget!.id});
@@ -2303,7 +2483,10 @@ describe('native code graph lifecycle', () => {
       const first = yield* indexer.index({cwd: root, ensureVectors: false, threadnoteHome: reusedHome});
       const changedPath = join(root, 'src/filler-125.ts');
       yield* Effect.sync(() => {
-        writeFileSync(changedPath, readFileSync(changedPath, 'utf8').replace('return 125;', 'return 1125;'));
+        writeFileSync(
+          changedPath,
+          Effect2.pipe(readFileSync(changedPath, 'utf8'), EffectString.replace('return 125;', 'return 1125;')),
+        );
       });
       const progress: CodeGraphProgress[] = [];
       const rebuilt = yield* indexer.index({
@@ -2319,11 +2502,17 @@ describe('native code graph lifecycle', () => {
       const rebuiltGraph = yield* store.loadGraph(reusedDatabasePath, rebuilt.snapshot.id);
       const freshGraph = yield* store.loadGraph(freshDatabasePath, fresh.snapshot.id);
       const metrics = finalFullMaterializationMetrics(progress);
-      const freshTarget = freshGraph.symbols.find(
-        symbol => symbol.path === 'src/leaf.ts' && symbol.name === 'target' && symbol.arity === 2,
+      const freshTarget = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          freshGraph.symbols,
+          symbol => symbol.path === 'src/leaf.ts' && symbol.name === 'target' && symbol.arity === 2,
+        ),
       );
-      const rebuiltCall = rebuiltGraph.edges.find(
-        edge => edge.evidencePath === 'src/caller.ts' && edge.relation === 'calls',
+      const rebuiltCall = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          rebuiltGraph.edges,
+          edge => edge.evidencePath === 'src/caller.ts' && edge.relation === 'calls',
+        ),
       );
 
       expect(first.snapshot.graphContentId).not.toBe(rebuilt.snapshot.graphContentId);
@@ -2366,7 +2555,9 @@ describe('native code graph lifecycle', () => {
       ({label, mutate}) =>
         Effect.gen(function* () {
           const root = createAmbientOverloadBarrelRepository();
-          const home = temporaryDirectory(`threadnote-code-graph-v4-invalidation-${label.replaceAll(' ', '-')}-`);
+          const home = temporaryDirectory(
+            `threadnote-code-graph-v4-invalidation-${Effect2.pipe(label, EffectString.replaceAll(' ', '-'))}-`,
+          );
           yield* Effect.sync(() => {
             writeFileSync(join(root, 'tsconfig.json'), `${JSON.stringify({compilerOptions: {baseUrl: '.'}})}\n`);
             git(root, ['add', 'tsconfig.json']);
@@ -2442,7 +2633,9 @@ describe('native code graph lifecycle', () => {
       ({label, mutate}) =>
         Effect.gen(function* () {
           const root = createManySourceRepository(2);
-          const home = temporaryDirectory(`threadnote-code-graph-v4-fail-closed-${label.replaceAll(' ', '-')}-`);
+          const home = temporaryDirectory(
+            `threadnote-code-graph-v4-fail-closed-${Effect2.pipe(label, EffectString.replaceAll(' ', '-'))}-`,
+          );
           const indexer = yield* CodeGraphIndexer;
           const store = yield* CodeGraphStore;
           const first = yield* indexer.index({cwd: root, ensureVectors: false, threadnoteHome: home});
@@ -2472,7 +2665,9 @@ describe('native code graph lifecycle', () => {
           expect(metrics.attributedFilesCompleted, label).toBe(2);
           expect(metrics.rawFactReplayBytesCompleted, label).toBeGreaterThan(0);
           expect(
-            rebuilt.diagnostics.some(value => value.startsWith('Reused content-addressed materialized shards')),
+            EffectArray.some(rebuilt.diagnostics, value =>
+              Effect2.pipe(value, EffectString.startsWith('Reused content-addressed materialized shards')),
+            ),
           ).toBe(false);
           expect(normalizeStoredGraph(rebuiltGraph), label).toEqual(normalizeStoredGraph(firstGraph));
         }),
@@ -2508,7 +2703,7 @@ describe('native code graph lifecycle', () => {
             )
             .all();
           expect(rows).toHaveLength(2);
-          expect(new Set(rows.map(row => row.derivationIdentity)).size).toBe(1);
+          expect(new Set(EffectArray.map(rows, row => row.derivationIdentity)).size).toBe(1);
           const secondSnapshotId = 'cgsn_complementary_partial_donor';
           database
             .query(
@@ -2534,7 +2729,7 @@ describe('native code graph lifecycle', () => {
           return {
             derivationIdentity: rows[0].derivationIdentity,
             extractorSet: rows[0].extractorSet,
-            files: rows.map(row => ({contentHash: row.contentHash, path: row.path})),
+            files: EffectArray.map(rows, row => ({contentHash: row.contentHash, path: row.path})),
             secondSnapshotId,
           };
         } finally {
@@ -2626,15 +2821,17 @@ describe('native code graph lifecycle', () => {
       const selectedDerivations = yield* Effect.sync(() => {
         const database = new Database(databasePath, {readonly: true});
         try {
-          return database
-            .query<{readonly derivation: string}, [string]>(
-              `SELECT DISTINCT shard.derivation_identity AS derivation
+          return EffectArray.map(
+            database
+              .query<{readonly derivation: string}, [string]>(
+                `SELECT DISTINCT shard.derivation_identity AS derivation
                FROM snapshot_file_shards AS association
                JOIN materialized_file_shards AS shard ON shard.id = association.shard_id
                WHERE association.snapshot_id = ?`,
-            )
-            .all(rebuilt.snapshot.id)
-            .map(row => row.derivation);
+              )
+              .all(rebuilt.snapshot.id),
+            row => row.derivation,
+          );
         } finally {
           database.close();
         }
@@ -2771,8 +2968,13 @@ describe('native code graph lifecycle', () => {
         expect(recovered.materialization).toMatchObject({mode: 'full', stagedFiles: 13, totalFiles: 13});
         expect(extractionCompletions).toHaveLength(14);
         for (let index = 0; index < 13; index += 1) {
-          const path = `src/file-${String(index).padStart(3, '0')}.ts`;
-          expect(extractionCompletions.filter(candidate => candidate === path)).toHaveLength(index === 12 ? 2 : 1);
+          const path = `src/file-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`;
+          expect(
+            EffectArray.filter(
+              extractionCompletions,
+              (candidate, __effectArrayIndex) => __effectArrayIndex in extractionCompletions && candidate === path,
+            ),
+          ).toHaveLength(index === 12 ? 2 : 1);
         }
         expect(normalizeStoredGraph(recoveredGraph)).toEqual(normalizeStoredGraph(oracleGraph));
       }),
@@ -2801,7 +3003,10 @@ describe('native code graph lifecycle', () => {
             '-qm',
             'committed cache recovery target',
           ]);
-          return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
+          return Effect2.pipe(
+            execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}),
+            EffectString.trim,
+          );
         });
 
         const ensured = yield* Effect.acquireUseRelease(
@@ -2867,7 +3072,9 @@ describe('native code graph lifecycle', () => {
 
         expect(rebuilt.materialization).toEqual({mode: 'full', stagedFiles: 2, totalFiles: 2});
         expect(
-          rebuilt.diagnostics.some(value => value.startsWith('Reused content-addressed materialized shards')),
+          EffectArray.some(rebuilt.diagnostics, value =>
+            Effect2.pipe(value, EffectString.startsWith('Reused content-addressed materialized shards')),
+          ),
         ).toBe(false);
         expect(normalizeStoredGraph(rebuiltGraph)).toEqual(normalizeStoredGraph(firstGraph));
       }).pipe(provideTestLayer(ApplicationLayer)),
@@ -2883,7 +3090,10 @@ describe('native code graph lifecycle', () => {
       const first = yield* indexer.index({cwd: root, threadnoteHome: home});
       yield* Effect.sync(() => {
         const changedPath = join(root, 'src/file-000.ts');
-        writeFileSync(changedPath, readFileSync(changedPath, 'utf8').replace('original0', 'renamed0'));
+        writeFileSync(
+          changedPath,
+          Effect2.pipe(readFileSync(changedPath, 'utf8'), EffectString.replace('original0', 'renamed0')),
+        );
         git(root, ['add', 'src/file-000.ts']);
         git(root, [
           '-c',
@@ -2914,7 +3124,7 @@ describe('native code graph lifecycle', () => {
       });
       expect(indexed.snapshot.baseSnapshotId).toBeUndefined();
       expect(indexed.snapshot.id).not.toBe(first.snapshot.id);
-      expect(found.nodes.some(node => node.name === 'renamed0')).toBe(true);
+      expect(EffectArray.some(found.nodes, node => node.name === 'renamed0')).toBe(true);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
@@ -2973,7 +3183,10 @@ describe('native code graph lifecycle', () => {
       }),
     );
     const committedPath = join(root, 'src/file-000.ts');
-    writeFileSync(committedPath, readFileSync(committedPath, 'utf8').replace('return 0;', 'return 1000;'));
+    writeFileSync(
+      committedPath,
+      Effect2.pipe(readFileSync(committedPath, 'utf8'), EffectString.replace('return 0;', 'return 1000;')),
+    );
     git(root, ['add', 'src/file-000.ts']);
     git(root, [
       '-c',
@@ -2985,7 +3198,10 @@ describe('native code graph lifecycle', () => {
       'new clean commit',
     ]);
     const dirtyPath = join(root, 'src/file-001.ts');
-    writeFileSync(dirtyPath, readFileSync(dirtyPath, 'utf8').replace('return 1;', 'return 1001;'));
+    writeFileSync(
+      dirtyPath,
+      Effect2.pipe(readFileSync(dirtyPath, 'utf8'), EffectString.replace('return 1;', 'return 1001;')),
+    );
 
     const result = await runEffect(
       Effect.gen(function* () {
@@ -3009,7 +3225,11 @@ describe('native code graph lifecycle', () => {
     });
     expect(result.indexed.snapshot).toMatchObject({baseSnapshotId: first.snapshot.id, dirty: true});
     expect(result.cleanCommit).toBeUndefined();
-    expect(result.indexed.diagnostics.some(message => message.includes('without first building commit'))).toBe(true);
+    expect(
+      EffectArray.some(result.indexed.diagnostics, message =>
+        Effect2.pipe(message, EffectString.includes('without first building commit')),
+      ),
+    ).toBe(true);
   });
 
   it('reuses parsed file facts when repository resolution context changes', async () => {
@@ -3022,7 +3242,8 @@ describe('native code graph lifecycle', () => {
       }),
     );
     const packagePath = join(root, 'package.json');
-    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
+    if (!isJsonObject(packageJson)) throw TestError.make({message: 'Expected a package manifest object.'});
     writeFileSync(packagePath, `${JSON.stringify({...packageJson, description: 'changed context'}, null, 2)}\n`);
 
     const second = await runEffect(
@@ -3046,7 +3267,8 @@ describe('native code graph lifecycle', () => {
       }),
     );
     const packagePath = join(root, 'packages/search/package.json');
-    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
+    if (!isJsonObject(packageJson)) throw TestError.make({message: 'Expected a package manifest object.'});
     writeFileSync(packagePath, `${JSON.stringify({...packageJson, name: '@fixture/search-renamed'}, null, 2)}\n`);
 
     const result = await runEffect(
@@ -3066,9 +3288,11 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(result.indexed.reusedFiles).toBe(first.snapshot.fileCount - 1);
-    expect(result.inspected.nodes.find(node => node.name === 'ensureVectorIndex')?.packageName).toBe(
-      '@fixture/search-renamed',
-    );
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.inspected.nodes, node => node.name === 'ensureVectorIndex'),
+      )?.packageName,
+    ).toBe('@fixture/search-renamed');
   });
 
   it('rehydrates cached manifest context across a committed rebuild without reparsing manifests', async () => {
@@ -3077,7 +3301,10 @@ describe('native code graph lifecycle', () => {
     mkdirSync(join(root, 'cmd', 'fixture'), {recursive: true});
     writeFileSync(
       join(root, 'go.mod'),
-      ['module example.com/threadnote-fixture', '', 'require example.com/cache-dependency v1.2.3', ''].join('\n'),
+      EffectArray.join(
+        ['module example.com/threadnote-fixture', '', 'require example.com/cache-dependency v1.2.3', ''],
+        '\n',
+      ),
     );
     writeFileSync(join(root, 'cmd', 'fixture', 'main.go'), 'package main\n\nfunc main() {}\n');
     git(root, ['add', 'go.mod', 'cmd/fixture/main.go']);
@@ -3105,8 +3332,8 @@ describe('native code graph lifecycle', () => {
       'graph-v3.sqlite',
     );
     const contextPaths = ['go.mod', 'package.json', 'packages/app/package.json', 'tsconfig.json'] as const;
-    const firstContextHashes = Object.fromEntries(
-      contextPaths.map(path => [path, effectiveSnapshotFileHash(databasePath, first.snapshot.id, path)]),
+    const firstContextHashes = EffectRecord.fromEntries(
+      EffectArray.map(contextPaths, path => [path, effectiveSnapshotFileHash(databasePath, first.snapshot.id, path)]),
     );
     const appPath = join(root, 'packages/app/src/main.ts');
     writeFileSync(appPath, `${readFileSync(appPath, 'utf8')}\n// ordinary source revision\n`);
@@ -3142,15 +3369,21 @@ describe('native code graph lifecycle', () => {
       stagedFiles: 1,
       totalFiles: first.snapshot.fileCount,
     });
-    expect(result.graph.symbols.find(symbol => symbol.name === 'runApplication')?.packageName).toBe('@fixture/app');
     expect(
-      result.graph.edges.some(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.graph.symbols, symbol => symbol.name === 'runApplication'),
+      )?.packageName,
+    ).toBe('@fixture/app');
+    expect(
+      EffectArray.some(
+        result.graph.edges,
         edge =>
           edge.sourceName === '@fixture/app' && edge.relation === 'depends_on' && edge.targetName === '@fixture/search',
       ),
     ).toBe(true);
     expect(
-      result.graph.edges.some(
+      EffectArray.some(
+        result.graph.edges,
         edge =>
           edge.sourceName === 'runApplication' &&
           edge.relation === 'calls' &&
@@ -3158,9 +3391,12 @@ describe('native code graph lifecycle', () => {
           edge.provenance === 'resolved',
       ),
     ).toBe(true);
-    expect(result.graph.symbols.some(symbol => symbol.name === 'example.com/threadnote-fixture')).toBe(true);
+    expect(EffectArray.some(result.graph.symbols, symbol => symbol.name === 'example.com/threadnote-fixture')).toBe(
+      true,
+    );
     expect(
-      result.graph.edges.some(
+      EffectArray.some(
+        result.graph.edges,
         edge =>
           edge.sourceName === 'example.com/threadnote-fixture' &&
           edge.relation === 'depends_on' &&
@@ -3168,8 +3404,11 @@ describe('native code graph lifecycle', () => {
       ),
     ).toBe(true);
     expect(
-      Object.fromEntries(
-        contextPaths.map(path => [path, effectiveSnapshotFileHash(databasePath, result.indexed.snapshot.id, path)]),
+      EffectRecord.fromEntries(
+        EffectArray.map(contextPaths, path => [
+          path,
+          effectiveSnapshotFileHash(databasePath, result.indexed.snapshot.id, path),
+        ]),
       ),
     ).toEqual(firstContextHashes);
   });
@@ -3213,12 +3452,14 @@ describe('native code graph lifecycle', () => {
     const database = new Database(databasePath, {readonly: true});
     let cachedHashes: string[];
     try {
-      cachedHashes = database
-        .query<{readonly content_hash: string}, [string]>(
-          'SELECT content_hash FROM file_blobs WHERE path_hint = ? ORDER BY content_hash',
-        )
-        .all(sourcePath)
-        .map(row => row.content_hash);
+      cachedHashes = EffectArray.map(
+        database
+          .query<{readonly content_hash: string}, [string]>(
+            'SELECT content_hash FROM file_blobs WHERE path_hint = ? ORDER BY content_hash',
+          )
+          .all(sourcePath),
+        row => row.content_hash,
+      );
     } finally {
       database.close();
     }
@@ -3261,7 +3502,7 @@ describe('native code graph lifecycle', () => {
         encodeStoredCodeGraphFact(
           ensureBoundedCodeGraphFact({
             ...facts,
-            symbols: facts.symbols.map(symbol => ({
+            symbols: EffectArray.map(facts.symbols, symbol => ({
               ...symbol,
               name: 'corruptedVectorIndex',
               qualifiedName: 'corruptedVectorIndex',
@@ -3291,17 +3532,20 @@ describe('native code graph lifecycle', () => {
 
     expect(result.rebuilt.snapshot.id).not.toBe(first.snapshot.id);
     expect(result.rebuilt.reusedFiles).toBe(0);
-    expect(result.inspected.nodes.some(node => node.name === 'ensureVectorIndex')).toBe(true);
-    expect(result.inspected.nodes.some(node => node.name === 'corruptedVectorIndex')).toBe(false);
+    expect(EffectArray.some(result.inspected.nodes, node => node.name === 'ensureVectorIndex')).toBe(true);
+    expect(EffectArray.some(result.inspected.nodes, node => node.name === 'corruptedVectorIndex')).toBe(false);
     const repairedDatabase = new Database(databasePath, {readonly: true});
     try {
       const repaired = repairedDatabase
         .query<{readonly facts_json: string}, [string]>('SELECT facts_json FROM file_blobs WHERE path_hint = ? LIMIT 1')
         .get('packages/search/src/vector-index.ts');
-      const names = decodeStoredCodeGraphFact(
-        repaired!.facts_json,
-        'packages/search/src/vector-index.ts',
-      ).facts.symbols.flatMap(symbol => [symbol.name, symbol.qualifiedName]);
+      const names = EffectArrayPipe(
+        decodeStoredCodeGraphFact(repaired!.facts_json, 'packages/search/src/vector-index.ts').facts.symbols,
+        __effectFlatMapValues =>
+          EffectArray.flatMap(__effectFlatMapValues, (symbol, __effectFlatMapIndex) =>
+            __effectFlatMapIndex in __effectFlatMapValues ? [symbol.name, symbol.qualifiedName] : [],
+          ),
+      );
       expect(names).toContain('ensureVectorIndex');
       expect(names).not.toContain('corruptedVectorIndex');
     } finally {
@@ -3319,15 +3563,15 @@ describe('native code graph lifecycle', () => {
           const inventory = yield* inventoryRepository(identity, {
             onContentBatch: files =>
               Effect.sync(() => {
-                observedBatches.push(files.map(file => file.path));
+                observedBatches.push(EffectArray.map(files, file => file.path));
               }),
           });
 
-          expect(observedBatches.map(batch => batch.length)).toEqual([512, 1]);
+          expect(EffectArray.map(observedBatches, batch => batch.length)).toEqual([512, 1]);
           expect(observedBatches[0]?.at(0)).toBe('src/file-000.ts');
           expect(observedBatches[1]).toEqual(['src/file-512.ts']);
           expect(inventory.parsedFiles).toBe(513);
-          expect(inventory.files.every(file => file.content === undefined)).toBe(true);
+          expect(EffectArray.every(inventory.files, file => file.content === undefined)).toBe(true);
         }),
       root =>
         FileSystem.FileSystem.pipe(
@@ -3353,7 +3597,7 @@ describe('native code graph lifecycle', () => {
           onContentBatch: files =>
             Effect.sync(() => {
               observedBatches.push({
-                bytes: files.reduce((total, file) => total + file.size, 0),
+                bytes: EffectArray.reduce(files, 0, (total, file) => total + file.size),
                 files: files.length,
               });
             }),
@@ -3361,11 +3605,13 @@ describe('native code graph lifecycle', () => {
       }),
     );
 
-    expect(observedBatches.map(batch => batch.files)).toEqual([16, 16, 16, 16, 16, 16, 16, 16, 1]);
-    expect(observedBatches.every(batch => batch.bytes <= 16 * 1_048_576 && batch.files <= 128)).toBe(true);
-    expect(observedBatches.reduce((total, batch) => total + batch.bytes, 0)).toBeGreaterThan(128 * 1_048_576);
+    expect(EffectArray.map(observedBatches, batch => batch.files)).toEqual([16, 16, 16, 16, 16, 16, 16, 16, 1]);
+    expect(EffectArray.every(observedBatches, batch => batch.bytes <= 16 * 1_048_576 && batch.files <= 128)).toBe(true);
+    expect(EffectArray.reduce(observedBatches, 0, (total, batch) => total + batch.bytes)).toBeGreaterThan(
+      128 * 1_048_576,
+    );
     expect(inventory.parsedFiles).toBe(129);
-    expect(inventory.files.every(file => file.content === undefined)).toBe(true);
+    expect(EffectArray.every(inventory.files, file => file.content === undefined)).toBe(true);
   }, 30_000);
 
   it('indexes an eligible tracked file above the former per-file byte cap', async () => {
@@ -3450,7 +3696,8 @@ describe('native code graph lifecycle', () => {
       totalFiles: 24,
     });
     expect(
-      result.incrementalGraph.edges.some(
+      EffectArray.some(
+        result.incrementalGraph.edges,
         edge =>
           edge.evidencePath === 'src/file-001.ts' &&
           edge.relation === 'calls' &&
@@ -3477,18 +3724,21 @@ describe('native code graph lifecycle', () => {
       yield* Effect.sync(() => {
         writeFileSync(
           join(localRoot, 'src/service.ts'),
-          [
-            'export class PublishedService {',
-            '  value(): number {',
-            '    return this.privateValue();',
-            '  }',
-            '',
-            '  private privateValue(): number {',
-            '    return 1;',
-            '  }',
-            '}',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'export class PublishedService {',
+              '  value(): number {',
+              '    return this.privateValue();',
+              '  }',
+              '',
+              '  private privateValue(): number {',
+              '    return 1;',
+              '  }',
+              '}',
+              '',
+            ],
+            '\n',
+          ),
         );
         writeFileSync(
           join(localRoot, 'test/service.test.ts'),
@@ -3555,15 +3805,19 @@ describe('native code graph lifecycle', () => {
 
     expect(result.incremental.materialization).toMatchObject({mode: 'incremental-overlay', stagedFiles: 1});
     expect(
-      result.incrementalGraph.edges
-        .filter(
-          edge =>
-            edge.evidencePath === 'packages/search/src/vector-index.ts' &&
-            ((edge.relation === 'extends' && edge.targetName === 'FileLock') ||
-              (edge.relation === 'calls' && edge.targetName === 'withExclusiveFileLock')),
-        )
-        .map(edge => ({confidence: edge.confidence, provenance: edge.provenance, relation: edge.relation}))
-        .sort((left, right) => left.relation.localeCompare(right.relation)),
+      EffectArray.map(
+        EffectArrayPipe(result.incrementalGraph.edges, __effectFilterValues =>
+          EffectArray.filter(
+            __effectFilterValues,
+            (edge, __effectFilterIndex) =>
+              __effectFilterIndex in __effectFilterValues &&
+              edge.evidencePath === 'packages/search/src/vector-index.ts' &&
+              ((edge.relation === 'extends' && edge.targetName === 'FileLock') ||
+                (edge.relation === 'calls' && edge.targetName === 'withExclusiveFileLock')),
+          ),
+        ),
+        edge => ({confidence: edge.confidence, provenance: edge.provenance, relation: edge.relation}),
+      ).sort((left, right) => Effect2.pipe(left.relation, EffectString.localeCompare(right.relation))),
     ).toEqual([
       {confidence: 1, provenance: 'resolved', relation: 'calls'},
       {confidence: 1, provenance: 'resolved', relation: 'extends'},
@@ -3581,7 +3835,11 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(result.materialization?.mode).toBe('incremental-overlay');
-    expect(result.diagnostics.some(diagnostic => diagnostic.includes('src/broken.ts'))).toBe(true);
+    expect(
+      EffectArray.some(result.diagnostics, diagnostic =>
+        Effect2.pipe(diagnostic, EffectString.includes('src/broken.ts')),
+      ),
+    ).toBe(true);
   });
 
   it('treats changes to graph-ineligible tracked content as freshness-clean', async () => {
@@ -3601,7 +3859,9 @@ describe('native code graph lifecycle', () => {
     expect(result.indexed.materialization).toMatchObject({mode: 'full'});
     expect(result.indexed.materialization?.fallbackReason).toBeUndefined();
     expect(
-      result.indexed.diagnostics.some(message => message.startsWith('Dirty overlay used full materialization:')),
+      EffectArray.some(result.indexed.diagnostics, message =>
+        Effect2.pipe(message, EffectString.startsWith('Dirty overlay used full materialization:')),
+      ),
     ).toBe(false);
     expect(result.status).toMatchObject({freshness: 'current', stale: false});
     expect(result.status.readySnapshot?.id).toBe(result.indexed.snapshot.id);
@@ -3625,9 +3885,11 @@ describe('native code graph lifecycle', () => {
       const result = yield* indexer.index({cwd: root, threadnoteHome: join(root, '.threadnote-test-home')});
 
       expect(result.materialization).toEqual({mode: 'incremental-overlay', stagedFiles: 1, totalFiles: 2});
-      expect(result.diagnostics.some(message => message.startsWith('Dirty overlay used full materialization:'))).toBe(
-        false,
-      );
+      expect(
+        EffectArray.some(result.diagnostics, message =>
+          Effect2.pipe(message, EffectString.startsWith('Dirty overlay used full materialization:')),
+        ),
+      ).toBe(false);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -3675,9 +3937,11 @@ describe('native code graph lifecycle', () => {
           expect(scanningFactsBytesCompleted).toBeGreaterThan(CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES);
           expect(scanningSourceBytesTotal).toBeLessThan(CODE_GRAPH_INCREMENTAL_REWRITE_MAX_SOURCE_BYTES);
         }
-        expect(result.diagnostics.some(message => message.startsWith('Dirty overlay used full materialization:'))).toBe(
-          true,
-        );
+        expect(
+          EffectArray.some(result.diagnostics, message =>
+            Effect2.pipe(message, EffectString.startsWith('Dirty overlay used full materialization:')),
+          ),
+        ).toBe(true);
         expect(storageObservations.at(-1)).toMatchObject({
           materializationMode: 'direct-persistent',
           temporaryDatabaseBytes: 0,
@@ -3743,7 +4007,7 @@ describe('native code graph lifecycle', () => {
     );
     for (let index = 0; index < 129; index += 1) {
       writeFileSync(
-        join(root, `src/file-${String(index).padStart(3, '0')}.ts`),
+        join(root, `src/file-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`),
         `export function changed${index}(): number { return ${index}; }\n`,
       );
     }
@@ -3766,7 +4030,7 @@ describe('native code graph lifecycle', () => {
 
     expect(result.indexed.reusedFiles).toBe(0);
     expect(result.indexed.snapshot.fileCount).toBe(129);
-    expect(result.inspected.nodes.some(node => node.name === 'changed128')).toBe(true);
+    expect(EffectArray.some(result.inspected.nodes, node => node.name === 'changed128')).toBe(true);
   }, 30_000);
 
   effectIt.effect('retries when the worktree changes after activation but before pointer promotion', () =>
@@ -3774,7 +4038,7 @@ describe('native code graph lifecycle', () => {
       const root = yield* Effect.sync(createFixtureRepository);
       const home = join(root, '.threadnote-test-home');
       const initialCommit = yield* Effect.sync(() =>
-        execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(),
+        Effect2.pipe(execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], {encoding: 'utf8'}), EffectString.trim),
       );
       let changed = false;
       let staleSnapshotId: string | undefined;
@@ -3789,7 +4053,10 @@ describe('native code graph lifecycle', () => {
               staleSnapshotId = progress.snapshotId;
               changed = true;
               const sourcePath = join(root, 'packages/search/src/vector-index.ts');
-              writeFileSync(sourcePath, readFileSync(sourcePath, 'utf8').replace('vectors-ready', 'vectors-raced'));
+              writeFileSync(
+                sourcePath,
+                Effect2.pipe(readFileSync(sourcePath, 'utf8'), EffectString.replace('vectors-ready', 'vectors-raced')),
+              );
             }
           }),
         threadnoteHome: home,
@@ -3808,10 +4075,16 @@ describe('native code graph lifecycle', () => {
       const staleGraph = stale ? yield* store.loadGraph(databasePath, stale.id) : undefined;
       const active = yield* store.readySnapshot(databasePath, current.identity.worktreeId);
       expect(inspected.freshness).toBe('deferred');
-      expect(inspected.nodes.some(node => node.name === 'ensureVectorIndex')).toBe(true);
+      expect(EffectArray.some(inspected.nodes, node => node.name === 'ensureVectorIndex')).toBe(true);
       expect(stale).toMatchObject({commit: initialCommit, id: staleSnapshotId, state: 'ready'});
       expect(stale?.id).not.toBe(current.snapshot.id);
-      expect(staleGraph?.symbols.some(symbol => symbol.name === 'ensureVectorIndex')).toBe(true);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(staleGraph?.symbols), __effectOptionalArray =>
+            Boolean(EffectArray.some(__effectOptionalArray, symbol => symbol.name === 'ensureVectorIndex')),
+          ),
+        ),
+      ).toBe(true);
       expect(active?.id).toBe(current.snapshot.id);
       expect(current.materialization).toMatchObject({mode: 'incremental-overlay', stagedFiles: 1});
       expect(snapshotFileHash(databasePath, staleSnapshotId!, 'packages/search/src/vector-index.ts')).not.toBe(
@@ -3859,7 +4132,10 @@ describe('native code graph lifecycle', () => {
               progress.subphase === 'promoting'
             ) {
               retainedSnapshotId = progress.snapshotId;
-              writeFileSync(sourcePath, readFileSync(sourcePath, 'utf8').replace('return 2;', 'return 3;'));
+              writeFileSync(
+                sourcePath,
+                Effect2.pipe(readFileSync(sourcePath, 'utf8'), EffectString.replace('return 2;', 'return 3;')),
+              );
             }
           }),
         threadnoteHome: home,
@@ -3894,7 +4170,10 @@ describe('native code graph lifecycle', () => {
       const baseline = yield* indexer.index({cwd: root, threadnoteHome: home});
       const sourcePath = join(root, 'packages/search/src/vector-index.ts');
       yield* Effect.sync(() => {
-        writeFileSync(sourcePath, readFileSync(sourcePath, 'utf8').replace('vectors-ready', 'vectors-before-race'));
+        writeFileSync(
+          sourcePath,
+          Effect2.pipe(readFileSync(sourcePath, 'utf8'), EffectString.replace('vectors-ready', 'vectors-before-race')),
+        );
       });
       let promotingEvents = 0;
       let postPromotedSnapshotId: string | undefined;
@@ -3913,7 +4192,10 @@ describe('native code graph lifecycle', () => {
                   postPromoteMutation = true;
                   writeFileSync(
                     sourcePath,
-                    readFileSync(sourcePath, 'utf8').replace('vectors-before-race', 'vectors-raced-once'),
+                    Effect2.pipe(
+                      readFileSync(sourcePath, 'utf8'),
+                      EffectString.replace('vectors-before-race', 'vectors-raced-once'),
+                    ),
                   );
                 }
               } else if (
@@ -3926,7 +4208,10 @@ describe('native code graph lifecycle', () => {
                 retrySnapshotId = progress.snapshotId;
                 writeFileSync(
                   sourcePath,
-                  readFileSync(sourcePath, 'utf8').replace('vectors-raced-once', 'vectors-raced-twice'),
+                  Effect2.pipe(
+                    readFileSync(sourcePath, 'utf8'),
+                    EffectString.replace('vectors-raced-once', 'vectors-raced-twice'),
+                  ),
                 );
               }
             }),
@@ -4051,8 +4336,18 @@ describe('native code graph lifecycle', () => {
           )
           .all();
         expect(ready).toHaveLength(2);
-        expect(ready.filter(snapshot => snapshot.dirty === 0)).toHaveLength(1);
-        expect(ready.filter(snapshot => snapshot.dirty === 1)).toEqual([{dirty: 1, id: current.snapshot.id}]);
+        expect(
+          EffectArray.filter(
+            ready,
+            (snapshot, __effectArrayIndex) => __effectArrayIndex in ready && snapshot.dirty === 0,
+          ),
+        ).toHaveLength(1);
+        expect(
+          EffectArray.filter(
+            ready,
+            (snapshot, __effectArrayIndex) => __effectArrayIndex in ready && snapshot.dirty === 1,
+          ),
+        ).toEqual([{dirty: 1, id: current.snapshot.id}]);
         expect(database.query('PRAGMA foreign_key_check').all()).toEqual([]);
       } finally {
         database.close(false);
@@ -4094,8 +4389,8 @@ describe('native code graph lifecycle', () => {
       });
       const firstGraph = yield* store.loadGraph(databasePath, firstTargetId!);
       const currentGraph = yield* store.loadGraph(databasePath, current.snapshot.id);
-      expect(firstGraph.symbols.some(symbol => symbol.name === 'ensureVectorIndexFirst')).toBe(true);
-      expect(currentGraph.symbols.some(symbol => symbol.name === 'ensureVectorIndexSecond')).toBe(true);
+      expect(EffectArray.some(firstGraph.symbols, symbol => symbol.name === 'ensureVectorIndexFirst')).toBe(true);
+      expect(EffectArray.some(currentGraph.symbols, symbol => symbol.name === 'ensureVectorIndexSecond')).toBe(true);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
@@ -4172,7 +4467,7 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(result.indexed.snapshot).toMatchObject({dirty: true, fileCount: first.snapshot.fileCount - 1});
-    expect(result.inspected.nodes.some(node => node.name === 'ensureVectorIndex')).toBe(false);
+    expect(EffectArray.some(result.inspected.nodes, node => node.name === 'ensureVectorIndex')).toBe(false);
   });
 
   it('does not follow a repository-controlled ignore-file symlink', async () => {
@@ -4214,7 +4509,7 @@ describe('native code graph lifecycle', () => {
       }),
     );
 
-    expect(result.nodes.some(node => node.name === 'outsideSecretSymbol')).toBe(false);
+    expect(EffectArray.some(result.nodes, node => node.name === 'outsideSecretSymbol')).toBe(false);
   });
 
   it('does not follow a dirty-overlay ancestor symlink outside the repository', async () => {
@@ -4242,7 +4537,7 @@ describe('native code graph lifecycle', () => {
       }),
     );
 
-    expect(result.nodes.some(node => node.name === 'outsideAncestorSecret')).toBe(false);
+    expect(EffectArray.some(result.nodes, node => node.name === 'outsideAncestorSecret')).toBe(false);
   });
 
   it('rejects an external file opened through an ancestor swapped between validation and open', async () => {
@@ -4421,7 +4716,7 @@ describe('native code graph lifecycle', () => {
               args.includes('diff') ||
               (args.includes('ls-files') && args.includes('--others')))
           ) {
-            observationCommands.push(args.join(' '));
+            observationCommands.push(EffectArray.join(args, ' '));
           }
           return command.execute(executable, args, options);
         },
@@ -4438,7 +4733,7 @@ describe('native code graph lifecycle', () => {
             executable === 'git' &&
             (args.includes('diff') || (args.includes('ls-files') && args.includes('--others')))
           ) {
-            repeatedOverlayCommands.push(args.join(' '));
+            repeatedOverlayCommands.push(EffectArray.join(args, ' '));
           }
           return command.execute(executable, args, options);
         },
@@ -4509,12 +4804,10 @@ describe('native code graph lifecycle', () => {
     mkdirSync(join(root, 'ios', 'Pods', 'Headers'), {recursive: true});
     writeFileSync(
       join(root, 'settings.gradle.kts'),
-      [
-        'rootProject.name = "mobile"',
-        'include(":pods")',
-        'project(":pods").projectDir = file("modules/pods")',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        ['rootProject.name = "mobile"', 'include(":pods")', 'project(":pods").projectDir = file("modules/pods")', ''],
+        '\n',
+      ),
     );
     writeFileSync(join(root, 'modules', 'pods', 'build.gradle.kts'), 'plugins { kotlin("jvm") }\n');
     writeFileSync(
@@ -4539,20 +4832,23 @@ describe('native code graph lifecycle', () => {
         return yield* inventoryRepository(identity);
       }),
     );
-    const paths = inventory.files.map(file => file.path);
+    const paths = EffectArray.map(inventory.files, file => file.path);
 
     expect(paths).toContain('modules/pods/src/main/kotlin/io/coda/pods/PodsService.kt');
     expect(paths).not.toContain('ios/Pods/Headers/Generated.h');
 
     writeFileSync(
       join(root, 'settings.gradle.kts'),
-      [
-        'rootProject.name = "mobile"',
-        'include(":pods", ":out")',
-        'project(":pods").projectDir = file("modules/pods")',
-        'project(":out").projectDir = file("modules/out")',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'rootProject.name = "mobile"',
+          'include(":pods", ":out")',
+          'project(":pods").projectDir = file("modules/pods")',
+          'project(":out").projectDir = file("modules/out")',
+          '',
+        ],
+        '\n',
+      ),
     );
     mkdirSync(join(root, 'modules', 'out', 'src', 'main', 'kotlin'), {recursive: true});
     writeFileSync(join(root, 'modules', 'out', 'src', 'main', 'kotlin', 'NewModule.kt'), 'class NewModule\n');
@@ -4562,7 +4858,9 @@ describe('native code graph lifecycle', () => {
         return yield* inventoryRepository(identity);
       }),
     );
-    expect(dirtyInventory.files.map(file => file.path)).toContain('modules/out/src/main/kotlin/NewModule.kt');
+    expect(EffectArray.map(dirtyInventory.files, file => file.path)).toContain(
+      'modules/out/src/main/kotlin/NewModule.kt',
+    );
   });
 
   it('keeps oversized dirty corpus artifacts metadata-only while preserving an exact fingerprint', async () => {
@@ -4600,8 +4898,12 @@ describe('native code graph lifecycle', () => {
         });
       }),
     );
-    const file = inventory.files.find(candidate => candidate.path === 'media/architecture.pdf');
-    const cached = cachedBatches.flat().find(candidate => candidate.path === file?.path);
+    const file = EffectOption.getOrUndefined(
+      EffectArray.findFirst(inventory.files, candidate => candidate.path === 'media/architecture.pdf'),
+    );
+    const cached = EffectOption.getOrUndefined(
+      EffectArray.findFirst(cachedBatches.flat(), candidate => candidate.path === file?.path),
+    );
 
     expect(file).toMatchObject({size: 64 * 1_048_576 + 1});
     expect(file?.bytes).toBeUndefined();
@@ -4657,7 +4959,7 @@ describe('native code graph lifecycle', () => {
       }),
     );
 
-    expect(impact.nodes.map(node => node.name)).toEqual(
+    expect(EffectArray.map(impact.nodes, node => node.name)).toEqual(
       expect.arrayContaining(['ensureVectorIndex', 'refreshRecallIndex', 'runApplication']),
     );
   });
@@ -4689,12 +4991,12 @@ describe('native code graph lifecycle', () => {
       }),
     );
 
-    expect(impact.nodes.map(node => node.name)).toEqual(
+    expect(EffectArray.map(impact.nodes, node => node.name)).toEqual(
       expect.arrayContaining(['ensureVectorIndex', 'refreshRecallIndex']),
     );
-    expect(impact.nodes.map(node => node.name)).not.toContain('runApplication');
-    expect(impact.warnings.join('\n')).toContain('deleted path(s) from base snapshot');
-    expect(impact.warnings.join('\n')).toContain('base-only relationships are omitted');
+    expect(EffectArray.map(impact.nodes, node => node.name)).not.toContain('runApplication');
+    expect(EffectArray.join(impact.warnings, '\n')).toContain('deleted path(s) from base snapshot');
+    expect(EffectArray.join(impact.warnings, '\n')).toContain('base-only relationships are omitted');
   });
 
   it('does not discover nodes through relationships omitted by the edge budget', async () => {
@@ -4728,7 +5030,7 @@ describe('native code graph lifecycle', () => {
 
     expect(deep.edges).toHaveLength(1);
     expect(deep.edges).toEqual(shallow.edges);
-    expect(deep.nodes.map(node => node.id)).toEqual(shallow.nodes.map(node => node.id));
+    expect(EffectArray.map(deep.nodes, node => node.id)).toEqual(EffectArray.map(shallow.nodes, node => node.id));
   });
 
   it('keeps heuristic and model relationship opt-ins independent', async () => {
@@ -4822,7 +5124,10 @@ describe('native code graph lifecycle', () => {
       }),
     );
     const optionalEdgeIds = (result: typeof plain) =>
-      result.edges.map(edge => edge.id).filter(id => id.startsWith('test-'));
+      EffectArray.filter(
+        EffectArray.map(result.edges, edge => edge.id),
+        id => Effect2.pipe(id, EffectString.startsWith('test-')),
+      );
 
     expect(optionalEdgeIds(plain)).toEqual([]);
     expect(optionalEdgeIds(heuristic)).toEqual(['test-heuristic-edge']);
@@ -4835,10 +5140,10 @@ describe('native code graph lifecycle', () => {
     const home = join(root, '.threadnote-test-home');
     mkdirSync(join(root, 'src'), {recursive: true});
     const seedQueries = Array.from({length: 201}, (_, index) => {
-      const relative = `src/changed-${String(index).padStart(3, '0')}.ts`;
+      const relative = `src/changed-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`;
       writeFileSync(
         join(root, relative),
-        `export function changedSymbol${String(index).padStart(3, '0')}(): number { return ${index}; }\n`,
+        `export function changedSymbol${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}(): number { return ${index}; }\n`,
       );
       return relative;
     });
@@ -4901,9 +5206,13 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(impact.nodes).toHaveLength(200);
-    expect(new Set(impact.nodes.map(node => node.path))).toEqual(new Set(seedQueries.slice(0, 200)));
-    expect(impact.warnings.some(warning => warning.includes('changed paths; results are partial'))).toBe(false);
-    expect(defaultLimit.nodes.some(node => node.name === 'boundaryConsumer')).toBe(true);
+    expect(new Set(EffectArray.map(impact.nodes, node => node.path))).toEqual(new Set(seedQueries.slice(0, 200)));
+    expect(
+      EffectArray.some(impact.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('changed paths; results are partial')),
+      ),
+    ).toBe(false);
+    expect(EffectArray.some(defaultLimit.nodes, node => node.name === 'boundaryConsumer')).toBe(true);
     expect(partial.warnings).toContain('Impact analysis evaluated 200 of 201 changed paths; results are partial.');
   });
 
@@ -4912,7 +5221,7 @@ describe('native code graph lifecycle', () => {
     const home = join(root, '.threadnote-test-home');
     writeFileSync(
       join(root, 'docs/danger.md'),
-      `# danger\u001b]8;;https://example.invalid\u0007${'x'.repeat(5_000)}\n`,
+      `# danger\u001b]8;;https://example.invalid\u0007${Effect2.pipe('x', EffectString.repeat(5_000))}\n`,
     );
 
     const result = await runEffect(
@@ -4928,7 +5237,11 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(JSON.stringify(result)).not.toContain('\u001b');
-    expect(result.nodes.find(node => node.name.includes('danger'))?.name.length).toBeLessThanOrEqual(256);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.nodes, node => Effect2.pipe(node.name, EffectString.includes('danger'))),
+      )?.name.length,
+    ).toBeLessThanOrEqual(256);
     expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeLessThan(270_000);
   });
 
@@ -5061,7 +5374,7 @@ describe('native code graph lifecycle', () => {
     for (const component of ['checkoutId', 'repositoryId', 'worktreeId'] as const) {
       const expectedIdentity = {
         ...identity,
-        [component]: `${identity[component].startsWith('f') ? 'e' : 'f'}${identity[component].slice(1)}`,
+        [component]: `${Effect2.pipe(identity[component], EffectString.startsWith('f')) ? 'e' : 'f'}${Effect2.pipe(identity[component], EffectString.slice(1))}`,
       };
       await expect(
         runEffect(
@@ -5111,7 +5424,7 @@ describe('native code graph lifecycle', () => {
       let queued!: () => void;
       return {promise: new Promise<void>(resolve => (queued = resolve)), queued};
     });
-    const waiters = waiterSignals.map(signal =>
+    const waiters = EffectArray.map(waiterSignals, signal =>
       runEffect(
         Effect.gen(function* () {
           const indexer = yield* CodeGraphIndexer;
@@ -5133,14 +5446,17 @@ describe('native code graph lifecycle', () => {
         }),
       ),
     );
-    await Promise.all(waiterSignals.map(signal => signal.promise));
+    await Promise.all(EffectArray.map(waiterSignals, signal => signal.promise));
     releaseOwner();
     const [ownerSummary, ...waiterSummaries] = await Promise.all([owner, ...waiters]);
 
     expect(inventoryPasses).toBe(1);
-    expect(new Set(waiterSummaries.map(summary => summary.snapshot.id))).toEqual(new Set([ownerSummary.snapshot.id]));
+    expect(new Set(EffectArray.map(waiterSummaries, summary => summary.snapshot.id))).toEqual(
+      new Set([ownerSummary.snapshot.id]),
+    );
     expect(
-      waiterSummaries.every(
+      EffectArray.every(
+        waiterSummaries,
         summary =>
           summary.materialization?.mode === 'reused-snapshot' &&
           summary.materialization.stagedFiles === 0 &&
@@ -5166,10 +5482,8 @@ describe('native code graph lifecycle', () => {
       const [firstOutput, secondOutput] = await Promise.all([first.done, second.done]);
       const firstSummary = codeGraphProcessSummary(firstOutput);
       const secondSummary = codeGraphProcessSummary(secondOutput);
-      const inventoryPasses = [
-        ...codeGraphProcessProgress(firstOutput),
-        ...codeGraphProcessProgress(secondOutput),
-      ].filter(
+      const inventoryPasses = EffectArray.filter(
+        [...codeGraphProcessProgress(firstOutput), ...codeGraphProcessProgress(secondOutput)],
         progress =>
           progress.phase === 'scanning' &&
           progress.completed === 0 &&
@@ -5214,13 +5528,9 @@ describe('native code graph lifecycle', () => {
         throw TestError.make({message: `Forced-build child did not reach a committed batch: ${stderr}`, cause: error});
       }
 
-      const markerProgress = JSON.parse(readFileSync(marker, 'utf8')) as {
-        readonly batchesCompleted: number;
-        readonly batchTotal: number;
-        readonly completed: number;
-        readonly factsBytesCompleted: number;
-        readonly factsBytesTotal?: number;
-      };
+      const markerProgress = Schema.decodeUnknownSync(directBuildProgressSchema)(
+        JSON.parse(readFileSync(marker, 'utf8')),
+      );
       expect(markerProgress.batchesCompleted).toBe(1);
       expect(markerProgress.batchTotal).toBe(2);
       expect(markerProgress.completed).toBeGreaterThan(0);
@@ -5230,21 +5540,39 @@ describe('native code graph lifecycle', () => {
       const identity = await runEffect(resolveRepositoryIdentity(root));
       const databasePath = join(home, 'indexes', 'code-graph', 'repositories', identity.checkoutId, 'graph-v3.sqlite');
       const interruptedDatabase = new Database(databasePath, {readonly: true, strict: true});
-      const interrupted = interruptedDatabase
-        .query("SELECT id FROM snapshots WHERE state = 'building' AND id GLOB 'cgsn_*-full-*' LIMIT 1")
-        .get() as {readonly id: string};
+      const interrupted = requiredRow(
+        interruptedDatabase
+          .query<{readonly id: string}, SQLQueryBindings[]>(
+            "SELECT id FROM snapshots WHERE state = 'building' AND id GLOB 'cgsn_*-full-*' LIMIT 1",
+          )
+          .get(),
+      );
       const receiptsBefore = interruptedDatabase
-        .query('SELECT batch_index FROM building_materialization_batches WHERE snapshot_id = ? ORDER BY batch_index')
-        .all(interrupted.id) as Array<{readonly batch_index: number}>;
-      const rawCache = interruptedDatabase
-        .query('SELECT COUNT(*) AS files, COALESCE(SUM(length(CAST(facts_json AS BLOB))), 0) AS bytes FROM file_blobs')
-        .get() as {readonly bytes: number; readonly files: number};
-      const partialSymbols = interruptedDatabase
-        .query('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?')
-        .get(interrupted.id) as {readonly count: number};
-      const partiallyActive = interruptedDatabase
-        .query('SELECT COUNT(*) AS count FROM active_snapshots WHERE snapshot_id = ?')
-        .get(interrupted.id) as {readonly count: number};
+        .query<{readonly batch_index: number}, SQLQueryBindings[]>(
+          'SELECT batch_index FROM building_materialization_batches WHERE snapshot_id = ? ORDER BY batch_index',
+        )
+        .all(interrupted.id);
+      const rawCache = requiredRow(
+        interruptedDatabase
+          .query<{readonly bytes: number; readonly files: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS files, COALESCE(SUM(length(CAST(facts_json AS BLOB))), 0) AS bytes FROM file_blobs',
+          )
+          .get(),
+      );
+      const partialSymbols = requiredRow(
+        interruptedDatabase
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?',
+          )
+          .get(interrupted.id),
+      );
+      const partiallyActive = requiredRow(
+        interruptedDatabase
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS count FROM active_snapshots WHERE snapshot_id = ?',
+          )
+          .get(interrupted.id),
+      );
       interruptedDatabase.close(false);
       expect(rawCache.files).toBe(3);
       expect(rawCache.bytes).toBeLessThanOrEqual(CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM);
@@ -5256,12 +5584,14 @@ describe('native code graph lifecycle', () => {
       let spoolReceiptsBefore: Array<{readonly batch_index: number}>;
       try {
         spoolReceiptsBefore = interruptedSpool
-          .query('SELECT batch_index FROM materialization_spool_batches ORDER BY batch_index')
-          .all() as Array<{readonly batch_index: number}>;
+          .query<{readonly batch_index: number}, SQLQueryBindings[]>(
+            'SELECT batch_index FROM materialization_spool_batches ORDER BY batch_index',
+          )
+          .all();
       } finally {
         interruptedSpool.close(false);
       }
-      expect(spoolReceiptsBefore.map(receipt => receipt.batch_index)).toEqual([0]);
+      expect(EffectArray.map(spoolReceiptsBefore, receipt => receipt.batch_index)).toEqual([0]);
       expect(spoolReceiptsBefore).toHaveLength(markerProgress.batchesCompleted);
       expect(spoolReceiptsBefore.length).toBeLessThan(markerProgress.batchTotal);
       expect(partialSymbols.count).toBe(0);
@@ -5296,10 +5626,12 @@ describe('native code graph lifecycle', () => {
                 completedMetrics = progress.metrics;
                 const committed = new Database(databasePath, {readonly: true, strict: true});
                 receiptsAtFinalCommit = Number(
-                  (
+                  requiredRow(
                     committed
-                      .query('SELECT COUNT(*) AS count FROM building_materialization_batches WHERE snapshot_id = ?')
-                      .get(interrupted.id) as {readonly count: number}
+                      .query<{readonly count: number}, SQLQueryBindings[]>(
+                        'SELECT COUNT(*) AS count FROM building_materialization_batches WHERE snapshot_id = ?',
+                      )
+                      .get(interrupted.id),
                   ).count,
                 );
                 committed.close(false);
@@ -5316,20 +5648,30 @@ describe('native code graph lifecycle', () => {
         factsBytesTotal: expect.any(Number),
       });
       expect(resumedTransactionBytes).toHaveLength(markerProgress.batchTotal);
-      expect(resumedTransactionBytes.every(bytes => bytes <= CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM)).toBe(true);
-      expect(resumedTransactionBytes.reduce((total, bytes) => total + bytes, 0)).toBe(
+      expect(EffectArray.every(resumedTransactionBytes, bytes => bytes <= CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM)).toBe(
+        true,
+      );
+      expect(EffectArray.reduce(resumedTransactionBytes, 0, (total, bytes) => total + bytes)).toBe(
         completedMetrics?.factsBytesTotal,
       );
       expect(completedMetrics?.factsBytesTotal).toBeGreaterThan(CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM);
       expect(receiptsAtFinalCommit).toBe(markerProgress.batchTotal);
 
       const readyDatabase = new Database(databasePath, {readonly: true, strict: true});
-      const receiptsAfter = readyDatabase
-        .query('SELECT COUNT(*) AS count FROM building_materialization_batches WHERE snapshot_id = ?')
-        .get(interrupted.id) as {readonly count: number};
-      const activeAfter = readyDatabase
-        .query('SELECT COUNT(*) AS count FROM active_snapshots WHERE snapshot_id = ?')
-        .get(interrupted.id) as {readonly count: number};
+      const receiptsAfter = requiredRow(
+        readyDatabase
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS count FROM building_materialization_batches WHERE snapshot_id = ?',
+          )
+          .get(interrupted.id),
+      );
+      const activeAfter = requiredRow(
+        readyDatabase
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS count FROM active_snapshots WHERE snapshot_id = ?',
+          )
+          .get(interrupted.id),
+      );
       readyDatabase.close(false);
       expect(receiptsAfter.count).toBe(0);
       expect(activeAfter.count).toBe(1);
@@ -5360,12 +5702,9 @@ describe('native code graph lifecycle', () => {
           child.once('exit', () => resolve());
         });
 
-        const markerProgress = JSON.parse(readFileSync(marker, 'utf8')) as {
-          readonly batchCompleted: number;
-          readonly batchesCompleted: number;
-          readonly batchesTotal: number;
-          readonly snapshotMode?: string;
-        };
+        const markerProgress = Schema.decodeUnknownSync(groupedBuildProgressSchema)(
+          JSON.parse(readFileSync(marker, 'utf8')),
+        );
         expect(markerProgress).toMatchObject({
           batchCompleted: expect.any(Number),
           batchesCompleted: 0,
@@ -5485,7 +5824,7 @@ describe('native code graph lifecycle', () => {
       // association write. Facts allow one transaction, then observe pressure
       // and the one bounded cleanup retry. Shared storage never spawns duplicate
       // df or PowerShell probes at a boundary.
-      expect(Object.fromEntries(probes)).toEqual({
+      expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'cache materialized code graph file shards': probesPerObservation * 4,
         'stage persistent code graph facts': probesPerObservation * 3,
@@ -5520,8 +5859,9 @@ describe('native code graph lifecycle', () => {
         pausedDatabase.close();
       }
       expect(
-        readdirSync(join(home, 'indexes', 'code-graph', 'repositories', baseline.identity.checkoutId)).filter(
-          candidate => candidate.startsWith('materialization-spool-v2-'),
+        EffectArray.filter(
+          readdirSync(join(home, 'indexes', 'code-graph', 'repositories', baseline.identity.checkoutId)),
+          candidate => Effect2.pipe(candidate, EffectString.startsWith('materialization-spool-v2-')),
         ),
       ).toEqual([]);
     }).pipe(provideTestLayer(ApplicationLayer)),
@@ -5574,13 +5914,16 @@ describe('native code graph lifecycle', () => {
 
       expect(indexed.snapshot.state).toBe('ready');
       expect(
-        indexed.diagnostics.some(
+        EffectArray.some(
+          indexed.diagnostics,
           diagnostic =>
-            diagnostic.includes('below the advisory whole-build materialization estimate') &&
-            diagnostic.includes('continue under measured bounded-write reservations'),
+            Effect2.pipe(
+              diagnostic,
+              EffectString.includes('below the advisory whole-build materialization estimate'),
+            ) && Effect2.pipe(diagnostic, EffectString.includes('continue under measured bounded-write reservations')),
         ),
       ).toBe(true);
-      expect(progress.some(update => update.phase === 'materializing')).toBe(true);
+      expect(EffectArray.some(progress, update => update.phase === 'materializing')).toBe(true);
       expect(failure).toBeInstanceOf(CodeGraphDiskCapacityPressureError);
       expect(failure).toMatchObject({
         evidence: {
@@ -5678,7 +6021,7 @@ describe('native code graph lifecycle', () => {
       });
 
       expect(resumed.snapshot).toMatchObject({id: pausedId, state: 'ready'});
-      expect(Object.fromEntries(resumedProbes)).toEqual({
+      expect(EffectRecord.fromEntries(resumedProbes)).toEqual({
         'promote ready code graph snapshot': probesPerObservation,
       });
       const resumedDatabase = new Database(databasePath, {readonly: true});
@@ -5735,7 +6078,7 @@ describe('native code graph lifecycle', () => {
       // write and owner-verified association write. The second fact boundary
       // fails closed after one observation; unlike positive pressure it does
       // not perform cleanup or a fresh re-observation.
-      expect(Object.fromEntries(probes)).toEqual({
+      expect(EffectRecord.fromEntries(probes)).toEqual({
         'cache code graph file facts': probesPerObservation,
         'cache materialized code graph file shards': probesPerObservation * 4,
         'stage persistent code graph facts': probesPerObservation * 2,
@@ -5935,7 +6278,12 @@ describe('native code graph lifecycle', () => {
         },
       ]);
       expect(
-        (yield* readAllCodeGraphBuildStatuses(home)).find(status => status.identity.worktreeId === identity.worktreeId),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            yield* readAllCodeGraphBuildStatuses(home),
+            status => status.identity.worktreeId === identity.worktreeId,
+          ),
+        ),
       ).toMatchObject({
         error: {summary: 'Code graph build was interrupted before completion.'},
         state: 'failed',
@@ -6003,10 +6351,16 @@ describe('native code graph lifecycle', () => {
       second = startCodeGraphIndexProcess(worktreeB, home, gateB, markerB);
       await waitForPath(`${markerB}.scanning`);
       const observed = await runEffect(Effect.map(readAllCodeGraphBuildStatuses(home), selectCodeGraphBuildStatuses));
-      const owners = observed.builds.filter(build => build.coordination?.role === 'owner');
+      const owners = EffectArrayPipe(observed.builds, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (build, __effectFilterIndex) =>
+            __effectFilterIndex in __effectFilterValues && build.coordination?.role === 'owner',
+        ),
+      );
       expect(observed.waiters).toEqual([]);
       expect(owners).toHaveLength(2);
-      expect(new Set(owners.map(build => build.identity.worktreeId)).size).toBe(2);
+      expect(new Set(EffectArray.map(owners, build => build.identity.worktreeId)).size).toBe(2);
       const checkoutId = owners[0]?.identity.checkoutId;
       if (!checkoutId) throw TestError.make({message: 'Linked-worktree builders did not publish a checkout identity.'});
       expect(await runEffect(compactCodeGraphStorage(home, checkoutId, {dryRun: false, force: true}))).toMatchObject({
@@ -6057,10 +6411,10 @@ describe('native code graph lifecycle', () => {
           );
         }),
       );
-      expect(queryA.nodes.some(node => node.name === 'ensureConcurrentBranchA')).toBe(true);
-      expect(queryA.nodes.some(node => node.name === 'ensureConcurrentBranchB')).toBe(false);
-      expect(queryB.nodes.some(node => node.name === 'ensureConcurrentBranchB')).toBe(true);
-      expect(queryB.nodes.some(node => node.name === 'ensureConcurrentBranchA')).toBe(false);
+      expect(EffectArray.some(queryA.nodes, node => node.name === 'ensureConcurrentBranchA')).toBe(true);
+      expect(EffectArray.some(queryA.nodes, node => node.name === 'ensureConcurrentBranchB')).toBe(false);
+      expect(EffectArray.some(queryB.nodes, node => node.name === 'ensureConcurrentBranchB')).toBe(true);
+      expect(EffectArray.some(queryB.nodes, node => node.name === 'ensureConcurrentBranchA')).toBe(false);
 
       const database = new Database(codeGraphDatabasePath(home, summaryA), {readonly: true});
       try {
@@ -6070,8 +6424,8 @@ describe('native code graph lifecycle', () => {
           )
           .all();
         expect(overlays).toHaveLength(2);
-        expect(new Set(overlays.map(row => row.worktree_id)).size).toBe(2);
-        expect(overlays.every(row => row.base_snapshot_id === baseline.snapshot.id)).toBe(true);
+        expect(new Set(EffectArray.map(overlays, row => row.worktree_id)).size).toBe(2);
+        expect(EffectArray.every(overlays, row => row.base_snapshot_id === baseline.snapshot.id)).toBe(true);
       } finally {
         database.close();
       }
@@ -6104,11 +6458,9 @@ describe('native code graph lifecycle', () => {
       child.stderr?.on('data', chunk => (stderr += String(chunk)));
       try {
         await waitForPath(marker, 45_000);
-        const markerProgress = JSON.parse(readFileSync(marker, 'utf8')) as {
-          readonly batchesCompleted: number;
-          readonly batchesTotal: number;
-          readonly snapshotMode?: string;
-        };
+        const markerProgress = Schema.decodeUnknownSync(persistentBuildProgressSchema)(
+          JSON.parse(readFileSync(marker, 'utf8')),
+        );
         expect(markerProgress).toMatchObject({batchesCompleted: 1, snapshotMode: 'direct-persistent'});
         expect(markerProgress.batchesTotal).toBeGreaterThan(1);
         child.kill('SIGKILL');
@@ -6300,7 +6652,7 @@ describe('native code graph lifecycle', () => {
     const home = join(root, '.threadnote-test-home');
     for (let index = 0; index < 25; index += 1) {
       writeFileSync(
-        join(root, `packages/app/src/duplicate-${String(index).padStart(2, '0')}.ts`),
+        join(root, `packages/app/src/duplicate-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}.ts`),
         `export function runApplication(): string { return 'duplicate-${index}'; }\n`,
       );
     }
@@ -6328,8 +6680,8 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(ambiguous.edges).toEqual([]);
-    expect(ambiguous.warnings.join('\n')).toContain('is ambiguous; use path#symbol');
-    expect(explicit.edges.map(edge => `${edge.sourceName}:${edge.targetName}`)).toEqual([
+    expect(EffectArray.join(ambiguous.warnings, '\n')).toContain('is ambiguous; use path#symbol');
+    expect(EffectArray.map(explicit.edges, edge => `${edge.sourceName}:${edge.targetName}`)).toEqual([
       'runApplication:ensureVectorIndex',
       'ensureVectorIndex:withExclusiveFileLock',
     ]);
@@ -6368,7 +6720,12 @@ describe('native code graph lifecycle', () => {
 
     expect(readFileSync(output, 'utf8')).toBe('other-process\n');
     expect(
-      readdirSync(root).filter(entry => entry.startsWith('.graph-export.json.') && entry.endsWith('.tmp')),
+      EffectArray.filter(
+        readdirSync(root),
+        entry =>
+          Effect2.pipe(entry, EffectString.startsWith('.graph-export.json.')) &&
+          Effect2.pipe(entry, EffectString.endsWith('.tmp')),
+      ),
     ).toEqual([]);
   });
 
@@ -6394,7 +6751,12 @@ describe('native code graph lifecycle', () => {
     expect(JSON.parse(readFileSync(output, 'utf8'))).toMatchObject({type: 'threadnote-code-graph-export'});
     expect(statSync(output).mode & 0o777).toBe(0o600);
     expect(
-      readdirSync(root).filter(entry => entry.startsWith('.graph-export.json.') && entry.endsWith('.tmp')),
+      EffectArray.filter(
+        readdirSync(root),
+        entry =>
+          Effect2.pipe(entry, EffectString.startsWith('.graph-export.json.')) &&
+          Effect2.pipe(entry, EffectString.endsWith('.tmp')),
+      ),
     ).toEqual([]);
   });
 
@@ -6430,6 +6792,7 @@ describe('native code graph lifecycle', () => {
                 replacement = temporary;
                 synchronizedSize = statSync(temporary).size;
                 // A distinct size keeps this regression deterministic even on a filesystem that immediately reuses an inode.
+                // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
                 replacementContent = 'x'.repeat(synchronizedSize + 1);
                 rmSync(temporary);
                 writeFileSync(temporary, replacementContent, {mode: 0o600});
@@ -6474,6 +6837,7 @@ describe('native code graph lifecycle', () => {
             beforeLink: temporary =>
               Effect.sync(() => {
                 replacement = temporary;
+                // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
                 replacementContent = 'x'.repeat(statSync(temporary).size);
                 rmSync(temporary);
                 writeFileSync(temporary, replacementContent, {mode: 0o600});
@@ -6661,7 +7025,9 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(result.doctor).toMatchObject({status: 'ok'});
-    const deferredProgress = repairProgress.filter(state => state.startsWith('deferred:'));
+    const deferredProgress = EffectArray.filter(repairProgress, state =>
+      Effect2.pipe(state, EffectString.startsWith('deferred:')),
+    );
     expect(result.repair).toMatchObject({
       databases: 2,
       deferredDatabases: deferredProgress.length,
@@ -6684,7 +7050,7 @@ describe('native code graph lifecycle', () => {
         'indexes',
         'code-graph',
         'repositories',
-        'a'.repeat(64),
+        Effect2.pipe('a', EffectString.repeat(64)),
         `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
       );
       const progress: string[] = [];
@@ -6725,7 +7091,7 @@ describe('native code graph lifecycle', () => {
         'indexes',
         'code-graph',
         'repositories',
-        'a'.repeat(64),
+        Effect2.pipe('a', EffectString.repeat(64)),
         `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
       );
       yield* store.initialize(secondDatabasePath);
@@ -6757,8 +7123,18 @@ describe('native code graph lifecycle', () => {
         'WARN native code graph: 2 database(s); 1 ready snapshot(s); 0 incomplete snapshot(s); ' +
           '2 database maintenance check(s) deferred',
       );
-      expect(output.repair.indexOf('Running Threadnote doctor checks.')).toBeGreaterThan(
-        output.repair.search(/Would repair \d+ native code graph database/),
+      expect(
+        Effect2.pipe(
+          output.repair,
+          EffectString.indexOf('Running Threadnote doctor checks.'),
+          Effect2.Option.getOrElse(() => -1),
+        ),
+      ).toBeGreaterThan(
+        Effect2.pipe(
+          output.repair,
+          EffectString.search(/Would repair \d+ native code graph database/),
+          Effect2.Option.getOrElse(() => -1),
+        ),
       );
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
@@ -6848,7 +7224,7 @@ describe('native code graph lifecycle', () => {
     );
 
     expect(result.snapshot.commit).toMatch(/^0{40}$/);
-    expect(result.nodes.some(node => node.name === 'unbornSymbol')).toBe(true);
+    expect(EffectArray.some(result.nodes, node => node.name === 'unbornSymbol')).toBe(true);
   });
 });
 
@@ -6889,7 +7265,7 @@ function createManySourceRepository(count: number): string {
   git(root, ['init', '-q']);
   for (let index = 0; index < count; index += 1) {
     writeFileSync(
-      join(root, `src/file-${String(index).padStart(3, '0')}.ts`),
+      join(root, `src/file-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`),
       `export function original${index}(): number { return ${index}; }\n`,
     );
   }
@@ -6915,7 +7291,7 @@ function createAmbientOverloadBarrelRepository(fillerCount = 0): string {
   );
   for (let index = 0; index < fillerCount; index += 1) {
     writeFileSync(
-      join(root, `src/filler-${String(index).padStart(3, '0')}.ts`),
+      join(root, `src/filler-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`),
       `export function filler${index}(): number { return ${index}; }\n`,
     );
   }
@@ -6927,7 +7303,7 @@ function createAmbientOverloadBarrelRepository(fillerCount = 0): string {
 function updateManySourceRepository(root: string, count: number, prefix: string): void {
   for (let index = 0; index < count; index += 1) {
     writeFileSync(
-      join(root, `src/file-${String(index).padStart(3, '0')}.ts`),
+      join(root, `src/file-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`),
       `export function ${prefix}${index}(): number { return ${index + 1}; }\n`,
     );
   }
@@ -6939,10 +7315,13 @@ function createRationaleAmplifiedRepository(): string {
   git(root, ['init', '-q']);
   writeFileSync(join(root, 'package.json'), JSON.stringify({name: 'rationale-amplification', type: 'module'}));
   for (let fileIndex = 0; fileIndex < 2; fileIndex += 1) {
-    const rationale = Array.from(
-      {length: 3_000},
-      (_, index) => `  // WHY: rationale-${fileIndex}-${index}-${'漢'.repeat(160)}`,
-    ).join('\n');
+    const rationale = EffectArray.join(
+      Array.from(
+        {length: 3_000},
+        (_, index) => `  // WHY: rationale-${fileIndex}-${index}-${Effect2.pipe('漢', EffectString.repeat(160))}`,
+      ),
+      '\n',
+    );
     writeFileSync(
       join(root, `src/rationale-${fileIndex}.ts`),
       `export function owner${fileIndex}(): number {\n${rationale}\n  return ${fileIndex};\n}\n`,
@@ -6980,7 +7359,7 @@ function createBodyModifiedRepository(count = 4): string {
     ]);
   }
   const file = join(root, 'src/file-000.ts');
-  writeFileSync(file, readFileSync(file, 'utf8').replace('return 0;', 'return 1000;'));
+  writeFileSync(file, Effect2.pipe(readFileSync(file, 'utf8'), EffectString.replace('return 0;', 'return 1000;')));
   return root;
 }
 
@@ -6990,18 +7369,21 @@ function createPublishedSurfaceRepository(): string {
   mkdirSync(join(root, 'test'), {recursive: true});
   writeFileSync(
     join(root, 'src/service.ts'),
-    ['export class PublishedService {', '  value(): number {', '    return 1;', '  }', '}', ''].join('\n'),
+    EffectArray.join(['export class PublishedService {', '  value(): number {', '    return 1;', '  }', '}', ''], '\n'),
   );
   writeFileSync(
     join(root, 'test/service.test.ts'),
-    [
-      'import {PublishedService} from "../src/service.js";',
-      '',
-      "it('reads the published service', () => {",
-      '  return new PublishedService().value();',
-      '});',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'import {PublishedService} from "../src/service.js";',
+        '',
+        "it('reads the published service', () => {",
+        '  return new PublishedService().value();',
+        '});',
+        '',
+      ],
+      '\n',
+    ),
   );
   git(root, ['init', '-q']);
   git(root, ['add', '.']);
@@ -7023,14 +7405,17 @@ function createBodyModifiedRepositoryWithCommittedDiagnostic(): string {
     'broken committed source',
   ]);
   const modified = join(root, 'src/file-000.ts');
-  writeFileSync(modified, readFileSync(modified, 'utf8').replace('return 0;', 'return 1000;'));
+  writeFileSync(
+    modified,
+    Effect2.pipe(readFileSync(modified, 'utf8'), EffectString.replace('return 0;', 'return 1000;')),
+  );
   return root;
 }
 
 function createRenamedDeclarationRepository(): string {
   const root = createManySourceRepository(4);
   const file = join(root, 'src/file-000.ts');
-  writeFileSync(file, readFileSync(file, 'utf8').replace('original0', 'renamed0'));
+  writeFileSync(file, Effect2.pipe(readFileSync(file, 'utf8'), EffectString.replace('original0', 'renamed0')));
   return root;
 }
 
@@ -7043,7 +7428,7 @@ function createChangedSignatureRepository(): string {
 function createChangedExportRepository(): string {
   const root = createManySourceRepository(4);
   const file = join(root, 'src/file-000.ts');
-  writeFileSync(file, readFileSync(file, 'utf8').replace('export function', 'function'));
+  writeFileSync(file, Effect2.pipe(readFileSync(file, 'utf8'), EffectString.replace('export function', 'function')));
   return root;
 }
 
@@ -7114,20 +7499,26 @@ function createFactBudgetExpandedRepository(): string {
   const sourceRoot = join(root, 'src');
   mkdirSync(sourceRoot, {recursive: true});
   git(root, ['init', '-q']);
-  const identifierPadding = 'x'.repeat(192);
+  const identifierPadding = Effect2.pipe('x', EffectString.repeat(192));
   for (let fileIndex = 0; fileIndex < 6; fileIndex += 1) {
     const declarations = Array.from(
       {length: 2_000},
       (_, symbolIndex) =>
         `export function expanded_${fileIndex}_${symbolIndex}_${identifierPadding}(): number { return ${symbolIndex}; }`,
     );
-    writeFileSync(join(sourceRoot, `expanded-${fileIndex}.ts`), `// base-state\n${declarations.join('\n')}\n`);
+    writeFileSync(
+      join(sourceRoot, `expanded-${fileIndex}.ts`),
+      `// base-state\n${EffectArray.join(declarations, '\n')}\n`,
+    );
   }
   git(root, ['add', '.']);
   git(root, ['-c', 'user.name=Threadnote Test', '-c', 'user.email=test@threadnote.local', 'commit', '-qm', 'fixture']);
   for (let fileIndex = 0; fileIndex < 6; fileIndex += 1) {
     const sourcePath = join(sourceRoot, `expanded-${fileIndex}.ts`);
-    writeFileSync(sourcePath, readFileSync(sourcePath, 'utf8').replace('// base-state', '// work-state'));
+    writeFileSync(
+      sourcePath,
+      Effect2.pipe(readFileSync(sourcePath, 'utf8'), EffectString.replace('// base-state', '// work-state')),
+    );
   }
   return root;
 }
@@ -7189,8 +7580,8 @@ function activeSnapshotId(databasePath: string, worktreeId: string): string | un
 
 function normalizeStoredGraph(graph: StoredCodeGraph): Pick<StoredCodeGraph, 'edges' | 'symbols'> {
   return {
-    edges: [...graph.edges].sort((left, right) => left.id.localeCompare(right.id)),
-    symbols: [...graph.symbols].sort((left, right) => left.id.localeCompare(right.id)),
+    edges: [...graph.edges].sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id))),
+    symbols: [...graph.symbols].sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id))),
   };
 }
 
@@ -7212,13 +7603,18 @@ function invalidateCachedFactFallback(databasePath: string, snapshotId: string, 
 }
 
 function finalFullMaterializationMetrics(progress: readonly CodeGraphProgress[]): CodeGraphMaterializationMetrics {
-  const metrics = progress
-    .filter(
-      (current): current is Extract<CodeGraphProgress, {readonly phase: 'materializing'}> =>
-        current.phase === 'materializing',
-    )
-    .flatMap(current => (current.metrics?.mode === 'full' ? [current.metrics] : []))
-    .at(-1);
+  const metrics = EffectArray.flatMap(
+    EffectArray.filter(
+      progress,
+      (
+        current: CodeGraphProgress,
+        __effectArrayIndex,
+      ): current is Extract<CodeGraphProgress, {readonly phase: 'materializing'}> =>
+        __effectArrayIndex in progress && current.phase === 'materializing',
+    ),
+    (current: Extract<CodeGraphProgress, {readonly phase: 'materializing'}>) =>
+      current.metrics?.mode === 'full' ? [current.metrics] : [],
+  ).at(-1);
   if (metrics === undefined) throw TestError.make({message: 'Expected terminal full-materialization metrics.'});
   return metrics;
 }
@@ -7227,14 +7623,18 @@ function createLargeInventoryRepository(count: number, bytes = 1_048_576): strin
   const root = temporaryDirectory('threadnote-code-graph-large-inventory-');
   git(root, ['init', '-q']);
   const prefix = '# large inventory fixture\n';
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   const content = `${prefix}${' '.repeat(bytes - Buffer.byteLength(prefix))}`;
-  const blob = execFileSync('git', ['-C', root, 'hash-object', '-w', '--stdin'], {
-    encoding: 'utf8',
-    input: content,
-  }).trim();
+  const blob = Effect2.pipe(
+    execFileSync('git', ['-C', root, 'hash-object', '-w', '--stdin'], {
+      encoding: 'utf8',
+      input: content,
+    }),
+    EffectString.trim,
+  );
   const paths: string[] = [];
   for (let index = 0; index < count; index += 1) {
-    const relative = `docs/file-${String(index).padStart(3, '0')}.md`;
+    const relative = `docs/file-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`;
     paths.push(relative);
     git(root, ['update-index', '--add', '--cacheinfo', `100644,${blob},${relative}`]);
   }
@@ -7298,35 +7698,27 @@ async function waitForPath(path: string, timeoutMilliseconds = 15_000): Promise<
 function codeGraphProcessProgress(
   output: string,
 ): readonly {readonly completed?: number; readonly phase: string; readonly total?: number}[] {
-  return output
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map(
-      line =>
-        JSON.parse(line) as {
-          readonly progress?: {readonly completed?: number; readonly phase: string; readonly total?: number};
-        },
-    )
-    .flatMap(message => (message.progress ? [message.progress] : []));
+  const messages = EffectArray.map(
+    EffectArray.filter(Effect2.pipe(output, EffectString.split(/\r?\n/)), Boolean),
+    line => JSON.parse(line),
+  );
+  return EffectArray.flatMap(messages, message =>
+    Schema.is(codeGraphProcessProgressMessageSchema)(message) && message.progress ? [message.progress] : [],
+  );
 }
 
-function codeGraphProcessSummary(output: string): {
-  readonly identity: {readonly checkoutId: string; readonly worktreeId: string};
-  readonly materialization?: {readonly mode: string; readonly stagedFiles: number};
-  readonly snapshot: {readonly baseSnapshotId?: string; readonly id: string};
-} {
-  const summary = output
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map(line => JSON.parse(line) as {readonly summary?: unknown; readonly type?: string})
-    .find(message => message.type === 'summary')?.summary;
-  if (!summary || typeof summary !== 'object')
+function codeGraphProcessSummary(output: string): typeof codeGraphProcessSummarySchema.Type {
+  const message = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      EffectArray.map(EffectArray.filter(Effect2.pipe(output, EffectString.split(/\r?\n/)), Boolean), line =>
+        JSON.parse(line),
+      ),
+      value => isJsonObject(value) && value.type === 'summary',
+    ),
+  );
+  if (!isJsonObject(message) || !('summary' in message))
     throw TestError.make({message: `Child process did not emit a summary: ${output}`});
-  return summary as {
-    readonly identity: {readonly checkoutId: string; readonly worktreeId: string};
-    readonly materialization?: {readonly mode: string; readonly stagedFiles: number};
-    readonly snapshot: {readonly baseSnapshotId?: string; readonly id: string};
-  };
+  return Schema.decodeUnknownSync(codeGraphProcessSummarySchema)(message.summary);
 }
 
 async function graphHealthAfterIndex(cwd: string, threadnoteHome: string) {
@@ -7346,7 +7738,7 @@ function git(cwd: string, args: readonly string[]): void {
 
 function replaceFunction(root: string, from: string, to: string): void {
   const path = join(root, 'packages/search/src/vector-index.ts');
-  writeFileSync(path, readFileSync(path, 'utf8').replaceAll(from, to));
+  writeFileSync(path, Effect2.pipe(readFileSync(path, 'utf8'), EffectString.replaceAll(from, to)));
 }
 
 function snapshotFileHash(databasePath: string, snapshotId: string, sourcePath: string): string {

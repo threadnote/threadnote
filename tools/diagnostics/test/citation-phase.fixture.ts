@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // Small deterministic synthetic parser fixture, matching the existing scale-contract test model.
 // No benchmark, generated memory corpus or hosted capture is executed by this helper.
 import {readFileSync} from '@threadnote/testing/node-fs';
@@ -19,13 +20,16 @@ import {
   type ContextBriefCitationScaleObservationV2,
   type ContextBriefCitationScaleProfileV1,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale-contract';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export const budget = parseContextBriefCitationScaleBudgetV1(
   JSON.parse(
     readFileSync('apps/threadnote/test/evaluation/baselines/context-brief-citations-v1/scale-budgets.json', 'utf8'),
   ),
 );
 function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
-  const profiles = budget.profiles.map(profile => {
+  const profiles = EffectArray.map(budget.profiles, profile => {
     const observation = scaleObservation(profile, {}, {}, {observationId: `context-rss-${profile.id}-0`});
     return evaluateContextBriefCitationScaleProfile(budget, profile.id, observation.memoryWorkload, [observation])
       .result;
@@ -35,7 +39,7 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
     environment: {
       architecture: 'arm64',
       candidateCommit: 'unclaimed',
-      commit: 'a'.repeat(40),
+      commit: Effect.pipe('a', EffectString.repeat(40)),
       cpu: 'Apple M1 Max',
       dirty: true,
       gitStatusObserved: true,
@@ -50,15 +54,18 @@ function scaleArtifact(): ContextBriefCitationScaleArtifactV2 {
       sourceVersion: 'threadnote-4.6.0',
     },
     evidenceClass: 'development-smoke',
-    execution: {builtArtifactSha256: 'b'.repeat(64), ...CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2},
+    execution: {
+      builtArtifactSha256: Effect.pipe('b', EffectString.repeat(64)),
+      ...CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2,
+    },
     fixture: {
-      hash: 'c'.repeat(64),
+      hash: Effect.pipe('c', EffectString.repeat(64)),
       indexedMemoryCandidates: 200,
       legacyV1MemoryCandidates: 128,
       readyGraphSetupMilliseconds: 1,
       recallIndexBuildMilliseconds: 1,
       requestedMemoryCandidates: 200,
-      worksetGenerationDigests: ['d'.repeat(64), 'e'.repeat(64)],
+      worksetGenerationDigests: [Effect.pipe('d', EffectString.repeat(64)), Effect.pipe('e', EffectString.repeat(64))],
       worksetRepositoryIdentities: [50, 128],
     },
     gate: contextBriefCitationScaleGate([
@@ -106,7 +113,7 @@ export function releaseScaleArtifact(
   runtime = 'bun/1.3.14',
 ): ContextBriefCitationScaleArtifactV2 {
   const base = scaleArtifact();
-  const profiles = budget.profiles.map(profile => {
+  const profiles = EffectArray.map(budget.profiles, profile => {
     const observations = Array.from({length: CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES}, (_, ordinal) =>
       scaleObservation(profile, {}, {}, {observationId: `context-rss-${profile.id}-${ordinal}`, ordinal}),
     );
@@ -118,7 +125,7 @@ export function releaseScaleArtifact(
     ...base,
     environment: {
       ...base.environment,
-      candidateCommit: 'a'.repeat(40),
+      candidateCommit: Effect.pipe('a', EffectString.repeat(40)),
       dirty: false,
       githubActions: true,
       runnerArchitecture: 'ARM64',

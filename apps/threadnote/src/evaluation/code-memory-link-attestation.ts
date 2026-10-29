@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 export const CODE_MEMORY_LINK_HARNESS_VERSION = 'code-memory-link-harness-v1' as const;
 
@@ -157,19 +159,19 @@ export function assertUniqueCodeMemoryLinkAttestations(
   label: string,
 ): void {
   unique(
-    attestations.map(value => value.invocationNonce),
+    EffectArray.map(attestations, value => value.invocationNonce),
     `${label} invocation nonces`,
   );
   unique(
-    attestations.map(value => value.invocationDigest),
+    EffectArray.map(attestations, value => value.invocationDigest),
     `${label} invocation digests`,
   );
   unique(
-    attestations.map(value => value.outputDigest),
+    EffectArray.map(attestations, value => value.outputDigest),
     `${label} output digests`,
   );
   unique(
-    attestations.map(value => value.summaryDigest),
+    EffectArray.map(attestations, value => value.summaryDigest),
     `${label} summary digests`,
   );
 }
@@ -214,9 +216,9 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }

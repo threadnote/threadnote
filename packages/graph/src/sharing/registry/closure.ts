@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Schema} from 'effect';
 import {
   GRAPH_SHARE_CHECKPOINT_MEDIA_TYPE,
@@ -94,7 +95,7 @@ export const collectGraphShareRegistryPublication = Effect.fn('codeGraph.sharing
       yield* include(currentDigest, currentBytes);
       for (const [artifact, mediaType] of [
         [current.checkpoint, GRAPH_SHARE_CHECKPOINT_MEDIA_TYPE],
-        ...current.deltas.map(delta => [delta, GRAPH_SHARE_DELTA_MEDIA_TYPE] as const),
+        ...EffectArray.map(current.deltas, delta => [delta, GRAPH_SHARE_DELTA_MEDIA_TYPE] as const),
       ] as const) {
         if (artifact.metadataDigest === undefined)
           return yield* graphSharingFailure('Registry publication requires artifact chunk metadata.');
@@ -141,7 +142,7 @@ export const collectGraphShareRegistryPublication = Effect.fn('codeGraph.sharing
     const descriptorDigest = sha256Digest(descriptorBytes);
     yield* include(descriptorDigest, descriptorBytes);
     const retention = yield* Effect.try({
-      try: () => graphShareRegistryRetentionRoot([...entries].map(([digest, size]) => ({digest, size}))),
+      try: () => graphShareRegistryRetentionRoot(EffectArray.map([...entries], ([digest, size]) => ({digest, size}))),
       catch: () => graphSharingFailure('Registry publication retention inventory is invalid or exceeds its limits.'),
     });
     return {descriptorBytes, descriptorDigest, frontier, historyFloor, pointer: input.pointer, retention};

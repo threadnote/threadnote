@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -17,6 +18,7 @@ import {
   maintainCodeGraphBuildHistoryUnit,
   makeCodeGraphBuildReporter,
   pruneCodeGraphBuildHistoryUnit,
+  parseCodeGraphBuildStatus,
   readAllCodeGraphBuildStatuses,
 } from '@threadnote/graph/build_status';
 import {
@@ -29,6 +31,9 @@ import {
   type CodeGraphSnapshot,
   type RepositoryIdentity,
 } from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const BuildStatusTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
 const EXPECTED_BUILD_HISTORY_STATUS_LIMIT = 10_000;
@@ -48,9 +53,15 @@ describe('bounded code graph build-status maintenance', () => {
           yield* reporter.progress({completed: 1, phase: 'materializing', reused: 0, total: 2, unit: 'files'});
 
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
-          const statusName = (yield* fs.readDirectory(directory)).find(name => name.endsWith('.json'))!;
+          const statusName = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              yield* fs.readDirectory(directory),
+              __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+            ),
+          )!;
           const statusPath = path.join(directory, statusName);
-          const status = JSON.parse(yield* fs.readFileString(statusPath)) as CodeGraphBuildStatus;
+          const status = parseCodeGraphBuildStatus(JSON.parse(yield* fs.readFileString(statusPath)));
+          if (!status) throw TestError.make({message: 'Expected the written code graph build status.'});
           yield* fs.writeFileString(
             statusPath,
             `${JSON.stringify({...status, owner: {...status.owner, processId: 2_147_483_647}})}\n`,
@@ -78,7 +89,7 @@ describe('bounded code graph build-status maintenance', () => {
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
           const status = {
-            ...fixtureStatus(identity, 'a'.repeat(32), 0, 'queued'),
+            ...fixtureStatus(identity, Effect2.pipe('a', EffectString.repeat(32)), 0, 'queued'),
             owner: {
               processId: 2_147_483_647,
               processStartIdentity: 'dead-process-instance',
@@ -109,7 +120,7 @@ describe('bounded code graph build-status maintenance', () => {
           const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
-          const status = fixtureStatus(identity, 'a'.repeat(32), 0, 'failed');
+          const status = fixtureStatus(identity, Effect2.pipe('a', EffectString.repeat(32)), 0, 'failed');
           yield* writeStatusPair(fs, path, directory, status);
           yield* TestClock.setTime(
             Date.parse(status.timestamps.completedAt!) + CODE_GRAPH_FAILED_BUILD_STATUS_RETENTION_MILLISECONDS + 1,
@@ -135,7 +146,7 @@ describe('bounded code graph build-status maintenance', () => {
           const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
-          const status = fixtureStatus(identity, 'a'.repeat(32), 0, 'failed');
+          const status = fixtureStatus(identity, Effect2.pipe('a', EffectString.repeat(32)), 0, 'failed');
           yield* writeStatusPair(fs, path, directory, status);
           yield* TestClock.setTime(
             Date.parse(status.timestamps.completedAt!) + CODE_GRAPH_FAILED_BUILD_STATUS_RETENTION_MILLISECONDS,
@@ -158,7 +169,7 @@ describe('bounded code graph build-status maintenance', () => {
           const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
-          const live = fixtureStatus(identity, 'b'.repeat(32), 0, 'queued');
+          const live = fixtureStatus(identity, Effect2.pipe('b', EffectString.repeat(32)), 0, 'queued');
           yield* writeStatusPair(fs, path, directory, live);
 
           expect(yield* maintainCodeGraphBuildHistoryUnit(layout, identity.worktreeId)).toEqual({state: 'complete'});
@@ -167,7 +178,7 @@ describe('bounded code graph build-status maintenance', () => {
           yield* fs.remove(path.join(directory, `${live.buildId}.json`));
           yield* fs.remove(path.join(directory, `${live.buildId}.manager-context`));
           const locked = {
-            ...fixtureStatus(identity, 'c'.repeat(32), 1, 'queued'),
+            ...fixtureStatus(identity, Effect2.pipe('c', EffectString.repeat(32)), 1, 'queued'),
             owner: {
               processId: 2_147_483_647,
               processStartIdentity: 'locked-process-instance',
@@ -206,7 +217,7 @@ describe('bounded code graph build-status maintenance', () => {
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
           const statuses = Array.from({length: 11}, (_, index) =>
-            fixtureStatus(identity, `${index.toString(16).padStart(16, '0')}`, index),
+            fixtureStatus(identity, `${Effect2.pipe(index.toString(16), EffectString.padStart(16, '0'))}`, index),
           );
           for (const status of statuses) {
             yield* writeStatusPair(fs, path, directory, status);
@@ -217,7 +228,7 @@ describe('bounded code graph build-status maintenance', () => {
           const before = yield* fs.readDirectory(directory);
           const result = yield* pruneCodeGraphBuildHistoryUnit(layout, identity.worktreeId, currentBuildId);
           const after = yield* fs.readDirectory(directory);
-          const removed = before.filter(name => !after.includes(name)).sort();
+          const removed = EffectArray.filter(before, name => !after.includes(name)).sort();
 
           expect(result).toEqual({cursorToken: 'bh1:r', state: 'progress'});
           expect(removed).toEqual(['0000000000000000.json', '0000000000000000.manager-context']);
@@ -238,7 +249,7 @@ describe('bounded code graph build-status maintenance', () => {
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
           const statuses = Array.from({length: 9}, (_, index) =>
-            fixtureStatus(identity, `${index.toString(16).padStart(16, '0')}`, index),
+            fixtureStatus(identity, `${Effect2.pipe(index.toString(16), EffectString.padStart(16, '0'))}`, index),
           );
           for (const status of statuses) yield* writeStatusPair(fs, path, directory, status);
           const target = statuses[0];
@@ -286,7 +297,7 @@ describe('bounded code graph build-status maintenance', () => {
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
           const statuses = Array.from({length: 9}, (_, index) =>
-            fixtureStatus(identity, `${index.toString(16).padStart(16, '0')}`, index),
+            fixtureStatus(identity, `${Effect2.pipe(index.toString(16), EffectString.padStart(16, '0'))}`, index),
           );
           for (const status of statuses) yield* writeStatusPair(fs, path, directory, status);
           const target = statuses[0];
@@ -324,10 +335,15 @@ describe('bounded code graph build-status maintenance', () => {
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
           const prefix = Array.from({length: 29}, (_, index) =>
-            fixtureStatus(identity, `${'-'.repeat(16)}${index.toString(16).padStart(2, '0')}`, index, 'queued'),
+            fixtureStatus(
+              identity,
+              `${Effect2.pipe('-', EffectString.repeat(16))}${Effect2.pipe(index.toString(16), EffectString.padStart(2, '0'))}`,
+              index,
+              'queued',
+            ),
           );
           const terminal = Array.from({length: 9}, (_, index) =>
-            fixtureStatus(identity, `f${index.toString(16).padStart(15, '0')}`, 30 + index),
+            fixtureStatus(identity, `f${Effect2.pipe(index.toString(16), EffectString.padStart(15, '0'))}`, 30 + index),
           );
           for (const status of [...prefix, ...terminal]) yield* writeStatusPair(fs, path, directory, status);
           const protectedBuildId = terminal.at(-1)!.buildId;
@@ -361,10 +377,15 @@ describe('bounded code graph build-status maintenance', () => {
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
           const prefix = Array.from({length: 29}, (_, index) =>
-            fixtureStatus(identity, `${'-'.repeat(16)}${index.toString(16).padStart(2, '0')}`, index, 'queued'),
+            fixtureStatus(
+              identity,
+              `${Effect2.pipe('-', EffectString.repeat(16))}${Effect2.pipe(index.toString(16), EffectString.padStart(2, '0'))}`,
+              index,
+              'queued',
+            ),
           );
           const terminal = Array.from({length: 9}, (_, index) =>
-            fixtureStatus(identity, `f${index.toString(16).padStart(15, '0')}`, 30 + index),
+            fixtureStatus(identity, `f${Effect2.pipe(index.toString(16), EffectString.padStart(15, '0'))}`, 30 + index),
           );
           for (const status of [...prefix, ...terminal]) yield* writeStatusPair(fs, path, directory, status);
 
@@ -395,10 +416,15 @@ describe('bounded code graph build-status maintenance', () => {
           const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
           yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
           const prefix = Array.from({length: 29}, (_, index) =>
-            fixtureStatus(identity, `${'-'.repeat(16)}${index.toString(16).padStart(2, '0')}`, index, 'queued'),
+            fixtureStatus(
+              identity,
+              `${Effect2.pipe('-', EffectString.repeat(16))}${Effect2.pipe(index.toString(16), EffectString.padStart(2, '0'))}`,
+              index,
+              'queued',
+            ),
           );
           const terminal = Array.from({length: 9}, (_, index) =>
-            fixtureStatus(identity, `f${index.toString(16).padStart(15, '0')}`, 30 + index),
+            fixtureStatus(identity, `f${Effect2.pipe(index.toString(16), EffectString.padStart(15, '0'))}`, 30 + index),
           );
           for (const status of [...prefix, ...terminal]) yield* writeStatusPair(fs, path, directory, status);
           const first = yield* pruneCodeGraphBuildHistoryUnit(layout, identity.worktreeId, terminal.at(-1)!.buildId);
@@ -436,7 +462,7 @@ describe('bounded code graph build-status maintenance', () => {
           yield* fs.makeDirectory(statusRoot, {recursive: true, mode: 0o700});
           yield* fs.makeDirectory(outside, {recursive: true, mode: 0o700});
           const statuses = Array.from({length: 9}, (_, index) =>
-            fixtureStatus(identity, `${index.toString(16).padStart(16, '0')}`, index),
+            fixtureStatus(identity, `${Effect2.pipe(index.toString(16), EffectString.padStart(16, '0'))}`, index),
           );
           for (const status of statuses) yield* writeStatusPair(fs, path, outside, status);
           const temporary = path.join(outside, '.history-prune-cursor.tmp');
@@ -514,7 +540,12 @@ describe('bounded code graph build-status maintenance', () => {
               }),
           });
           const prefix = Array.from({length: 29}, (_, index) =>
-            fixtureStatus(identity, `${'-'.repeat(16)}${index.toString(16).padStart(2, '0')}`, index, 'queued'),
+            fixtureStatus(
+              identity,
+              `${Effect2.pipe('-', EffectString.repeat(16))}${Effect2.pipe(index.toString(16), EffectString.padStart(2, '0'))}`,
+              index,
+              'queued',
+            ),
           );
           for (const status of prefix) yield* writeStatusPair(fs, path, directory, status);
 
@@ -551,7 +582,12 @@ describe('bounded code graph build-status maintenance', () => {
 
           expect(yield* fs.readFileString(statusFile)).toBe('replacement-status');
           expect(yield* fs.readFileString(contextFile)).toBe('replacement-context');
-          expect((yield* fs.readDirectory(directory)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+          expect(
+            EffectArray.filter(
+              yield* fs.readDirectory(directory),
+              __effectArrayValue2 => !!(name => Effect2.pipe(name, EffectString.endsWith('.tmp')))(__effectArrayValue2),
+            ),
+          ).toEqual([]);
         }),
       ),
     );
@@ -571,7 +607,7 @@ describe('bounded code graph build-status maintenance', () => {
             const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
             yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
             const statuses = Array.from({length: historySize}, (_, index) =>
-              fixtureStatus(identity, `${index.toString(16).padStart(16, '0')}`, index),
+              fixtureStatus(identity, `${Effect2.pipe(index.toString(16), EffectString.padStart(16, '0'))}`, index),
             );
             for (const status of statuses) yield* writeStatusPair(fs, path, directory, status);
             const currentBuildId = statuses.at(-1)!.buildId;
@@ -579,12 +615,18 @@ describe('bounded code graph build-status maintenance', () => {
             const before = new Set(yield* fs.readDirectory(directory));
             yield* pruneCodeGraphBuildHistoryUnit(layout, identity.worktreeId, currentBuildId);
             const after = new Set(yield* fs.readDirectory(directory));
-            const removed = [...before].filter(name => !after.has(name)).sort();
+            const removed = EffectArray.filter([...before], name => !after.has(name)).sort();
 
             expect(removed.length).toBeLessThanOrEqual(2);
-            expect(removed.filter(name => name.endsWith('.json'))).toHaveLength(1);
-            expect(removed.filter(name => name.endsWith('.manager-context'))).toHaveLength(1);
-            expect(removed[0].slice(0, -'.json'.length)).toBe(removed[1].slice(0, -'.manager-context'.length));
+            expect(
+              EffectArray.filter(removed, name => Effect2.pipe(name, EffectString.endsWith('.json'))),
+            ).toHaveLength(1);
+            expect(
+              EffectArray.filter(removed, name => Effect2.pipe(name, EffectString.endsWith('.manager-context'))),
+            ).toHaveLength(1);
+            expect(Effect2.pipe(removed[0], EffectString.slice(0, -'.json'.length))).toBe(
+              Effect2.pipe(removed[1], EffectString.slice(0, -'.manager-context'.length)),
+            );
             expect(after.has(`${currentBuildId}.json`)).toBe(true);
           }),
         ),
@@ -624,7 +666,7 @@ describe('bounded code graph build-status maintenance', () => {
         Effect.sync(() => {
           const statuses = Array.from(
             {length: statusCount},
-            (_, index) => `${index.toString(16).padStart(16, '0')}.json`,
+            (_, index) => `${Effect2.pipe(index.toString(16), EffectString.padStart(16, '0'))}.json`,
           );
           const names = [...statuses, ...Array.from({length: extraEntries}, (_, index) => `sentinel-${index}`)];
           const result = codeGraphBuildHistoryInventory({names, overflow});
@@ -642,9 +684,12 @@ describe('bounded code graph build-status maintenance', () => {
       Effect.sync(() => {
         const statuses = Array.from(
           {length: EXPECTED_BUILD_HISTORY_STATUS_LIMIT},
-          (_, index) => `${index.toString(16).padStart(16, '0')}.json`,
+          (_, index) => `${Effect2.pipe(index.toString(16), EffectString.padStart(16, '0'))}.json`,
         );
-        const contexts = statuses.map(name => `${name.slice(0, -'.json'.length)}.manager-context`);
+        const contexts = EffectArray.map(
+          statuses,
+          name => `${Effect2.pipe(name, EffectString.slice(0, -'.json'.length))}.manager-context`,
+        );
         const maximal = [...statuses, ...contexts, '.history-prune-cursor', '.history-prune-cursor.tmp'];
 
         expect(maximal).toHaveLength(EXPECTED_BUILD_HISTORY_DIRECTORY_ENTRY_LIMIT);
@@ -722,21 +767,21 @@ function writeStatusPair(fs: FileSystem.FileSystem, path: Path.Path, directory: 
 function fixtureIdentity(home: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'a'.repeat(64),
+    checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
     displayName: 'example/repository',
     gitCommonDirectory: `${home}/repository/.git`,
-    headCommit: 'd'.repeat(40),
+    headCommit: Effect2.pipe('d', EffectString.repeat(40)),
     objectFormat: 'sha1',
     remoteIdentity: 'example.invalid/repository',
     repoRoot: `${home}/repository`,
-    repositoryId: 'b'.repeat(64),
-    worktreeId: 'c'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
   };
 }
 
 function observedFailedStatus(heartbeatAgeMilliseconds: number): ObservedCodeGraphBuildStatus {
   return {
-    ...fixtureStatus(fixtureIdentity('/tmp'), 'a'.repeat(32), 0, 'failed'),
+    ...fixtureStatus(fixtureIdentity('/tmp'), Effect2.pipe('a', EffectString.repeat(32)), 0, 'failed'),
     observation: {heartbeatAgeMilliseconds, liveness: 'failed'},
   };
 }

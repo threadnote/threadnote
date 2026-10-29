@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Resvg} from '@resvg/resvg-js';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {strToU8, zipSync, type Zippable} from 'fflate';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const palettes = [
   {id: 'monochrome-light', label: 'Monochrome / light', foreground: '#182124', background: '#ffffff'},
@@ -29,13 +32,13 @@ function artwork(group: string, shape: Shape, palette: Palette): string {
       : shape === 'naked'
         ? ''
         : `<rect width="256" height="256" rx="${shape === 'avatar' ? 0 : 44}" fill="${palette.background}"/>`;
-  return background + group.replaceAll('#67e8c7', palette.foreground);
+  return background + Effect2.pipe(group, EffectString.replaceAll('#67e8c7', palette.foreground));
 }
 
 function svg(group: string, shape: Shape, palette: Palette): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Threadnote">
   <title>Threadnote Continuum</title>
-  <desc>A continuous t and n with an extended tail. ${shape}, ${palette.label.toLowerCase()}.</desc>
+  <desc>A continuous t and n with an extended tail. ${shape}, ${Effect2.pipe(palette.label, EffectString.toLowerCase)}.</desc>
   ${artwork(group, shape, palette)}
 </svg>
 `;
@@ -60,9 +63,9 @@ function png(source: string, width: number, root: string): Uint8Array {
 
 function faviconIco(source: string, root: string): Uint8Array {
   const sizes = [16, 32, 48];
-  const images = sizes.map(size => png(source, size, root));
+  const images = EffectArray.map(sizes, size => png(source, size, root));
   const headerSize = 6 + sizes.length * 16;
-  const output = new Uint8Array(headerSize + images.reduce((sum, image) => sum + image.length, 0));
+  const output = new Uint8Array(headerSize + EffectArray.reduce(images, 0, (sum, image) => sum + image.length));
   const view = new DataView(output.buffer);
   view.setUint16(2, 1, true);
   view.setUint16(4, sizes.length, true);
@@ -82,11 +85,11 @@ function faviconIco(source: string, root: string): Uint8Array {
 }
 
 function overview(group: string): string {
-  const cells = shapes.flatMap((shape, row) =>
-    palettes.map((palette, column) => {
+  const cells = EffectArray.flatMap(shapes, (shape, row) =>
+    EffectArray.map(palettes, (palette, column) => {
       const x = 40 + column * 300;
       const y = 140 + row * 276;
-      const isDark = palette.id.endsWith('-dark');
+      const isDark = Effect2.pipe(palette.id, EffectString.endsWith('-dark'));
       return `<g><rect x="${x}" y="${y}" width="276" height="252" rx="16" fill="${isDark ? '#263035' : '#e8ebe6'}"/>
         <g transform="translate(${x + 38} ${y + 14}) scale(.78125)">${artwork(group, shape, palette)}</g>
         <text x="${x + 138}" y="${y + 236}" text-anchor="middle" fill="${isDark ? '#e9efec' : '#182124'}" font-size="14">${shape}</text></g>`;
@@ -95,8 +98,15 @@ function overview(group: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1010" viewBox="0 0 1280 1010">
     <rect width="1280" height="1010" fill="#f7f7f2"/>
     <g font-family="Spline Sans"><text x="40" y="55" fill="#182124" font-size="30" font-weight="600">Threadnote / Continuum</text>
-    ${palettes.map((palette, column) => `<text x="${40 + column * 300}" y="113" fill="#182124" font-size="18">${palette.label}</text>`).join('')}
-    ${cells.join('')}<text x="40" y="994" fill="#606864" font-size="13">Approved extended-tail geometry · 12 SVG variants · Social avatars at 512 and 1024 px</text></g>
+    ${EffectArray.join(
+      EffectArray.map(
+        palettes,
+        (palette, column) =>
+          `<text x="${40 + column * 300}" y="113" fill="#182124" font-size="18">${palette.label}</text>`,
+      ),
+      '',
+    )}
+    ${EffectArray.join(cells, '')}<text x="40" y="994" fill="#606864" font-size="13">Approved extended-tail geometry · 12 SVG variants · Social avatars at 512 and 1024 px</text></g>
   </svg>`;
 }
 

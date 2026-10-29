@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   createMatchedEvaluationManifestV1,
@@ -17,6 +18,9 @@ import {
   parseMatchedEvaluationVerificationReceiptV1,
   type MatchedEvaluationVerificationReceiptV1,
 } from './matched-verification.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MATCHED_EVALUATION_OUTCOME_VERSION = 5 as const;
 export const MATCHED_EVALUATION_UNAVAILABLE_REASONS = [
@@ -383,8 +387,8 @@ export function parseMatchedEvaluationOutcomesJsonlV1(input: string): readonly M
   if (new TextEncoder().encode(input).byteLength > MAXIMUM_LEDGER_BYTES) {
     invalid('outcome ledger exceeds 16 MiB');
   }
-  return input.split(/\r?\n/u).flatMap((line, index) => {
-    if (!line.trim()) return [];
+  return EffectArray.flatMap(Effect.pipe(input, EffectString.split(/\r?\n/u)), (line, index) => {
+    if (!Effect.pipe(line, EffectString.trim)) return [];
     try {
       return [parseMatchedEvaluationOutcomeV1(JSON.parse(line) as unknown)];
     } catch (cause) {
@@ -400,7 +404,7 @@ export function assertMatchedEvaluationOutcomePrefixV1(
   const manifest = parseMatchedEvaluationManifestV1(manifestInput);
   if (outcomesInput.length > manifest.schedule.length) invalid('outcome ledger is longer than the schedule');
   let previous: string | null = null;
-  const outcomes = outcomesInput.map((input, index) => {
+  const outcomes = EffectArray.map(outcomesInput, (input, index) => {
     const outcome = parseMatchedEvaluationOutcomeV1(input);
     const scheduled = manifest.schedule[index];
     if (
@@ -445,7 +449,9 @@ export async function runMatchedEvaluationV1(input: {
   for (let index = outcomes.length; index < manifest.schedule.length; index += 1) {
     const schedule = manifest.schedule[index];
     const arm = matchedEvaluationArmForLabelV1(manifest, schedule.blindLabel);
-    const definition = manifest.arms.find(candidate => candidate.arm === arm);
+    const definition = EffectOption.getOrUndefined(
+      EffectArray.findFirst(manifest.arms, candidate => candidate.arm === arm),
+    );
     if (definition === undefined) invalid(`schedule arm ${arm} is not defined`);
     let state = availability.get(arm);
     if (state === undefined) {
@@ -485,23 +491,27 @@ export function summarizeMatchedEvaluationV1(
 ): MatchedEvaluationSummaryV1 {
   const manifest = parseMatchedEvaluationManifestV1(manifestInput);
   const outcomes = assertMatchedEvaluationOutcomePrefixV1(manifest, outcomesInput);
-  const arms = MATCHED_EVALUATION_ARMS.map(arm => {
-    const label = (
-      Object.entries(manifest.blindAssignment) as readonly [
-        MatchedEvaluationScheduleEntryV1['blindLabel'],
-        MatchedEvaluationArm,
-      ][]
-    ).find(([, candidate]) => candidate === arm)?.[0];
+  const arms = EffectArray.map(MATCHED_EVALUATION_ARMS, arm => {
+    const label = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectRecord.toEntries(manifest.blindAssignment) as readonly [
+          MatchedEvaluationScheduleEntryV1['blindLabel'],
+          MatchedEvaluationArm,
+        ][],
+        ([, candidate]) => candidate === arm,
+      ),
+    )?.[0];
     if (label === undefined) invalid(`manifest has no blind label for ${arm}`);
     return summarizeArm(
       arm,
-      outcomes.filter(outcome => outcome.blindLabel === label),
+      EffectArray.filter(outcomes, outcome => outcome.blindLabel === label),
     );
   });
   const expectedPerArm = manifest.tasks.length * manifest.repetitions;
   return {
     arms,
-    comparativeClaimsEligible: arms.every(
+    comparativeClaimsEligible: EffectArray.every(
+      arms,
       arm => arm.completed === expectedPerArm && arm.invalid === 0 && arm.unavailable === 0,
     ),
     corpusHash: manifest.corpusHash,
@@ -574,7 +584,9 @@ function assertCorpusMatchesManifest(corpus: MatchedEvaluationCorpusV1, manifest
 }
 
 function requiredTask(corpus: MatchedEvaluationCorpusV1, taskId: string): MatchedEvaluationCorpusTaskV1 {
-  const task = corpus.tasks.find(candidate => candidate.taskId === taskId);
+  const task = EffectOption.getOrUndefined(
+    EffectArray.findFirst(corpus.tasks, candidate => candidate.taskId === taskId),
+  );
   if (task === undefined) invalid(`corpus does not contain scheduled task ${taskId}`);
   return task;
 }
@@ -583,14 +595,15 @@ function summarizeArm(
   arm: MatchedEvaluationArm,
   outcomes: readonly MatchedEvaluationOutcomeV1[],
 ): MatchedEvaluationArmSummaryV1 {
-  const completed = outcomes.filter(
+  const completed = EffectArray.filter(
+    outcomes,
     (outcome): outcome is MatchedEvaluationOutcomeV1 & {readonly metrics: MatchedEvaluationMetricsV1} =>
       outcome.status === 'completed' && outcome.metrics !== null,
   );
-  const valid = completed.filter(outcome => outcome.metrics.validity.valid);
+  const valid = EffectArray.filter(completed, outcome => outcome.metrics.validity.valid);
   const count = valid.length;
   const sum = (select: (metrics: MatchedEvaluationMetricsV1) => number) =>
-    valid.reduce((total, outcome) => total + select(outcome.metrics), 0);
+    EffectArray.reduce(valid, 0, (total, outcome) => total + select(outcome.metrics));
   const ratio = (
     numerator: (metrics: MatchedEvaluationMetricsV1) => number,
     denominator: (metrics: MatchedEvaluationMetricsV1) => number,
@@ -598,29 +611,42 @@ function summarizeArm(
     const total = sum(denominator);
     return total === 0 ? null : sum(numerator) / total;
   };
-  const costs = valid.flatMap(outcome =>
+  const costs = EffectArray.flatMap(valid, outcome =>
     outcome.metrics.providerCostMicros === null ? [] : [outcome.metrics.providerCostMicros],
   );
-  const correctnessPasses = valid.filter(outcome => outcome.metrics.correctness.scoreMilli === 1_000).length;
+  const correctnessPasses = EffectArray.filter(
+    valid,
+    outcome => outcome.metrics.correctness.scoreMilli === 1_000,
+  ).length;
   return {
     arm,
     auditabilityRate: ratio(
       metrics => metrics.auditability.resolvableCitations,
       metrics => metrics.auditability.citations,
     ),
-    averageAgentTaskMilliseconds: average(valid.map(outcome => outcome.metrics.timing.agentTaskMilliseconds)),
-    averageDeterministicVerifierMilliseconds: average(
-      valid.map(outcome => outcome.metrics.timing.deterministicVerifierMilliseconds),
+    averageAgentTaskMilliseconds: average(
+      EffectArray.map(valid, outcome => outcome.metrics.timing.agentTaskMilliseconds),
     ),
-    averageEndToEndMilliseconds: average(valid.map(outcome => outcome.metrics.timing.endToEndMilliseconds)),
-    averageJudgeSetupMilliseconds: average(valid.map(outcome => outcome.metrics.timing.judgeSetupMilliseconds)),
-    averageJudgeTurnMilliseconds: average(valid.map(outcome => outcome.metrics.timing.judgeTurnMilliseconds)),
-    averageModelVisibleBytes: average(valid.map(outcome => outcome.metrics.usage.modelVisibleBytes)),
-    averageModelVisibleTokens: average(valid.map(outcome => outcome.metrics.usage.modelVisibleTokens)),
+    averageDeterministicVerifierMilliseconds: average(
+      EffectArray.map(valid, outcome => outcome.metrics.timing.deterministicVerifierMilliseconds),
+    ),
+    averageEndToEndMilliseconds: average(
+      EffectArray.map(valid, outcome => outcome.metrics.timing.endToEndMilliseconds),
+    ),
+    averageJudgeSetupMilliseconds: average(
+      EffectArray.map(valid, outcome => outcome.metrics.timing.judgeSetupMilliseconds),
+    ),
+    averageJudgeTurnMilliseconds: average(
+      EffectArray.map(valid, outcome => outcome.metrics.timing.judgeTurnMilliseconds),
+    ),
+    averageModelVisibleBytes: average(EffectArray.map(valid, outcome => outcome.metrics.usage.modelVisibleBytes)),
+    averageModelVisibleTokens: average(EffectArray.map(valid, outcome => outcome.metrics.usage.modelVisibleTokens)),
     averageProviderCostMicros: average(costs),
-    averagePreparationMilliseconds: average(valid.map(outcome => outcome.metrics.timing.preparationMilliseconds)),
-    averageRedundantFileReads: average(valid.map(outcome => outcome.metrics.usage.redundantFileReads)),
-    averageToolTurns: average(valid.map(outcome => outcome.metrics.usage.toolTurns)),
+    averagePreparationMilliseconds: average(
+      EffectArray.map(valid, outcome => outcome.metrics.timing.preparationMilliseconds),
+    ),
+    averageRedundantFileReads: average(EffectArray.map(valid, outcome => outcome.metrics.usage.redundantFileReads)),
+    averageToolTurns: average(EffectArray.map(valid, outcome => outcome.metrics.usage.toolTurns)),
     completed: completed.length,
     completionRate: count === 0 ? null : sum(metrics => (metrics.completion.completed ? 1 : 0)) / count,
     correctness: {
@@ -641,7 +667,7 @@ function summarizeArm(
       metrics => metrics.sourceSupport.supportedClaims,
       metrics => metrics.sourceSupport.requiredClaims,
     ),
-    unavailable: outcomes.filter(outcome => outcome.status === 'unavailable').length,
+    unavailable: EffectArray.filter(outcomes, outcome => outcome.status === 'unavailable').length,
   };
 }
 
@@ -814,11 +840,8 @@ function parseMetrics(value: unknown): MatchedEvaluationMetricsV1 {
 
 function parseAttribution(value: unknown): MatchedEvaluationAttributionV1 {
   const attribution = object(value, 'usage attribution');
-  const hasPostSufficientEvidence = Object.prototype.hasOwnProperty.call(attribution, 'postSufficientEvidence');
-  const hasInitialContinuationEvidenceState = Object.prototype.hasOwnProperty.call(
-    attribution,
-    'initialContinuationEvidenceState',
-  );
+  const hasPostSufficientEvidence = EffectRecord.has(attribution, 'postSufficientEvidence');
+  const hasInitialContinuationEvidenceState = EffectRecord.has(attribution, 'initialContinuationEvidenceState');
   exactKeys(
     attribution,
     [
@@ -848,7 +871,7 @@ function parseAttribution(value: unknown): MatchedEvaluationAttributionV1 {
     ['commandExecution', 'contextBrief', 'fileChange', 'inspectCodeGraph', 'readContext', 'recallContext'],
     'repeated tool calls',
   );
-  const modelCalls = array(attribution.modelCalls, 'attribution model calls').map((call, index) =>
+  const modelCalls = EffectArray.map(array(attribution.modelCalls, 'attribution model calls'), (call, index) =>
     parseAttributionTokens(call, `attribution model call ${index}`),
   );
   const modelCallCount = nonNegativeInteger(attribution.modelCallCount, 'model call count');
@@ -864,9 +887,10 @@ function parseAttribution(value: unknown): MatchedEvaluationAttributionV1 {
   assertReconciledAttributionTokens(tokens, sumTokenAccounting(modelCalls), 'model call deltas');
   const modelVisibleBytes = object(attribution.modelVisibleBytes, 'attribution model-visible bytes');
   exactKeys(modelVisibleBytes, ['completedItemBytes', 'promptBytes', 'totalBytes'], 'attribution model-visible bytes');
-  const completedItemByteTotal = Object.values(completedItemBytes).reduce<number>(
-    (total, bytes) => total + nonNegativeInteger(bytes, 'completed item byte count'),
+  const completedItemByteTotal = EffectArray.reduce(
+    EffectRecord.values(completedItemBytes),
     0,
+    (total, bytes) => total + nonNegativeInteger(bytes, 'completed item byte count'),
   );
   const parsedModelVisibleBytes = {
     completedItemBytes: nonNegativeInteger(modelVisibleBytes.completedItemBytes, 'completed item byte total'),
@@ -897,7 +921,7 @@ function parseAttribution(value: unknown): MatchedEvaluationAttributionV1 {
       attribution.firstSufficientEvidenceMilliseconds === null
         ? null
         : nonNegativeInteger(attribution.firstSufficientEvidenceMilliseconds, 'attribution sufficient evidence time'),
-    graphRequests: array(attribution.graphRequests, 'graph request receipts').map((request, index) =>
+    graphRequests: EffectArray.map(array(attribution.graphRequests, 'graph request receipts'), (request, index) =>
       parseGraphRequestReceipt(request, index),
     ),
     ...(hasInitialContinuationEvidenceState
@@ -1043,18 +1067,18 @@ function assertReconciledAttributionTokens(
   expected: ReconciledTokenAccounting,
   source: string,
 ): void {
-  const mismatches = RECONCILED_TOKEN_FIELDS.flatMap(([field, label]) =>
+  const mismatches = EffectArray.flatMap(RECONCILED_TOKEN_FIELDS, ([field, label]) =>
     actual[field] === expected[field] ? [] : [label],
   );
-  if (mismatches.length > 0) invalid(`attribution tokens differ from ${source}: ${mismatches.join(', ')}`);
+  if (mismatches.length > 0) invalid(`attribution tokens differ from ${source}: ${EffectArray.join(mismatches, ', ')}`);
 }
 
 function sumTokenAccounting(values: readonly MatchedEvaluationTokenAccountingV1[]): MatchedEvaluationTokenAccountingV1 {
   const sum = (
     key: keyof Omit<MatchedEvaluationTokenAccountingV1, 'cacheWriteTokens' | 'newTokens' | 'processedTokens'>,
-  ) => values.reduce((total, value) => total + value[key], 0);
-  const cacheWriteTokens = values.every(value => value.cacheWriteTokens !== null)
-    ? values.reduce((total, value) => total + (value.cacheWriteTokens ?? 0), 0)
+  ) => EffectArray.reduce(values, 0, (total, value) => total + value[key]);
+  const cacheWriteTokens = EffectArray.every(values, value => value.cacheWriteTokens !== null)
+    ? EffectArray.reduce(values, 0, (total, value) => total + (value.cacheWriteTokens ?? 0))
     : null;
   const rawInputTokens = sum('rawInputTokens');
   const cachedInputTokens = sum('cachedInputTokens');
@@ -1145,7 +1169,7 @@ function boundedPair(
 }
 
 function average(values: readonly number[]): number | null {
-  return values.length === 0 ? null : values.reduce((total, value) => total + value, 0) / values.length;
+  return values.length === 0 ? null : EffectArray.reduce(values, 0, (total, value) => total + value) / values.length;
 }
 
 function wilson95(successes: number, total: number): {readonly high: number; readonly low: number} {
@@ -1158,19 +1182,19 @@ function wilson95(successes: number, total: number): {readonly high: number; rea
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -1181,7 +1205,12 @@ function matchingString(value: unknown, pattern: RegExp, label: string): string 
 }
 
 function boundedString(value: unknown, minimum: number, maximum: number, label: string): string {
-  if (typeof value !== 'string' || value.length < minimum || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} is invalid`);
   }
   return value;

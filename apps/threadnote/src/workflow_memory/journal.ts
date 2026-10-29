@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
@@ -8,6 +9,8 @@ import {uriSegment} from '@threadnote/store/resource-segment';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   stableJson,
+  WorkflowNameFamilySchema,
+  WorkflowRequestSchema,
   validateWorkflowInput,
   workflowError,
   WorkflowMemoryError,
@@ -22,6 +25,8 @@ import {readWorkflowSharedRoots} from './scopes.js';
 import {verifyWorkflowEvidence} from './evidence.js';
 import {decodeWorkflowJournal, encodeWorkflowJournal, workflowJournalLimits} from './journal_codec.js';
 import {workflowStateTopic} from './naming.js';
+import {isMemoryCodeCitationRecovery} from '../memory/deferred/code_anchor_scope.js';
+import type {DeferredCodeAnchorWriteRequest} from '../memory/deferred/code_anchor.js';
 import {CurrentWorkflowReadCache, immutableWorkflowImage} from './read_cache.js';
 import {
   decodeWorkflowJournalStorageImage,
@@ -29,6 +34,89 @@ import {
   markPackedWorkflowScopes,
   workflowJournalStorageImage,
 } from './journal_storage.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const WorkflowBindingSchema = Schema.Struct({
+  bindingId: Schema.String,
+  naming: Schema.optionalKey(WorkflowNameFamilySchema),
+  workflowRunId: Schema.String,
+  profile: Schema.Literals(['desktop', 'codex-cloud-personal', 'cursor-cloud-personal']),
+  project: Schema.String,
+  featureId: Schema.String,
+  generation: Schema.String,
+  home: Schema.String,
+  repo: Schema.String,
+  account: Schema.String,
+  user: Schema.String,
+  agentId: Schema.String,
+  team: Schema.optionalKey(Schema.String),
+  remote: Schema.optionalKey(Schema.String),
+  branch: Schema.optionalKey(Schema.String),
+  sharedRoots: Schema.Array(Schema.String),
+  artifactLifetime: Schema.Literals(['local-home', 'possibly-ephemeral-workspace']),
+});
+const WorkflowArtifactSchema = Schema.Struct({
+  artifactKey: Schema.String,
+  sourceRunId: Schema.String,
+  role: Schema.String,
+  naming: Schema.optionalKey(
+    Schema.Struct({
+      role: Schema.String,
+      version: Schema.Finite,
+      archiveOrdinal: Schema.optionalKey(Schema.Finite),
+    }),
+  ),
+  canonicalUri: Schema.String,
+  memoryId: Schema.String,
+  revision: Schema.String,
+  bodySha256: Schema.String,
+  storageKind: Schema.Literals(['handoff', 'durable']),
+  state: Schema.Literals(['active', 'archived']),
+});
+const isDeferredCodeAnchorWriteRequest = (value: unknown): value is DeferredCodeAnchorWriteRequest =>
+  value !== null &&
+  typeof value === 'object' &&
+  !EffectArray.isArray(value) &&
+  'callerCwd' in value &&
+  typeof value.callerCwd === 'string' &&
+  'codeRefs' in value &&
+  EffectArray.isArray(value.codeRefs) &&
+  EffectArray.every(value.codeRefs, (codeRef: unknown) => typeof codeRef === 'string') &&
+  (!('project' in value) || value.project === undefined || typeof value.project === 'string') &&
+  'recovery' in value &&
+  isMemoryCodeCitationRecovery(value.recovery);
+const DeferredCodeAnchorWriteRequestSchema = Schema.declare<DeferredCodeAnchorWriteRequest>(
+  isDeferredCodeAnchorWriteRequest,
+);
+const WorkflowRelationSchema = Schema.Struct({
+  uri: Schema.String,
+  content: Schema.String,
+  memoryId: Schema.optionalKey(Schema.String),
+  allowedUriScopes: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+const WorkflowOperationSchema = Schema.Struct({
+  deferredCodeAnchor: Schema.optionalKey(DeferredCodeAnchorWriteRequestSchema),
+  request: WorkflowRequestSchema,
+  intentDigest: Schema.String,
+  desired: Schema.String,
+  before: Schema.optionalKey(Schema.String),
+  sourceUri: Schema.optionalKey(Schema.String),
+  artifact: WorkflowArtifactSchema,
+  relations: Schema.Array(WorkflowRelationSchema),
+  status: Schema.Literals(['prepared', 'verified']),
+});
+const WorkflowJournalSchema = Schema.Struct({
+  protocolVersion: Schema.Literal(1),
+  binding: WorkflowBindingSchema,
+  artifacts: Schema.Record(Schema.String, WorkflowArtifactSchema),
+  operations: Schema.Record(Schema.String, WorkflowOperationSchema),
+  manifestUri: Schema.String,
+  manifestContent: Schema.String,
+  previousManifestContent: Schema.optionalKey(Schema.String),
+  manifestCommitted: Schema.Boolean,
+});
 
 export const workflowLocation = (config: RuntimeConfig) => ({
   account: config.account,
@@ -80,20 +168,12 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
   if (cache?.journal?.file === file && cache.journal.bytes === text) return cache.journal.state;
   const state = yield* fromPromiseInterruptible(
     async signal => {
-      const parsed = decodeWorkflowJournalStorageImage(
-        JSON.parse(await decodeWorkflowJournal(text, signal)),
-      ) as WorkflowJournal;
-      if (
-        parsed.protocolVersion !== 1 ||
-        parsed.binding?.bindingId !== bindingId ||
-        typeof parsed.manifestContent !== 'string' ||
-        typeof parsed.manifestUri !== 'string' ||
-        !parsed.artifacts ||
-        !parsed.operations ||
-        typeof parsed.manifestCommitted !== 'boolean'
-      )
+      const decoded = decodeWorkflowJournalStorageImage(
+        JSON.parse(await decodeWorkflowJournal(text, signal)) as unknown,
+      );
+      if (!Schema.is(WorkflowJournalSchema)(decoded) || decoded.binding.bindingId !== bindingId)
         throw new Error('Invalid journal');
-      return parsed;
+      return decoded;
     },
     () =>
       workflowError(
@@ -345,7 +425,7 @@ const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['
       status: 'active',
       project: binding.project,
       topic: workflowStateTopic(binding),
-      memoryId: `tn_${binding.bindingId.slice(0, 20)}`,
+      memoryId: `tn_${Effect2.pipe(binding.bindingId, EffectString.slice(0, 20))}`,
       timestamp,
       sourceAgentClient: 'threadnote',
       sourceSessionId: binding.workflowRunId,
@@ -418,7 +498,10 @@ export const bindWorkflow = Effect.fn('workflowMemory.bind')(function* (
   const existing = yield* readJournalFile(config, binding.bindingId);
   if (existing) {
     yield* verifyWorkflowBinding(config, existing.binding);
-    if (options.requireEmpty && (Object.keys(existing.artifacts).length || Object.keys(existing.operations).length))
+    if (
+      options.requireEmpty &&
+      (EffectRecord.keys(existing.artifacts).length || EffectRecord.keys(existing.operations).length)
+    )
       return yield* workflowError(
         'unsupported-state',
         'A populated memory binding cannot initialize a fresh native run. Restore its original native state or start a new native run.',

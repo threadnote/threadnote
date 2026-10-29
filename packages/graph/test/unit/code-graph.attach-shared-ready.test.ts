@@ -4,11 +4,13 @@ import * as FC from 'fast-check';
 import {shouldReuseReadySnapshotForCleanCommit} from '@threadnote/graph/indexer';
 import {shouldAttachSharedReadySnapshot} from '@threadnote/graph/query';
 import {codeGraphWatcherRefreshIndexRequest} from '@threadnote/graph/watcher';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const commit = 'a'.repeat(40);
-const otherCommit = 'b'.repeat(40);
-const graphContentId = `cgc_${'1'.repeat(40)}`;
-const otherGraphContentId = `cgc_${'2'.repeat(40)}`;
+const commit = Effect.pipe('a', EffectString.repeat(40));
+const otherCommit = Effect.pipe('b', EffectString.repeat(40));
+const graphContentId = `cgc_${Effect.pipe('1', EffectString.repeat(40))}`;
+const otherGraphContentId = `cgc_${Effect.pipe('2', EffectString.repeat(40))}`;
 
 describe('shouldAttachSharedReadySnapshot', () => {
   it('promotes when the worktree is clean and a HEAD-matching candidate is unused', () => {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
@@ -7,7 +8,7 @@ import {codeGraphCitationSourceKey} from '@threadnote/graph/citation/source';
 import type {CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/types';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor} from '@threadnote/platform/command';
-import {SystemInfo} from '@threadnote/platform/system';
+import {citationSystemInfoLayer} from '../helpers/citation-platform.js';
 import {compileContextBriefWith} from '../../src/compiler.js';
 import {planContextBrief} from '../../src/planner.js';
 import {projectContextBriefAgentView} from '../../src/projector.js';
@@ -21,11 +22,20 @@ import {
   selectContextBriefSourceRanges,
   type ContextBriefSourceRangeCandidateV1,
 } from '../../src/graph/source_evidence.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const SourceReadTestLayer = Layer.mergeAll(
   BunServices.layer,
-  Layer.succeed(CommandExecutor, {execute: () => Effect.die('commit fallback must stay disabled')} as never),
-  Layer.succeed(SystemInfo, {environment: () => process.env, platform: process.platform} as never),
+  Layer.succeed(
+    CommandExecutor,
+    CommandExecutor.of({
+      execute: () => Effect.die('commit fallback must stay disabled'),
+      executeStreaming: () => Effect.die('commit fallback must stay disabled'),
+    }),
+  ),
+  citationSystemInfoLayer,
 );
 
 describe('Context Brief source evidence', () => {
@@ -77,12 +87,17 @@ describe('Context Brief source evidence', () => {
       candidate(6, 'src/d.ts', 1, 2, 'g'),
     ]);
 
-    expect(new Set(selected.map(range => range.path)).size).toBeLessThanOrEqual(CONTEXT_BRIEF_SOURCE_MAXIMUM_FILES);
-    expect(selected.filter(range => range.path === 'src/a.ts')).toHaveLength(
+    expect(new Set(EffectArray.map(selected, range => range.path)).size).toBeLessThanOrEqual(
+      CONTEXT_BRIEF_SOURCE_MAXIMUM_FILES,
+    );
+    expect(EffectArray.filter(selected, range => range.path === 'src/a.ts')).toHaveLength(
       CONTEXT_BRIEF_SOURCE_MAXIMUM_RANGES_PER_FILE,
     );
     expect(
-      selected.every(range => range.endLine - range.startLine + 1 <= CONTEXT_BRIEF_SOURCE_MAXIMUM_LINES_PER_RANGE),
+      EffectArray.every(
+        selected,
+        range => range.endLine - range.startLine + 1 <= CONTEXT_BRIEF_SOURCE_MAXIMUM_LINES_PER_RANGE,
+      ),
     ).toBe(true);
     expect(selected[0]).toMatchObject({coveredGraphRefs: ['cgs_a', 'cgs_c'], endLine: 30, path: 'src/a.ts'});
   });
@@ -148,8 +163,11 @@ describe('Context Brief source evidence', () => {
         const source = projected.structuredContent.graph.sources?.[0];
         expect(source).toBeDefined();
         expect(source?.coveredGraphRefs).toEqual([graph.cards[0].ref]);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional source handling while counting lines.
         expect(source?.content.split('\n').length).toBeLessThanOrEqual(24);
-        expect(source?.endLine).toBe(source!.startLine + source!.content.split('\n').length - 1);
+        expect(source?.endLine).toBe(
+          source!.startLine + Effect2.pipe(source!.content, EffectString.split('\n')).length - 1,
+        );
         if (responseFormat === 'dual') expect(source?.truncated).toBe(true);
         expect(projected.measurement.estimatedTokens).toBeLessThanOrEqual(1_500);
       }
@@ -165,7 +183,7 @@ describe('Context Brief source evidence', () => {
           graphEvidence: () =>
             Effect.succeed({
               ...graph,
-              sourceExcerpts: [{...source, content: 'x'.repeat(8_192), endLine: 1}],
+              sourceExcerpts: [{...source, content: Effect2.pipe('x', EffectString.repeat(8_192)), endLine: 1}],
             }),
           memoryEvidence: () => Effect.succeed(emptyMemoryEvidence()),
         },
@@ -234,7 +252,7 @@ describe('Context Brief source evidence', () => {
     'selection is permutation invariant and idempotent',
     {seed: fc.array(fc.tuple(fc.integer({min: 1, max: 80}), fc.integer({min: 1, max: 24})), {maxLength: 24})},
     ({seed}) => {
-      const candidates = seed.map(([start, length], rank) =>
+      const candidates = EffectArray.map(seed, ([start, length], rank) =>
         candidate(rank, `src/${String(rank % 5)}.ts`, start, start + length - 1, String(rank)),
       );
       const reversed = selectContextBriefSourceRanges([...candidates].reverse());
@@ -264,8 +282,22 @@ describe('Context Brief source evidence', () => {
         candidate(1, 'src/a.ts', seed.earlierStart, earlierEnd, 'earlier'),
       ]);
       expect(selected).toHaveLength(2);
-      expect(selected.find(range => range.coveredGraphRefs.includes('cgs_later'))?.startLine).toBe(laterStart);
-      expect(selected.find(range => range.coveredGraphRefs.includes('cgs_earlier'))?.startLine).toBe(seed.earlierStart);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            selected,
+            __effectArrayValue => !!(range => range.coveredGraphRefs.includes('cgs_later'))(__effectArrayValue),
+          ),
+        )?.startLine,
+      ).toBe(laterStart);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            selected,
+            __effectArrayValue => !!(range => range.coveredGraphRefs.includes('cgs_earlier'))(__effectArrayValue),
+          ),
+        )?.startLine,
+      ).toBe(seed.earlierStart);
     },
     {fastCheck: {numRuns: 100}},
   );
@@ -284,7 +316,12 @@ describe('Context Brief source evidence', () => {
       const resolved = new Map([
         [
           codeGraphCitationSourceKey(source),
-          new TextEncoder().encode(Array.from({length: 32}, (_, i) => `line-${i}`).join('\n')),
+          new TextEncoder().encode(
+            EffectArray.join(
+              Array.from({length: 32}, (_, i) => `line-${i}`),
+              '\n',
+            ),
+          ),
         ],
       ]);
       const smaller = materializeContextBriefSourceExcerpts({
@@ -349,7 +386,7 @@ function emptyMemoryEvidence() {
 }
 
 function graphEvidence(withSource = false): ContextBriefGraphEvidenceV1 {
-  const ref = `cgs_${'a'.repeat(32)}`;
+  const ref = `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`;
   return {
     cards: [
       {
@@ -379,12 +416,12 @@ function graphEvidence(withSource = false): ContextBriefGraphEvidenceV1 {
     gaps: [],
     resolvedSnapshots: [
       {
-        commit: 'b'.repeat(40),
+        commit: Effect2.pipe('b', EffectString.repeat(40)),
         dirty: false,
         freshness: 'fresh',
-        repositoryId: 'c'.repeat(64),
+        repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
         repositoryKey: 'owner/repo',
-        snapshotId: `cgsn_${'d'.repeat(40)}`,
+        snapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
       },
     ],
     ...(withSource
@@ -413,10 +450,14 @@ function graphEvidence(withSource = false): ContextBriefGraphEvidenceV1 {
 
 function largeSourceGraphEvidence(): ContextBriefGraphEvidenceV1 {
   const base = graphEvidence();
-  const source = Array.from(
-    {length: 24},
-    (_, index) => `export const sourceLine${index.toString().padStart(2, '0')} = '${'x'.repeat(42)}';`,
-  ).join('\n');
+  const source = EffectArray.join(
+    Array.from(
+      {length: 24},
+      (_, index) =>
+        `export const sourceLine${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))} = '${Effect2.pipe('x', EffectString.repeat(42))}';`,
+    ),
+    '\n',
+  );
   return {
     ...base,
     sourceExcerpts: [
@@ -438,7 +479,7 @@ function largeSourceGraphEvidence(): ContextBriefGraphEvidenceV1 {
 }
 
 function sourceQueryResult(contentHash: string): CodeGraphQueryResult {
-  const ref = `cgs_${'a'.repeat(32)}`;
+  const ref = `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`;
   return {
     edges: [],
     freshness: 'current',
@@ -457,8 +498,13 @@ function sourceQueryResult(contentHash: string): CodeGraphQueryResult {
       },
     ],
     operation: 'query',
-    repository: {displayName: 'owner/repo', repositoryId: 'c'.repeat(64)},
-    snapshot: {commit: 'b'.repeat(40), dirty: true, id: `cgsn_${'d'.repeat(40)}`, worktreeId: 'e'.repeat(64)},
+    repository: {displayName: 'owner/repo', repositoryId: Effect2.pipe('c', EffectString.repeat(64))},
+    snapshot: {
+      commit: Effect2.pipe('b', EffectString.repeat(40)),
+      dirty: true,
+      id: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
+      worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
+    },
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
     version: 1,
     warnings: [],
@@ -468,13 +514,13 @@ function sourceQueryResult(contentHash: string): CodeGraphQueryResult {
 function sourceRepositoryIdentity(repositoryRoot: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'a'.repeat(64),
+    checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
     displayName: 'owner/repo',
     gitCommonDirectory: `${repositoryRoot}/.git`,
-    headCommit: 'b'.repeat(40),
+    headCommit: Effect2.pipe('b', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: repositoryRoot,
-    repositoryId: 'c'.repeat(64),
-    worktreeId: 'e'.repeat(64),
+    repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
   };
 }

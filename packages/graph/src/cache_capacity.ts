@@ -5,6 +5,9 @@ import {
   type CodeGraphDirectPersistentCapacityOperation,
 } from './disk/capacity.js';
 import {compareCodeUnits} from './ordering.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export const CODE_GRAPH_CACHE_TRANSACTION_LIMITS = {
   payloadBytes: 32 * 1_048_576,
@@ -80,7 +83,7 @@ export function codeGraphMaterializedShardCapacityBytes(fields: CodeGraphMateria
 }
 
 export function codeGraphTextFieldsCapacityBytes(...fields: readonly string[]): number {
-  return saturatingCapacityAdd(...fields.map(codeGraphUtf8ByteLength));
+  return saturatingCapacityAdd(...EffectArray.map(fields, codeGraphUtf8ByteLength));
 }
 
 /**
@@ -109,7 +112,7 @@ export function planCodeGraphCacheCapacityChunks<Row extends CodeGraphCacheCapac
   };
 
   for (const row of rows) {
-    if (row.key.length === 0 || row.key.includes('\0')) {
+    if (row.key.length === 0 || Effect.pipe(row.key, EffectString.includes('\0'))) {
       throw new Error('Code graph cache capacity row key is invalid.');
     }
     if (row.key === previousKey) {

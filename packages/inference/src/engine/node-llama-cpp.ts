@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Exit, Layer, Path, Scope} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -21,6 +22,8 @@ import {
   type LlamaRankingSession,
   type LocalModelLoadOptions,
 } from './llama-cpp-engine.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface NativeEmbedding {
   readonly vector: readonly number[];
@@ -248,7 +251,9 @@ function makeEngine(
         const contextPoolSize = yield* Effect.try({
           try: () =>
             embeddingPolicy.contextPoolSize ??
-            (embeddingPolicy.contextPoolSizeEnvironment?.trim()
+            (Effect2.pipe(embeddingPolicy.contextPoolSizeEnvironment, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            )
               ? parseEmbeddingContextPoolSize(embeddingPolicy.contextPoolSizeEnvironment)
               : (options.embeddingContextPoolSize ?? parseEmbeddingContextPoolSize(undefined))),
           catch: cause =>
@@ -286,7 +291,10 @@ function makeEngine(
             effectiveContexts: contextPlan.contexts,
             ...(modelGpuLayers === undefined ? {} : {modelGpuLayers}),
             requestedContexts: contextPoolSize,
-            threadCounts: contextPlan.threadCounts.filter((threads): threads is number => threads !== undefined),
+            threadCounts: EffectArray.filter(
+              contextPlan.threadCounts,
+              (threads): threads is number => threads !== undefined,
+            ),
           };
           diagnostics.embeddingContextPlan = embeddingContextPlan;
           const contexts = yield* Effect.forEach(
@@ -368,7 +376,7 @@ export function resolveNativeEmbeddingGpuLayers(options: {
 }
 
 export function parseEmbeddingContextPoolSize(value: string | undefined): EmbeddingContextPoolSize {
-  if (value === undefined || value.trim() === '') return 1;
+  if (value === undefined || Effect2.pipe(value, EffectString.trim) === '') return 1;
   const parsed = Number(value);
   if (!isEmbeddingContextPoolSize(parsed)) {
     throw new RangeError(`${THREADNOTE_EMBEDDING_CONTEXTS_ENV} must be one of 1, 2, 4, or 8.`);
@@ -392,9 +400,12 @@ export function nativeEmbeddingContextPlan(options: {
     return {contexts: 1, threadCounts: [undefined]};
   }
   const availableCores = Math.max(1, Math.floor(options.cpuMathCores));
-  const contexts = [...EMBEDDING_CONTEXT_POOL_SIZES]
-    .reverse()
-    .find(candidate => candidate <= options.requestedContexts && candidate <= availableCores)!;
+  const contexts = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...EMBEDDING_CONTEXT_POOL_SIZES].reverse(),
+      candidate => candidate <= options.requestedContexts && candidate <= availableCores,
+    ),
+  )!;
   const baseThreads = Math.floor(availableCores / contexts);
   const remainder = availableCores % contexts;
   return {
@@ -548,9 +559,15 @@ function embeddingSession(
               }),
       ).pipe(
         Effect.flatMap(embeddings => {
-          const vectors = embeddings.map(embedding => embedding.vector);
-          const invalid = vectors.find(
-            vector => vector.length !== options.dimensions || vector.some(component => !Number.isFinite(component)),
+          const vectors = EffectArray.map(embeddings, embedding => embedding.vector);
+          const invalid = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              vectors,
+              __effectArrayValue =>
+                !!(vector =>
+                  vector.length !== options.dimensions ||
+                  EffectArray.some(vector, component => !Number.isFinite(component)))(__effectArrayValue),
+            ),
           );
           return invalid
             ? Effect.fail(
@@ -597,8 +614,8 @@ async function embeddingForInput(
       pooled[dimension] /= totalWeight;
     }
   }
-  const magnitude = Math.sqrt(pooled.reduce((sum, value) => sum + value * value, 0));
-  return {vector: magnitude > 0 ? pooled.map(value => value / magnitude) : pooled};
+  const magnitude = Math.sqrt(EffectArray.reduce(pooled, 0, (sum, value) => sum + value * value));
+  return {vector: magnitude > 0 ? EffectArray.map(pooled, value => value / magnitude) : pooled};
 }
 
 async function embedInputsWithContextPool(
@@ -618,7 +635,7 @@ async function embedInputsWithContextPool(
     stopped = true;
   };
   signal.addEventListener('abort', stop, {once: true});
-  const workers = contexts.slice(0, inputs.length).map(async context => {
+  const workers = EffectArray.map(contexts.slice(0, inputs.length), async context => {
     for (;;) {
       if (stopped || failed) return;
       const index = cursor;
@@ -656,7 +673,7 @@ async function embedInputsWithContextPool(
 
 async function disposeEmbeddingContexts(contexts: readonly NativeEmbeddingContext[]): Promise<void> {
   await Promise.all(
-    contexts.map(async context => {
+    EffectArray.map(contexts, async context => {
       if (context.disposed) return;
       try {
         await context.dispose();
@@ -733,7 +750,7 @@ function rankingSession(options: LocalModelLoadOptions, context: NativeRankingCo
               }),
       ).pipe(
         Effect.filterOrFail(
-          scores => scores.length === documents.length && scores.every(score => Number.isFinite(score)),
+          scores => scores.length === documents.length && EffectArray.every(scores, score => Number.isFinite(score)),
           scores =>
             RerankingFailed.make({
               cause: scores,

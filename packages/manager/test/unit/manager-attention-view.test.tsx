@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 // @vitest-environment happy-dom
 
 import React, {act} from 'react';
@@ -5,6 +6,9 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {ContextHealthPanel, ReviewsPanel} from '@threadnote/manager/attention-view';
+import {reviewPreviewFixture} from '../helpers/review_preview_fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let reactRoot: Root | undefined;
 let contextHealthRequests: string[];
@@ -28,7 +32,7 @@ beforeEach(() => {
   backgroundRepairPollFailures = 0;
   backgroundRepairScenario = 'running';
   backgroundRepairStartGate = undefined;
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -64,20 +68,24 @@ beforeEach(() => {
       }
       if (url.pathname === '/api/context-health/citations/preview') {
         bulkRequests.push(url.pathname);
-        const body = JSON.parse(String(init?.body)) as {readonly findingCategory?: string};
+        const body = Schema.decodeUnknownSync(
+          Schema.StructWithRest(Schema.Struct({findingCategory: Schema.optional(Schema.String)}), [
+            Schema.Record(Schema.String, Schema.Unknown),
+          ]),
+        )(JSON.parse(String(init?.body)));
         bulkPreviewCategories.push(body.findingCategory ?? 'all');
         await bulkPreviewGate;
         return response({
           items: [
             {
               category: 'citation-changed',
-              citationId: `tncc_${'1'.repeat(40)}`,
+              citationId: `tncc_${Effect.pipe('1', EffectString.repeat(40))}`,
               findingId: 'finding-1',
               path: 'src/example.ts',
-              proposalId: `health-repair-${'4'.repeat(40)}`,
-              replacementId: `tncc_${'2'.repeat(40)}`,
-              revision: '5'.repeat(64),
-              sourceCommit: '3'.repeat(40),
+              proposalId: `health-repair-${Effect.pipe('4', EffectString.repeat(40))}`,
+              replacementId: `tncc_${Effect.pipe('2', EffectString.repeat(40))}`,
+              revision: Effect.pipe('5', EffectString.repeat(64)),
+              sourceCommit: Effect.pipe('3', EffectString.repeat(40)),
               subjectUri: 'threadnote://user/tester/memories/example.md',
               targetKind: 'file',
             },
@@ -139,13 +147,13 @@ beforeEach(() => {
           recordPreviews: [],
           recordsScanned: 3,
           repositoryEvidence: {reason: 'project-not-configured', state: 'unavailable'},
-          semanticCompleteness: {state: 'unavailable'},
+          semanticCompleteness: semanticCompleteness('unavailable'),
           status: 'unknown',
           version: 1,
         });
       }
       if (url.searchParams.get('project') === 'grouped') {
-        const findings = healthFindings(1, 2).map(finding => ({
+        const findings = EffectArray.map(healthFindings(1, 2), finding => ({
           ...finding,
           repair: {...finding.repair, subjectUri: 'threadnote://memory/grouped'},
           uris: ['threadnote://memory/grouped'],
@@ -159,7 +167,7 @@ beforeEach(() => {
             {
               code: [
                 {
-                  citationId: `tncc_${'0'.repeat(39)}1`,
+                  citationId: `tncc_${Effect.pipe('0', EffectString.repeat(39))}1`,
                   excerpt: 'export const grouped = true;',
                   findingIds: ['finding-1'],
                   line: 1,
@@ -174,7 +182,7 @@ beforeEach(() => {
           ],
           recordsScanned: 1,
           repositoryEvidence: {state: 'available'},
-          semanticCompleteness: {reason: 'complete', state: 'complete'},
+          semanticCompleteness: semanticCompleteness('complete'),
           status: 'findings',
           version: 1,
         });
@@ -184,13 +192,15 @@ beforeEach(() => {
       return response({
         findings: healthFindings(start, count),
         limit: 100,
-        ...(after ? {remainingFindings: 0} : {nextCursor: `hcx1_2s_${'a'.repeat(40)}`, remainingFindings: 1}),
+        ...(after
+          ? {remainingFindings: 0}
+          : {nextCursor: `hcx1_2s_${Effect.pipe('a', EffectString.repeat(40))}`, remainingFindings: 1}),
         omittedFindings: after ? 100 : 1,
         project: 'threadnote',
         recordPreviews: healthPreviews(start, count),
         recordsScanned: 12,
         repositoryEvidence: {state: 'available'},
-        semanticCompleteness: {reason: 'complete', state: 'complete'},
+        semanticCompleteness: semanticCompleteness('complete'),
         status: 'findings',
         version: 1,
       });
@@ -445,9 +455,12 @@ describe('Manager attention views', () => {
     expect(document.querySelector('.attention-card')).toBe(card);
     expect(document.body.textContent).not.toContain('Loading the review inbox');
     await act(async () =>
-      [...document.querySelectorAll<HTMLButtonElement>('[role=tab]')]
-        .find(button => button.textContent === 'Deferred')!
-        .click(),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...document.querySelectorAll<HTMLButtonElement>('[role=tab]')],
+          button => button.textContent === 'Deferred',
+        ),
+      )!.click(),
     );
     expect(document.querySelector('.attention-card')).toBeNull();
     expect(document.body.textContent).toContain('Loading the review inbox');
@@ -469,34 +482,23 @@ describe('Manager attention views', () => {
             background: {assessments: 0, awaitingSources: 1, obsolete: 0, reasons: {checking: 1}},
           });
         if (url.pathname === '/api/reviews/preview')
-          return response({
-            review: {
-              version: 2,
-              reviewId: 'review-1',
-              revision: 1,
-              project: 'threadnote',
-              task: 'Authorized fixture proposal.',
-              candidates: [
-                {
-                  candidateId: 'candidate-1',
-                  state: 'pending',
-                  kind: 'durable',
-                  topic: 'fixture',
-                  proposedText: 'Retained authorized proposal.',
-                  reason: 'Choose its exact operation.',
-                  evidence: [],
-                },
-              ],
-            },
-            delta: {
-              items: [
-                {
-                  candidateId: 'candidate-1',
-                  mutationPreview: {operation: 'requires_explicit_operation', truncated: false},
-                },
-              ],
-            },
-          });
+          return response(
+            reviewPreviewFixture({
+              mutationPreview: {operation: 'requires_explicit_operation'},
+              candidate: {
+                candidateId: 'candidate-1',
+                proposedText: 'Retained authorized proposal.',
+                reason: 'Choose its exact operation.',
+              },
+              review: {
+                project: 'threadnote',
+                reviewId: 'review-1',
+                revision: 1,
+                task: 'Authorized fixture proposal.',
+                topic: 'fixture',
+              },
+            }),
+          );
         return originalFetch(input, init);
       }),
     );
@@ -619,7 +621,9 @@ describe('Manager attention views', () => {
     await waitFor('Memory 100');
     await clickButton('Load 1 findings');
     await waitFor('Memory 101');
-    expect(contextHealthRequests).toContain(`?project=threadnote&after=hcx1_2s_${'a'.repeat(40)}`);
+    expect(contextHealthRequests).toContain(
+      `?project=threadnote&after=hcx1_2s_${Effect.pipe('a', EffectString.repeat(40))}`,
+    );
     expect(metricValue('Issues')).toBe('101');
     expect(buttonWithText('Load')).toBeUndefined();
 
@@ -666,7 +670,7 @@ describe('Manager attention views', () => {
     expect(document.body.textContent).toContain('src/grouped.ts');
     expect(document.body.textContent).toContain('export const grouped = true;');
     expect(document.querySelectorAll('.health-record')).toHaveLength(1);
-    expect(document.body.textContent).not.toContain(`tncc_${'0'.repeat(39)}1`);
+    expect(document.body.textContent).not.toContain(`tncc_${Effect.pipe('0', EffectString.repeat(39))}1`);
   });
 
   it('previews current-graph citation repairs, rebuilds evidence, and applies the reviewed batch', async () => {
@@ -881,26 +885,45 @@ async function rerender(element: React.ReactElement): Promise<void> {
 
 async function waitFor(text: string): Promise<void> {
   for (let index = 0; index < 20; index += 1) {
-    if (document.body.textContent?.includes(text)) return;
+    if (
+      Effect.pipe(document.body.textContent, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+      )
+    )
+      return;
     await act(async () => Promise.resolve());
   }
   throw new Error(`Text did not render: ${text}`);
 }
 
 async function clickButton(label: string): Promise<void> {
-  const button = [...document.querySelectorAll('button')].find(item => item.textContent === label);
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst([...document.querySelectorAll('button')], item => item.textContent === label),
+  );
   if (!button) throw new Error(`Button did not render: ${label}`);
   await act(async () => button.click());
 }
 
 function buttonWithText(text: string): HTMLButtonElement | undefined {
-  return [...document.querySelectorAll('button')].find(item => item.textContent?.includes(text));
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(item.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+          ))(__effectArrayValue),
+    ),
+  );
 }
 
 function metricValue(label: string): string | undefined {
-  return [...document.querySelectorAll('.attention-metrics > div')]
-    .find(item => item.querySelector('span')?.textContent === label)
-    ?.querySelector('strong')?.textContent;
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('.attention-metrics > div')],
+      item => item.querySelector('span')?.textContent === label,
+    ),
+  )?.querySelector('strong')?.textContent;
 }
 
 async function waitForRequestCount(count: number): Promise<void> {
@@ -927,8 +950,8 @@ function healthFindings(start: number, count: number) {
     repair: {
       kind: 'repair-citation' as const,
       subjectUri: `threadnote://memory/example-${start + index}`,
-      summary: `Review and recapture citation tncc_${String(start + index).padStart(40, '0')}.`,
-      targetUri: `threadnote://memory/example-${start + index}#tncc_${String(start + index).padStart(40, '0')}`,
+      summary: `Review and recapture citation tncc_${Effect.pipe(String(start + index), EffectString.padStart(40, '0'))}.`,
+      targetUri: `threadnote://memory/example-${start + index}#tncc_${Effect.pipe(String(start + index), EffectString.padStart(40, '0'))}`,
     },
     repairability: 'reviewable' as const,
     severity: 'high' as const,
@@ -941,7 +964,7 @@ function healthPreviews(start: number, count: number) {
   return Array.from({length: count}, (_, index) => ({
     code: [
       {
-        citationId: `tncc_${String(start + index).padStart(40, '0')}`,
+        citationId: `tncc_${Effect.pipe(String(start + index), EffectString.padStart(40, '0'))}`,
         excerpt: `export const example${start + index} = true;`,
         findingIds: [`finding-${start + index}`],
         line: 1,
@@ -956,6 +979,24 @@ function healthPreviews(start: number, count: number) {
   }));
 }
 
+function semanticCompleteness(state: 'complete' | 'partial' | 'unavailable') {
+  return {
+    analyzedRecords: state === 'complete' ? 1 : 0,
+    claimsAnalyzed: 0,
+    supportedClaims: 0,
+    unsupportedClaims: 0,
+    coverage: 'bounded-English-extraction' as const,
+    contradictionCount: 0,
+    eligibleRecords: 1,
+    omittedContradictions: 0,
+    pairsCompared: 0,
+    state,
+    unknownReasons: state === 'complete' ? [] : [{reason: 'record-limit' as const, count: 1}],
+    unknownRecords: state === 'complete' ? 0 : 1,
+    version: 2 as const,
+  };
+}
+
 function response(value: unknown): Response {
   return new Response(JSON.stringify(value), {headers: {'content-type': 'application/json'}, status: 200});
 }
@@ -966,10 +1007,10 @@ function refreshReport(title: string) {
     limit: 100,
     omittedFindings: 0,
     project: 'threadnote',
-    recordPreviews: healthPreviews(1, 1).map(preview => ({...preview, title})),
+    recordPreviews: EffectArray.map(healthPreviews(1, 1), preview => ({...preview, title})),
     recordsScanned: 1,
     repositoryEvidence: {state: 'available'},
-    semanticCompleteness: {state: 'complete'},
+    semanticCompleteness: semanticCompleteness('complete'),
     status: 'findings',
     version: 1,
   };

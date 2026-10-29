@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {parse, stringify} from 'smol-toml';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -12,13 +13,16 @@ import {
   THREADNOTE_ORG_MCP_NAME,
   type ComposerShareBinding,
 } from './composer_attach.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODEX_ORG_MINIMUM_VERIFIED_VERSION = '0.153.4';
 
 export function supportsCodexOrgOAuth(versionOutput: string): boolean {
-  const match = /^codex(?:-cli)? (\d+)\.(\d+)\.(\d+)\s*$/u.exec(versionOutput.trim());
+  const match = /^codex(?:-cli)? (\d+)\.(\d+)\.(\d+)\s*$/u.exec(Effect2.pipe(versionOutput, EffectString.trim));
   if (!match) return false;
-  const [major, minor, patch] = match.slice(1).map(Number);
+  const [major, minor, patch] = EffectArray.map(match.slice(1), Number);
   return major > 0 || minor > 153 || (minor === 153 && patch >= 4);
 }
 
@@ -43,7 +47,7 @@ export function renderCodexOrgMcpConfig(content: string, attach: ComposerShareBi
     throw ComposerAttachError.make({message: 'Codex mcp_servers is not a table; preserving the existing config.'});
   }
   const scopes = composerOAuthScopes(attach.additionalScopes);
-  if (scopes.some(scope => scope.includes(','))) {
+  if (EffectArray.some(scopes, scope => Effect2.pipe(scope, EffectString.includes(',')))) {
     throw ComposerAttachError.make({
       message:
         'Codex native login cannot preserve a comma inside one OAuth scope token; remove that scope or configure the client manually.',
@@ -55,15 +59,19 @@ export function renderCodexOrgMcpConfig(content: string, attach: ComposerShareBi
       !isJsonObject(current) ||
       current.url !== attach.url ||
       !isJsonObject(current.http_headers) ||
-      Object.keys(current.http_headers).length !== 1 ||
+      EffectRecord.keys(current.http_headers).length !== 1 ||
       current.http_headers['threadnote-share-id'] !== attach.shareId ||
       !isJsonObject(current.oauth) ||
       current.oauth.client_id !== attach.clientId ||
-      Object.keys(current.oauth).some(key => !['client_id', 'callback_url', 'callback_port'].includes(key)) ||
-      !Array.isArray(current.scopes) ||
-      !current.scopes.every(scope => typeof scope === 'string') ||
+      EffectArray.some(
+        EffectRecord.keys(current.oauth),
+        key => !['client_id', 'callback_url', 'callback_port'].includes(key),
+      ) ||
+      !EffectArray.isArray(current.scopes) ||
+      !EffectArray.every(current.scopes, scope => typeof scope === 'string') ||
       !composerOAuthScopesMatch(current.scopes, scopes) ||
-      ['command', 'args', 'env', 'bearer_token', 'bearer_token_env_var', 'env_http_headers', 'oauth_resource'].some(
+      EffectArray.some(
+        ['command', 'args', 'env', 'bearer_token', 'bearer_token_env_var', 'env_http_headers', 'oauth_resource'],
         key => key in current,
       ) ||
       (attach.callback &&
@@ -92,7 +100,7 @@ export function renderCodexOrgMcpConfig(content: string, attach: ComposerShareBi
       },
     },
   });
-  const proposed = `${content}${content.endsWith('\n') || !content ? '' : '\n'}\n${addition}`;
+  const proposed = `${content}${Effect2.pipe(content, EffectString.endsWith('\n')) || !content ? '' : '\n'}\n${addition}`;
   parseConfig(proposed);
   return proposed;
 }
@@ -178,7 +186,7 @@ export const runCodexOrgMcpInstall = Effect.fn('mcp.runCodexOrgInstall')(functio
     'login',
     THREADNOTE_ORG_MCP_NAME,
     '--scopes',
-    composerOAuthScopes(attach.additionalScopes).join(','),
+    EffectArray.join(composerOAuthScopes(attach.additionalScopes), ','),
   ]);
   if (!apply) {
     yield* Console.log(
@@ -187,7 +195,7 @@ export const runCodexOrgMcpInstall = Effect.fn('mcp.runCodexOrgInstall')(functio
     yield* Console.log(
       proposed === current?.content
         ? 'Already configured; the existing entry will be preserved.'
-        : proposed.slice((current?.content ?? '').length),
+        : Effect2.pipe(proposed, EffectString.slice((current?.content ?? '').length)),
     );
     return;
   }

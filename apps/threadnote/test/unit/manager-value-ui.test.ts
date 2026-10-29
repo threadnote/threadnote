@@ -2,22 +2,26 @@
 
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
-import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {ValuePanel} from '@threadnote/manager/value_view';
 import {aggregateValueReportV1} from '@threadnote/threadnote/value_report/index';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 let reactRoot: Root | undefined;
-let originalFetch: typeof fetch;
 let requests: Array<{readonly body: Record<string, unknown>; readonly path: string}>;
 
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
-  originalFetch = globalThis.fetch;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   requests = [];
-  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+  vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
     const path =
       typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
-    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+    const parsedBody: unknown = init?.body ? JSON.parse(String(init.body)) : {};
+    if (!isJsonObject(parsedBody)) throw new Error('Expected a value request object.');
+    const body = parsedBody;
     requests.push({body, path});
     if (path === '/api/value/report') {
       return Promise.resolve(
@@ -27,7 +31,7 @@ beforeEach(() => {
               {
                 action: 'applied',
                 project: 'threadnote',
-                queryFingerprint: 'a'.repeat(64),
+                queryFingerprint: Effect.pipe('a', EffectString.repeat(64)),
                 rankerVersion: 'hybrid-v1',
                 timestamp: '2026-09-15T00:00:00.000Z',
                 uri: 'threadnote://private/value',
@@ -65,14 +69,14 @@ beforeEach(() => {
       );
     }
     throw new Error(`Unexpected Manager value request: ${path}`);
-  }) as typeof fetch;
+  });
 });
 
 afterEach(async () => {
   if (reactRoot) await act(async () => reactRoot?.unmount());
   reactRoot = undefined;
   document.body.replaceChildren();
-  globalThis.fetch = originalFetch;
+  vi.unstubAllGlobals();
 });
 
 describe('Manager value workspace', () => {
@@ -102,8 +106,14 @@ describe('Manager value workspace', () => {
 });
 
 async function clickButton(label: string): Promise<void> {
-  const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-    candidate => candidate.textContent?.trim() === label,
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      candidate =>
+        Effect.pipe(candidate.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
   );
   if (!button) throw new Error(`Button did not render: ${label}`);
   await act(async () => button.click());
@@ -111,7 +121,12 @@ async function clickButton(label: string): Promise<void> {
 
 async function waitForText(text: string): Promise<void> {
   for (let index = 0; index < 30; index += 1) {
-    if (document.body.textContent?.includes(text)) return;
+    if (
+      Effect.pipe(document.body.textContent, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+      )
+    )
+      return;
     await act(async () => {
       await Promise.resolve();
       await new Promise(resolve => window.setTimeout(resolve, 0));

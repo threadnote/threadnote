@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
@@ -10,6 +11,8 @@ import {makeGraphControlCredentialLoader} from '@threadnote/graph/sharing/contro
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = Layer.merge(BunServices.layer, TestSystemInfoLayer);
 
@@ -17,7 +20,7 @@ const scope = {
   coordinatorUrl: 'https://graph.example.test/team.v1',
   organization: 'acme',
   profileDigest: sha256Digest('profile'),
-  repositoryId: 'a'.repeat(64),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
 };
 const binding = {
   audience: 'https://graph.example.test',
@@ -171,7 +174,7 @@ describe('graph control credential discovery', () => {
       const wave = () => Effect.forEach(Array.from({length: 8}), () => f.loader.load, {concurrency: 8});
       const first = yield* wave();
       expect(f.calls()).toBe(1);
-      expect(new Set(first.map(item => item.identity)).size).toBe(1);
+      expect(new Set(EffectArray.map(first, item => item.identity)).size).toBe(1);
       expect(Redacted.value(first[0].authorization)).toBe('Bearer synthetic.token.1');
       expect(JSON.stringify(first)).not.toContain('synthetic.token');
       f.loader.invalidate(first[0]);

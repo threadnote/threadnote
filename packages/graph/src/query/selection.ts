@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphQueryResult} from '../types.js';
 import {sanitizeCodeGraphPresentationText as sanitizeText} from '../presentation_text.js';
 
@@ -16,7 +17,7 @@ export function sanitizeSelection(selection: {
   readonly searchCoverage?: CodeGraphQueryResult['searchCoverage'];
   readonly warnings: readonly string[];
 } {
-  const nodes = selection.nodes.map(node => ({
+  const nodes = EffectArray.map(selection.nodes, node => ({
     ...node,
     documentation: node.documentation ? sanitizeText(node.documentation, 2_048) : undefined,
     id: sanitizeText(node.id, 256),
@@ -28,7 +29,7 @@ export function sanitizeSelection(selection: {
     qualifiedName: sanitizeText(node.qualifiedName, 512),
     signature: node.signature ? sanitizeText(node.signature, 1_024) : undefined,
   }));
-  const edges = selection.edges.map(edge => ({
+  const edges = EffectArray.map(selection.edges, edge => ({
     ...edge,
     evidencePath: sanitizeText(edge.evidencePath, 1_024),
     id: sanitizeText(edge.id, 256),
@@ -37,7 +38,7 @@ export function sanitizeSelection(selection: {
     targetId: edge.targetId ? sanitizeText(edge.targetId, 256) : undefined,
     targetName: sanitizeText(edge.targetName, 256),
   }));
-  const warnings = selection.warnings.map(warning => sanitizeText(warning, 1_024));
+  const warnings = EffectArray.map(selection.warnings, warning => sanitizeText(warning, 1_024));
   const acceptedNodes: CodeGraphQueryNode[] = [];
   const acceptedEdges: CodeGraphEdge[] = [];
   let bytes = 0;

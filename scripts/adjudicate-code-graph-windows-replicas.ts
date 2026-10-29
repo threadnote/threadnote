@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -10,6 +11,9 @@ import {parseBenchmarkArtifactV1, type BenchmarkArtifactV1} from '@threadnote/ev
 import {enforceCodeGraphBenchmarkBudget} from './benchmark-code-graph.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_BUDGET = 'apps/threadnote/test/evaluation/baselines/code-graph-v1/budgets.json';
 const WINDOWS_REPLICA_FILE = /^code-graph-Windows-X64-replica-([123])\.json$/u;
@@ -114,16 +118,21 @@ export function adjudicateCodeGraphWindowsReplicas(
   const sorted = [...inputs].sort((left, right) => left.replica - right.replica);
   const failures: string[] = [];
   const expectedReplicas = Array.from({length: policy.replicas}, (_, index) => index + 1);
-  if (JSON.stringify(sorted.map(input => input.replica)) !== JSON.stringify(expectedReplicas)) {
-    failures.push(`replica ordinals must be exactly ${expectedReplicas.join(',')}`);
+  if (JSON.stringify(EffectArray.map(sorted, input => input.replica)) !== JSON.stringify(expectedReplicas)) {
+    failures.push(
+      `replica ordinals must be exactly ${EffectArray.join(
+        EffectArray.map(expectedReplicas, item => (item === null || item === undefined ? '' : String(item))),
+        ',',
+      )}`,
+    );
   }
 
-  const parsed = sorted.map(input => ({artifact: parseBenchmarkArtifactV1(input.artifact), input}));
+  const parsed = EffectArray.map(sorted, input => ({artifact: parseBenchmarkArtifactV1(input.artifact), input}));
   for (const {artifact, input} of parsed) {
     assertUniqueMeasurementNames(artifact, `replica ${input.replica}`);
   }
 
-  const observations = parsed.map(({artifact, input}) => {
+  const observations = EffectArray.map(parsed, ({artifact, input}) => {
     const prefix = `replica ${input.replica}`;
     const runnerClass = stringMetadata(artifact, 'runnerClass');
     const runnerIdentity = stringMetadata(artifact, 'runnerIdentity');
@@ -166,7 +175,7 @@ export function adjudicateCodeGraphWindowsReplicas(
       );
     }
     const invariantFailures = nativeReplicaInvariantFailures(artifact);
-    failures.push(...invariantFailures.map(failure => `${prefix} ${failure}`));
+    failures.push(...EffectArray.map(invariantFailures, failure => `${prefix} ${failure}`));
 
     const safetyFailure = performanceBudgetFailure(artifact, safetyBudget);
     const materializationCpuFailures = nestedMaterializationCpuFailures(
@@ -177,8 +186,8 @@ export function adjudicateCodeGraphWindowsReplicas(
     const analysisCpuFailures = wholeGraphAnalysisCpuFailures(wholeGraphAnalysis, wholeGraphAnalysisProcessCpu, policy);
     const ordinaryFailure = performanceBudgetFailure(artifact, budgetInput);
     if (safetyFailure !== undefined) failures.push(`${prefix} safety budget: ${safetyFailure}`);
-    failures.push(...materializationCpuFailures.map(failure => `${prefix} safety budget: ${failure}`));
-    failures.push(...analysisCpuFailures.map(failure => `${prefix} safety budget: ${failure}`));
+    failures.push(...EffectArray.map(materializationCpuFailures, failure => `${prefix} safety budget: ${failure}`));
+    failures.push(...EffectArray.map(analysisCpuFailures, failure => `${prefix} safety budget: ${failure}`));
 
     return {
       artifactSha256: input.artifactSha256,
@@ -211,22 +220,25 @@ export function adjudicateCodeGraphWindowsReplicas(
   });
 
   for (const [label, values] of [
-    ['artifact digests', observations.map(observation => observation.artifactSha256)],
-    ['runner identities', observations.map(observation => observation.runnerIdentity)],
+    ['artifact digests', EffectArray.map(observations, observation => observation.artifactSha256)],
+    ['runner identities', EffectArray.map(observations, observation => observation.runnerIdentity)],
   ] as const) {
     if (new Set(values).size !== policy.replicas) failures.push(`${label} must be distinct across all replicas`);
   }
   for (const [label, values] of [
-    ['commit', sorted.map(input => input.artifact.environment.commit)],
-    ['fixture', sorted.map(input => input.artifact.environment.fixtureHash)],
-    ['runtime', sorted.map(input => input.artifact.environment.node)],
-    ['package manager', sorted.map(input => input.artifact.environment.packageManager)],
-    ['operating system', sorted.map(input => input.artifact.environment.operatingSystem)],
-    ['architecture', sorted.map(input => input.artifact.environment.architecture)],
+    ['commit', EffectArray.map(sorted, input => input.artifact.environment.commit)],
+    ['fixture', EffectArray.map(sorted, input => input.artifact.environment.fixtureHash)],
+    ['runtime', EffectArray.map(sorted, input => input.artifact.environment.node)],
+    ['package manager', EffectArray.map(sorted, input => input.artifact.environment.packageManager)],
+    ['operating system', EffectArray.map(sorted, input => input.artifact.environment.operatingSystem)],
+    ['architecture', EffectArray.map(sorted, input => input.artifact.environment.architecture)],
   ] as const) {
     if (new Set(values).size !== 1) failures.push(`${label} must match across all replicas`);
   }
-  const ordinaryPasses = observations.filter(observation => observation.ordinaryPassed).length;
+  const ordinaryPasses = EffectArray.filter(
+    observations,
+    (observation, __effectArrayIndex) => __effectArrayIndex in observations && observation.ordinaryPassed,
+  ).length;
   if (ordinaryPasses < policy.ordinaryPassesMinimum) {
     failures.push(
       `ordinary performance budget passed ${ordinaryPasses}/${policy.replicas}; required ${policy.ordinaryPassesMinimum}`,
@@ -237,8 +249,7 @@ export function adjudicateCodeGraphWindowsReplicas(
   const first = sorted[0]?.artifact;
   return {
     createdAt:
-      observations
-        .map(observation => observation.createdAt)
+      EffectArray.map(observations, observation => observation.createdAt)
         .sort()
         .at(-1) ?? new Date(0).toISOString(),
     environment: {
@@ -272,7 +283,9 @@ function nativeReplicaInvariantFailures(artifact: BenchmarkArtifactV1): readonly
     'one-file-reindex-index',
     'one-file-reindex-materialization',
   ] as const) {
-    const measurement = artifact.measurements.find(candidate => candidate.name === name);
+    const measurement = EffectOption.getOrUndefined(
+      EffectArray.findFirst(artifact.measurements, candidate => candidate.name === name),
+    );
     if (measurement === undefined) continue;
     if (measurement.unit !== 'milliseconds') failures.push(`${name} measurement must use milliseconds`);
     if (measurement.samples !== 1) failures.push(`${name} samples ${measurement.samples}; expected 1`);
@@ -294,12 +307,15 @@ function nativeReplicaInvariantFailures(artifact: BenchmarkArtifactV1): readonly
     ['primary-query-structural-parity', 1],
     ['structural-graph-digest-parity', 1],
   ] as const) {
-    const measurement = artifact.measurements.find(candidate => candidate.name === name);
+    const measurement = EffectOption.getOrUndefined(
+      EffectArray.findFirst(artifact.measurements, candidate => candidate.name === name),
+    );
     if (
       measurement === undefined ||
       measurement.unit !== 'count' ||
       measurement.samples !== 1 ||
-      [measurement.minimum, measurement.p50, measurement.p95, measurement.p99, measurement.maximum].some(
+      EffectArray.some(
+        [measurement.minimum, measurement.p50, measurement.p95, measurement.p99, measurement.maximum],
         value => value !== expected,
       )
     ) {
@@ -410,8 +426,8 @@ function parseWindowsReplicaPolicy(value: unknown): WindowsReplicaPolicyV1 {
     warmupsPerReplica: 5,
   };
   if (
-    JSON.stringify(Object.keys(policy).sort()) !== JSON.stringify(Object.keys(expected).sort()) ||
-    Object.entries(expected).some(([key, expectedValue]) => policy[key] !== expectedValue)
+    JSON.stringify(EffectRecord.keys(policy).sort()) !== JSON.stringify(EffectRecord.keys(expected).sort()) ||
+    EffectArray.some(EffectRecord.toEntries(expected), ([key, expectedValue]) => policy[key] !== expectedValue)
   ) {
     throw ScriptError.make({message: 'Hosted Windows replica policy does not match the reviewed v1 contract.'});
   }
@@ -470,7 +486,9 @@ function budgetFixtureHash(value: unknown): string {
 }
 
 function requiredMeasurement(artifact: BenchmarkArtifactV1, name: string) {
-  const measurement = artifact.measurements.find(candidate => candidate.name === name);
+  const measurement = EffectOption.getOrUndefined(
+    EffectArray.findFirst(artifact.measurements, candidate => candidate.name === name),
+  );
   if (measurement === undefined) throw ScriptError.make({message: `Replica artifact is missing ${name}.`});
   return measurement;
 }
@@ -484,7 +502,7 @@ function assertUniqueMeasurementNames(artifact: BenchmarkArtifactV1, prefix: str
   }
   if (duplicates.size > 0) {
     throw ScriptError.make({
-      message: `${prefix} measurement names must be unique; duplicates: ${[...duplicates].sort().join(', ')}`,
+      message: `${prefix} measurement names must be unique; duplicates: ${EffectArray.join([...duplicates].sort(), ', ')}`,
     });
   }
 }
@@ -503,7 +521,7 @@ function requiredRecord(value: unknown, label: string): Readonly<Record<string, 
 }
 
 function isUnknownRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function requiredString(value: unknown, label: string): string {
@@ -546,6 +564,7 @@ function parseArguments(args: readonly string[]): AdjudicatorOptions {
 }
 
 function requiredArgument(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
@@ -554,7 +573,10 @@ const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const options = parseArguments(yield* scriptArguments());
-  const names = (yield* fs.readDirectory(options.input)).filter(name => name.endsWith('.json')).sort();
+  const names = EffectArray.filter(
+    yield* fs.readDirectory(options.input),
+    __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+  ).sort();
   const inputs: CodeGraphWindowsReplicaInput[] = [];
   for (const name of names) {
     const match = WINDOWS_REPLICA_FILE.exec(name);
@@ -579,7 +601,7 @@ const program = Effect.gen(function* () {
   yield* atomicWrite(options.output, `${JSON.stringify(result, undefined, 2)}\n`);
   yield* printJson(result);
   if (options.failOnBudget && !result.gate.passed) {
-    return yield* ScriptError.make({message: result.gate.failures.join('\n')});
+    return yield* ScriptError.make({message: EffectArray.join(result.gate.failures, '\n')});
   }
 });
 

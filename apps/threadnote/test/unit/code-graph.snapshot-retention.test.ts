@@ -1,7 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber} from 'effect';
@@ -13,11 +14,18 @@ import {CodeGraphStoreBusyError, type CodeGraphSnapshot, type RepositoryIdentity
 import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 describe('code graph ready snapshot retention', () => {
@@ -36,7 +44,10 @@ describe('code graph ready snapshot retention', () => {
           'graph-v3.sqlite',
         );
         const fixtures = Array.from({length: 64}, (_, index) => {
-          const identity = {...baseIdentity, worktreeId: index.toString(16).padStart(64, '0')};
+          const identity = {
+            ...baseIdentity,
+            worktreeId: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+          };
           return {identity, snapshot: snapshot(identity, `registered-${index}`)};
         });
         const store = yield* CodeGraphStore;
@@ -146,8 +157,8 @@ describe('code graph ready snapshot retention', () => {
         const databasePath = join(root, 'graph-v3.sqlite');
         const identity = {
           ...repositoryIdentity(root),
-          repositoryId: 'b'.repeat(64),
-          worktreeId: 'a'.repeat(64),
+          repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('a', EffectString.repeat(64)),
         };
         const clean = snapshot(identity, 'removed-clean-view', {dirty: false});
         const store = yield* CodeGraphStore;
@@ -442,10 +453,15 @@ describe('code graph ready snapshot retention', () => {
 
     const database = new Database(databasePath, {readonly: true, strict: true});
     try {
-      const columns = database.query("PRAGMA table_info('snapshot_leases')").all() as readonly {
-        readonly name: string;
-      }[];
-      expect(columns.map(column => column.name)).toContain('retire_when_inactive');
+      const columns = database
+        .query<
+          {
+            readonly name: string;
+          },
+          SQLQueryBindings[]
+        >("PRAGMA table_info('snapshot_leases')")
+        .all();
+      expect(EffectArray.map(columns, column => column.name)).toContain('retire_when_inactive');
       expect(database.query('SELECT state FROM snapshots WHERE id = ?').get(superseded.id)).toBeNull();
       expect(database.query('SELECT state FROM snapshots WHERE id = ?').get(current.id)).toEqual({state: 'ready'});
     } finally {
@@ -532,13 +548,13 @@ describe('code graph ready snapshot retention', () => {
   it('returns a typed privacy-safe error when a bounded lease writer wait expires', async () => {
     const home = await mkdtemp('threadnote-ready-retention-writer-busy-');
     temporaryRoots.push(home);
-    const checkoutId = 'c'.repeat(64);
+    const checkoutId = Effect2.pipe('c', EffectString.repeat(64));
     const databasePath = join(home, 'indexes', 'code-graph', 'repositories', checkoutId, 'graph-v3.sqlite');
     const writerLockPath = join(home, 'locks', 'indexes', 'code-graph', 'database-writes', `${checkoutId}.lock`);
     const identity = {
       ...repositoryIdentity(home),
       checkoutId,
-      worktreeId: 'd'.repeat(64),
+      worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
     };
     const ready = snapshot(identity, 'bounded-writer-wait');
 
@@ -748,14 +764,14 @@ function registerReadySnapshots(
 function repositoryIdentity(root: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'snapshot-retention-fixture',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
 }
 
@@ -844,19 +860,27 @@ function readSnapshotSymbolCount(databasePath: string, snapshotId: string): numb
 }
 
 function readSnapshotSymbolCountFromDatabase(database: Database, snapshotId: string): number {
-  return (
-    database.query('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?').get(snapshotId) as {
-      readonly count: number;
-    }
+  return requiredRow(
+    database
+      .query<
+        {
+          readonly count: number;
+        },
+        SQLQueryBindings[]
+      >('SELECT COUNT(*) AS count FROM symbols WHERE snapshot_id = ?')
+      .get(snapshotId),
   ).count;
 }
 
 function readSnapshotLeaseTokens(databasePath: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return (
-      database.query('SELECT token FROM snapshot_leases ORDER BY token').all() as readonly {readonly token: string}[]
-    ).map(row => row.token);
+    return EffectArray.map(
+      database
+        .query<{readonly token: string}, SQLQueryBindings[]>('SELECT token FROM snapshot_leases ORDER BY token')
+        .all(),
+      row => row.token,
+    );
   } finally {
     database.close(false);
   }
@@ -927,11 +951,17 @@ function dropLeaseRetirementColumn(databasePath: string): void {
 }
 
 function leaseColumns(database: Database): readonly string[] {
-  return (
-    database.query("PRAGMA table_info('snapshot_leases')").all() as readonly {
-      readonly name: string;
-    }[]
-  ).map(column => column.name);
+  return EffectArray.map(
+    database
+      .query<
+        {
+          readonly name: string;
+        },
+        SQLQueryBindings[]
+      >("PRAGMA table_info('snapshot_leases')")
+      .all(),
+    column => column.name,
+  );
 }
 
 function readLeaseRetirementFlag(databasePath: string, token: string): number | undefined {
@@ -951,8 +981,11 @@ function readLeaseExpiration(databasePath: string, token: string): number | unde
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return (
-      database.query('SELECT expires_at FROM snapshot_leases WHERE token = ?').get(token) as
-        {readonly expires_at: number} | undefined
+      database
+        .query<{readonly expires_at: number}, SQLQueryBindings[]>(
+          'SELECT expires_at FROM snapshot_leases WHERE token = ?',
+        )
+        .get(token) ?? undefined
     )?.expires_at;
   } finally {
     database.close(false);
@@ -963,7 +996,9 @@ function readSnapshotState(databasePath: string, snapshotId: string): string | u
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return (
-      database.query('SELECT state FROM snapshots WHERE id = ?').get(snapshotId) as {readonly state: string} | undefined
+      database
+        .query<{readonly state: string}, SQLQueryBindings[]>('SELECT state FROM snapshots WHERE id = ?')
+        .get(snapshotId) ?? undefined
     )?.state;
   } finally {
     database.close(false);

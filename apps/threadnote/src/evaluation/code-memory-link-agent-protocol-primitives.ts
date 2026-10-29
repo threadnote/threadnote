@@ -1,8 +1,19 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type CanonicalJsonValue =
   boolean | null | number | string | readonly CanonicalJsonValue[] | {readonly [key: string]: CanonicalJsonValue};
+
+/** Narrows an already-normalized JSON value to its plain object variant. */
+export function isCanonicalJsonRecord(
+  value: CanonicalJsonValue,
+): value is Readonly<Record<string, CanonicalJsonValue>> {
+  return value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
+}
 
 const HASH = /^[0-9a-f]{64}$/u;
 const MAXIMUM_TEXT_BYTES = 1_024 * 1_024;
@@ -15,17 +26,19 @@ export function normalizeJsonValue(value: unknown, label: string, depth = 0): Ca
     if (!Number.isFinite(value)) invalid(`${label} contains a non-finite number`);
     return value;
   }
-  if (Array.isArray(value)) {
+  if (EffectArray.isArray(value)) {
     if (value.length > 10_000) invalid(`${label} array is too large`);
-    return value.map(entry => normalizeJsonValue(entry, label, depth + 1));
+    return EffectArray.map(value, entry => normalizeJsonValue(entry, label, depth + 1));
   }
   if (!isPlainRecord(value)) {
     invalid(`${label} must contain only JSON values`);
   }
   const object = value;
-  const keys = Object.keys(object).sort(compareStrings);
+  const keys = EffectRecord.keys(object).sort(compareStrings);
   if (keys.length > 10_000) invalid(`${label} object is too large`);
-  return Object.fromEntries(keys.map(key => [key, normalizeJsonValue(object[key], label, depth + 1)]));
+  return EffectRecord.fromEntries(
+    EffectArray.map(keys, key => [key, normalizeJsonValue(object[key], label, depth + 1)]),
+  );
 }
 
 export function validateCodeMemoryLinkThreadSettingsUpdateV1(value: unknown, threadId: string): void {
@@ -38,7 +51,7 @@ export function validateCodeMemoryLinkThreadSettingsUpdateV1(value: unknown, thr
     settings.approvalsReviewer !== 'user' ||
     settings.activePermissionProfile !== null ||
     sandbox.type !== 'workspaceWrite' ||
-    !Array.isArray(sandbox.writableRoots) ||
+    !EffectArray.isArray(sandbox.writableRoots) ||
     sandbox.writableRoots.length !== 0 ||
     sandbox.networkAccess !== false ||
     sandbox.excludeTmpdirEnvVar !== true ||
@@ -73,13 +86,18 @@ export function assertSyntheticText(value: string, label: string): void {
   }
 }
 
+const isCanonicalJsonArray = (value: CanonicalJsonValue): value is readonly CanonicalJsonValue[] =>
+  EffectArray.isArray(value);
+
 export function assertSyntheticJsonValue(value: CanonicalJsonValue, label: string): void {
   if (typeof value === 'string') {
     if (!/^[A-Za-z0-9_.:-]{0,256}$/u.test(value)) invalid(`${label} contains non-synthetic text`);
     return;
   }
   if (value === null || typeof value === 'boolean' || typeof value === 'number') return;
-  if (Array.isArray(value)) return void value.forEach(entry => assertSyntheticJsonValue(entry, label));
+  if (isCanonicalJsonArray(value))
+    return void EffectArray.forEach(value, entry => assertSyntheticJsonValue(entry, label));
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   for (const [key, entry] of Object.entries(value)) {
     if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/u.test(key)) invalid(`${label} contains a non-synthetic key`);
     assertSyntheticJsonValue(entry, label);
@@ -106,10 +124,10 @@ export function normalizeContextBriefProxyRequest(value: unknown, prompt: string
   if (request.task !== prompt) invalid('Context Brief proxy request must use the exact sealed task prompt');
   let codeRefs: readonly string[] | undefined;
   if (request.codeRefs !== undefined) {
-    if (!Array.isArray(request.codeRefs) || request.codeRefs.length > 8) {
+    if (!EffectArray.isArray(request.codeRefs) || request.codeRefs.length > 8) {
       invalid('Context Brief proxy codeRefs must be an array with at most eight values');
     }
-    codeRefs = request.codeRefs.map((entry, index) =>
+    codeRefs = EffectArray.map(request.codeRefs, (entry, index) =>
       boundedText(entry, `Context Brief proxy codeRefs[${index}]`, 4_096),
     );
     unique(codeRefs, 'Context Brief proxy codeRefs');
@@ -135,10 +153,10 @@ export function normalizeContextBriefProxyRequest(value: unknown, prompt: string
 }
 
 export function hashArray(value: unknown, label: string, maximum: number): readonly string[] {
-  if (!Array.isArray(value) || value.length > maximum) {
+  if (!EffectArray.isArray(value) || value.length > maximum) {
     invalid(`${label} must be an array with at most ${maximum} entries`);
   }
-  const hashes = value.map((entry, index) => matchingHash(entry, `${label} ${index + 1}`));
+  const hashes = EffectArray.map(value, (entry, index) => matchingHash(entry, `${label} ${index + 1}`));
   canonicalUnique(hashes, label);
   return hashes;
 }
@@ -148,8 +166,8 @@ export function literalArray<const T extends readonly string[]>(
   allowed: T,
   label: string,
 ): readonly T[number][] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
-  const entries = value.map(entry => literal(entry, allowed, label));
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
+  const entries = EffectArray.map(value, entry => literal(entry, allowed, label));
   canonicalUnique(entries, label);
   return entries;
 }
@@ -169,9 +187,9 @@ export function matchingText(value: unknown, pattern: RegExp, label: string): st
 
 export function boundedText(value: unknown, label: string, maximumBytes: number, normalize = true): string {
   if (typeof value !== 'string') invalid(`${label} must be a string`);
-  const text = normalize ? value.normalize('NFKC').trim() : value;
+  const text = normalize ? Effect.pipe(value, EffectString.normalize('NFKC'), EffectString.trim) : value;
   if (
-    !text.trim() ||
+    !Effect.pipe(text, EffectString.trim) ||
     UTF8.encode(text).byteLength > Math.min(maximumBytes, MAXIMUM_TEXT_BYTES) ||
     containsUnsupportedControl(text)
   ) {
@@ -214,14 +232,14 @@ export function boolean(value: unknown, label: string): boolean {
 
 export function literal<const T extends readonly string[]>(value: unknown, allowed: T, label: string): T[number] {
   if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
-    invalid(`${label} must be one of ${allowed.join(', ')}`);
+    invalid(`${label} must be one of ${EffectArray.join(allowed, ', ')}`);
   }
   return value;
 }
 
 export function canonicalUnique(values: readonly string[], label: string): void {
   unique(values, label);
-  if (values.some((value, index) => index > 0 && value <= values[index - 1])) {
+  if (EffectArray.some(values, (value, index) => index > 0 && value <= values[index - 1])) {
     invalid(`${label} must use canonical ascending order`);
   }
 }
@@ -231,9 +249,9 @@ export function unique(values: readonly string[], label: string): void {
 }
 
 export function uniqueMap<T>(values: readonly T[], key: (value: T) => string, label: string): ReadonlyMap<string, T> {
-  const entries = values.map(value => [key(value), value] as const);
+  const entries = EffectArray.map(values, value => [key(value), value] as const);
   unique(
-    entries.map(([entryKey]) => entryKey),
+    EffectArray.map(entries, ([entryKey]) => entryKey),
     label,
   );
   return new Map(entries);
@@ -254,14 +272,14 @@ export function exactKeys(
   label: string,
   optional = false,
 ): void {
-  const actual = Object.keys(value).sort(compareStrings);
+  const actual = EffectRecord.keys(value).sort(compareStrings);
   const expected = [...keys].sort(compareStrings);
   if (optional) {
-    const unexpected = actual.filter(key => !expected.includes(key));
+    const unexpected = EffectArray.filter(actual, key => !expected.includes(key));
     if (unexpected.length > 0) invalid(`${label} has unsupported field ${unexpected[0]}`);
     return;
   }
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -291,8 +309,13 @@ export function invalid(message: string): never {
 }
 
 function containsUnsupportedControl(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31) || code === 127;
   });
 }

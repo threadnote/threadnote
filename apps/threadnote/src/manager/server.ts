@@ -1,3 +1,7 @@
+import {shareSummaries} from './share_summaries.js';
+import {parseDoctorChecksFromOutput} from './doctor_output.js';
+export {parseDoctorChecksFromOutput} from './doctor_output.js';
+import {Array as EffectArray} from 'effect';
 import {ManagerReviewVerificationScope, ManagerReviewSourceReadiness} from './review_actionability.js';
 import {startAutomaticModelSetupScheduler} from '../models/setup_lifecycle.js';
 import {MANAGER_STATIC_FILES as STATIC_FILES} from './static-files.js';
@@ -104,7 +108,6 @@ import {
   isInSharedNamespace,
   parentUri,
   publishShareGitChange,
-  readTeamsFile,
   resolveTeam,
   sharedTeamNameForUri,
   resourceUriToWorktreeRelative,
@@ -179,13 +182,17 @@ import {
   managerGraphVisualization,
   managerGraphViewsPage,
 } from '@threadnote/graph/visualization';
-import type {ConsolidationAgent, DoctorCheck, ManageOptions} from '../types.js';
+import type {ConsolidationAgent, ManageOptions} from '../types.js';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {assertResourceUri, findExecutable, runCommand, safeTimestamp, sha256} from '../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {isRawMemoryDocument} from '../memory/parse.js';
+
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 interface ManagerDirectoryEntry {
   readonly name: string;
   readonly isDirectory: () => boolean;
@@ -287,21 +294,21 @@ interface ApiContext {
   readonly token: string;
 }
 
-class ManagerGraphViewActionBusyError extends Schema.TaggedError<ManagerGraphViewActionBusyError>()(
-  'ManagerGraphViewActionBusyError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class ManagerGraphViewActionBusyError extends Schema.TaggedError<
+  ManagerGraphViewActionBusyError,
+  {readonly brand: unique symbol}
+>()('ManagerGraphViewActionBusyError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
-class ManagerGraphViewActionError extends Schema.TaggedError<ManagerGraphViewActionError>()(
-  'ManagerGraphViewActionError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class ManagerGraphViewActionError extends Schema.TaggedError<
+  ManagerGraphViewActionError,
+  {readonly brand: unique symbol}
+>()('ManagerGraphViewActionError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 type ManagerRequest = ManagerHttpRequest;
 
@@ -461,18 +468,23 @@ export const readManagedMemory = Effect.fn('manager.readManagedMemory')(function
     return yield* ManagerOperationError.make({message: `Manager requires regular memory files: ${canonicalUri}`});
   const content = yield* readFile(path, 'utf8');
   yield* verifyResolvedMemoryIdentity(resolved, canonicalUri, content);
-  const relativePath = (yield* pathRelative(yield* localMemoriesRoot(config), path))
-    .split(yield* pathSeparator)
-    .join('/');
+  const relativePath = EffectArray.join(
+    (yield* pathRelative(yield* localMemoriesRoot(config), path))
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+      .split(yield* pathSeparator),
+    '/',
+  );
   const record = parseMemoryDocument(canonicalUri, content);
   return {
     content,
     node: {
       isDir: false,
       isShared: isInSharedNamespace(config, canonicalUri),
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
       isSystem: SYSTEM_MEMORY_NAMES.has(path.split(yield* pathSeparator).at(-1) ?? ''),
       metadata: record?.metadata,
       modTime: pathStat.mtime.toISOString(),
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
       name: path.split(yield* pathSeparator).at(-1) ?? canonicalUri,
       relativePath,
       sharedTeam: sharedTeamNameForUri(config, canonicalUri),
@@ -538,7 +550,7 @@ function handleRequestEffect(context: ApiContext, request: ManagerRequest, respo
       if (agent !== 'codex' && agent !== 'claude' && agent !== 'local-ai' && agent !== 'effect-ai')
         return yield* ConsolidationModelsError.make({message: 'Choose a supported agent to load model choices.'});
       const models = yield* availableConsolidationModels(context.config, agent);
-      writeJson(response, 200, {models: models.map(({id, label, isDefault}) => ({id, label, isDefault}))});
+      writeJson(response, 200, {models: EffectArray.map(models, ({id, label, isDefault}) => ({id, label, isDefault}))});
     });
   } else if (request.method === 'POST' && url.pathname === '/api/consolidations') {
     requestEffect = Effect.gen(function* () {
@@ -573,7 +585,7 @@ function handleRequestEffect(context: ApiContext, request: ManagerRequest, respo
           writeJson(response, 409, {code: 'graph-view-stale', error: error.message, retryAfterMilliseconds: 0});
           return;
         }
-        if (error instanceof ManagerMemoryRelationsError)
+        if (Schema.is(ManagerMemoryRelationsError)(error))
           return writeJson(response, error.status, {code: error.code, error: error.message, retryAfterMilliseconds: 0});
         if (Schema.is(graphProjects.ManagerGraphProjectActionError)(error))
           return writeJson(response, 409, {code: error.code, error: error.message, retryAfterMilliseconds: 0});
@@ -810,8 +822,8 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
     });
     return;
   }
-  if (request.method === 'GET' && url.pathname.startsWith('/api/consolidations/')) {
-    const id = url.pathname.split('/').at(-1) ?? '';
+  if (request.method === 'GET' && Effect2.pipe(url.pathname, EffectString.startsWith('/api/consolidations/'))) {
+    const id = Effect2.pipe(url.pathname, EffectString.split('/')).at(-1) ?? '';
     const job = context.jobs.get(id);
     writeJson(response, job ? 200 : 404, job ? {job} : {error: 'Consolidation job not found'});
     return;
@@ -1048,9 +1060,12 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
       );
       return;
     default:
-      if (url.pathname.startsWith('/api/consolidations/') && url.pathname.endsWith('/apply')) {
+      if (
+        Effect2.pipe(url.pathname, EffectString.startsWith('/api/consolidations/')) &&
+        Effect2.pipe(url.pathname, EffectString.endsWith('/apply'))
+      ) {
         requireConfirm(body);
-        const id = url.pathname.split('/').at(-2) ?? '';
+        const id = Effect2.pipe(url.pathname, EffectString.split('/')).at(-2) ?? '';
         writeJson(response, 200, yield* applyConsolidation(context.config, context.jobs, id, body, context.runEffect));
         return;
       }
@@ -1084,7 +1099,9 @@ const readTree: (
 ) => Effect.Effect<ManagerTreeNode, unknown, FileSystem.FileSystem | Path.Path> = Effect.fn('manager.readTree')(
   function* (config: RuntimeConfig, path: string, uri: string, relativePath: string, options: ReadTreeOptions = {}) {
     const pathStat = yield* lstat(path);
-    const name = relativePath ? (relativePath.split('/').at(-1) ?? relativePath) : (options.rootName ?? 'memories');
+    const name = relativePath
+      ? (Effect2.pipe(relativePath, EffectString.split('/')).at(-1) ?? relativePath)
+      : (options.rootName ?? 'memories');
     const isDir = pathStat.isDirectory();
     if (!isDir) {
       if (!pathStat.isFile()) {
@@ -1109,13 +1126,17 @@ const readTree: (
     }
     const entries = yield* readdir(path, {withFileTypes: true});
     const children = yield* Effect.forEach(
-      entries
-        .filter(entry => entry.isDirectory() || entry.isFile())
-        .filter(entry => !options.externalContentOnly || externalResourceTree.entryVisible(relativePath, entry))
-        .sort(
-          (left, right) =>
-            Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name),
+      EffectArray.filter(
+        EffectArray.filter(
+          entries,
+          (entry, __effectArrayIndex) => __effectArrayIndex in entries && (entry.isDirectory() || entry.isFile()),
         ),
+        entry => !options.externalContentOnly || externalResourceTree.entryVisible(relativePath, entry),
+      ).sort(
+        (left, right) =>
+          Number(right.isDirectory()) - Number(left.isDirectory()) ||
+          Effect2.pipe(left.name, EffectString.localeCompare(right.name)),
+      ),
       Effect.fn('manager.readTreeChild')(function* (entry) {
         const childRelative = relativePath ? `${relativePath}/${entry.name}` : entry.name;
         return yield* readTree(
@@ -1128,7 +1149,7 @@ const readTree: (
       }),
     );
     return {
-      children: options.externalContentOnly ? children.filter(externalResourceTree.nodeVisible) : children,
+      children: options.externalContentOnly ? EffectArray.filter(children, externalResourceTree.nodeVisible) : children,
       isDir: true,
       isShared: isInSharedNamespace(config, uri),
       isSystem: SYSTEM_MEMORY_NAMES.has(name),
@@ -1297,7 +1318,7 @@ const moveMemory = Effect.fn('manager.moveMemory')(function* (
     }
     const published = publishExit.value;
     return {
-      output: [saved.output, published.output].filter(Boolean).join('\n'),
+      output: EffectArray.join(EffectArray.filter([saved.output, published.output], Boolean), '\n'),
       targetUri: sharedMemoryUriFor(config, targetTeam, metadata),
     };
   }
@@ -1315,7 +1336,10 @@ const moveMemory = Effect.fn('manager.moveMemory')(function* (
         ),
       runEffect,
     );
-    return {output: [saved.output, removed.output].filter(Boolean).join('\n'), targetUri: personalTargetUri};
+    return {
+      output: EffectArray.join(EffectArray.filter([saved.output, removed.output], Boolean), '\n'),
+      targetUri: personalTargetUri,
+    };
   }
   const output = yield* runCaptured(
     () => storeManagerPersonalMemoryMove(config, sourceUri, source.content, metadata, true),
@@ -1344,7 +1368,12 @@ const removeManagedFolder = Effect.fn('manager.removeManagedFolder')(function* (
     throw ManagerOperationError.make({message: `Not a folder: ${uri}`});
   }
   const relativePath = yield* pathRelative(yield* localMemoriesRoot(config), path);
-  if (!relativePath || relativePath.startsWith('..') || relativePath.split(yield* pathSeparator).includes('..')) {
+  if (
+    !relativePath ||
+    Effect2.pipe(relativePath, EffectString.startsWith('..')) ||
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+    relativePath.split(yield* pathSeparator).includes('..')
+  ) {
     throw ManagerOperationError.make({message: 'Refusing to remove a folder outside the memories tree.'});
   }
   const fileUris = yield* fileUrisUnderFolder(config, path);
@@ -1364,7 +1393,7 @@ const fileUrisUnderFolder: (
 )(function* (config: RuntimeConfig, folderPath: string) {
   const entries = yield* readdir(folderPath, {withFileTypes: true});
   const uris: string[] = [];
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+  for (const entry of entries.sort((left, right) => Effect2.pipe(left.name, EffectString.localeCompare(right.name)))) {
     const path = yield* pathJoin(folderPath, entry.name);
     if (entry.isDirectory()) {
       uris.push(...(yield* fileUrisUnderFolder(config, path)));
@@ -1436,13 +1465,10 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
       input.agent === 'local-ai' ||
       input.agent === 'effect-ai'
     ) {
-      yield* Effect.try({
-        try: () => {
-          if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 256)
-            throw ConsolidationModelsError.make({message: 'Choose a model before generating a consolidation draft.'});
-        },
-        catch: cause => cause as ConsolidationModelsError,
-      });
+      if (typeof body.model !== 'string' || !Effect2.pipe(body.model, EffectString.trim) || body.model.length > 256)
+        return yield* ConsolidationModelsError.make({
+          message: 'Choose a model before generating a consolidation draft.',
+        });
       const models = yield* availableConsolidationModels(context.config, input.agent);
       if (input.agent === 'local-ai' && models.length === 0)
         return yield* ConsolidationModelsError.make({
@@ -1450,7 +1476,10 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
         });
       selectedModel = yield* Effect.try({
         try: () => selectConsolidationModel(body.model, models),
-        catch: cause => cause as ConsolidationModelsError,
+        catch: cause =>
+          Schema.is(ConsolidationModelsError)(cause)
+            ? cause
+            : ConsolidationModelsError.make({message: errorMessage(cause)}),
       });
     }
     const job: ConsolidationJob = {
@@ -1466,10 +1495,13 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
     yield* Effect.gen(function* () {
       const sources = yield* Effect.forEach(input.sourceUris, uri => readManagedMemory(context.config, uri));
       job.sources = yield* Effect.try({
-        try: () => sources.map(source => captureConsolidationSource({uri: source.node.uri, content: source.content})),
+        try: () =>
+          EffectArray.map(sources, source =>
+            captureConsolidationSource({uri: source.node.uri, content: source.content}),
+          ),
         catch: managerOperationError,
       });
-      if (new Set(job.sources.map(source => source.uri)).size !== job.sources.length)
+      if (new Set(EffectArray.map(job.sources, source => source.uri)).size !== job.sources.length)
         return yield* ManagerOperationError.make({message: 'Select distinct source memories.'});
       job.draft = yield* runSelectedDraft(
         context.config,
@@ -1505,42 +1537,21 @@ const applyConsolidation = Effect.fn('manager.applyConsolidation')(function* (
 });
 
 function consolidationPrompt(sources: readonly {readonly content: string; readonly node: ManagerTreeNode}[]): string {
-  return [
-    'Consolidate these Threadnote memories into one concise memory.',
-    'Return only the replacement memory body in Markdown. Do not include frontmatter.',
-    'Preserve important facts, current status, decisions, blockers, and source threadnote:// URIs.',
-    '',
-    ...sources.flatMap(source => [`--- SOURCE ${source.node.uri} ---`, source.content.trim(), '']),
-  ].join('\n');
-}
-
-const shareSummaries = Effect.fn('manager.shareSummaries')(function* (config: RuntimeConfig) {
-  const teamsFile = yield* readTeamsFile(config);
-  const git = yield* findExecutable(['git']);
-  const entries = yield* Effect.forEach(
-    Object.values(teamsFile.teams),
-    Effect.fn('manager.callback')(function* (team) {
-      if (!git) {
-        return {...team, default: teamsFile.defaultTeam === team.name, warning: 'git not found'};
-      }
-      const status = yield* runCommand(git, ['-C', team.worktree, 'status', '--short', '--branch'], {
-        allowFailure: true,
-      });
-      const ahead = yield* gitCount(git, team.worktree, '@{u}..HEAD');
-      const behind = yield* gitCount(git, team.worktree, 'HEAD..@{u}');
-      return {
-        ...team,
-        ahead,
-        behind,
-        default: teamsFile.defaultTeam === team.name,
-        dirty: status.stdout.split('\n').some(line => line.trim().length > 0 && !line.startsWith('##')),
-        status: status.stdout.trim(),
-        warning: status.exitCode === 0 ? undefined : status.stderr.trim() || status.stdout.trim(),
-      };
-    }),
+  return EffectArray.join(
+    [
+      'Consolidate these Threadnote memories into one concise memory.',
+      'Return only the replacement memory body in Markdown. Do not include frontmatter.',
+      'Preserve important facts, current status, decisions, blockers, and source threadnote:// URIs.',
+      '',
+      ...EffectArray.flatMap(sources, (source, effectFlatMapIndex) =>
+        effectFlatMapIndex in sources
+          ? [`--- SOURCE ${source.node.uri} ---`, Effect2.pipe(source.content, EffectString.trim), '']
+          : [],
+      ),
+    ],
+    '\n',
   );
-  return entries.sort((left, right) => left.name.localeCompare(right.name));
-});
+}
 
 const collectManagerDoctorChecks = Effect.fn('manager.collectManagerDoctorChecks')(function* (config: RuntimeConfig) {
   const threadnote = yield* findExecutable(['threadnote']);
@@ -1552,41 +1563,11 @@ const collectManagerDoctorChecks = Effect.fn('manager.collectManagerDoctorChecks
     ['--home', config.agentContextHome, '--manifest', config.manifestPath, 'doctor'],
     {allowFailure: true, maxOutputBytes: 1024 * 1024},
   );
-  const checks = parseDoctorChecksFromOutput([result.stdout, result.stderr].filter(Boolean).join('\n'));
+  const checks = parseDoctorChecksFromOutput(
+    EffectArray.join(EffectArray.filter([result.stdout, result.stderr], Boolean), '\n'),
+  );
   return checks.length > 0 ? checks : collectDoctorChecks(config, {});
 });
-
-export function parseDoctorChecksFromOutput(output: string): readonly DoctorCheck[] {
-  const ansiEscape = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
-  return output
-    .split(/\r?\n/)
-    .map(line => line.replace(ansiEscape, '').trim())
-    .map(line => /^(OK|WARN|FAIL)\s+([^:]+):\s*(.*)$/.exec(line))
-    .filter((match): match is RegExpExecArray => match !== null)
-    .map(match => ({
-      detail: match[3] ?? '',
-      name: match[2] ?? '',
-      status: doctorStatus(match[1] ?? ''),
-    }));
-}
-
-const gitCount = Effect.fn('manager.gitCount')(function* (git: string, worktree: string, range: string) {
-  const result = yield* runCommand(git, ['-C', worktree, 'rev-list', '--count', range], {allowFailure: true});
-  if (result.exitCode !== 0) {
-    return undefined;
-  }
-  return Number.parseInt(result.stdout.trim(), 10) || 0;
-});
-
-function doctorStatus(value: string): DoctorCheck['status'] {
-  if (value === 'OK') {
-    return 'ok';
-  }
-  if (value === 'FAIL') {
-    return 'fail';
-  }
-  return 'warn';
-}
 
 const runCaptured = Effect.fn('manager.runCaptured')(function* (
   action: () => ManagerOperation<void>,
@@ -1701,10 +1682,13 @@ const runManagerGraphAction = Effect.fn('manager.runGraphAction')(function* (
           expectedSnapshotId,
           actionEffect,
         );
-    const warningOutput = applied.warnings.map(warning => `Warning [${warning.code}]: ${warning.message}`);
+    const warningOutput = EffectArray.map(applied.warnings, warning => `Warning [${warning.code}]: ${warning.message}`);
     return {
       approvalDigest,
-      output: [renderCodeGraphViewRemovalResult(applied.result), ...warningOutput].filter(Boolean).join('\n'),
+      output: EffectArray.join(
+        EffectArray.filter([renderCodeGraphViewRemovalResult(applied.result), ...warningOutput], Boolean),
+        '\n',
+      ),
       result: applied.result,
       warnings: applied.warnings,
     };
@@ -1868,7 +1852,7 @@ const memoryUriFor = Effect.fn('manager.memoryUriFor')(function* (
   const filename =
     metadata.status === 'active' && metadata.kind !== 'smoke'
       ? `${uriSegment(metadata.topic)}.md`
-      : `threadnote-${safeTimestamp()}-${(yield* sha256(JSON.stringify(metadata))).slice(0, 12)}.md`;
+      : `threadnote-${safeTimestamp()}-${Effect2.pipe(yield* sha256(JSON.stringify(metadata)), EffectString.slice(0, 12))}.md`;
   return `${memoryDirectoryUri(config, metadata.kind, metadata.status, project)}/${filename}`;
 });
 
@@ -1923,12 +1907,12 @@ const localPathForMemoryUri = Effect.fn('manager.localPathForMemoryUri')(functio
   uri: string,
 ) {
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories`;
-  if (uri !== prefix && !uri.startsWith(`${prefix}/`)) {
+  if (uri !== prefix && !Effect2.pipe(uri, EffectString.startsWith(`${prefix}/`))) {
     return undefined;
   }
-  const relativePath = uri === prefix ? '' : uri.slice(prefix.length + 1);
-  const segments = relativePath.split('/').filter(Boolean);
-  if (segments.some(segment => segment === '.' || segment === '..')) {
+  const relativePath = uri === prefix ? '' : Effect2.pipe(uri, EffectString.slice(prefix.length + 1));
+  const segments = EffectArray.filter(Effect2.pipe(relativePath, EffectString.split('/')), Boolean);
+  if (EffectArray.some(segments, segment => segment === '.' || segment === '..')) {
     return undefined;
   }
   return yield* pathJoin(yield* localMemoriesRoot(config), ...segments);
@@ -1936,10 +1920,16 @@ const localPathForMemoryUri = Effect.fn('manager.localPathForMemoryUri')(functio
 
 const localPathToMemoryUri = Effect.fn('manager.localPathToMemoryUri')(function* (config: RuntimeConfig, path: string) {
   const relativePath = yield* pathRelative(yield* localMemoriesRoot(config), path);
-  if (!relativePath || relativePath.startsWith('..') || relativePath.split(yield* pathSeparator).includes('..')) {
+  if (
+    !relativePath ||
+    Effect2.pipe(relativePath, EffectString.startsWith('..')) ||
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+    relativePath.split(yield* pathSeparator).includes('..')
+  ) {
     throw ManagerOperationError.make({message: `Path is outside the memories tree: ${path}`});
   }
-  return `threadnote://user/${uriSegment(config.user)}/memories/${relativePath.split(yield* pathSeparator).join('/')}`;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+  return `threadnote://user/${uriSegment(config.user)}/memories/${EffectArray.join(relativePath.split(yield* pathSeparator), '/')}`;
 });
 
 const ensurePersonalDirectoryChain = Effect.fn('manager.ensurePersonalDirectoryChain')(function* (
@@ -1949,10 +1939,15 @@ const ensurePersonalDirectoryChain = Effect.fn('manager.ensurePersonalDirectoryC
 ) {
   const store = yield* ResourceStore;
   const prefix = 'threadnote://';
-  const parts = directoryUri.startsWith(prefix) ? directoryUri.slice(prefix.length).split('/').filter(Boolean) : [];
+  const parts = Effect2.pipe(directoryUri, EffectString.startsWith(prefix))
+    ? EffectArray.filter(
+        Effect2.pipe(directoryUri, EffectString.slice(prefix.length), EffectString.split('/')),
+        Boolean,
+      )
+    : [];
   const startIndex = parts[0] === 'user' && parts.length > 2 ? 3 : 1;
   for (let index = startIndex; index <= parts.length; index += 1) {
-    const uri = `${prefix}${parts.slice(0, index).join('/')}`;
+    const uri = `${prefix}${EffectArray.join(parts.slice(0, index), '/')}`;
     yield* store.makeDirectory({account: config.account, home: config.agentContextHome, user: config.user}, uri);
   }
 });
@@ -1972,7 +1967,11 @@ function isAuthorized(context: ApiContext, request: ManagerRequest): boolean {
 }
 
 function isGraphApiPath(pathname: string): boolean {
-  return pathname === '/api/graph' || pathname.startsWith('/api/graph/') || pathname.startsWith('/api/graphs');
+  return (
+    pathname === '/api/graph' ||
+    Effect2.pipe(pathname, EffectString.startsWith('/api/graph/')) ||
+    Effect2.pipe(pathname, EffectString.startsWith('/api/graphs'))
+  );
 }
 
 const SYSTEM_MEMORY_NAMES = new Set(['.abstract.md', '.overview.md', '.git', '.gitignore']);

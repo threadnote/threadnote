@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Path} from 'effect';
 import {codeGraphCheckpointAbiInputV1} from '../../checkpoint/compatibility.js';
 import {codeGraphCheckpointAbiDigestV1} from '../../checkpoint/pack.js';
@@ -22,6 +23,9 @@ import {
   SIGNED_CANDIDATE_PAGE_MAXIMUM_ITEMS,
   type SignedCandidateJournalSpec,
 } from './candidate_journal.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const BATCH = /^[0-9a-f]{40}$/u;
@@ -91,7 +95,10 @@ export const persistGraphSharePendingSignedCandidates = Effect.fn('codeGraph.sha
     readonly threadnoteHome: string;
   }) {
     if (input.candidates.length === 0) return {queued: 0};
-    if (!SHA256_HEX.test(input.repositoryId) || input.candidates.some(candidate => !validPending(candidate)))
+    if (
+      !SHA256_HEX.test(input.repositoryId) ||
+      EffectArray.some(input.candidates, candidate => !validPending(candidate))
+    )
       return yield* graphSharingFailure('Pending signed candidate evidence is invalid.');
     const path = yield* Path.Path;
     return yield* appendSignedCandidateJournal({
@@ -102,6 +109,11 @@ export const persistGraphSharePendingSignedCandidates = Effect.fn('codeGraph.sha
   },
 );
 
+export type GraphShareSignedCandidateStore = Pick<
+  CodeGraphStoreShape,
+  'effectiveSnapshotFilesByPaths' | 'loadCachedFacts' | 'snapshotPackProvenance'
+>;
+
 /** Replays durable pending work after any clean ready result, even when this attempt parsed no files. */
 export const finalizeGraphShareSignedCandidates = Effect.fn('codeGraph.sharing.finalizeSignedCandidates')(
   function* (input: {
@@ -109,7 +121,7 @@ export const finalizeGraphShareSignedCandidates = Effect.fn('codeGraph.sharing.f
     readonly repositoryId: string;
     readonly skippedFiles: number;
     readonly snapshot: CodeGraphSnapshot;
-    readonly store: CodeGraphStoreShape;
+    readonly store: GraphShareSignedCandidateStore;
     readonly threadnoteHome: string;
   }) {
     const snapshot = input.snapshot;
@@ -133,7 +145,7 @@ export const finalizeGraphShareSignedCandidates = Effect.fn('codeGraph.sharing.f
     const state = yield* resolveGraphShareRepositoryClient(input.threadnoteHome, trust);
     if (state.contributionMode === 'off') return {examined: 0, queued: 0, verified: 0};
     const graphAbi = codeGraphCheckpointAbiDigestV1(codeGraphCheckpointAbiInputV1(provenance)).digest;
-    const cacheIdentities = new Set(provenance.map(pack => pack.cacheIdentity));
+    const cacheIdentities = new Set(EffectArray.map(provenance, pack => pack.cacheIdentity));
     let examined = 0;
     let queued = 0;
     let verifiedCount = 0;
@@ -141,10 +153,13 @@ export const finalizeGraphShareSignedCandidates = Effect.fn('codeGraph.sharing.f
       const page = yield* readSignedCandidateJournalPage({id, manifestPath: pendingPath, spec: pendingJournalSpec});
       if (page === undefined) continue;
       examined += page.candidates.length;
-      const relevant = page.candidates.filter(
-        candidate =>
+      const candidates = page.candidates;
+      const relevant = EffectArray.filter(
+        candidates,
+        (candidate, __effectArrayIndex) =>
+          __effectArrayIndex in candidates &&
           candidate.sourceCommit === snapshot.commit &&
-          candidate.batchId === candidate.sourceCommit.slice(0, 40) &&
+          candidate.batchId === Effect2.pipe(candidate.sourceCommit, EffectString.slice(0, 40)) &&
           candidate.profileDigest === trust.profileDigest &&
           candidate.organization === trust.organization &&
           candidate.casRoot === state.casRoot &&
@@ -163,7 +178,7 @@ export const finalizeGraphShareSignedCandidates = Effect.fn('codeGraph.sharing.f
         if (result !== undefined) parsed.push({candidate, result});
       }
       if (parsed.length === 0) continue;
-      const uniquePaths = [...new Set(parsed.map(item => item.result.normalizedPath))];
+      const uniquePaths = [...new Set(EffectArray.map(parsed, item => item.result.normalizedPath))];
       const snapshotFiles = new Map<string, CodeGraphInventoryFile>();
       for (let offset = 0; offset < uniquePaths.length; offset += SNAPSHOT_PATH_BATCH) {
         const observed = yield* input.store.effectiveSnapshotFilesByPaths(
@@ -224,7 +239,7 @@ export const finalizeGraphShareSignedCandidates = Effect.fn('codeGraph.sharing.f
       queued += added.queued;
       verifiedCount += verified.length;
       yield* acknowledgeSignedCandidateJournalPage({
-        acceptedIdentities: new Set(verified.map(pendingIdentity)),
+        acceptedIdentities: new Set(EffectArray.map(verified, pendingIdentity)),
         id,
         manifestPath: pendingPath,
         spec: pendingJournalSpec,
@@ -324,40 +339,50 @@ export const persistGraphShareSignedCandidates = Effect.fn('codeGraph.sharing.pe
   });
 });
 
+function isPendingSignedCandidateQueue(value: unknown): value is GraphSharePendingSignedCandidateQueueV1 {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    EffectArray.isArray(value.candidates) &&
+    value.candidates.length <= SIGNED_CANDIDATE_PAGE_MAXIMUM_ITEMS &&
+    !EffectArray.some(value.candidates, candidate => !validPending(candidate)) &&
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') === 'candidates,schemaVersion'
+  );
+}
+
 export function parseGraphSharePendingSignedCandidateQueue(value: unknown): GraphSharePendingSignedCandidateQueueV1 {
-  if (
-    !isRecord(value) ||
-    value.schemaVersion !== 1 ||
-    !Array.isArray(value.candidates) ||
-    value.candidates.length > SIGNED_CANDIDATE_PAGE_MAXIMUM_ITEMS ||
-    value.candidates.some(candidate => !validPending(candidate)) ||
-    Object.keys(value).sort().join(',') !== 'candidates,schemaVersion'
-  )
+  if (!isPendingSignedCandidateQueue(value)) {
     throw graphSharingFailure('Pending signed candidate queue is invalid.');
-  return value as unknown as GraphSharePendingSignedCandidateQueueV1;
+  }
+  return value;
 }
 
 export function parseGraphShareSignedCandidateQueue(value: unknown): GraphShareSignedCandidateQueueV2 {
   // The pre-release v1 private queue lacked producer profile authority and cannot be signed safely.
   // Treat it as empty so the first verified v2 append replaces it atomically.
-  if (isRecord(value) && value.schemaVersion === 1 && Array.isArray(value.candidates))
+  if (isRecord(value) && value.schemaVersion === 1 && EffectArray.isArray(value.candidates))
     return {candidates: [], schemaVersion: 2};
-  if (
-    !isRecord(value) ||
-    value.schemaVersion !== 2 ||
-    !Array.isArray(value.candidates) ||
-    value.candidates.length > SIGNED_CANDIDATE_PAGE_MAXIMUM_ITEMS ||
-    value.candidates.some(candidate => !validCandidate(candidate)) ||
-    Object.keys(value).sort().join(',') !== 'candidates,schemaVersion'
-  )
+  if (!isSignedCandidateQueue(value)) {
     throw graphSharingFailure('Signed candidate queue is invalid.');
-  return value as unknown as GraphShareSignedCandidateQueueV2;
+  }
+  return value;
+}
+
+function isSignedCandidateQueue(value: unknown): value is GraphShareSignedCandidateQueueV2 {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 2 &&
+    EffectArray.isArray(value.candidates) &&
+    value.candidates.length <= SIGNED_CANDIDATE_PAGE_MAXIMUM_ITEMS &&
+    !EffectArray.some(value.candidates, candidate => !validCandidate(candidate)) &&
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') === 'candidates,schemaVersion'
+  );
 }
 
 function validPending(value: unknown): value is GraphSharePendingSignedCandidate {
   return (
     isRecord(value) &&
-    Object.keys(value).sort().join(',') ===
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') ===
       'actionKey,batchId,casRoot,extractorSet,organization,platform,profileDigest,queuedAtMilliseconds,releaseIdentity,resultDigest,resultSize,semanticDigest,sourceCommit' &&
     typeof value.actionKey === 'string' &&
     SHA256_HEX.test(value.actionKey) &&
@@ -389,7 +414,7 @@ function validPending(value: unknown): value is GraphSharePendingSignedCandidate
     SHA256_DIGEST.test(value.semanticDigest) &&
     typeof value.sourceCommit === 'string' &&
     COMMIT.test(value.sourceCommit) &&
-    value.batchId === value.sourceCommit.slice(0, 40)
+    value.batchId === Effect2.pipe(value.sourceCommit, EffectString.slice(0, 40))
   );
 }
 
@@ -398,11 +423,11 @@ function validCandidate(value: unknown): value is GraphShareSignedCandidateV2 {
   const {graphAbi, partialCoverage, resourceLimits, snapshotId, ...pending} = value;
   return (
     validPending(pending) &&
-    Object.keys(value).length === 17 &&
+    EffectRecord.keys(value).length === 17 &&
     typeof graphAbi === 'string' &&
     SHA256_HEX.test(graphAbi) &&
     typeof partialCoverage === 'boolean' &&
-    Array.isArray(resourceLimits) &&
+    EffectArray.isArray(resourceLimits) &&
     resourceLimits.length === 0 &&
     typeof snapshotId === 'string' &&
     SNAPSHOT.test(snapshotId)
@@ -412,7 +437,7 @@ function validCandidate(value: unknown): value is GraphShareSignedCandidateV2 {
 function validPlatform(value: unknown): value is GraphSharePendingSignedCandidate['platform'] {
   return (
     isRecord(value) &&
-    Object.keys(value).sort().join(',') === 'architecture,os' &&
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') === 'architecture,os' &&
     (value.os === 'darwin' || value.os === 'linux' || value.os === 'win32') &&
     (value.architecture === 'arm64' || value.architecture === 'x64')
   );
@@ -436,5 +461,5 @@ export function graphShareSignedCandidateIdentity(value: GraphShareSignedCandida
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }

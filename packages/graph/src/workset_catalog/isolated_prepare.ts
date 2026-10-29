@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option, Predicate, Stream, Schema} from 'effect';
 import * as ChildProcess from 'effect/process/ChildProcess';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -14,6 +15,8 @@ import type {
   CodeGraphWorksetPrepareResultV1,
   PrepareCodeGraphWorksetOptionsV1,
 } from './workset.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_MANAGER_WORKSET_ORCHESTRATOR_ENV = 'THREADNOTE_MANAGER_WORKSET_ORCHESTRATOR';
 const ISOLATED_WORKSET_STDOUT_BYTES_MAXIMUM = 8 * 1_048_576;
@@ -75,13 +78,13 @@ const WORKSET_PREPARE_FAILURE_CODES = [
   'worktree-changed',
 ] as const satisfies readonly CodeGraphWorksetPrepareFailureCodeV1[];
 
-export class CodeGraphIsolatedWorksetPrepareError extends Schema.TaggedError<CodeGraphIsolatedWorksetPrepareError>()(
-  'CodeGraphIsolatedWorksetPrepareError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphIsolatedWorksetPrepareError extends Schema.TaggedError<
+  CodeGraphIsolatedWorksetPrepareError,
+  {readonly brand: unique symbol}
+>()('CodeGraphIsolatedWorksetPrepareError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export interface CodeGraphIsolatedWorksetPrepareSpawnPlan {
   readonly arguments: readonly string[];
@@ -200,7 +203,7 @@ function collectBoundedWorksetOutput(stream: Stream.Stream<Uint8Array, unknown>)
         return Effect.succeed({chunks: state.chunks, size});
       },
     ),
-    Effect.map(state => state.chunks.join('')),
+    Effect.map(state => EffectArray.join(state.chunks, '')),
   );
 }
 
@@ -319,7 +322,7 @@ export function decodeIsolatedWorksetPrepareResult(content: string): CodeGraphWo
     (value.state !== 'failed' && value.state !== 'ready') ||
     !boundedText(value.workset) ||
     !digest(value.manifestDigest) ||
-    !Array.isArray(value.members) ||
+    !EffectArray.isArray(value.members) ||
     value.members.length > ISOLATED_WORKSET_MEMBER_MAXIMUM
   ) {
     return undefined;
@@ -518,7 +521,7 @@ function decodeBridges(value: unknown): CodeGraphWorksetPrepareBridgeReceiptV1 |
 
 function jsonRecord(content: string): Readonly<Record<string, unknown>> | undefined {
   try {
-    const value: unknown = JSON.parse(content.trim());
+    const value: unknown = JSON.parse(Effect2.pipe(content, EffectString.trim));
     return Predicate.isObject(value) ? value : undefined;
   } catch {
     return undefined;
@@ -530,7 +533,11 @@ function boundedText(value: unknown): value is string {
 }
 
 function boundedTextArray(value: unknown): value is readonly string[] {
-  return Array.isArray(value) && value.length <= ISOLATED_WORKSET_MEMBER_MAXIMUM && value.every(boundedText);
+  return (
+    EffectArray.isArray(value) &&
+    value.length <= ISOLATED_WORKSET_MEMBER_MAXIMUM &&
+    EffectArray.every(value, boundedText)
+  );
 }
 
 function digest(value: unknown): value is string {
@@ -542,5 +549,5 @@ function nonnegativeInteger(value: unknown): value is number {
 }
 
 function isOneOf<const Values extends readonly string[]>(value: unknown, options: Values): value is Values[number] {
-  return typeof value === 'string' && options.some(option => option === value);
+  return typeof value === 'string' && EffectArray.some(options, option => option === value);
 }

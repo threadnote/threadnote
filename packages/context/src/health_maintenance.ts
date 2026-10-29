@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import type {ContextBriefMemoryCitationValidationV2} from './types.js';
 import type {ContextHealthFindingV1} from './health.js';
 import type {ContextHealthSemanticCompletenessV2} from './health_semantic.js';
@@ -6,27 +7,31 @@ import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {memoryCodeCitationAnchorId, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type ContextHealthFindingClassificationV2 = 'actionable' | 'automatically-managed' | 'coverage' | 'historical';
 
-export interface ContextMaintenanceSnapshotDiagnosticV1 {
-  readonly version: 1;
-  readonly category:
-    | 'invalid-header'
-    | 'invalid-utf8'
-    | 'permission-denied'
-    | 'record-size-limit'
-    | 'cache-size-limit'
-    | 'authority-boundary'
-    | 'record-not-regular'
-    | 'record-changed'
-    | 'io-error';
-  readonly stage: 'discovery' | 'record-read' | 'authority-check' | 'inventory-cache';
-  readonly memoryUri?: string;
-  readonly summary: string;
-  readonly recovery: string;
-  readonly retryable: boolean;
-}
+export const ContextMaintenanceSnapshotDiagnosticV1 = Schema.Struct({
+  version: Schema.Literals([1]),
+  category: Schema.Literals([
+    'invalid-header',
+    'invalid-utf8',
+    'permission-denied',
+    'record-size-limit',
+    'cache-size-limit',
+    'authority-boundary',
+    'record-not-regular',
+    'record-changed',
+    'io-error',
+  ]),
+  stage: Schema.Literals(['discovery', 'record-read', 'authority-check', 'inventory-cache']),
+  memoryUri: Schema.optional(Schema.String),
+  summary: Schema.String,
+  recovery: Schema.String,
+  retryable: Schema.Boolean,
+});
+export type ContextMaintenanceSnapshotDiagnosticV1 = typeof ContextMaintenanceSnapshotDiagnosticV1.Type;
 
 export type ContextHealthCaseDispositionV2 =
   | 'queued'
@@ -78,11 +83,13 @@ export function migrateContextHealthCitationCaseSlotV2(input: {
   readonly citationId?: string;
   readonly citations: readonly MemoryCodeCitationV1[];
 }): string | undefined {
-  const stableId = /^anchor:tncc_[0-9a-f]{40}$/u.test(input.slot) ? input.slot.slice(7) : undefined;
+  const stableId = /^anchor:tncc_[0-9a-f]{40}$/u.test(input.slot)
+    ? Effect.pipe(input.slot, EffectString.slice(7))
+    : undefined;
   const evidenceId = input.citationId ?? (/^tncc_[0-9a-f]{40}$/u.test(input.slot) ? input.slot : undefined);
   if (stableId === undefined && evidenceId === undefined) return undefined;
   try {
-    const matches = input.citations.filter(citation =>
+    const matches = EffectArray.filter(input.citations, citation =>
       stableId === undefined
         ? citation.id === evidenceId || memoryCodeCitationAnchorId(citation) === evidenceId
         : memoryCodeCitationAnchorId(citation) === stableId,
@@ -91,7 +98,7 @@ export function migrateContextHealthCitationCaseSlotV2(input: {
     const match = matches[0];
     const anchorId = memoryCodeCitationAnchorId(match);
     if (evidenceId !== undefined && match.id !== evidenceId && anchorId !== evidenceId) return undefined;
-    if (input.citations.filter(citation => memoryCodeCitationAnchorId(citation) === anchorId).length !== 1)
+    if (EffectArray.filter(input.citations, citation => memoryCodeCitationAnchorId(citation) === anchorId).length !== 1)
       return undefined;
     return contextHealthCitationCaseSlotV2(match);
   } catch {
@@ -104,7 +111,7 @@ export function resolveContextHealthRelationTargetV2(
   uri: string,
 ): {readonly state: 'active' | 'inactive' | 'missing' | 'conflicted'; readonly record?: MemoryRecord} {
   const id = memoryIdFromIdentityAlias(uri);
-  const matches = records.filter(record =>
+  const matches = EffectArray.filter(records, record =>
     id === undefined ? record.uri === uri || record.metadata.archivedFrom === uri : record.metadata.memoryId === id,
   );
   const record = matches[0];
@@ -123,13 +130,17 @@ export function contextHealthFindingCaseIdentityV2(input: {
   const {finding, records, project} = input;
   if (finding.caseIdentity !== undefined) return finding.caseIdentity;
   const subjectUri = finding.repair.subjectUri ?? finding.uris[0];
-  const subject = records.find(record => record.uri === subjectUri);
+  const subject = EffectOption.getOrUndefined(EffectArray.findFirst(records, record => record.uri === subjectUri));
   let memoryId = subject?.metadata.memoryId ?? subjectUri ?? 'project';
   let family: string = finding.category;
   let slot = finding.repair.targetUri ?? 'record';
-  if (finding.category.startsWith('citation-')) {
+  if (Effect.pipe(finding.category, EffectString.startsWith('citation-'))) {
     family = 'citation';
-    const citationId = finding.repair.targetUri?.slice((subjectUri?.length ?? 0) + 1);
+    const citationId = Effect.pipe(finding.repair.targetUri, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(effectOptionalString, EffectString.slice((subjectUri?.length ?? 0) + 1)),
+    );
     slot =
       migrateContextHealthCitationCaseSlotV2({
         slot: citationId ?? slot,
@@ -137,27 +148,33 @@ export function contextHealthFindingCaseIdentityV2(input: {
       }) ??
       citationId ??
       slot;
-  } else if (finding.category.startsWith('relation-target-')) {
+  } else if (Effect.pipe(finding.category, EffectString.startsWith('relation-target-'))) {
     family = 'relation';
     slot =
       finding.repair.targetUri === undefined
         ? slot
         : (resolveContextHealthRelationTargetV2(records, finding.repair.targetUri).record?.metadata.memoryId ?? slot);
   } else if (finding.semanticEvidence !== undefined) {
-    memoryId = [finding.semanticEvidence.left.recordUri, finding.semanticEvidence.right.recordUri]
-      .map(uri => records.find(record => record.uri === uri)?.metadata.memoryId ?? uri)
-      .sort()
-      .join(':');
-    slot = [finding.semanticEvidence.left.claimFingerprint, finding.semanticEvidence.right.claimFingerprint]
-      .sort()
-      .join(':');
+    memoryId = EffectArray.join(
+      EffectArray.map(
+        [finding.semanticEvidence.left.recordUri, finding.semanticEvidence.right.recordUri],
+        uri =>
+          EffectOption.getOrUndefined(EffectArray.findFirst(records, record => record.uri === uri))?.metadata
+            .memoryId ?? uri,
+      ).sort(),
+      ':',
+    );
+    slot = EffectArray.join(
+      [finding.semanticEvidence.left.claimFingerprint, finding.semanticEvidence.right.claimFingerprint].sort(),
+      ':',
+    );
   }
   return {project, memoryId, family, slot};
 }
 
 /** Stable identity stays independent of messages, retry reasons and physical memory locations. */
 export function contextHealthCaseIdV2(input: ContextHealthCaseIdentityV2): string {
-  return `health-case-${sha256HexSync(JSON.stringify([input.project, input.memoryId, input.family, input.slot])).slice(0, 40)}`;
+  return `health-case-${Effect.pipe(sha256HexSync(JSON.stringify([input.project, input.memoryId, input.family, input.slot])), EffectString.slice(0, 40))}`;
 }
 
 export function classifyContextHealthFindingV2(
@@ -183,7 +200,7 @@ export function contextHealthCitationCoverageV2(input: {
   /** Reader DTOs may explicitly select a bounded subset of the canonical current vector. */
   readonly citationSelection?: 'provided';
 }): ContextHealthCitationCoverageV2 {
-  const validations = new Map(input.validations.map(validation => [validation.uri, validation]));
+  const validations = new Map(EffectArray.map(input.validations, validation => [validation.uri, validation]));
   let eligible = 0;
   let checked = 0;
   let pending = 0;
@@ -194,16 +211,21 @@ export function contextHealthCitationCoverageV2(input: {
   const reasons = new Map<string, number>();
   for (const record of input.records) {
     const receipts = new Map(
-      (validations.get(record.uri)?.receipts ?? []).map(receipt => [receipt.citationId, receipt]),
+      EffectArray.map(validations.get(record.uri)?.receipts ?? [], receipt => [receipt.citationId, receipt]),
     );
     const current = currentMemoryCodeCitations(record);
-    const provided = new Set((record.metadata.codeCitations ?? []).map(citation => citation.id));
+    const provided = new Set(EffectArray.map(record.metadata.codeCitations ?? [], citation => citation.id));
     const citationIds = new Set(
       record.metadata.reviewedSupport === undefined
-        ? [...current.map(citation => citation.id), ...receipts.keys()]
-        : current
-            .filter(citation => input.citationSelection !== 'provided' || provided.has(citation.id))
-            .map(citation => citation.id),
+        ? [...EffectArray.map(current, citation => citation.id), ...receipts.keys()]
+        : EffectArray.map(
+            EffectArray.filter(
+              current,
+              (citation, __effectArrayIndex) =>
+                __effectArrayIndex in current && (input.citationSelection !== 'provided' || provided.has(citation.id)),
+            ),
+            citation => citation.id,
+          ),
     );
     for (const citationId of citationIds) {
       eligible += 1;
@@ -243,9 +265,9 @@ export function contextHealthCitationCoverageV2(input: {
     historicalVerified,
     unverified: eligible - currentVerified - historicalVerified,
     state: completeChecks === eligible ? 'complete' : checked === 0 ? 'unavailable' : 'partial',
-    reasons: [...reasons]
-      .map(([reason, count]) => ({reason, count}))
-      .sort((left, right) => left.reason.localeCompare(right.reason)),
+    reasons: EffectArray.map([...reasons], ([reason, count]) => ({reason, count})).sort((left, right) =>
+      Effect.pipe(left.reason, EffectString.localeCompare(right.reason)),
+    ),
   };
 }
 
@@ -255,16 +277,21 @@ export function summarizeContextHealthMaintenanceV2(input: {
   readonly semanticCoverage: ContextHealthSemanticCompletenessV2;
 }): ContextHealthMaintenanceSummaryV2 {
   const count = (classification: ContextHealthFindingClassificationV2) =>
-    input.findings.filter(finding => finding.classification === classification).length;
+    EffectArray.filter(input.findings, finding => finding.classification === classification).length;
   return {
     version: 2,
     actionableFindings: count('actionable'),
     automaticallyManagedFindings: count('automatically-managed'),
     historicalFindings: count('historical'),
     affectedMemories: new Set(
-      input.findings
-        .filter(finding => finding.classification === 'actionable')
-        .flatMap(finding => (finding.repair.subjectUri === undefined ? finding.uris : [finding.repair.subjectUri])),
+      EffectArray.flatMap(
+        EffectArray.filter(
+          input.findings,
+          (finding: ContextHealthFindingV1) => finding.classification === 'actionable',
+        ),
+        (finding: ContextHealthFindingV1) =>
+          finding.repair.subjectUri === undefined ? finding.uris : [finding.repair.subjectUri],
+      ),
     ).size,
     citationCoverage: input.citationCoverage,
     semanticCoverage: input.semanticCoverage,

@@ -1,7 +1,9 @@
 import type {CodeGraphRelation, CodeGraphSymbol} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function documentLookupTiers(targetName: string): readonly (readonly string[])[] {
-  return targetName.includes('/')
+  return Effect.pipe(targetName, EffectString.includes('/'))
     ? [[`global:path:${lookupComponent(targetName)}`]]
     : [[`global:qualified:${lookupComponent(targetName)}`], [`global:name:${lookupComponent(lastName(targetName))}`]];
 }
@@ -39,8 +41,12 @@ export function resolveLookupTiers(
 }
 
 function lookupKeyResolutionDomain(key: string, fallback: string | undefined): string {
-  const separator = key.indexOf(':');
-  return separator > 0 ? key.slice(0, separator) : (fallback ?? 'generic');
+  const separator = Effect.pipe(
+    key,
+    EffectString.indexOf(':'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  return separator > 0 ? Effect.pipe(key, EffectString.slice(0, separator)) : (fallback ?? 'generic');
 }
 
 function lookupComponent(value: string): string {
@@ -48,5 +54,5 @@ function lookupComponent(value: string): string {
 }
 
 function lastName(value: string): string {
-  return value.split('.').at(-1) ?? value;
+  return Effect.pipe(value, EffectString.split('.')).at(-1) ?? value;
 }

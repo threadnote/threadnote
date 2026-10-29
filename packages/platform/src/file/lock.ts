@@ -8,6 +8,8 @@ import {
   SystemInfo,
   type SystemInfoShape,
 } from '../system.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ExclusiveFileLockOptions {
   /** Existing-home workers must never recreate a directory removed by uninstall. Defaults to true. */
@@ -32,10 +34,13 @@ export interface ExclusiveFileLockOptions {
   readonly waitTimeoutMilliseconds: number;
 }
 
-export class FileLockTimeout extends Schema.TaggedError<FileLockTimeout>()('FileLockTimeout', {
-  lockPath: Schema.String,
-  message: Schema.String,
-}) {
+export class FileLockTimeout extends Schema.TaggedError<FileLockTimeout, {readonly brand: unique symbol}>()(
+  'FileLockTimeout',
+  {
+    lockPath: Schema.String,
+    message: Schema.String,
+  },
+) {
   static of(lockPath: string): FileLockTimeout {
     return FileLockTimeout.make({
       lockPath,
@@ -66,7 +71,7 @@ export const readExclusiveFileLockOwner = Effect.fn('fileLock.readOwner')(functi
     if (Option.isSome(yield* fs.readLink(lockPath).pipe(Effect.option))) return Option.none<FileLockOwner>();
     const info = yield* fs.stat(lockPath);
     if (info.type !== 'File' || Number(info.size) > 4_096) return Option.none<FileLockOwner>();
-    return Option.fromUndefinedOr(fileLockOwner((yield* fs.readFileString(lockPath)).trim()));
+    return Option.fromUndefinedOr(fileLockOwner(Effect2.pipe(yield* fs.readFileString(lockPath), EffectString.trim)));
   }).pipe(Effect.orElseSucceed(() => Option.none<FileLockOwner>()));
 });
 
@@ -368,6 +373,7 @@ function fileLockOwner(token: string): FileLockOwner | undefined {
   } catch {
     // Threadnote 4 beta lock tokens used the legacy "<pid>:<nonce>" format.
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const legacyProcessId = Number.parseInt(token.split(':', 1)[0] ?? '', 10);
   return Number.isSafeInteger(legacyProcessId) && legacyProcessId > 0
     ? {processId: legacyProcessId, token, version: 1}
@@ -384,7 +390,7 @@ function releaseFileLock(fs: FileSystem.FileSystem, lockPath: string, token: str
 
 function readStableFileLockToken(path: string, remainingAttempts = 2): Effect.Effect<string | undefined, never> {
   return fromPromise('fileLock.readStableToken', () => runtimeReadBoundedStableRegularFile(path, 4_096)).pipe(
-    Effect.map(bytes => new TextDecoder().decode(bytes).trim()),
+    Effect.map(bytes => Effect2.pipe(new TextDecoder().decode(bytes), EffectString.trim)),
     Effect.catch(() =>
       remainingAttempts <= 0
         ? succeedUndefined

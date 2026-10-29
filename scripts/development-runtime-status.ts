@@ -4,7 +4,7 @@ import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {printJson, scriptArguments} from './effect/script.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Console, Effect, FileSystem, Layer, Option, Path} from 'effect';
+import {Array as EffectArray, Console, Effect, FileSystem, Layer, Option, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {installationRoot} from '@threadnote/threadnote/installations';
@@ -17,6 +17,8 @@ import {
   type DevelopmentRuntimeOwnershipConflict,
   type DevelopmentRuntimeOwnershipState,
 } from './install-local-standalone.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const GIT_COMMIT_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const ROOT_URL = new URL('..', import.meta.url);
@@ -111,19 +113,26 @@ export const inspectDevelopmentRuntimeStatus = Effect.fn('developmentRuntimeStat
     ],
     {concurrency: 2},
   );
-  const commit = sourceCommit.stdout.trim();
+  const commit = Effect2.pipe(sourceCommit.stdout, EffectString.trim);
   if (!GIT_COMMIT_PATTERN.test(commit)) {
     return yield* ScriptError.make({message: 'The Threadnote checkout did not resolve to an exact Git commit.'});
   }
   const manifest = yield* fs.readFileString(path.join(checkoutRoot, 'package.json')).pipe(
     Effect.flatMap(source =>
       Effect.try({
-        try: () => JSON.parse(source) as {readonly version?: unknown},
+        try: (): unknown => JSON.parse(source),
         catch: cause => ScriptError.make({message: 'Could not parse package.json.', cause}),
       }),
     ),
   );
-  if (typeof manifest.version !== 'string' || manifest.version.length === 0) {
+  if (
+    typeof manifest !== 'object' ||
+    manifest === null ||
+    EffectArray.isArray(manifest) ||
+    !('version' in manifest) ||
+    typeof manifest.version !== 'string' ||
+    manifest.version.length === 0
+  ) {
     return yield* ScriptError.make({message: 'package.json does not declare a version.'});
   }
   const packageVersion = manifest.version;

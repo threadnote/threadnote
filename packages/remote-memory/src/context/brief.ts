@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {deriveRecallCodeLinkSelectorDigest} from '@threadnote/recall/code_links';
 import type {RemoteMemoryReceiptV1} from '@threadnote/memory/remote/receipts';
 import type {RemoteMemoryRecallResult} from '../postgres/repository.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const REMOTE_CONTEXT_BRIEF_MINIMUM_BUDGET_TOKENS = 800;
 export const REMOTE_CONTEXT_BRIEF_DEFAULT_BUDGET_TOKENS = 1_250;
@@ -47,7 +50,7 @@ export function normalizeRemoteContextBriefAnchors(
     {errors: 'all', onExcessProperty: 'error'},
   )(anchors);
   const seen = new Set<string>();
-  return parsed.filter(anchor => {
+  return EffectArray.filter(parsed, anchor => {
     const key = `${anchor.repositoryId}\n${anchor.path}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -58,7 +61,7 @@ export function normalizeRemoteContextBriefAnchors(
 export function remoteContextBriefAnchorSelectors(
   anchors: readonly RemoteContextBriefAnchorV1[] | undefined,
 ): readonly RemoteContextBriefAnchorSelector[] {
-  return (normalizeRemoteContextBriefAnchors(anchors) ?? []).map((anchor, anchorOrdinal) => ({
+  return EffectArray.map(normalizeRemoteContextBriefAnchors(anchors) ?? [], (anchor, anchorOrdinal) => ({
     anchorOrdinal,
     selectorDigest: deriveRecallCodeLinkSelectorDigest({
       repositoryId: anchor.repositoryId,
@@ -120,32 +123,42 @@ function responseForPrefix(
   count: number,
 ): RemoteContextBriefProjection {
   const prefix = input.results.slice(0, count);
-  const returnedAnchorOrdinals = uniqueOrdinals(prefix.flatMap(result => result.anchorOrdinals ?? []));
+  const returnedAnchorOrdinals = uniqueOrdinals(EffectArray.flatMap(prefix, result => result.anchorOrdinals ?? []));
   const matchedAnchorOrdinals = uniqueOrdinals(input.matchedAnchorOrdinals);
   const lane = (kind: 'durable' | 'handoff') =>
-    prefix
-      .filter(result => result.kind === kind)
-      .map(result => ({
+    EffectArray.map(
+      EffectArray.filter(prefix, result => result.kind === kind),
+      result => ({
         ...(result.anchorOrdinals === undefined ? {} : {anchorOrdinals: result.anchorOrdinals}),
         evidence: result.evidence,
         readState: 'unread',
         reason:
           result.evidence === 'anchor' ? 'capture-time citation matched supplied anchor' : 'lexical remote recall',
         uri: result.uri,
-      }));
+      }),
+    );
   const coverage = {
     directSearchComplete: input.directSearchComplete,
     directSearchTruncated: input.directSearchTruncated,
     matchedAnchorOrdinals,
-    omittedMatchedAnchorOrdinals: matchedAnchorOrdinals.filter(ordinal => !returnedAnchorOrdinals.includes(ordinal)),
+    omittedMatchedAnchorOrdinals: EffectArray.filter(
+      matchedAnchorOrdinals,
+      ordinal => !returnedAnchorOrdinals.includes(ordinal),
+    ),
     returnedAnchorOrdinals,
     supplied: input.anchors.length,
     unmatchedAnchorOrdinals: input.directSearchComplete
-      ? input.anchors.map((_, index) => index).filter(index => !matchedAnchorOrdinals.includes(index))
+      ? EffectArray.filter(
+          EffectArray.map(input.anchors, (_, index) => index),
+          index => !matchedAnchorOrdinals.includes(index),
+        )
       : [],
     unresolvedAnchorOrdinals: input.directSearchComplete
       ? []
-      : input.anchors.map((_, index) => index).filter(index => !matchedAnchorOrdinals.includes(index)),
+      : EffectArray.filter(
+          EffectArray.map(input.anchors, (_, index) => index),
+          index => !matchedAnchorOrdinals.includes(index),
+        ),
   };
   const task = boundedTask(input.task);
   const structuredContent: Readonly<Record<string, unknown>> = {
@@ -153,7 +166,7 @@ function responseForPrefix(
     durable: lane('durable'),
     estimatedTokens: input.budgetTokens,
     nextAction: {
-      readCanonicalMemories: prefix.slice(0, 3).map(result => result.uri),
+      readCanonicalMemories: EffectArray.map(prefix.slice(0, 3), result => result.uri),
       validateLocally:
         'Use threadnote-local inspect_code_graph or local Context Brief to validate cited graph references against the current checkout.',
     },
@@ -165,14 +178,21 @@ function responseForPrefix(
     type: 'threadnote-remote-context-brief',
     version: 1,
   };
-  const pointers = prefix.map(result => `${result.evidence} ${result.uri}`).join('\n');
-  const text = [
-    `Remote Context Brief: ${count}/${input.results.length} authorized memories.`,
-    pointers,
-    'Citation links are capture-time provenance; validate graph references on threadnote-local before relying on them.',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const pointers = EffectArray.join(
+    EffectArray.map(prefix, result => `${result.evidence} ${result.uri}`),
+    '\n',
+  );
+  const text = EffectArray.join(
+    EffectArray.filter(
+      [
+        `Remote Context Brief: ${count}/${input.results.length} authorized memories.`,
+        pointers,
+        'Citation links are capture-time provenance; validate graph references on threadnote-local before relying on them.',
+      ],
+      Boolean,
+    ),
+    '\n',
+  );
   const estimatedTokens = Math.ceil(bytes({structuredContent, text}) / BYTES_PER_TOKEN);
   return {structuredContent: {...structuredContent, estimatedTokens}, text};
 }
@@ -198,9 +218,12 @@ function boundedTask(task: string): {readonly summary: string; readonly truncate
 
 function isCanonicalRepositoryPath(value: string): boolean {
   return (
-    !value.startsWith('/') &&
-    !value.includes('\\') &&
-    !value.includes('\0') &&
-    value.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
+    !Effect.pipe(value, EffectString.startsWith('/')) &&
+    !Effect.pipe(value, EffectString.includes('\\')) &&
+    !Effect.pipe(value, EffectString.includes('\0')) &&
+    EffectArray.every(
+      Effect.pipe(value, EffectString.split('/')),
+      segment => segment.length > 0 && segment !== '.' && segment !== '..',
+    )
   );
 }

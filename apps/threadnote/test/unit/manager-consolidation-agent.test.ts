@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -8,6 +9,8 @@ import {describe, expect} from 'vitest';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {runConsolidationAgentCommand} from '../../src/manager/consolidation_agent.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const commandLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
@@ -113,7 +116,7 @@ exit 1`,
     'keeps bounded actionable diagnostics for a failed %s process',
     agent =>
       Effect.gen(function* () {
-        const diagnostic = `${'x'.repeat(1000)}invalid agent configuration`;
+        const diagnostic = `${Effect2.pipe('x', EffectString.repeat(1000))}invalid agent configuration`;
         const result = yield* runConsolidationAgentCommand(agent, '/fake/agent', 'source prompt').pipe(
           provideTestLayer(finalAnswerCommandLayer('echoed source prompt', diagnostic, '', 7)),
           Effect.result,
@@ -168,27 +171,35 @@ exit 1`,
     effectIt,
     'keeps Codex diagnostics independent from its final-answer file',
     {
-      draft: FC.string({minLength: 1, maxLength: 80}).filter(value => value.trim().length > 0),
+      draft: FC.string({minLength: 1, maxLength: 80}).filter(
+        value => Effect2.pipe(value, EffectString.trim).length > 0,
+      ),
       stderr: FC.array(FC.string({maxLength: 80}), {maxLength: 8}).map(lines =>
-        lines.map(line => `diagnostic:${JSON.stringify(line)}`).join('\n'),
+        EffectArray.join(
+          EffectArray.map(lines, line => `diagnostic:${JSON.stringify(line)}`),
+          '\n',
+        ),
       ),
       stdout: FC.array(FC.string({maxLength: 80}), {maxLength: 8}).map(lines =>
-        lines.map(line => `diagnostic:${JSON.stringify(line)}`).join('\n'),
+        EffectArray.join(
+          EffectArray.map(lines, line => `diagnostic:${JSON.stringify(line)}`),
+          '\n',
+        ),
       ),
     },
     ({draft, stderr, stdout}) =>
       runConsolidationAgentCommand('codex', '/fake/codex', 'source prompt').pipe(
         provideTestLayer(finalAnswerCommandLayer(stdout, stderr, draft)),
-        Effect.tap(actual => Effect.sync(() => expect(actual).toBe(draft.trim()))),
+        Effect.tap(actual => Effect.sync(() => expect(actual).toBe(Effect2.pipe(draft, EffectString.trim)))),
       ),
     {fastCheck: {numRuns: 24}},
   );
 
   effectIt.effect.each([
-    ['exactly 32 KiB ASCII', 'a'.repeat(32 * 1024), true],
-    ['over 32 KiB ASCII', 'a'.repeat(32 * 1024 + 1), false],
-    ['one byte over with UTF-8', `${'a'.repeat(32 * 1024 - 1)}é`, false],
-    ['exactly 32 KiB with UTF-8', `${'a'.repeat(32 * 1024 - 4)}😀`, true],
+    ['exactly 32 KiB ASCII', Effect2.pipe('a', EffectString.repeat(32 * 1024)), true],
+    ['over 32 KiB ASCII', Effect2.pipe('a', EffectString.repeat(32 * 1024 + 1)), false],
+    ['one byte over with UTF-8', `${Effect2.pipe('a', EffectString.repeat(32 * 1024 - 1))}é`, false],
+    ['exactly 32 KiB with UTF-8', `${Effect2.pipe('a', EffectString.repeat(32 * 1024 - 4))}😀`, true],
   ] as const)('enforces the UTF-8 byte limit for %s', ([, draft, accepted]) =>
     Effect.gen(function* () {
       const result = yield* runConsolidationAgentCommand('codex', '/fake/codex', 'source prompt').pipe(

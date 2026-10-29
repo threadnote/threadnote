@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+
 export interface ManagerRefreshTask {
   readonly label: string;
   readonly run: () => Promise<void>;
@@ -5,7 +7,7 @@ export interface ManagerRefreshTask {
 
 export async function settleManagerRefreshTasks(tasks: readonly ManagerRefreshTask[]): Promise<readonly string[]> {
   const outcomes = await Promise.all(
-    tasks.map(async task => {
+    EffectArray.map(tasks, async task => {
       try {
         await task.run();
         return undefined;
@@ -15,5 +17,5 @@ export async function settleManagerRefreshTasks(tasks: readonly ManagerRefreshTa
       }
     }),
   );
-  return outcomes.filter((outcome): outcome is string => outcome !== undefined);
+  return EffectArray.filter(outcomes, (outcome): outcome is string => outcome !== undefined);
 }

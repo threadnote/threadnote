@@ -1,8 +1,10 @@
-import type {JSONValue, Sql, TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import type {Sql, ISql} from 'postgres';
 
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {randomUuidV4} from '@threadnote/platform/uuid';
+import {requireJsonValue} from '../json.js';
 import {
   buildHostedContextHealthReceiptV1,
   buildHostedContextHealthScheduleV1,
@@ -16,6 +18,8 @@ import {
   type HostedContextHealthScheduleReceiptV1,
   type HostedContextHealthScheduleV1,
 } from './context_health.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const DATABASE_TIMEOUT_MILLISECONDS = 5_000;
 const CLAIM_LEASE_MILLISECONDS = 5 * 60_000;
@@ -97,7 +101,7 @@ export async function registerHostedContextHealthSchedule(
         tenant_id, share_id, version, digest, policy_document
       ) VALUES (
         ${schedule.tenantId}, ${schedule.shareId}, ${schedule.policy.policyVersion}, ${schedule.policy.digest},
-        ${transaction.json(schedule.policy as unknown as JSONValue)}
+        ${transaction.json(requireJsonValue(schedule.policy))}
       )
       ON CONFLICT (tenant_id, share_id, version) DO NOTHING
     `;
@@ -234,12 +238,12 @@ export async function claimHostedContextHealthJobs(
     const generation = worker.generation + 1;
     const backlog = await authoritativeBacklog(transaction, clock.now);
     const claims: HostedContextHealthClaimV1[] = [];
-    const remaining = new Map(candidates.map(candidate => [candidate.schedule_id, candidate]));
+    const remaining = new Map(EffectArray.map(candidates, candidate => [candidate.schedule_id, candidate]));
     let unavailableCount = 0;
     let nextTenantOrdinal = worker.tenant_cursor_ordinal;
     while (remaining.size > 0 && claims.length < concurrency) {
       const selection = selectHostedContextHealthJobsV1(
-        [...remaining.values()].map(row => ({
+        EffectArray.map([...remaining.values()], row => ({
           dueAt: row.next_due_at.toISOString(),
           scheduleId: row.schedule_id,
           tenantId: row.tenant_id,
@@ -264,7 +268,7 @@ export async function claimHostedContextHealthJobs(
         unavailableCount += 1;
         continue;
       }
-      const claimToken = randomUuidV4().replaceAll('-', '');
+      const claimToken = Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''));
       const expiresAt = new Date(clock.now.getTime() + CLAIM_LEASE_MILLISECONDS).toISOString();
       const rows = await transaction<{schedule_id: string}[]>`
         UPDATE remote_memory.context_health_due_directory SET
@@ -427,7 +431,7 @@ export async function recordHostedContextHealthRun(
       ) VALUES (
         ${claim.schedule.tenantId}, ${claim.schedule.shareId}, ${claim.schedule.project}, ${receipt.receiptId},
         ${claim.schedule.scheduleId}, ${receipt.inputDigest}, ${receipt.outcome},
-        ${transaction.json(receipt as unknown as JSONValue)}, ${receipt.observedAt}
+        ${transaction.json(requireJsonValue(receipt))}, ${receipt.observedAt}
       )
     `;
     const failed = receipt.outcome === 'unknown';
@@ -454,11 +458,7 @@ export async function recordHostedContextHealthRun(
   });
 }
 
-async function settleUnavailableCandidate(
-  transaction: TransactionSql,
-  candidate: DueDirectoryRow,
-  now: Date,
-): Promise<void> {
+async function settleUnavailableCandidate(transaction: ISql, candidate: DueDirectoryRow, now: Date): Promise<void> {
   const [schedule] = await transaction<{consecutive_failures: number; status: string}[]>`
     SELECT status, consecutive_failures::integer
     FROM remote_memory.context_health_schedules
@@ -610,7 +610,7 @@ export async function setHostedContextHealthScheduleStatus(
 }
 
 async function authoritativeEvidence(
-  transaction: TransactionSql,
+  transaction: ISql,
   target: DueDirectoryRow,
   lock: boolean,
 ): Promise<AuthoritativeEvidence | undefined> {
@@ -682,7 +682,8 @@ async function authoritativeEvidence(
     ORDER BY h.kind, h.topic, h.id
   `;
   if (
-    memoryRows.some(
+    EffectArray.some(
+      memoryRows,
       memory => memory.git_commit === null || memory.git_observed_commit !== row.git_ingest_snapshot_commit,
     )
   ) {
@@ -711,7 +712,7 @@ async function authoritativeEvidence(
 }
 
 async function authoritativeBacklog(
-  transaction: TransactionSql,
+  transaction: ISql,
   now: Date,
 ): Promise<{readonly depth: number; readonly lagMinutes: number}> {
   const [row] = await transaction<{depth: number; oldest_due_at: Date | null}[]>`
@@ -726,11 +727,7 @@ async function authoritativeBacklog(
   };
 }
 
-async function releaseClaim(
-  transaction: TransactionSql,
-  claim: HostedContextHealthClaimV1,
-  nextDueAt: string,
-): Promise<void> {
+async function releaseClaim(transaction: ISql, claim: HostedContextHealthClaimV1, nextDueAt: string): Promise<void> {
   const rows = await transaction<{schedule_id: string}[]>`
     UPDATE remote_memory.context_health_due_directory SET
       next_due_at = ${nextDueAt}, claim_token = NULL, claim_expires_at = NULL, updated_at = clock_timestamp()
@@ -789,19 +786,19 @@ function scheduleReceipt(
   };
 }
 
-async function setTenant(transaction: TransactionSql, tenantId: string): Promise<void> {
+async function setTenant(transaction: ISql, tenantId: string): Promise<void> {
   await setOperationalTimeouts(transaction);
   await setTenantContext(transaction, tenantId);
 }
 
-async function setOperationalTimeouts(transaction: TransactionSql): Promise<void> {
+async function setOperationalTimeouts(transaction: ISql): Promise<void> {
   await transaction`SELECT pg_catalog.set_config('search_path', 'pg_catalog', true)`;
   await transaction`SELECT set_config('statement_timeout', ${String(DATABASE_TIMEOUT_MILLISECONDS)}, true)`;
   await transaction`SELECT set_config('lock_timeout', ${String(DATABASE_TIMEOUT_MILLISECONDS)}, true)`;
   await transaction`SELECT set_config('transaction_timeout', ${String(DATABASE_TIMEOUT_MILLISECONDS)}, true)`;
 }
 
-async function setTenantContext(transaction: TransactionSql, tenantId: string): Promise<void> {
+async function setTenantContext(transaction: ISql, tenantId: string): Promise<void> {
   await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
 }
 

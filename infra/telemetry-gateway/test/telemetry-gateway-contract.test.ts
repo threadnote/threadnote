@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import ts from 'typescript-compiler';
 import {describe, expect, it} from 'vitest';
 import {PRODUCTION_LOG_PHASES} from '@threadnote/threadnote/effect/production_log';
@@ -23,56 +24,68 @@ import {closedTelemetryErrorType} from '@threadnote/threadnote/telemetry/diagnos
 import {safeAnonymousTelemetryOperation} from '@threadnote/threadnote/telemetry/operations';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {join} from '@threadnote/testing/node-path';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-interface TelemetrySchema {
-  readonly attributeContract: {
-    readonly booleanSpan: readonly string[];
-    readonly integerSpan: readonly string[];
-    readonly memoryBucketSpan: readonly string[];
-    readonly quantityBucketSpan: readonly string[];
-    readonly requiredSpan: readonly string[];
-    readonly resource: readonly string[];
-    readonly span: readonly string[];
-  };
-  readonly limits: {
-    readonly maxSafeInteger: number;
-    readonly maxSpansPerRequest: number;
-    readonly maxVersionBytes: number;
-  };
-  readonly patterns: Readonly<Record<string, string>>;
-  readonly registries: Readonly<Record<string, readonly string[]>>;
-  readonly schemaVersion: number;
-}
+const TelemetrySchema = Schema.StructWithRest(
+  Schema.Struct({
+    attributeContract: Schema.Struct({
+      booleanSpan: Schema.Array(Schema.String),
+      integerSpan: Schema.Array(Schema.String),
+      memoryBucketSpan: Schema.Array(Schema.String),
+      quantityBucketSpan: Schema.Array(Schema.String),
+      requiredSpan: Schema.Array(Schema.String),
+      resource: Schema.Array(Schema.String),
+      span: Schema.Array(Schema.String),
+    }),
+    limits: Schema.Struct({
+      maxSafeInteger: Schema.Finite,
+      maxSpansPerRequest: Schema.Finite,
+      maxVersionBytes: Schema.Finite,
+    }),
+    patterns: Schema.Record(Schema.String, Schema.String),
+    registries: Schema.Record(Schema.String, Schema.Array(Schema.String)),
+    schemaVersion: Schema.Finite,
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const decodeTelemetrySchema = Schema.decodeUnknownSync(TelemetrySchema);
 
 const root = process.cwd();
 const effectTelemetrySource = sourceFile('apps/threadnote/src/effect/telemetry.ts');
 const diagnosticSource = sourceFile('apps/threadnote/src/telemetry/diagnostic.ts');
 const diskCapacitySource = sourceFile('packages/graph/src/disk/capacity.ts');
 const operationsSource = sourceFile('apps/threadnote/src/telemetry/operations.ts');
-const schemaV1 = JSON.parse(
-  readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v1.json'), 'utf8'),
-) as TelemetrySchema;
-const schemaV2 = JSON.parse(
-  readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v2.json'), 'utf8'),
-) as TelemetrySchema;
-const schemaV3 = JSON.parse(
-  readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v3.json'), 'utf8'),
-) as TelemetrySchema;
-const schemaV4 = JSON.parse(
-  readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v4.json'), 'utf8'),
-) as TelemetrySchema;
-const schemaV5 = JSON.parse(
-  readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v5.json'), 'utf8'),
-) as TelemetrySchema;
-const schema = JSON.parse(
-  readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v6.json'), 'utf8'),
-) as TelemetrySchema;
-
+const schemaV1 = decodeTelemetrySchema(
+  JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v1.json'), 'utf8')),
+);
+const schemaV2 = decodeTelemetrySchema(
+  JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v2.json'), 'utf8')),
+);
+const schemaV3 = decodeTelemetrySchema(
+  JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v3.json'), 'utf8')),
+);
+const schemaV4 = decodeTelemetrySchema(
+  JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v4.json'), 'utf8')),
+);
+const schemaV5 = decodeTelemetrySchema(
+  JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v5.json'), 'utf8')),
+);
+const schema = decodeTelemetrySchema(
+  JSON.parse(readFileSync(join(root, 'infra', 'telemetry-gateway', 'telemetry-schema-v6.json'), 'utf8')),
+);
 describe('telemetry producer and production gateway schema', () => {
   it('keeps the exact producer resource and span attribute surface', () => {
     const sourceText = effectTelemetrySource.getFullText();
     const sourceAttributeKeys = new Set(
-      [...sourceText.matchAll(/['"]((?:error\.type|session\.id|threadnote\.[a-z0-9_.]+))['"]/giu)].map(
+      EffectArray.map(
+        [
+          ...Effect.pipe(
+            sourceText,
+            EffectString.matchAll(/['"]((?:error\.type|session\.id|threadnote\.[a-z0-9_.]+))['"]/giu),
+          ),
+        ],
         match => match[1],
       ),
     );
@@ -97,7 +110,7 @@ describe('telemetry producer and production gateway schema', () => {
       ...schema.attributeContract.quantityBucketSpan,
     ];
     expect(new Set(classifiedSpanKeys).size).toBe(classifiedSpanKeys.length);
-    expect(classifiedSpanKeys.every(key => schema.attributeContract.span.includes(key))).toBe(true);
+    expect(EffectArray.every(classifiedSpanKeys, key => schema.attributeContract.span.includes(key))).toBe(true);
     expect(schema.attributeContract.requiredSpan).toEqual([
       'threadnote.component',
       'threadnote.event',
@@ -121,13 +134,18 @@ describe('telemetry producer and production gateway schema', () => {
     expect(schemaV4.attributeContract.resource).toEqual(schemaV5.attributeContract.resource);
     expect(schemaV5.attributeContract.resource).toEqual(schema.attributeContract.resource);
     expect(
-      schemaV1.attributeContract.span.some(
-        key => key.startsWith('threadnote.graph.') && key !== 'threadnote.graph.degradation_reason',
+      EffectArray.some(
+        schemaV1.attributeContract.span,
+        key =>
+          Effect.pipe(key, EffectString.startsWith('threadnote.graph.')) &&
+          key !== 'threadnote.graph.degradation_reason',
       ),
     ).toBe(false);
 
-    const graphAttributes = schemaV2.attributeContract.span.filter(
-      key => key.startsWith('threadnote.graph.') && key !== 'threadnote.graph.degradation_reason',
+    const graphAttributes = EffectArray.filter(
+      schemaV2.attributeContract.span,
+      key =>
+        Effect.pipe(key, EffectString.startsWith('threadnote.graph.')) && key !== 'threadnote.graph.degradation_reason',
     );
     expect(graphAttributes).toEqual([
       'threadnote.graph.build_kind',
@@ -148,18 +166,27 @@ describe('telemetry producer and production gateway schema', () => {
       'threadnote.graph.staged_files_bucket',
       'threadnote.graph.total_files_bucket',
     ]);
-    expect(graphAttributes.some(key => /(?:repository|path|commit|session|invocation)/u.test(key))).toBe(false);
-    const autoUpdateAttributes = schemaV3.attributeContract.span.filter(
+    expect(EffectArray.some(graphAttributes, key => /(?:repository|path|commit|session|invocation)/u.test(key))).toBe(
+      false,
+    );
+    const autoUpdateAttributes = EffectArray.filter(
+      schemaV3.attributeContract.span,
       key => !schemaV2.attributeContract.span.includes(key),
     );
     expect(autoUpdateAttributes).toEqual(['threadnote.auto_update.repair_required', 'threadnote.auto_update.result']);
     expect(
-      schemaV3.attributeContract.booleanSpan.filter(key => !schemaV2.attributeContract.booleanSpan.includes(key)),
+      EffectArray.filter(
+        schemaV3.attributeContract.booleanSpan,
+        key => !schemaV2.attributeContract.booleanSpan.includes(key),
+      ),
     ).toEqual(['threadnote.auto_update.repair_required']);
     expect(schemaV3.registries.autoUpdateResult).toEqual(ANONYMOUS_TELEMETRY_AUTO_UPDATE_RESULTS);
 
-    const graphQueryAttributes = schemaV4.attributeContract.span.filter(
-      key => key.startsWith('threadnote.graph.') && !schemaV3.attributeContract.span.includes(key),
+    const graphQueryAttributes = EffectArray.filter(
+      schemaV4.attributeContract.span,
+      key =>
+        Effect.pipe(key, EffectString.startsWith('threadnote.graph.')) &&
+        !schemaV3.attributeContract.span.includes(key),
     );
     expect(graphQueryAttributes).toEqual([
       'threadnote.graph.request_kind',
@@ -171,16 +198,22 @@ describe('telemetry producer and production gateway schema', () => {
       'threadnote.graph.snapshot_symbols_bucket',
     ]);
     expect(
-      graphQueryAttributes.some(key => /(?:repository|path|commit|query_text|symbol_id|graph_id)/u.test(key)),
+      EffectArray.some(graphQueryAttributes, key =>
+        /(?:repository|path|commit|query_text|symbol_id|graph_id)/u.test(key),
+      ),
     ).toBe(false);
-    expect(schemaV4.attributeContract.span.filter(key => !schemaV3.attributeContract.span.includes(key))).toEqual(
-      graphQueryAttributes,
-    );
     expect(
-      schemaV4.attributeContract.booleanSpan.filter(key => !schemaV3.attributeContract.booleanSpan.includes(key)),
+      EffectArray.filter(schemaV4.attributeContract.span, key => !schemaV3.attributeContract.span.includes(key)),
+    ).toEqual(graphQueryAttributes);
+    expect(
+      EffectArray.filter(
+        schemaV4.attributeContract.booleanSpan,
+        key => !schemaV3.attributeContract.booleanSpan.includes(key),
+      ),
     ).toEqual([]);
 
-    const contextBriefV5Attributes = schemaV5.attributeContract.span.filter(
+    const contextBriefV5Attributes = EffectArray.filter(
+      schemaV5.attributeContract.span,
       key => !schemaV4.attributeContract.span.includes(key),
     );
     expect(contextBriefV5Attributes).toEqual([
@@ -199,15 +232,21 @@ describe('telemetry producer and production gateway schema', () => {
       'threadnote.context_brief.unknown_citations_bucket',
     ]);
     expect(
-      contextBriefV5Attributes.some(key =>
+      EffectArray.some(contextBriefV5Attributes, key =>
         /(?:path|repository_id|workset_id|commit|hash|task|query|memory_id|citation_id)/u.test(key),
       ),
     ).toBe(false);
     expect(
-      schemaV5.attributeContract.booleanSpan.filter(key => !schemaV4.attributeContract.booleanSpan.includes(key)),
+      EffectArray.filter(
+        schemaV5.attributeContract.booleanSpan,
+        key => !schemaV4.attributeContract.booleanSpan.includes(key),
+      ),
     ).toEqual(['threadnote.context_brief.output_truncated']);
 
-    const v6Attributes = schema.attributeContract.span.filter(key => !schemaV5.attributeContract.span.includes(key));
+    const v6Attributes = EffectArray.filter(
+      schema.attributeContract.span,
+      key => !schemaV5.attributeContract.span.includes(key),
+    );
     expect(v6Attributes).toEqual([
       'threadnote.code_anchor_finalization.conflict_bucket',
       'threadnote.code_anchor_finalization.failed_bucket',
@@ -230,12 +269,15 @@ describe('telemetry producer and production gateway schema', () => {
       'threadnote.context_brief.returned_lane',
     ]);
     expect(
-      v6Attributes.some(key =>
+      EffectArray.some(v6Attributes, key =>
         /(?:path|repository_id|workset_id|commit|hash|task|query|memory_id|citation_id|uri|user)/u.test(key),
       ),
     ).toBe(false);
     expect(
-      schema.attributeContract.booleanSpan.filter(key => !schemaV5.attributeContract.booleanSpan.includes(key)),
+      EffectArray.filter(
+        schema.attributeContract.booleanSpan,
+        key => !schemaV5.attributeContract.booleanSpan.includes(key),
+      ),
     ).toEqual(['threadnote.context_brief.code_anchor_gap', 'threadnote.context_brief.recovery_present']);
     const collector = readFileSync(join(root, 'infra', 'telemetry-gateway', 'collector.yaml'), 'utf8');
     const canarySource = readFileSync(join(root, 'infra', 'telemetry-gateway', 'cmd', 'canary', 'main.go'), 'utf8');
@@ -256,8 +298,8 @@ describe('telemetry producer and production gateway schema', () => {
 
   it('keeps every closed producer registry identical to the gateway boundary', () => {
     const expected = producerRegistries();
-    expect(Object.keys(schema.registries).sort()).toEqual(Object.keys(expected).sort());
-    for (const [name, values] of Object.entries(expected)) {
+    expect(EffectRecord.keys(schema.registries).sort()).toEqual(EffectRecord.keys(expected).sort());
+    for (const [name, values] of EffectRecord.toEntries(expected)) {
       expect(sortedUnique(schema.registries[name] ?? []), name).toEqual(sortedUnique(values));
     }
 
@@ -289,10 +331,10 @@ describe('telemetry producer and production gateway schema', () => {
     const serviceVersion = pattern('serviceVersion');
     const session = pattern('sessionId');
 
-    expect(invocation.test(`tni_${'0'.repeat(24)}`)).toBe(true);
-    expect(invocation.test(`tni_${'0'.repeat(23)}`)).toBe(false);
-    expect(session.test(`tns_${'a'.repeat(32)}`)).toBe(true);
-    expect(session.test(`tns_${'a'.repeat(33)}`)).toBe(false);
+    expect(invocation.test(`tni_${Effect.pipe('0', EffectString.repeat(24))}`)).toBe(true);
+    expect(invocation.test(`tni_${Effect.pipe('0', EffectString.repeat(23))}`)).toBe(false);
+    expect(session.test(`tns_${Effect.pipe('a', EffectString.repeat(32))}`)).toBe(true);
+    expect(session.test(`tns_${Effect.pipe('a', EffectString.repeat(33))}`)).toBe(false);
     expect(runtime.test('darwin-arm64_1.2')).toBe(true);
     expect(runtime.test('/Users/private')).toBe(false);
     expect(serviceVersion.test('4.2.2-local.g63bc61f')).toBe(true);
@@ -389,7 +431,13 @@ describe('telemetry producer and production gateway schema', () => {
     expect(gatewayWorkflow).toContain('queue: max');
     expect(gatewayWorkflow).toContain('cancel-in-progress: false');
     expect(gatewayWorkflow).toContain('classify-changes.sh');
-    expect(gatewayWorkflow.match(/git diff --name-only --no-renames/gu)).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        gatewayWorkflow,
+        EffectString.match(/git diff --name-only --no-renames/gu),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
     expect(gatewayWorkflow).toContain("grep -qx 'supersede=true'");
     expect(gatewayWorkflow).toContain('--image "$THREADNOTE_TELEMETRY_IMAGE"');
     expect(gatewayWorkflow).toContain('--update-only');
@@ -448,7 +496,9 @@ function producerRegistries(): Readonly<Record<string, readonly string[]>> {
     event: functionStringLiterals(effectTelemetrySource, 'safeEvent'),
     failureCode: literalRegistry(diagnosticSource, 'CODE_GRAPH_STORE_FAILURE_CODES'),
     failureDomain: interfacePropertyStrings(diagnosticSource, 'AnonymousTelemetryDiagnostic', 'domain'),
-    failureOperation: codeGraphFailureOperations.map(value => value.replaceAll(' ', '-')),
+    failureOperation: EffectArray.map(codeGraphFailureOperations, value =>
+      Effect.pipe(value, EffectString.replaceAll(' ', '-')),
+    ),
     failureReason: interfacePropertyStrings(diagnosticSource, 'AnonymousTelemetryDiagnostic', 'reason'),
     failureRecovery: literalRegistry(diagnosticSource, 'CODE_GRAPH_STORE_RECOVERIES'),
     fallbackReason: literalRegistry(effectTelemetrySource, 'ANONYMOUS_TELEMETRY_GRAPH_FALLBACK_REASONS'),
@@ -473,7 +523,9 @@ function anonymousTelemetryOperations(): readonly string[] {
   const topLevel = literalRegistry(operationsSource, 'CLI_TOP_LEVEL_OPERATIONS');
   const fixed = literalRegistry(operationsSource, 'FIXED_RUNTIME_OPERATIONS');
   const subcommands = objectStringArrays(operationsSource, 'CLI_SUBCOMMANDS');
-  const nested = Object.entries(subcommands).flatMap(([top, values]) => values.map(value => `${top}.${value}`));
+  const nested = EffectArray.flatMap(EffectRecord.toEntries(subcommands), ([top, values]) =>
+    EffectArray.map(values, value => `${top}.${value}`),
+  );
   const explicit = literalRegistry(operationsSource, 'ANONYMOUS_TELEMETRY_OPERATIONS', {ignoreSpreads: true});
   return [...topLevel, ...nested, ...fixed, ...explicit, 'unknown'];
 }
@@ -506,7 +558,11 @@ function literalRegistry(
   options: {readonly ignoreSpreads?: boolean} = {},
 ): readonly string[] {
   let initializer = variableInitializer(source, name);
-  if (ts.isNewExpression(initializer)) initializer = unwrap(initializer.arguments?.[0] as ts.Expression);
+  if (ts.isNewExpression(initializer)) {
+    const argument = initializer.arguments?.[0];
+    if (argument === undefined) throw new Error(`${name} must initialize its registry.`);
+    initializer = unwrap(argument);
+  }
   if (!ts.isArrayLiteralExpression(initializer)) throw new Error(`${name} must remain an array-backed registry.`);
   const values: string[] = [];
   for (const element of initializer.elements) {
@@ -521,15 +577,17 @@ function literalRegistry(
 function objectStringArrays(source: ts.SourceFile, name: string): Readonly<Record<string, readonly string[]>> {
   const initializer = variableInitializer(source, name);
   if (!ts.isObjectLiteralExpression(initializer)) throw new Error(`${name} must remain an object literal.`);
-  return Object.fromEntries(
-    initializer.properties.map(property => {
+  return EffectRecord.fromEntries(
+    EffectArray.map(initializer.properties, property => {
       if (!ts.isPropertyAssignment(property)) throw new Error(`${name} contains an unsupported property.`);
       const key = propertyName(property.name);
       const value = unwrap(property.initializer);
-      if (!ts.isArrayLiteralExpression(value) || value.elements.some(element => !ts.isStringLiteral(element))) {
-        throw new Error(`${name}.${key} must remain a string literal array.`);
-      }
-      return [key, value.elements.map(element => (element as ts.StringLiteral).text)];
+      if (!ts.isArrayLiteralExpression(value)) throw new Error(`${name}.${key} must remain a string literal array.`);
+      const strings = EffectArray.map(value.elements, element => {
+        if (!ts.isStringLiteral(element)) throw new Error(`${name}.${key} must remain a string literal array.`);
+        return element.text;
+      });
+      return [key, strings];
     }),
   );
 }

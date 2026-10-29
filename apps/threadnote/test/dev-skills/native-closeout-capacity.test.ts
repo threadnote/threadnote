@@ -1,5 +1,5 @@
 import {it} from '@effect/vitest';
-import {Array as EffectArray, String as EffectString, Effect, Result, Schema} from 'effect';
+import {Array as EffectArray, String as EffectString, Option as EffectOption, Effect, Result, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -28,9 +28,11 @@ import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {prepareWorkflowOperation} from '../../src/workflow_memory/artifacts.js';
 import type {NativeCloseoutPlannedDocument} from '../../src/workflow_automation/closeout_documents.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectRecord from 'effect/Record';
+import * as Effect2 from 'effect';
 
-const transaction = 'c'.repeat(64);
-const operationId = (key: string) => 'closeout-' + transaction.slice(0, 24) + '-' + key;
+const transaction = Effect2.pipe('c', EffectString.repeat(64));
+const operationId = (key: string) => 'closeout-' + Effect2.pipe(transaction, EffectString.slice(0, 24)) + '-' + key;
 const fixture = Effect.gen(function* () {
   const f = yield* nativeFixture();
   const system = yield* SystemInfo;
@@ -100,7 +102,7 @@ describe('whole closeout capacity reservation', () => {
           Effect.provideService(SystemInfo, f.scopedSystem),
         );
       const admitted = yield* reserve();
-      expect(admitted.operationIds).toEqual(['one', 'two'].map(operationId));
+      expect(admitted.operationIds).toEqual(EffectArray.map(['one', 'two'], operationId));
       const bytes = yield* f.fs.readFileString(f.statePath());
       const wrongRelease = yield* releasePristineNativeCloseoutCapacity(f.config, 'native-run', {
         ...admitted,
@@ -142,7 +144,9 @@ describe('whole closeout capacity reservation', () => {
       expect((yield* readNativeWorkflowState(f.config, 'native-run'))?.state.operations).toHaveLength(2);
       expect(
         Result.isFailure(
-          yield* clearNativeCloseoutCapacity(f.config, 'native-run', 'd'.repeat(64)).pipe(Effect.result),
+          yield* clearNativeCloseoutCapacity(f.config, 'native-run', Effect2.pipe('d', EffectString.repeat(64))).pipe(
+            Effect.result,
+          ),
         ),
       ).toBe(true);
       yield* clearNativeCloseoutCapacity(f.config, 'native-run', transaction);
@@ -186,7 +190,7 @@ describe('whole closeout capacity reservation', () => {
               ...f.base('write', sourceRun),
               operationId: 'source-' + index,
               artifactKey: 'source-' + index,
-              body: 'Original complete draft '.repeat(1700),
+              body: Effect2.pipe('Original complete draft ', EffectString.repeat(1700)),
             }),
           );
         const source = yield* readNativeWorkflowState(f.config, sourceRun);
@@ -196,7 +200,9 @@ describe('whole closeout capacity reservation', () => {
           source.state.bindingId,
           inspectWorkflowJournal(f.config, source.state.bindingId),
         ).pipe(Effect.provideService(SystemInfo, f.scopedSystem));
-        const artifact = Object.values(journal.state.artifacts).find(item => item.artifactKey === 'source-0');
+        const artifact = EffectOption.getOrUndefined(
+          EffectArray.findFirst(EffectRecord.values(journal.state.artifacts), item => item.artifactKey === 'source-0'),
+        );
         if (!artifact) throw new Error('Expected original source artifact.');
         const archiveId = 'archive-fixture-source';
         const inventory = [
@@ -348,7 +354,7 @@ describe('whole closeout capacity reservation', () => {
             key,
             body,
             uri: predicted.uri,
-            relations: targets.map(target => ({type: 'references' as const, uri: target.uri})),
+            relations: EffectArray.map(targets, target => ({type: 'references' as const, uri: target.uri})),
           };
           documents.push(document);
           return document;
@@ -387,7 +393,13 @@ describe('whole closeout capacity reservation', () => {
       expect(yield* reserve()).toEqual(reservation);
       const completed = yield* readNativeWorkflowState(f.config, 'native-run');
       expect(completed?.state.operations).toHaveLength(35);
-      expect(completed?.state.operations.every(operation => operation.status === 'verified')).toBe(true);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(completed?.state.operations), __effectArrayReceiver =>
+            EffectArray.every(__effectArrayReceiver, operation => operation.status === 'verified'),
+          ),
+        ),
+      ).toBe(true);
       if (!completed) throw new Error('Expected completed native controller.');
       const actual = yield* withWorkflowLock(
         f.config,

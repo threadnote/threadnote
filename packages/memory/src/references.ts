@@ -1,4 +1,6 @@
 import {parseResourceId} from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 /**
  * Validates and dedupes caller-supplied reference URIs so a handoff can record
@@ -12,7 +14,7 @@ export function normalizeReferenceUris(references: readonly string[] | undefined
   }
   const seen = new Set<string>();
   for (const raw of references) {
-    const uri = raw.trim();
+    const uri = Effect.pipe(raw, EffectString.trim);
     if (!uri) {
       continue;
     }

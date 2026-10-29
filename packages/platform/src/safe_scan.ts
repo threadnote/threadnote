@@ -1,5 +1,8 @@
 import {Effect, FileSystem, Option, Path, Stream, Schema} from 'effect';
 import {runtimeTextDirectoryNames} from './system.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export interface SafeScannedFile {
   readonly modifiedAt?: Date;
@@ -17,10 +20,13 @@ const SAFE_SCAN_ENTRY_CONCURRENCY = 64;
 const SAFE_SCAN_INSPECTION_PAGE_SIZE = 256;
 const SAFE_SCAN_DIRECTORY_RECORD_BYTES_MAXIMUM = 1_048_576;
 
-class SafeFileScanError extends Schema.TaggedError<SafeFileScanError>()('SafeFileScanError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class SafeFileScanError extends Schema.TaggedError<SafeFileScanError, {readonly brand: unique symbol}>()(
+  'SafeFileScanError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 /** Visit live-runtime files in bounded directory pages without retaining the corpus. */
 export function forEachFileWithinBoundary<A, E, R>(
@@ -181,7 +187,10 @@ export const safeChildDirectoryNames = Effect.fn('filesystem.safeChildDirectoryN
       inspectMappedPath(fs, pathService.join(root, name), roots).pipe(Effect.map(inspected => ({inspected, name}))),
     {concurrency: SAFE_SCAN_ENTRY_CONCURRENCY},
   );
-  return entries.filter(entry => entry.inspected?.type === 'Directory').map(entry => entry.name);
+  return EffectArray.map(
+    EffectArray.filter(entries, entry => entry.inspected?.type === 'Directory'),
+    entry => entry.name,
+  );
 });
 
 interface ScanRoots {
@@ -238,7 +247,9 @@ function inspectMappedPath(
 
 function pathEscapesBoundary(relativePath: string, pathService: Path.Path): boolean {
   return (
-    relativePath === '..' || relativePath.startsWith(`..${pathService.sep}`) || pathService.isAbsolute(relativePath)
+    relativePath === '..' ||
+    Effect2.pipe(relativePath, EffectString.startsWith(`..${pathService.sep}`)) ||
+    pathService.isAbsolute(relativePath)
   );
 }
 

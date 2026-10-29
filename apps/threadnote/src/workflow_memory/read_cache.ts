@@ -7,6 +7,7 @@ import {
 import {sha256HexSync} from './native_digest.js';
 import {makeRequestCanonicalJson} from './canonical_json.js';
 import type {WorkflowBinding, WorkflowJournal, WorkflowOperation} from './protocol.js';
+import * as EffectRecord from 'effect/Record';
 
 /** Request-local memoization of immutable images, never file metadata or scope authority. */
 export interface WorkflowReadCache {
@@ -40,7 +41,7 @@ const immutableImages = new WeakSet<object>();
 
 export function immutableWorkflowImage<A>(value: A): A {
   if (value !== null && typeof value === 'object' && !immutableImages.has(value)) {
-    for (const child of Object.values(value)) immutableWorkflowImage(child);
+    for (const child of EffectRecord.values(value)) immutableWorkflowImage(child);
     Object.freeze(value);
     immutableImages.add(value);
   }

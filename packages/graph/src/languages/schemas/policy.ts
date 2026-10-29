@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const LOW_SIGNAL_STRUCTURED_PATH =
   /(?:^|\/)_*(?:snapshots?|golden[-_]data|goldens?|fixtures?|oplogs?|evaluations?|evals?|datasets?|test[-_]?data|animations?)_*(?:\/|$)|(?:^|\/)[^/]*(?:snapshot|golden|fixture|oplog|evaluation|dataset|animation)[^/]*\.(?:jsonc?|ya?ml)$/i;
 
@@ -38,7 +42,15 @@ export function structuredObjectDeclarationBudget(path: string): StructuredObjec
 }
 
 export function isXcodeAssetContentsPath(path: string): boolean {
-  const segments = path.split('/');
-  if (segments.length < 3 || segments.at(-1)?.toLowerCase() !== 'contents.json') return false;
-  return segments.slice(0, -2).some(segment => segment.toLowerCase().endsWith('.xcassets'));
+  const segments = Effect.pipe(path, EffectString.split('/'));
+  if (
+    segments.length < 3 ||
+    Effect.pipe(segments.at(-1), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    ) !== 'contents.json'
+  )
+    return false;
+  return EffectArray.some(segments.slice(0, -2), segment =>
+    Effect.pipe(segment, EffectString.toLowerCase, EffectString.endsWith('.xcassets')),
+  );
 }

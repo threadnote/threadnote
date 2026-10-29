@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
@@ -21,6 +22,11 @@ import {
 } from '../src/content/websiteArticles.js';
 import {whatsNewArticlePath, whatsNewReleasePath} from '../src/lib/routes.js';
 import {loadPreparedWebsiteMetadataFromEnvironment, type PreparedWebsiteMetadata} from './site-prepared-metadata.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {pipe as effectPipe} from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const publicOrigin = 'https://threadnote.io/';
 const articleFilePattern = /^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)--([a-z0-9]+(?:-[a-z0-9]+)*)\.md$/;
@@ -59,22 +65,34 @@ function articleError(fileName: string, detail: string): ScriptError {
 }
 
 function plainText(markdown: string): string {
-  return markdown
-    .replace(/\[([^\]]+)]\([^\s)]+(?:\s+"[^"]*")?\)/g, '$1')
-    .replace(/[`*_~]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return Effect2.pipe(
+    markdown,
+    EffectString.replace(/\[([^\]]+)]\([^\s)]+(?:\s+"[^"]*")?\)/g, '$1'),
+    EffectString.replace(/[`*_~]/g, ''),
+    EffectString.replace(/\s+/g, ' '),
+    EffectString.trim,
+  );
 }
 
 function articleHighlights(body: string): readonly string[] {
   return [
     ...new Set(
-      body
-        .split('\n')
-        .map(line => /^#{2,3}\s+(.+)$/.exec(line.trim())?.[1])
-        .filter((heading): heading is string => Boolean(heading))
-        .map(plainText)
-        .filter(Boolean),
+      effectPipe(
+        EffectOption.fromNullishOr(
+          EffectArray.map(
+            EffectArray.filter(
+              EffectArray.map(
+                Effect2.pipe(body, EffectString.split('\n')),
+                line => /^#{2,3}\s+(.+)$/.exec(Effect2.pipe(line, EffectString.trim))?.[1],
+              ),
+              (heading): heading is string => Boolean(heading),
+            ),
+            plainText,
+          ),
+        ),
+        EffectOption.map(values => EffectArray.filter(values, (value, index) => index in values && Boolean(value))),
+        EffectOption.getOrUndefined,
+      ),
     ),
   ];
 }
@@ -85,8 +103,10 @@ function requiredMetadataString(
   fileName: string,
 ): string {
   const value = metadata[key];
-  if (typeof value !== 'string' || !value.trim()) throw articleError(fileName, `frontmatter ${key} must be a string`);
-  if (value !== value.trim()) throw articleError(fileName, `frontmatter ${key} must not have surrounding whitespace`);
+  if (typeof value !== 'string' || !Effect2.pipe(value, EffectString.trim))
+    throw articleError(fileName, `frontmatter ${key} must be a string`);
+  if (value !== Effect2.pipe(value, EffectString.trim))
+    throw articleError(fileName, `frontmatter ${key} must not have surrounding whitespace`);
   return value;
 }
 
@@ -94,9 +114,14 @@ function parseArticleMetadata(
   fileName: string,
   source: string,
 ): {readonly body: string; readonly metadata: ArticleMetadata} {
-  const normalized = source.replace(/\r\n?/g, '\n');
+  const normalized = Effect2.pipe(source, EffectString.replace(/\r\n?/g, '\n'));
   const document = /^---\n([\s\S]*?)\n---\n+([\s\S]*)$/.exec(normalized);
-  if (!document?.[1] || !document[2]?.trim()) {
+  if (
+    !document?.[1] ||
+    !Effect2.pipe(document[2], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  ) {
     throw articleError(fileName, 'expected YAML frontmatter followed by a non-empty Markdown body');
   }
 
@@ -106,12 +131,13 @@ function parseArticleMetadata(
   } catch (error) {
     throw articleError(fileName, `frontmatter is not valid YAML: ${String(error)}`);
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!Schema.is(Schema.Record(Schema.String, Schema.Unknown))(parsed)) {
     throw articleError(fileName, 'frontmatter must be a mapping');
   }
-  const raw = parsed as Readonly<Record<string, unknown>>;
-  const unknownKeys = Object.keys(raw).filter(key => !articleMetadataKeys.has(key));
-  if (unknownKeys.length > 0) throw articleError(fileName, `unknown frontmatter field(s): ${unknownKeys.join(', ')}`);
+  const raw = parsed;
+  const unknownKeys = EffectArray.filter(EffectRecord.keys(raw), key => !articleMetadataKeys.has(key));
+  if (unknownKeys.length > 0)
+    throw articleError(fileName, `unknown frontmatter field(s): ${EffectArray.join(unknownKeys, ', ')}`);
 
   const title = requiredMetadataString(raw, 'title', fileName);
   const summary = requiredMetadataString(raw, 'summary', fileName);
@@ -119,11 +145,14 @@ function parseArticleMetadata(
   const publishedAt = requiredMetadataString(raw, 'publishedAt', fileName);
   const slug = requiredMetadataString(raw, 'slug', fileName);
   const authorUrlValue = raw.authorUrl;
-  if (authorUrlValue !== undefined && (typeof authorUrlValue !== 'string' || !authorUrlValue.trim())) {
+  if (
+    authorUrlValue !== undefined &&
+    (typeof authorUrlValue !== 'string' || !Effect2.pipe(authorUrlValue, EffectString.trim))
+  ) {
     throw articleError(fileName, 'frontmatter authorUrl must be a non-empty HTTPS URL when present');
   }
   const authorUrl = authorUrlValue;
-  if (authorUrl && authorUrl !== authorUrl.trim()) {
+  if (authorUrl && authorUrl !== Effect2.pipe(authorUrl, EffectString.trim)) {
     throw articleError(fileName, 'frontmatter authorUrl must not have surrounding whitespace');
   }
   const socialImageValue = raw.socialImage;
@@ -131,18 +160,24 @@ function parseArticleMetadata(
   if ((socialImageValue === undefined) !== (socialImageAltValue === undefined)) {
     throw articleError(fileName, 'frontmatter socialImage and socialImageAlt must be provided together');
   }
-  if (socialImageValue !== undefined && (typeof socialImageValue !== 'string' || !socialImageValue.trim())) {
+  if (
+    socialImageValue !== undefined &&
+    (typeof socialImageValue !== 'string' || !Effect2.pipe(socialImageValue, EffectString.trim))
+  ) {
     throw articleError(fileName, 'frontmatter socialImage must be a non-empty PNG filename when present');
   }
-  if (socialImageAltValue !== undefined && (typeof socialImageAltValue !== 'string' || !socialImageAltValue.trim())) {
+  if (
+    socialImageAltValue !== undefined &&
+    (typeof socialImageAltValue !== 'string' || !Effect2.pipe(socialImageAltValue, EffectString.trim))
+  ) {
     throw articleError(fileName, 'frontmatter socialImageAlt must be a non-empty string when present');
   }
   const socialImage = socialImageValue;
   const socialImageAlt = socialImageAltValue;
-  if (socialImage && socialImage !== socialImage.trim()) {
+  if (socialImage && socialImage !== Effect2.pipe(socialImage, EffectString.trim)) {
     throw articleError(fileName, 'frontmatter socialImage must not have surrounding whitespace');
   }
-  if (socialImageAlt && socialImageAlt !== socialImageAlt.trim()) {
+  if (socialImageAlt && socialImageAlt !== Effect2.pipe(socialImageAlt, EffectString.trim)) {
     throw articleError(fileName, 'frontmatter socialImageAlt must not have surrounding whitespace');
   }
 
@@ -158,7 +193,7 @@ function parseArticleMetadata(
   if (!articleSlugPattern.test(slug)) throw articleError(fileName, `frontmatter slug is not URL-safe: ${slug}`);
   const parsedPublishedAt = Date.parse(publishedAt);
   const canonicalPublishedAt = Number.isFinite(parsedPublishedAt)
-    ? new Date(parsedPublishedAt).toISOString().replace('.000Z', 'Z')
+    ? Effect2.pipe(new Date(parsedPublishedAt).toISOString(), EffectString.replace('.000Z', 'Z'))
     : undefined;
   if (!exactTimestampPattern.test(publishedAt) || canonicalPublishedAt !== publishedAt) {
     throw articleError(fileName, 'frontmatter publishedAt must be an exact UTC timestamp such as 2026-08-26T14:30:00Z');
@@ -179,13 +214,13 @@ function parseArticleMetadata(
   if (!fileMatch) {
     throw articleError(fileName, 'filename must be <UTC timestamp>--<slug>.md with colons written as hyphens');
   }
-  const fileTimestamp = fileMatch[1].replace(/T(\d{2})-(\d{2})-(\d{2})Z$/, 'T$1:$2:$3Z');
+  const fileTimestamp = Effect2.pipe(fileMatch[1], EffectString.replace(/T(\d{2})-(\d{2})-(\d{2})Z$/, 'T$1:$2:$3Z'));
   if (fileTimestamp !== publishedAt || fileMatch[2] !== slug) {
     throw articleError(fileName, 'filename timestamp and slug must exactly match frontmatter publishedAt and slug');
   }
 
   return {
-    body: document[2].trim(),
+    body: Effect2.pipe(document[2], EffectString.trim),
     metadata: {
       author,
       ...(authorUrl ? {authorUrl} : {}),
@@ -223,7 +258,7 @@ async function validateArticleSocialImage(
   const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   const hasPngSignature =
     header.length === 24 &&
-    pngSignature.every((byte, index) => header[index] === byte) &&
+    EffectArray.every(pngSignature, (byte, index) => header[index] === byte) &&
     String.fromCharCode(...header.slice(12, 16)) === 'IHDR';
   if (!hasPngSignature) {
     throw articleError(fileName, `frontmatter socialImage is not a valid PNG: ${article.socialImage}`);
@@ -243,13 +278,22 @@ export async function loadWebsiteArticles(repositoryRoot: string): Promise<reado
   const fileNames: string[] = [];
   const glob = new Bun.Glob('apps/website/articles/*.md');
   for await (const path of glob.scan({cwd: repositoryRoot, onlyFiles: true})) {
-    const fileName = path.slice(path.lastIndexOf('/') + 1);
-    if (fileName.toLowerCase() !== 'readme.md') fileNames.push(fileName);
+    const fileName = Effect2.pipe(
+      path,
+      EffectString.slice(
+        Effect2.pipe(
+          path,
+          EffectString.lastIndexOf('/'),
+          Effect2.Option.getOrElse(() => -1),
+        ) + 1,
+      ),
+    );
+    if (Effect2.pipe(fileName, EffectString.toLowerCase) !== 'readme.md') fileNames.push(fileName);
   }
   fileNames.sort();
 
   const articles = await Promise.all(
-    fileNames.map(async fileName => {
+    EffectArray.map(fileNames, async fileName => {
       const article = parseWebsiteArticle(
         fileName,
         await Bun.file(`${repositoryRoot}/apps/website/articles/${fileName}`).text(),
@@ -266,21 +310,24 @@ export async function loadWebsiteArticles(repositoryRoot: string): Promise<reado
   }
   return articles.sort(
     (left, right) =>
-      Date.parse(right.publishedAt) - Date.parse(left.publishedAt) || left.slug.localeCompare(right.slug),
+      Date.parse(right.publishedAt) - Date.parse(left.publishedAt) ||
+      Effect2.pipe(left.slug, EffectString.localeCompare(right.slug)),
   );
 }
 
 function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
+  return Effect2.pipe(
+    value,
+    EffectString.replaceAll('&', '&amp;'),
+    EffectString.replaceAll('<', '&lt;'),
+    EffectString.replaceAll('>', '&gt;'),
+    EffectString.replaceAll('"', '&quot;'),
+    EffectString.replaceAll("'", '&#39;'),
+  );
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return Effect2.pipe(value, EffectString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 }
 
 function replaceTagAttribute(
@@ -295,7 +342,11 @@ function replaceTagAttribute(
     `<${tagName}\\b[^>]*\\b${escapeRegExp(identifyingAttribute)}="${escapeRegExp(identifyingValue)}"[^>]*>`,
     'i',
   );
-  const tag = html.match(tagPattern)?.[0];
+  const tag = Effect2.pipe(
+    html,
+    EffectString.match(tagPattern),
+    Effect2.Option.getOrElse(() => null),
+  )?.[0];
   if (!tag)
     throw ScriptError.make({
       message: `What's New HTML template is missing ${tagName}[${identifyingAttribute}="${identifyingValue}"]`,
@@ -306,8 +357,11 @@ function replaceTagAttribute(
       message: `What's New HTML template ${tagName}[${identifyingAttribute}="${identifyingValue}"] is missing ${updatedAttribute}`,
     });
   }
-  const updatedTag = tag.replace(attributePattern, `${updatedAttribute}="${escapeHtml(updatedValue)}"`);
-  return html.replace(tagPattern, updatedTag);
+  const updatedTag = Effect2.pipe(
+    tag,
+    EffectString.replace(attributePattern, `${updatedAttribute}="${escapeHtml(updatedValue)}"`),
+  );
+  return Effect2.pipe(html, EffectString.replace(tagPattern, updatedTag));
 }
 
 function postDetails(post: WebsitePost): {
@@ -354,21 +408,24 @@ function crawlerFallback(post: WebsitePost): string {
   const shareText = encodeURIComponent(post.title);
   const shareUrl = encodeURIComponent(details.canonicalUrl);
   const markdown = renderToStaticMarkup(createElement(ReactMarkdown, {remarkPlugins: [remarkGfm]}, details.body));
-  return [
-    '<main class="crawler-post">',
-    '<article>',
-    `<p>${details.kindLabel} · ${escapeHtml(post.publishedAt)} · By ${escapeHtml(details.author)}</p>`,
-    `<h1>${escapeHtml(post.title)}</h1>`,
-    `<p>${escapeHtml(post.summary)}</p>`,
-    markdown,
-    '<aside aria-label="Share this post">',
-    `<label>Permanent public URL <input readonly value="${escapeHtml(details.canonicalUrl)}" /></label>`,
-    `<p><a href="https://x.com/intent/post?text=${shareText}&amp;url=${shareUrl}">Share on X</a> · ` +
-      `<a href="https://www.linkedin.com/sharing/share-offsite/?url=${shareUrl}">Share on LinkedIn</a></p>`,
-    '</aside>',
-    '</article>',
-    '</main>',
-  ].join('');
+  return EffectArray.join(
+    [
+      '<main class="crawler-post">',
+      '<article>',
+      `<p>${details.kindLabel} · ${escapeHtml(post.publishedAt)} · By ${escapeHtml(details.author)}</p>`,
+      `<h1>${escapeHtml(post.title)}</h1>`,
+      `<p>${escapeHtml(post.summary)}</p>`,
+      markdown,
+      '<aside aria-label="Share this post">',
+      `<label>Permanent public URL <input readonly value="${escapeHtml(details.canonicalUrl)}" /></label>`,
+      `<p><a href="https://x.com/intent/post?text=${shareText}&amp;url=${shareUrl}">Share on X</a> · ` +
+        `<a href="https://www.linkedin.com/sharing/share-offsite/?url=${shareUrl}">Share on LinkedIn</a></p>`,
+      '</aside>',
+      '</article>',
+      '</main>',
+    ],
+    '',
+  );
 }
 
 function postStableId(post: WebsitePost): string {
@@ -376,36 +433,45 @@ function postStableId(post: WebsitePost): string {
 }
 
 export function orderWebsitePostsDescending(posts: readonly WebsitePost[]): readonly WebsitePost[] {
-  return orderWebsiteUpdatesDescending(
-    posts.map(post => ({post, publishedAt: post.publishedAt, stableId: postStableId(post)})),
-  ).map(({post}) => post);
+  return EffectArray.map(
+    orderWebsiteUpdatesDescending(
+      EffectArray.map(posts, post => ({post, publishedAt: post.publishedAt, stableId: postStableId(post)})),
+    ),
+    ({post}) => post,
+  );
 }
 
 function crawlerIndexFallback(posts: readonly WebsitePost[]): string {
   const renderPostList = (kind: 'article' | 'release', heading: string, view: 'articles' | 'releases') => [
     `<section><h2><a href="${new URL(`whats-new/?view=${view}`, publicOrigin).href}">${heading}</a></h2>`,
     '<ol>',
-    ...filterWebsiteUpdatesByKind(posts, kind).map(post => {
+    ...EffectArray.map(filterWebsiteUpdatesByKind(posts, kind), post => {
       const details = postDetails(post);
-      return [
-        '<li><article>',
-        `<p>${details.kindLabel} · ${escapeHtml(post.publishedAt)} · By ${escapeHtml(details.author)}</p>`,
-        `<h3><a href="${escapeHtml(details.canonicalUrl)}">${escapeHtml(post.title)}</a></h3>`,
-        `<p>${escapeHtml(post.summary)}</p>`,
-        '</article></li>',
-      ].join('');
+      return EffectArray.join(
+        [
+          '<li><article>',
+          `<p>${details.kindLabel} · ${escapeHtml(post.publishedAt)} · By ${escapeHtml(details.author)}</p>`,
+          `<h3><a href="${escapeHtml(details.canonicalUrl)}">${escapeHtml(post.title)}</a></h3>`,
+          `<p>${escapeHtml(post.summary)}</p>`,
+          '</article></li>',
+        ],
+        '',
+      );
     }),
     '</ol></section>',
   ];
 
-  return [
-    '<main class="crawler-post crawler-post--index">',
-    "<header><p>What's new</p><h1>Threadnote articles and releases</h1>",
-    '<p>Engineering stories and stable release posts, kept in separate views.</p></header>',
-    ...renderPostList('article', 'Articles', 'articles'),
-    ...renderPostList('release', 'Release notes', 'releases'),
-    '</main>',
-  ].join('');
+  return EffectArray.join(
+    [
+      '<main class="crawler-post crawler-post--index">',
+      "<header><p>What's new</p><h1>Threadnote articles and releases</h1>",
+      '<p>Engineering stories and stable release posts, kept in separate views.</p></header>',
+      ...renderPostList('article', 'Articles', 'articles'),
+      ...renderPostList('release', 'Release notes', 'releases'),
+      '</main>',
+    ],
+    '',
+  );
 }
 
 export function renderWhatsNewIndexHtml(template: string, posts: readonly WebsitePost[]): string {
@@ -413,13 +479,14 @@ export function renderWhatsNewIndexHtml(template: string, posts: readonly Websit
   const latestPost = filterWebsiteUpdatesByKind(orderedPosts, 'article')[0] ?? orderedPosts[0];
   if (!latestPost) throw ScriptError.make({message: "What's New index requires at least one post"});
   const latestSocialImage = postDetails(latestPost).socialImage;
-  if (!template.includes('<div id="root"></div>'))
+  if (!Effect2.pipe(template, EffectString.includes('<div id="root"></div>')))
     throw ScriptError.make({message: "What's New HTML template is missing #root"});
-  if (!template.includes('</head>')) throw ScriptError.make({message: "What's New HTML template is missing </head>"});
+  if (!Effect2.pipe(template, EffectString.includes('</head>')))
+    throw ScriptError.make({message: "What's New HTML template is missing </head>"});
   const itemList = {
     '@context': 'https://schema.org',
     '@type': 'CollectionPage',
-    hasPart: orderedPosts.map(post => {
+    hasPart: EffectArray.map(orderedPosts, post => {
       const details = postDetails(post);
       return {
         '@type': post.kind === 'article' ? 'Article' : 'TechArticle',
@@ -431,13 +498,21 @@ export function renderWhatsNewIndexHtml(template: string, posts: readonly Websit
     name: "What's new in Threadnote",
     url: new URL('whats-new/', publicOrigin).href,
   };
-  const structuredData = JSON.stringify(itemList).replaceAll('<', '\\u003c');
-  return replaceSocialImageMetadata(template, latestSocialImage)
-    .replace(
-      '</head>',
-      `    <script type="application/ld+json" data-threadnote-index>${structuredData}</script>\n  </head>`,
-    )
-    .replace('<div id="root"></div>', `<div id="root">${crawlerIndexFallback(orderedPosts)}</div>`);
+  const structuredData = Effect2.pipe(JSON.stringify(itemList), EffectString.replaceAll('<', '\\u003c'));
+  return Effect2.pipe(replaceSocialImageMetadata(template, latestSocialImage), __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(
+      __effectPipeInput,
+      EffectString.replace(
+        '</head>',
+        `    <script type="application/ld+json" data-threadnote-index>${structuredData}</script>\n  </head>`,
+      ),
+    );
+    const __effectPipeStage1 = Effect2.pipe(
+      __effectPipeStage0,
+      EffectString.replace('<div id="root"></div>', `<div id="root">${crawlerIndexFallback(orderedPosts)}</div>`),
+    );
+    return __effectPipeStage1;
+  });
 }
 
 function postStructuredData(post: WebsitePost): Readonly<Record<string, unknown>> {
@@ -475,36 +550,53 @@ export function renderWebsitePostHtml(template: string, post: WebsitePost): stri
   html = replaceTagAttribute(html, 'meta', 'name', 'twitter:description', 'content', post.summary);
   if (!/<title>[^<]*<\/title>/i.test(html))
     throw ScriptError.make({message: "What's New HTML template is missing its title"});
-  html = html.replace(/<title>[^<]*<\/title>/i, `<title>${escapeHtml(details.pageTitle)}</title>`);
+  html = Effect2.pipe(
+    html,
+    EffectString.replace(/<title>[^<]*<\/title>/i, `<title>${escapeHtml(details.pageTitle)}</title>`),
+  );
 
-  const structuredData = JSON.stringify(postStructuredData(post)).replaceAll('<', '\\u003c');
-  const postMetadata = [
-    `<meta property="article:published_time" content="${escapeHtml(post.publishedAt)}" />`,
-    `<meta property="article:author" content="${escapeHtml(details.author)}" />`,
-    `<script type="application/ld+json" data-threadnote-post>${structuredData}</script>`,
-  ].join('\n    ');
-  if (!html.includes('</head>')) throw ScriptError.make({message: "What's New HTML template is missing </head>"});
-  html = html.replace('</head>', `    ${postMetadata}\n  </head>`);
-  if (!html.includes('<div id="root"></div>'))
+  const structuredData = Effect2.pipe(
+    JSON.stringify(postStructuredData(post)),
+    EffectString.replaceAll('<', '\\u003c'),
+  );
+  const postMetadata = EffectArray.join(
+    [
+      `<meta property="article:published_time" content="${escapeHtml(post.publishedAt)}" />`,
+      `<meta property="article:author" content="${escapeHtml(details.author)}" />`,
+      `<script type="application/ld+json" data-threadnote-post>${structuredData}</script>`,
+    ],
+    '\n    ',
+  );
+  if (!Effect2.pipe(html, EffectString.includes('</head>')))
+    throw ScriptError.make({message: "What's New HTML template is missing </head>"});
+  html = Effect2.pipe(html, EffectString.replace('</head>', `    ${postMetadata}\n  </head>`));
+  if (!Effect2.pipe(html, EffectString.includes('<div id="root"></div>')))
     throw ScriptError.make({message: "What's New HTML template is missing #root"});
-  return html.replace('<div id="root"></div>', `<div id="root">${crawlerFallback(post)}</div>`);
+  return Effect2.pipe(
+    html,
+    EffectString.replace('<div id="root"></div>', `<div id="root">${crawlerFallback(post)}</div>`),
+  );
 }
 
 export function renderWebsitePostsSitemap(sitemap: string, posts: readonly WebsitePost[]): string {
-  const generated = [
-    generatedSitemapStart,
-    ...posts.map(post => {
-      const path = post.kind === 'article' ? whatsNewArticlePath(post.slug) : whatsNewReleasePath(post.version);
-      return `  <url><loc>${new URL(path, publicOrigin).href}</loc><lastmod>${post.publishedAt}</lastmod></url>`;
-    }),
-    generatedSitemapEnd,
-  ].join('\n');
+  const generated = EffectArray.join(
+    [
+      generatedSitemapStart,
+      ...EffectArray.map(posts, post => {
+        const path = post.kind === 'article' ? whatsNewArticlePath(post.slug) : whatsNewReleasePath(post.version);
+        return `  <url><loc>${new URL(path, publicOrigin).href}</loc><lastmod>${post.publishedAt}</lastmod></url>`;
+      }),
+      generatedSitemapEnd,
+    ],
+    '\n',
+  );
   const generatedPattern = new RegExp(
     `${escapeRegExp(generatedSitemapStart)}[\\s\\S]*?${escapeRegExp(generatedSitemapEnd)}`,
   );
-  if (generatedPattern.test(sitemap)) return sitemap.replace(generatedPattern, generated);
-  if (!sitemap.includes('</urlset>')) throw ScriptError.make({message: 'Website sitemap is missing </urlset>'});
-  return sitemap.replace('</urlset>', `${generated}\n</urlset>`);
+  if (generatedPattern.test(sitemap)) return Effect2.pipe(sitemap, EffectString.replace(generatedPattern, generated));
+  if (!Effect2.pipe(sitemap, EffectString.includes('</urlset>')))
+    throw ScriptError.make({message: 'Website sitemap is missing </urlset>'});
+  return Effect2.pipe(sitemap, EffectString.replace('</urlset>', `${generated}\n</urlset>`));
 }
 
 export const generateWebsitePostPages = Effect.fn('siteArticles.generatePostPages')(function* (
@@ -535,11 +627,11 @@ export const generateWebsitePostPages = Effect.fn('siteArticles.generatePostPage
     }));
   const posts = orderWebsitePostsDescending([
     ...articles,
-    ...releases.map(release => ({
+    ...EffectArray.map(releases, release => ({
       ...release,
       author: 'Threadnote' as const,
       kind: 'release' as const,
-      title: `Threadnote ${release.version.replace(/^v/, '')}`,
+      title: `Threadnote ${Effect2.pipe(release.version, EffectString.replace(/^v/, ''))}`,
     })),
   ]);
   const templatePath = path.join(outputRoot, 'whats-new', 'index.html');

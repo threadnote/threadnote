@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path} from 'effect';
@@ -8,6 +9,7 @@ import {sha256HexSync as hash} from '@threadnote/platform/sha256';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
+import {TestError} from '@threadnote/testing/test-error';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {
   claimDraftWork,
@@ -25,6 +27,8 @@ import {
   type DraftQueueWork,
 } from '../../src/memory/context/maintenance_draft_queue.js';
 import {AUTOMATIC_DRAFT_PROMPT_VERSION} from '../../src/effect/ai/selected_generation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
@@ -180,7 +184,7 @@ describe('private durable draft queue', () => {
             ...fs,
             rename: (from, to) =>
               Effect.gen(function* () {
-                if (fault !== 'none' && !injected && to.endsWith('/queue.json')) {
+                if (fault !== 'none' && !injected && Effect2.pipe(to, EffectString.endsWith('/queue.json'))) {
                   injected = true;
                   if (fault === 'after-marker') yield* fs.rename(from, to);
                   return yield* fs.rename(`${from}.missing`, to);
@@ -284,7 +288,7 @@ describe('private durable draft queue', () => {
           open: (file, options) =>
             fs.open(file, options).pipe(
               Effect.map(handle =>
-                file.startsWith(root)
+                Effect2.pipe(file, EffectString.startsWith(root))
                   ? new Proxy(handle, {
                       get: (target, key) =>
                         key === 'sync'
@@ -560,7 +564,9 @@ describe('private durable draft queue', () => {
           }).pipe(Effect.forkChild({startImmediately: true}));
           yield* Deferred.await(started);
           const contenders = yield* Effect.all([claimDraftWork(config), claimDraftWork(config)], {concurrency: 2});
-          expect(contenders.every(result => result.state === 'waiting' && result.reason === 'active')).toBe(true);
+          expect(
+            EffectArray.every(contenders, result => result.state === 'waiting' && result.reason === 'active'),
+          ).toBe(true);
           expect((yield* readDraftQueueStatus(config)).backgroundReservations).toHaveLength(1);
           yield* Deferred.succeed(release, undefined);
           expect(yield* Fiber.join(owner)).toBe(true);
@@ -977,9 +983,19 @@ await Effect.runPromise(Effect.scoped(program.pipe(Effect.tap(result => Console.
           for (const result of results) expect(result.exitCode, result.stdout + result.stderr).toBe(0);
           expect(waited, JSON.stringify(results)).toBe(true);
           expect(yield* fs.readFileString(waiting)).toBe('active');
-          const states = results.map(result => JSON.parse(result.stdout.trim()) as {state: string; reason?: string});
-          expect(states.filter(result => result.state === 'claimed')).toHaveLength(1);
-          expect(states.filter(result => result.state === 'waiting')).toHaveLength(1);
+          const states = EffectArray.map(results, result => {
+            const parsed: unknown = JSON.parse(Effect2.pipe(result.stdout, EffectString.trim));
+            if (
+              !Predicate.isObject(parsed) ||
+              typeof parsed.state !== 'string' ||
+              (parsed.reason !== undefined && typeof parsed.reason !== 'string')
+            ) {
+              throw TestError.make({message: 'Queue child returned a malformed admission result.'});
+            }
+            return {state: parsed.state, ...(typeof parsed.reason === 'string' ? {reason: parsed.reason} : {})};
+          });
+          expect(EffectArray.filter(states, result => result.state === 'claimed')).toHaveLength(1);
+          expect(EffectArray.filter(states, result => result.state === 'waiting')).toHaveLength(1);
           expect((yield* readDraftQueueStatus(config)).backgroundReservations).toHaveLength(1);
           expect((yield* readDraftQueueTarget(config, hash('process')))?.state).toBe('completed');
         }),
@@ -995,7 +1011,7 @@ await Effect.runPromise(Effect.scoped(program.pipe(Effect.tap(result => Console.
           ...fs,
           makeDirectory: (directory, options) =>
             Effect.gen(function* () {
-              if (!raced && directory.endsWith('threadnote')) {
+              if (!raced && Effect2.pipe(directory, EffectString.endsWith('threadnote'))) {
                 raced = true;
                 yield* fs.makeDirectory(directory, options);
               }

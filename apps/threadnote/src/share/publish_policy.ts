@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -6,6 +7,8 @@ import {loadRecallMemoryIdentities} from '@threadnote/recall/index';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import type {ShareRuntime} from '../types.js';
 import {Effect} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Publication accepts only active personal durable memories, regardless of entry point. */
 export function sharePublishEligibilityError(
@@ -20,8 +23,8 @@ export function sharePublishEligibilityError(
     return `Refusing to publish ${sourceUri}: enrolled topics require the reviewed existing-target Git proposal path; generic publication cannot project their provenance.`;
   if (
     resource.anchor === undefined &&
-    resource.canonicalUri.startsWith(prefix) &&
-    resource.canonicalUri.slice(prefix.length).endsWith('.md') &&
+    Effect2.pipe(resource.canonicalUri, EffectString.startsWith(prefix)) &&
+    Effect2.pipe(resource.canonicalUri, EffectString.slice(prefix.length), EffectString.endsWith('.md')) &&
     record?.headerTitle === 'MEMORY' &&
     record.metadata.kind === 'durable' &&
     record.metadata.status === 'active'
@@ -39,7 +42,15 @@ export const sharePublishRelationWarnings = Effect.fn('share.relationWarnings')(
   team: string,
 ) {
   const relations = parseMemoryDocument(sourceUri, publishedContent)?.metadata.relations ?? [];
-  const memoryIds = [...new Set(relations.flatMap(relation => memoryIdFromIdentityAlias(relation.uri) ?? []))];
+  const memoryIds = [
+    ...new Set(
+      EffectArray.flatMap(relations, (relation, __effectArrayIndex) => {
+        if (!(__effectArrayIndex in relations)) return [];
+        const memoryId = memoryIdFromIdentityAlias(relation.uri);
+        return memoryId === undefined ? [] : [memoryId];
+      }),
+    ),
+  ];
   if (memoryIds.length === 0) return [];
   const scope = `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(team)}/durable/projects`;
   const candidates = yield* loadRecallMemoryIdentities(config, {
@@ -50,7 +61,7 @@ export const sharePublishRelationWarnings = Effect.fn('share.relationWarnings')(
   if (candidates === undefined) {
     return ['PREVIEW WARNING: relation target availability in the destination team could not be verified.'];
   }
-  return memoryIds.flatMap(memoryId => {
+  return EffectArray.flatMap(memoryIds, memoryId => {
     const resolution = classifyMemoryIdentityCandidates(candidates, memoryId, [scope]);
     return resolution.state === 'resolved'
       ? []

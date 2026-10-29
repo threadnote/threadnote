@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -10,6 +11,9 @@ import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/regist
 import {CODE_GRAPH_INVENTORY_EXCLUSION_REASONS} from '@threadnote/graph/inventory/policy';
 import {CODE_GRAPH_INVENTORY_REUSE_RECEIPT_VERSION} from '@threadnote/graph/store/models';
 import {mergeCodeGraphWorkspaces} from '@threadnote/graph/workspace';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const emptyWorkspace = mergeCodeGraphWorkspaces([]);
 
@@ -18,7 +22,7 @@ describe('code graph inventory reuse receipts', () => {
     const file = (path: string, content: string) => ({
       blobId: `blob:${path}`,
       content,
-      contentHash: 'a'.repeat(64),
+      contentHash: Effect.pipe('a', EffectString.repeat(64)),
       language: 'fixture',
       mode: '100644',
       path,
@@ -33,7 +37,12 @@ describe('code graph inventory reuse receipts', () => {
     ];
 
     expect(
-      codeGraphAttributionContextFilesForReceipt(files, BUILTIN_LANGUAGE_PACK_REGISTRY)?.map(item => item.path),
+      EffectOption.getOrUndefined(
+        EffectOption.map(
+          EffectOption.fromNullishOr(codeGraphAttributionContextFilesForReceipt(files, BUILTIN_LANGUAGE_PACK_REGISTRY)),
+          __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, item => item.path),
+        ),
+      ),
     ).toEqual(['package.json', 'packages/app/tsconfig.json']);
   });
 
@@ -50,7 +59,7 @@ describe('code graph inventory reuse receipts', () => {
           {
             blobId: 'blob:package',
             content: '{"name":"fixture"}',
-            contentHash: 'c'.repeat(64),
+            contentHash: Effect.pipe('c', EffectString.repeat(64)),
             language: 'json',
             mode: '100644',
             path: 'package.json',
@@ -58,15 +67,15 @@ describe('code graph inventory reuse receipts', () => {
             source: 'commit' as const,
           },
         ],
-        contract: 'a'.repeat(64),
+        contract: Effect.pipe('a', EffectString.repeat(64)),
         diagnostics,
-        environmentFingerprint: 'b'.repeat(64),
+        environmentFingerprint: Effect.pipe('b', EffectString.repeat(64)),
         includeOpaqueCorpusAssets: true,
         policyExclusions: {
           bytes: 0,
           files: 0,
           policyVersion: 2,
-          reasons: CODE_GRAPH_INVENTORY_EXCLUSION_REASONS.map(reason => ({bytes: 0, files: 0, reason})),
+          reasons: EffectArray.map(CODE_GRAPH_INVENTORY_EXCLUSION_REASONS, reason => ({bytes: 0, files: 0, reason})),
         },
         skipped,
         version: CODE_GRAPH_INVENTORY_REUSE_RECEIPT_VERSION,
@@ -81,7 +90,11 @@ describe('code graph inventory reuse receipts', () => {
   fcProp(
     it,
     'rejects arbitrary non-receipt payloads instead of trusting persisted JSON',
-    {payload: FC.string({maxLength: 2_000}).filter(payload => !payload.trimStart().startsWith('{'))},
+    {
+      payload: FC.string({maxLength: 2_000}).filter(
+        payload => !Effect.pipe(payload, EffectString.trimStart, EffectString.startsWith('{')),
+      ),
+    },
     ({payload}) => {
       expect(decodeCodeGraphInventoryReuseReceipt(payload)).toBeUndefined();
     },

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -13,9 +14,11 @@ import {
 } from '@threadnote/graph/store/query/indexes';
 import {selectRecentReadySnapshotsForRepository} from '@threadnote/graph/store/queries';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const repositoryId = 'a'.repeat(64);
-const scopeId = `code-graph-scope:${'7'.padStart(64, '0')}`;
+const repositoryId = Effect2.pipe('a', EffectString.repeat(64));
+const scopeId = `code-graph-scope:${Effect2.pipe('7', EffectString.padStart(64, '0'))}`;
 const layer = SqliteClient.layer({filename: ':memory:'});
 
 describe('scope-aware graph snapshot query indexes', () => {
@@ -33,7 +36,7 @@ describe('scope-aware graph snapshot query indexes', () => {
         SELECT printf('cgsn_%040x', value), ?, ?, printf('code-graph-scope:%064x', value % 2000), printf('%040x', value % 5),
           printf('content-%d', value % 5), 'extractor', 0, 'ready', 0, 0, 0, '2026-09-20T00:00:00.000Z',
           printf('2026-09-20T00:00:%02d.000Z', value % 60) FROM sequence`,
-          [repositoryId, 'b'.repeat(64)],
+          [repositoryId, Effect2.pipe('b', EffectString.repeat(64))],
         );
         yield* sql.unsafe(
           `INSERT INTO lexical_storage_formats (snapshot_id, format_version, posting_count, symbol_count, term_count, created_at)
@@ -42,11 +45,13 @@ describe('scope-aware graph snapshot query indexes', () => {
         );
         yield* sql.unsafe('ANALYZE');
         const recent = yield* selectRecentReadySnapshotsForRepository(repositoryId, scopeId);
-        const expected = Array.from({length: 10}, (_, index) => 7 + 2000 * index)
-          .sort((left, right) => (right % 60) - (left % 60) || left - right)
-          .slice(0, 8)
-          .map(value => `cgsn_${value.toString(16).padStart(40, '0')}`);
-        expect(recent.map(snapshot => snapshot.id)).toEqual(expected);
+        const expected = EffectArray.map(
+          Array.from({length: 10}, (_, index) => 7 + 2000 * index)
+            .sort((left, right) => (right % 60) - (left % 60) || left - right)
+            .slice(0, 8),
+          value => `cgsn_${Effect2.pipe(value.toString(16), EffectString.padStart(40, '0'))}`,
+        );
+        expect(EffectArray.map(recent, snapshot => snapshot.id)).toEqual(expected);
         const queries = [
           {name: 'snapshots_scope_recent_ready', predicate: '', order: 'completed_at DESC, id'},
           {name: 'snapshots_scope_commit_ready', predicate: "AND commit_id = 'commit'", order: 'completed_at DESC, id'},
@@ -74,10 +79,15 @@ describe('scope-aware graph snapshot query indexes', () => {
           ORDER BY ${query.order} LIMIT 8`,
             [repositoryId, scopeId],
           );
-          expect(plan.map(row => row.detail).join('\n')).toContain(
-            `USING INDEX ${query.name} (repository_id=? AND scope_id=?`,
-          );
-          expect(plan.some(row => row.detail.includes('USE TEMP B-TREE'))).toBe(false);
+          expect(
+            EffectArray.join(
+              EffectArray.map(plan, row => row.detail),
+              '\n',
+            ),
+          ).toContain(`USING INDEX ${query.name} (repository_id=? AND scope_id=?`);
+          expect(
+            EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes('USE TEMP B-TREE'))),
+          ).toBe(false);
         }
       }).pipe(provideTestLayer(layer)),
   );
@@ -88,12 +98,12 @@ describe('scope-aware graph snapshot query indexes', () => {
       yield* initializeSchema(sql);
       yield* sql`INSERT INTO repositories VALUES (${repositoryId}, 'test', 'sha1', '2026-09-20', '2026-09-20')`;
       for (const [index, selectedScope] of ['full-repository', scopeId].entries()) {
-        const id = `cgsn_${String(index).repeat(40)}`;
+        const id = `cgsn_${Effect2.pipe(String(index), EffectString.repeat(40))}`;
         yield* sql`INSERT INTO snapshots (id, repository_id, worktree_id, scope_id, commit_id, extractor_set, dirty,
           state, file_count, symbol_count, edge_count, started_at)
-          VALUES (${id}, ${repositoryId}, ${'b'.repeat(64)}, ${selectedScope}, 'commit', 'extractor', 0, 'ready', 0, 0, 0, '2026-09-20T00:00:00.000Z')`;
+          VALUES (${id}, ${repositoryId}, ${Effect2.pipe('b', EffectString.repeat(64))}, ${selectedScope}, 'commit', 'extractor', 0, 'ready', 0, 0, 0, '2026-09-20T00:00:00.000Z')`;
         yield* sql`INSERT INTO snapshot_extractor_generations VALUES (${id}, ${CODE_GRAPH_EXTRACTOR_GENERATION})`;
-        yield* sql`INSERT INTO active_snapshots VALUES (${'b'.repeat(64)}, ${selectedScope}, ${id}, '2026-09-20T00:00:00.000Z')`;
+        yield* sql`INSERT INTO active_snapshots VALUES (${Effect2.pipe('b', EffectString.repeat(64))}, ${selectedScope}, ${id}, '2026-09-20T00:00:00.000Z')`;
       }
       const authorityBefore = yield* sql.unsafe('SELECT * FROM active_snapshots ORDER BY scope_id');
       for (const definition of CODE_GRAPH_SCOPE_QUERY_INDEX_DEFINITIONS)

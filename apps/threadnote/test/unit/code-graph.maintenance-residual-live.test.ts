@@ -1,5 +1,7 @@
+import {TestError} from '@threadnote/testing/test-error';
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Clock, DateTime, Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -20,11 +22,18 @@ import {CodeGraphStore} from '@threadnote/graph/store';
 import {CODE_GRAPH_EXTRACTOR_GENERATION} from '@threadnote/graph/types';
 import {removeCodeGraphView} from '@threadnote/graph/view_removal';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const REPOSITORY_ID = 'b'.repeat(64);
-const WORKTREE_ID = 'c'.repeat(64);
-const SNAPSHOT_ID = `cgsn_${'1'.repeat(40)}`;
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('c', EffectString.repeat(64));
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
 const BUILD_ID = '11111111-1111-1111';
 const PHASES = ['vector-pointers', 'build-status', 'provenance', 'complete'] as const;
 
@@ -116,12 +125,14 @@ describe('live removed-view residual maintenance', () => {
           cursor_token: null,
           phase: 'complete',
         });
-        expect(new Set(observed.map(row => row.phase))).toEqual(new Set(PHASES));
+        expect(new Set(EffectArray.map(observed, row => row.phase))).toEqual(new Set(PHASES));
         expect(observedDurablePointerRetirement).toBe(true);
         expect(observedBuildSidecarRetirement).toBe(true);
         expect(pointerCounts[0]).toBe(1);
         expect(pointerCounts.at(-1)).toBe(0);
-        expect(pointerCounts.every((count, index) => index === 0 || count <= pointerCounts[index - 1])).toBe(true);
+        expect(
+          EffectArray.every(pointerCounts, (count, index) => index === 0 || count <= pointerCounts[index - 1]),
+        ).toBe(true);
         const completedVectorState = readVectorCounts(fixture.vectorDatabasePath!);
         expect(completedVectorState).toEqual({generations: 0, pointers: 0, retirements: 0, vectors: 0});
         expect(buildStatusExists(fixture.home)).toBe(false);
@@ -164,8 +175,8 @@ describe('live removed-view residual maintenance', () => {
           expect(
             yield* store.removeView(fixture.databasePath, WORKTREE_ID, SNAPSHOT_ID, {
               cleanupEvidence: {
-                recordDigest: 'd'.repeat(64),
-                recordIdentity: 'e'.repeat(64),
+                recordDigest: Effect2.pipe('d', EffectString.repeat(64)),
+                recordIdentity: Effect2.pipe('e', EffectString.repeat(64)),
                 repositoryId: REPOSITORY_ID,
               },
             }),
@@ -270,7 +281,7 @@ function seedGraph(databasePath: string): void {
         SNAPSHOT_ID,
         REPOSITORY_ID,
         WORKTREE_ID,
-        'f'.repeat(40),
+        Effect2.pipe('f', EffectString.repeat(40)),
         new Date(0).toISOString(),
         new Date(1).toISOString(),
       );
@@ -309,7 +320,12 @@ function seedVectorDatabase(fs: FileSystem.FileSystem, path: Path.Path, home: st
                template_version, count, state, created_at
              ) VALUES (?, ?, 'model-live', ?, 384, 1, 0, 'ready', ?)`,
           )
-          .run('generation-live', SNAPSHOT_ID, '9'.repeat(64), DateTime.formatIso(DateTime.makeUnsafe(0)));
+          .run(
+            'generation-live',
+            SNAPSHOT_ID,
+            Effect2.pipe('9', EffectString.repeat(64)),
+            DateTime.formatIso(DateTime.makeUnsafe(0)),
+          );
         database
           .query('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)')
           .run(WORKTREE_ID, 'generation-live');
@@ -361,7 +377,7 @@ function seedExactProvenance(fs: FileSystem.FileSystem, path: Path.Path, home: s
       `${JSON.stringify({
         canonicalWorktreePath: path.join(home, 'missing-worktree'),
         checkoutId: CHECKOUT_ID,
-        headCommit: 'f'.repeat(40),
+        headCommit: Effect2.pipe('f', EffectString.repeat(40)),
         observedAt: DateTime.formatIso(DateTime.makeUnsafe(0)),
         registration: {kind: 'main'},
         repositoryId: REPOSITORY_ID,
@@ -381,7 +397,7 @@ function terminalBuildStatus(): CodeGraphBuildStatus {
     counters: {},
     identity: {
       checkoutId: CHECKOUT_ID,
-      commit: 'f'.repeat(40),
+      commit: Effect2.pipe('f', EffectString.repeat(40)),
       repositoryId: REPOSITORY_ID,
       worktreeId: WORKTREE_ID,
     },
@@ -421,7 +437,7 @@ function seedPoisonProvenance(
         : {
             canonicalWorktreePath: path.join(home, 'missing-worktree'),
             checkoutId: CHECKOUT_ID,
-            headCommit: 'f'.repeat(40),
+            headCommit: Effect2.pipe('f', EffectString.repeat(40)),
             observedAt: DateTime.formatIso(DateTime.makeUnsafe(0)),
             repositoryId: REPOSITORY_ID,
             schemaVersion: 1,
@@ -479,16 +495,23 @@ function readVectorCounts(databasePath: string) {
   try {
     const hasTable = (table: string) =>
       Number(
-        (
+        requiredRow(
           database
-            .query("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
-            .get(table) as {
-            readonly count: number;
-          }
+            .query<
+              {
+                readonly count: number;
+              },
+              SQLQueryBindings[]
+            >("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .get(table),
         ).count,
       ) === 1;
     const count = (table: string) =>
-      Number((database.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as {readonly count: number}).count);
+      Number(
+        requiredRow(
+          database.query<{readonly count: number}, SQLQueryBindings[]>(`SELECT COUNT(*) AS count FROM ${table}`).get(),
+        ).count,
+      );
     return {
       generations: count('vector_generations'),
       pointers: count('vector_pointers'),
@@ -509,6 +532,9 @@ function activeReceiptCount(fs: FileSystem.FileSystem, path: Path.Path, home: st
   return Effect.gen(function* () {
     const root = codeGraphDiskReservationRoot(path, home);
     if (!(yield* fs.exists(root))) return 0;
-    return (yield* fs.readDirectory(root)).filter(name => /^v1-[0-9a-f]{64}\.json$/u.test(name)).length;
+    return EffectArray.filter(
+      yield* fs.readDirectory(root),
+      __effectArrayValue => !!(name => /^v1-[0-9a-f]{64}\.json$/u.test(name))(__effectArrayValue),
+    ).length;
   });
 }

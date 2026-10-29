@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
@@ -14,10 +15,12 @@ import {makeGraphShareRegistryWriter} from '@threadnote/graph/sharing/registry/w
 import {graphShareOciDescriptorFromLayers} from '@threadnote/graph/sharing/descriptor';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, FetchHttpClient.layer);
 const target = parseGraphShareRegistryTarget('oci://registry.example.test/acme/canonical');
-const pathname = '/v2/acme/canonical/blobs/sha256:' + 'a'.repeat(64);
+const pathname = '/v2/acme/canonical/blobs/sha256:' + Effect2.pipe('a', EffectString.repeat(64));
 const secret = 'synthetic-helper-output';
 const basic = 'Basic ' + Buffer.from('synthetic-reader:' + secret).toString('base64');
 type Request = {
@@ -59,7 +62,7 @@ const fixture = Effect.fn('test.registry.fixture')(function* (options: {
   const requests: Request[] = [];
   let helperCalls = 0;
   const fetch = Object.assign(
-    async (url: string | URL | Request, init?: RequestInit) => {
+    async (url: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       const request = {
         url: new URL(String(url)),
         headers: new Headers(init?.headers),
@@ -73,7 +76,7 @@ const fixture = Effect.fn('test.registry.fixture')(function* (options: {
       return options.handler(request);
     },
     {preconnect: () => undefined},
-  ) as typeof globalThis.fetch;
+  );
   const reader = yield* Effect.gen(function* () {
     return {
       http: yield* makeGraphShareRegistryHttp(target, options.access, options.isAuthorized),
@@ -218,7 +221,10 @@ describe('registry authentication and bounded transport', () => {
       yield* Ref.set(principal, 'principal-b');
       tokenResponse.resolve(Response.json({token: 'synthetic-token'}));
       expect(yield* Fiber.join(write)).toMatchObject({failure: {kind: 'verification-failed'}});
-      expect(f.requests.map(request => request.url.pathname)).toEqual(['/v2/acme/canonical/blobs/uploads/', '/token']);
+      expect(EffectArray.map(f.requests, request => request.url.pathname)).toEqual([
+        '/v2/acme/canonical/blobs/uploads/',
+        '/token',
+      ]);
     }).pipe(provideTestLayer(layer)),
   );
 
@@ -251,7 +257,11 @@ describe('registry authentication and bounded transport', () => {
           },
         });
         expect((yield* f.read()).bytes).toEqual(Buffer.from([1, 2, 3]));
-        expect(f.requests.map(request => request.url.pathname)).toEqual([pathname, '/zot/auth/token', pathname]);
+        expect(EffectArray.map(f.requests, request => request.url.pathname)).toEqual([
+          pathname,
+          '/zot/auth/token',
+          pathname,
+        ]);
       }
     }).pipe(provideTestLayer(layer)),
   );
@@ -275,7 +285,7 @@ describe('registry authentication and bounded transport', () => {
             handler: () => new Response(null, {status: 401, headers: {'www-authenticate': challenge}}),
           });
           expect((yield* Effect.result(f.read()))._tag).toBe('Failure');
-          expect(f.requests.map(request => request.url.pathname)).toEqual([pathname]);
+          expect(EffectArray.map(f.requests, request => request.url.pathname)).toEqual([pathname]);
         }
       }
     }).pipe(provideTestLayer(layer)),
@@ -333,7 +343,10 @@ describe('registry authentication and bounded transport', () => {
         },
       });
       expect(yield* f.writer!.putManifest(digest, bytes)).toBe(digest);
-      expect((yield* Effect.result(f.writer!.putManifest('sha256:' + 'a'.repeat(64), bytes)))._tag).toBe('Failure');
+      expect(
+        (yield* Effect.result(f.writer!.putManifest('sha256:' + Effect2.pipe('a', EffectString.repeat(64)), bytes)))
+          ._tag,
+      ).toBe('Failure');
       expect((yield* Effect.result(f.writer!.putManifest('../foreign', bytes)))._tag).toBe('Failure');
       expect(f.requests).toHaveLength(1);
       const mismatch = yield* fixture({
@@ -356,7 +369,7 @@ describe('registry authentication and bounded transport', () => {
               : new Response(null, {status: 202, headers: {location}}),
         });
         expect((yield* Effect.result(invalid.writer!.putBlob(digest, bytes)))._tag).toBe('Failure');
-        expect(invalid.requests.map(request => request.method)).toEqual(['HEAD', 'POST']);
+        expect(EffectArray.map(invalid.requests, request => request.method)).toEqual(['HEAD', 'POST']);
       }
     }).pipe(provideTestLayer(layer)),
   );
@@ -378,8 +391,11 @@ describe('registry authentication and bounded transport', () => {
       const fiber = yield* Effect.forkChild(Effect.result(f.writer!.putBlob(sha256Digest(bytes), bytes)));
       yield* TestClock.adjust(60_001);
       expect((yield* Fiber.join(fiber))._tag).toBe('Failure');
-      expect(f.requests.map(request => request.method)).toEqual(['HEAD', 'POST', 'PUT', 'DELETE']);
-      expect(f.requests.find(request => request.method === 'PUT')?.signal?.aborted).toBe(true);
+      expect(EffectArray.map(f.requests, request => request.method)).toEqual(['HEAD', 'POST', 'PUT', 'DELETE']);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(f.requests, request => request.method === 'PUT'))?.signal
+          ?.aborted,
+      ).toBe(true);
     }).pipe(provideTestLayer(layer)),
   );
 
@@ -412,8 +428,8 @@ describe('registry authentication and bounded transport', () => {
       });
       expect(yield* f.writer!.putBlob(digest, bytes)).toMatchObject({digest, existed: false});
       expect(yield* f.writer!.putBlob(digest, bytes)).toMatchObject({digest, existed: true});
-      expect(f.requests.filter(request => request.method === 'PUT')).toHaveLength(1);
-      expect(f.requests.filter(request => request.method === 'POST')).toHaveLength(1);
+      expect(EffectArray.filter(f.requests, request => request.method === 'PUT')).toHaveLength(1);
+      expect(EffectArray.filter(f.requests, request => request.method === 'POST')).toHaveLength(1);
       expect(f.helperCalls()).toBe(1);
     }).pipe(provideTestLayer(layer)),
   );
@@ -436,14 +452,16 @@ describe('registry authentication and bounded transport', () => {
           return new Response(null, {status: 503, headers: {'retry-after': '11'}});
         },
       });
-      expect(yield* Effect.result(f.writer!.putBlob('sha256:' + 'a'.repeat(64), bytes))).toMatchObject({
+      expect(
+        yield* Effect.result(f.writer!.putBlob('sha256:' + Effect2.pipe('a', EffectString.repeat(64)), bytes)),
+      ).toMatchObject({
         failure: {kind: 'verification-failed'},
       });
       expect(f.requests).toHaveLength(0);
       expect(yield* Effect.result(f.writer!.putBlob(digest, bytes))).toMatchObject({
         failure: {httpStatus: 503, retryAfterMilliseconds: 11_000},
       });
-      expect(f.requests.map(request => request.method)).toEqual(['HEAD', 'POST', 'PUT', 'DELETE']);
+      expect(EffectArray.map(f.requests, request => request.method)).toEqual(['HEAD', 'POST', 'PUT', 'DELETE']);
     }).pipe(provideTestLayer(layer)),
   );
   effectIt.effect('requires an explicitly selected credential before constructing a writer', () =>
@@ -529,7 +547,9 @@ describe('registry authentication and bounded transport', () => {
       expect(f.helperCalls()).toBe(1);
       expect(f.requests).toHaveLength(3);
       expect(f.requests[0]?.headers.get('authorization')).toBeNull();
-      expect(f.requests.slice(1).every(request => request.headers.get('authorization') === basic)).toBe(true);
+      expect(EffectArray.every(f.requests.slice(1), request => request.headers.get('authorization') === basic)).toBe(
+        true,
+      );
     }).pipe(provideTestLayer(layer)),
   );
 
@@ -638,7 +658,7 @@ describe('registry authentication and bounded transport', () => {
       expect((yield* Effect.exit(f.read()))._tag).toBe('Failure');
       expect(f.requests).toHaveLength(3);
       expect(f.helperCalls()).toBe(2);
-      expect(f.requests.every(request => request.signal?.aborted)).toBe(true);
+      expect(EffectArray.every(f.requests, request => request.signal?.aborted === true)).toBe(true);
     }).pipe(provideTestLayer(layer)),
   );
 
@@ -719,7 +739,7 @@ describe('registry authentication and bounded transport', () => {
         handler: () =>
           new Response(body, {headers: {'content-type': descriptor.mediaType, 'docker-content-digest': digest}}),
       });
-      const resolved = yield* valid.registry.readManifest('tn-frontier-' + 'a'.repeat(40));
+      const resolved = yield* valid.registry.readManifest('tn-frontier-' + Effect2.pipe('a', EffectString.repeat(40)));
       expect(resolved).toMatchObject({
         descriptor,
         digest,
@@ -730,9 +750,11 @@ describe('registry authentication and bounded transport', () => {
         {'content-type': descriptor.mediaType, 'docker-content-digest': sha256Digest('different')},
       ]) {
         const invalid = yield* fixture({handler: () => new Response(body, {headers})});
-        expect((yield* Effect.exit(invalid.registry.readManifest('tn-frontier-' + 'a'.repeat(40))))._tag).toBe(
-          'Failure',
-        );
+        expect(
+          (yield* Effect.exit(
+            invalid.registry.readManifest('tn-frontier-' + Effect2.pipe('a', EffectString.repeat(40))),
+          ))._tag,
+        ).toBe('Failure');
       }
     }).pipe(provideTestLayer(layer)),
   );

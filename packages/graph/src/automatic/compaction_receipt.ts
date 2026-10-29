@@ -2,14 +2,15 @@ import {Clock, Crypto, Effect, FileSystem, Option, Path, Predicate, Schema} from
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {codeGraphRepositoriesRoot, codeGraphRepositoryRoot} from '../layout.js';
+import * as EffectRecord from 'effect/Record';
 
-class CodeGraphAutomaticCompactionReceiptError extends Schema.TaggedError<CodeGraphAutomaticCompactionReceiptError>()(
-  'CodeGraphAutomaticCompactionReceiptError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphAutomaticCompactionReceiptError extends Schema.TaggedError<
+  CodeGraphAutomaticCompactionReceiptError,
+  {readonly brand: unique symbol}
+>()('CodeGraphAutomaticCompactionReceiptError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const CODE_GRAPH_AUTOMATIC_COMPACTION_COOLDOWN_MILLISECONDS = 24 * 60 * 60 * 1_000;
 export const CODE_GRAPH_AUTOMATIC_COMPACTION_LOW_YIELD_COOLDOWN_MILLISECONDS = 7 * 24 * 60 * 60 * 1_000;
@@ -289,7 +290,7 @@ function decodeAutomaticCompactionReceipt(
     const parsed: unknown = JSON.parse(content);
     if (!Predicate.isObject(parsed)) return undefined;
     const receipt = parsed;
-    const keys = Object.keys(receipt).sort();
+    const keys = EffectRecord.keys(receipt).sort();
     if (
       JSON.stringify(keys) !==
         JSON.stringify(

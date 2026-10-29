@@ -1,12 +1,16 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {readFile, readdir} from '@threadnote/testing/node-fs-promises';
 import {builtinModules} from '@threadnote/testing/node-module';
 import {dirname, join, relative} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const sourceRoot = join(repoRoot, 'apps', 'threadnote', 'src');
-const codeRoots = ['scripts', 'tools', 'infra', 'packages', 'apps'].map(path => join(repoRoot, path));
+const codeRoots = EffectArray.map(['scripts', 'tools', 'infra', 'packages', 'apps'], path => join(repoRoot, path));
 
 async function codeFiles(path: string): Promise<readonly string[]> {
   const files: string[] = [];
@@ -23,20 +27,28 @@ async function codeFiles(path: string): Promise<readonly string[]> {
 
 const sourceFiles = async () => {
   const packagesRoot = join(repoRoot, 'packages');
-  const packageDirectories = (await readdir(packagesRoot, {withFileTypes: true})).filter(
-    entry => entry.isDirectory() && entry.name !== 'testing',
+  const packageDirectories = EffectArrayPipe(await readdir(packagesRoot, {withFileTypes: true}), __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (entry, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues && entry.isDirectory() && entry.name !== 'testing',
+    ),
   );
-  return (
-    await Promise.all([
-      codeFiles(sourceRoot),
-      ...packageDirectories.map(entry => codeFiles(join(packagesRoot, entry.name, 'src'))),
-    ])
-  )
-    .flat()
-    .filter(path => !relative(repoRoot, path).split(/[\\/]/).includes('test'));
+  return EffectArray.filter(
+    (
+      await Promise.all([
+        codeFiles(sourceRoot),
+        ...EffectArray.map(packageDirectories, entry => codeFiles(join(packagesRoot, entry.name, 'src'))),
+      ])
+    ).flat(),
+    path => !Effect.pipe(relative(repoRoot, path), EffectString.split(/[\\/]/)).includes('test'),
+  );
 };
 const nodeBuiltinModules = new Set(
-  builtinModules.filter(module => !module.startsWith('bun:')).map(module => module.replace(/^node:/, '')),
+  EffectArray.map(
+    EffectArray.filter(builtinModules, module => !Effect.pipe(module, EffectString.startsWith('bun:'))),
+    module => Effect.pipe(module, EffectString.replace(/^node:/, '')),
+  ),
 );
 const moduleSpecifierScanners = {
   js: new Bun.Transpiler({loader: 'js', logLevel: 'error'}),
@@ -46,12 +58,19 @@ const moduleSpecifierScanners = {
 };
 
 function importedModuleSpecifiers(path: string, source: string): readonly string[] {
-  const loader = path.endsWith('.tsx') ? 'tsx' : path.endsWith('.ts') ? 'ts' : path.endsWith('.jsx') ? 'jsx' : 'js';
-  return moduleSpecifierScanners[loader].scanImports(source).map(imported => imported.path);
+  const loader = Effect.pipe(path, EffectString.endsWith('.tsx'))
+    ? 'tsx'
+    : Effect.pipe(path, EffectString.endsWith('.ts'))
+      ? 'ts'
+      : Effect.pipe(path, EffectString.endsWith('.jsx'))
+        ? 'jsx'
+        : 'js';
+  return EffectArray.map(moduleSpecifierScanners[loader].scanImports(source), imported => imported.path);
 }
 
 function isNodeBuiltinSpecifier(specifier: string): boolean {
-  if (specifier.startsWith('node:')) return true;
+  if (Effect.pipe(specifier, EffectString.startsWith('node:'))) return true;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const root = specifier.split('/', 1)[0];
   return nodeBuiltinModules.has(specifier) || nodeBuiltinModules.has(root);
 }
@@ -104,28 +123,42 @@ describe('Effect architecture boundaries', () => {
   });
 
   it('does not import or require Node built-ins in production source', async () => {
-    const importShapes = [
-      "import '../helpers/node-fs.js';",
-      "import {readFile} from 'fs/promises';",
-      "export {join} from '../helpers/node-path.js';",
-      "void import('../helpers/node-url.js');",
-      "const os = require('os');",
-      "import fs = require('fs');",
-      "import external from 'external-package';",
-      "const ignored = `require('fs') ${`nested ${value}`}`;",
-      "import '../helpers/node-crypto.js';",
-    ].join('\n');
-    expect(importedModuleSpecifiers('builtin-shapes.ts', importShapes).filter(isNodeBuiltinSpecifier)).toEqual([
-      'fs/promises',
-      'os',
-      'fs',
-    ]);
+    const importShapes = EffectArray.join(
+      [
+        "import '../helpers/node-fs.js';",
+        "import {readFile} from 'fs/promises';",
+        "export {join} from '../helpers/node-path.js';",
+        "void import('../helpers/node-url.js');",
+        "const os = require('os');",
+        "import fs = require('fs');",
+        "import external from 'external-package';",
+        "const ignored = `require('fs') ${`nested ${value}`}`;",
+        "import '../helpers/node-crypto.js';",
+      ],
+      '\n',
+    );
+    expect(
+      EffectArrayPipe(importedModuleSpecifiers('builtin-shapes.ts', importShapes), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (__effectArrayValue, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && isNodeBuiltinSpecifier(__effectArrayValue),
+        ),
+      ),
+    ).toEqual(['fs/promises', 'os', 'fs']);
 
     for (const path of await sourceFiles()) {
       const source = await readFile(path, 'utf8');
-      expect(importedModuleSpecifiers(path, source).filter(isNodeBuiltinSpecifier), relative(repoRoot, path)).toEqual(
-        [],
-      );
+      expect(
+        EffectArrayPipe(importedModuleSpecifiers(path, source), __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (__effectArrayValue, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues && isNodeBuiltinSpecifier(__effectArrayValue),
+          ),
+        ),
+        relative(repoRoot, path),
+      ).toEqual([]);
     }
   });
 
@@ -134,10 +167,17 @@ describe('Effect architecture boundaries', () => {
     for (const path of await sourceFiles()) {
       const source = await readFile(path, 'utf8');
       const relativePath = relative(repoRoot, path);
-      const mentions = source.match(/\bgetBuiltinModule\b/g)?.length ?? 0;
+      const mentions =
+        Effect.pipe(
+          source,
+          EffectString.match(/\bgetBuiltinModule\b/g),
+          Effect.Option.getOrElse(() => null),
+        )?.length ?? 0;
       expect(mentions, relativePath).toBe(relativePath === 'packages/platform/src/system.ts' ? 3 : 0);
-      const calls = [...source.matchAll(/process\.getBuiltinModule\(\s*['"]([^'"]+)['"]\s*\)/g)];
-      accesses.push(...calls.map(match => ({module: match[1], path: relativePath})));
+      const calls = [
+        ...Effect.pipe(source, EffectString.matchAll(/process\.getBuiltinModule\(\s*['"]([^'"]+)['"]\s*\)/g)),
+      ];
+      accesses.push(...EffectArray.map(calls, match => ({module: match[1], path: relativePath})));
     }
     expect(accesses).toEqual([
       {module: 'os', path: 'packages/platform/src/system.ts'},
@@ -146,16 +186,28 @@ describe('Effect architecture boundaries', () => {
     ]);
 
     const system = await readFile(join(repoRoot, 'packages', 'platform', 'src', 'system.ts'), 'utf8');
-    const nativeStatfsStart = system.indexOf('function nativeStatfs');
-    const fallbackStart = system.indexOf('export function legacyAvailableDiskBytes');
-    const windowsWorkerAdapterStart = system.indexOf('export interface WindowsDiskCapacityWorkerProcess');
+    const nativeStatfsStart = Effect.pipe(
+      system,
+      EffectString.indexOf('function nativeStatfs'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const fallbackStart = Effect.pipe(
+      system,
+      EffectString.indexOf('export function legacyAvailableDiskBytes'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    const windowsWorkerAdapterStart = Effect.pipe(
+      system,
+      EffectString.indexOf('export interface WindowsDiskCapacityWorkerProcess'),
+      Effect.Option.getOrElse(() => -1),
+    );
     expect(nativeStatfsStart).toBeGreaterThanOrEqual(0);
     expect(fallbackStart).toBeGreaterThan(nativeStatfsStart);
     expect(windowsWorkerAdapterStart).toBeGreaterThan(fallbackStart);
-    const nativeStatfs = system.slice(nativeStatfsStart, fallbackStart);
-    const fallback = system.slice(fallbackStart, windowsWorkerAdapterStart);
+    const nativeStatfs = Effect.pipe(system, EffectString.slice(nativeStatfsStart, fallbackStart));
+    const fallback = Effect.pipe(system, EffectString.slice(fallbackStart, windowsWorkerAdapterStart));
     expect(nativeStatfs).toContain('Effect.tryPromise({');
-    expect(nativeStatfs).toContain('nativeFileSystemPromises.statfs!(path, {bigint: true})');
+    expect(nativeStatfs).toContain('nativeFileSystemPromises.statfs(path, {bigint: true})');
     expect(nativeStatfs).not.toContain('Effect.try({');
     expect(fallback).toContain('Effect.acquireUseRelease(');
     expect(fallback).toContain('Bun.spawn({');
@@ -254,9 +306,9 @@ describe('Effect architecture boundaries', () => {
   it('keeps Manager Context browser paging outside the server runtime graph', async () => {
     const contextView = await readFile(join(repoRoot, 'packages', 'manager', 'src', 'context', 'view.tsx'), 'utf8');
     const paging = await readFile(join(repoRoot, 'packages', 'manager', 'src', 'context', 'paging.ts'), 'utf8');
-    const browserRuntimeSource = contextView.replace(
-      /import\s+type\s+[^;]+\s+from\s+['"]\.\.\/context\.js['"];\n?/u,
-      '',
+    const browserRuntimeSource = Effect.pipe(
+      contextView,
+      EffectString.replace(/import\s+type\s+[^;]+\s+from\s+['"]\.\.\/context\.js['"];\n?/u, ''),
     );
 
     expect(importedModuleSpecifiers('context/view.tsx', browserRuntimeSource)).not.toContain('../context.js');

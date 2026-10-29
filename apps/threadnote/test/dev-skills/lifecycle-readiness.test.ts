@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -95,7 +96,7 @@ describe('installed workflow readiness', () => {
         expect(result.readiness?.planning.state).toBe('unchecked');
         expect(result.readiness?.publication.state).toBe('unchecked');
         expect(result.readiness?.watch.state).toBe('unchecked');
-        expect(probes.some(executable => /python/iu.test(executable))).toBe(false);
+        expect(EffectArray.some(probes, executable => /python/iu.test(executable))).toBe(false);
         expect(yield* snapshot(f.root)).toEqual(before);
         yield* f.fs.remove(f.path.join(target.skillRoot, 'threadnote-memory', 'SKILL.md'));
         expect((yield* check).targets[0].readiness?.planning.reasons).toContainEqual(

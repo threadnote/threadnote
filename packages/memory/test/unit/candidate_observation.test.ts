@@ -3,6 +3,8 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import {describe, expect} from 'vitest';
 import {candidateReviewObservationPaths} from '@threadnote/memory/candidate';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function provideBun<A, E, R>(effect: Effect.Effect<A, E, R>) {
   return Effect.scoped(
@@ -20,7 +22,10 @@ describe('candidateReviewObservationPaths', () => {
       expect(empty).toMatchObject({state: 'ready', files: []});
       if (empty.state !== 'ready') return;
       const names = [
-        ...Array.from({length: 501}, (_, index) => `${String(index).padStart(3, '0')}.json`),
+        ...Array.from(
+          {length: 501},
+          (_, index) => `${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.json`,
+        ),
         '.ignored.json',
         'temporary.tmp',
       ];

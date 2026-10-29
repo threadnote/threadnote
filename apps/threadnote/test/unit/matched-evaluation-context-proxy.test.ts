@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -18,12 +19,14 @@ import {
   renderMatchedEvaluationRuntimeManifestV1,
   type MatchedEvaluationContextProxyPacketV1,
 } from '../../../../scripts/matched-evaluation-context-proxy.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('matched evaluation context proxy', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('uses a sealed run-local manifest bound to the isolated repository', async () => {
@@ -94,10 +97,12 @@ describe('matched evaluation context proxy', () => {
     try {
       await client.connect(transport);
       const listed = await client.listTools();
-      expect(listed.tools.map(tool => tool.name).sort()).toEqual(
+      expect(EffectArray.map(listed.tools, tool => tool.name).sort()).toEqual(
         [...matchedEvaluationContextTools(fixture.packet.detail)].sort(),
       );
-      const tool = listed.tools.find(candidate => candidate.name === 'context_brief');
+      const tool = EffectOption.getOrUndefined(
+        EffectArray.findFirst(listed.tools, candidate => candidate.name === 'context_brief'),
+      );
       expect(tool).toBeDefined();
       expect(JSON.stringify(tool?.inputSchema)).not.toContain('task');
 
@@ -113,15 +118,26 @@ describe('matched evaluation context proxy', () => {
       });
       expect(result.isError).not.toBe(true);
       expect(result.content).toHaveLength(1);
-      const content = result.content as readonly {readonly text: string; readonly type: string}[];
-      expect(content[0]).toMatchObject({type: 'text'});
+      const content = Schema.decodeUnknownSync(Schema.Array(Schema.Unknown))(result.content);
+      expect(content).toHaveLength(1);
+      const item = content[0];
+      if (
+        typeof item !== 'object' ||
+        item === null ||
+        !('type' in item) ||
+        item.type !== 'text' ||
+        !('text' in item) ||
+        typeof item.text !== 'string'
+      ) {
+        throw new Error('Expected one text content item from the context brief tool.');
+      }
       expect('structuredContent' in result).toBe(false);
       expect(result._meta).toMatchObject({
         matchedEvaluation: {
           version: MATCHED_EVALUATION_CONTEXT_PROXY_VERSION,
           runNonce: fixture.packet.runNonce,
           runtimeManifestSha256: fixture.packet.runtimeManifestSha256,
-          contentResponseSha256: sha256HexSync(Buffer.from(content[0].text)),
+          contentResponseSha256: sha256HexSync(Buffer.from(item.text)),
           frozenPromptSha256: sha256HexSync(Buffer.from(fixture.packet.prompt)),
         },
       });
@@ -158,11 +174,11 @@ describe('matched evaluation context proxy', () => {
     try {
       await client.connect(transport);
       const listed = await client.listTools();
-      expect(listed.tools.map(tool => tool.name).sort()).toEqual(
+      expect(EffectArray.map(listed.tools, tool => tool.name).sort()).toEqual(
         [...matchedEvaluationContextTools(packet.detail, 'preloaded', requiredGraphQuery)].sort(),
       );
-      expect(listed.tools.some(tool => tool.name === 'context_brief')).toBe(false);
-      expect(listed.tools.map(tool => tool.name)).toEqual(['inspect_code_graph']);
+      expect(EffectArray.some(listed.tools, tool => tool.name === 'context_brief')).toBe(false);
+      expect(EffectArray.map(listed.tools, tool => tool.name)).toEqual(['inspect_code_graph']);
       const followup = await client.callTool({
         name: 'inspect_code_graph',
         arguments: {callerCwd: fixture.repository, operation: 'query', query: requiredGraphQuery},
@@ -244,6 +260,43 @@ describe('matched evaluation context proxy', () => {
       'read_context',
     ]);
     expect(matchedEvaluationContextTools('source')).toEqual(['context_brief']);
+  });
+
+  it('rejects malformed child content envelopes without falling back to structured metadata', async () => {
+    const fixture = await contextFixture(roots, 'memory prompt', 'compact', 'linked');
+    const args = {uri: 'threadnote://memory/tn_prepared'};
+    const malformedContent = await handleMatchedEvaluationFollowupRequest(
+      fixture.packet,
+      'read_context',
+      args,
+      // @ts-expect-error This fixture deliberately violates the MCP result envelope.
+      async () => ({
+        content: 'not-an-array',
+        structuredContent: {secret: 'metadata fallback must not be used'},
+      }),
+    );
+    expect(malformedContent.isError).toBe(true);
+    expect(malformedContent.content[0].text).toContain('Threadnote tool result content is invalid.');
+    expect(malformedContent.content[0].text).not.toContain('metadata fallback must not be used');
+
+    const malformedText = await handleMatchedEvaluationFollowupRequest(
+      fixture.packet,
+      'read_context',
+      args,
+      // @ts-expect-error This fixture deliberately violates the MCP text block envelope.
+      async () => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: 42,
+          },
+        ],
+        structuredContent: {secret: 'metadata fallback must not be used'},
+      }),
+    );
+    expect(malformedText.isError).toBe(true);
+    expect(malformedText.content[0].text).toContain('Threadnote tool result text payload is invalid.');
+    expect(malformedText.content[0].text).not.toContain('metadata fallback must not be used');
   });
 
   it('uses the sealed resume mode and rejects an agent-selected mode', async () => {
@@ -556,12 +609,12 @@ async function contextFixture(
       detail,
       mode,
       expectedContext: {
-        graphContentHash: '1'.repeat(64),
-        graphSnapshotHash: '2'.repeat(64),
-        linkReceiptsHash: memoryAccess === 'linked' ? '4'.repeat(64) : null,
+        graphContentHash: Effect.pipe('1', EffectString.repeat(64)),
+        graphSnapshotHash: Effect.pipe('2', EffectString.repeat(64)),
+        linkReceiptsHash: memoryAccess === 'linked' ? Effect.pipe('4', EffectString.repeat(64)) : null,
         memoryAccess,
-        studyHash: '3'.repeat(64),
-        taskContextHash: memoryAccess === 'linked' ? '5'.repeat(64) : null,
+        studyHash: Effect.pipe('3', EffectString.repeat(64)),
+        taskContextHash: memoryAccess === 'linked' ? Effect.pipe('5', EffectString.repeat(64)) : null,
       },
       expectedResume:
         mode === 'resume'

@@ -8,6 +8,8 @@ import {
 } from '@threadnote/threadnote/remote_memory/operator/main';
 import type {RemoteMemoryOperatorAdapter} from '@threadnote/remote-memory/operator';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const databaseUrl = 'postgresql://localhost/threadnote';
 
@@ -84,7 +86,10 @@ describe('remote memory operator ci-control command', () => {
         expect(JSON.parse(yield* fs.readFileString(receipt))).toEqual({jobId: 'job-1', status: 'enqueued', version: 1});
 
         const oversized = path.join(root, 'oversized-action.json');
-        yield* fs.writeFileString(oversized, JSON.stringify({action: 'enqueue', value: 'x'.repeat(4 * 1024 * 1024)}));
+        yield* fs.writeFileString(
+          oversized,
+          JSON.stringify({action: 'enqueue', value: Effect2.pipe('x', EffectString.repeat(4 * 1024 * 1024))}),
+        );
         expect(
           yield* runRemoteMemoryOperator(
             ['ci-control', '--input', oversized, '--receipt', path.join(root, 'oversized-receipt.json')],

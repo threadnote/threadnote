@@ -1,3 +1,6 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {TestError} from './helpers/test-error.js';
 import {access, mkdir, mkdtemp, readFile, rm, writeFile} from './helpers/node-fs-promises.js';
 import {join} from './helpers/node-path.js';
@@ -21,6 +24,7 @@ import {selectLatestMajorReleases} from '../tools/site-release-notes.js';
 import {validateExternalRepositoryEvidence} from '@threadnote/evidence/external-evidence';
 import {agentIntegrations, tierLabels} from '../src/content/agentIntegrations.js';
 import {cliCommands, docsSections, mcpTools} from '../src/content/docs.js';
+import type {DocsVisualBlock} from '../src/content/docsTypes.js';
 import {ManagerOperationsVisual, managerOperationsVisualKinds} from '../src/components/ManagerOperationsVisual.js';
 import {graphAnalyzeScenario, graphInspectScenario, heroScenario} from '../src/content/landing.js';
 import {
@@ -56,13 +60,57 @@ import {
 } from '../src/lib/routes.js';
 import {renderDocsArticleHtml, renderDocsSitemap} from '../tools/site-doc-pages.js';
 import {filterWebsiteUpdatesByKind, orderWebsiteUpdatesDescending} from '../src/content/websiteArticles.js';
-import type {BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
+import {parseBenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import {proTips} from '../src/content/proTips.js';
 import {EXTERNAL_REPOSITORY_REQUIRED_MEASUREMENTS} from '@threadnote/evidence/external-evidence';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const root = process.cwd();
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
+}
 
-function validateRetainedExternalPerformanceEvidence(artifact: BenchmarkArtifactV1): void {
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw TestError.make({message: 'Expected an object fixture.'});
+  return value;
+}
+
+function requireRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw TestError.make({message: 'Expected an array of object fixtures.'});
+  const records = EffectArray.filter(value, isRecord);
+  if (records.length !== value.length) throw TestError.make({message: 'Expected an array of object fixtures.'});
+  return records;
+}
+
+function requireUnknownArray(value: unknown): unknown[] {
+  if (!EffectArray.isArray(value)) throw TestError.make({message: 'Expected an array fixture.'});
+  return value;
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw TestError.make({message: 'Expected a string fixture.'});
+  return value;
+}
+
+function requireBoolean(value: unknown): boolean {
+  if (typeof value !== 'boolean') throw TestError.make({message: 'Expected a boolean fixture.'});
+  return value;
+}
+
+function requireStringRecordMap(value: unknown): Record<string, Record<string, string>> {
+  const result: Record<string, Record<string, string>> = {};
+  for (const [key, raw] of EffectRecord.toEntries(requireRecord(value))) {
+    const row: Record<string, string> = {};
+    for (const [field, item] of EffectRecord.toEntries(requireRecord(raw))) row[field] = requireString(item);
+    result[key] = row;
+  }
+  return result;
+}
+
+function validateRetainedExternalPerformanceEvidence(input: unknown): void {
+  const artifact = parseBenchmarkArtifactV1(input);
   validateExternalRepositoryEvidence(artifact, {
     expectedControlLanguages: ['java', 'kotlin', 'typescript', 'bazel-build'],
     managerEdgeBudget: 1_500,
@@ -162,29 +210,31 @@ const toolKeys = {
 
 type DisplayedTool = keyof typeof toolKeys;
 
+function isDisplayedTool(value: string): value is DisplayedTool {
+  return EffectArray.some(EffectRecord.keys(toolKeys), key => key === value);
+}
+
 function toolName(actor: string): DisplayedTool {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const name = actor.split(' · ', 1)[0];
-  if (!name || !(name in toolKeys)) {
+  if (!name || !isDisplayedTool(name)) {
     throw TestError.make({message: `Website scenario uses an unverified tool contract: ${actor}`});
   }
-  return name as DisplayedTool;
+  return name;
 }
 
 function parseToolPayload(text: string): Record<string, unknown> {
   const parsed: unknown = JSON.parse(text);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw TestError.make({message: `Tool payload must be a JSON object: ${text}`});
-  }
-  return parsed as Record<string, unknown>;
+  return requireRecord(parsed);
 }
 
 function expectNonEmptyString(payload: Record<string, unknown>, key: string): void {
-  expect(typeof payload[key]).toBe('string');
-  expect((payload[key] as string).trim().length).toBeGreaterThan(0);
+  const value = requireString(payload[key]);
+  expect(Effect.pipe(value, EffectString.trim).length).toBeGreaterThan(0);
 }
 
-const fixtureLockfileSha256 = '1'.repeat(64);
-const fixturePackageManifestSha256 = '2'.repeat(64);
+const fixtureLockfileSha256 = Effect.pipe('1', EffectString.repeat(64));
+const fixturePackageManifestSha256 = Effect.pipe('2', EffectString.repeat(64));
 
 function harnessMeasurement(
   name: string,
@@ -206,16 +256,16 @@ function harnessMeasurement(
 }
 
 function verifiedPerformanceFixture(): Record<string, unknown> {
-  const sourceCommit = 'b'.repeat(40);
-  const repositoryCommit = 'c'.repeat(40);
-  const overlayDigest = 'd'.repeat(64);
-  const controls = Object.fromEntries(
-    ['java', 'kotlin', 'typescript', 'bazel'].map((language, index) => [
+  const sourceCommit = Effect.pipe('b', EffectString.repeat(40));
+  const repositoryCommit = Effect.pipe('c', EffectString.repeat(40));
+  const overlayDigest = Effect.pipe('d', EffectString.repeat(64));
+  const controls = EffectRecord.fromEntries(
+    EffectArray.map(['java', 'kotlin', 'typescript', 'bazel'], (language, index) => [
       language,
       {
         query: `${language}Definition`,
         path: `src/${language}/control.${language}`,
-        stableNodeId: `cgs_${String(index + 1).repeat(32)}`,
+        stableNodeId: `cgs_${Effect.pipe(String(index + 1), EffectString.repeat(32))}`,
       },
     ]),
   );
@@ -305,21 +355,22 @@ function verifiedPerformanceFixture(): Record<string, unknown> {
       harnessMeasurement(`mcp-${operation}-text-output`, 'bytes', 1_024),
     );
   }
-  const measurementNames = new Set(measurements.map(measurement => String(measurement.name)));
+  const measurementNames = new Set(EffectArray.map(measurements, measurement => String(measurement.name)));
   for (const required of EXTERNAL_REPOSITORY_REQUIRED_MEASUREMENTS) {
     if (measurementNames.has(required.name)) continue;
     const value =
-      required.name.startsWith('cold-activation-copying-') && required.name.endsWith('-observed-n1')
+      Effect.pipe(required.name, EffectString.startsWith('cold-activation-copying-')) &&
+      Effect.pipe(required.name, EffectString.endsWith('-observed-n1'))
         ? 0
-        : required.name.endsWith('-external-sampler-version-n1')
+        : Effect.pipe(required.name, EffectString.endsWith('-external-sampler-version-n1'))
           ? 4
-          : required.name.endsWith('-external-process-tree-failures-n1') ||
-              required.name.endsWith('-external-open-temp-process-tree-failures-n1') ||
-              required.name.endsWith('-journal-peak-observed')
+          : Effect.pipe(required.name, EffectString.endsWith('-external-process-tree-failures-n1')) ||
+              Effect.pipe(required.name, EffectString.endsWith('-external-open-temp-process-tree-failures-n1')) ||
+              Effect.pipe(required.name, EffectString.endsWith('-journal-peak-observed'))
             ? 0
             : required.name === 'cold-activation-observed-stages-n1'
               ? 3
-              : required.name.endsWith('-activation-observed-stages-n1')
+              : Effect.pipe(required.name, EffectString.endsWith('-activation-observed-stages-n1'))
                 ? 32
                 : 1;
     measurements.push(harnessMeasurement(required.name, required.unit, value));
@@ -353,13 +404,13 @@ function verifiedPerformanceFixture(): Record<string, unknown> {
       benchmarkMeasuredSourcePackageManifestSha256: fixturePackageManifestSha256,
       benchmarkSourceValidationMode: 'managed-payload-exact-head-validated',
       benchmarkValidatedManagedDependencyInstallation: 'bun install --frozen-lockfile',
-      benchmarkValidatedManagedExecutableSha256: '3'.repeat(64),
+      benchmarkValidatedManagedExecutableSha256: Effect.pipe('3', EffectString.repeat(64)),
       benchmarkValidatedManagedPayload: 'exact-head-not-executed',
       benchmarkValidatedManagedPayloadBytes: 1_000_000,
       benchmarkValidatedManagedPayloadFileCount: 20,
-      benchmarkValidatedManagedPayloadManifestSha256: '4'.repeat(64),
+      benchmarkValidatedManagedPayloadManifestSha256: Effect.pipe('4', EffectString.repeat(64)),
       benchmarkValidatedManagedProcessLeaseInspection: 'complete',
-      benchmarkValidatedManagedReleaseMetadataSha256: '5'.repeat(64),
+      benchmarkValidatedManagedReleaseMetadataSha256: Effect.pipe('5', EffectString.repeat(64)),
       benchmarkValidatedManagedRuntime: 'bun-1.3.14',
       benchmarkValidatedManagedTarget: 'darwin-arm64',
       benchmarkValidatedManagedVersion: `4.3.1-local.g${sourceCommit}`,
@@ -404,7 +455,7 @@ function verifiedPerformanceFixture(): Record<string, unknown> {
       sameOverlayReferenceMaterializationStorageMode: 'direct-persistent',
       simultaneousWorktrees: 2,
       sqliteVersion: '3.54.0',
-      structuralGraphDigestCold: 'e'.repeat(64),
+      structuralGraphDigestCold: Effect.pipe('e', EffectString.repeat(64)),
       structuralGraphDigestIncremental: overlayDigest,
       structuralGraphDigestSameOverlayReference: overlayDigest,
       worktreeIsolationCleanupPassed: true,
@@ -432,8 +483,8 @@ function fixtureBinding(
     schemaVersion: 1,
     artifactSha256: overrides.artifactSha256 ?? sha256Hex(artifactBytes),
     generatedAt: '2026-08-02T20:00:00Z',
-    sourceThreadnoteCommit: overrides.sourceThreadnoteCommit ?? 'b'.repeat(40),
-    sourceTreeSha256: overrides.sourceTreeSha256 ?? 'f'.repeat(64),
+    sourceThreadnoteCommit: overrides.sourceThreadnoteCommit ?? Effect.pipe('b', EffectString.repeat(40)),
+    sourceTreeSha256: overrides.sourceTreeSha256 ?? Effect.pipe('f', EffectString.repeat(64)),
   };
 }
 
@@ -451,7 +502,7 @@ describe('Threadnote website content', () => {
       'faq/index.html',
     ];
 
-    await Promise.all(routes.map(route => access(join(root, 'apps', 'website', route))));
+    await Promise.all(EffectArray.map(routes, route => access(join(root, 'apps', 'website', route))));
     const config = await readFile(join(root, 'apps', 'website', 'vite.config.ts'), 'utf8');
     for (const route of [
       'performance',
@@ -469,18 +520,21 @@ describe('Threadnote website content', () => {
 
   it('shows the copyright in the shared site footer', async () => {
     const [shell, ...pages] = await Promise.all(
-      [
-        'components/SiteShell.tsx',
-        'pages/LandingPage.tsx',
-        'pages/PerformancePage.tsx',
-        'pages/GraphifyPerformancePage.tsx',
-        'pages/DocsPage.tsx',
-        'pages/AgentsPage.tsx',
-        'pages/WhatsNewPage.tsx',
-        'pages/ProTipsPage.tsx',
-        'pages/ManagerDemoPage.tsx',
-        'pages/FaqPage.tsx',
-      ].map(path => readFile(join(root, 'apps', 'website', 'src', path), 'utf8')),
+      EffectArray.map(
+        [
+          'components/SiteShell.tsx',
+          'pages/LandingPage.tsx',
+          'pages/PerformancePage.tsx',
+          'pages/GraphifyPerformancePage.tsx',
+          'pages/DocsPage.tsx',
+          'pages/AgentsPage.tsx',
+          'pages/WhatsNewPage.tsx',
+          'pages/ProTipsPage.tsx',
+          'pages/ManagerDemoPage.tsx',
+          'pages/FaqPage.tsx',
+        ],
+        path => readFile(join(root, 'apps', 'website', 'src', path), 'utf8'),
+      ),
     );
 
     expect(shell).toContain('© Denys Kashkovskyi 2026');
@@ -517,20 +571,20 @@ describe('Threadnote website content', () => {
           minLength: 1,
         }),
         versions => {
-          const releases = versions.map(([major, minor, patch], index) => ({
+          const releases = EffectArray.map(versions, ([major, minor, patch], index) => ({
             major,
             minor,
             patch,
-            publishedAt: `2026-01-${String((index % 28) + 1).padStart(2, '0')}T00:00:00Z`,
+            publishedAt: `2026-01-${Effect.pipe(String((index % 28) + 1), EffectString.padStart(2, '0'))}T00:00:00Z`,
             version: `v${major}.${minor}.${patch}`,
           }));
           const before = structuredClone(releases);
           const selected = selectLatestMajorReleases(releases);
-          const latestMajor = Math.max(...releases.map(release => release.major));
+          const latestMajor = Math.max(...EffectArray.map(releases, release => release.major));
 
           expect(releases).toEqual(before);
-          expect(selected.every(release => release.major === latestMajor)).toBe(true);
-          expect(new Set(selected.map(release => release.version)).size).toBe(selected.length);
+          expect(EffectArray.every(selected, release => release.major === latestMajor)).toBe(true);
+          expect(new Set(EffectArray.map(selected, release => release.version)).size).toBe(selected.length);
           for (let index = 1; index < selected.length; index += 1) {
             const previous = selected[index - 1];
             const current = selected[index];
@@ -571,7 +625,7 @@ The body remains ordinary **Markdown**.
       );
 
       const loaded = await loadWebsiteArticles(repository);
-      expect(loaded.map(entry => entry.slug)).toEqual(['evidence-before-rewrites', 'earlier-story']);
+      expect(EffectArray.map(loaded, entry => entry.slug)).toEqual(['evidence-before-rewrites', 'earlier-story']);
       expect(loaded[0]).toMatchObject({
         author: 'Denys Kashkovskyi',
         highlights: ['Evidence first'],
@@ -587,37 +641,46 @@ The body remains ordinary **Markdown**.
       expect(() =>
         parseWebsiteArticle(
           '2026-08-26T14-30-00Z--evidence-before-rewrites.md',
-          article('2026-08-26T14:30:00Z', 'evidence-before-rewrites', 'Evidence before rewrites').replace(
-            'title: Evidence before rewrites',
-            'category: engineering\ntitle: Evidence before rewrites',
+          Effect.pipe(
+            article('2026-08-26T14:30:00Z', 'evidence-before-rewrites', 'Evidence before rewrites'),
+            EffectString.replace(
+              'title: Evidence before rewrites',
+              'category: engineering\ntitle: Evidence before rewrites',
+            ),
           ),
         ),
       ).toThrow('unknown frontmatter field');
       expect(() =>
         parseWebsiteArticle(
           '2026-08-26T14-30-00Z--evidence-before-rewrites.md',
-          article('2026-08-26T14:30:00Z', 'evidence-before-rewrites', 'Evidence before rewrites').replace(
-            'summary:',
-            'socialImage: evidence-before-rewrites-og.png\nsummary:',
+          Effect.pipe(
+            article('2026-08-26T14:30:00Z', 'evidence-before-rewrites', 'Evidence before rewrites'),
+            EffectString.replace('summary:', 'socialImage: evidence-before-rewrites-og.png\nsummary:'),
           ),
         ),
       ).toThrow('socialImage and socialImageAlt must be provided together');
       expect(() =>
         parseWebsiteArticle(
           '2026-08-26T14-30-00Z--evidence-before-rewrites.md',
-          article('2026-08-26T14:30:00Z', 'evidence-before-rewrites', 'Evidence before rewrites').replace(
-            'summary:',
-            'socialImage: ../evidence-before-rewrites.png\n' +
-              'socialImageAlt: Evidence before rewrites social card.\nsummary:',
+          Effect.pipe(
+            article('2026-08-26T14:30:00Z', 'evidence-before-rewrites', 'Evidence before rewrites'),
+            EffectString.replace(
+              'summary:',
+              'socialImage: ../evidence-before-rewrites.png\n' +
+                'socialImageAlt: Evidence before rewrites social card.\nsummary:',
+            ),
           ),
         ),
       ).toThrow('socialImage must be a root-level lowercase PNG filename');
       expect(() =>
         parseWebsiteArticle(
           '2026-08-26T14-30-00Z--evidence-before-rewrites.md',
-          article('2026-08-26T14:30:00Z', 'evidence-before-rewrites', 'Evidence before rewrites').replace(
-            'An external-facing introduction.',
-            'Publication placeholder: replace this before shipping.',
+          Effect.pipe(
+            article('2026-08-26T14:30:00Z', 'evidence-before-rewrites', 'Evidence before rewrites'),
+            EffectString.replace(
+              'An external-facing introduction.',
+              'Publication placeholder: replace this before shipping.',
+            ),
           ),
         ),
       ).toThrow('publication placeholders are forbidden');
@@ -631,9 +694,12 @@ The body remains ordinary **Markdown**.
       const socialArticleFile = '2026-08-27T10-00-00Z--social-story.md';
       await writeFile(
         join(repository, 'apps', 'website', 'articles', socialArticleFile),
-        article('2026-08-27T10:00:00Z', 'social-story', 'Social story').replace(
-          'summary:',
-          'socialImage: social-story-og.png\n' + 'socialImageAlt: Social story article card.\nsummary:',
+        Effect.pipe(
+          article('2026-08-27T10:00:00Z', 'social-story', 'Social story'),
+          EffectString.replace(
+            'summary:',
+            'socialImage: social-story-og.png\n' + 'socialImageAlt: Social story article card.\nsummary:',
+          ),
         ),
       );
       await expect(loadWebsiteArticles(repository)).rejects.toThrow(
@@ -715,9 +781,11 @@ The body remains ordinary **Markdown**.
     expect(latest?.body).toContain('minimum judge-score');
     expect(latest?.body).toContain('threshold to zero');
     expect(latest?.body).toContain('separate uncertainty analysis');
-    expect(latest?.body.replace(/\s+/g, ' ')).toContain(
-      "The judge's own completion verdict was also stricter: 2/5 for Threadnote and 1/5 for files-only",
-    );
+    expect(
+      Effect.pipe(latest?.body, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.replace(/\s+/g, ' ')),
+      ),
+    ).toContain("The judge's own completion verdict was also stricter: 2/5 for Threadnote and 1/5 for files-only");
     for (const seconds of [179.619, 122.845, 230.997, 161.289, 204.802, 156.835, 286.463, 216.087, 239.619, 111.454]) {
       expect(latest?.body).toContain(seconds.toFixed(3));
     }
@@ -759,8 +827,20 @@ The body remains ordinary **Markdown**.
 
   it('leads with scoped token and time savings linked to the continuation study', async () => {
     const source = await readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8');
-    const hero = source.match(/<section className="hero section-grid">([\s\S]*?)<\/section>/)?.[1];
-    const study = hero?.match(/<div className="hero-study"[\s\S]*?<\/dl>[\s\S]*?<\/div>/)?.[0];
+    const hero = Effect.pipe(
+      source,
+      EffectString.match(/<section className="hero section-grid">([\s\S]*?)<\/section>/),
+      Effect.Option.getOrElse(() => null),
+    )?.[1];
+    const study = Effect.pipe(hero, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(
+            effectOptionalString,
+            EffectString.match(/<div className="hero-study"[\s\S]*?<\/dl>[\s\S]*?<\/div>/),
+            Effect.Option.getOrElse(() => null),
+          ),
+    )?.[0];
 
     expect(hero).toContain('Less rediscovery.');
     expect(hero).toContain('More finished work.');
@@ -769,13 +849,35 @@ The body remains ordinary **Markdown**.
     expect(study).toContain('46.1');
     expect(study).toContain('less time');
     expect(study).toContain('Measured in our 5.1 beta study');
-    expect(study?.replace(/\s+/g, ' ')).toContain(
-      'Per verified completion. Five tasks, one model, versus files-only with no handoff.',
-    );
+    expect(
+      Effect.pipe(study, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.replace(/\s+/g, ' ')),
+      ),
+    ).toContain('Per verified completion. Five tasks, one model, versus files-only with no handoff.');
     expect(study).toContain('href={whatsNewArticleHref(continuationStudySlug)}');
     expect(source).toContain("const continuationStudySlug = 'graphmem-agent-continuation-study'");
     expect(source).toContain('latestArticle.slug !== continuationStudySlug');
-    expect(hero?.indexOf('className="hero-study"')).toBeLessThan(hero?.indexOf('className="hero__actions"') ?? -1);
+    expect(
+      Effect.pipe(hero, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect.pipe(
+              effectOptionalString,
+              EffectString.indexOf('className="hero-study"'),
+              Effect.Option.getOrElse(() => -1),
+            ),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(hero, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect.pipe(
+              effectOptionalString,
+              EffectString.indexOf('className="hero__actions"'),
+              Effect.Option.getOrElse(() => -1),
+            ),
+      ) ?? -1,
+    );
     expect(study).not.toMatch(/less cost|cheaper|faster|guaranteed/i);
   });
 
@@ -784,13 +886,25 @@ The body remains ordinary **Markdown**.
       readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8'),
       readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8'),
     ]);
-    const articles = docsSections.flatMap(section => section.articles);
-    const gettingStarted = docsSections.find(section => section.id === 'getting-started');
-    const journey = articles.find(article => article.id === 'threadnote-5-journey');
-    const firstWorkflow = articles.find(article => article.id === 'first-workflow');
-    const concepts = articles.find(article => article.id === 'context-lifecycle');
+    const articles = EffectArray.flatMap(docsSections, section => section.articles);
+    const gettingStarted = EffectOption.getOrUndefined(
+      EffectArray.findFirst(docsSections, section => section.id === 'getting-started'),
+    );
+    const journey = EffectOption.getOrUndefined(
+      EffectArray.findFirst(articles, article => article.id === 'threadnote-5-journey'),
+    );
+    const firstWorkflow = EffectOption.getOrUndefined(
+      EffectArray.findFirst(articles, article => article.id === 'first-workflow'),
+    );
+    const concepts = EffectOption.getOrUndefined(
+      EffectArray.findFirst(articles, article => article.id === 'context-lifecycle'),
+    );
 
-    const hero = landingSource.match(/<section className="hero section-grid">([\s\S]*?)<\/section>/)?.[1];
+    const hero = Effect.pipe(
+      landingSource,
+      EffectString.match(/<section className="hero section-grid">([\s\S]*?)<\/section>/),
+      Effect.Option.getOrElse(() => null),
+    )?.[1];
     expect(hero).toContain('className="home-update-banner home-update-banner--hero"');
     expect(hero).toContain('className="hero__copy"');
     expect(hero).toContain('className="hero__visual"');
@@ -809,15 +923,45 @@ The body remains ordinary **Markdown**.
     for (const [index, step] of soloWorkflow.entries()) {
       expect(landingSource).toContain(step);
       if (index > 0)
-        expect(landingSource.indexOf(step)).toBeGreaterThan(landingSource.indexOf(soloWorkflow[index - 1]));
+        expect(
+          Effect.pipe(
+            landingSource,
+            EffectString.indexOf(step),
+            Effect.Option.getOrElse(() => -1),
+          ),
+        ).toBeGreaterThan(
+          Effect.pipe(
+            landingSource,
+            EffectString.indexOf(soloWorkflow[index - 1]),
+            Effect.Option.getOrElse(() => -1),
+          ),
+        );
     }
-    expect(landingSource.replace(/\s+/g, ' ')).toContain('Threadnote calls it a surface');
+    expect(Effect.pipe(landingSource, EffectString.replace(/\s+/g, ' '))).toContain('Threadnote calls it a surface');
     expect(landingSource).toContain('One solo-first workflow');
-    expect(gettingStarted?.articles.map(article => article.id)).toEqual(
-      expect.arrayContaining(['connect-an-agent', 'first-workflow']),
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(gettingStarted?.articles), articles =>
+          EffectArray.map(articles, article => article.id),
+        ),
+      ),
+    ).toEqual(expect.arrayContaining(['connect-an-agent', 'first-workflow']));
+    const connectIndex = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(gettingStarted?.articles), __effectFindIndexArray =>
+        EffectOption.getOrElse(
+          EffectArray.findFirstIndex(__effectFindIndexArray, article => article.id === 'connect-an-agent'),
+          () => -1,
+        ),
+      ),
     );
-    const connectIndex = gettingStarted?.articles.findIndex(article => article.id === 'connect-an-agent');
-    const workflowIndex = gettingStarted?.articles.findIndex(article => article.id === 'first-workflow');
+    const workflowIndex = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(gettingStarted?.articles), __effectFindIndexArray =>
+        EffectOption.getOrElse(
+          EffectArray.findFirstIndex(__effectFindIndexArray, article => article.id === 'first-workflow'),
+          () => -1,
+        ),
+      ),
+    );
     expect(workflowIndex).toBe((connectIndex ?? -2) + 1);
     expect(JSON.stringify(journey)).toContain('Optional: share the proof with a team');
     expect(JSON.stringify(journey)).toContain('coding-agent environment');
@@ -850,10 +994,15 @@ The body remains ordinary **Markdown**.
   });
 
   it('takes new installations directly through agent setup and the first task', () => {
-    const articles = docsSections.find(section => section.id === 'getting-started')?.articles ?? [];
-    const installationIndex = articles.findIndex(article => article.id === 'installation');
+    const articles =
+      EffectOption.getOrUndefined(EffectArray.findFirst(docsSections, section => section.id === 'getting-started'))
+        ?.articles ?? [];
+    const installationIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(articles, article => article.id === 'installation'),
+      () => -1,
+    );
     expect(installationIndex).toBeGreaterThanOrEqual(0);
-    expect(articles.slice(installationIndex, installationIndex + 3).map(article => article.id)).toEqual([
+    expect(EffectArray.map(articles.slice(installationIndex, installationIndex + 3), article => article.id)).toEqual([
       'installation',
       'connect-an-agent',
       'first-workflow',
@@ -873,7 +1022,7 @@ The body remains ordinary **Markdown**.
       code: 'irm https://raw.githubusercontent.com/threadnote/threadnote/main/scripts/install.ps1 | iex\nthreadnote doctor',
     });
     for (const id of ['connect-an-agent', 'first-workflow', 'upgrade-from-4']) {
-      expect(articles.some(article => article.id === id)).toBe(true);
+      expect(EffectArray.some(articles, article => article.id === id)).toBe(true);
     }
   });
 
@@ -882,8 +1031,8 @@ The body remains ordinary **Markdown**.
       fc.property(
         fc.array(fc.record({second: fc.integer({min: 0, max: 59}), stableId: fc.uuid()}), {maxLength: 80}),
         updates => {
-          const input = updates.map(({second, stableId}) => ({
-            publishedAt: `2026-08-26T14:30:${String(second).padStart(2, '0')}Z`,
+          const input = EffectArray.map(updates, ({second, stableId}) => ({
+            publishedAt: `2026-08-26T14:30:${Effect.pipe(String(second), EffectString.padStart(2, '0'))}Z`,
             stableId,
           }));
           const before = structuredClone(input);
@@ -921,13 +1070,18 @@ The body remains ordinary **Markdown**.
           const selected = filterWebsiteUpdatesByKind(updates, kind);
 
           expect(updates).toEqual(before);
-          expect(selected.length).toBe(updates.reduce((count, update) => count + Number(update.kind === kind), 0));
-          const positions = selected.map(update => updates.indexOf(update));
+          expect(selected.length).toBe(
+            EffectArray.reduce(updates, 0, (count, update) => count + Number(update.kind === kind)),
+          );
+          const positions = EffectArray.map(selected, update => updates.indexOf(update));
           expect(
-            positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])),
+            EffectArray.every(
+              positions,
+              (position, index) => position >= 0 && (index === 0 || position > positions[index - 1]),
+            ),
           ).toBe(true);
           expect(filterWebsiteUpdatesByKind(selected, kind)).toEqual(selected);
-          expect(selected.every(update => update.kind === kind)).toBe(true);
+          expect(EffectArray.every(selected, update => update.kind === kind)).toBe(true);
         },
       ),
       {numRuns: 100},
@@ -935,8 +1089,8 @@ The body remains ordinary **Markdown**.
   });
 
   it('covers the complete 5.0 documentation map with unique article anchors', () => {
-    const articles = docsSections.flatMap(section => section.articles);
-    const articleIds = articles.map(article => article.id);
+    const articles = EffectArray.flatMap(docsSections, section => section.articles);
+    const articleIds = EffectArray.map(articles, article => article.id);
 
     expect(docsSections.length).toBeGreaterThanOrEqual(8);
     expect(articles.length).toBeGreaterThanOrEqual(35);
@@ -976,12 +1130,18 @@ The body remains ordinary **Markdown**.
   });
 
   it('documents separate data-home and standalone-installation isolation roots', () => {
-    const configuration = docsSections
-      .flatMap(section => section.articles)
-      .find(article => article.id === 'configuration');
-    const cliReference = docsSections
-      .flatMap(section => section.articles)
-      .find(article => article.id === 'cli-reference');
+    const configuration = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        article => article.id === 'configuration',
+      ),
+    );
+    const cliReference = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        article => article.id === 'cli-reference',
+      ),
+    );
     const content = JSON.stringify({cliReference, configuration});
 
     expect(content).toContain('THREADNOTE_HOME / --home');
@@ -992,9 +1152,13 @@ The body remains ordinary **Markdown**.
   });
 
   it('explains the first-agent setup and the optional two-agent journey in plain language', () => {
-    const articles = docsSections.flatMap(section => section.articles);
-    const connectAgent = JSON.stringify(articles.find(article => article.id === 'connect-an-agent'));
-    const journey = JSON.stringify(articles.find(article => article.id === 'threadnote-5-journey'));
+    const articles = EffectArray.flatMap(docsSections, section => section.articles);
+    const connectAgent = JSON.stringify(
+      EffectOption.getOrUndefined(EffectArray.findFirst(articles, article => article.id === 'connect-an-agent')),
+    );
+    const journey = JSON.stringify(
+      EffectOption.getOrUndefined(EffectArray.findFirst(articles, article => article.id === 'threadnote-5-journey')),
+    );
 
     expect(connectAgent).toContain('What setup does');
     expect(connectAgent).toContain('Why not install only the MCP connection?');
@@ -1008,9 +1172,12 @@ The body remains ordinary **Markdown**.
   });
 
   it('gives existing 4.x users a safe, optional path into the 5.0 workflow', () => {
-    const article = docsSections
-      .flatMap(section => section.articles)
-      .find(candidate => candidate.id === 'upgrade-from-4');
+    const article = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        candidate => candidate.id === 'upgrade-from-4',
+      ),
+    );
     const content = JSON.stringify(article);
 
     expect(article?.title).toBe('Upgrade from Threadnote 4');
@@ -1025,21 +1192,54 @@ The body remains ordinary **Markdown**.
   });
 
   it('keeps the schema-v5 metadata walkthrough aligned with the shipped CAS contract', () => {
-    const article = docsSections
-      .flatMap(section => section.articles)
-      .find(candidate => candidate.id === 'memory-schema-v5');
-    const example = article?.body.find(
-      block => block.type === 'code' && block.code.includes('threadnote context metadata preview'),
+    const article = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        candidate => candidate.id === 'memory-schema-v5',
+      ),
     );
-    const metadataTools = mcpTools.find(reference => reference.name.includes('context_metadata_apply'));
+    const example =
+      article === undefined
+        ? undefined
+        : EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              article.body,
+              block =>
+                block.type === 'code' &&
+                Effect.pipe(block.code, EffectString.includes('threadnote context metadata preview')),
+            ),
+          );
+    const metadataTools = EffectOption.getOrUndefined(
+      EffectArray.findFirst(mcpTools, reference =>
+        Effect.pipe(reference.name, EffectString.includes('context_metadata_apply')),
+      ),
+    );
 
     expect(article).toBeDefined();
     expect(example?.type).toBe('code');
     if (!example || example.type !== 'code') throw TestError.make({message: 'Metadata example is missing.'});
     expect(example.code).toContain('--review-after 2026-12-31');
-    expect(example.code.match(/--uri <threadnote-uri>/g)).toHaveLength(2);
-    expect(example.code.match(/--owner platform-team/g)).toHaveLength(2);
-    expect(example.code.match(/--review-after 2026-12-31/g)).toHaveLength(2);
+    expect(
+      Effect.pipe(
+        example.code,
+        EffectString.match(/--uri <threadnote-uri>/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(2);
+    expect(
+      Effect.pipe(
+        example.code,
+        EffectString.match(/--owner platform-team/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(2);
+    expect(
+      Effect.pipe(
+        example.code,
+        EffectString.match(/--review-after 2026-12-31/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(2);
     expect(example.code).toContain('--content-hash <content-hash>');
     expect(example.code).toContain('--proposal-id <proposal-id>');
     expect(example.code).toContain('--revision <revision>');
@@ -1048,14 +1248,24 @@ The body remains ordinary **Markdown**.
   });
 
   it('shows how closeout creates a Knowledge Delta review before consuming its ID', () => {
-    const article = docsSections
-      .flatMap(section => section.articles)
-      .find(candidate => candidate.id === 'knowledge-delta');
+    const article = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        candidate => candidate.id === 'knowledge-delta',
+      ),
+    );
     const content = JSON.stringify(article);
     const tips = JSON.stringify(proTips);
-    const reviewCall = article?.body.find(
-      block => block.type === 'code' && block.code.includes('review_session_context'),
-    );
+    const reviewCall =
+      article === undefined
+        ? undefined
+        : EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              article.body,
+              block =>
+                block.type === 'code' && Effect.pipe(block.code, EffectString.includes('review_session_context')),
+            ),
+          );
 
     expect(content).toContain('review_session_context');
     expect(reviewCall?.type).toBe('code');
@@ -1074,9 +1284,12 @@ The body remains ordinary **Markdown**.
   });
 
   it('distinguishes user-level Threadnote bootstrap from repository-scoped project guidance', () => {
-    const article = docsSections
-      .flatMap(section => section.articles)
-      .find(candidate => candidate.id === 'project-guidance');
+    const article = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        candidate => candidate.id === 'project-guidance',
+      ),
+    );
     const content = JSON.stringify(article);
 
     expect(content).toContain('generic user-level bootstrap');
@@ -1097,15 +1310,16 @@ The body remains ordinary **Markdown**.
       readFile(join(root, 'apps', 'website', 'src', 'components', 'SiteShell.tsx'), 'utf8'),
       readFile(join(root, 'apps', 'website', 'public', 'sitemap.xml'), 'utf8'),
     ]);
-    const agentDocs = docsSections
-      .flatMap(section => section.articles)
-      .filter(article => agentIntegrations.some(integration => article.id === `agent-${integration.id}`));
+    const agentDocs = EffectArray.filter(
+      EffectArray.flatMap(docsSections, section => section.articles),
+      article => EffectArray.some(agentIntegrations, integration => article.id === `agent-${integration.id}`),
+    );
 
     expect(agentIntegrations.length).toBeGreaterThan(0);
-    expect(Object.keys(tierLabels).sort()).toEqual(['core', 'experimental', 'full', 'manual', 'project']);
+    expect(EffectRecord.keys(tierLabels).sort()).toEqual(['core', 'experimental', 'full', 'manual', 'project']);
     expect(JSON.parse(catalog)).toMatchObject({version: 1});
     expect(agentDocs).toHaveLength(agentIntegrations.length);
-    expect(agentsPage).toContain('agentIntegrations.map');
+    expect(agentsPage).toContain('EffectArray.map(agentIntegrations,');
     expect(agentsPage).toContain('officialDocs');
     expect(agentsPage).toContain('lastVerified');
     expect(agentsPage).toContain('capabilities');
@@ -1123,7 +1337,9 @@ The body remains ordinary **Markdown**.
   });
 
   it('publishes OpenCode and Zeno setup with managed MCP, guidance, and skills', () => {
-    const integration = agentIntegrations.find(entry => entry.id === 'opencode');
+    const integration = EffectOption.getOrUndefined(
+      EffectArray.findFirst(agentIntegrations, entry => entry.id === 'opencode'),
+    );
     expect(integration).toMatchObject({
       displayName: 'OpenCode',
       tier: 'core',
@@ -1136,7 +1352,12 @@ The body remains ordinary **Markdown**.
         hooks: {status: 'unsupported'},
       },
     });
-    const article = docsSections.flatMap(section => section.articles).find(entry => entry.id === 'agent-opencode');
+    const article = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        entry => entry.id === 'agent-opencode',
+      ),
+    );
     const content = JSON.stringify(article);
     expect(content).toContain('threadnote agents install opencode');
     expect(content).toContain('--scope project');
@@ -1146,11 +1367,16 @@ The body remains ordinary **Markdown**.
     expect(content).toContain('AGENTS.md');
     expect(content).toContain('.opencode/skills');
     expect(content).not.toContain('No managed skill installation');
-    const zeno = agentIntegrations.find(entry => entry.id === 'zeno-desktop');
+    const zeno = EffectOption.getOrUndefined(
+      EffectArray.findFirst(agentIntegrations, entry => entry.id === 'zeno-desktop'),
+    );
     expect(zeno).toMatchObject({displayName: 'Zeno', aliases: ['zeno'], scopes: ['user'], platforms: ['darwin']});
-    const zenoArticle = docsSections
-      .flatMap(section => section.articles)
-      .find(entry => entry.id === 'agent-zeno-desktop');
+    const zenoArticle = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        entry => entry.id === 'agent-zeno-desktop',
+      ),
+    );
     expect(zenoArticle?.keywords).toContain('zeno');
     const zenoContent = JSON.stringify(zenoArticle);
     expect(zenoContent).toContain('threadnote agents install zeno');
@@ -1160,11 +1386,24 @@ The body remains ordinary **Markdown**.
   });
 
   it('documents Manager project and Workset operations with accessible motion-safe illustrations', async () => {
-    const managerWorksets = docsSections
-      .flatMap(section => section.articles)
-      .find(article => article.id === 'manager-worksets');
+    const managerWorksets = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        article => article.id === 'manager-worksets',
+      ),
+    );
     const content = JSON.stringify(managerWorksets);
-    const visualKinds = managerWorksets?.body.filter(block => block.type === 'visual').map(block => block.visual);
+    const visualKinds =
+      managerWorksets === undefined
+        ? undefined
+        : EffectArray.map(
+            EffectArray.filter(
+              managerWorksets.body,
+              (block, __effectArrayIndex): block is DocsVisualBlock =>
+                __effectArrayIndex in managerWorksets.body && block.type === 'visual',
+            ),
+            block => block.visual,
+          );
 
     expect(managerWorksets).toBeDefined();
     expect(visualKinds).toEqual(managerOperationsVisualKinds);
@@ -1187,8 +1426,31 @@ The body remains ordinary **Markdown**.
     }
 
     const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
-    const visualStyles = styles.slice(styles.indexOf('.docs-manager-workflow'), styles.indexOf('.docs-pagination'));
-    const reducedMotionStyles = styles.slice(styles.indexOf('@media (prefers-reduced-motion: reduce)'));
+    const visualStyles = Effect.pipe(
+      styles,
+      EffectString.slice(
+        Effect.pipe(
+          styles,
+          EffectString.indexOf('.docs-manager-workflow'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+        Effect.pipe(
+          styles,
+          EffectString.indexOf('.docs-pagination'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
+    );
+    const reducedMotionStyles = Effect.pipe(
+      styles,
+      EffectString.slice(
+        Effect.pipe(
+          styles,
+          EffectString.indexOf('@media (prefers-reduced-motion: reduce)'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
+    );
 
     expect(visualStyles).toContain('@keyframes docs-manager-stage-enter');
     expect(visualStyles).toContain('@keyframes docs-manager-flow-signal');
@@ -1200,11 +1462,14 @@ The body remains ordinary **Markdown**.
   });
 
   it('keeps pro-tip simulations aligned with the requested team and graph workflows', () => {
-    const ids = proTips.map(tip => tip.id);
-    const operations = proTips
-      .flatMap(tip => tip.scenario.steps)
-      .filter(step => step.kind === 'tool')
-      .map(step => step.actor);
+    const ids = EffectArray.map(proTips, tip => tip.id);
+    const operations = EffectArray.map(
+      EffectArray.filter(
+        EffectArray.flatMap(proTips, tip => tip.scenario.steps),
+        step => step.kind === 'tool',
+      ),
+      step => step.actor,
+    );
 
     expect(ids).toEqual(
       expect.arrayContaining([
@@ -1223,11 +1488,23 @@ The body remains ordinary **Markdown**.
         'portable-graph-checkpoints',
       ]),
     );
-    expect(operations.some(operation => operation.includes('recall_context'))).toBe(true);
-    expect(operations.some(operation => operation.includes('inspect_code_graph'))).toBe(true);
-    expect(operations.some(operation => operation.includes('context_brief'))).toBe(true);
-    expect(operations.some(operation => operation.includes('review_session_context'))).toBe(true);
-    expect(operations.some(operation => operation.includes('share_publish'))).toBe(true);
+    expect(
+      EffectArray.some(operations, operation => Effect.pipe(operation, EffectString.includes('recall_context'))),
+    ).toBe(true);
+    expect(
+      EffectArray.some(operations, operation => Effect.pipe(operation, EffectString.includes('inspect_code_graph'))),
+    ).toBe(true);
+    expect(
+      EffectArray.some(operations, operation => Effect.pipe(operation, EffectString.includes('context_brief'))),
+    ).toBe(true);
+    expect(
+      EffectArray.some(operations, operation =>
+        Effect.pipe(operation, EffectString.includes('review_session_context')),
+      ),
+    ).toBe(true);
+    expect(
+      EffectArray.some(operations, operation => Effect.pipe(operation, EffectString.includes('share_publish'))),
+    ).toBe(true);
     expect(JSON.stringify(proTips)).toContain('Knowledge Delta');
     expect(JSON.stringify(proTips)).toContain('Applied');
     expect(JSON.stringify(proTips)).toContain('stale-link');
@@ -1237,10 +1514,10 @@ The body remains ordinary **Markdown**.
 
   it('uses fictional, generic examples in public graph simulations', async () => {
     const publicExamples = await Promise.all(
-      ['content/landing.ts', 'content/proTips.ts', 'content/managerDemo.ts'].map(path =>
+      EffectArray.map(['content/landing.ts', 'content/proTips.ts', 'content/managerDemo.ts'], path =>
         readFile(join(root, 'apps', 'website', 'src', path), 'utf8'),
       ),
-    ).then(sources => sources.join('\n'));
+    ).then(sources => EffectArray.join(sources, '\n'));
 
     expect(publicExamples).toContain('request retry flow');
     expect(publicExamples).toContain('RequestRetryCoordinator');
@@ -1250,15 +1527,25 @@ The body remains ordinary **Markdown**.
   });
 
   it('keeps every simulated MCP payload parseable and aligned with the actual tool contract', () => {
-    const scenarios = [heroScenario, graphInspectScenario, graphAnalyzeScenario, ...proTips.map(tip => tip.scenario)];
+    const scenarios = [
+      heroScenario,
+      graphInspectScenario,
+      graphAnalyzeScenario,
+      ...EffectArray.map(proTips, tip => tip.scenario),
+    ];
 
     for (const scenario of scenarios) {
       const sharePreviews: boolean[] = [];
-      for (const step of scenario.steps.filter(step => step.kind === 'tool')) {
+      for (const step of EffectArrayPipe(scenario.steps, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (step, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && step.kind === 'tool',
+        ),
+      )) {
         const name = toolName(step.actor);
         const payload = parseToolPayload(step.text);
         const allowedKeys: ReadonlySet<string> = toolKeys[name];
-        expect(Object.keys(payload).every(key => allowedKeys.has(key))).toBe(true);
+        expect(EffectArray.every(EffectRecord.keys(payload), key => allowedKeys.has(key))).toBe(true);
 
         switch (name) {
           case 'context_brief':
@@ -1276,17 +1563,20 @@ The body remains ordinary **Markdown**.
             expect(
               typeof payload.uri === 'string' ||
                 typeof payload.uris === 'string' ||
-                (Array.isArray(payload.uris) && payload.uris.length > 0),
+                (EffectArray.isArray(payload.uris) && payload.uris.length > 0),
             ).toBe(true);
             break;
           case 'remember_context':
             expectNonEmptyString(payload, 'text');
             if (payload.codeRefs !== undefined) {
-              expect(Array.isArray(payload.codeRefs)).toBe(true);
-              expect((payload.codeRefs as unknown[]).length).toBeGreaterThan(0);
-              expect((payload.codeRefs as unknown[]).every(ref => typeof ref === 'string' && ref.length > 0)).toBe(
-                true,
-              );
+              expect(EffectArray.isArray(payload.codeRefs)).toBe(true);
+              expect(requireUnknownArray(payload.codeRefs).length).toBeGreaterThan(0);
+              expect(
+                EffectArray.every(
+                  requireUnknownArray(payload.codeRefs),
+                  ref => typeof ref === 'string' && ref.length > 0,
+                ),
+              ).toBe(true);
               expectNonEmptyString(payload, 'callerCwd');
               expect(payload.callerCwd).toMatch(/^\//);
             }
@@ -1294,19 +1584,22 @@ The body remains ordinary **Markdown**.
           case 'review_session_context': {
             expectNonEmptyString(payload, 'task');
             expectNonEmptyString(payload, 'outcome');
-            const hasCandidateMaterial = [
-              'constraints',
-              'decisions',
-              'invariants',
-              'knowledgeInvalidated',
-              'preferences',
-              'rationale',
-              'unresolvedRisks',
-              'verificationPerformed',
-            ].some(key => Array.isArray(payload[key]) && (payload[key] as unknown[]).length > 0);
+            const hasCandidateMaterial = EffectArray.some(
+              [
+                'constraints',
+                'decisions',
+                'invariants',
+                'knowledgeInvalidated',
+                'preferences',
+                'rationale',
+                'unresolvedRisks',
+                'verificationPerformed',
+              ],
+              key => EffectArray.isArray(payload[key]) && payload[key].length > 0,
+            );
             if (hasCandidateMaterial) {
               expect(
-                (Array.isArray(payload.evidence) && payload.evidence.length > 0) ||
+                (EffectArray.isArray(payload.evidence) && payload.evidence.length > 0) ||
                   typeof payload.sourceSessionId === 'string' ||
                   typeof payload.sourceCommit === 'string',
               ).toBe(true);
@@ -1317,7 +1610,7 @@ The body remains ordinary **Markdown**.
             expectNonEmptyString(payload, 'uri');
             expectNonEmptyString(payload, 'team');
             expect(typeof payload.preview).toBe('boolean');
-            sharePreviews.push(payload.preview as boolean);
+            sharePreviews.push(requireBoolean(payload.preview));
             break;
           case 'inspect_code_graph':
             expect(['query', 'node', 'neighbors', 'explain', 'path', 'impact']).toContain(payload.operation);
@@ -1365,31 +1658,58 @@ The body remains ordinary **Markdown**.
   });
 
   it('advances Knowledge Delta revisions before proposing applied candidates', () => {
-    const proposalTips = proTips.filter(tip =>
-      tip.scenario.steps.some(step => step.kind === 'tool' && toolName(step.actor) === 'share_propose'),
+    const proposalTips = EffectArray.filter(
+      proTips,
+      (tip, __effectArrayIndex2) =>
+        __effectArrayIndex2 in proTips &&
+        EffectArray.some(tip.scenario.steps, step => step.kind === 'tool' && toolName(step.actor) === 'share_propose'),
     );
 
     expect(proposalTips).toHaveLength(3);
     for (const tip of proposalTips) {
-      const reviewIndex = tip.scenario.steps.findIndex(
-        step => step.kind === 'tool' && toolName(step.actor) === 'review_session_context',
+      const reviewIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(
+          tip.scenario.steps,
+          step => step.kind === 'tool' && toolName(step.actor) === 'review_session_context',
+        ),
+        () => -1,
       );
-      const applyIndex = tip.scenario.steps.findIndex(
-        step => step.kind === 'tool' && toolName(step.actor) === 'apply_memory_candidates',
+      const applyIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(
+          tip.scenario.steps,
+          step => step.kind === 'tool' && toolName(step.actor) === 'apply_memory_candidates',
+        ),
+        () => -1,
       );
-      const proposalIndex = tip.scenario.steps.findIndex(
-        step => step.kind === 'tool' && toolName(step.actor) === 'share_propose',
+      const proposalIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(
+          tip.scenario.steps,
+          step => step.kind === 'tool' && toolName(step.actor) === 'share_propose',
+        ),
+        () => -1,
       );
 
       expect(reviewIndex).toBeGreaterThanOrEqual(0);
       expect(applyIndex).toBeGreaterThan(reviewIndex);
       expect(proposalIndex).toBeGreaterThan(applyIndex);
       expect(
-        tip.scenario.steps[reviewIndex + 1]?.evidence?.some(item => /review review-[a-z0-9]+ · revision 1/.test(item)),
+        EffectOption.getOrUndefined(
+          EffectOption.map(
+            EffectOption.fromNullishOr(tip.scenario.steps[reviewIndex + 1]?.evidence),
+            __effectSomeValues =>
+              EffectArray.some(__effectSomeValues, item => /review review-[a-z0-9]+ · revision 1/.test(item)),
+          ),
+        ),
       ).toBe(true);
       expect(parseToolPayload(tip.scenario.steps[applyIndex].text).revision).toBe(1);
       expect(
-        tip.scenario.steps[applyIndex + 1]?.evidence?.some(item => /review review-[a-z0-9]+ · revision 2/.test(item)),
+        EffectOption.getOrUndefined(
+          EffectOption.map(
+            EffectOption.fromNullishOr(tip.scenario.steps[applyIndex + 1]?.evidence),
+            __effectSomeValues =>
+              EffectArray.some(__effectSomeValues, item => /review review-[a-z0-9]+ · revision 2/.test(item)),
+          ),
+        ),
       ).toBe(true);
       expect(parseToolPayload(tip.scenario.steps[proposalIndex].text).revision).toBe(2);
     }
@@ -1500,7 +1820,10 @@ The body remains ordinary **Markdown**.
 
   it('ranks documentation headings, content, keywords, prefixes, and small typos', () => {
     const index = createDocsSearchIndex(docsSections);
-    const graphResultIds = searchDocs(index, 'polyglot current worktree impact').map(result => result.article.id);
+    const graphResultIds = EffectArray.map(
+      searchDocs(index, 'polyglot current worktree impact'),
+      result => result.article.id,
+    );
     const headingResults = searchDocs(index, 'saved decisions current code');
     const typoResults = searchDocs(index, 'archtecture analysis');
     const commandResults = searchDocs(index, 'inspect code graph');
@@ -1508,9 +1831,9 @@ The body remains ordinary **Markdown**.
     expect(graphResultIds.slice(0, 4)).toContain('what-is-threadnote');
     expect(headingResults[0]).toMatchObject({article: {id: 'what-is-threadnote'}});
     expect(headingResults[0]?.matchLabel).toContain('Saved decisions and current code stay separate');
-    expect(typoResults.map(result => result.article.id)).toContain('graph-analysis');
-    expect(commandResults.map(result => result.article.id)).toContain('graph-operations');
-    expect(commandResults.some(result => result.snippet !== result.article.summary)).toBe(true);
+    expect(EffectArray.map(typoResults, result => result.article.id)).toContain('graph-analysis');
+    expect(EffectArray.map(commandResults, result => result.article.id)).toContain('graph-operations');
+    expect(EffectArray.some(commandResults, result => result.snippet !== result.article.summary)).toBe(true);
   });
 
   it('keeps docs search deterministic and useful without an exact phrase match', () => {
@@ -1519,9 +1842,11 @@ The body remains ordinary **Markdown**.
     const second = searchDocs(index, 'team publish preview durable');
 
     expect(first.length).toBeGreaterThan(0);
-    expect(first.map(result => result.article.id)).toEqual(second.map(result => result.article.id));
-    expect(first.map(result => result.article.id)).toContain('publish-memory');
-    expect(first.every(result => result.matchedTerms.length >= 3)).toBe(true);
+    expect(EffectArray.map(first, result => result.article.id)).toEqual(
+      EffectArray.map(second, result => result.article.id),
+    );
+    expect(EffectArray.map(first, result => result.article.id)).toContain('publish-memory');
+    expect(EffectArray.every(first, result => result.matchedTerms.length >= 3)).toBe(true);
   });
 
   it('ranks purpose-built documentation ahead of the general introduction', () => {
@@ -1538,7 +1863,12 @@ The body remains ordinary **Markdown**.
   });
 
   it('documents how to enable optional memory enrichment on the Local AI page', () => {
-    const localAi = docsSections.flatMap(section => section.articles).find(article => article.id === 'local-ai');
+    const localAi = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        article => article.id === 'local-ai',
+      ),
+    );
     const content = JSON.stringify(localAi);
 
     expect(localAi).toBeDefined();
@@ -1553,9 +1883,20 @@ The body remains ordinary **Markdown**.
   });
 
   it('documents the complete bounded cross-repository graph-query workflow', () => {
-    const worksetArticle = docsSections.flatMap(section => section.articles).find(article => article.id === 'worksets');
+    const worksetArticle = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        article => article.id === 'worksets',
+      ),
+    );
     const content = JSON.stringify(worksetArticle);
-    const mcpExample = worksetArticle?.body.find(block => block.type === 'code' && block.language === 'json');
+    const mcpExample = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(worksetArticle?.body), findArray =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(findArray, block => block.type === 'code' && block.language === 'json'),
+        ),
+      ),
+    );
 
     expect(worksetArticle).toBeDefined();
     expect(mcpExample?.type).toBe('code');
@@ -1628,7 +1969,7 @@ The body remains ordinary **Markdown**.
       readFile(join(root, 'docs', 'troubleshooting.md'), 'utf8'),
     ]);
 
-    const troubleshootingNormalized = troubleshooting.replace(/\s+/g, ' ');
+    const troubleshootingNormalized = Effect.pipe(troubleshooting, EffectString.replace(/\s+/g, ' '));
     expect(troubleshootingNormalized).toContain('Workset Search 2.0');
     expect(troubleshootingNormalized).toContain('no eight-repository admission cap');
     expect(troubleshootingNormalized).toContain('logical evidence sequence defaults to 40 cards');
@@ -1637,36 +1978,48 @@ The body remains ordinary **Markdown**.
     expect(troubleshootingNormalized).toContain('1,500');
     expect(troubleshootingNormalized).toContain('not a public DSL');
     expect(troubleshootingNormalized).not.toMatch(/(?:queries|query) at most eight repositories/i);
-    expect(readme.replace(/\s+/g, ' ')).not.toMatch(/(?:queries|query) at most eight repositories/i);
+    expect(Effect.pipe(readme, EffectString.replace(/\s+/g, ' '))).not.toMatch(
+      /(?:queries|query) at most eight repositories/i,
+    );
   });
 
   it('bounds adversarial query length and term count before fuzzy matching', () => {
     const index = createDocsSearchIndex(docsSections);
-    const query = Array.from({length: 10_000}, (_, term) => `searchterm${term}`).join(' ');
-    const boundedQuery = query.slice(0, DOCS_SEARCH_MAXIMUM_LENGTH);
+    const query = EffectArray.join(
+      Array.from({length: 10_000}, (_, term) => `searchterm${term}`),
+      ' ',
+    );
+    const boundedQuery = Effect.pipe(query, EffectString.slice(0, DOCS_SEARCH_MAXIMUM_LENGTH));
     const startedAt = performance.now();
     const result = searchDocs(index, query);
     const elapsedMilliseconds = performance.now() - startedAt;
 
     expect(result).toEqual(searchDocs(index, boundedQuery));
-    expect(result.every(candidate => candidate.matchedTerms.length <= DOCS_SEARCH_MAXIMUM_TERMS)).toBe(true);
+    expect(EffectArray.every(result, candidate => candidate.matchedTerms.length <= DOCS_SEARCH_MAXIMUM_TERMS)).toBe(
+      true,
+    );
     expect(elapsedMilliseconds).toBeLessThan(250);
   });
 
-  it('bounds, deduplicates, and deterministically orders arbitrary docs searches', () => {
+  it('bounds, deduplicates, and orders docs searches independently of preceding queries', () => {
     const index = createDocsSearchIndex(docsSections);
 
     fc.assert(
-      fc.property(fc.string({maxLength: 80}), query => {
-        const first = searchDocs(index, query, 7);
-        const second = searchDocs(index, query, 7);
-        expect(first).toEqual(second);
-        expect(first.length).toBeLessThanOrEqual(7);
-        expect(new Set(first.map(result => result.article.id)).size).toBe(first.length);
-        for (let index = 1; index < first.length; index += 1) {
-          expect(first[index - 1].score).toBeGreaterThanOrEqual(first[index].score);
-        }
-      }),
+      fc.property(
+        fc.string({maxLength: 80}),
+        fc.oneof(fc.string({maxLength: 80}), fc.constantFrom('graph', 'memory', 'memroy', 'retrieval', 'scope')),
+        (query, interveningQuery) => {
+          const first = searchDocs(index, query, 7);
+          searchDocs(index, interveningQuery, 7);
+          const second = searchDocs(index, query, 7);
+          expect(first).toEqual(second);
+          expect(first.length).toBeLessThanOrEqual(7);
+          expect(new Set(EffectArray.map(first, result => result.article.id)).size).toBe(first.length);
+          for (let index = 1; index < first.length; index += 1) {
+            expect(first[index - 1].score).toBeGreaterThanOrEqual(first[index].score);
+          }
+        },
+      ),
       {numRuns: 100},
     );
   });
@@ -1676,7 +2029,16 @@ The body remains ordinary **Markdown**.
       readFile(join(root, 'apps', 'website', 'src', 'pages', 'DocsPage.tsx'), 'utf8'),
       readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8'),
     ]);
-    const mobileStyles = styles.slice(styles.indexOf('@media (max-width: 680px)'));
+    const mobileStyles = Effect.pipe(
+      styles,
+      EffectString.slice(
+        Effect.pipe(
+          styles,
+          EffectString.indexOf('@media (max-width: 680px)'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
+    );
 
     expect(docsPage).toContain('role="combobox"');
     expect(docsPage).toContain('role="listbox"');
@@ -1760,12 +2122,12 @@ The body remains ordinary **Markdown**.
   it('round-trips URL-safe documentation article paths under every supported site base', () => {
     const slug = fc
       .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789-'), {minLength: 1, maxLength: 48})
-      .map(parts => parts.join(''))
+      .map(parts => EffectArray.join(parts, ''))
       .filter(value => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value));
 
     fc.assert(
       fc.property(slug, fc.constantFrom('/', '/threadnote/'), (articleId, basePath) => {
-        const pathname = `${basePath}${docsArticlePath(articleId)}`.replace(/\/+/g, '/');
+        const pathname = Effect.pipe(`${basePath}${docsArticlePath(articleId)}`, EffectString.replace(/\/+/g, '/'));
         expect(sitePageForPathname(pathname, basePath)).toBe('docs');
         expect(docsArticleIdForPathname(pathname, basePath)).toBe(articleId);
         expect(siteCanonicalUrlForPathname(pathname, basePath)).toBe(
@@ -1779,13 +2141,19 @@ The body remains ordinary **Markdown**.
   it('round-trips stable article and release post paths under every supported site base', () => {
     const slug = fc
       .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789-'), {minLength: 1, maxLength: 48})
-      .map(parts => parts.join(''))
+      .map(parts => EffectArray.join(parts, ''))
       .filter(value => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value));
 
     fc.assert(
       fc.property(slug, fc.constantFrom('/', '/threadnote/'), (articleSlug, basePath) => {
-        const articlePathname = `${basePath}${whatsNewArticlePath(articleSlug)}`.replace(/\/+/g, '/');
-        const releasePathname = `${basePath}${whatsNewReleasePath('v4.3.8')}`.replace(/\/+/g, '/');
+        const articlePathname = Effect.pipe(
+          `${basePath}${whatsNewArticlePath(articleSlug)}`,
+          EffectString.replace(/\/+/g, '/'),
+        );
+        const releasePathname = Effect.pipe(
+          `${basePath}${whatsNewReleasePath('v4.3.8')}`,
+          EffectString.replace(/\/+/g, '/'),
+        );
         expect(sitePageForPathname(articlePathname, basePath)).toBe('whats-new');
         expect(whatsNewPostForPathname(articlePathname, basePath)).toEqual({kind: 'article', slug: articleSlug});
         expect(siteCanonicalUrlForPathname(articlePathname, basePath)).toBe(
@@ -1801,7 +2169,12 @@ The body remains ordinary **Markdown**.
   });
 
   it('renders crawler-visible metadata and sitemap entries for exact documentation articles', async () => {
-    const worksets = docsSections.flatMap(section => section.articles).find(article => article.id === 'worksets');
+    const worksets = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        article => article.id === 'worksets',
+      ),
+    );
     expect(worksets).toBeDefined();
     const [template, sitemap] = await Promise.all([
       readFile(join(root, 'apps', 'website', 'docs', 'index.html'), 'utf8'),
@@ -1830,7 +2203,7 @@ The body remains ordinary **Markdown**.
 
     fc.assert(
       fc.property(publicationOffsets, offsets => {
-        const posts = offsets.map(offset => ({
+        const posts = EffectArray.map(offsets, offset => ({
           author: 'Threadnote',
           body: 'A generated article body.',
           highlights: ['A generated highlight'],
@@ -1849,7 +2222,10 @@ The body remains ordinary **Markdown**.
         expect(rendered).toContain(`<meta property="og:image" content="${latestImageUrl}" />`);
         expect(rendered).toContain(`<meta name="twitter:image" content="${latestImageUrl}" />`);
         expect(rendered).toContain(`"image":"${latestImageUrl}"`);
-        for (const olderOffset of offsets.filter(offset => offset !== latestOffset)) {
+        for (const olderOffset of EffectArray.filter(
+          offsets,
+          (offset, __effectArrayIndex) => __effectArrayIndex in offsets && offset !== latestOffset,
+        )) {
           expect(rendered).not.toContain(`https://threadnote.io/generated-${olderOffset}.png`);
         }
       }),
@@ -1874,7 +2250,7 @@ Measure the system before changing its implementation language.
     );
     const imageStem = fc
       .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'), {minLength: 1, maxLength: 24})
-      .map(characters => characters.join(''));
+      .map(characters => EffectArray.join(characters, ''));
 
     fc.assert(
       fc.property(imageStem, stem => {
@@ -1900,18 +2276,16 @@ Measure the system before changing its implementation language.
       readFile(join(root, 'apps', 'website', 'public', 'performance-evidence.json')),
       readFile(join(root, 'apps', 'website', 'performance', 'evidence.binding.json'), 'utf8'),
     ]);
-    const retainedArtifactInput = JSON.parse(retainedArtifactBytes.toString('utf8')) as {
-      environment: {commit: string; dirty: boolean};
-      metadata: {releaseEvidenceRef: string; releaseEvidenceSha: string; releaseEvidenceSourceMode: string};
-      measurements: Array<{name: string; p50: number}>;
-    };
+    const retainedArtifactInput = requireRecord(JSON.parse(retainedArtifactBytes.toString('utf8')));
     const retainedArtifact = validateRetainedPerformancePayload(retainedArtifactInput);
-    const retainedBinding = JSON.parse(retainedBindingBytes) as {
-      artifactSha256: string;
-      sourceThreadnoteCommit: string;
-    };
+    const retainedBinding = requireRecord(JSON.parse(retainedBindingBytes));
     const measurement = (name: string) => {
-      const matches = retainedArtifact.measurements.filter(candidate => candidate.name === name);
+      const matches = EffectArrayPipe(retainedArtifact.measurements, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (candidate, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && candidate.name === name,
+        ),
+      );
       expect(matches).toHaveLength(1);
       return matches[0].p50;
     };
@@ -1988,8 +2362,8 @@ Measure the system before changing its implementation language.
     const deferredDocs = new Promise<string>(resolve => {
       resolveDocs = resolve;
     });
-    const loaders = Object.fromEntries(
-      (
+    const loaders = EffectRecord.fromEntries(
+      EffectArray.map(
         [
           'home',
           'performance',
@@ -2000,8 +2374,9 @@ Measure the system before changing its implementation language.
           'pro-tips',
           'manager-demo',
           'faq',
-        ] as const
-      ).map(page => [page, page === 'docs' ? () => deferredDocs : async () => page]),
+        ] as const,
+        page => [page, page === 'docs' ? () => deferredDocs : async () => page],
+      ),
     ) as Record<SitePage, () => Promise<string>>;
     const cache = createSitePageModuleCache(loaders);
     let currentRoute = 'home';
@@ -2040,7 +2415,7 @@ Measure the system before changing its implementation language.
       binding: fixtureBinding(artifactBytes),
       currentLockfileSha256: fixtureLockfileSha256,
       currentPackageManifestSha256: fixturePackageManifestSha256,
-      currentSourceTreeSha256: 'f'.repeat(64),
+      currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
     });
 
     expect(evidence).toMatchObject({
@@ -2051,7 +2426,7 @@ Measure the system before changing its implementation language.
           sha256: sha256Hex(artifactBytes),
           generatedAt: '2026-08-02T20:00:00Z',
         },
-        source: {threadnote: {commit: 'b'.repeat(40), version: 'v4.3.1'}},
+        source: {threadnote: {commit: Effect.pipe('b', EffectString.repeat(40)), version: 'v4.3.1'}},
         phases: {
           incremental: {
             attributionContextFiles: 1,
@@ -2086,10 +2461,9 @@ Measure the system before changing its implementation language.
         ({channel, channelVersion, minor, patch}) => {
           const version = `4.${minor}.${patch}${channel === undefined ? '' : `-${channel}.${channelVersion}`}`;
           const fixture = verifiedPerformanceFixture();
-          const sourceCommit = String((fixture.environment as Record<string, unknown>).commit);
-          (fixture.metadata as Record<string, unknown>).releaseEvidenceRef = `refs/tags/v${version}`;
-          (fixture.metadata as Record<string, unknown>).benchmarkValidatedManagedVersion =
-            `${version}-local.g${sourceCommit}`;
+          const sourceCommit = String(requireRecord(fixture.environment).commit);
+          requireRecord(fixture.metadata).releaseEvidenceRef = `refs/tags/v${version}`;
+          requireRecord(fixture.metadata).benchmarkValidatedManagedVersion = `${version}-local.g${sourceCommit}`;
           const artifactBytes = fixtureBytes(fixture);
           const evidence = bindRetainedPerformanceArtifact({
             artifactBytes,
@@ -2097,7 +2471,7 @@ Measure the system before changing its implementation language.
             binding: fixtureBinding(artifactBytes),
             currentLockfileSha256: fixtureLockfileSha256,
             currentPackageManifestSha256: fixturePackageManifestSha256,
-            currentSourceTreeSha256: 'f'.repeat(64),
+            currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
           });
 
           expect(evidence.state).toBe('verified');
@@ -2118,7 +2492,9 @@ Measure the system before changing its implementation language.
     fc.assert(
       fc.property(fc.constantFrom(...targets), fc.integer({min: -1_000, max: 1_000}), ([name, limit], delta) => {
         const fixture = verifiedPerformanceFixture();
-        const measurement = (fixture.measurements as Record<string, unknown>[]).find(row => row.name === name);
+        const measurement = EffectOption.getOrUndefined(
+          EffectArray.findFirst(requireRecordArray(fixture.measurements), row => row.name === name),
+        );
         if (measurement === undefined) throw TestError.make({message: `Missing fixture measurement ${name}.`});
         const observed = limit + delta;
         for (const field of ['maximum', 'mean', 'minimum', 'p50', 'p95', 'p99'] as const) {
@@ -2131,12 +2507,15 @@ Measure the system before changing its implementation language.
           binding: fixtureBinding(artifactBytes),
           currentLockfileSha256: fixtureLockfileSha256,
           currentPackageManifestSha256: fixturePackageManifestSha256,
-          currentSourceTreeSha256: 'f'.repeat(64),
+          currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
         });
         expect(evidence.state).toBe('verified');
         if (evidence.state !== 'verified') return;
-        const objective = retainedPerformanceObjectiveResults(evidence.artifact).find(
-          candidate => candidate.measurement === name,
+        const objective = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            retainedPerformanceObjectiveResults(evidence.artifact),
+            candidate => candidate.measurement === name,
+          ),
         );
         expect(objective).toMatchObject({
           observedMilliseconds: observed,
@@ -2156,7 +2535,9 @@ Measure the system before changing its implementation language.
       'one-file-reindex-incremental-work-probed-dependency-paths-n1',
     ] as const) {
       const fixture = verifiedPerformanceFixture();
-      const measurement = (fixture.measurements as Record<string, unknown>[]).find(row => row.name === name);
+      const measurement = EffectOption.getOrUndefined(
+        EffectArray.findFirst(requireRecordArray(fixture.measurements), row => row.name === name),
+      );
       if (measurement === undefined) throw TestError.make({message: `Missing fixture measurement ${name}.`});
       for (const field of ['maximum', 'mean', 'minimum', 'p50', 'p95', 'p99'] as const) measurement[field] = 90;
       const artifactBytes = fixtureBytes(fixture);
@@ -2168,7 +2549,7 @@ Measure the system before changing its implementation language.
           binding: fixtureBinding(artifactBytes),
           currentLockfileSha256: fixtureLockfileSha256,
           currentPackageManifestSha256: fixturePackageManifestSha256,
-          currentSourceTreeSha256: 'f'.repeat(64),
+          currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
         }),
       ).toThrow('Performance evidence one-file work must remain below a repository-wide scan.');
     }
@@ -2176,8 +2557,11 @@ Measure the system before changing its implementation language.
 
   it('retains zero dependency probes for a body-only one-file edit', () => {
     const fixture = verifiedPerformanceFixture();
-    const measurement = (fixture.measurements as Record<string, unknown>[]).find(
-      row => row.name === 'one-file-reindex-incremental-work-probed-dependency-paths-n1',
+    const measurement = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        requireRecordArray(fixture.measurements),
+        row => row.name === 'one-file-reindex-incremental-work-probed-dependency-paths-n1',
+      ),
     );
     if (measurement === undefined) throw TestError.make({message: 'Missing dependency-probe fixture measurement.'});
     for (const field of ['maximum', 'mean', 'minimum', 'p50', 'p95', 'p99'] as const) measurement[field] = 0;
@@ -2188,7 +2572,7 @@ Measure the system before changing its implementation language.
       binding: fixtureBinding(artifactBytes),
       currentLockfileSha256: fixtureLockfileSha256,
       currentPackageManifestSha256: fixturePackageManifestSha256,
-      currentSourceTreeSha256: 'f'.repeat(64),
+      currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
     });
 
     expect(evidence.state).toBe('verified');
@@ -2199,8 +2583,8 @@ Measure the system before changing its implementation language.
 
   it('projects canonical Threadnote 5 release provenance into retained website evidence', () => {
     const fixture = verifiedPerformanceFixture();
-    const metadata = fixture.metadata as Record<string, unknown>;
-    const commit = (fixture.environment as Record<string, unknown>).commit;
+    const metadata = requireRecord(fixture.metadata);
+    const commit = requireRecord(fixture.environment).commit;
     metadata.releaseEvidenceRef = 'refs/tags/v5.0.2';
     metadata.benchmarkValidatedManagedVersion = `5.0.2-local.g${commit}`;
     const artifactBytes = fixtureBytes(fixture);
@@ -2210,7 +2594,7 @@ Measure the system before changing its implementation language.
       binding: fixtureBinding(artifactBytes),
       currentLockfileSha256: fixtureLockfileSha256,
       currentPackageManifestSha256: fixturePackageManifestSha256,
-      currentSourceTreeSha256: 'f'.repeat(64),
+      currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
     });
 
     expect(evidence.state).toBe('verified');
@@ -2224,56 +2608,72 @@ Measure the system before changing its implementation language.
       [
         'MCP output',
         fixture => {
-          fixture.measurements = (fixture.measurements as Record<string, unknown>[]).filter(
-            measurement => measurement.name !== 'mcp-path-text-output',
+          fixture.measurements = EffectArrayPipe(requireRecordArray(fixture.measurements), __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (measurement, __effectFilterIndex) =>
+                __effectFilterIndex in __effectFilterValues && measurement.name !== 'mcp-path-text-output',
+            ),
           );
         },
       ],
       [
         'sampler observation',
         fixture => {
-          fixture.measurements = (fixture.measurements as Record<string, unknown>[]).filter(
-            measurement => measurement.name !== 'cold-external-storage-samples-n1',
+          fixture.measurements = EffectArrayPipe(requireRecordArray(fixture.measurements), __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (measurement, __effectFilterIndex) =>
+                __effectFilterIndex in __effectFilterValues && measurement.name !== 'cold-external-storage-samples-n1',
+            ),
           );
         },
       ],
       [
         'activation observation',
         fixture => {
-          fixture.measurements = (fixture.measurements as Record<string, unknown>[]).filter(
-            measurement => measurement.name !== 'cold-activation-committing-snapshot-observed-n1',
+          fixture.measurements = EffectArrayPipe(requireRecordArray(fixture.measurements), __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (measurement, __effectFilterIndex) =>
+                __effectFilterIndex in __effectFilterValues &&
+                measurement.name !== 'cold-activation-committing-snapshot-observed-n1',
+            ),
           );
         },
       ],
       [
         'unknown metadata',
         fixture => {
-          (fixture.metadata as Record<string, unknown>).privateRepositoryRoot = '/private/repository';
+          requireRecord(fixture.metadata).privateRepositoryRoot = '/private/repository';
         },
       ],
       [
         'credential metadata',
         fixture => {
-          (fixture.metadata as Record<string, unknown>).runnerIdentity = 'token=github_pat_example';
+          requireRecord(fixture.metadata).runnerIdentity = 'token=github_pat_example';
         },
       ],
       [
         'pre-Threadnote-4 release tag',
         fixture => {
-          (fixture.metadata as Record<string, unknown>).releaseEvidenceRef = 'refs/tags/v3.9.9';
+          requireRecord(fixture.metadata).releaseEvidenceRef = 'refs/tags/v3.9.9';
         },
       ],
       [
         'local-path metadata',
         fixture => {
-          (fixture.metadata as Record<string, unknown>).runnerIdentity = '/Users/private/runner';
+          requireRecord(fixture.metadata).runnerIdentity = '/Users/private/runner';
         },
       ],
       [
         'insufficient p95 samples',
         fixture => {
-          const measurement = (fixture.measurements as Record<string, unknown>[]).find(
-            candidate => candidate.name === 'manager-bounded-query',
+          const measurement = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              requireRecordArray(fixture.measurements),
+              candidate => candidate.name === 'manager-bounded-query',
+            ),
           )!;
           measurement.samples = 24;
         },
@@ -2284,7 +2684,7 @@ Measure the system before changing its implementation language.
       const fixture = structuredClone(verifiedPerformanceFixture());
       mutate(fixture);
       for (const validate of [
-        (input: unknown) => validateRetainedExternalPerformanceEvidence(input as BenchmarkArtifactV1),
+        (input: unknown) => validateRetainedExternalPerformanceEvidence(parseBenchmarkArtifactV1(input)),
         validateRetainedPerformancePayload,
       ]) {
         expect(() => validate(fixture), label).toThrow();
@@ -2304,25 +2704,25 @@ Measure the system before changing its implementation language.
         binding,
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('artifact SHA-256 mismatch');
     expect(() =>
       bindRetainedPerformanceArtifact({
         artifactBytes,
         artifactPublicUrl: performanceArtifactPublicUrl('/'),
-        binding: fixtureBinding(artifactBytes, {artifactSha256: '0'.repeat(64)}),
+        binding: fixtureBinding(artifactBytes, {artifactSha256: Effect.pipe('0', EffectString.repeat(64))}),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('artifact SHA-256 mismatch');
   });
 
   it('rejects sensitive or machine-local public control evidence at the site binder', () => {
     for (const [field, value] of [
-      ['query', `ghp_${'a'.repeat(24)}`],
-      ['query', `sk-proj_${'b'.repeat(24)}`],
+      ['query', `ghp_${Effect.pipe('a', EffectString.repeat(24))}`],
+      ['query', `sk-proj_${Effect.pipe('b', EffectString.repeat(24))}`],
       ['path', '/Users/example/private.ts'],
       ['path', '/home/example/private.ts'],
       ['path', '/mnt/c/Users/example/private.ts'],
@@ -2332,8 +2732,8 @@ Measure the system before changing its implementation language.
       ['path', '../outside/private.ts'],
     ] as const) {
       const fixture = verifiedPerformanceFixture();
-      const metadata = fixture.metadata as Record<string, unknown>;
-      const controls = JSON.parse(String(metadata.externalControlEvidence)) as Record<string, Record<string, string>>;
+      const metadata = requireRecord(fixture.metadata);
+      const controls = requireStringRecordMap(JSON.parse(String(metadata.externalControlEvidence)));
       controls.java = {...controls.java, [field]: value};
       metadata.externalControlEvidence = JSON.stringify(controls);
       const artifactBytes = fixtureBytes(fixture);
@@ -2345,7 +2745,7 @@ Measure the system before changing its implementation language.
           binding: fixtureBinding(artifactBytes),
           currentLockfileSha256: fixtureLockfileSha256,
           currentPackageManifestSha256: fixturePackageManifestSha256,
-          currentSourceTreeSha256: 'f'.repeat(64),
+          currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
         }),
       ).toThrow(/privacy-safe|repository-relative/);
     }
@@ -2358,10 +2758,10 @@ Measure the system before changing its implementation language.
       bindRetainedPerformanceArtifact({
         artifactBytes,
         artifactPublicUrl: performanceArtifactPublicUrl('/'),
-        binding: fixtureBinding(artifactBytes, {sourceThreadnoteCommit: '9'.repeat(40)}),
+        binding: fixtureBinding(artifactBytes, {sourceThreadnoteCommit: Effect.pipe('9', EffectString.repeat(40))}),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('different Threadnote source commits');
     expect(() =>
@@ -2371,7 +2771,7 @@ Measure the system before changing its implementation language.
         binding: fixtureBinding(artifactBytes),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: '8'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('8', EffectString.repeat(64)),
       }),
     ).toThrow('does not match its measured Threadnote source tree');
   });
@@ -2387,7 +2787,7 @@ Measure the system before changing its implementation language.
         binding: fixtureBinding(partialBytes),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('Missing key');
 
@@ -2401,13 +2801,13 @@ Measure the system before changing its implementation language.
         binding: fixtureBinding(extraBytes),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('unexpected or missing fields');
 
     const mismatched = verifiedPerformanceFixture();
-    const metadata = mismatched.metadata as Record<string, unknown>;
-    metadata.structuralGraphDigestSameOverlayReference = '0'.repeat(64);
+    const metadata = requireRecord(mismatched.metadata);
+    metadata.structuralGraphDigestSameOverlayReference = Effect.pipe('0', EffectString.repeat(64));
     const mismatchedBytes = fixtureBytes(mismatched);
     expect(() =>
       bindRetainedPerformanceArtifact({
@@ -2416,14 +2816,14 @@ Measure the system before changing its implementation language.
         binding: fixtureBinding(mismatchedBytes),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('overlay digests must match');
   });
 
   it('rejects fabricated, mixed-runtime, and separately supplied Manager evidence', () => {
     const githubMode = verifiedPerformanceFixture();
-    (githubMode.metadata as Record<string, unknown>).benchmarkSourceValidationMode = 'github-actions-clean-source';
+    requireRecord(githubMode.metadata).benchmarkSourceValidationMode = 'github-actions-clean-source';
     const githubBytes = fixtureBytes(githubMode);
     expect(() =>
       bindRetainedPerformanceArtifact({
@@ -2432,12 +2832,12 @@ Measure the system before changing its implementation language.
         binding: fixtureBinding(githubBytes),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('managed-payload-exact-head-validated');
 
     const missingRuntimeHash = verifiedPerformanceFixture();
-    delete (missingRuntimeHash.metadata as Record<string, unknown>).benchmarkValidatedManagedExecutableSha256;
+    delete requireRecord(missingRuntimeHash.metadata).benchmarkValidatedManagedExecutableSha256;
     const runtimeBytes = fixtureBytes(missingRuntimeHash);
     expect(() =>
       bindRetainedPerformanceArtifact({
@@ -2446,7 +2846,7 @@ Measure the system before changing its implementation language.
         binding: fixtureBinding(runtimeBytes),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('benchmarkValidatedManagedExecutableSha256');
 
@@ -2454,31 +2854,31 @@ Measure the system before changing its implementation language.
       [
         'dirty source',
         (fixture: Record<string, unknown>) => {
-          (fixture.environment as Record<string, unknown>).dirty = true;
+          requireRecord(fixture.environment).dirty = true;
         },
       ],
       [
         'dependency installation',
         (fixture: Record<string, unknown>) => {
-          (fixture.metadata as Record<string, unknown>).benchmarkValidatedManagedDependencyInstallation = 'bun install';
+          requireRecord(fixture.metadata).benchmarkValidatedManagedDependencyInstallation = 'bun install';
         },
       ],
       [
         'payload manifest hash',
         (fixture: Record<string, unknown>) => {
-          delete (fixture.metadata as Record<string, unknown>).benchmarkValidatedManagedPayloadManifestSha256;
+          delete requireRecord(fixture.metadata).benchmarkValidatedManagedPayloadManifestSha256;
         },
       ],
       [
         'release metadata hash',
         (fixture: Record<string, unknown>) => {
-          delete (fixture.metadata as Record<string, unknown>).benchmarkValidatedManagedReleaseMetadataSha256;
+          delete requireRecord(fixture.metadata).benchmarkValidatedManagedReleaseMetadataSha256;
         },
       ],
       [
         'runtime target',
         (fixture: Record<string, unknown>) => {
-          (fixture.metadata as Record<string, unknown>).benchmarkValidatedManagedTarget = 'linux-x64';
+          requireRecord(fixture.metadata).benchmarkValidatedManagedTarget = 'linux-x64';
         },
       ],
     ] as const) {
@@ -2493,15 +2893,21 @@ Measure the system before changing its implementation language.
             binding: fixtureBinding(bytes),
             currentLockfileSha256: fixtureLockfileSha256,
             currentPackageManifestSha256: fixturePackageManifestSha256,
-            currentSourceTreeSha256: 'f'.repeat(64),
+            currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
           }),
         label,
       ).toThrow();
     }
 
     const withoutManagerQuery = verifiedPerformanceFixture();
-    withoutManagerQuery.measurements = (withoutManagerQuery.measurements as Record<string, unknown>[]).filter(
-      measurement => measurement.name !== 'manager-bounded-query',
+    withoutManagerQuery.measurements = EffectArrayPipe(
+      requireRecordArray(withoutManagerQuery.measurements),
+      __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (measurement, __effectFilterIndex) =>
+            __effectFilterIndex in __effectFilterValues && measurement.name !== 'manager-bounded-query',
+        ),
     );
     const managerBytes = fixtureBytes(withoutManagerQuery);
     expect(() =>
@@ -2511,7 +2917,7 @@ Measure the system before changing its implementation language.
         binding: fixtureBinding(managerBytes),
         currentLockfileSha256: fixtureLockfileSha256,
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('manager-bounded-query');
   });
@@ -2528,9 +2934,9 @@ Measure the system before changing its implementation language.
         artifactBytes,
         artifactPublicUrl: performanceArtifactPublicUrl('/threadnote/'),
         binding: fixtureBinding(artifactBytes),
-        currentLockfileSha256: '0'.repeat(64),
+        currentLockfileSha256: Effect.pipe('0', EffectString.repeat(64)),
         currentPackageManifestSha256: fixturePackageManifestSha256,
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('lockfile SHA-256');
     expect(() =>
@@ -2539,8 +2945,8 @@ Measure the system before changing its implementation language.
         artifactPublicUrl: performanceArtifactPublicUrl('/threadnote/'),
         binding: fixtureBinding(artifactBytes),
         currentLockfileSha256: fixtureLockfileSha256,
-        currentPackageManifestSha256: '0'.repeat(64),
-        currentSourceTreeSha256: 'f'.repeat(64),
+        currentPackageManifestSha256: Effect.pipe('0', EffectString.repeat(64)),
+        currentSourceTreeSha256: Effect.pipe('f', EffectString.repeat(64)),
       }),
     ).toThrow('package manifest SHA-256');
   });
@@ -2630,9 +3036,12 @@ Measure the system before changing its implementation language.
 
   it('documents explicit publishing, Cursor Marketplace, and supported hook boundaries', () => {
     const content = JSON.stringify(docsSections);
-    const cursorPluginArticle = docsSections
-      .flatMap(section => section.articles)
-      .find(article => article.id === 'cursor-marketplace-plugin');
+    const cursorPluginArticle = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        article => article.id === 'cursor-marketplace-plugin',
+      ),
+    );
 
     expect(content).toContain('threadnote install-hooks claude --dry-run');
     expect(content).toContain('threadnote install-hooks codex --dry-run');
@@ -2651,26 +3060,50 @@ Measure the system before changing its implementation language.
   });
 
   it('withholds Cursor organization setup until its live flow is verified', () => {
-    const articles = docsSections.flatMap(section => section.articles);
-    expect(articles.some(article => article.id === 'cursor-cloud-agents')).toBe(false);
+    const articles = EffectArray.flatMap(docsSections, section => section.articles);
+    expect(EffectArray.some(articles, article => article.id === 'cursor-cloud-agents')).toBe(false);
     expect(JSON.stringify(articles)).not.toContain('Bootstrap Threadnote for a Cursor organization');
     expect(
-      searchDocs(createDocsSearchIndex(docsSections), 'Cursor organization managed remote memory').some(
+      EffectArray.some(
+        searchDocs(createDocsSearchIndex(docsSections), 'Cursor organization managed remote memory'),
         result => result.article.id === 'cursor-cloud-agents',
       ),
     ).toBe(false);
   });
 
   it('documents the standalone Personal Cursor Cloud one-MCP multi-share setup', () => {
-    const article = docsSections
-      .flatMap(section => section.articles)
-      .find(candidate => candidate.id === 'personal-cursor-cloud');
-    const content = JSON.stringify(article);
-    const mcpConfiguration = article?.body.find(
-      block => block.type === 'code' && block.language === 'json' && block.code.includes('THREADNOTE_MCP_TOOLSET'),
+    const article = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        candidate => candidate.id === 'personal-cursor-cloud',
+      ),
     );
-    const install = article?.body.find(
-      block => block.type === 'code' && block.language === 'sh' && block.code.includes('cloud cursor bootstrap'),
+    const content = JSON.stringify(article);
+    const mcpConfiguration = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(article), __effectOptionalArticle =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectOptionalArticle.body,
+            block =>
+              block.type === 'code' &&
+              block.language === 'json' &&
+              Effect.pipe(block.code, EffectString.includes('THREADNOTE_MCP_TOOLSET')),
+          ),
+        ),
+      ),
+    );
+    const install = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(article), __effectOptionalArticle =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            __effectOptionalArticle.body,
+            block =>
+              block.type === 'code' &&
+              block.language === 'sh' &&
+              Effect.pipe(block.code, EffectString.includes('cloud cursor bootstrap')),
+          ),
+        ),
+      ),
     );
 
     expect(article?.title).toBe('Personal Cursor Cloud setup');
@@ -2709,7 +3142,13 @@ Measure the system before changing its implementation language.
     expect(content).not.toContain('same repeated team set');
     if (!install || install.type !== 'code')
       throw TestError.make({message: 'Missing Personal Cursor Cloud install command.'});
-    expect(install.code.match(/cloud cursor bootstrap/gu)).toHaveLength(2);
+    expect(
+      Effect.pipe(
+        install.code,
+        EffectString.match(/cloud cursor bootstrap/gu),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(2);
     expect(install.code).toContain('$HOME/.cursor/skills/threadnote-memory/SKILL.md');
     expect(
       searchDocs(createDocsSearchIndex(docsSections), 'personal Cursor Cloud multiple shares one MCP')[0]?.article.id,
@@ -2717,9 +3156,12 @@ Measure the system before changing its implementation language.
   });
 
   it('documents scoped Codex Cloud briefs, graph startup, and optional Knowledge Delta approval', () => {
-    const article = docsSections
-      .flatMap(section => section.articles)
-      .find(candidate => candidate.id === 'personal-codex-cloud');
+    const article = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        EffectArray.flatMap(docsSections, section => section.articles),
+        candidate => candidate.id === 'personal-codex-cloud',
+      ),
+    );
     const content = JSON.stringify(article);
     expect(article?.title).toBe('Personal Codex Cloud setup');
     for (const expected of [
@@ -2750,7 +3192,12 @@ Measure the system before changing its implementation language.
       searchDocs(createDocsSearchIndex(docsSections), 'personal Codex Cloud published environment')[0]?.article.id,
     ).toBe('personal-codex-cloud');
     const cursor = JSON.stringify(
-      docsSections.flatMap(section => section.articles).find(candidate => candidate.id === 'personal-cursor-cloud'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.flatMap(docsSections, section => section.articles),
+          candidate => candidate.id === 'personal-cursor-cloud',
+        ),
+      ),
     );
     expect(cursor).toContain('two Agent Skills');
     expect(cursor).toContain('Graph tools are unavailable');
@@ -2758,7 +3205,13 @@ Measure the system before changing its implementation language.
   });
 
   it('uses the real Manager labels and share status fields in the mock data', () => {
-    expect(managerDemoTabs.map(tab => tab.label)).toEqual(['Graph', 'Library', 'Sharing', 'Health', 'Tools']);
+    expect(EffectArray.map(managerDemoTabs, tab => tab.label)).toEqual([
+      'Graph',
+      'Library',
+      'Sharing',
+      'Health',
+      'Tools',
+    ]);
     for (const share of managerDemoShares) {
       expect(share.name).toBe(share.label);
       expect(share.remote).not.toBe('');
@@ -2801,8 +3254,8 @@ Measure the system before changing its implementation language.
         'utf8',
       ),
     ]);
-    const sharedCopy = JSON.stringify(graphifySharedCapabilities).toLowerCase();
-    const differenceCopy = JSON.stringify(graphifyVerifiedDifferences).toLowerCase();
+    const sharedCopy = Effect.pipe(JSON.stringify(graphifySharedCapabilities), EffectString.toLowerCase);
+    const differenceCopy = Effect.pipe(JSON.stringify(graphifyVerifiedDifferences), EffectString.toLowerCase);
 
     expect(managerSource).toContain('Mock data — no local files read');
     expect(faqSource).not.toMatch(/Graphify|SHOW_GRAPHIFY_COMPARISON|comparisonOnly/);
@@ -2869,9 +3322,7 @@ Measure the system before changing its implementation language.
     expect(graphifyPage).toContain('bound benchmark artifact does not serialize that field');
     expect(graphifyPage).not.toMatch(/Graphify-exclusive|Graphify only|Threadnote-exclusive|Threadnote only/);
 
-    const graphifyEvidence = JSON.parse(evidenceSource) as {
-      threadnoteComparator: {artifactSha256: string; commit: string; version: string};
-    };
+    const graphifyEvidence = requireRecord(JSON.parse(evidenceSource));
     expect(graphifyEvidence).toMatchObject({
       result: 'operator-terminated-right-censored-artifact-non-arrival',
       scope: {package: 'graphifyy', product: 'Graphify'},
@@ -2901,9 +3352,10 @@ Measure the system before changing its implementation language.
       },
       restartBoundary: {perFileAstCachePersisted: true, postParseResumeArtifactPersisted: false},
     });
-    expect(graphifyPage).toContain(`artifactSha256: '${graphifyEvidence.threadnoteComparator.artifactSha256}'`);
-    expect(graphifyPage).toContain(`commit: '${graphifyEvidence.threadnoteComparator.commit}'`);
-    expect(graphifyPage).toContain(`version: '${graphifyEvidence.threadnoteComparator.version}'`);
+    const threadnoteComparator = requireRecord(graphifyEvidence.threadnoteComparator);
+    expect(graphifyPage).toContain(`artifactSha256: '${requireString(threadnoteComparator.artifactSha256)}'`);
+    expect(graphifyPage).toContain(`commit: '${requireString(threadnoteComparator.commit)}'`);
+    expect(graphifyPage).toContain(`version: '${requireString(threadnoteComparator.version)}'`);
     expect(addressedEvidenceSource).toBe(evidenceSource);
     expect(sha256Hex(evidenceSource)).toBe('bd4686d2fce1fe369c73ac77ebe65604bcb3af6fb4564691d10dfb296aca61b1');
 
@@ -2917,7 +3369,9 @@ Measure the system before changing its implementation language.
 
   it('documents the separate whole-graph analysis and corpus/export contracts', () => {
     const content = JSON.stringify(docsSections);
-    const analysisTool = mcpTools.find(tool => tool.name === 'analyze_code_graph');
+    const analysisTool = EffectOption.getOrUndefined(
+      EffectArray.findFirst(mcpTools, tool => tool.name === 'analyze_code_graph'),
+    );
 
     expect(analysisTool).toMatchObject({toolset: 'core'});
     expect(analysisTool?.keyInputs).toContain(
@@ -2946,7 +3400,11 @@ Measure the system before changing its implementation language.
 
   it('keeps the docs Performance link inside a configured Pages subpath', () => {
     const content = JSON.stringify(docsSections);
-    const relativeLink = content.match(/\[Performance page\]\(([^)]+)\)/)?.[1];
+    const relativeLink = Effect.pipe(
+      content,
+      EffectString.match(/\[Performance page\]\(([^)]+)\)/),
+      Effect.Option.getOrElse(() => null),
+    )?.[1];
 
     expect(relativeLink).toBe('../performance/');
     expect(new URL(relativeLink ?? '', 'https://example.test/threadnote/docs/').pathname).toBe(
@@ -2965,10 +3423,15 @@ Measure the system before changing its implementation language.
 
   it('contains the landing hero and install command at narrow mobile widths', async () => {
     const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
-    const tabletStart = styles.indexOf('@media (max-width: 980px)');
+    const tabletStart = Effect.pipe(
+      styles,
+      EffectString.indexOf('@media (max-width: 980px)'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const mobileStart = styles.indexOf('@media (max-width: 680px)', tabletStart);
-    const tabletStyles = styles.slice(tabletStart, mobileStart);
-    const mobileStyles = styles.slice(mobileStart);
+    const tabletStyles = Effect.pipe(styles, EffectString.slice(tabletStart, mobileStart));
+    const mobileStyles = Effect.pipe(styles, EffectString.slice(mobileStart));
 
     expect(styles).toMatch(/\.hero__copy\s*{[^}]*min-width: 0;/s);
     expect(styles).toMatch(/\.hero__visual\s*{[^}]*min-width: 0;/s);
@@ -2981,10 +3444,15 @@ Measure the system before changing its implementation language.
 
   it('keeps the Pro Tips explorer contained at mobile widths', async () => {
     const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
-    const tabletStart = styles.indexOf('@media (max-width: 980px)');
+    const tabletStart = Effect.pipe(
+      styles,
+      EffectString.indexOf('@media (max-width: 980px)'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const mobileStart = styles.indexOf('@media (max-width: 680px)', tabletStart);
-    const tabletStyles = styles.slice(tabletStart, mobileStart);
-    const mobileStyles = styles.slice(mobileStart);
+    const tabletStyles = Effect.pipe(styles, EffectString.slice(tabletStart, mobileStart));
+    const mobileStyles = Effect.pipe(styles, EffectString.slice(mobileStart));
 
     expect(styles).toMatch(/\.tips-layout\s*{[^}]*min-width: 0;/s);
     expect(styles).toMatch(/\.tips-index\s*{[^}]*min-width: 0;/s);
@@ -3006,20 +3474,26 @@ Measure the system before changing its implementation language.
 
   it('keeps every explicit site text size at or above the shared 12px minimum', async () => {
     const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
-    const explicitPixelSizes = [...styles.matchAll(/(?:font-size:\s*|font:\s*)(\d+(?:\.\d+)?)px/g)].map(match =>
-      Number(match[1]),
+    const explicitPixelSizes = EffectArray.map(
+      [...Effect.pipe(styles, EffectString.matchAll(/(?:font-size:\s*|font:\s*)(\d+(?:\.\d+)?)px/g))],
+      match => Number(match[1]),
     );
 
     expect(styles).toContain('--font-size-min: 12px;');
-    expect(explicitPixelSizes.filter(size => size < 12)).toEqual([]);
+    expect(EffectArray.filter(explicitPixelSizes, size => size < 12)).toEqual([]);
   });
 
   it('stacks the worktree-readiness evidence without connector overflow on mobile', async () => {
     const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
-    const tabletStart = styles.indexOf('@media (max-width: 980px)');
+    const tabletStart = Effect.pipe(
+      styles,
+      EffectString.indexOf('@media (max-width: 980px)'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const mobileStart = styles.indexOf('@media (max-width: 680px)', tabletStart);
-    const tabletStyles = styles.slice(tabletStart, mobileStart);
-    const mobileStyles = styles.slice(mobileStart);
+    const tabletStyles = Effect.pipe(styles, EffectString.slice(tabletStart, mobileStart));
+    const mobileStyles = Effect.pipe(styles, EffectString.slice(mobileStart));
 
     expect(tabletStart).toBeGreaterThan(-1);
     expect(mobileStart).toBeGreaterThan(tabletStart);
@@ -3043,9 +3517,14 @@ Measure the system before changing its implementation language.
 
   it('collapses the footer before its six links can overflow narrow tablet widths', async () => {
     const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
-    const tabletStart = styles.indexOf('@media (max-width: 760px)');
+    const tabletStart = Effect.pipe(
+      styles,
+      EffectString.indexOf('@media (max-width: 760px)'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const mobileStart = styles.indexOf('@media (max-width: 680px)', tabletStart);
-    const tabletFooter = styles.slice(tabletStart, mobileStart);
+    const tabletFooter = Effect.pipe(styles, EffectString.slice(tabletStart, mobileStart));
 
     expect(tabletStart).toBeGreaterThan(-1);
     expect(mobileStart).toBeGreaterThan(tabletStart);

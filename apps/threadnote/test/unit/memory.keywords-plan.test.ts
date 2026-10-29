@@ -5,6 +5,8 @@ import {
   shouldEnrichForKeywordPlan,
   tryResolveMemoryKeywordPlan,
 } from '@threadnote/threadnote/memory/keywords';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('resolveMemoryKeywordPlan', () => {
   it('falls through to automatic on a fresh memory', () => {
@@ -77,7 +79,7 @@ describe('resolveMemoryKeywordPlan', () => {
   });
 
   it('filters token-shaped values from explicit handoff keywords', () => {
-    const secretLike = `xapp${'a'.repeat(10)}`;
+    const secretLike = `xapp${Effect.pipe('a', EffectString.repeat(10))}`;
     expect(
       resolveMemoryKeywordPlan({keywords: [secretLike, `keyword-${secretLike}`, 'handoff-retry'], kind: 'handoff'}),
     ).toEqual({

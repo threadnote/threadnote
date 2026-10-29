@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import {
   selectCodeGraphCitationContentHashTargets,
@@ -5,10 +6,15 @@ import {
   type CodeGraphEffectiveSnapshotCitationEvidenceRequest,
 } from '@threadnote/graph/citation/primitives';
 import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
-import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphQueryService, type CodeGraphStatusOptions} from '@threadnote/graph/query';
+import {CodeGraphRepositoryError} from '@threadnote/graph/types';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
-import type {CodeGraphInventoryFile, CodeGraphSnapshot, CodeGraphStatus} from '@threadnote/graph/types';
+import type {
+  CodeGraphInventoryFile,
+  CodeGraphSnapshot,
+  CodeGraphStatus,
+  RepositoryIdentityExpectation,
+} from '@threadnote/graph/types';
 import {compileContextBriefWith} from '@threadnote/context/compiler';
 import {
   retrieveContextBriefMemoryEvidence,
@@ -28,6 +34,8 @@ import {
   type ContextBriefCitationRuntimeScenarioV1,
   type ContextBriefCitationRuntimeWarning,
 } from './context-brief-citation-runtime-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const LEGACY_TOPIC = 'runtime-evaluation-legacy-v1-continuity';
 
@@ -122,7 +130,7 @@ const evaluateCitedScenario = Effect.fn('evaluation.contextBriefCitationRuntime.
     );
     const contextBriefMilliseconds = elapsedMilliseconds(briefStarted);
     const memories = [...brief.structuredContent.activeHandoffs, ...brief.structuredContent.durableDecisions];
-    const memory = memories.find(item => item.uri === uri);
+    const memory = EffectOption.getOrUndefined(EffectArray.findFirst(memories, item => item.uri === uri));
     return {
       capture: {
         ...(citation === undefined ? {} : {citationId: citation.id}),
@@ -185,7 +193,7 @@ const evaluateLegacyScenario = Effect.fn('evaluation.contextBriefCitationRuntime
   );
   const contextBriefMilliseconds = elapsedMilliseconds(briefStarted);
   const memories = [...brief.structuredContent.activeHandoffs, ...brief.structuredContent.durableDecisions];
-  const memory = memories.find(item => item.topic === LEGACY_TOPIC);
+  const memory = EffectOption.getOrUndefined(EffectArray.findFirst(memories, item => item.topic === LEGACY_TOPIC));
   return {
     capture: {milliseconds: 0, succeeded: false},
     contextBriefMilliseconds,
@@ -254,36 +262,48 @@ function makeScenarioGraph(
       phase === 'capture'
         ? [sourceFile]
         : currentFiles(fixture.source.path, fixture.source.content, sourceHash, changedHash, scenario.kind);
-    const byPath = new Map(files.map(file => [file.path, file]));
+    const byPath = new Map(EffectArray.map(files, file => [file.path, file]));
     const paths = [
-      ...new Set([...(request.paths ?? []), ...(request.fileRelocationFallbacks ?? []).map(item => item.path)]),
+      ...new Set([
+        ...(request.paths ?? []),
+        ...EffectArray.map(request.fileRelocationFallbacks ?? [], item => item.path),
+      ]),
     ];
     const contentHashes = selectCodeGraphCitationContentHashTargets(
       [...new Set(request.contentHashes ?? [])],
       request.fileRelocationFallbacks ?? [],
-      new Set(files.map(file => file.path)),
+      new Set(EffectArray.map(files, file => file.path)),
     );
     return {
       fileInventoryCoverage:
         phase === 'capture' || scenario.snapshotState === 'current-complete' ? 'complete' : 'incomplete',
-      filesByContentHashes: contentHashes.map(contentHash => ({
+      filesByContentHashes: EffectArray.map(contentHashes, contentHash => ({
         contentHash,
-        files: files.filter(file => file.contentHash === contentHash),
+        files: EffectArray.filter(files, file => file.contentHash === contentHash),
         truncated: false,
       })),
-      filesByPaths: paths.map(repositoryPath => ({
+      filesByPaths: EffectArray.map(paths, repositoryPath => ({
         ...(byPath.get(repositoryPath) === undefined ? {} : {file: byPath.get(repositoryPath)!}),
         path: repositoryPath,
       })),
       symbolsByIds: [],
-      symbolsBySemanticLocators: (request.semanticLocators ?? []).map(locator => ({
+      symbolsBySemanticLocators: EffectArray.map(request.semanticLocators ?? [], locator => ({
         locator,
         symbols: [],
         truncated: false,
       })),
     } satisfies CodeGraphEffectiveSnapshotCitationEvidence;
   };
-  const store = CodeGraphStore.of({
+  const store = {
+    activateCleanSnapshotAlias: undefined,
+    discardInvalidCachedFacts: undefined,
+    existingSnapshotFilePaths: undefined,
+    loadSnapshotMaterializedFileShards: undefined,
+    reusableCleanBase: undefined,
+    reusableCleanBaseForCommitPaths: undefined,
+    reusableFoldForwardBase: undefined,
+    reusableOverlayBase: undefined,
+    snapshotProjectClosureFiles: undefined,
     acquireSnapshotLease: () => Effect.sync(() => `runtime-eval-lease-${++acquired}`),
     effectiveSnapshotCitationEvidence: (
       _databasePath: string,
@@ -291,19 +311,41 @@ function makeScenarioGraph(
       request: CodeGraphEffectiveSnapshotCitationEvidenceRequest,
     ) => Effect.sync(() => evidence(request)),
     releaseSnapshotLease: () => Effect.sync(() => void ++released),
-  } as unknown as CodeGraphStoreShape);
-  const query = CodeGraphQueryService.of({
-    status: (_threadnoteHome: string, _cwd: string, options: {readonly requestMaintenance?: boolean}) =>
+  };
+  const query = {
+    withStatusSession: undefined,
+    status: (_threadnoteHome: string, _cwd: string, options?: {readonly requestMaintenance?: boolean}) =>
       Effect.sync(() => {
-        if (options.requestMaintenance) maintenanceRequests += 1;
+        if (options?.requestMaintenance) maintenanceRequests += 1;
         return phase === 'capture' ? sourceStatus : currentStatus;
       }),
-  } as unknown as Parameters<typeof CodeGraphQueryService.of>[0]);
+    statusForPublishedIdentity: (
+      _threadnoteHome: string,
+      _cwd: string,
+      expected: RepositoryIdentityExpectation,
+      options?: CodeGraphStatusOptions,
+    ) =>
+      Effect.sync(() => {
+        if (options?.requestMaintenance) maintenanceRequests += 1;
+        return phase === 'capture' ? sourceStatus : currentStatus;
+      }).pipe(
+        Effect.filterOrFail(
+          observed =>
+            observed.identity.checkoutId === expected.checkoutId &&
+            observed.identity.repositoryId === expected.repositoryId &&
+            observed.identity.worktreeId === expected.worktreeId,
+          () =>
+            CodeGraphRepositoryError.make({
+              message: 'Evaluation graph status identity did not match the published identity.',
+            }),
+        ),
+      ),
+  };
   return {
     beginValidation: () => {
       phase = 'validation';
     },
-    layer: Layer.merge(Layer.succeed(CodeGraphStore, store), Layer.succeed(CodeGraphQueryService, query)),
+    layer: Layer.merge(Layer.mock(CodeGraphStore, store), Layer.mock(CodeGraphQueryService, query)),
     leaseBalance: () => acquired - released,
     maintenanceRequests: () => maintenanceRequests,
     validationEvidenceCalls: () => validationEvidenceCalls,
@@ -355,7 +397,7 @@ function snapshot(
   commit: string,
   id: string,
   fileCount: number,
-  graphContentId: string | undefined = `cgc_${sha256HexSync(id).slice(0, 40)}`,
+  graphContentId: string | undefined = `cgc_${Effect2.pipe(sha256HexSync(id), EffectString.slice(0, 40))}`,
   repositoryId = fixture.source.repositoryId,
   baseSnapshotId?: string,
 ): CodeGraphSnapshot {
@@ -446,7 +488,12 @@ function warningForMemory(
   issues: readonly {readonly kind: string; readonly uris: readonly string[]}[],
   uri: string,
 ): ContextBriefCitationRuntimeWarning {
-  const issue = issues.find(candidate => candidate.uris.includes(uri));
+  const issue = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      issues,
+      __effectArrayValue => !!(candidate => candidate.uris.includes(uri))(__effectArrayValue),
+    ),
+  );
   switch (issue?.kind) {
     case 'stale-link':
     case 'stale-memory':
@@ -458,18 +505,21 @@ function warningForMemory(
 }
 
 function legacyMemory(): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${LEGACY_TOPIC}`,
-    'source_agent_client: codex',
-    'timestamp: 2025-01-01T00:00:00.000Z',
-    'schema_version: 1',
-    '',
-    'Runtime evaluation legacy v1 continuity sentinel remains recallable after the schema-v4 upgrade.',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${LEGACY_TOPIC}`,
+      'source_agent_client: codex',
+      'timestamp: 2025-01-01T00:00:00.000Z',
+      'schema_version: 1',
+      '',
+      'Runtime evaluation legacy v1 continuity sentinel remains recallable after the schema-v4 upgrade.',
+    ],
+    '\n',
+  );
 }
 
 function runtimeConfig(root: string, home: string): RuntimeConfig {

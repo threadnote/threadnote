@@ -1,7 +1,9 @@
 import {Effect, Predicate} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function isExternalTreePath(relativePath: string): boolean {
-  return relativePath === 'external' || relativePath.startsWith('external/');
+  return relativePath === 'external' || Effect2.pipe(relativePath, EffectString.startsWith('external/'));
 }
 
 function externalResourceTreeEntryVisible(
@@ -10,7 +12,8 @@ function externalResourceTreeEntryVisible(
 ): boolean {
   return (
     !isExternalTreePath(relativePath) ||
-    (!entry.name.startsWith('.') && (entry.isDirectory() || entry.name.endsWith('.md')))
+    (!Effect2.pipe(entry.name, EffectString.startsWith('.')) &&
+      (entry.isDirectory() || Effect2.pipe(entry.name, EffectString.endsWith('.md'))))
   );
 }
 

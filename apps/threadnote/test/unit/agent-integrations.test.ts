@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -21,6 +22,10 @@ import type {AgentClient} from '@threadnote/threadnote/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {withoutOmpPathSelectors} from '@threadnote/testing/omp-environment';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const agents = ['codex', 'claude', 'cursor', 'copilot', 'omp'] as const;
 
@@ -192,9 +197,12 @@ describe('agent integrations', () => {
           name: 'threadnote',
           toolset: 'core',
         }).pipe(Effect.provideService(SystemInfo, testSystem('first')));
-        const olderGeneratedSkill = (yield* fs.readFileString(skillPath('first'))).replace(
-          USER_INSTRUCTIONS_START_MARKER,
-          `${USER_INSTRUCTIONS_START_MARKER}\nLegacy generated content from an older Threadnote release.`,
+        const olderGeneratedSkill = Effect2.pipe(
+          yield* fs.readFileString(skillPath('first')),
+          EffectString.replace(
+            USER_INSTRUCTIONS_START_MARKER,
+            `${USER_INSTRUCTIONS_START_MARKER}\nLegacy generated content from an older Threadnote release.`,
+          ),
         );
         yield* fs.writeFileString(skillPath('first'), olderGeneratedSkill);
 
@@ -233,6 +241,7 @@ describe('agent integrations', () => {
         }).pipe(Effect.provideService(SystemInfo, testSystem));
 
         const registry = yield* readAgentIntegrationRegistry(config(threadnoteHome));
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         expect(Object.keys(registry?.hosts ?? {})).toEqual(['cursor']);
         expect(registry?.hosts.cursor).toMatchObject({
           mcp: {name: 'threadnote', toolset: 'core'},
@@ -309,7 +318,7 @@ describe('agent integrations', () => {
         const testSystem = SystemInfo.of({...system, homeDirectory: userHome});
 
         yield* Effect.all(
-          agents.map(agent =>
+          EffectArray.map(agents, agent =>
             installAgentIntegration(config(threadnoteHome), agent, {
               dryRun: false,
               name: `threadnote-${agent}`,
@@ -321,6 +330,7 @@ describe('agent integrations', () => {
         ).pipe(TestClock.withLive);
 
         const registry = yield* readAgentIntegrationRegistry(config(threadnoteHome));
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         expect(Object.keys(registry?.hosts ?? {}).sort()).toEqual([...agents].sort());
         for (const agent of agents) {
           expect(registry?.hosts[agent]).toMatchObject({
@@ -358,6 +368,7 @@ describe('agent integrations', () => {
         const migratedClaude = yield* fs.readFileString(claudeInstructions);
         expect(migratedClaude).toContain('Keep this Claude note.');
         expect(migratedClaude).toContain('Route non-trivial work by situation');
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         expect(Object.keys((yield* readAgentIntegrationRegistry(config(threadnoteHome)))?.hosts ?? {})).toEqual([
           'claude',
         ]);
@@ -389,6 +400,7 @@ describe('agent integrations', () => {
         ).pipe(Effect.provideService(SystemInfo, testSystem), Effect.exit);
         expect(migration._tag).toBe('Failure');
         const pending = yield* readAgentIntegrationRegistry(config(threadnoteHome));
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         expect(Object.keys(pending?.hosts ?? {})).toEqual(['codex', 'claude']);
         expect(pending?.hosts.codex?.status).toBe('pending');
         expect(pending?.hosts.claude?.status).toBe('pending');
@@ -418,21 +430,24 @@ describe('agent integrations', () => {
         yield* fs.makeDirectory(path.dirname(cursorRule), {recursive: true});
         yield* fs.writeFileString(
           cursorRule,
-          [
-            '---',
-            'description: User-maintained Cursor rule',
-            'alwaysApply: true',
-            '---',
-            '',
-            'Keep this user preface.',
-            '',
-            USER_INSTRUCTIONS_START_MARKER,
-            'Legacy dense instructions.',
-            USER_INSTRUCTIONS_END_MARKER,
-            '',
-            'Keep this user appendix.',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              '---',
+              'description: User-maintained Cursor rule',
+              'alwaysApply: true',
+              '---',
+              '',
+              'Keep this user preface.',
+              '',
+              USER_INSTRUCTIONS_START_MARKER,
+              'Legacy dense instructions.',
+              USER_INSTRUCTIONS_END_MARKER,
+              '',
+              'Keep this user appendix.',
+              '',
+            ],
+            '\n',
+          ),
         );
         const testSystem = SystemInfo.of({...system, homeDirectory: userHome});
 
@@ -477,8 +492,8 @@ describe('agent integrations', () => {
 
         expect(yield* fs.readFileString(directRule)).toBe('Keep this note.\n');
         const receipt = (yield* readAgentIntegrationRegistry(config(threadnoteHome)))?.hosts.cursor;
-        expect(Object.keys(receipt?.artifacts ?? {})).not.toContain(directRule);
-        expect(Object.keys(receipt?.artifacts ?? {})).toHaveLength(4);
+        expect(EffectRecord.keys(receipt?.artifacts ?? {})).not.toContain(directRule);
+        expect(EffectRecord.keys(receipt?.artifacts ?? {})).toHaveLength(4);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -551,7 +566,7 @@ describe('agent integrations', () => {
             ...registry.hosts,
             cursor: {
               ...cursor,
-              artifacts: {...cursor.artifacts, [graphSkill]: Object.values(cursor.artifacts)[0]},
+              artifacts: {...cursor.artifacts, [graphSkill]: EffectRecord.values(cursor.artifacts)[0]},
             },
           },
         }).pipe(Effect.provideService(SystemInfo, testSystem));
@@ -633,10 +648,21 @@ describe('agent integrations', () => {
             Effect.provideService(SystemInfo, testSystem),
           );
           const checkedHosts = new Set(
-            checks.map(check => agents.find(agent => check.name.startsWith(`${agent} `))).filter(Boolean),
+            EffectArray.filter(
+              EffectArray.map(checks, check =>
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    agents,
+                    __effectArrayValue =>
+                      !!(agent => Effect2.pipe(check.name, EffectString.startsWith(`${agent} `)))(__effectArrayValue),
+                  ),
+                ),
+              ),
+              Boolean,
+            ),
           );
           expect([...checkedHosts].sort()).toEqual([...selected].sort());
-          expect(checks.every(check => check.status === 'ok')).toBe(true);
+          expect(EffectArray.every(checks, check => check.status === 'ok')).toBe(true);
         }),
       ).pipe(provideTestLayer(ApplicationLayer)),
     {fastCheck: {numRuns: 20}},

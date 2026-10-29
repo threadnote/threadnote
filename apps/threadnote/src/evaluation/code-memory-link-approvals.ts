@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import approvalData from './code-memory-link-approvals.json' with {type: 'json'};
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 const HASH = /^[0-9a-f]{64}$/u;
 const APPROVAL_KEYS = [
@@ -23,9 +25,9 @@ function parseApprovalData(value: unknown): CodeMemoryLinkApprovalsV1 {
     throw new Error('Code Memory Link approvals must be a JSON object.');
   }
   const record = value;
-  const keys = Object.keys(record).sort();
+  const keys = EffectRecord.keys(record).sort();
   if (JSON.stringify(keys) !== JSON.stringify([...APPROVAL_KEYS].sort())) {
-    throw new Error(`Code Memory Link approvals must contain exactly: ${APPROVAL_KEYS.join(', ')}.`);
+    throw new Error(`Code Memory Link approvals must contain exactly: ${EffectArray.join(APPROVAL_KEYS, ', ')}.`);
   }
   if (record.version !== 1) throw new Error('Code Memory Link approvals version must be 1.');
   return Object.freeze({
@@ -37,8 +39,12 @@ function parseApprovalData(value: unknown): CodeMemoryLinkApprovalsV1 {
   });
 }
 
+const isHashArray = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) &&
+  EffectArray.every(value, (hash): hash is string => typeof hash === 'string' && HASH.test(hash));
+
 function parseHashes(value: unknown, name: string): readonly string[] {
-  if (!Array.isArray(value) || value.some(hash => typeof hash !== 'string' || !HASH.test(hash))) {
+  if (!isHashArray(value)) {
     throw new Error(`${name} must contain only lowercase SHA-256 hashes.`);
   }
   if (new Set(value).size !== value.length) throw new Error(`${name} must not contain duplicate hashes.`);

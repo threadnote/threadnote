@@ -68,6 +68,8 @@ import {makeGraphShareRegistryReader} from '@threadnote/graph/sharing/registry/r
 import {makeGraphShareRegistryWriter} from '@threadnote/graph/sharing/registry/writer';
 import {parseGraphShareRegistryTarget} from '@threadnote/graph/sharing/registry/reference';
 import {readGraphShareEnrolledProfile} from '@threadnote/graph/sharing/profile/storage';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface GraphShareInitOptions {
   readonly cas?: string;
@@ -178,7 +180,10 @@ export const runGraphShareInit = Effect.fn('codeGraph.sharing.init')(function* (
     branch,
     canonicalRemote: identity.remoteIdentity,
     ...(options.coordinator === undefined ? {} : {coordinatorUrl: parseGraphShareCoordinatorUrl(options.coordinator)}),
-    organization: options.organization?.trim() || 'local',
+    organization:
+      Effect2.pipe(options.organization, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || 'local',
     publisherKeyFingerprint: key.fingerprint,
     repositoryId: identity.repositoryId,
   });
@@ -360,7 +365,8 @@ export const runGraphPublisherListen = Effect.fn('codeGraph.sharing.publisherLis
   const enrollment = parseGraphShareEnrollment(yield* readJsonFile(graphShareEnrollmentPath(path, identity.repoRoot)));
   const profile = yield* readGraphShareEnrolledProfile(casRoot, enrollment);
   const enableWorkerResults =
-    profile.registry.canonical.startsWith('oci://') && profile.registry.worker.startsWith('oci://');
+    Effect2.pipe(profile.registry.canonical, EffectString.startsWith('oci://')) &&
+    Effect2.pipe(profile.registry.worker, EffectString.startsWith('oci://'));
   if (enableWorkerResults)
     yield* Effect.try({
       try: () =>
@@ -552,7 +558,11 @@ function commandCwd(value: string | undefined) {
   return Effect.gen(function* () {
     const system = yield* SystemInfo;
     const path = yield* Path.Path;
-    return path.resolve(value?.trim() || system.currentDirectory());
+    return path.resolve(
+      Effect2.pipe(value, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || system.currentDirectory(),
+    );
   });
 }
 

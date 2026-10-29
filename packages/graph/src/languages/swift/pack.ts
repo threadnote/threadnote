@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import type {Node} from 'web-tree-sitter';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -8,6 +9,8 @@ import {
 } from '../../tree_sitter/extractor.js';
 import {SWIFT_GRAMMAR} from '../tree_sitter_assets.js';
 import type {CodeGraphLanguagePack} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const DECLARATIONS = `
 (class_declaration declaration_kind: "class" name: (_) @name) @definition.class
@@ -44,7 +47,7 @@ const definition: TreeSitterLanguageDefinition = {
   asset: SWIFT_GRAMMAR,
   declarationQuery: DECLARATIONS,
   declarationKind: (capture, node) => {
-    if (capture !== 'definition.function') return capture.replace(/^definition\./, '');
+    if (capture !== 'definition.function') return Effect.pipe(capture, EffectString.replace(/^definition\./, ''));
     for (let current = node.parent; current; current = current.parent) {
       if (current.type === 'class_body' || current.type === 'protocol_body') return 'method';
       if (current.type === 'source_file') break;
@@ -58,12 +61,12 @@ const definition: TreeSitterLanguageDefinition = {
   lookupKeysForSymbol: input => swiftKeys(input.qualifiedName, input.metadata, input.arity),
   lookupTiersForReference: input => {
     if (input.relation === 'imports' || /^(?:self|super)(?:\.|$)/.test(input.targetName)) return [];
-    const owner = input.owner.qualifiedName.split('.').slice(0, -1).join('.');
+    const owner = EffectArray.join(Effect.pipe(input.owner.qualifiedName, EffectString.split('.')).slice(0, -1), '.');
     const candidates = [
       ...(owner ? swiftKeys(`${owner}.${input.targetName}`, input.metadata, input.arity) : []),
       ...swiftKeys(input.targetName, input.metadata, input.arity),
     ];
-    return candidates.map(key => [key]);
+    return EffectArray.map(candidates, key => [key]);
   },
   metadataQuery: METADATA,
   namespaceFromNode: () => Option.none(),
@@ -71,7 +74,7 @@ const definition: TreeSitterLanguageDefinition = {
   referenceRelation: (capture, node) => {
     if (capture === 'reference.call') {
       const target = callTarget(node);
-      return /^[A-Z]/.test(target.split('.').at(-1) ?? '') ? 'constructs' : 'calls';
+      return /^[A-Z]/.test(Effect.pipe(target, EffectString.split('.')).at(-1) ?? '') ? 'constructs' : 'calls';
     }
     if (capture === 'reference.import') return 'imports';
     if (capture === 'reference.extend') return 'extends';
@@ -79,7 +82,8 @@ const definition: TreeSitterLanguageDefinition = {
     return 'references';
   },
   referenceTarget: (capture, node) => {
-    if (capture === 'reference.import') return node.text.replace(/^\s*import\s+/, '').trim();
+    if (capture === 'reference.import')
+      return Effect.pipe(node.text, EffectString.replace(/^\s*import\s+/, ''), EffectString.trim);
     return capture === 'reference.call' ? callTarget(node) : node.text;
   },
   resolutionDomain: 'swift',
@@ -113,14 +117,16 @@ function swiftKeys(
 }
 
 function parseSwiftImport(value: string) {
-  const module = value
-    .replace(/^\s*import\s+/, '')
-    .replace(/^(?:class|enum|func|let|protocol|struct|typealias|var)\s+/, '')
-    .trim();
+  const module = Effect.pipe(
+    value,
+    EffectString.replace(/^\s*import\s+/, ''),
+    EffectString.replace(/^(?:class|enum|func|let|protocol|struct|typealias|var)\s+/, ''),
+    EffectString.trim,
+  );
   return module
     ? Option.some({
         alias: Option.none<string>(),
-        importedName: Option.some(module.split('.').at(-1)!),
+        importedName: Option.some(Effect.pipe(module, EffectString.split('.')).at(-1)!),
         module,
         wildcard: false,
       })
@@ -128,10 +134,20 @@ function parseSwiftImport(value: string) {
 }
 
 function callTarget(node: Node): string {
-  const target = node.namedChildren.find(child => child.type !== 'call_suffix');
-  return target?.text.trim() ?? node.text.split('(', 1)[0].trim();
+  const target = Option.getOrUndefined(
+    EffectArray.findFirst(node.namedChildren, child => child.type !== 'call_suffix'),
+  );
+  return (
+    Effect.pipe(
+      target?.text,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+    ) ?? Effect.pipe(node.text.split('(', 1)[0], EffectString.trim)
+  );
 }
 
 function header(node: Node): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   return node.text.split(/[{\n]/, 1)[0] ?? '';
 }

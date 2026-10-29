@@ -9,10 +9,11 @@ import {readSourceConfiguration} from '../src/config.js';
 import {Redacted} from 'effect';
 import {provideLayer} from './layer.js';
 import {issue, response, safeFetch, source, uuid} from './fixtures.js';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'linear-manager-'}));
-  return {config: {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig};
+  return {config: runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'})};
 });
 const body = {
   ...source,

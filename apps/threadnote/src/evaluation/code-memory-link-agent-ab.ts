@@ -1,10 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertUniqueCodeMemoryLinkAttestations,
   codeMemoryLinkCandidateFromAttestation,
   createCodeMemoryLinkInvocationAttestationV1,
   parseCodeMemoryLinkInvocationAttestationV1,
-  type CodeMemoryLinkInvocationAttestationV1,
   type CodeMemoryLinkRuntimeIdentityV1,
 } from './code-memory-link-attestation.js';
 import {
@@ -19,10 +19,7 @@ import {
   assertCodeMemoryLinkAgentEvidenceLedgerV1,
   parseCodeMemoryLinkAgentEvidenceReceiptV1,
 } from './code-memory-link-agent-evidence.js';
-import {
-  parseCodeMemoryLinkExpectedCodexClientV1,
-  type CodeMemoryLinkExpectedCodexClientV1,
-} from './code-memory-link-agent-client-identity.js';
+import {parseCodeMemoryLinkExpectedCodexClientV1} from './code-memory-link-agent-client-identity.js';
 import {
   armPosition,
   assertCanonicalOrder,
@@ -39,146 +36,86 @@ import {
 import type {
   ArmAcceptanceMetricV1,
   BinaryScenarioFamilyMetricV1,
-  CodeMemoryLinkAgentAbMetricsV1,
   FirstUseMetricV1,
   PairedPassMetricV1,
   PerClientMetricV1,
   ReductionScenarioFamilyMetricV1,
   TotalTaskUsageMetricV1,
 } from './code-memory-link-agent-ab-metrics.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
+import {
+  CODE_MEMORY_LINK_AGENT_AB_VERSION,
+  CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS,
+  CODE_MEMORY_LINK_AGENT_AB_ARMS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_CLIENTS,
+  CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_CLIENTS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_HIDDEN_TASKS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_TASKS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_HIDDEN_SCENARIO_FAMILIES,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILIES,
+  CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_TASKS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_ADHERENCE_DELTA_PERCENTAGE_POINTS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_FIRST_USE_REDUCTION_PERCENT,
+  CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_NEGATIVE_CONTROL_REGRESSION_PERCENTAGE_POINTS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_PASS_RATE,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILY_PASS_RATE,
+  CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILY_REGRESSION_EVENT_RATE,
+  CODE_MEMORY_LINK_AGENT_AB_SCHEDULE_ALGORITHM_VERSION,
+} from './code-memory-link-agent-ab-contracts.js';
+import type {
+  CodeMemoryLinkAgentAbBlindLabel,
+  CodeMemoryLinkAgentAbArm,
+  CodeMemoryLinkAgentAbScenarioFamily,
+  CodeMemoryLinkAgentAbAssignmentV1,
+  CodeMemoryLinkAgentAbManifestV1,
+  CodeMemoryLinkAgentAbManifestClientV1,
+  CodeMemoryLinkAgentAbScheduleEntryV1,
+  CodeMemoryLinkAgentAbManifestTaskV1,
+  CodeMemoryLinkAgentAbTrialV1,
+  CodeMemoryLinkAgentAbTrialSummaryV1,
+  CodeMemoryLinkAgentAbClientTrialSummaryV1,
+  CodeMemoryLinkAgentAbResultV1,
+} from './code-memory-link-agent-ab-contracts.js';
+export {
+  CODE_MEMORY_LINK_AGENT_AB_VERSION,
+  CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS,
+  CODE_MEMORY_LINK_AGENT_AB_ARMS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_CLIENTS,
+  CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_CLIENTS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_HIDDEN_TASKS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_TASKS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_HIDDEN_SCENARIO_FAMILIES,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILIES,
+  CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_TASKS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_ADHERENCE_DELTA_PERCENTAGE_POINTS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_FIRST_USE_REDUCTION_PERCENT,
+  CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_NEGATIVE_CONTROL_REGRESSION_PERCENTAGE_POINTS,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_PASS_RATE,
+  CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILY_PASS_RATE,
+  CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILY_REGRESSION_EVENT_RATE,
+  CODE_MEMORY_LINK_AGENT_AB_SCHEDULE_ALGORITHM_VERSION,
+} from './code-memory-link-agent-ab-contracts.js';
+export type {
+  CodeMemoryLinkAgentAbBlindLabel,
+  CodeMemoryLinkAgentAbArm,
+  CodeMemoryLinkAgentAbScenarioFamily,
+  CodeMemoryLinkAgentAbAssignmentV1,
+  CodeMemoryLinkAgentAbManifestV1,
+  CodeMemoryLinkAgentAbManifestClientV1,
+  CodeMemoryLinkAgentAbScheduleEntryV1,
+  CodeMemoryLinkAgentAbManifestTaskV1,
+  CodeMemoryLinkAgentAbTrialV1,
+  CodeMemoryLinkAgentAbTrialSummaryV1,
+  CodeMemoryLinkAgentAbClientTrialSummaryV1,
+  CodeMemoryLinkAgentAbResultV1,
+} from './code-memory-link-agent-ab-contracts.js';
 export {
   CODE_MEMORY_LINK_AGENT_AB_APPROVED_EVIDENCE_HASHES,
   CODE_MEMORY_LINK_AGENT_AB_APPROVED_MANIFEST_HASHES,
 } from './code-memory-link-approvals.js';
-
-export const CODE_MEMORY_LINK_AGENT_AB_VERSION = 1 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS = ['X', 'Y', 'Z'] as const;
-export const CODE_MEMORY_LINK_AGENT_AB_ARMS = ['anchored', 'task-only', 'no-memory'] as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_CLIENTS = 2 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_CLIENTS = 8 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_HIDDEN_TASKS = 12 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_TASKS = 16 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_HIDDEN_SCENARIO_FAMILIES = 2 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILIES = 9 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_TASKS = 64 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_ADHERENCE_DELTA_PERCENTAGE_POINTS = 10 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_FIRST_USE_REDUCTION_PERCENT = 20 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_NEGATIVE_CONTROL_REGRESSION_PERCENTAGE_POINTS = 0 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_PASS_RATE = 0.9 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILY_PASS_RATE = 1 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILY_REGRESSION_EVENT_RATE = 0 as const;
-export const CODE_MEMORY_LINK_AGENT_AB_SCHEDULE_ALGORITHM_VERSION = 'sha256-counterbalanced-v1' as const;
-
-export type CodeMemoryLinkAgentAbBlindLabel = (typeof CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS)[number];
-export type CodeMemoryLinkAgentAbArm = (typeof CODE_MEMORY_LINK_AGENT_AB_ARMS)[number];
-export type CodeMemoryLinkAgentAbScenarioFamily = 'hidden:anchored-only' | 'hidden:lexical' | `control:${string}`;
-
-export interface CodeMemoryLinkAgentAbAssignmentV1 {
-  readonly assignmentHash: string;
-  readonly fixtureHash: string;
-  readonly labels: Readonly<Record<CodeMemoryLinkAgentAbBlindLabel, CodeMemoryLinkAgentAbArm>>;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_AB_VERSION;
-}
-
-export interface CodeMemoryLinkAgentAbManifestV1 {
-  readonly adjudicationArtifactHash: string;
-  readonly assignmentHash: string;
-  readonly candidate: {
-    /** SHA-256 of the exact managed Threadnote executable used by every external trial. */
-    readonly buildIdentityHash: string;
-    readonly commit: string;
-    readonly dirty: false;
-  };
-  readonly clients: readonly CodeMemoryLinkAgentAbManifestClientV1[];
-  readonly evaluatorVersion: string;
-  readonly experimentId: string;
-  readonly fixtureHash: string;
-  /** Clean protocol checkout that governs the harness independently from the evaluated candidate. */
-  readonly harnessGovernanceCommit?: string;
-  readonly judgeVersion: string;
-  readonly manifestHash: string;
-  readonly schedule: readonly CodeMemoryLinkAgentAbScheduleEntryV1[];
-  readonly scheduleAlgorithmVersion: typeof CODE_MEMORY_LINK_AGENT_AB_SCHEDULE_ALGORITHM_VERSION;
-  readonly scheduleSeed: string;
-  /** Content hash of the exact sealed task, packet, rubric, and fixture corpus. */
-  readonly suiteHash: string;
-  readonly tasks: readonly CodeMemoryLinkAgentAbManifestTaskV1[];
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_AB_VERSION;
-}
-
-export interface CodeMemoryLinkAgentAbManifestClientV1 {
-  readonly clientId: string;
-  readonly configurationProjectionHash: string;
-  readonly environmentPolicyHash: string;
-  readonly executionBundleHash: string;
-  readonly expectedClient: CodeMemoryLinkExpectedCodexClientV1;
-  readonly implementationDescriptorHash: string;
-}
-
-export interface CodeMemoryLinkAgentAbScheduleEntryV1 {
-  readonly armPosition: 1 | 2 | 3;
-  readonly blindLabel: CodeMemoryLinkAgentAbBlindLabel;
-  readonly clientId: string;
-  readonly runNonce: string;
-  readonly runOrder: number;
-  readonly taskId: string;
-}
-
-export interface CodeMemoryLinkAgentAbManifestTaskV1 {
-  readonly budget: {readonly steps: number; readonly tokens: number};
-  readonly constraintTotal: number;
-  readonly expectedResponseHashes: {
-    readonly anchored: string;
-    readonly noMemory: string;
-    readonly taskOnly: string;
-  };
-  readonly packetHash: string;
-  readonly rubricHash: string;
-  /** Reviewed structural family; token-renamed tasks in one family are not independent population samples. */
-  readonly scenarioFamily: CodeMemoryLinkAgentAbScenarioFamily;
-  readonly taskId: string;
-  readonly taskKind: 'hidden-constraint' | 'negative-control';
-}
-
-export interface CodeMemoryLinkAgentAbTrialV1 {
-  readonly acceptedStaleOrHarmful: boolean;
-  readonly adjudicationHash: string;
-  readonly attestation: CodeMemoryLinkInvocationAttestationV1;
-  /** Clean governance commit that allowlisted this manifest before the trial began. */
-  readonly approvalCommit: string;
-  readonly armPosition: 1 | 2 | 3;
-  readonly assignmentHash: string;
-  readonly blindLabel: CodeMemoryLinkAgentAbBlindLabel;
-  readonly budget: {readonly steps: number; readonly tokens: number};
-  readonly clientId: string;
-  readonly constraintAdherence: {readonly satisfied: number; readonly total: number};
-  /** Mock receipts exercise import/scoring only and are excluded from release evidence. */
-  readonly evidenceKind: 'external-agent' | 'mock';
-  readonly firstUsefulMemoryUse: {readonly steps: number; readonly tokens: number} | null;
-  readonly fixtureHash: string;
-  readonly manifestHash: string;
-  readonly packetHash: string;
-  /** Digest of the immediately preceding receipt in the frozen JSONL schedule, or null for run zero. */
-  readonly previousReceiptDigest: string | null;
-  readonly providerUsageHash: string;
-  readonly rubricHash: string;
-  readonly runNonce: string;
-  readonly runOrder: number;
-  readonly taskId: string;
-  readonly taskKind: 'hidden-constraint' | 'negative-control';
-  readonly taskPassed: boolean;
-  readonly tokenAccounting: 'client-reported' | 'provider-reported' | 'unavailable';
-  readonly totalTaskUsage: {readonly steps: number; readonly tokens: number};
-  readonly trialId: string;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_AB_VERSION;
-}
-
-export type CodeMemoryLinkAgentAbTrialSummaryV1 = Omit<CodeMemoryLinkAgentAbTrialV1, 'attestation'>;
-export type CodeMemoryLinkAgentAbClientTrialSummaryV1 = Omit<
-  CodeMemoryLinkAgentAbTrialSummaryV1,
-  'previousReceiptDigest' | 'trialId'
->;
 
 export function parseCodeMemoryLinkAgentAbClientTrialSummaryV1(
   value: unknown,
@@ -193,35 +130,6 @@ export function parseCodeMemoryLinkAgentAbClientTrialSummaryV1(
     trialId: 'trl_0000000000000000',
   });
   return clientSummary;
-}
-
-export interface CodeMemoryLinkAgentAbResultV1 {
-  readonly assignmentHash: string;
-  readonly candidate: CodeMemoryLinkAgentAbManifestV1['candidate'];
-  readonly evidence: {
-    readonly approvedEvidence: boolean;
-    readonly approvedManifest: boolean;
-    readonly distinctClients: number;
-    readonly eligibleExternalTrials: number;
-    readonly excludedMockTrials: number;
-    readonly externalEvidenceHash: string;
-    readonly hiddenTasks: number;
-    readonly manifestApprovalCommit: string | null;
-    readonly negativeControlTasks: number;
-    readonly pairedBlocks: number;
-    readonly retainedEvidenceReceipts: number;
-  };
-  readonly fixtureHash: string;
-  readonly gate: {
-    readonly failures: readonly string[];
-    readonly insufficiencies: readonly string[];
-    readonly qualityFailures: readonly string[];
-    readonly status: 'failed' | 'insufficient' | 'passed';
-  };
-  readonly manifestHash: string;
-  readonly metrics: CodeMemoryLinkAgentAbMetricsV1;
-  readonly suiteHash: string;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_AB_VERSION;
 }
 
 interface CompleteTrialBlock {
@@ -313,7 +221,9 @@ export function codeMemoryLinkAgentAbManifestHash(input: {
     fixtureHash: matchingString(input.fixtureHash, HASH, 'manifest fixture hash'),
     ...(input.harnessGovernanceCommit === undefined
       ? {}
-      : {harnessGovernanceCommit: matchingString(input.harnessGovernanceCommit, COMMIT, 'harness governance commit')}),
+      : {
+          harnessGovernanceCommit: matchingString(input.harnessGovernanceCommit, COMMIT, 'harness governance commit'),
+        }),
     judgeVersion: matchingString(input.judgeVersion, VERSION_ID, 'manifest judge version'),
     schedule: parseSchedule(input.schedule, clients, tasks, scheduleAlgorithmVersion, scheduleSeed),
     scheduleAlgorithmVersion,
@@ -403,7 +313,10 @@ export function deriveCodeMemoryLinkAgentAbScheduleV1(input: {
 /** Fail closed unless the preregistered candidate is the exact verified managed executable. */
 export function assertCodeMemoryLinkAgentAbRuntimeIdentity(
   candidateInput: CodeMemoryLinkAgentAbManifestV1['candidate'],
-  runtimeInput: {readonly executableSha256: string; readonly sourceCommit: string},
+  runtimeInput: {
+    readonly executableSha256: string;
+    readonly sourceCommit: string;
+  },
 ): void {
   const candidate = parseCandidate(candidateInput);
   const executableSha256 = matchingString(runtimeInput.executableSha256, HASH, 'runtime executable hash');
@@ -608,20 +521,28 @@ export function codeMemoryLinkAgentAbExternalEvidenceHash(input: {
 }): string {
   if (input.version !== CODE_MEMORY_LINK_AGENT_AB_VERSION) invalid('external evidence version must be 1');
   const manifestHash = matchingString(input.manifestHash, HASH, 'external evidence manifest hash');
-  const trials = input.trials
-    .map(parseCodeMemoryLinkAgentAbTrialV1)
-    .filter(trial => trial.evidenceKind === 'external-agent')
-    .sort(compareTrialsCanonically);
+  const trials = EffectArray.filter(
+    EffectArray.map(input.trials, parseCodeMemoryLinkAgentAbTrialV1),
+    trial => trial.evidenceKind === 'external-agent',
+  ).sort(compareTrialsCanonically);
   assertUnique(
-    trials.map(trial => trial.trialId),
+    EffectArray.map(trials, trial => trial.trialId),
     'external evidence trial ids',
   );
   assertUniqueCodeMemoryLinkAttestations(
-    trials.map(trial => trial.attestation),
+    EffectArray.map(trials, trial => trial.attestation),
     'external evidence',
   );
-  const attempts = input.attempts?.map(parseCodeMemoryLinkAgentAttemptEventV1);
-  const evidence = input.evidence?.map(parseCodeMemoryLinkAgentEvidenceReceiptV1);
+  const attempts = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(input.attempts), __effectArrayReceiver =>
+      EffectArray.map(__effectArrayReceiver, parseCodeMemoryLinkAgentAttemptEventV1),
+    ),
+  );
+  const evidence = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(input.evidence), __effectArrayReceiver =>
+      EffectArray.map(__effectArrayReceiver, parseCodeMemoryLinkAgentEvidenceReceiptV1),
+    ),
+  );
   const projection = {
     ...(attempts === undefined ? {} : {attempts}),
     ...(evidence === undefined ? {} : {evidence}),
@@ -635,8 +556,8 @@ export function codeMemoryLinkAgentAbExternalEvidenceHash(input: {
 /** Parse newline-delimited scrubbed receipts. Raw prompts and transcripts are intentionally not part of this schema. */
 export function parseCodeMemoryLinkAgentAbTrialsJsonl(input: string): readonly CodeMemoryLinkAgentAbTrialV1[] {
   if (new TextEncoder().encode(input).byteLength > 16 * 1024 * 1024) invalid('JSONL input exceeds 16 MiB');
-  return input.split(/\r?\n/u).flatMap((line, index) => {
-    if (!line.trim()) return [];
+  return EffectArray.flatMap(Effect.pipe(input, EffectString.split(/\r?\n/u)), (line, index) => {
+    if (!Effect.pipe(line, EffectString.trim)) return [];
     try {
       return [parseCodeMemoryLinkAgentAbTrialV1(JSON.parse(line) as unknown)];
     } catch (cause) {
@@ -657,7 +578,7 @@ export function assertCodeMemoryLinkAgentAbTrialLedgerPrefixV1(input: {
   readonly trials: readonly unknown[];
 }): void {
   const manifest = parseCodeMemoryLinkAgentAbManifestV1(input.manifest);
-  const trials = input.trials.map(parseCodeMemoryLinkAgentAbTrialV1);
+  const trials = EffectArray.map(input.trials, parseCodeMemoryLinkAgentAbTrialV1);
   evaluateCodeMemoryLinkAgentAb({...input, manifest, trials});
   if (trials.length > manifest.schedule.length) invalid('trial ledger is longer than the frozen schedule');
   for (const [index, trial] of trials.entries()) {
@@ -691,15 +612,15 @@ export function evaluateCodeMemoryLinkAgentAb(input: {
   const manifest = parseCodeMemoryLinkAgentAbManifestV1(input.manifest);
   if (manifest.fixtureHash !== assignment.fixtureHash) invalid('manifest fixture hash does not match assignment');
   if (manifest.assignmentHash !== assignment.assignmentHash) invalid('manifest assignment hash does not match');
-  const trials = input.trials.map(parseCodeMemoryLinkAgentAbTrialV1);
+  const trials = EffectArray.map(input.trials, parseCodeMemoryLinkAgentAbTrialV1);
   assertUnique(
-    trials.map(trial => trial.trialId),
+    EffectArray.map(trials, trial => trial.trialId),
     'trial ids',
   );
-  const tasks = new Map(manifest.tasks.map(task => [task.taskId, task]));
-  const clients = new Set(manifest.clients.map(client => client.clientId));
+  const tasks = new Map(EffectArray.map(manifest.tasks, task => [task.taskId, task]));
+  const clients = new Set(EffectArray.map(manifest.clients, client => client.clientId));
   const schedule = new Map(
-    manifest.schedule.map(entry => [scheduleKey(entry.clientId, entry.taskId, entry.blindLabel), entry]),
+    EffectArray.map(manifest.schedule, entry => [scheduleKey(entry.clientId, entry.taskId, entry.blindLabel), entry]),
   );
   for (const trial of trials) {
     assertCodeMemoryLinkAgentAbRuntimeIdentity(manifest.candidate, trial.attestation.preRuntime);
@@ -717,20 +638,20 @@ export function evaluateCodeMemoryLinkAgentAb(input: {
     validateTrialSchedule(trial, scheduled);
   }
 
-  const external = trials.filter(trial => trial.evidenceKind === 'external-agent');
+  const external = EffectArray.filter(trials, trial => trial.evidenceKind === 'external-agent');
   assertUniqueCodeMemoryLinkAttestations(
-    external.map(trial => trial.attestation),
+    EffectArray.map(external, trial => trial.attestation),
     'external-agent trials',
   );
   assertUnique(
-    external.map(trial => trial.providerUsageHash),
+    EffectArray.map(external, trial => trial.providerUsageHash),
     'external-agent provider usage hashes',
   );
   assertUnique(
-    external.map(trial => trial.adjudicationHash),
+    EffectArray.map(external, trial => trial.adjudicationHash),
     'external-agent adjudication hashes',
   );
-  const manifestApprovalCommits = new Set(external.map(trial => trial.approvalCommit));
+  const manifestApprovalCommits = new Set(EffectArray.map(external, trial => trial.approvalCommit));
   const manifestApprovalCommit = manifestApprovalCommits.size === 1 ? (external[0]?.approvalCommit ?? null) : null;
   const insufficiencies: string[] = [];
   if (input.attempts !== undefined) {
@@ -744,12 +665,12 @@ export function evaluateCodeMemoryLinkAgentAb(input: {
         trials: external,
       });
       const attemptEvents = attemptState.events;
-      const starts = attemptEvents.filter(event => event.type === 'attempt-started');
+      const starts = EffectArray.filter(attemptEvents, event => event.type === 'attempt-started');
       if (
         attemptState.requiredRetry !== null ||
         starts.length !== external.length ||
-        starts.some(event => event.retryOfAttemptId !== null) ||
-        attemptEvents.some(event => event.type === 'attempt-failed')
+        EffectArray.some(starts, event => event.retryOfAttemptId !== null) ||
+        EffectArray.some(attemptEvents, event => event.type === 'attempt-failed')
       ) {
         insufficiencies.push(
           'attempt audit contains failed, interrupted, or retried runs; a release experiment requires a fresh preregistered manifest',
@@ -760,7 +681,12 @@ export function evaluateCodeMemoryLinkAgentAb(input: {
   const retainedEvidence =
     input.evidence === undefined
       ? undefined
-      : assertCodeMemoryLinkAgentEvidenceLedgerV1({assignment, evidence: input.evidence, manifest, trials: external});
+      : assertCodeMemoryLinkAgentEvidenceLedgerV1({
+          assignment,
+          evidence: input.evidence,
+          manifest,
+          trials: external,
+        });
   if (input.attempts !== undefined && external.length > 0 && retainedEvidence === undefined) {
     insufficiencies.push('replayable retained evidence is required for every audited external-agent trial');
   }
@@ -781,10 +707,10 @@ export function evaluateCodeMemoryLinkAgentAb(input: {
   validateArmSemantics(completeBlocks, assessmentBlockers);
   insufficiencies.push(...assessmentBlockers);
 
-  const hiddenBlocks = completeBlocks.filter(block => block.taskKind === 'hidden-constraint');
-  const negativeBlocks = completeBlocks.filter(block => block.taskKind === 'negative-control');
-  const hiddenTasks = manifest.tasks.filter(task => task.taskKind === 'hidden-constraint');
-  const negativeTasks = manifest.tasks.filter(task => task.taskKind === 'negative-control');
+  const hiddenBlocks = EffectArray.filter(completeBlocks, block => block.taskKind === 'hidden-constraint');
+  const negativeBlocks = EffectArray.filter(completeBlocks, block => block.taskKind === 'negative-control');
+  const hiddenTasks = EffectArray.filter(manifest.tasks, task => task.taskKind === 'hidden-constraint');
+  const negativeTasks = EffectArray.filter(manifest.tasks, task => task.taskKind === 'negative-control');
 
   const adherence = adherenceMetrics(hiddenBlocks);
   const firstUsefulMemoryUse = firstUseMetrics(hiddenBlocks);
@@ -792,7 +718,7 @@ export function evaluateCodeMemoryLinkAgentAb(input: {
   const negativeControl = negativeControlMetrics(negativeBlocks);
   const perClient = perClientMetrics(
     completeBlocks,
-    manifest.clients.map(client => client.clientId),
+    EffectArray.map(manifest.clients, client => client.clientId),
   );
   const staleOrHarmfulAcceptance = acceptanceMetrics(completeBlocks);
   const totalTaskUsage = totalTaskUsageMetrics(hiddenBlocks);
@@ -830,7 +756,12 @@ export function evaluateCodeMemoryLinkAgentAb(input: {
       retainedEvidenceReceipts: retainedEvidence?.length ?? 0,
     },
     fixtureHash: assignment.fixtureHash,
-    gate: {failures, insufficiencies: uniqueInsufficiencies, qualityFailures: uniqueQualityFailures, status},
+    gate: {
+      failures,
+      insufficiencies: uniqueInsufficiencies,
+      qualityFailures: uniqueQualityFailures,
+      status,
+    },
     manifestHash: manifest.manifestHash,
     metrics: {
       adherence,
@@ -862,11 +793,11 @@ function completeTrialBlocks(
     for (const task of manifest.tasks) {
       const key = `${clientId}\0${task.taskId}`;
       const group = grouped.get(key) ?? [];
-      const byLabel = new Map(group.map(trial => [trial.blindLabel, trial]));
+      const byLabel = new Map(EffectArray.map(group, trial => [trial.blindLabel, trial]));
       if (
         group.length !== 3 ||
         byLabel.size !== 3 ||
-        CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS.some(label => !byLabel.has(label))
+        Boolean(EffectArray.some(CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS, label => !byLabel.has(label)))
       ) {
         failures.push(`manifest paired block ${displayKey(key)} requires exactly one X, Y, and Z external-agent trial`);
         continue;
@@ -901,7 +832,7 @@ function minimumEvidenceFailures(
   failures: string[],
 ): void {
   if (external.length === 0) failures.push('no external-agent trials; mock receipts cannot support a release claim');
-  if (external.length > 0 && new Set(external.map(trial => trial.approvalCommit)).size !== 1) {
+  if (external.length > 0 && new Set(EffectArray.map(external, trial => trial.approvalCommit)).size !== 1) {
     failures.push('external-agent trials must share one preregistered manifest approval commit');
   }
   if (manifest.clients.length < CODE_MEMORY_LINK_AGENT_AB_MINIMUM_CLIENTS) {
@@ -909,13 +840,19 @@ function minimumEvidenceFailures(
       `rostered external clients ${manifest.clients.length}; minimum ${CODE_MEMORY_LINK_AGENT_AB_MINIMUM_CLIENTS}`,
     );
   }
-  const hiddenTasks = manifest.tasks.filter(task => task.taskKind === 'hidden-constraint').length;
-  const negativeTasks = manifest.tasks.filter(task => task.taskKind === 'negative-control').length;
+  const hiddenTasks = EffectArray.filter(manifest.tasks, task => task.taskKind === 'hidden-constraint').length;
+  const negativeTasks = EffectArray.filter(manifest.tasks, task => task.taskKind === 'negative-control').length;
   const hiddenScenarioFamilies = new Set(
-    manifest.tasks.filter(task => task.taskKind === 'hidden-constraint').map(task => task.scenarioFamily),
+    EffectArray.map(
+      EffectArray.filter(manifest.tasks, task => task.taskKind === 'hidden-constraint'),
+      task => task.scenarioFamily,
+    ),
   ).size;
   const negativeScenarioFamilies = new Set(
-    manifest.tasks.filter(task => task.taskKind === 'negative-control').map(task => task.scenarioFamily),
+    EffectArray.map(
+      EffectArray.filter(manifest.tasks, task => task.taskKind === 'negative-control'),
+      task => task.scenarioFamily,
+    ),
   ).size;
   if (hiddenTasks < CODE_MEMORY_LINK_AGENT_AB_MINIMUM_HIDDEN_TASKS) {
     failures.push(
@@ -937,7 +874,7 @@ function minimumEvidenceFailures(
       `rostered negative-control scenario families ${negativeScenarioFamilies}; minimum ${CODE_MEMORY_LINK_AGENT_AB_MINIMUM_NEGATIVE_CONTROL_SCENARIO_FAMILIES}`,
     );
   }
-  if (external.some(trial => trial.tokenAccounting !== 'provider-reported')) {
+  if (EffectArray.some(external, trial => trial.tokenAccounting !== 'provider-reported')) {
     failures.push('provider-reported token accounting is required for every external-agent trial');
   }
 }
@@ -949,7 +886,7 @@ function validateArmSemantics(blocks: readonly CompleteTrialBlock[], failures: s
     }
     if (
       block.taskKind === 'negative-control' &&
-      CODE_MEMORY_LINK_AGENT_AB_ARMS.some(arm => block.arms[arm].firstUsefulMemoryUse !== null)
+      EffectArray.some(CODE_MEMORY_LINK_AGENT_AB_ARMS, arm => block.arms[arm].firstUsefulMemoryUse !== null)
     ) {
       failures.push(`negative-control block ${block.clientId}/${block.taskId} reports useful memory use`);
     }
@@ -959,13 +896,16 @@ function validateArmSemantics(blocks: readonly CompleteTrialBlock[], failures: s
 function adherenceMetrics(
   blocks: readonly CompleteTrialBlock[],
 ): CodeMemoryLinkAgentAbResultV1['metrics']['adherence'] {
-  const anchoredRate = rate(blocks.filter(block => allConstraintsSatisfied(block.arms.anchored)).length, blocks.length);
+  const anchoredRate = rate(
+    EffectArray.filter(blocks, block => allConstraintsSatisfied(block.arms.anchored)).length,
+    blocks.length,
+  );
   const taskOnlyRate = rate(
-    blocks.filter(block => allConstraintsSatisfied(block.arms['task-only'])).length,
+    EffectArray.filter(blocks, block => allConstraintsSatisfied(block.arms['task-only'])).length,
     blocks.length,
   );
   const noMemoryRate = rate(
-    blocks.filter(block => allConstraintsSatisfied(block.arms['no-memory'])).length,
+    EffectArray.filter(blocks, block => allConstraintsSatisfied(block.arms['no-memory'])).length,
     blocks.length,
   );
   const scenarioFamilies = binaryScenarioFamilyMetrics(blocks, allConstraintsSatisfied);
@@ -973,14 +913,14 @@ function adherenceMetrics(
     anchoredRate,
     deltaPercentagePoints: (anchoredRate - taskOnlyRate) * 100,
     minimumScenarioFamilyDeltaPercentagePoints: minimumOrNull(
-      scenarioFamilies.map(family => family.anchoredVsTaskOnlyDeltaPercentagePoints),
+      EffectArray.map(scenarioFamilies, family => family.anchoredVsTaskOnlyDeltaPercentagePoints),
     ),
     noMemoryRate,
     pairedTrials: blocks.length,
     scenarioFamilies,
     taskOnlyVsNoMemoryDeltaPercentagePoints: (taskOnlyRate - noMemoryRate) * 100,
     taskOnlyVsNoMemoryMinimumScenarioFamilyDeltaPercentagePoints: minimumOrNull(
-      scenarioFamilies.map(family => family.taskOnlyVsNoMemoryDeltaPercentagePoints),
+      EffectArray.map(scenarioFamilies, family => family.taskOnlyVsNoMemoryDeltaPercentagePoints),
     ),
     taskOnlyRate,
   };
@@ -990,14 +930,26 @@ function binaryScenarioFamilyMetrics(
   blocks: readonly CompleteTrialBlock[],
   outcome: (trial: CodeMemoryLinkAgentAbTrialV1) => boolean,
 ): readonly BinaryScenarioFamilyMetricV1[] {
-  return scenarioFamilyGroups(blocks).map(([scenarioFamily, familyBlocks]) => {
-    const anchoredRate = rate(familyBlocks.filter(block => outcome(block.arms.anchored)).length, familyBlocks.length);
+  return EffectArray.map(scenarioFamilyGroups(blocks), ([scenarioFamily, familyBlocks]) => {
+    const anchoredRate = rate(
+      EffectArray.filter(
+        familyBlocks,
+        (block, __effectArrayIndex2) => __effectArrayIndex2 in familyBlocks && outcome(block.arms.anchored),
+      ).length,
+      familyBlocks.length,
+    );
     const taskOnlyRate = rate(
-      familyBlocks.filter(block => outcome(block.arms['task-only'])).length,
+      EffectArray.filter(
+        familyBlocks,
+        (block, __effectArrayIndex2) => __effectArrayIndex2 in familyBlocks && outcome(block.arms['task-only']),
+      ).length,
       familyBlocks.length,
     );
     const noMemoryRate = rate(
-      familyBlocks.filter(block => outcome(block.arms['no-memory'])).length,
+      EffectArray.filter(
+        familyBlocks,
+        (block, __effectArrayIndex2) => __effectArrayIndex2 in familyBlocks && outcome(block.arms['no-memory']),
+      ).length,
       familyBlocks.length,
     );
     return {
@@ -1022,8 +974,8 @@ function firstUseMetrics(
 }
 
 function firstUseMetric(blocks: readonly CompleteTrialBlock[], field: 'steps' | 'tokens'): FirstUseMetricV1 {
-  const anchored = blocks.map(block => firstUseOrObservedCensor(block.arms.anchored, field));
-  const taskOnly = blocks.map(block => firstUseOrObservedCensor(block.arms['task-only'], field));
+  const anchored = EffectArray.map(blocks, block => firstUseOrObservedCensor(block.arms.anchored, field));
+  const taskOnly = EffectArray.map(blocks, block => firstUseOrObservedCensor(block.arms['task-only'], field));
   const anchoredMean = mean(anchored);
   const taskOnlyMean = mean(taskOnly);
   const scenarioFamilies = scenarioFamilyReductionMetrics(blocks, block => ({
@@ -1031,24 +983,31 @@ function firstUseMetric(blocks: readonly CompleteTrialBlock[], field: 'steps' | 
     right: firstUseOrObservedCensor(block.arms['task-only'], field),
   }));
   return {
-    anchoredCensoredTrials: blocks.filter(block => block.arms.anchored.firstUsefulMemoryUse === null).length,
+    anchoredCensoredTrials: EffectArray.filter(blocks, block => block.arms.anchored.firstUsefulMemoryUse === null)
+      .length,
     anchoredMean,
-    minimumScenarioFamilyReductionPercent: minimumOrNull(scenarioFamilies.map(family => family.reductionPercent)),
+    minimumScenarioFamilyReductionPercent: minimumOrNull(
+      EffectArray.map(scenarioFamilies, family => family.reductionPercent),
+    ),
     reductionPercent: taskOnlyMean === 0 ? 0 : ((taskOnlyMean - anchoredMean) / taskOnlyMean) * 100,
     scenarioFamilies,
-    taskOnlyCensoredTrials: blocks.filter(block => block.arms['task-only'].firstUsefulMemoryUse === null).length,
+    taskOnlyCensoredTrials: EffectArray.filter(blocks, block => block.arms['task-only'].firstUsefulMemoryUse === null)
+      .length,
     taskOnlyMean,
   };
 }
 
 function scenarioFamilyReductionMetrics(
   blocks: readonly CompleteTrialBlock[],
-  pair: (block: CompleteTrialBlock) => {readonly left: number; readonly right: number},
+  pair: (block: CompleteTrialBlock) => {
+    readonly left: number;
+    readonly right: number;
+  },
 ): readonly ReductionScenarioFamilyMetricV1[] {
-  return scenarioFamilyGroups(blocks).map(([scenarioFamily, familyBlocks]) => {
-    const pairs = familyBlocks.map(pair);
-    const left = mean(pairs.map(value => value.left));
-    const right = mean(pairs.map(value => value.right));
+  return EffectArray.map(scenarioFamilyGroups(blocks), ([scenarioFamily, familyBlocks]) => {
+    const pairs = EffectArray.map(familyBlocks, pair);
+    const left = mean(EffectArray.map(pairs, value => value.left));
+    const right = mean(EffectArray.map(pairs, value => value.right));
     return {
       leftMean: left,
       reductionPercent: right === 0 ? 0 : ((right - left) / right) * 100,
@@ -1063,29 +1022,44 @@ function negativeControlMetrics(
   blocks: readonly CompleteTrialBlock[],
 ): CodeMemoryLinkAgentAbResultV1['metrics']['negativeControl'] {
   const taskClusters = [...groupBlocks(blocks, block => block.taskId).values()];
-  const anchoredPasses = taskClusters.filter(taskBlocks => taskClusterPasses(taskBlocks, 'anchored')).length;
-  const taskOnlyPasses = taskClusters.filter(taskBlocks => taskClusterPasses(taskBlocks, 'task-only')).length;
-  const noMemoryPasses = taskClusters.filter(taskBlocks => taskClusterPasses(taskBlocks, 'no-memory')).length;
-  const anchoredRegressionEvents = taskClusters.filter(
+  const anchoredPasses = EffectArray.filter(taskClusters, taskBlocks =>
+    taskClusterPasses(taskBlocks, 'anchored'),
+  ).length;
+  const taskOnlyPasses = EffectArray.filter(taskClusters, taskBlocks =>
+    taskClusterPasses(taskBlocks, 'task-only'),
+  ).length;
+  const noMemoryPasses = EffectArray.filter(taskClusters, taskBlocks =>
+    taskClusterPasses(taskBlocks, 'no-memory'),
+  ).length;
+  const anchoredRegressionEvents = EffectArray.filter(
+    taskClusters,
     taskBlocks => taskClusterPasses(taskBlocks, 'no-memory') && !taskClusterPasses(taskBlocks, 'anchored'),
   ).length;
-  const taskOnlyRegressionEvents = taskClusters.filter(
+  const taskOnlyRegressionEvents = EffectArray.filter(
+    taskClusters,
     taskBlocks => taskClusterPasses(taskBlocks, 'no-memory') && !taskClusterPasses(taskBlocks, 'task-only'),
   ).length;
   const taskCount = taskClusters.length;
   const anchoredPassRate = rate(anchoredPasses, taskCount);
   const taskOnlyPassRate = rate(taskOnlyPasses, taskCount);
   const noMemoryPassRate = rate(noMemoryPasses, taskCount);
-  const scenarioFamilies = scenarioFamilyGroups(blocks).map(([scenarioFamily, familyBlocks]) => {
+  const scenarioFamilies = EffectArray.map(scenarioFamilyGroups(blocks), ([scenarioFamily, familyBlocks]) => {
     const familyTaskClusters = [...groupBlocks(familyBlocks, block => block.taskId).values()];
     const familyTaskCount = familyTaskClusters.length;
-    const familyAnchoredPasses = familyTaskClusters.filter(taskBlocks => taskClusterPasses(taskBlocks, 'anchored'));
-    const familyTaskOnlyPasses = familyTaskClusters.filter(taskBlocks => taskClusterPasses(taskBlocks, 'task-only'));
-    const familyNoMemoryPasses = familyTaskClusters.filter(taskBlocks => taskClusterPasses(taskBlocks, 'no-memory'));
+    const familyAnchoredPasses = EffectArray.filter(familyTaskClusters, taskBlocks =>
+      taskClusterPasses(taskBlocks, 'anchored'),
+    );
+    const familyTaskOnlyPasses = EffectArray.filter(familyTaskClusters, taskBlocks =>
+      taskClusterPasses(taskBlocks, 'task-only'),
+    );
+    const familyNoMemoryPasses = EffectArray.filter(familyTaskClusters, taskBlocks =>
+      taskClusterPasses(taskBlocks, 'no-memory'),
+    );
     return {
       anchoredPassRate: rate(familyAnchoredPasses.length, familyTaskCount),
       anchoredRegressionEventRate: rate(
-        familyTaskClusters.filter(
+        EffectArray.filter(
+          familyTaskClusters,
           taskBlocks => taskClusterPasses(taskBlocks, 'no-memory') && !taskClusterPasses(taskBlocks, 'anchored'),
         ).length,
         familyTaskCount,
@@ -1095,7 +1069,8 @@ function negativeControlMetrics(
       taskClusters: familyTaskCount,
       taskOnlyPassRate: rate(familyTaskOnlyPasses.length, familyTaskCount),
       taskOnlyRegressionEventRate: rate(
-        familyTaskClusters.filter(
+        EffectArray.filter(
+          familyTaskClusters,
           taskBlocks => taskClusterPasses(taskBlocks, 'no-memory') && !taskClusterPasses(taskBlocks, 'task-only'),
         ).length,
         familyTaskCount,
@@ -1104,20 +1079,26 @@ function negativeControlMetrics(
   });
   return {
     anchoredMaximumScenarioFamilyRegressionEventRate: maximumOrNull(
-      scenarioFamilies.map(family => family.anchoredRegressionEventRate),
+      EffectArray.map(scenarioFamilies, family => family.anchoredRegressionEventRate),
     ),
-    anchoredMinimumScenarioFamilyPassRate: minimumOrNull(scenarioFamilies.map(family => family.anchoredPassRate)),
+    anchoredMinimumScenarioFamilyPassRate: minimumOrNull(
+      EffectArray.map(scenarioFamilies, family => family.anchoredPassRate),
+    ),
     anchoredRegressionPercentagePoints: (noMemoryPassRate - anchoredPassRate) * 100,
     anchoredRegressionEventRate: rate(anchoredRegressionEvents, taskCount),
     anchoredPassRate,
-    noMemoryMinimumScenarioFamilyPassRate: minimumOrNull(scenarioFamilies.map(family => family.noMemoryPassRate)),
+    noMemoryMinimumScenarioFamilyPassRate: minimumOrNull(
+      EffectArray.map(scenarioFamilies, family => family.noMemoryPassRate),
+    ),
     noMemoryPassRate,
     pairedTrials: blocks.length,
     scenarioFamilies,
     taskOnlyMaximumScenarioFamilyRegressionEventRate: maximumOrNull(
-      scenarioFamilies.map(family => family.taskOnlyRegressionEventRate),
+      EffectArray.map(scenarioFamilies, family => family.taskOnlyRegressionEventRate),
     ),
-    taskOnlyMinimumScenarioFamilyPassRate: minimumOrNull(scenarioFamilies.map(family => family.taskOnlyPassRate)),
+    taskOnlyMinimumScenarioFamilyPassRate: minimumOrNull(
+      EffectArray.map(scenarioFamilies, family => family.taskOnlyPassRate),
+    ),
     taskOnlyRegressionPercentagePoints: (noMemoryPassRate - taskOnlyPassRate) * 100,
     taskOnlyRegressionEventRate: rate(taskOnlyRegressionEvents, taskCount),
     taskOnlyPassRate,
@@ -1125,19 +1106,28 @@ function negativeControlMetrics(
 }
 
 function taskClusterPasses(blocks: readonly CompleteTrialBlock[], arm: CodeMemoryLinkAgentAbArm): boolean {
-  return blocks.length > 0 && blocks.every(block => block.arms[arm].taskPassed);
+  return blocks.length > 0 && EffectArray.every(blocks, block => block.arms[arm].taskPassed);
 }
 
 function hiddenTaskPassMetrics(blocks: readonly CompleteTrialBlock[]): PairedPassMetricV1 {
-  const anchoredPassRate = rate(blocks.filter(block => block.arms.anchored.taskPassed).length, blocks.length);
-  const taskOnlyPassRate = rate(blocks.filter(block => block.arms['task-only'].taskPassed).length, blocks.length);
-  const noMemoryPassRate = rate(blocks.filter(block => block.arms['no-memory'].taskPassed).length, blocks.length);
+  const anchoredPassRate = rate(
+    EffectArray.filter(blocks, block => block.arms.anchored.taskPassed).length,
+    blocks.length,
+  );
+  const taskOnlyPassRate = rate(
+    EffectArray.filter(blocks, block => block.arms['task-only'].taskPassed).length,
+    blocks.length,
+  );
+  const noMemoryPassRate = rate(
+    EffectArray.filter(blocks, block => block.arms['no-memory'].taskPassed).length,
+    blocks.length,
+  );
   const scenarioFamilies = binaryScenarioFamilyMetrics(blocks, trial => trial.taskPassed);
   return {
     anchoredPassRate,
     deltaPercentagePoints: (anchoredPassRate - taskOnlyPassRate) * 100,
     minimumScenarioFamilyDeltaPercentagePoints: minimumOrNull(
-      scenarioFamilies.map(family => family.anchoredVsTaskOnlyDeltaPercentagePoints),
+      EffectArray.map(scenarioFamilies, family => family.anchoredVsTaskOnlyDeltaPercentagePoints),
     ),
     noMemoryPassRate,
     pairedTrials: blocks.length,
@@ -1145,7 +1135,7 @@ function hiddenTaskPassMetrics(blocks: readonly CompleteTrialBlock[]): PairedPas
     taskOnlyPassRate,
     taskOnlyVsNoMemoryDeltaPercentagePoints: (taskOnlyPassRate - noMemoryPassRate) * 100,
     taskOnlyVsNoMemoryMinimumScenarioFamilyDeltaPercentagePoints: minimumOrNull(
-      scenarioFamilies.map(family => family.taskOnlyVsNoMemoryDeltaPercentagePoints),
+      EffectArray.map(scenarioFamilies, family => family.taskOnlyVsNoMemoryDeltaPercentagePoints),
     ),
   };
 }
@@ -1163,14 +1153,16 @@ function totalTaskUsageMetric(
   blocks: readonly CompleteTrialBlock[],
   field: 'steps' | 'tokens',
 ): TotalTaskUsageMetricV1 {
-  const taskOnlyMean = mean(blocks.map(block => block.arms['task-only'].totalTaskUsage[field]));
-  const noMemoryMean = mean(blocks.map(block => block.arms['no-memory'].totalTaskUsage[field]));
+  const taskOnlyMean = mean(EffectArray.map(blocks, block => block.arms['task-only'].totalTaskUsage[field]));
+  const noMemoryMean = mean(EffectArray.map(blocks, block => block.arms['no-memory'].totalTaskUsage[field]));
   const scenarioFamilies = scenarioFamilyReductionMetrics(blocks, block => ({
     left: block.arms['task-only'].totalTaskUsage[field],
     right: block.arms['no-memory'].totalTaskUsage[field],
   }));
   return {
-    minimumScenarioFamilyReductionPercent: minimumOrNull(scenarioFamilies.map(family => family.reductionPercent)),
+    minimumScenarioFamilyReductionPercent: minimumOrNull(
+      EffectArray.map(scenarioFamilies, family => family.reductionPercent),
+    ),
     noMemoryMean,
     reductionPercent: noMemoryMean === 0 ? 0 : ((noMemoryMean - taskOnlyMean) / noMemoryMean) * 100,
     scenarioFamilies,
@@ -1182,10 +1174,10 @@ function perClientMetrics(
   blocks: readonly CompleteTrialBlock[],
   clientIds: readonly string[],
 ): readonly PerClientMetricV1[] {
-  return clientIds.map(clientId => {
-    const clientBlocks = blocks.filter(block => block.clientId === clientId);
-    const hidden = clientBlocks.filter(block => block.taskKind === 'hidden-constraint');
-    const negative = clientBlocks.filter(block => block.taskKind === 'negative-control');
+  return EffectArray.map(clientIds, clientId => {
+    const clientBlocks = EffectArray.filter(blocks, block => block.clientId === clientId);
+    const hidden = EffectArray.filter(clientBlocks, block => block.taskKind === 'hidden-constraint');
+    const negative = EffectArray.filter(clientBlocks, block => block.taskKind === 'negative-control');
     const adherence = adherenceMetrics(hidden);
     const firstUse = firstUseMetrics(hidden);
     const hiddenPass = hiddenTaskPassMetrics(hidden);
@@ -1214,11 +1206,22 @@ function acceptanceMetrics(
   blocks: readonly CompleteTrialBlock[],
 ): CodeMemoryLinkAgentAbResultV1['metrics']['staleOrHarmfulAcceptance'] {
   const metric = (arm: CodeMemoryLinkAgentAbArm): ArmAcceptanceMetricV1 => {
-    const trials = blocks.map(block => block.arms[arm]);
-    const acceptedTrials = trials.filter(trial => trial.acceptedStaleOrHarmful).length;
-    return {acceptedTrials, rate: rate(acceptedTrials, trials.length), trials: trials.length};
+    const trials = EffectArray.map(blocks, block => block.arms[arm]);
+    const acceptedTrials = EffectArray.filter(
+      trials,
+      (trial, __effectArrayIndex) => __effectArrayIndex in trials && trial.acceptedStaleOrHarmful,
+    ).length;
+    return {
+      acceptedTrials,
+      rate: rate(acceptedTrials, trials.length),
+      trials: trials.length,
+    };
   };
-  return {anchored: metric('anchored'), 'no-memory': metric('no-memory'), 'task-only': metric('task-only')};
+  return {
+    anchored: metric('anchored'),
+    'no-memory': metric('no-memory'),
+    'task-only': metric('task-only'),
+  };
 }
 
 function qualityGateFailures(
@@ -1235,8 +1238,8 @@ function qualityGateFailures(
       `anchored versus task-only adherence delta ${format(adherence.deltaPercentagePoints)} pp; minimum ${CODE_MEMORY_LINK_AGENT_AB_MINIMUM_ADHERENCE_DELTA_PERCENTAGE_POINTS} pp`,
     );
   }
-  const anchoredOnlyFamily = adherence.scenarioFamilies.find(
-    family => family.scenarioFamily === 'hidden:anchored-only',
+  const anchoredOnlyFamily = EffectOption.getOrUndefined(
+    EffectArray.findFirst(adherence.scenarioFamilies, family => family.scenarioFamily === 'hidden:anchored-only'),
   );
   if (
     adherence.minimumScenarioFamilyDeltaPercentagePoints === null ||
@@ -1263,7 +1266,9 @@ function qualityGateFailures(
       `task-only versus no-memory adherence delta ${format(adherence.taskOnlyVsNoMemoryDeltaPercentagePoints)} pp; minimum ${CODE_MEMORY_LINK_AGENT_AB_MINIMUM_ADHERENCE_DELTA_PERCENTAGE_POINTS} pp`,
     );
   }
-  const lexicalFamily = adherence.scenarioFamilies.find(family => family.scenarioFamily === 'hidden:lexical');
+  const lexicalFamily = EffectOption.getOrUndefined(
+    EffectArray.findFirst(adherence.scenarioFamilies, family => family.scenarioFamily === 'hidden:lexical'),
+  );
   if (
     adherence.taskOnlyVsNoMemoryMinimumScenarioFamilyDeltaPercentagePoints === null ||
     adherence.taskOnlyVsNoMemoryMinimumScenarioFamilyDeltaPercentagePoints < 0
@@ -1307,7 +1312,7 @@ function qualityGateFailures(
       `task-only hidden-task pass minimum finite-corpus scenario-family delta ${formatNullable(hiddenTaskPass.taskOnlyVsNoMemoryMinimumScenarioFamilyDeltaPercentagePoints)} pp; minimum 0 pp`,
     );
   }
-  for (const [name, metric] of Object.entries(firstUse) as readonly [string, FirstUseMetricV1][]) {
+  for (const [name, metric] of EffectRecord.toEntries(firstUse) as readonly [string, FirstUseMetricV1][]) {
     if (metric.reductionPercent < CODE_MEMORY_LINK_AGENT_AB_MINIMUM_FIRST_USE_REDUCTION_PERCENT) {
       failures.push(
         `anchored versus task-only ${name}-to-first-use reduction ${format(metric.reductionPercent)}%; minimum ${CODE_MEMORY_LINK_AGENT_AB_MINIMUM_FIRST_USE_REDUCTION_PERCENT}%`,
@@ -1322,7 +1327,7 @@ function qualityGateFailures(
       );
     }
   }
-  for (const [name, metric] of Object.entries(totalTaskUsage) as readonly [string, TotalTaskUsageMetricV1][]) {
+  for (const [name, metric] of EffectRecord.toEntries(totalTaskUsage) as readonly [string, TotalTaskUsageMetricV1][]) {
     if (metric.reductionPercent < 0) {
       failures.push(
         `task-only versus no-memory total ${name} reduction ${format(metric.reductionPercent)}%; minimum 0%`,
@@ -1437,12 +1442,22 @@ function monotoneSafetyFailures(
   trials: readonly CodeMemoryLinkAgentAbTrialV1[],
   assignment: CodeMemoryLinkAgentAbAssignmentV1,
 ): string[] {
-  const anchored = trials.filter(trial => assignment.labels[trial.blindLabel] === 'anchored');
-  const taskOnly = trials.filter(trial => assignment.labels[trial.blindLabel] === 'task-only');
-  const anchoredHarmful = anchored.filter(trial => trial.acceptedStaleOrHarmful).length;
-  const taskOnlyHarmful = taskOnly.filter(trial => trial.acceptedStaleOrHarmful).length;
-  const hiddenFailures = anchored.filter(trial => trial.taskKind === 'hidden-constraint' && !trial.taskPassed).length;
-  const anchoredWithoutUsefulMemory = anchored.filter(
+  const anchored = EffectArray.filter(trials, trial => assignment.labels[trial.blindLabel] === 'anchored');
+  const taskOnly = EffectArray.filter(trials, trial => assignment.labels[trial.blindLabel] === 'task-only');
+  const anchoredHarmful = EffectArray.filter(
+    anchored,
+    __effectArrayValue => !!(trial => trial.acceptedStaleOrHarmful)(__effectArrayValue),
+  ).length;
+  const taskOnlyHarmful = EffectArray.filter(
+    taskOnly,
+    __effectArrayValue => !!(trial => trial.acceptedStaleOrHarmful)(__effectArrayValue),
+  ).length;
+  const hiddenFailures = EffectArray.filter(
+    anchored,
+    trial => trial.taskKind === 'hidden-constraint' && !trial.taskPassed,
+  ).length;
+  const anchoredWithoutUsefulMemory = EffectArray.filter(
+    anchored,
     trial => trial.taskKind === 'hidden-constraint' && trial.firstUsefulMemoryUse === null,
   ).length;
   const failures: string[] = [];
@@ -1465,7 +1480,7 @@ function parseLabels(value: unknown): Readonly<Record<CodeMemoryLinkAgentAbBlind
     Y: literal(labels.Y, CODE_MEMORY_LINK_AGENT_AB_ARMS, 'assignment label Y'),
     Z: literal(labels.Z, CODE_MEMORY_LINK_AGENT_AB_ARMS, 'assignment label Z'),
   };
-  if (new Set(Object.values(parsed)).size !== CODE_MEMORY_LINK_AGENT_AB_ARMS.length) {
+  if (new Set(EffectRecord.values(parsed)).size !== CODE_MEMORY_LINK_AGENT_AB_ARMS.length) {
     invalid('assignment labels must map bijectively to all three arms');
   }
   return parsed;
@@ -1483,11 +1498,11 @@ function parseCandidate(value: unknown): CodeMemoryLinkAgentAbManifestV1['candid
 }
 
 function parseManifestClients(value: unknown): readonly CodeMemoryLinkAgentAbManifestClientV1[] {
-  if (!Array.isArray(value)) invalid('manifest clients must be an array');
+  if (!EffectArray.isArray(value)) invalid('manifest clients must be an array');
   if (value.length === 0 || value.length > CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_CLIENTS) {
     invalid(`manifest client roster must contain 1-${CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_CLIENTS} opaque ids`);
   }
-  const parsed = value.map(entry => {
+  const parsed = EffectArray.map(value, entry => {
     const client = record(entry, 'manifest client');
     exactKeys(
       client,
@@ -1519,15 +1534,15 @@ function parseManifestClients(value: unknown): readonly CodeMemoryLinkAgentAbMan
     };
   });
   assertUnique(
-    parsed.map(client => client.clientId),
+    EffectArray.map(parsed, client => client.clientId),
     'manifest client ids',
   );
   assertUnique(
-    parsed.map(client => client.implementationDescriptorHash),
+    EffectArray.map(parsed, client => client.implementationDescriptorHash),
     'client implementation descriptor hashes',
   );
   assertCanonicalOrder(
-    parsed.map(client => client.clientId),
+    EffectArray.map(parsed, client => client.clientId),
     'manifest clients',
   );
   return parsed;
@@ -1540,29 +1555,29 @@ function parseSchedule(
   scheduleAlgorithmVersion: typeof CODE_MEMORY_LINK_AGENT_AB_SCHEDULE_ALGORITHM_VERSION,
   scheduleSeed: string,
 ): readonly CodeMemoryLinkAgentAbScheduleEntryV1[] {
-  if (!Array.isArray(value)) invalid('manifest schedule must be an array');
+  if (!EffectArray.isArray(value)) invalid('manifest schedule must be an array');
   const expectedLength = clients.length * tasks.length * CODE_MEMORY_LINK_AGENT_AB_ARMS.length;
   if (value.length !== expectedLength) invalid(`manifest schedule must contain exactly ${expectedLength} runs`);
-  const entries = value.map(parseScheduleEntry);
-  const clientIds = new Set(clients.map(client => client.clientId));
-  const taskIds = new Set(tasks.map(task => task.taskId));
+  const entries = EffectArray.map(value, parseScheduleEntry);
+  const clientIds = new Set(EffectArray.map(clients, client => client.clientId));
+  const taskIds = new Set(EffectArray.map(tasks, task => task.taskId));
   for (const entry of entries) {
     if (!clientIds.has(entry.clientId)) invalid('manifest schedule contains a client outside the roster');
     if (!taskIds.has(entry.taskId)) invalid('manifest schedule contains a task outside the roster');
   }
   assertUnique(
-    entries.map(entry => entry.runNonce),
+    EffectArray.map(entries, entry => entry.runNonce),
     'manifest schedule run nonces',
   );
   assertUnique(
-    entries.map(entry => entry.runOrder.toString()),
+    EffectArray.map(entries, entry => entry.runOrder.toString()),
     'manifest schedule run order',
   );
   assertUnique(
-    entries.map(entry => scheduleKey(entry.clientId, entry.taskId, entry.blindLabel)),
+    EffectArray.map(entries, entry => scheduleKey(entry.clientId, entry.taskId, entry.blindLabel)),
     'manifest schedule client/task/arm runs',
   );
-  if (entries.some((entry, index) => entry.runOrder !== index)) {
+  if (EffectArray.some(entries, (entry, index) => entry.runOrder !== index)) {
     invalid('manifest schedule must be canonically ordered with contiguous zero-based run order');
   }
   validateScheduleBlocks(entries, clients, tasks);
@@ -1580,21 +1595,20 @@ function deriveValidatedSchedule(
   tasks: readonly CodeMemoryLinkAgentAbManifestTaskV1[],
   scheduleSeed: string,
 ): readonly CodeMemoryLinkAgentAbScheduleEntryV1[] {
-  const scheduledBlocks = clients.flatMap(client =>
-    TASK_KINDS.flatMap(taskKind => {
-      const stratum = tasks
-        .filter(task => task.taskKind === taskKind)
-        .map(task => ({
+  const scheduledBlocks = EffectArray.flatMap(clients, client =>
+    EffectArray.flatMap(TASK_KINDS, taskKind => {
+      const stratum = EffectArray.map(
+        EffectArray.filter(tasks, task => task.taskKind === taskKind),
+        task => ({
           clientId: client.clientId,
           order: sha256HexSync(`${scheduleSeed}\0task-order\0${client.clientId}\0${taskKind}\0${task.taskId}`),
           task,
-        }))
-        .sort(
-          (left, right) =>
-            compareStrings(left.order, right.order) || compareStrings(left.task.taskId, right.task.taskId),
-        );
+        }),
+      ).sort(
+        (left, right) => compareStrings(left.order, right.order) || compareStrings(left.task.taskId, right.task.taskId),
+      );
       const offset = schedulePermutationOffset(scheduleSeed, client.clientId, taskKind);
-      return stratum.map((block, index) => ({
+      return EffectArray.map(stratum, (block, index) => ({
         ...block,
         permutation: BALANCED_BLIND_LABEL_PERMUTATIONS[(index + offset) % BALANCED_BLIND_LABEL_PERMUTATIONS.length],
       }));
@@ -1607,8 +1621,8 @@ function deriveValidatedSchedule(
         sha256HexSync(`${scheduleSeed}\0block-order\0${right.clientId}\0${right.task.taskId}`),
       ) || compareStrings(`${left.clientId}\0${left.task.taskId}`, `${right.clientId}\0${right.task.taskId}`),
   );
-  return orderedBlocks.flatMap((block, blockIndex) =>
-    block.permutation.map((blindLabel, positionIndex) => {
+  return EffectArray.flatMap(orderedBlocks, (block, blockIndex) =>
+    EffectArray.map(block.permutation, (blindLabel, positionIndex) => {
       const runOrder = blockIndex * CODE_MEMORY_LINK_AGENT_AB_ARMS.length + positionIndex;
       return {
         armPosition: armPosition(positionIndex + 1),
@@ -1629,7 +1643,7 @@ function schedulePermutationOffset(
 ): number {
   const digest = sha256HexSync(`${scheduleSeed}\0permutation-offset\0${clientId}\0${taskKind}`);
   // Either balanced Latin-square half may lead; every prefix then differs by at most one position per label.
-  return (Number.parseInt(digest.slice(0, 8), 16) % 2) * 3;
+  return (Number.parseInt(Effect.pipe(digest, EffectString.slice(0, 8)), 16) % 2) * 3;
 }
 
 function parseScheduleEntry(value: unknown): CodeMemoryLinkAgentAbScheduleEntryV1 {
@@ -1656,18 +1670,21 @@ function validateScheduleBlocks(
 ): void {
   for (const {clientId} of clients) {
     for (const task of tasks) {
-      const block = entries.filter(entry => entry.clientId === clientId && entry.taskId === task.taskId);
+      const block = EffectArray.filter(entries, entry => entry.clientId === clientId && entry.taskId === task.taskId);
       if (
         block.length !== CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS.length ||
-        new Set(block.map(entry => entry.blindLabel)).size !== CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS.length ||
-        new Set(block.map(entry => entry.armPosition)).size !== CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS.length
+        new Set(EffectArray.map(block, entry => entry.blindLabel)).size !==
+          CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS.length ||
+        new Set(EffectArray.map(block, entry => entry.armPosition)).size !==
+          CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS.length
       ) {
         invalid(`manifest schedule block ${clientId}/${task.taskId} must contain each blind arm and position once`);
       }
-      const chronologicalPositions = [...block]
-        .sort((left, right) => left.runOrder - right.runOrder)
-        .map(entry => entry.armPosition);
-      if (chronologicalPositions.some((position, index) => position !== index + 1)) {
+      const chronologicalPositions = EffectArray.map(
+        [...block].sort((left, right) => left.runOrder - right.runOrder),
+        entry => entry.armPosition,
+      );
+      if (EffectArray.some(chronologicalPositions, (position, index) => position !== index + 1)) {
         invalid(`manifest schedule block ${clientId}/${task.taskId} chronological order must match arm positions 1-3`);
       }
     }
@@ -1681,12 +1698,20 @@ function validateBalancedArmPositions(
 ): void {
   for (const {clientId} of clients) {
     for (const taskKind of TASK_KINDS) {
-      const taskIds = new Set(tasks.filter(task => task.taskKind === taskKind).map(task => task.taskId));
+      const taskIds = new Set(
+        EffectArray.map(
+          EffectArray.filter(tasks, task => task.taskKind === taskKind),
+          task => task.taskId,
+        ),
+      );
       for (const blindLabel of CODE_MEMORY_LINK_AGENT_AB_BLIND_LABELS) {
-        const counts = [1, 2, 3].map(
+        const counts = EffectArray.map(
+          [1, 2, 3],
           position =>
-            entries.filter(
-              entry =>
+            EffectArray.filter(
+              entries,
+              (entry, __effectArrayIndex) =>
+                __effectArrayIndex in entries &&
                 entry.clientId === clientId &&
                 taskIds.has(entry.taskId) &&
                 entry.blindLabel === blindLabel &&
@@ -1702,21 +1727,21 @@ function validateBalancedArmPositions(
 }
 
 function parseManifestTasks(value: unknown): readonly CodeMemoryLinkAgentAbManifestTaskV1[] {
-  if (!Array.isArray(value)) invalid('manifest tasks must be an array');
+  if (!EffectArray.isArray(value)) invalid('manifest tasks must be an array');
   if (value.length === 0 || value.length > CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_TASKS) {
     invalid(`manifest task roster must contain 1-${CODE_MEMORY_LINK_AGENT_AB_MAXIMUM_TASKS} tasks`);
   }
-  const tasks = value.map(parseManifestTask);
+  const tasks = EffectArray.map(value, parseManifestTask);
   assertUnique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'manifest task ids',
   );
   assertUnique(
-    tasks.map(task => task.packetHash),
+    EffectArray.map(tasks, task => task.packetHash),
     'manifest task packet hashes',
   );
   assertUnique(
-    tasks.map(task =>
+    EffectArray.map(tasks, task =>
       JSON.stringify({
         budget: task.budget,
         constraintTotal: task.constraintTotal,
@@ -1729,11 +1754,14 @@ function parseManifestTasks(value: unknown): readonly CodeMemoryLinkAgentAbManif
     'manifest task contracts',
   );
   assertCanonicalOrder(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'manifest tasks',
   );
   const hiddenBudgets = new Set(
-    tasks.filter(task => task.taskKind === 'hidden-constraint').map(task => JSON.stringify(task.budget)),
+    EffectArray.map(
+      EffectArray.filter(tasks, task => task.taskKind === 'hidden-constraint'),
+      task => JSON.stringify(task.budget),
+    ),
   );
   if (hiddenBudgets.size > 1) invalid('manifest hidden-constraint tasks must share one token and step budget');
   return tasks;
@@ -1828,7 +1856,10 @@ function validateTrialSchedule(
 function parseBudget(value: unknown): CodeMemoryLinkAgentAbTrialV1['budget'] {
   const budget = record(value, 'trial budget');
   exactKeys(budget, ['steps', 'tokens'], 'trial budget');
-  return {steps: positiveInteger(budget.steps, 'step budget'), tokens: positiveInteger(budget.tokens, 'token budget')};
+  return {
+    steps: positiveInteger(budget.steps, 'step budget'),
+    tokens: positiveInteger(budget.tokens, 'token budget'),
+  };
 }
 
 function parseTotalTaskUsage(
@@ -1904,9 +1935,12 @@ function groupBlocks<Key extends string>(
 function scenarioFamilyGroups(
   blocks: readonly CompleteTrialBlock[],
 ): readonly (readonly [CodeMemoryLinkAgentAbScenarioFamily, readonly CompleteTrialBlock[]])[] {
-  return [...groupBlocks(blocks, block => block.scenarioFamily).entries()]
-    .sort(([left], [right]) => compareStrings(left, right))
-    .map(([scenarioFamily, familyBlocks]) => [scenarioFamily, familyBlocks]);
+  return EffectArray.map(
+    [...groupBlocks(blocks, block => block.scenarioFamily).entries()].sort(([left], [right]) =>
+      compareStrings(left, right),
+    ),
+    ([scenarioFamily, familyBlocks]) => [scenarioFamily, familyBlocks],
+  );
 }
 
 function compareTrialsCanonically(left: CodeMemoryLinkAgentAbTrialV1, right: CodeMemoryLinkAgentAbTrialV1): number {
@@ -1929,11 +1963,11 @@ function scheduleAlgorithmVersionValue(value: unknown): typeof CODE_MEMORY_LINK_
 }
 
 function displayKey(value: string): string {
-  return value.replaceAll('\0', '/');
+  return Effect.pipe(value, EffectString.replaceAll('\0', '/'));
 }
 
 function mean(values: readonly number[]): number {
-  return values.length === 0 ? 0 : values.reduce((total, value) => total + value, 0) / values.length;
+  return values.length === 0 ? 0 : EffectArray.reduce(values, 0, (total, value) => total + value) / values.length;
 }
 
 function minimumOrNull(values: readonly number[]): number | null {

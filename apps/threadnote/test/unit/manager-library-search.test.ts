@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {beforeEach, expect, vi} from 'vitest';
@@ -11,6 +12,8 @@ vi.mock('@threadnote/recall/runtime', async importOriginal => ({
   loadMcpRecallSemanticScoresResult: semantic,
 }));
 import {searchManagerLibrary} from '../../src/manager/library_search.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 beforeEach(() => semantic.mockReset());
 
@@ -49,7 +52,7 @@ effectIt.effect(
           status: 'available',
           result: {
             corpusGeneration: Option.fromNullishOr(index.generation),
-            scores: Option.some(new Map(documents.map(([relative]) => [`${base}/${relative}`, 0.99]))),
+            scores: Option.some(new Map(EffectArray.map(documents, ([relative]) => [`${base}/${relative}`, 0.99]))),
             warning: Option.none(),
           },
         }),
@@ -64,7 +67,7 @@ effectIt.effect(
       const local = yield* search('shipping software safely', 'local');
       expect(local.semantic).toBe('available');
       expect(local.uris).toContain(`${base}/${documents[0][0]}`);
-      expect(local.uris.every(uri => !uri.includes('/shared/'))).toBe(true);
+      expect(EffectArray.every(local.uris, uri => !Effect2.pipe(uri, EffectString.includes('/shared/')))).toBe(true);
       expect(semantic.mock.calls[0][4]).toEqual([base]);
       const team = yield* search('shipping software safely', 'team:alpha');
       expect(team.uris).toEqual([`${base}/${documents[2][0]}`]);
@@ -92,7 +95,7 @@ effectIt.effect('rejects empty, oversized and invalid-scope requests before usin
     };
     for (const params of [
       'query=',
-      `query=${'x'.repeat(1025)}`,
+      `query=${Effect2.pipe('x', EffectString.repeat(1025))}`,
       'query=hello&scope=invalid',
       'query=hello&scope=team:',
     ]) {

@@ -1,8 +1,12 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {CODE_MEMORY_LINK_RETAINED_BUNDLE_ROOT} from '@threadnote/threadnote/evaluation/code-memory-link-retained-bundle';
 import {
   CODE_MEMORY_LINK_SCALE_ARTIFACT_ROOT,
   codeMemoryLinkScaleArtifactPath,
 } from '@threadnote/threadnote/evaluation/code-memory-link-scale-contract';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_RELEASE_DESCRIPTOR_ROOT = '.github/release-evidence/code-memory-link' as const;
 export const CODE_MEMORY_LINK_RELEASE_DESCRIPTOR_TYPE = 'code-memory-link-release-governance' as const;
@@ -155,14 +159,14 @@ export function parseCodeMemoryLinkReleaseDescriptorV1(input: {
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  if (actual.length !== expected.length || EffectArray.some(actual, (key, index) => key !== expected[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -173,7 +177,7 @@ function matching(value: unknown, pattern: RegExp, label: string): string {
 }
 
 function nonEmpty(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) invalid(`${label} is invalid`);
+  if (typeof value !== 'string' || Effect.pipe(value, EffectString.trim).length === 0) invalid(`${label} is invalid`);
   return value;
 }
 

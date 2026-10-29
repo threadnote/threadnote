@@ -1,12 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Deferred, Effect, Fiber, FileSystem, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
-import {makeCodeGraphBuildReporter, type CodeGraphBuildStatus} from '@threadnote/graph/build_status';
+import {makeCodeGraphBuildReporter, parseCodeGraphBuildStatus} from '@threadnote/graph/build_status';
 import {codeGraphLayout, codeGraphSnapshotBuildLockPath} from '@threadnote/graph/layout';
 import {
   COMPLETED_PERSISTENT_BUILD_DRAIN_SPECS,
@@ -38,12 +39,14 @@ import {
 import {join, mkdir, mkdtemp, rm, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {legacyCodeGraphAuthorityStatements} from '@threadnote/graph/test/helpers/code-graph-legacy-authority';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryHomes: string[] = [];
 const ROUTINE_CACHE_ALL_ELIGIBLE = '9999-12-31T23:59:59.999Z';
 
 afterEach(async () => {
-  await Promise.all(temporaryHomes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryHomes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('routine code graph maintenance', () => {
@@ -65,38 +68,52 @@ describe('routine code graph maintenance', () => {
               ) WITHOUT ROWID;
             `);
             for (const [index, active] of building.entries()) {
-              const id = `snapshot-${index.toString().padStart(2, '0')}`;
+              const id = `snapshot-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`;
               database.query('INSERT INTO snapshots VALUES (?, ?)').run(id, active ? 'building' : 'ready');
               database.query('INSERT INTO building_reference_candidates VALUES (?, ?, 0, ?)').run(id, 'edge', 'key');
             }
             const target =
               targetIndex === undefined
                 ? undefined
-                : `snapshot-${(targetIndex % building.length).toString().padStart(2, '0')}`;
+                : `snapshot-${Effect2.pipe((targetIndex % building.length).toString(), EffectString.padStart(2, '0'))}`;
             const statement = completedPersistentBuildDrainPageStatement(spec, 3, target);
             const plan = database
-              .query(`EXPLAIN QUERY PLAN ${statement.text}`)
-              .all(...statement.parameters) as readonly {
-              readonly detail: string;
-            }[];
-            expect(plan.some(row => row.detail.includes('SEARCH candidate USING PRIMARY KEY (snapshot_id=?)'))).toBe(
-              true,
+              .query<
+                {
+                  readonly detail: string;
+                },
+                SQLQueryBindings[]
+              >(`EXPLAIN QUERY PLAN ${statement.text}`)
+              .all(...statement.parameters);
+            expect(
+              EffectArray.some(plan, row =>
+                Effect2.pipe(row.detail, EffectString.includes('SEARCH candidate USING PRIMARY KEY (snapshot_id=?)')),
+              ),
+            ).toBe(true);
+            expect(EffectArray.some(plan, row => /SCAN candidate|USE TEMP B-TREE/u.test(row.detail))).toBe(false);
+            const ids = EffectArray.map(
+              building,
+              (_, index) => `snapshot-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
             );
-            expect(plan.some(row => /SCAN candidate|USE TEMP B-TREE/u.test(row.detail))).toBe(false);
-            const ids = building.map((_, index) => `snapshot-${index.toString().padStart(2, '0')}`);
-            const eligible = ids.filter((id, index) => !building[index] && (target === undefined || target === id));
+            const eligible = EffectArray.filter(
+              ids,
+              (id, index) => !building[index] && (target === undefined || target === id),
+            );
             const remainingIds = () =>
-              (
+              EffectArray.map(
                 database
-                  .query('SELECT snapshot_id FROM building_reference_candidates ORDER BY snapshot_id')
-                  .all() as readonly {readonly snapshot_id: string}[]
-              ).map(row => row.snapshot_id);
+                  .query<{readonly snapshot_id: string}, SQLQueryBindings[]>(
+                    'SELECT snapshot_id FROM building_reference_candidates ORDER BY snapshot_id',
+                  )
+                  .all(),
+                row => row.snapshot_id,
+              );
             database.query(statement.text).run(...statement.parameters);
-            expect(remainingIds()).toEqual(ids.filter(id => !eligible.slice(0, 3).includes(id)));
+            expect(remainingIds()).toEqual(EffectArray.filter(ids, id => !eligible.slice(0, 3).includes(id)));
             for (let page = 0; page < 4; page += 1) {
               database.query(statement.text).run(...statement.parameters);
             }
-            expect(remainingIds()).toEqual(ids.filter(id => !eligible.includes(id)));
+            expect(remainingIds()).toEqual(EffectArray.filter(ids, id => !eligible.includes(id)));
           } finally {
             database.close(false);
           }
@@ -176,7 +193,7 @@ describe('routine code graph maintenance', () => {
       const temporaryHome = yield* fs.makeTempDirectory({prefix: 'threadnote-routine-abandoned-status-'});
       const home = yield* fs.realPath(temporaryHome);
       temporaryHomes.push(home);
-      const checkoutId = 'a'.repeat(64);
+      const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
       const identity = {...routineMaintenanceAnchor(), checkoutId, repoRoot: home};
       const layout = codeGraphLayout(path, home, checkoutId, identity.worktreeId);
       yield* fs.makeDirectory(path.dirname(layout.databasePath), {recursive: true});
@@ -189,7 +206,8 @@ describe('routine code graph maintenance', () => {
         identity.worktreeId,
         `${reporter.ownerIdentity.buildId}.json`,
       );
-      const status = JSON.parse(yield* fs.readFileString(statusPath)) as CodeGraphBuildStatus;
+      const status = parseCodeGraphBuildStatus(JSON.parse(yield* fs.readFileString(statusPath)));
+      if (status === undefined) throw new Error('Persisted code graph build status was invalid.');
       yield* fs.writeFileString(
         statusPath,
         `${JSON.stringify({
@@ -296,8 +314,8 @@ describe('routine code graph maintenance', () => {
 
   it('does not reclaim fresh cache rows while any persistent snapshot is still building', async () => {
     const fixture = await routineFixture('threadnote-routine-cache-active-build-');
-    const identity = routineIdentity(fixture, 'd'.repeat(64));
-    const snapshot = routineBuildingSnapshot(identity, `cgsn_${'8'.repeat(40)}`);
+    const identity = routineIdentity(fixture, Effect2.pipe('d', EffectString.repeat(64)));
+    const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('8', EffectString.repeat(40))}`);
     seedRoutineCacheRows(fixture.databasePath, 1, 1);
 
     const result = await runEffect(
@@ -380,10 +398,16 @@ describe('routine code graph maintenance', () => {
               materializedCursor = candidates.at(-1)!;
             }
 
-            expect(examinedPages.every(rows => rows > 0 && rows <= CODE_GRAPH_ROUTINE_CACHE_PAGE_SIZE)).toBe(true);
-            expect(pages.every(page => page.rows > 0 && page.rows <= CODE_GRAPH_ROUTINE_CACHE_PAGE_SIZE)).toBe(true);
-            expect(pages.reduce((total, page) => total + page.rows, 0)).toBe(fileBlobs + materializedShards);
-            expect(pages.map(page => page.cleanup)).toEqual([
+            expect(
+              EffectArray.every(examinedPages, rows => rows > 0 && rows <= CODE_GRAPH_ROUTINE_CACHE_PAGE_SIZE),
+            ).toBe(true);
+            expect(
+              EffectArray.every(pages, page => page.rows > 0 && page.rows <= CODE_GRAPH_ROUTINE_CACHE_PAGE_SIZE),
+            ).toBe(true);
+            expect(EffectArray.reduce(pages, 0, (total, page) => total + page.rows)).toBe(
+              fileBlobs + materializedShards,
+            );
+            expect(EffectArray.map(pages, page => page.cleanup)).toEqual([
               ...Array.from(
                 {length: Math.ceil(fileBlobs / CODE_GRAPH_ROUTINE_CACHE_PAGE_SIZE)},
                 () => 'file-blob-cache' as const,
@@ -416,7 +440,7 @@ describe('routine code graph maintenance', () => {
         .run(
           'zz-live-content',
           'config/donor.json',
-          'a'.repeat(40),
+          Effect2.pipe('a', EffectString.repeat(40)),
           'structured-object-v1:json:full',
           '{"diagnostics":[],"edges":[],"path":"config/donor.json","symbols":[]}',
           now,
@@ -442,9 +466,9 @@ describe('routine code graph maintenance', () => {
 
   it('starts the zero-wait cache collector after a successful promotion without a displaced pointer', async () => {
     const fixture = await routineFixture('threadnote-routine-cache-promotion-');
-    const identity = routineIdentity(fixture, 'b'.repeat(64));
+    const identity = routineIdentity(fixture, Effect2.pipe('b', EffectString.repeat(64)));
     const snapshot = {
-      ...routineBuildingSnapshot(identity, `cgsn_${'9'.repeat(40)}`),
+      ...routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('9', EffectString.repeat(40))}`),
       state: 'ready' as const,
     };
     seedRoutineCacheRows(fixture.databasePath, 1, 1);
@@ -463,8 +487,8 @@ describe('routine code graph maintenance', () => {
 
   it('logically retires an exact dead owner and leaves physical rows for the next bounded tick', async () => {
     const fixture = await routineFixture('threadnote-routine-abandoned-owner-');
-    const identity = routineIdentity(fixture, 'b'.repeat(64));
-    const snapshot = routineBuildingSnapshot(identity, `cgsn_${'1'.repeat(40)}`);
+    const identity = routineIdentity(fixture, Effect2.pipe('b', EffectString.repeat(64)));
+    const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`);
     const buildId = '01234567-89ab-cdef';
 
     const results = await runEffect(
@@ -513,8 +537,8 @@ describe('routine code graph maintenance', () => {
       Effect.promise(() => routineFixture('threadnote-routine-mark-failed-')),
       fixture =>
         Effect.gen(function* () {
-          const identity = routineIdentity(fixture, '4'.repeat(64));
-          const snapshot = routineBuildingSnapshot(identity, `cgsn_${'7'.repeat(40)}`);
+          const identity = routineIdentity(fixture, Effect2.pipe('4', EffectString.repeat(64)));
+          const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('7', EffectString.repeat(40))}`);
           const store = yield* CodeGraphStore;
           const ownerToken = yield* store.claimPersistentBuild(fixture.databasePath, identity, snapshot, {
             logicalSnapshotId: snapshot.id,
@@ -549,8 +573,8 @@ describe('routine code graph maintenance', () => {
     'refuses to retire an exact dead owner protected by %s state',
     async protection => {
       const fixture = await routineFixture(`threadnote-routine-abandoned-${protection}-`);
-      const identity = routineIdentity(fixture, 'c'.repeat(64));
-      const snapshot = routineBuildingSnapshot(identity, `cgsn_${'2'.repeat(40)}`);
+      const identity = routineIdentity(fixture, Effect2.pipe('c', EffectString.repeat(64)));
+      const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`);
       const result = await runEffect(
         Effect.gen(function* () {
           const store = yield* CodeGraphStore;
@@ -574,8 +598,8 @@ describe('routine code graph maintenance', () => {
 
   it('lets an unrelated physical page progress behind a persistently protected owner', async () => {
     const fixture = await routineFixture('threadnote-routine-owner-protected-fairness-');
-    const identity = routineIdentity(fixture, '5'.repeat(64));
-    const snapshot = routineBuildingSnapshot(identity, `cgsn_${'8'.repeat(40)}`);
+    const identity = routineIdentity(fixture, Effect2.pipe('5', EffectString.repeat(64)));
+    const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('8', EffectString.repeat(40))}`);
     const result = await runEffect(
       Effect.gen(function* () {
         const store = yield* CodeGraphStore;
@@ -605,8 +629,8 @@ describe('routine code graph maintenance', () => {
     ['pid-reused', 'different', true],
   ] as const)('uses exact tri-state liveness for a running %s owner', async (_, storedStart, retires) => {
     const fixture = await routineFixture(`threadnote-routine-owner-${storedStart ?? 'unknown'}-`);
-    const identity = routineIdentity(fixture, 'f'.repeat(64));
-    const snapshot = routineBuildingSnapshot(identity, `cgsn_${'3'.repeat(40)}`);
+    const identity = routineIdentity(fixture, Effect2.pipe('f', EffectString.repeat(64)));
+    const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`);
 
     const result = await runEffect(
       Effect.gen(function* () {
@@ -634,8 +658,8 @@ describe('routine code graph maintenance', () => {
 
   it.each(['worktree', 'snapshot'] as const)('defers without waiting when the target %s lock is held', async lock => {
     const fixture = await routineFixture(`threadnote-routine-owner-${lock}-lock-`);
-    const identity = routineIdentity(fixture, '1'.repeat(64));
-    const snapshot = routineBuildingSnapshot(identity, `cgsn_${'4'.repeat(40)}`);
+    const identity = routineIdentity(fixture, Effect2.pipe('1', EffectString.repeat(64)));
+    const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('4', EffectString.repeat(40))}`);
     const observed = await runEffect(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -689,8 +713,8 @@ describe('routine code graph maintenance', () => {
 
   it('fails closed when an old writer changes only the legacy owner token', async () => {
     const fixture = await routineFixture('threadnote-routine-owner-mixed-writer-');
-    const identity = routineIdentity(fixture, '2'.repeat(64));
-    const snapshot = routineBuildingSnapshot(identity, `cgsn_${'5'.repeat(40)}`);
+    const identity = routineIdentity(fixture, Effect2.pipe('2', EffectString.repeat(64)));
+    const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('5', EffectString.repeat(40))}`);
     const result = await runEffect(
       Effect.gen(function* () {
         const store = yield* CodeGraphStore;
@@ -722,8 +746,8 @@ describe('routine code graph maintenance', () => {
 
   it('refuses a present build-status document whose process tuple does not match durable state', async () => {
     const fixture = await routineFixture('threadnote-routine-owner-sidecar-mismatch-');
-    const identity = routineIdentity(fixture, '3'.repeat(64));
-    const snapshot = routineBuildingSnapshot(identity, `cgsn_${'6'.repeat(40)}`);
+    const identity = routineIdentity(fixture, Effect2.pipe('3', EffectString.repeat(64)));
+    const snapshot = routineBuildingSnapshot(identity, `cgsn_${Effect2.pipe('6', EffectString.repeat(40))}`);
     const result = await runEffect(
       Effect.gen(function* () {
         const path = yield* Path.Path;
@@ -758,7 +782,7 @@ describe('routine code graph maintenance', () => {
 
   it('advances a durable bounded cursor so a full live page cannot starve the next dead owner', async () => {
     const fixture = await routineFixture('threadnote-routine-owner-cursor-load-');
-    const deadSnapshotId = `cgsn_${(64).toString(16).padStart(40, '0')}`;
+    const deadSnapshotId = `cgsn_${Effect2.pipe((64).toString(16), EffectString.padStart(40, '0'))}`;
     const observed = await runEffect(
       Effect.gen(function* () {
         const system = yield* SystemInfo;
@@ -938,7 +962,7 @@ describe('routine code graph maintenance', () => {
           insert.run('flagged-baton', 0, 1);
           database.transaction(() => {
             for (let index = 0; index < 100; index += 1) {
-              insert.run(`unflagged-${index.toString().padStart(3, '0')}`, 1, 0);
+              insert.run(`unflagged-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`, 1, 0);
             }
           })();
         } finally {
@@ -968,7 +992,7 @@ describe('routine code graph maintenance', () => {
             reopened.query("SELECT name FROM sqlite_master WHERE name = 'snapshot_leases_snapshot_expiry'").get(),
           ).toBeNull();
           const plan = reopened
-            .query(
+            .query<{readonly detail: string}, SQLQueryBindings[]>(
               `EXPLAIN QUERY PLAN
                SELECT token
                FROM snapshot_leases
@@ -976,9 +1000,11 @@ describe('routine code graph maintenance', () => {
                ORDER BY expires_at
                LIMIT 100`,
             )
-            .all(now) as readonly {readonly detail: string}[];
-          expect(plan.some(row => row.detail.includes('snapshot_leases_expiry'))).toBe(true);
-          expect(plan.some(row => /SCAN|TEMP B-TREE/iu.test(row.detail))).toBe(false);
+            .all(now);
+          expect(
+            EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes('snapshot_leases_expiry'))),
+          ).toBe(true);
+          expect(EffectArray.some(plan, row => /SCAN|TEMP B-TREE/iu.test(row.detail))).toBe(false);
         } finally {
           reopened.close(false);
         }
@@ -1083,7 +1109,7 @@ describe('routine code graph maintenance', () => {
       const owner = yield* Effect.forkChild(coordinator.tick(first));
       yield* Deferred.await(started);
       const queued = Array.from({length: 64}, (_, index) =>
-        tick('/home', `/database/${String(index + 1).padStart(3, '0')}`),
+        tick('/home', `/database/${Effect2.pipe(String(index + 1), EffectString.padStart(3, '0'))}`),
       );
       const admissions: CodeGraphRoutineMaintenanceResult[] = [];
       for (const input of queued) admissions.push(yield* coordinator.tick(input));
@@ -1091,9 +1117,12 @@ describe('routine code graph maintenance', () => {
       yield* Fiber.interrupt(owner);
       yield* Deferred.await(drained);
 
-      expect(admissions).toEqual(queued.map(() => ({reason: 'home-tick-active', state: 'deferred'})));
+      expect(admissions).toEqual(EffectArray.map(queued, () => ({reason: 'home-tick-active', state: 'deferred'})));
       expect(duplicate).toEqual({reason: 'home-tick-active', state: 'deferred'});
-      expect(yield* Ref.get(calls)).toEqual([first.databasePath, ...queued.map(input => input.databasePath)]);
+      expect(yield* Ref.get(calls)).toEqual([
+        first.databasePath,
+        ...EffectArray.map(queued, input => input.databasePath),
+      ]);
     }),
   );
 
@@ -1222,7 +1251,7 @@ describe('routine code graph maintenance', () => {
       const drained = yield* Deferred.make<void>();
       const calls = yield* Ref.make<CodeGraphRoutineMaintenanceTick[]>([]);
       const expectedOrdinary = Array.from({length: 127}, (_, index) =>
-        tick('/home', `/database/${String(index).padStart(3, '0')}`),
+        tick('/home', `/database/${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}`),
       );
       const expectedRunCount = 1 + expectedOrdinary.length + 1;
       const coordinator = yield* makeCodeGraphMaintenanceCoordinator(input =>
@@ -1255,9 +1284,9 @@ describe('routine code graph maintenance', () => {
       yield* Deferred.await(drained);
 
       const observed = yield* Ref.get(calls);
-      expect(observed.map(input => input.databasePath)).toEqual([
+      expect(EffectArray.map(observed, input => input.databasePath)).toEqual([
         first.databasePath,
-        ...expectedOrdinary.map(input => input.databasePath),
+        ...EffectArray.map(expectedOrdinary, input => input.databasePath),
         first.databasePath,
       ]);
       expect(observed.at(-1)).toMatchObject({allowIndexPreparation: true, anchorIdentity: anchor});
@@ -1359,7 +1388,7 @@ describe('routine code graph maintenance', () => {
       const temporaryHome = yield* fs.makeTempDirectory({prefix: 'threadnote-reconciliation-index-bootstrap-'});
       const home = yield* fs.realPath(temporaryHome);
       temporaryHomes.push(home);
-      const checkoutId = 'a'.repeat(64);
+      const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
       const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
       const databasePath = join(repositoryRoot, 'graph-v3.sqlite');
       const writerLockPath = join(home, 'locks', 'indexes', 'code-graph', 'database-writes', `${checkoutId}.lock`);
@@ -1406,23 +1435,24 @@ describe('routine code graph maintenance', () => {
       );
 
       expect(
-        results.filter(result => result.state === 'completed' && result.cleanup === 'reconciliation-index').length,
+        EffectArray.filter(results, result => result.state === 'completed' && result.cleanup === 'reconciliation-index')
+          .length,
       ).toBe(3);
       expect(
-        results.filter(result => result.state === 'completed' && result.cleanup === 'schema-migration'),
+        EffectArray.filter(results, result => result.state === 'completed' && result.cleanup === 'schema-migration'),
       ).toHaveLength(1);
       expect(
-        results
-          .filter(
+        EffectArray.every(
+          EffectArray.filter(
+            results,
             result =>
               result.state !== 'completed' ||
               (result.cleanup !== 'reconciliation-index' && result.cleanup !== 'schema-migration'),
-          )
-          .every(
-            result =>
-              (result.state === 'deferred' && result.reason === 'writer-busy') ||
-              (result.state === 'completed' && result.cleanup === 'none'),
           ),
+          result =>
+            (result.state === 'deferred' && result.reason === 'writer-busy') ||
+            (result.state === 'completed' && result.cleanup === 'none'),
+        ),
       ).toBe(true);
       expect(readReconciliationIndexes(databasePath)).toEqual([
         'active_snapshots_snapshot_worktree',
@@ -1483,29 +1513,34 @@ const noWorkResult = {
 } as const satisfies CodeGraphRoutineMaintenanceResult;
 
 function tick(threadnoteHome: string, databasePath: string): CodeGraphRoutineMaintenanceTick {
-  return {checkoutId: 'a'.repeat(64), databasePath, threadnoteHome, writerLockPath: `${databasePath}.lock`};
+  return {
+    checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+    databasePath,
+    threadnoteHome,
+    writerLockPath: `${databasePath}.lock`,
+  };
 }
 
 function routineMaintenanceAnchor(): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'a'.repeat(64),
+    checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
     displayName: 'routine-maintenance-anchor',
     gitCommonDirectory: '/anchor/common',
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     repoRoot: '/anchor/root',
-    worktreeId: 'c'.repeat(64),
+    worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
   };
 }
 
 function readReconciliationIndexes(databasePath: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return (
+    return EffectArray.map(
       database
-        .query(
+        .query<{readonly name: string}, SQLQueryBindings[]>(
           `SELECT name FROM sqlite_master
            WHERE type = 'index'
              AND name IN (
@@ -1515,8 +1550,9 @@ function readReconciliationIndexes(databasePath: string): readonly string[] {
              )
            ORDER BY name`,
         )
-        .all() as readonly {readonly name: string}[]
-    ).map(row => row.name);
+        .all(),
+      row => row.name,
+    );
   } finally {
     database.close(false);
   }
@@ -1525,7 +1561,7 @@ function readReconciliationIndexes(databasePath: string): readonly string[] {
 async function routineFixture(prefix: string, initialize = true) {
   const home = await mkdtemp(prefix);
   temporaryHomes.push(home);
-  const checkoutId = 'a'.repeat(64);
+  const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
   const repositoryRoot = join(home, 'indexes', 'code-graph', 'repositories', checkoutId);
   const databasePath = join(repositoryRoot, 'graph-v3.sqlite');
   const writerLockPath = join(home, 'locks', 'indexes', 'code-graph', 'database-writes', `${checkoutId}.lock`);
@@ -1555,10 +1591,10 @@ function routineIdentity(fixture: Awaited<ReturnType<typeof routineFixture>>, wo
     checkoutId: fixture.checkoutId,
     displayName: 'routine-maintenance-fixture',
     gitCommonDirectory: fixture.home,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: fixture.repositoryRoot,
-    repositoryId: 'e'.repeat(64),
+    repositoryId: Effect2.pipe('e', EffectString.repeat(64)),
     worktreeId,
   };
 }
@@ -1649,7 +1685,7 @@ function protectRoutineSnapshot(
         .run(
           `${snapshot.id}-dependent`,
           snapshot.repositoryId,
-          'd'.repeat(64),
+          Effect2.pipe('d', EffectString.repeat(64)),
           snapshot.commit,
           `${snapshot.id}-dependent`,
           snapshot.id,
@@ -1671,7 +1707,7 @@ function seedRoutineOwnerPage(databasePath: string, liveProcessId: number, count
         `INSERT OR IGNORE INTO repositories (id, display_name, object_format, created_at, last_used_at)
          VALUES (?, 'cursor fixture', 'sha1', ?, ?)`,
       )
-      .run('e'.repeat(64), now, now);
+      .run(Effect2.pipe('e', EffectString.repeat(64)), now, now);
     const snapshot = database.query(
       `INSERT INTO snapshots (
          id, repository_id, worktree_id, commit_id, graph_content_id, base_snapshot_id,
@@ -1690,16 +1726,23 @@ function seedRoutineOwnerPage(databasePath: string, liveProcessId: number, count
     );
     database.transaction(() => {
       for (let index = 0; index < count; index += 1) {
-        const logicalSnapshotId = `cgsn_${index.toString(16).padStart(40, '0')}`;
-        const worktreeId = index.toString(16).padStart(64, '0');
+        const logicalSnapshotId = `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`;
+        const worktreeId = Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'));
         const ownerToken = `owner-${index}`;
         const dead = index === count - 1;
-        snapshot.run(logicalSnapshotId, 'e'.repeat(64), worktreeId, '1'.repeat(40), logicalSnapshotId, now);
+        snapshot.run(
+          logicalSnapshotId,
+          Effect2.pipe('e', EffectString.repeat(64)),
+          worktreeId,
+          Effect2.pipe('1', EffectString.repeat(40)),
+          logicalSnapshotId,
+          now,
+        );
         owner.run(logicalSnapshotId, ownerToken, now);
         instance.run(
           logicalSnapshotId,
           ownerToken,
-          index.toString(16).padStart(16, '0'),
+          Effect2.pipe(index.toString(16), EffectString.padStart(16, '0')),
           dead ? 2_147_483_647 : liveProcessId,
           dead ? 'dead-process' : null,
           logicalSnapshotId,
@@ -1772,11 +1815,11 @@ function seedRoutineCacheRows(databasePath: string, fileBlobCount: number, mater
         )
         .run();
       for (let index = 0; index < fileBlobCount; index += 1) {
-        const suffix = index.toString().padStart(4, '0');
+        const suffix = Effect2.pipe(index.toString(), EffectString.padStart(4, '0'));
         insertFile.run(`orphan-file-${suffix}`, `fixtures/legacy-${suffix}.svg`, now);
       }
       for (let index = 0; index < materializedShardCount; index += 1) {
-        const suffix = index.toString().padStart(4, '0');
+        const suffix = Effect2.pipe(index.toString(), EffectString.padStart(4, '0'));
         insertShard.run(
           `orphan-shard-${suffix}`,
           `orphan-shard-content-${suffix}`,
@@ -1862,11 +1905,11 @@ function routineCachePropertyDatabase(
     insertShard.run('zz-live-shard', 'zz-live-content', 'src/live.ts', now, now);
     database.query("INSERT INTO snapshot_file_shards VALUES ('live-snapshot', 'src/live.ts', 'zz-live-shard')").run();
     for (const index of fileIndexes) {
-      const suffix = index.toString().padStart(4, '0');
+      const suffix = Effect2.pipe(index.toString(), EffectString.padStart(4, '0'));
       insertFile.run(`orphan-file-${suffix}`, `fixtures/legacy-${suffix}.svg`, now);
     }
     for (const index of shardIndexes) {
-      const suffix = index.toString().padStart(4, '0');
+      const suffix = Effect2.pipe(index.toString(), EffectString.padStart(4, '0'));
       insertShard.run(
         `orphan-shard-${suffix}`,
         `orphan-shard-content-${suffix}`,
@@ -1907,20 +1950,26 @@ function readRoutineFileBlobCacheCandidates(
       cursor?.path ?? null,
       CODE_GRAPH_ROUTINE_CACHE_PAGE_SIZE,
     );
-  return rows.map(row => ({contentHash: row.content_hash, extractorSet: row.extractor_set, path: row.path_hint}));
+  return EffectArray.map(rows, row => ({
+    contentHash: row.content_hash,
+    extractorSet: row.extractor_set,
+    path: row.path_hint,
+  }));
 }
 
 function readRoutineMaterializedShardCacheCandidates(database: Database, cursor: string | undefined): string[] {
-  return database
-    .query<{readonly id: string}, [string | null, string | null, number]>(
-      `SELECT id
+  return EffectArray.map(
+    database
+      .query<{readonly id: string}, [string | null, string | null, number]>(
+        `SELECT id
        FROM materialized_file_shards
        WHERE (? IS NULL OR id > ?)
        ORDER BY id
        LIMIT ?`,
-    )
-    .all(cursor ?? null, cursor ?? null, CODE_GRAPH_ROUTINE_CACHE_PAGE_SIZE)
-    .map(row => row.id);
+      )
+      .all(cursor ?? null, cursor ?? null, CODE_GRAPH_ROUTINE_CACHE_PAGE_SIZE),
+    row => row.id,
+  );
 }
 
 function readRoutineCacheCounts(databasePath: string): {
@@ -2020,7 +2069,8 @@ function seedLeaseAndCleanupPages(databasePath: string, leases: number): void {
        VALUES (?, 'lease-target', 0, 0)`,
     );
     database.transaction(() => {
-      for (let index = 0; index < leases; index += 1) insert.run(`expired-${index.toString().padStart(3, '0')}`);
+      for (let index = 0; index < leases; index += 1)
+        insert.run(`expired-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`);
     })();
   } finally {
     database.close(false);

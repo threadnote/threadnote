@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Cause, Effect, FileSystem, Path} from 'effect';
@@ -18,6 +19,8 @@ import {
 } from '@threadnote/threadnote/evaluation/code-graph';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
 import {git, prepareCodeGraphFixture} from './code-graph-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const evaluateNativeCodeGraph = Effect.scoped(
   Effect.gen(function* () {
@@ -105,12 +108,12 @@ const evaluateNativeCodeGraph = Effect.scoped(
         );
         const failuresBefore = worktreeFailures.length;
         const leakageBefore = worktreeLeakageCount;
-        if (!allowed.nodes.some(node => node.name === variant.allowed)) {
+        if (!EffectArray.some(allowed.nodes, node => node.name === variant.allowed)) {
           worktreeFailures.push(`worktree overlay did not expose ${variant.allowed}`);
         }
         if (contract.forbiddenCrossBranch) {
           worktreeObservationCount += 1;
-          if (forbidden.nodes.some(node => node.name === variant.forbidden)) worktreeLeakageCount += 1;
+          if (EffectArray.some(forbidden.nodes, node => node.name === variant.forbidden)) worktreeLeakageCount += 1;
         }
         if (worktreeFailures.length !== failuresBefore || worktreeLeakageCount !== leakageBefore) {
           failedWorktrees.push({allowed, forbidden, expected: variant.allowed, path: contract.basePath});
@@ -120,20 +123,20 @@ const evaluateNativeCodeGraph = Effect.scoped(
     const identity = yield* resolveRepositoryIdentity(prepared.repository);
     const layout = codeGraphLayout(path, prepared.home, identity.checkoutId, identity.worktreeId);
     const graph = yield* store.loadGraph(layout.databasePath, summary.snapshot.id);
-    const actualAuthoritativeEdges = graph.edges
-      .filter(edge => edge.provenance === 'declared' || edge.provenance === 'resolved')
-      .map(edge =>
+    const actualAuthoritativeEdges = EffectArray.map(
+      EffectArray.filter(graph.edges, edge => edge.provenance === 'declared' || edge.provenance === 'resolved'),
+      edge =>
         codeGraphEdgeKey({
           provenance: edge.provenance,
           relation: edge.relation,
           source: edge.sourceName,
           target: edge.targetName,
         }),
-      );
+    );
     const metrics = evaluateCodeGraphObservations(fixture, observations, {
       actualAuthoritativeEdges,
-      allowedAuthoritativeEdgeKeys: fixture.allowedAuthoritativeEdges.map(codeGraphEdgeKey),
-      extractedEdgeKeys: graph.edges.map(edge =>
+      allowedAuthoritativeEdgeKeys: EffectArray.map(fixture.allowedAuthoritativeEdges, codeGraphEdgeKey),
+      extractedEdgeKeys: EffectArray.map(graph.edges, edge =>
         codeGraphEdgeKey({
           provenance: edge.provenance,
           relation: edge.relation,
@@ -163,13 +166,17 @@ const evaluateNativeCodeGraph = Effect.scoped(
             }).pipe(
               Effect.map(({exact, file}) => ({
                 state: 'observed-after-queries' as const,
-                exactSymbolNames: exact.slice(0, 20).map(node => node.name.slice(0, 256)),
-                fileSymbolNames: (file[0] ?? []).slice(0, 20).map(node => node.name.slice(0, 256)),
+                exactSymbolNames: EffectArray.map(exact.slice(0, 20), node =>
+                  Effect2.pipe(node.name, EffectString.slice(0, 256)),
+                ),
+                fileSymbolNames: EffectArray.map((file[0] ?? []).slice(0, 20), node =>
+                  Effect2.pipe(node.name, EffectString.slice(0, 256)),
+                ),
               })),
             );
             return {
-              expected: failed.expected.slice(0, 256),
-              path: failed.path.slice(0, 1_024),
+              expected: Effect2.pipe(failed.expected, EffectString.slice(0, 256)),
+              path: Effect2.pipe(failed.path, EffectString.slice(0, 1_024)),
               allowed: worktreeQueryObservation(failed.allowed),
               forbidden: worktreeQueryObservation(failed.forbidden),
               selectedSnapshot,
@@ -179,13 +186,13 @@ const evaluateNativeCodeGraph = Effect.scoped(
       );
       yield* printJson({
         actualAuthoritativeEdges,
-        expectedEdges: fixture.expectedEdges.map(codeGraphEdgeKey),
+        expectedEdges: EffectArray.map(fixture.expectedEdges, codeGraphEdgeKey),
         metrics,
         observations,
         worktreeObservations,
         worktreeObservationsTruncated: failedWorktrees.length > worktreeObservations.length,
       });
-      return yield* ScriptError.make({message: gateFailures.join('\n')});
+      return yield* ScriptError.make({message: EffectArray.join(gateFailures, '\n')});
     }
     const baseline: CodeGraphEvaluationBaselineV1 = {
       createdAt: options.createdAt,
@@ -222,15 +229,20 @@ function worktreeQueryObservation(result: CodeGraphQueryResult) {
   return {
     freshness: result.freshness,
     snapshot: result.snapshot,
-    nodes: result.nodes.slice(0, 20).map(node => ({name: node.name.slice(0, 256), path: node.path.slice(0, 1_024)})),
-    warnings: result.warnings.slice(0, 8).map(warning => warning.slice(0, 512)),
+    nodes: EffectArray.map(result.nodes.slice(0, 20), node => ({
+      name: Effect2.pipe(node.name, EffectString.slice(0, 256)),
+      path: Effect2.pipe(node.path, EffectString.slice(0, 1_024)),
+    })),
+    warnings: EffectArray.map(result.warnings.slice(0, 8), warning =>
+      Effect2.pipe(warning, EffectString.slice(0, 512)),
+    ),
   };
 }
 
 function observation(queryId: string, answerable: boolean, result: CodeGraphQueryResult) {
   return {
     answerable,
-    edgeKeys: result.edges.map(edge =>
+    edgeKeys: EffectArray.map(result.edges, edge =>
       codeGraphEdgeKey({
         provenance: edge.provenance,
         relation: edge.relation,
@@ -240,20 +252,23 @@ function observation(queryId: string, answerable: boolean, result: CodeGraphQuer
     ),
     pathHits: [],
     queryId,
-    symbolHits: result.nodes.map(node => `${node.name}\u0000${node.path}`),
+    symbolHits: EffectArray.map(result.nodes, node => `${node.name}\u0000${node.path}`),
   };
 }
 
 function nativeGateFailures(metrics: CodeGraphEvaluationBaselineV1['metrics']): readonly string[] {
-  return [
-    metrics.authoritativeFalseEdgeRate !== 0 ? 'authoritative false-edge rate must be zero' : '',
-    metrics.worktreeLeakageRate !== 0 ? 'worktree leakage rate must be zero' : '',
-    metrics.noAnswerPrecision !== 1 ? 'no-answer precision must be one' : '',
-    metrics.noAnswerRecall !== 1 ? 'no-answer recall must be one' : '',
-    metrics.edgeRecall !== 1 ? 'edge recall regressed below the reviewed native baseline' : '',
-    metrics.symbolRecall !== 1 ? 'symbol recall regressed below the reviewed native baseline' : '',
-    metrics.meanReciprocalRank !== 1 ? 'MRR regressed below the reviewed native baseline' : '',
-  ].filter(Boolean);
+  return EffectArray.filter(
+    [
+      metrics.authoritativeFalseEdgeRate !== 0 ? 'authoritative false-edge rate must be zero' : '',
+      metrics.worktreeLeakageRate !== 0 ? 'worktree leakage rate must be zero' : '',
+      metrics.noAnswerPrecision !== 1 ? 'no-answer precision must be one' : '',
+      metrics.noAnswerRecall !== 1 ? 'no-answer recall must be one' : '',
+      metrics.edgeRecall !== 1 ? 'edge recall regressed below the reviewed native baseline' : '',
+      metrics.symbolRecall !== 1 ? 'symbol recall regressed below the reviewed native baseline' : '',
+      metrics.meanReciprocalRank !== 1 ? 'MRR regressed below the reviewed native baseline' : '',
+    ],
+    Boolean,
+  );
 }
 
 function parseArguments(args: readonly string[]): {
@@ -279,6 +294,7 @@ function parseArguments(args: readonly string[]): {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
@@ -290,9 +306,9 @@ const replaceContractSymbol = Effect.fn('codeGraphEvaluation.replaceContractSymb
   to: string,
 ) {
   const content = yield* fs.readFileString(target);
-  if (!content.includes(from))
+  if (!Effect2.pipe(content, EffectString.includes(from)))
     return yield* ScriptError.make({message: `Evaluation fixture does not contain ${from}.`});
-  yield* fs.writeFileString(target, content.replaceAll(from, to));
+  yield* fs.writeFileString(target, Effect2.pipe(content, EffectString.replaceAll(from, to)));
 });
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(evaluateNativeCodeGraph, ApplicationLayer));

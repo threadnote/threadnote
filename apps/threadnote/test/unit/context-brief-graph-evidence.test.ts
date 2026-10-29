@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -22,12 +23,14 @@ import {
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const REPOSITORY_ID = 'a'.repeat(64);
-const COMMIT = 'b'.repeat(40);
-const SNAPSHOT_ID = `cgsn_${'c'.repeat(40)}`;
+const REPOSITORY_ID = Effect2.pipe('a', EffectString.repeat(64));
+const COMMIT = Effect2.pipe('b', EffectString.repeat(40));
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`;
 const PATH_ANCHOR = 'packages/platform/node/src/NodeHttpClient.ts';
-const SYMBOL_ANCHOR = `cgs_${'d'.repeat(32)}`;
+const SYMBOL_ANCHOR = `cgs_${Effect2.pipe('d', EffectString.repeat(32))}`;
 const MIGRATION_PATH = 'migration/annotations/effect__platform-node__NodeHttpClient.yaml';
 const EFFECT_SOURCE_ANCHORS = [
   PATH_ANCHOR,
@@ -118,13 +121,19 @@ describe('Context Brief exact-anchor graph evidence', () => {
         scope: {callerCwd: '/workspace/effect', kind: 'repository', project: 'effect'},
         task: 'Find NodeHttpClient Undici migration annotations and options.',
       });
-      const pathModuleId = `cgs_${'f'.repeat(32)}`;
+      const pathModuleId = `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`;
       const query = queryService(calls, options => {
         if (options.operation === 'impact') {
           return queryResult({
             edges: [],
             nodes: [
-              sourceNode(`cgs_${'e'.repeat(32)}`, 'UndiciRequestOptions', MIGRATION_PATH, 'property', 'yaml'),
+              sourceNode(
+                `cgs_${Effect2.pipe('e', EffectString.repeat(32))}`,
+                'UndiciRequestOptions',
+                MIGRATION_PATH,
+                'property',
+                'yaml',
+              ),
               sourceNode(pathModuleId, PATH_ANCHOR, PATH_ANCHOR, 'module'),
             ],
             operation: 'impact',
@@ -142,7 +151,13 @@ describe('Context Brief exact-anchor graph evidence', () => {
                 graphEdge('source-import', 'imports', 'packages/platform/node/src/NodeClusterSocket.ts'),
               ],
               nodes: [
-                sourceNode(`cgs_${'e'.repeat(32)}`, 'UndiciRequestOptions', MIGRATION_PATH, 'property', 'yaml'),
+                sourceNode(
+                  `cgs_${Effect2.pipe('e', EffectString.repeat(32))}`,
+                  'UndiciRequestOptions',
+                  MIGRATION_PATH,
+                  'property',
+                  'yaml',
+                ),
                 sourceNode(pathModuleId, PATH_ANCHOR, PATH_ANCHOR, 'module'),
               ],
               operation: 'neighbors',
@@ -155,8 +170,12 @@ describe('Context Brief exact-anchor graph evidence', () => {
       );
 
       expect(calls).toHaveLength(3);
-      expect(calls.every(call => call.project === 'effect' && call.manifestPath === CONFIG.manifestPath)).toBe(true);
-      expect(calls.find(call => call.operation === 'impact')).toMatchObject({
+      expect(
+        EffectArray.every(calls, call => call.project === 'effect' && call.manifestPath === CONFIG.manifestPath),
+      ).toBe(true);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(calls, call => call.operation === 'impact')),
+      ).toMatchObject({
         depth: 0,
         direction: 'incoming',
         operation: 'impact',
@@ -166,18 +185,22 @@ describe('Context Brief exact-anchor graph evidence', () => {
         seedQueries: [PATH_ANCHOR],
         seedQueryCount: 1,
       });
-      expect(calls.find(call => call.nodeId === pathModuleId)).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(calls, call => call.nodeId === pathModuleId)),
+      ).toMatchObject({
         depth: 1,
         direction: 'both',
         operation: 'neighbors',
       });
-      expect(calls.find(call => call.nodeId === SYMBOL_ANCHOR)).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(calls, call => call.nodeId === SYMBOL_ANCHOR)),
+      ).toMatchObject({
         depth: 1,
         direction: 'both',
         nodeId: SYMBOL_ANCHOR,
         operation: 'neighbors',
       });
-      expect(calls.map(call => call.query)).not.toContain(plan.task);
+      expect(EffectArray.map(calls, call => call.query)).not.toContain(plan.task);
       expect([PATH_ANCHOR, 'packages/platform/node/src/Undici.ts']).toContain(evidence.cards[0]?.symbol.path);
       expect(evidence.cards[0]?.symbol.kind).not.toBe('property');
       expect(evidence.contracts[0]).toMatchObject({relation: 'imports'});
@@ -200,13 +223,15 @@ describe('Context Brief exact-anchor graph evidence', () => {
           edges: [graphEdge(`import-${String(options.query)}`, 'imports', 'packages/platform/node/src/index.ts')],
           nodes: [
             sourceNode(
-              options.query === PATH_ANCHOR ? `cgs_${'1'.repeat(32)}` : `cgs_${'2'.repeat(32)}`,
+              options.query === PATH_ANCHOR
+                ? `cgs_${Effect2.pipe('1', EffectString.repeat(32))}`
+                : `cgs_${Effect2.pipe('2', EffectString.repeat(32))}`,
               'packages/platform/node/src/index.ts',
               'packages/platform/node/src/index.ts',
               'module',
             ),
             sourceNode(
-              options.query === PATH_ANCHOR ? `cgs_${'3'.repeat(32)}` : SYMBOL_ANCHOR,
+              options.query === PATH_ANCHOR ? `cgs_${Effect2.pipe('3', EffectString.repeat(32))}` : SYMBOL_ANCHOR,
               String(options.query),
               options.query === PATH_ANCHOR ? PATH_ANCHOR : 'packages/platform/node/src/Undici.ts',
               options.query === PATH_ANCHOR ? 'module' : 'function',
@@ -222,7 +247,7 @@ describe('Context Brief exact-anchor graph evidence', () => {
       );
 
       expect(calls).toHaveLength(2);
-      expect(calls.map(call => call.query)).toEqual([PATH_ANCHOR, SYMBOL_ANCHOR]);
+      expect(EffectArray.map(calls, call => call.query)).toEqual([PATH_ANCHOR, SYMBOL_ANCHOR]);
       expect(calls[0]).toMatchObject({
         depth: 1,
         direction: 'incoming',
@@ -249,7 +274,10 @@ describe('Context Brief exact-anchor graph evidence', () => {
       });
       const query = queryService(calls, options => {
         const anchorPath = String(options.query);
-        const index = EFFECT_SOURCE_ANCHORS.indexOf(anchorPath as (typeof EFFECT_SOURCE_ANCHORS)[number]);
+        const index = EffectOption.getOrElse(
+          EffectArray.findFirstIndex(EFFECT_SOURCE_ANCHORS, anchor => anchor === anchorPath),
+          () => -1,
+        );
         return queryResult({
           edges: [graphEdge(`metadata-${index}`, 'contains', MIGRATION_PATH)],
           nodes: [
@@ -274,11 +302,11 @@ describe('Context Brief exact-anchor graph evidence', () => {
       const recovery = projected.structuredContent.recommendedFollowUps[0];
 
       expect(calls).toHaveLength(EFFECT_SOURCE_ANCHORS.length);
-      expect(calls.every(call => call.operation === 'impact' && call.depth === 0)).toBe(true);
-      expect(calls.map(call => call.query)).toEqual(EFFECT_SOURCE_ANCHORS);
-      expect(calls.map(call => call.query)).not.toContain(plan.task);
-      expect(evidence.cards.map(card => card.symbol.path)).toEqual(EFFECT_SOURCE_ANCHORS);
-      expect(evidence.cards.every(card => card.symbol.kind === 'module')).toBe(true);
+      expect(EffectArray.every(calls, call => call.operation === 'impact' && call.depth === 0)).toBe(true);
+      expect(EffectArray.map(calls, call => call.query)).toEqual(EFFECT_SOURCE_ANCHORS);
+      expect(EffectArray.map(calls, call => call.query)).not.toContain(plan.task);
+      expect(EffectArray.map(evidence.cards, card => card.symbol.path)).toEqual(EFFECT_SOURCE_ANCHORS);
+      expect(EffectArray.every(evidence.cards, card => card.symbol.kind === 'module')).toBe(true);
       expect(evidence.contracts).toEqual([]);
       expect(recovery).toMatchObject({operation: 'inspect-node', ref: stableId(1)});
       expect(parseContextBriefJsonText(projected.text).recommendedFollowUps?.[0]).toEqual(recovery);
@@ -300,7 +328,15 @@ describe('Context Brief exact-anchor graph evidence', () => {
       const query = queryService(calls, () =>
         queryResult({
           edges: [graphEdge('unrelated-metadata', 'contains', MIGRATION_PATH)],
-          nodes: [sourceNode(`cgs_${'8'.repeat(32)}`, 'UnrelatedMigration', MIGRATION_PATH, 'property', 'yaml')],
+          nodes: [
+            sourceNode(
+              `cgs_${Effect2.pipe('8', EffectString.repeat(32))}`,
+              'UnrelatedMigration',
+              MIGRATION_PATH,
+              'property',
+              'yaml',
+            ),
+          ],
           operation: 'impact',
         }),
       );
@@ -503,21 +539,24 @@ describe('Context Brief exact-anchor graph evidence', () => {
           scope: {callerCwd: '/workspace/effect', kind: 'repository'},
           task: 'Trace the selected source.',
         });
-        const metadataNodes = values.map((value, index) =>
+        const metadataNodes = EffectArray.map(values, (value, index) =>
           sourceNode(
-            `cgs_${(index + 10).toString(16).padStart(32, '0')}`,
+            `cgs_${Effect2.pipe((index + 10).toString(16), EffectString.padStart(32, '0'))}`,
             `migration-${value}`,
             `${MIGRATION_PATH}#property-${index}`,
             'property',
             'yaml',
           ),
         );
-        const metadataEdges = values.map((value, index) =>
+        const metadataEdges = EffectArray.map(values, (value, index) =>
           graphEdge(`metadata-${index}-${value}`, 'contains', MIGRATION_PATH),
         );
         const result = queryResult({
           edges: [...metadataEdges, graphEdge('source-reexport', 'reexports', 'packages/platform/node/src/index.ts')],
-          nodes: [...metadataNodes, sourceNode(`cgs_${'9'.repeat(32)}`, PATH_ANCHOR, PATH_ANCHOR, 'module')],
+          nodes: [
+            ...metadataNodes,
+            sourceNode(`cgs_${Effect2.pipe('9', EffectString.repeat(32))}`, PATH_ANCHOR, PATH_ANCHOR, 'module'),
+          ],
           operation: 'query',
         });
         const projected = fromRepositoryQuery(mergeContextBriefAnchoredRepositoryGraphResults(plan.graph, [result]));
@@ -572,7 +611,7 @@ describe('Context Brief exact-anchor graph evidence', () => {
         task: 'Trace NodeHttpClient, Undici, consumers, re-exports, and tests.',
       });
       const relations = ['imports', 'imports', 'imports', 'reexports', 'tests'] as const;
-      const results = EFFECT_SOURCE_ANCHORS.map((anchorPath, index) => {
+      const results = EffectArray.map(EFFECT_SOURCE_ANCHORS, (anchorPath, index) => {
         const anchorId = stableId(index * 4 + 1);
         const consumerId = stableId(index * 4 + 2);
         const metadataId = stableId(index * 4 + 3);
@@ -608,7 +647,7 @@ describe('Context Brief exact-anchor graph evidence', () => {
       const selectedAction = projected.structuredContent.recommendedFollowUps[0];
 
       expect(evidence.cards[0]?.symbol.path).not.toBe(MIGRATION_PATH);
-      expect(evidence.cards.some(card => card.symbol.path === MIGRATION_PATH)).toBe(true);
+      expect(EffectArray.some(evidence.cards, card => card.symbol.path === MIGRATION_PATH)).toBe(true);
       expect(topContract).toMatchObject({
         evidence: {path: sourceConsumerPath(0)},
         relation: 'imports',
@@ -642,10 +681,10 @@ describe('Context Brief exact-anchor graph evidence', () => {
           });
           const anchorId = stableId(1);
           const consumerId = stableId(2);
-          const metadataNodes = values.map((value, index) =>
+          const metadataNodes = EffectArray.map(values, (value, index) =>
             sourceNode(stableId(index + 10), `migration-${value}`, MIGRATION_PATH, 'property', 'yaml'),
           );
-          const metadataEdges = metadataNodes.map((node, index) =>
+          const metadataEdges = EffectArray.map(metadataNodes, (node, index) =>
             relationshipEdge(`metadata-${index}`, 'contains', MIGRATION_PATH, node.id, anchorId),
           );
           const result = queryResult({
@@ -664,7 +703,9 @@ describe('Context Brief exact-anchor graph evidence', () => {
 
           expect(evidence.cards[0]?.ref).toBe(consumerId);
           expect(evidence.contracts[0]?.relation).toBe(relation);
-          expect(evidence.cards.filter(card => card.symbol.path === MIGRATION_PATH)).toHaveLength(values.length);
+          expect(EffectArray.filter(evidence.cards, card => card.symbol.path === MIGRATION_PATH)).toHaveLength(
+            values.length,
+          );
         },
       ),
       {numRuns: 50},
@@ -676,7 +717,7 @@ describe('Context Brief exact-anchor graph evidence', () => {
       fc.property(
         fc.array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789_-'), {minLength: 1, maxLength: 40}),
         characters => {
-          const path = `src/${characters.join('')}.ts`;
+          const path = `src/${EffectArray.join(characters, '')}.ts`;
           const plan = planContextBrief({
             budgetTokens: 1_500,
             codeRefs: [path, SYMBOL_ANCHOR],
@@ -699,7 +740,14 @@ describe('Context Brief exact-anchor graph evidence', () => {
               {...requests[0], seedQueries: undefined, seedQueryCount: undefined},
               queryResult({
                 edges: [],
-                nodes: [sourceNode(`cgs_${'4'.repeat(32)}`, 'UnrelatedMigration', MIGRATION_PATH, 'property')],
+                nodes: [
+                  sourceNode(
+                    `cgs_${Effect2.pipe('4', EffectString.repeat(32))}`,
+                    'UnrelatedMigration',
+                    MIGRATION_PATH,
+                    'property',
+                  ),
+                ],
                 operation: 'impact',
               }),
             ),
@@ -760,7 +808,7 @@ function queryResult(input: {
 
 function sourceNode(id: string, name: string, path: string, kind: string, language = 'typescript'): CodeGraphQueryNode {
   return {
-    contentHash: '0'.repeat(64),
+    contentHash: Effect2.pipe('0', EffectString.repeat(64)),
     exported: true,
     id,
     kind,
@@ -781,9 +829,9 @@ function graphEdge(id: string, relation: CodeGraphEdge['relation'], evidencePath
     id,
     provenance: 'resolved',
     relation,
-    sourceId: `cgs_${'6'.repeat(32)}`,
+    sourceId: `cgs_${Effect2.pipe('6', EffectString.repeat(32))}`,
     sourceName: 'source',
-    targetId: `cgs_${'7'.repeat(32)}`,
+    targetId: `cgs_${Effect2.pipe('7', EffectString.repeat(32))}`,
     targetName: 'target',
   };
 }
@@ -799,7 +847,7 @@ function relationshipEdge(
 }
 
 function stableId(value: number): string {
-  return `cgs_${value.toString(16).padStart(32, '0')}`;
+  return `cgs_${Effect2.pipe(value.toString(16), EffectString.padStart(32, '0'))}`;
 }
 
 function sourceConsumerPath(index: number): string {

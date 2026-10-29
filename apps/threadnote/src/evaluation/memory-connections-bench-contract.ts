@@ -1,7 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {MEMORY_RELATION_TYPES, type MemoryRelation, type MemoryRelationType} from '@threadnote/memory/document';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MEMORY_CONNECTIONS_BENCH_VERSION = 1 as const;
 export const MEMORY_CONNECTIONS_BENCH_ID = 'memory-connections-bench-v1' as const;
@@ -131,40 +135,42 @@ export function parseMemoryConnectionsBenchFixtureV1(value: unknown): MemoryConn
 
   const authoring = record(fixture.authoring, 'authoring');
   exactKeys(authoring, ['cases', 'documents']);
-  if (!Array.isArray(authoring.documents) || authoring.documents.length === 0) {
+  if (!EffectArray.isArray(authoring.documents) || authoring.documents.length === 0) {
     invalid('authoring documents must be a non-empty array');
   }
-  if (!Array.isArray(authoring.cases) || authoring.cases.length === 0) {
+  if (!EffectArray.isArray(authoring.cases) || authoring.cases.length === 0) {
     invalid('authoring cases must be a non-empty array');
   }
-  const documents = authoring.documents.map(parseDocument);
-  const cases = authoring.cases.map(parseAuthoringCase);
+  const documents = EffectArray.map(authoring.documents, parseDocument);
+  const cases = EffectArray.map(authoring.cases, parseAuthoringCase);
   assertUnique(
-    cases.map(testCase => testCase.id),
+    EffectArray.map(cases, testCase => testCase.id),
     'authoring case ids',
   );
   for (const scenario of MEMORY_CONNECTIONS_AUTHORING_SCENARIOS) {
-    if (!cases.some(testCase => testCase.scenario === scenario)) {
+    if (!EffectArray.some(cases, testCase => testCase.scenario === scenario)) {
       invalid(`missing reviewed authoring scenario ${scenario}`);
     }
   }
 
-  if (!Array.isArray(fixture.projectionTraces) || fixture.projectionTraces.length === 0) {
+  if (!EffectArray.isArray(fixture.projectionTraces) || fixture.projectionTraces.length === 0) {
     invalid('projection traces must be a non-empty array');
   }
-  const projectionTraces = fixture.projectionTraces.map(parseProjectionTrace);
+  const projectionTraces = EffectArray.map(fixture.projectionTraces, parseProjectionTrace);
   assertUnique(
-    projectionTraces.map(trace => trace.id),
+    EffectArray.map(projectionTraces, trace => trace.id),
     'projection trace ids',
   );
-  const operationKinds = new Set(projectionTraces.flatMap(trace => trace.operations.map(operation => operation.kind)));
+  const operationKinds = new Set(
+    EffectArray.flatMap(projectionTraces, trace => EffectArray.map(trace.operations, operation => operation.kind)),
+  );
   for (const operation of MEMORY_CONNECTIONS_PROJECTION_OPERATIONS) {
     if (!operationKinds.has(operation)) invalid(`missing reviewed projection operation ${operation}`);
   }
 
   const coveredAbilities = new Set([
-    ...cases.map(testCase => testCase.ability),
-    ...projectionTraces.map(trace => trace.ability),
+    ...EffectArray.map(cases, testCase => testCase.ability),
+    ...EffectArray.map(projectionTraces, trace => trace.ability),
   ]);
   for (const ability of MEMORY_CONNECTIONS_BENCH_ABILITIES) {
     if (!coveredAbilities.has(ability)) invalid(`ability ${ability} has no reviewed case`);
@@ -204,10 +210,10 @@ export function assertApprovedMemoryConnectionsBenchFixture(input: MemoryConnect
 function parseDocument(value: unknown): MemoryConnectionsBenchDocumentV1 {
   const document = record(value, 'document');
   exactKeys(document, ['memoryId', 'relations', 'status', 'topic', 'user']);
-  if (!Array.isArray(document.relations)) invalid('document relations must be an array');
+  if (!EffectArray.isArray(document.relations)) invalid('document relations must be an array');
   return {
     memoryId: memoryId(document.memoryId, 'document memory id'),
-    relations: document.relations.map(parseRelation),
+    relations: EffectArray.map(document.relations, parseRelation),
     status: literal(document.status, ['active', 'archived'] as const, 'document status'),
     topic: slug(document.topic, 'document topic'),
     user: slug(document.user, 'document user'),
@@ -217,17 +223,17 @@ function parseDocument(value: unknown): MemoryConnectionsBenchDocumentV1 {
 function parseAuthoringCase(value: unknown): MemoryConnectionsAuthoringCaseV1 {
   const testCase = record(value, 'authoring case');
   exactKeys(testCase, ['ability', 'allowedScopes', 'expected', 'id', 'relations', 'scenario', 'sourceMemoryId']);
-  if (!Array.isArray(testCase.relations) || testCase.relations.length === 0 || testCase.relations.length > 16) {
+  if (!EffectArray.isArray(testCase.relations) || testCase.relations.length === 0 || testCase.relations.length > 16) {
     invalid('authoring case relations must contain between 1 and 16 items');
   }
   const expected = record(testCase.expected, 'authoring expectation');
   let parsedExpected: MemoryConnectionsAuthoringCaseV1['expected'];
   if (expected.kind === 'success') {
     exactKeys(expected, ['kind', 'relations']);
-    if (!Array.isArray(expected.relations) || expected.relations.length === 0) {
+    if (!EffectArray.isArray(expected.relations) || expected.relations.length === 0) {
       invalid('successful authoring expectation needs relations');
     }
-    parsedExpected = {kind: 'success', relations: expected.relations.map(parseRelation)};
+    parsedExpected = {kind: 'success', relations: EffectArray.map(expected.relations, parseRelation)};
   } else if (expected.kind === 'failure') {
     exactKeys(expected, ['kind', 'messageIncludes']);
     parsedExpected = {
@@ -237,15 +243,15 @@ function parseAuthoringCase(value: unknown): MemoryConnectionsAuthoringCaseV1 {
   } else {
     invalid('authoring expectation kind is invalid');
   }
-  if (!Array.isArray(testCase.allowedScopes) || testCase.allowedScopes.length === 0) {
+  if (!EffectArray.isArray(testCase.allowedScopes) || testCase.allowedScopes.length === 0) {
     invalid('authoring case allowed scopes must be a non-empty array');
   }
   return {
     ability: literal(testCase.ability, MEMORY_CONNECTIONS_BENCH_ABILITIES, 'authoring ability'),
-    allowedScopes: testCase.allowedScopes.map(scope => threadnoteUri(scope, 'allowed scope')),
+    allowedScopes: EffectArray.map(testCase.allowedScopes, scope => threadnoteUri(scope, 'allowed scope')),
     expected: parsedExpected,
     id: nonEmptyString(testCase.id, 'authoring case id'),
-    relations: testCase.relations.map(parseRelation),
+    relations: EffectArray.map(testCase.relations, parseRelation),
     scenario: literal(testCase.scenario, MEMORY_CONNECTIONS_AUTHORING_SCENARIOS, 'authoring scenario'),
     sourceMemoryId: testCase.sourceMemoryId === null ? null : memoryId(testCase.sourceMemoryId, 'source memory id'),
   };
@@ -254,17 +260,17 @@ function parseAuthoringCase(value: unknown): MemoryConnectionsAuthoringCaseV1 {
 function parseProjectionTrace(value: unknown): MemoryConnectionsProjectionTraceV1 {
   const trace = record(value, 'projection trace');
   exactKeys(trace, ['ability', 'id', 'initialDocuments', 'operations', 'user']);
-  if (!Array.isArray(trace.initialDocuments) || trace.initialDocuments.length === 0) {
+  if (!EffectArray.isArray(trace.initialDocuments) || trace.initialDocuments.length === 0) {
     invalid('projection trace initial documents must be a non-empty array');
   }
-  if (!Array.isArray(trace.operations) || trace.operations.length === 0) {
+  if (!EffectArray.isArray(trace.operations) || trace.operations.length === 0) {
     invalid('projection trace operations must be a non-empty array');
   }
   return {
     ability: literal(trace.ability, MEMORY_CONNECTIONS_BENCH_ABILITIES, 'projection ability'),
     id: nonEmptyString(trace.id, 'projection trace id'),
-    initialDocuments: trace.initialDocuments.map(parseDocument).sort(compareDocument),
-    operations: trace.operations.map(parseProjectionOperation),
+    initialDocuments: EffectArray.map(trace.initialDocuments, parseDocument).sort(compareDocument),
+    operations: EffectArray.map(trace.operations, parseProjectionOperation),
     user: slug(trace.user, 'projection trace user'),
   };
 }
@@ -301,30 +307,27 @@ function parseProjectionOperation(value: unknown): MemoryConnectionsProjectionOp
 }
 
 function parseExpectedRows(value: unknown): readonly MemoryConnectionsExpectedProjectionRowV1[] {
-  if (!Array.isArray(value)) invalid('expected rows must be an array');
-  return value
-    .map(item => {
-      const row = record(item, 'expected projection row');
-      exactKeys(row, [
-        'relationOrdinal',
-        'relationOrigin',
-        'relationType',
-        'sourceMemoryId',
-        'targetMemoryId',
-        'targetRef',
-      ]);
-      if (row.relationOrigin !== 'relation') invalid('projection row origin must be relation in the A+B fixture');
-      return {
-        relationOrdinal: nonNegativeInteger(row.relationOrdinal, 'relation ordinal'),
-        relationOrigin: 'relation' as const,
-        relationType: literal(row.relationType, MEMORY_RELATION_TYPES, 'projection relation type'),
-        sourceMemoryId: memoryId(row.sourceMemoryId, 'projection source memory id'),
-        targetMemoryId:
-          row.targetMemoryId === null ? null : memoryId(row.targetMemoryId, 'projection target memory id'),
-        targetRef: threadnoteUri(row.targetRef, 'projection target ref'),
-      };
-    })
-    .sort(compareExpectedRow);
+  if (!EffectArray.isArray(value)) invalid('expected rows must be an array');
+  return EffectArray.map(value, item => {
+    const row = record(item, 'expected projection row');
+    exactKeys(row, [
+      'relationOrdinal',
+      'relationOrigin',
+      'relationType',
+      'sourceMemoryId',
+      'targetMemoryId',
+      'targetRef',
+    ]);
+    if (row.relationOrigin !== 'relation') invalid('projection row origin must be relation in the A+B fixture');
+    return {
+      relationOrdinal: nonNegativeInteger(row.relationOrdinal, 'relation ordinal'),
+      relationOrigin: 'relation' as const,
+      relationType: literal(row.relationType, MEMORY_RELATION_TYPES, 'projection relation type'),
+      sourceMemoryId: memoryId(row.sourceMemoryId, 'projection source memory id'),
+      targetMemoryId: row.targetMemoryId === null ? null : memoryId(row.targetMemoryId, 'projection target memory id'),
+      targetRef: threadnoteUri(row.targetRef, 'projection target ref'),
+    };
+  }).sort(compareExpectedRow);
 }
 
 function parseRelation(value: unknown): MemoryRelation {
@@ -356,9 +359,9 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
-  const actual = Object.keys(value).sort(compareText);
+  const actual = EffectRecord.keys(value).sort(compareText);
   const wanted = [...expected].sort(compareText);
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid('object has unsupported or missing fields');
   }
 }
@@ -377,13 +380,15 @@ function literalArray<const Values extends readonly string[]>(
   values: Values,
   label: string,
 ): Array<Values[number]> {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
-  return value.map(item => literal(item, values, label));
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
+  return EffectArray.map(value, item => literal(item, values, label));
 }
 
 function sameSet(left: readonly string[], right: readonly string[]): boolean {
   return (
-    left.length === right.length && new Set(left).size === left.length && left.every(value => right.includes(value))
+    left.length === right.length &&
+    new Set(left).size === left.length &&
+    EffectArray.every(left, value => right.includes(value))
   );
 }
 
@@ -409,7 +414,8 @@ function threadnoteUri(value: unknown, label: string): string {
 }
 
 function nonEmptyString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value.trim()) invalid(`${label} must be a non-empty string`);
+  if (typeof value !== 'string' || !Effect.pipe(value, EffectString.trim))
+    invalid(`${label} must be a non-empty string`);
   return value;
 }
 

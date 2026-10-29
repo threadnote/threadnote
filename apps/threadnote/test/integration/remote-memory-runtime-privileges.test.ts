@@ -11,6 +11,8 @@ import {
   assertRemoteMemoryRuntimePrivileges,
 } from '@threadnote/remote-memory/runtime_privileges';
 import {PostgresRemoteMemoryOperatorAdapter} from '@threadnote/remote-memory/operator/postgres';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const databaseUrl = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const postgresDescribe = databaseUrl ? describe : describe.skip;
@@ -35,19 +37,32 @@ postgresDescribe('remote runtime database privilege preflight', () => {
   beforeAll(async () => {
     fixture = await createRemoteMemoryPostgresFixture(databaseUrl!);
     admin = postgres(databaseUrl!, {max: 1, onnotice: () => undefined});
-    const grants = (await Bun.file('deploy/remote-memory/grants/001-runtime.sql').text())
-      .replace(/^\\set .*$/gm, '')
-      .replaceAll('threadnote_remote_runtime', fixture.runtimeRoleName);
+    const grants = Effect.pipe(
+      await Bun.file('deploy/remote-memory/grants/001-runtime.sql').text(),
+      __effectPipeInput => {
+        const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.replace(/^\\set .*$/gm, ''));
+        const __effectPipeStage1 = Effect.pipe(
+          __effectPipeStage0,
+          EffectString.replaceAll('threadnote_remote_runtime', fixture.runtimeRoleName),
+        );
+        return __effectPipeStage1;
+      },
+    );
     await fixture.migratorSql.unsafe(grants);
-    healthWorkerRoleName = fixture.runtimeRoleName.replace('runtime', 'context_health_worker');
-    const password = randomUuidV4().replaceAll('-', '');
+    healthWorkerRoleName = Effect.pipe(
+      fixture.runtimeRoleName,
+      EffectString.replace('runtime', 'context_health_worker'),
+    );
+    const password = Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''));
     await admin.unsafe(
       `CREATE ROLE ${healthWorkerRoleName} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`,
     );
     await admin.unsafe(`GRANT CONNECT ON DATABASE ${fixture.databaseName} TO ${healthWorkerRoleName}`);
-    const healthGrants = (await Bun.file('deploy/remote-memory/grants/002-context-health-worker.sql').text())
-      .replace(/^\\set .*$/gm, '')
-      .replaceAll('threadnote_context_health_worker', healthWorkerRoleName);
+    const healthGrants = Effect.pipe(
+      await Bun.file('deploy/remote-memory/grants/002-context-health-worker.sql').text(),
+      EffectString.replace(/^\\set .*$/gm, ''),
+      EffectString.replaceAll('threadnote_context_health_worker', healthWorkerRoleName),
+    );
     await fixture.migratorSql.unsafe(healthGrants);
     const healthUrl = new URL(databaseUrl!);
     healthUrl.pathname = `/${fixture.databaseName}`;
@@ -164,7 +179,8 @@ postgresDescribe('remote runtime database privilege preflight', () => {
     const migration = await Bun.file('packages/remote-memory/src/migrations/008_hosted_context_health.sql').text();
     const original = /CREATE FUNCTION remote_memory\.lock_context_health_target\([\s\S]*?\n\$\$;/u.exec(migration)?.[0];
     if (!original) throw new Error('Lifecycle-lock definition is missing from migration 8.');
-    const replacement = original.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION');
+    const replacement = Effect.pipe(original, EffectString.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'));
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
     const drifted = replacement.replace(/AS \$\$[\s\S]*?\n\$\$;/u, () => 'AS $$\nBEGIN\n  RETURN false;\nEND;\n$$;');
     const before = await lifecycleLockCatalogIdentity(fixture.migratorSql);
     try {

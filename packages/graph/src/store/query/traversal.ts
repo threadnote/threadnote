@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {type CodeGraphProvenance} from '../../types.js';
 import {type CodeGraphSqlQueryStatement} from '../visualization_sql.js';
 import {edgePriorityOrder, effectiveAdjacentEdgesCte} from './core.js';
@@ -37,7 +38,10 @@ export function codeGraphEdgesByIdsQueryStatement(
   edgeIds: readonly string[],
 ): CodeGraphSqlQueryStatement {
   const ids = [...new Set(edgeIds)].slice(0, CODE_GRAPH_EDGE_HYDRATION_BATCH_SIZE);
-  const placeholders = ids.map(() => '?').join(', ');
+  const placeholders = EffectArray.join(
+    EffectArray.map(ids, () => '?'),
+    ', ',
+  );
   return {
     parameters: [snapshotId, ...ids, baseSnapshotId ?? '', ...ids, snapshotId, snapshotId],
     text: `SELECT current_edges.*

@@ -1,9 +1,32 @@
+import {
+  managerWorksetRepositoryLabel,
+  findDefinitionMember,
+  managerWorksetMemberLocation,
+  managerWorksetProjectLocation,
+  managerWorksetProjectSearchText,
+  managerWorksetProjectRank,
+  hasProjectSelection,
+} from './worksets_locations.js';
+export {managerWorksetRepositoryLabel} from './worksets_locations.js';
+import {
+  isCodeGraphCrossRepositoryTraversalResultV1,
+  isCodeGraphWorksetStatusResultV1,
+  isCodeGraphWorksetTopologyResultV1,
+  isJobResponse,
+  isJobsResponse,
+  isManagerWorksetCatalog,
+  isManagerWorksetDefinition,
+  isManagerWorksetDefinitionMutationResult,
+  isProjectedCodeGraphWorksetEvidenceV1,
+  isProjectedContextBriefV1,
+} from './api/response_guards.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {ArrowLeft, Layers, Plus} from 'lucide-react';
 import {PageActions} from './workspace.js';
 import {Schema} from 'effect';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {CONTEXT_BRIEF_MODES} from '@threadnote/context/types';
-import type {ProjectedContextBriefV1, ContextBriefMode} from '@threadnote/context/types';
+import {isContextBriefMode, type ProjectedContextBriefV1, type ContextBriefMode} from '@threadnote/context/types';
 import type {CodeGraphWorksetTopologyResultV1} from '@threadnote/graph/cross_repository/runtime';
 import type {CodeGraphCrossRepositoryTraversalResultV1} from '@threadnote/graph/cross_repository/traversal';
 import {renderCodeGraphWorksetPrepareProgress} from '@threadnote/graph/workset_catalog/progress_render';
@@ -21,6 +44,8 @@ import type {
   ManagerWorksetPrepareJobSummary,
   ManagerWorksetProjectSummary,
 } from '@threadnote/manager/workset/contracts';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type WorksetOperation = 'brief' | 'query' | 'topology' | 'traversal';
 type TraversalMode = 'impact' | 'path';
@@ -55,32 +80,49 @@ export function WorksetsPanel(): React.ReactElement {
   const catalogLive = useManagerLiveQuery<ManagerWorksetCatalog>(
     {topic: 'worksets', scope: 'account'},
     'catalog',
-    signal => api('/api/worksets', undefined, {signal}),
+    signal => api('/api/worksets', undefined, {signal}, isManagerWorksetCatalog),
+    isManagerWorksetCatalog,
   );
   const jobsLive = useManagerLiveQuery<{readonly jobs: readonly ManagerWorksetPrepareJobSummary[]}>(
     {topic: 'worksets', scope: 'account'},
     'jobs',
-    signal => api('/api/worksets/jobs', undefined, {signal}),
+    signal => api('/api/worksets/jobs', undefined, {signal}, isJobsResponse),
+    isJobsResponse,
   );
   const definitionLive = useManagerLiveQuery<ManagerWorksetDefinition>(
     selectedName ? {topic: 'worksets', scope: 'account'} : undefined,
     JSON.stringify(['definition', selectedName]),
-    signal => api(`/api/worksets/definition?workset=${encodeURIComponent(selectedName)}`, undefined, {signal}),
+    signal =>
+      api(
+        `/api/worksets/definition?workset=${encodeURIComponent(selectedName)}`,
+        undefined,
+        {signal},
+        isManagerWorksetDefinition,
+      ),
+    isManagerWorksetDefinition,
   );
   const statusLive = useManagerLiveQuery<CodeGraphWorksetStatusResultV1>(
     selectedName ? {topic: 'worksets', scope: 'account'} : undefined,
     JSON.stringify(['status', selectedName]),
-    signal => api(`/api/worksets/status?workset=${encodeURIComponent(selectedName)}`, undefined, {signal}),
+    signal =>
+      api(
+        `/api/worksets/status?workset=${encodeURIComponent(selectedName)}`,
+        undefined,
+        {signal},
+        isCodeGraphWorksetStatusResultV1,
+      ),
+    isCodeGraphWorksetStatusResultV1,
   );
   const jobLive = useManagerLiveQuery<{readonly job: ManagerWorksetPrepareJob}>(
     job?.id ? {topic: 'worksets', scope: 'account'} : undefined,
     JSON.stringify(['job', job?.id]),
-    signal => api(`/api/worksets/jobs/${encodeURIComponent(job?.id ?? '')}`, undefined, {signal}),
+    signal => api(`/api/worksets/jobs/${encodeURIComponent(job?.id ?? '')}`, undefined, {signal}, isJobResponse),
+    isJobResponse,
   );
   const fallback = !catalogLive.active || catalogLive.snapshot.status === 'unsupported';
   const liveReadErrors = fallback
     ? []
-    : [jobsLive.snapshot, definitionLive.snapshot, jobLive.snapshot].flatMap(snapshot =>
+    : EffectArray.flatMap([jobsLive.snapshot, definitionLive.snapshot, jobLive.snapshot], snapshot =>
         snapshot.status === 'error' ? [errorMessage(snapshot.error)] : [],
       );
   const completedJob = useRef<string | undefined>(undefined);
@@ -120,15 +162,22 @@ export function WorksetsPanel(): React.ReactElement {
   selectedNameRef.current = selectedName;
 
   const selected = useMemo(
-    () => catalog?.definitions.find(definition => definition.name === selectedName),
+    () =>
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(catalog?.definitions), findArray =>
+          EffectOption.getOrUndefined(EffectArray.findFirst(findArray, definition => definition.name === selectedName)),
+        ),
+      ),
     [catalog, selectedName],
   );
   const projectPicker = useMemo(() => {
     if (!definitionDraft || !catalog) return {items: [], page: 0, pageCount: 0, total: 0};
-    const normalized = definitionFilter.trim().toLowerCase();
-    const projects = new Map(catalog.projects.map(project => [project.name.toLowerCase(), project]));
+    const normalized = Effect.pipe(definitionFilter, EffectString.trim, EffectString.toLowerCase);
+    const projects = new Map(
+      EffectArray.map(catalog.projects, project => [Effect.pipe(project.name, EffectString.toLowerCase), project]),
+    );
     for (const project of definitionDraft.projects) {
-      const key = project.toLowerCase();
+      const key = Effect.pipe(project, EffectString.toLowerCase);
       if (!projects.has(key)) {
         projects.set(key, {
           branchState: 'missing',
@@ -140,12 +189,14 @@ export function WorksetsPanel(): React.ReactElement {
         });
       }
     }
-    const candidates = [...projects.values()]
-      .filter(project => !definitionSelectedOnly || hasProjectSelection(definitionDraft.projects, project.name))
-      .filter(project => !normalized || managerWorksetProjectSearchText(project).includes(normalized))
-      .sort(
-        (left, right) => managerWorksetProjectRank(left, normalized) - managerWorksetProjectRank(right, normalized),
-      );
+    const candidates = EffectArray.filter(
+      EffectArray.filter(
+        [...projects.values()],
+        project => !definitionSelectedOnly || hasProjectSelection(definitionDraft.projects, project.name),
+      ),
+      project =>
+        !normalized || Effect.pipe(managerWorksetProjectSearchText(project), EffectString.includes(normalized)),
+    ).sort((left, right) => managerWorksetProjectRank(left, normalized) - managerWorksetProjectRank(right, normalized));
     const pageCount = Math.ceil(candidates.length / PROJECT_PICKER_VISIBLE_MAXIMUM);
     const page = Math.min(definitionProjectPage, Math.max(0, pageCount - 1));
     return {
@@ -179,13 +230,20 @@ export function WorksetsPanel(): React.ReactElement {
     setCatalog(next);
     setCatalogError('');
     setSelectedName(current =>
-      next.definitions.some(definition => definition.name === current) ? current : (next.definitions[0]?.name ?? ''),
+      EffectArray.some(next.definitions, definition => definition.name === current)
+        ? current
+        : (next.definitions[0]?.name ?? ''),
     );
   }, [fallback, catalogLive.snapshot]);
   useEffect(() => {
     if (fallback) return;
     if (jobsLive.snapshot.status !== 'ready') return;
-    const active = jobsLive.snapshot.data.jobs.find(item => item.status === 'running' || item.status === 'cancelling');
+    const active = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        jobsLive.snapshot.data.jobs,
+        item => item.status === 'running' || item.status === 'cancelling',
+      ),
+    );
     const selectedJob = active ?? jobsLive.snapshot.data.jobs[0];
     if (selectedJob) setJob(current => (current?.id === selectedJob.id ? current : selectedJob));
   }, [fallback, jobsLive.snapshot]);
@@ -255,7 +313,12 @@ export function WorksetsPanel(): React.ReactElement {
     let jobTimer: number | undefined;
     const pollJob = async (): Promise<void> => {
       try {
-        const next = await api<{readonly job: ManagerWorksetPrepareJob}>(`/api/worksets/jobs/${job.id}`);
+        const next = await api<{readonly job: ManagerWorksetPrepareJob}>(
+          `/api/worksets/jobs/${job.id}`,
+          undefined,
+          undefined,
+          isJobResponse,
+        );
         if (cancelled) return;
         setJob(next.job);
         if (next.job.status === 'running' || next.job.status === 'cancelling') {
@@ -285,12 +348,17 @@ export function WorksetsPanel(): React.ReactElement {
     const sequence = catalogSequenceRef.current + 1;
     catalogSequenceRef.current = sequence;
     try {
-      const next = await api<ManagerWorksetCatalog>('/api/worksets', undefined, {signal: controller.signal});
+      const next = await api<ManagerWorksetCatalog>(
+        '/api/worksets',
+        undefined,
+        {signal: controller.signal},
+        isManagerWorksetCatalog,
+      );
       if (sequence !== catalogSequenceRef.current) return;
       setCatalog(next);
       setCatalogError('');
       const currentName = selectedNameRef.current;
-      const nextName = next.definitions.some(definition => definition.name === currentName)
+      const nextName = EffectArray.some(next.definitions, definition => definition.name === currentName)
         ? currentName
         : (next.definitions[0]?.name ?? '');
       setSelectedName(nextName);
@@ -308,11 +376,23 @@ export function WorksetsPanel(): React.ReactElement {
 
   async function loadJobs(): Promise<void> {
     try {
-      const response = await api<{readonly jobs: readonly ManagerWorksetPrepareJobSummary[]}>('/api/worksets/jobs');
-      const active = response.jobs.find(item => item.status === 'running' || item.status === 'cancelling');
+      const response = await api<{readonly jobs: readonly ManagerWorksetPrepareJobSummary[]}>(
+        '/api/worksets/jobs',
+        undefined,
+        undefined,
+        isJobsResponse,
+      );
+      const active = EffectOption.getOrUndefined(
+        EffectArray.findFirst(response.jobs, item => item.status === 'running' || item.status === 'cancelling'),
+      );
       const selectedJob = active ?? response.jobs[0];
       if (!selectedJob) return;
-      const detail = await api<{readonly job: ManagerWorksetPrepareJob}>(`/api/worksets/jobs/${selectedJob.id}`);
+      const detail = await api<{readonly job: ManagerWorksetPrepareJob}>(
+        `/api/worksets/jobs/${selectedJob.id}`,
+        undefined,
+        undefined,
+        isJobResponse,
+      );
       setJob(detail.job);
     } catch {
       // Definitions and read-only search remain useful if job history is unavailable.
@@ -330,6 +410,7 @@ export function WorksetsPanel(): React.ReactElement {
         `/api/worksets/definition?workset=${encodeURIComponent(name)}`,
         undefined,
         {signal: controller.signal},
+        isManagerWorksetDefinition,
       );
       if (sequence === definitionSequenceRef.current) setSelectedDefinition(next);
     } catch (cause) {
@@ -350,6 +431,7 @@ export function WorksetsPanel(): React.ReactElement {
         `/api/worksets/status?workset=${encodeURIComponent(name)}`,
         undefined,
         {signal: controller.signal},
+        isCodeGraphWorksetStatusResultV1,
       );
       if (sequence !== statusSequenceRef.current) return;
       setStatus(next);
@@ -384,7 +466,7 @@ export function WorksetsPanel(): React.ReactElement {
       mode: 'edit',
       name: definition.name,
       originalName: definition.name,
-      projects: new Set(definition.members.map(member => member.project)),
+      projects: new Set(EffectArray.map(definition.members, member => member.project)),
     });
   }
 
@@ -393,26 +475,39 @@ export function WorksetsPanel(): React.ReactElement {
     setDefinitionBusy(true);
     setNotice('');
     try {
-      const result = await api<ManagerWorksetDefinitionMutationResult>('/api/worksets/definitions', {
-        description: definitionDraft.description,
-        expectedRevision: catalog.revision,
-        name: definitionDraft.name,
-        operation: definitionDraft.mode === 'create' ? 'create' : 'update',
-        projects: [...definitionDraft.projects],
-        ...(definitionDraft.originalName === undefined ? {} : {workset: definitionDraft.originalName}),
-      });
+      const result = await api<ManagerWorksetDefinitionMutationResult>(
+        '/api/worksets/definitions',
+        {
+          description: definitionDraft.description,
+          expectedRevision: catalog.revision,
+          name: definitionDraft.name,
+          operation: definitionDraft.mode === 'create' ? 'create' : 'update',
+          projects: [...definitionDraft.projects],
+          ...(definitionDraft.originalName === undefined ? {} : {workset: definitionDraft.originalName}),
+        },
+        undefined,
+        isManagerWorksetDefinitionMutationResult,
+      );
       acceptAuthoritativeCatalog(result.catalog);
       cancelOperation();
       clearOperationResults();
       const savedName =
-        result.catalog.definitions.find(
-          definition => definition.name.toLowerCase() === definitionDraft.name.trim().toLowerCase(),
-        )?.name ?? definitionDraft.name.trim();
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            result.catalog.definitions,
+            definition =>
+              Effect.pipe(definition.name, EffectString.toLowerCase) ===
+              Effect.pipe(definitionDraft.name, EffectString.trim, EffectString.toLowerCase),
+          ),
+        )?.name ?? Effect.pipe(definitionDraft.name, EffectString.trim);
       setSelectedName(savedName);
       setSelectedDefinition(undefined);
       await Promise.all([loadDefinition(savedName), loadStatus(savedName)]);
       setDefinitionDraft(undefined);
-      setNotice(result.warnings.join(' ') || (result.changed ? 'Workset definition saved.' : 'No definition change.'));
+      setNotice(
+        EffectArray.join(result.warnings, ' ') ||
+          (result.changed ? 'Workset definition saved.' : 'No definition change.'),
+      );
     } catch (cause) {
       if (Schema.is(ManagerApiError)(cause) && cause.code === 'revision-conflict') {
         setNotice('The manifest changed. Definitions were refreshed; your draft is preserved for review and retry.');
@@ -438,18 +533,23 @@ export function WorksetsPanel(): React.ReactElement {
     if (!confirmed) return;
     setDefinitionBusy(true);
     try {
-      const result = await api<ManagerWorksetDefinitionMutationResult>('/api/worksets/definitions', {
-        confirm: true,
-        expectedRevision: catalog.revision,
-        operation: 'delete',
-        workset: definition.name,
-      });
+      const result = await api<ManagerWorksetDefinitionMutationResult>(
+        '/api/worksets/definitions',
+        {
+          confirm: true,
+          expectedRevision: catalog.revision,
+          operation: 'delete',
+          workset: definition.name,
+        },
+        undefined,
+        isManagerWorksetDefinitionMutationResult,
+      );
       acceptAuthoritativeCatalog(result.catalog);
       cancelOperation();
       clearOperationResults();
       setSelectedName(result.catalog.definitions[0]?.name ?? '');
       setSelectedDefinition(undefined);
-      setNotice(result.warnings.join(' ') || 'Workset definition deleted.');
+      setNotice(EffectArray.join(result.warnings, ' ') || 'Workset definition deleted.');
     } catch (cause) {
       setNotice(errorMessage(cause));
       await loadCatalog();
@@ -462,10 +562,15 @@ export function WorksetsPanel(): React.ReactElement {
     if (!selected) return;
     setOperationError('');
     try {
-      const result = await api<{readonly job: ManagerWorksetPrepareJob}>('/api/worksets/prepare', {
-        concurrency: 2,
-        workset: selected.name,
-      });
+      const result = await api<{readonly job: ManagerWorksetPrepareJob}>(
+        '/api/worksets/prepare',
+        {
+          concurrency: 2,
+          workset: selected.name,
+        },
+        undefined,
+        isJobResponse,
+      );
       setJob(result.job);
     } catch (cause) {
       setOperationError(errorMessage(cause));
@@ -475,7 +580,12 @@ export function WorksetsPanel(): React.ReactElement {
   async function cancelPrepare(): Promise<void> {
     if (!job) return;
     try {
-      const result = await api<{readonly job: ManagerWorksetPrepareJob}>('/api/worksets/jobs/cancel', {id: job.id});
+      const result = await api<{readonly job: ManagerWorksetPrepareJob}>(
+        '/api/worksets/jobs/cancel',
+        {id: job.id},
+        undefined,
+        isJobResponse,
+      );
       setJob(result.job);
     } catch (cause) {
       setOperationError(errorMessage(cause));
@@ -565,7 +675,7 @@ export function WorksetsPanel(): React.ReactElement {
   }
 
   function runQuery(): void {
-    if (!selected || !query.trim()) return;
+    if (!selected || !Effect.pipe(query, EffectString.trim)) return;
     setQueryPages([]);
     void runOperation(
       signal =>
@@ -579,6 +689,7 @@ export function WorksetsPanel(): React.ReactElement {
             workset: selected.name,
           },
           {signal},
+          isProjectedCodeGraphWorksetEvidenceV1,
         ),
       result => setQueryPages([result]),
     );
@@ -593,6 +704,7 @@ export function WorksetsPanel(): React.ReactElement {
           '/api/worksets/continue',
           {budgetTokens: queryBudget, cursor},
           {signal},
+          isProjectedCodeGraphWorksetEvidenceV1,
         ),
       result => setQueryPages(current => [...current, result]),
     );
@@ -605,7 +717,13 @@ export function WorksetsPanel(): React.ReactElement {
         ? {from: pathFrom, maxDepth: 8, maxEdges: 500, to: pathTo, workset: selected.name}
         : {maxDepth: 8, maxEdges: 500, query: impactQuery, workset: selected.name};
     void runOperation(
-      signal => api<CodeGraphCrossRepositoryTraversalResultV1>(`/api/worksets/${traversalMode}`, body, {signal}),
+      signal =>
+        api<CodeGraphCrossRepositoryTraversalResultV1>(
+          `/api/worksets/${traversalMode}`,
+          body,
+          {signal},
+          isCodeGraphCrossRepositoryTraversalResultV1,
+        ),
       setTraversalResult,
     );
   }
@@ -623,13 +741,14 @@ export function WorksetsPanel(): React.ReactElement {
             workset: selected.name,
           },
           {signal},
+          isCodeGraphWorksetTopologyResultV1,
         ),
       setTopologyResult,
     );
   }
 
   function runBrief(): void {
-    if (!selected || !briefTask.trim()) return;
+    if (!selected || !Effect.pipe(briefTask, EffectString.trim)) return;
     void runOperation(
       signal =>
         api<ProjectedContextBriefV1>(
@@ -641,6 +760,7 @@ export function WorksetsPanel(): React.ReactElement {
             workset: selected.name,
           },
           {signal},
+          isProjectedContextBriefV1,
         ),
       setBriefResult,
     );
@@ -652,7 +772,9 @@ export function WorksetsPanel(): React.ReactElement {
     catalogSequenceRef.current += 1;
     setCatalog(next);
     const currentName = selectedNameRef.current;
-    setSelectedName(next.definitions.some(definition => definition.name === currentName) ? currentName : '');
+    setSelectedName(
+      EffectArray.some(next.definitions, definition => definition.name === currentName) ? currentName : '',
+    );
     setSelectedDefinition(undefined);
     setStatus(undefined);
     cancelOperation();
@@ -674,7 +796,7 @@ export function WorksetsPanel(): React.ReactElement {
     <div className="worksets-management">
       {liveReadErrors.length > 0 ? (
         <p className="worksets-error" role="alert">
-          {liveReadErrors.join(' ')}
+          {EffectArray.join(liveReadErrors, ' ')}
         </p>
       ) : null}
       {managementView === 'worksets' ? (
@@ -745,31 +867,35 @@ export function WorksetsPanel(): React.ReactElement {
                   </button>
                 </p>
               ) : null}
-              {catalog?.definitions.map(definition => (
-                <section className="workspace-card" key={definition.name}>
-                  <div className="workspace-row">
-                    <Layers />
-                    <div className="row-copy">
-                      <strong>{definition.name}</strong>
-                      <p>
-                        {definition.description ||
-                          `${definition.memberCount} ${definition.memberCount === 1 ? 'project' : 'projects'} in this workspace`}
-                      </p>
-                    </div>
-                    <span className="workspace-status neutral">
-                      {definition.memberCount} {definition.memberCount === 1 ? 'project' : 'projects'}
-                    </span>
-                    <button
-                      onClick={() => {
-                        setSelectedName(definition.name);
-                        setDetailsOpen(true);
-                      }}
-                    >
-                      Open workset
-                    </button>
-                  </div>
-                </section>
-              ))}
+              {EffectOption.getOrUndefined(
+                EffectOption.map(EffectOption.fromNullishOr(catalog?.definitions), __effectArrayReceiver =>
+                  EffectArray.map(__effectArrayReceiver, definition => (
+                    <section className="workspace-card" key={definition.name}>
+                      <div className="workspace-row">
+                        <Layers />
+                        <div className="row-copy">
+                          <strong>{definition.name}</strong>
+                          <p>
+                            {definition.description ||
+                              `${definition.memberCount} ${definition.memberCount === 1 ? 'project' : 'projects'} in this workspace`}
+                          </p>
+                        </div>
+                        <span className="workspace-status neutral">
+                          {definition.memberCount} {definition.memberCount === 1 ? 'project' : 'projects'}
+                        </span>
+                        <button
+                          onClick={() => {
+                            setSelectedName(definition.name);
+                            setDetailsOpen(true);
+                          }}
+                        >
+                          Open workset
+                        </button>
+                      </div>
+                    </section>
+                  )),
+                ),
+              )}
               {catalog && catalog.definitions.length === 0 ? (
                 <section className="workspace-card">
                   <div className="workspace-pad">
@@ -818,20 +944,24 @@ export function WorksetsPanel(): React.ReactElement {
               </p>
               {catalogError ? <p className="worksets-error">{catalogError}</p> : null}
               <div className="worksets-definition-list">
-                {catalog?.definitions.map(definition => (
-                  <button
-                    aria-current={selectedName === definition.name ? 'true' : undefined}
-                    className={selectedName === definition.name ? 'is-selected' : undefined}
-                    key={definition.name}
-                    onClick={() => setSelectedName(definition.name)}
-                    type="button"
-                  >
-                    <strong>{definition.name}</strong>
-                    <span>
-                      {definition.memberCount} {definition.memberCount === 1 ? 'member' : 'members'}
-                    </span>
-                  </button>
-                ))}
+                {EffectOption.getOrUndefined(
+                  EffectOption.map(EffectOption.fromNullishOr(catalog?.definitions), __effectArrayReceiver =>
+                    EffectArray.map(__effectArrayReceiver, definition => (
+                      <button
+                        aria-current={selectedName === definition.name ? 'true' : undefined}
+                        className={selectedName === definition.name ? 'is-selected' : undefined}
+                        key={definition.name}
+                        onClick={() => setSelectedName(definition.name)}
+                        type="button"
+                      >
+                        <strong>{definition.name}</strong>
+                        <span>
+                          {definition.memberCount} {definition.memberCount === 1 ? 'member' : 'members'}
+                        </span>
+                      </button>
+                    )),
+                  ),
+                )}
                 {catalog && catalog.definitions.length === 0 ? <p>No worksets yet. Create one to start.</p> : null}
               </div>
               <button className="quiet-button" onClick={() => void loadCatalog()} type="button">
@@ -902,7 +1032,7 @@ export function WorksetsPanel(): React.ReactElement {
                     />
                   ) : null}
                   <div className="worksets-operation-tabs" role="tablist" aria-label="Workset operations">
-                    {WORKSET_OPERATIONS.map(value => (
+                    {EffectArray.map(WORKSET_OPERATIONS, value => (
                       <button
                         aria-controls={`worksets-panel-${value}`}
                         aria-selected={operation === value}
@@ -915,7 +1045,9 @@ export function WorksetsPanel(): React.ReactElement {
                         tabIndex={operation === value ? 0 : -1}
                         type="button"
                       >
-                        {value === 'brief' ? 'Context brief' : value[0].toUpperCase() + value.slice(1)}
+                        {value === 'brief'
+                          ? 'Context brief'
+                          : Effect.pipe(value[0], EffectString.toUpperCase) + Effect.pipe(value, EffectString.slice(1))}
                       </button>
                     ))}
                   </div>
@@ -1065,13 +1197,13 @@ function WorksetStatusPanel(props: {
             <Metric label="Bridge coverage" value={status.bridges?.coverage.state ?? 'unavailable'} />
             <Metric label="Exact bridges" value={String(status.bridges?.bridgeCount ?? 0)} />
           </div>
-          {status.warnings.map(warning => (
+          {EffectArray.map(status.warnings, warning => (
             <p className="worksets-warning" key={warning}>
               {warning}
             </p>
           ))}
           <div className="worksets-member-grid">
-            {status.members.map(member => {
+            {EffectArray.map(status.members, member => {
               const definitionMember = findDefinitionMember(props.definition, member.project);
               return (
                 <article key={member.project}>
@@ -1157,7 +1289,7 @@ export function PrepareJobPanel(props: {
       {props.job.warning ? <p className="worksets-warning">{props.job.warning}</p> : null}
       {receipts.length > 0 ? (
         <div className="worksets-job-receipts">
-          {receipts.map(member => (
+          {EffectArray.map(receipts, member => (
             <article key={member.project}>
               <strong>{member.project}</strong>
               <span className={`worksets-state is-${statusTone(member.state)}`}>{member.state}</span>
@@ -1259,7 +1391,11 @@ function QueryPanel(props: {
         />
       </div>
       <div className="button-row">
-        <button disabled={props.busy || !props.query.trim()} onClick={props.onRun} type="button">
+        <button
+          disabled={props.busy || !Effect.pipe(props.query, EffectString.trim)}
+          onClick={props.onRun}
+          type="button"
+        >
           Search published workset
         </button>
         {props.busy ? (
@@ -1275,59 +1411,65 @@ function QueryPanel(props: {
           {latest.output.totalCards} evidence cards{latest.output.truncated ? ' · response truncated' : ''}
         </p>
       ) : null}
-      {latest?.warnings.map(warning => (
-        <p className="worksets-warning" key={warning}>
-          {warning}
-        </p>
-      ))}
-      <div className="worksets-evidence-list">
-        {props.pages.flatMap((page, pageIndex) =>
-          page.structuredContent.cards.map(card => (
-            <article key={`${pageIndex}:${card.id}`}>
-              <header>
-                <strong>{card.symbol.qualifiedName}</strong>
-                <span>{props.repositoryLabel(card.repositoryKey)}</span>
-              </header>
-              <code>
-                {card.symbol.path}:{card.symbol.span.line}
-              </code>
-              <p>{card.reason.summary}</p>
-              <details className="worksets-reference-actions">
-                <summary>Graph reference and traversal actions</summary>
-                <code>{card.ref}</code>
-                <div className="button-row">
-                  <button
-                    aria-label={`Use ${card.symbol.qualifiedName} as path start`}
-                    onClick={() => props.onUseReference(card.ref, 'from')}
-                    type="button"
-                  >
-                    Use as From
-                  </button>
-                  <button
-                    aria-label={`Use ${card.symbol.qualifiedName} as path destination`}
-                    onClick={() => props.onUseReference(card.ref, 'to')}
-                    type="button"
-                  >
-                    Use as To
-                  </button>
-                  <button
-                    aria-label={`Trace reverse impact from ${card.symbol.qualifiedName}`}
-                    onClick={() => props.onUseReference(card.ref, 'impact')}
-                    type="button"
-                  >
-                    Trace impact
-                  </button>
-                </div>
-              </details>
-              {card.relationships.map((relationship, index) => (
-                <small key={`${relationship.source.ref}:${index}`}>
-                  {props.repositoryLabel(relationship.source.repositoryKey)} → {relationship.relation} →{' '}
-                  {props.repositoryLabel(relationship.target.repositoryKey)} · {relationship.authority} ·{' '}
-                  {relationship.provenance} {Math.round(relationship.confidence * 100)}%
-                </small>
-              ))}
-            </article>
+      {EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(latest?.warnings), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, warning => (
+            <p className="worksets-warning" key={warning}>
+              {warning}
+            </p>
           )),
+        ),
+      )}
+      <div className="worksets-evidence-list">
+        {EffectArray.flatMap(props.pages, (page, pageIndex) =>
+          pageIndex in props.pages
+            ? EffectArray.map(page.structuredContent.cards, card => (
+                <article key={`${pageIndex}:${card.id}`}>
+                  <header>
+                    <strong>{card.symbol.qualifiedName}</strong>
+                    <span>{props.repositoryLabel(card.repositoryKey)}</span>
+                  </header>
+                  <code>
+                    {card.symbol.path}:{card.symbol.span.line}
+                  </code>
+                  <p>{card.reason.summary}</p>
+                  <details className="worksets-reference-actions">
+                    <summary>Graph reference and traversal actions</summary>
+                    <code>{card.ref}</code>
+                    <div className="button-row">
+                      <button
+                        aria-label={`Use ${card.symbol.qualifiedName} as path start`}
+                        onClick={() => props.onUseReference(card.ref, 'from')}
+                        type="button"
+                      >
+                        Use as From
+                      </button>
+                      <button
+                        aria-label={`Use ${card.symbol.qualifiedName} as path destination`}
+                        onClick={() => props.onUseReference(card.ref, 'to')}
+                        type="button"
+                      >
+                        Use as To
+                      </button>
+                      <button
+                        aria-label={`Trace reverse impact from ${card.symbol.qualifiedName}`}
+                        onClick={() => props.onUseReference(card.ref, 'impact')}
+                        type="button"
+                      >
+                        Trace impact
+                      </button>
+                    </div>
+                  </details>
+                  {EffectArray.map(card.relationships, (relationship, index) => (
+                    <small key={`${relationship.source.ref}:${index}`}>
+                      {props.repositoryLabel(relationship.source.repositoryKey)} → {relationship.relation} →{' '}
+                      {props.repositoryLabel(relationship.target.repositoryKey)} · {relationship.authority} ·{' '}
+                      {relationship.provenance} {Math.round(relationship.confidence * 100)}%
+                    </small>
+                  ))}
+                </article>
+              ))
+            : [],
         )}
       </div>
       {latest?.continuation ? (
@@ -1424,7 +1566,7 @@ function TraversalPanel(props: {
             <Metric label="Scanned edges" value={String(props.result.coverage.scannedEdges)} />
           </div>
           <div className="worksets-edge-list">
-            {props.result.edges.map(edge => (
+            {EffectArray.map(props.result.edges, edge => (
               <article key={edge.id}>
                 <strong>
                   {props.repositoryLabel(edge.source.repositoryKey)} →{' '}
@@ -1453,7 +1595,11 @@ function TopologyPanel(props: {
 }): React.ReactElement {
   const topology = props.result?.topology;
   const nodeLabels = new Map(
-    topology?.nodes.map(node => [node.id, topologyNodeLabel(node, props.repositoryLabel)]) ?? [],
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(topology?.nodes), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, node => [node.id, topologyNodeLabel(node, props.repositoryLabel)]),
+      ),
+    ) ?? [],
   );
   return (
     <section
@@ -1468,11 +1614,15 @@ function TopologyPanel(props: {
       <button disabled={props.busy} onClick={props.onRun} type="button">
         Load topology
       </button>
-      {props.result?.warnings.map(warning => (
-        <p className="worksets-warning" key={warning}>
-          {warning}
-        </p>
-      ))}
+      {EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(props.result?.warnings), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, warning => (
+            <p className="worksets-warning" key={warning}>
+              {warning}
+            </p>
+          )),
+        ),
+      )}
       {topology ? (
         <>
           <div className="worksets-metrics">
@@ -1484,12 +1634,12 @@ function TopologyPanel(props: {
           <div className="worksets-topology-grid">
             <div>
               <h4>Repositories and components</h4>
-              {topology.nodes.map(node => (
+              {EffectArray.map(topology.nodes, node => (
                 <article key={node.id}>
                   <strong>{props.repositoryLabel(node.repositoryKey)}</strong>
                   <span>
                     {node.kind === 'component'
-                      ? node.packageIdentities.join(', ') || 'package component'
+                      ? EffectArray.join(node.packageIdentities, ', ') || 'package component'
                       : 'repository'}
                   </span>
                   <small>{node.incidentBridgeCount} incident bridges</small>
@@ -1498,13 +1648,18 @@ function TopologyPanel(props: {
             </div>
             <div>
               <h4>Cross-repository edges</h4>
-              {topology.edges.map(edge => (
+              {EffectArray.map(topology.edges, edge => (
                 <article key={edge.id}>
                   <strong>
                     {nodeLabels.get(edge.sourceNodeId) ?? 'Unknown source'} →{' '}
                     {nodeLabels.get(edge.targetNodeId) ?? 'Unknown target'}
                   </strong>
-                  <span>{edge.relations.map(item => `${item.value} (${item.count})`).join(', ')}</span>
+                  <span>
+                    {EffectArray.join(
+                      EffectArray.map(edge.relations, item => `${item.value} (${item.count})`),
+                      ', ',
+                    )}
+                  </span>
                   <small>
                     {edge.bridgeCount} exact bridges · {edge.evidence.returnedCount}/{edge.evidence.totalCount} evidence
                   </small>
@@ -1551,8 +1706,14 @@ function ContextBriefPanel(props: {
         <div>
           <label>
             Mode
-            <select onChange={event => props.onMode(event.target.value as ContextBriefMode)} value={props.mode}>
-              {CONTEXT_BRIEF_MODES.map(mode => (
+            <select
+              onChange={event => {
+                const mode = event.target.value;
+                if (isContextBriefMode(mode)) props.onMode(mode);
+              }}
+              value={props.mode}
+            >
+              {EffectArray.map(CONTEXT_BRIEF_MODES, mode => (
                 <option key={mode}>{mode}</option>
               ))}
             </select>
@@ -1560,7 +1721,7 @@ function ContextBriefPanel(props: {
           <BudgetInput onChange={props.onBudget} value={props.budget} />
         </div>
       </div>
-      <button disabled={props.busy || !props.task.trim()} onClick={props.onRun} type="button">
+      <button disabled={props.busy || !Effect.pipe(props.task, EffectString.trim)} onClick={props.onRun} type="button">
         Compile context brief
       </button>
       {brief ? (
@@ -1576,28 +1737,36 @@ function ContextBriefPanel(props: {
           </div>
           <BriefSection
             title="Graph evidence"
-            items={brief.graph.cards.map(
+            items={EffectArray.map(
+              brief.graph.cards,
               card =>
                 `${props.repositoryLabel(card.repositoryKey)} · ${card.symbol.qualifiedName} · ${card.symbol.path}:${card.symbol.line}`,
             )}
           />
           <BriefSection
             title="Contracts"
-            items={brief.graph.contracts.map(
+            items={EffectArray.map(
+              brief.graph.contracts,
               contract =>
                 `${props.repositoryLabel(contract.evidence.repositoryKey)} · ${contract.relation} · ${contract.authority} · ${contract.provenance}`,
             )}
           />
           <BriefSection
             title="Durable decisions"
-            items={brief.durableDecisions.map(item => `${item.topic ?? item.uri} · ${item.excerpt}`)}
+            items={EffectArray.map(brief.durableDecisions, item => `${item.topic ?? item.uri} · ${item.excerpt}`)}
           />
           <BriefSection
             title="Active handoffs"
-            items={brief.activeHandoffs.map(item => `${item.topic ?? item.uri} · ${item.excerpt}`)}
+            items={EffectArray.map(brief.activeHandoffs, item => `${item.topic ?? item.uri} · ${item.excerpt}`)}
           />
-          <BriefSection title="Staleness and conflicts" items={brief.stalenessAndConflicts.map(item => item.summary)} />
-          <BriefSection title="Recommended follow-ups" items={brief.recommendedFollowUps.map(item => item.operation)} />
+          <BriefSection
+            title="Staleness and conflicts"
+            items={EffectArray.map(brief.stalenessAndConflicts, item => item.summary)}
+          />
+          <BriefSection
+            title="Recommended follow-ups"
+            items={EffectArray.map(brief.recommendedFollowUps, item => item.operation)}
+          />
         </>
       ) : null}
     </section>
@@ -1718,14 +1887,18 @@ function DefinitionEditor(props: {
           </button>
         </div>
         <div className="worksets-project-picker">
-          {props.projects.map(project => (
+          {EffectArray.map(props.projects, project => (
             <label key={project.name}>
               <input
                 checked={hasProjectSelection(props.draft.projects, project.name)}
                 onChange={event => {
                   const projects = new Set(props.draft.projects);
                   for (const selected of projects) {
-                    if (selected.toLowerCase() === project.name.toLowerCase()) projects.delete(selected);
+                    if (
+                      Effect.pipe(selected, EffectString.toLowerCase) ===
+                      Effect.pipe(project.name, EffectString.toLowerCase)
+                    )
+                      projects.delete(selected);
                   }
                   if (event.target.checked) projects.add(project.name);
                   update({projects});
@@ -1744,7 +1917,9 @@ function DefinitionEditor(props: {
             Cancel
           </button>
           <button
-            disabled={props.busy || !props.draft.name.trim() || props.draft.projects.size === 0}
+            disabled={
+              props.busy || !Effect.pipe(props.draft.name, EffectString.trim) || props.draft.projects.size === 0
+            }
             onClick={props.onSave}
             type="button"
           >
@@ -1798,7 +1973,7 @@ function BriefSection(props: {readonly items: readonly string[]; readonly title:
   return (
     <section className="worksets-brief-section">
       <h4>{props.title}</h4>
-      {props.items.map((item, index) => (
+      {EffectArray.map(props.items, (item, index) => (
         <p key={`${index}:${item}`}>{item}</p>
       ))}
     </section>
@@ -1815,70 +1990,5 @@ function topologyNodeLabel(
 ): string {
   return node.kind === 'repository'
     ? repositoryLabel(node.repositoryKey)
-    : `${repositoryLabel(node.repositoryKey)} / ${node.packageIdentities.join(', ') || 'package component'}`;
-}
-
-export function managerWorksetRepositoryLabel(repositoryKey: string, definition?: ManagerWorksetDefinition): string {
-  const member = findDefinitionMember(definition, repositoryKey);
-  return member ? `${member.project} · ${managerWorksetMemberLocation(member)}` : opaqueRepositoryLabel(repositoryKey);
-}
-
-function findDefinitionMember(
-  definition: ManagerWorksetDefinition | undefined,
-  project: string,
-): ManagerWorksetDefinition['members'][number] | undefined {
-  return definition?.members.find(member => member.project.toLowerCase() === project.toLowerCase());
-}
-
-function managerWorksetMemberLocation(member: ManagerWorksetDefinition['members'][number] | undefined): string {
-  if (!member) return 'branch and local folder unavailable';
-  return managerWorksetLocation(member.branchState, member.branch, member.folder, member.path);
-}
-
-function managerWorksetProjectLocation(project: ManagerWorksetProjectSummary): string {
-  return managerWorksetLocation(project.branchState, project.branch, project.folder, project.path);
-}
-
-function managerWorksetProjectSearchText(project: ManagerWorksetProjectSummary): string {
-  return [project.name, project.branch, project.folder, project.path].filter(Boolean).join('\n').toLowerCase();
-}
-
-function managerWorksetProjectRank(project: ManagerWorksetProjectSummary, query: string): number {
-  if (!query) return 0;
-  const name = project.name.toLowerCase();
-  if (name === query) return 0;
-  if (name.startsWith(query)) return 1;
-  if (name.includes(query)) return 2;
-  return 3;
-}
-
-function hasProjectSelection(projects: ReadonlySet<string>, project: string): boolean {
-  const key = project.toLowerCase();
-  return [...projects].some(selected => selected.toLowerCase() === key);
-}
-
-function managerWorksetLocation(
-  branchState: ManagerWorksetProjectSummary['branchState'],
-  branch: string | undefined,
-  folder: string | undefined,
-  path: string | undefined,
-): string {
-  const branchLabel =
-    branchState === 'current' && branch
-      ? `observed branch ${branch}`
-      : branchState === 'detached'
-        ? 'observed detached checkout'
-        : branchState === 'not-observed'
-          ? 'branch observation deferred'
-          : 'branch observation unavailable';
-  return [branchLabel, folder, path]
-    .filter((value, index, values) => value && values.indexOf(value) === index)
-    .join(' · ');
-}
-
-function opaqueRepositoryLabel(repositoryKey: string): string {
-  const value = repositoryKey.trim();
-  return /^(?:[a-f\d]{24,}|(?:checkout|repository|worktree|repo)[_:-][a-z\d_-]{16,})$/iu.test(value)
-    ? `Repository ${value.slice(0, 8)}…`
-    : value || 'Unknown repository';
+    : `${repositoryLabel(node.repositoryKey)} / ${EffectArray.join(node.packageIdentities, ', ') || 'package component'}`;
 }

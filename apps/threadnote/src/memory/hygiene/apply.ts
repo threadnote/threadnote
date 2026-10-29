@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Schema} from 'effect';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {ResourceStore, type ResourceStoreShape} from '@threadnote/store/resource-store';
@@ -7,14 +8,16 @@ import {discardMemoryRelocation} from '@threadnote/memory/relocation';
 import {MemoryOperationError, resourceStoreLocation} from '../migrations.js';
 import {writeMemoryFile} from '../../share/index.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class MemoryHygieneApplyConflict extends Schema.TaggedError<MemoryHygieneApplyConflict>()(
-  'MemoryHygieneApplyConflict',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class MemoryHygieneApplyConflict extends Schema.TaggedError<
+  MemoryHygieneApplyConflict,
+  {readonly brand: unique symbol}
+>()('MemoryHygieneApplyConflict', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 interface ExactDuplicateApplyGroup {
   readonly keepUpdate?: KeepUpdateAction;
@@ -38,15 +41,15 @@ export const applyAtomicExactDuplicateActions = Effect.fn('memoryHygiene.applyAt
   plan: CompactPlan,
   records: readonly MemoryRecord[],
 ) {
-  const recordContentByUri = new Map(records.map(record => [record.uri, record.content]));
-  const keepUpdateByUri = new Map(plan.keepUpdates.map(action => [action.uri, action]));
+  const recordContentByUri = new Map(EffectArray.map(records, record => [record.uri, record.content]));
+  const keepUpdateByUri = new Map(EffectArray.map(plan.keepUpdates, action => [action.uri, action]));
   const groupsBySurvivor = new Map<
     string,
     {keepUpdate?: KeepUpdateAction; retired: ForgetAction[]; survivorExpectedContent: string}
   >();
 
   for (const action of plan.forgets) {
-    const survivorUris = [...new Set(action.sourceUris.filter(uri => uri !== action.uri))];
+    const survivorUris = [...new Set(EffectArray.filter(action.sourceUris, uri => uri !== action.uri))];
     const survivorUri = survivorUris[0];
     if (survivorUris.length !== 1 || !survivorUri) {
       return yield* conflict(
@@ -70,7 +73,7 @@ export const applyAtomicExactDuplicateActions = Effect.fn('memoryHygiene.applyAt
     });
   }
 
-  const retiredUris = new Set(plan.forgets.map(action => action.uri));
+  const retiredUris = new Set(EffectArray.map(plan.forgets, action => action.uri));
   for (const survivorUri of groupsBySurvivor.keys()) {
     if (retiredUris.has(survivorUri)) {
       return yield* conflict(
@@ -79,13 +82,14 @@ export const applyAtomicExactDuplicateActions = Effect.fn('memoryHygiene.applyAt
     }
   }
 
-  const groups: ExactDuplicateApplyGroup[] = [...groupsBySurvivor.entries()]
-    .map(([survivorUri, group]) => ({
+  const groups: ExactDuplicateApplyGroup[] = EffectArray.map(
+    [...groupsBySurvivor.entries()],
+    ([survivorUri, group]) => ({
       ...group,
-      retired: [...group.retired].sort((left, right) => left.uri.localeCompare(right.uri)),
+      retired: [...group.retired].sort((left, right) => Effect2.pipe(left.uri, EffectString.localeCompare(right.uri))),
       survivorUri,
-    }))
-    .sort((left, right) => left.survivorUri.localeCompare(right.survivorUri));
+    }),
+  ).sort((left, right) => Effect2.pipe(left.survivorUri, EffectString.localeCompare(right.survivorUri)));
   const fs = yield* FileSystem.FileSystem;
   const store = yield* ResourceStore;
   const location = resourceStoreLocation(config);
@@ -93,7 +97,7 @@ export const applyAtomicExactDuplicateActions = Effect.fn('memoryHygiene.applyAt
   const updatedSurvivorUris: string[] = [];
 
   for (const group of groups) {
-    const lockedUris = [group.survivorUri, ...group.retired.map(action => action.uri)].sort();
+    const lockedUris = [group.survivorUri, ...EffectArray.map(group.retired, action => action.uri)].sort();
     yield* withMemoryUriLocks(
       fs,
       config.agentContextHome,
@@ -176,7 +180,7 @@ export const applyCliCompactKeepUpdates = Effect.fn('memoryHygiene.applyCliCompa
   const fs = yield* FileSystem.FileSystem;
   const store = yield* ResourceStore;
   const location = resourceStoreLocation(config);
-  for (const action of plan.keepUpdates.filter(candidate => !atomicallyUpdatedUris.has(candidate.uri))) {
+  for (const action of EffectArray.filter(plan.keepUpdates, candidate => !atomicallyUpdatedUris.has(candidate.uri))) {
     yield* withMemoryUriLocks(
       fs,
       config.agentContextHome,

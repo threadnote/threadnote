@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {tableExists} from '../session.js';
 import {CodeGraphStoreError} from '../../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_FILE_BLOB_AUTHORITY_TABLE = 'file_blob_authority';
 
@@ -65,7 +68,8 @@ const CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGERS = [
   },
 ] as const;
 
-export const CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGER_SQL = CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGERS.map(
+export const CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGER_SQL = EffectArray.map(
+  CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGERS,
   trigger => trigger.sql,
 );
 
@@ -88,17 +92,21 @@ export const ensureCodeGraphFileBlobAuthority = Effect.fn('codeGraph.ensureFileB
   if (!(yield* tableExists(sql, 'file_blobs'))) return;
   const expected = new Map([
     [CODE_GRAPH_FILE_BLOB_AUTHORITY_TABLE, {sql: CODE_GRAPH_FILE_BLOB_AUTHORITY_TABLE_SQL, type: 'table'}],
-    ...CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGERS.map(
+    ...EffectArray.map(
+      CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGERS,
       trigger => [trigger.name, {sql: trigger.sql, type: 'trigger'}] as const,
     ),
   ]);
   const observed = yield* sql.unsafe<{readonly name: unknown; readonly sql: unknown; readonly type: unknown}>(
     `SELECT name, type, sql
      FROM sqlite_master
-     WHERE name IN (${[...expected].map(() => '?').join(', ')})`,
+     WHERE name IN (${EffectArray.join(
+       EffectArray.map([...expected], () => '?'),
+       ', ',
+     )})`,
     [...expected.keys()],
   );
-  const conflictingObject = observed.some(row => {
+  const conflictingObject = EffectArray.some(observed, row => {
     const contract = typeof row.name === 'string' ? expected.get(row.name) : undefined;
     return contract === undefined || row.type !== contract.type;
   });
@@ -107,7 +115,7 @@ export const ensureCodeGraphFileBlobAuthority = Effect.fn('codeGraph.ensureFileB
   }
   const current =
     observed.length === expected.size &&
-    observed.every(row => {
+    EffectArray.every(observed, row => {
       const contract = expected.get(String(row.name));
       return contract !== undefined && normalizedSchemaSql(row.sql) === normalizedSchemaSql(contract.sql);
     });
@@ -124,10 +132,12 @@ export const ensureCodeGraphFileBlobAuthority = Effect.fn('codeGraph.ensureFileB
 
 function normalizedSchemaSql(value: unknown): string | undefined {
   return typeof value === 'string'
-    ? value
-        .replace(/\bIF\s+NOT\s+EXISTS\b/giu, '')
-        .replace(/\s+/gu, ' ')
-        .trim()
-        .toLowerCase()
+    ? Effect2.pipe(
+        value,
+        EffectString.replace(/\bIF\s+NOT\s+EXISTS\b/giu, ''),
+        EffectString.replace(/\s+/gu, ' '),
+        EffectString.trim,
+        EffectString.toLowerCase,
+      )
     : undefined;
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -5,24 +6,28 @@ import {Console, Effect, FileSystem, Path} from 'effect';
 import {docsSections, type DocsArticle} from '../src/content/docs.js';
 import {docsArticlePath} from '../src/lib/routes.js';
 import {loadPreparedWebsiteMetadataFromEnvironment} from './site-prepared-metadata.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const publicOrigin = 'https://threadnote.io/';
 const generatedSitemapStart = '  <!-- BEGIN GENERATED DOCS ARTICLES -->';
 const generatedSitemapEnd = '  <!-- END GENERATED DOCS ARTICLES -->';
 
-export const docsArticles: readonly DocsArticle[] = docsSections.flatMap(section => section.articles);
+export const docsArticles: readonly DocsArticle[] = EffectArray.flatMap(docsSections, section => section.articles);
 
 function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
+  return Effect2.pipe(
+    value,
+    EffectString.replaceAll('&', '&amp;'),
+    EffectString.replaceAll('<', '&lt;'),
+    EffectString.replaceAll('>', '&gt;'),
+    EffectString.replaceAll('"', '&quot;'),
+    EffectString.replaceAll("'", '&#39;'),
+  );
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return Effect2.pipe(value, EffectString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 }
 
 function replaceTagAttribute(
@@ -37,7 +42,11 @@ function replaceTagAttribute(
     `<${tagName}\\b[^>]*\\b${escapeRegExp(identifyingAttribute)}="${escapeRegExp(identifyingValue)}"[^>]*>`,
     'i',
   );
-  const tag = html.match(tagPattern)?.[0];
+  const tag = Effect2.pipe(
+    html,
+    EffectString.match(tagPattern),
+    Effect2.Option.getOrElse(() => null),
+  )?.[0];
   if (!tag)
     throw ScriptError.make({
       message: `Docs HTML template is missing ${tagName}[${identifyingAttribute}="${identifyingValue}"]`,
@@ -49,8 +58,11 @@ function replaceTagAttribute(
       message: `Docs HTML template ${tagName}[${identifyingAttribute}="${identifyingValue}"] is missing ${updatedAttribute}`,
     });
   }
-  const updatedTag = tag.replace(attributePattern, `${updatedAttribute}="${escapeHtml(updatedValue)}"`);
-  return html.replace(tagPattern, updatedTag);
+  const updatedTag = Effect2.pipe(
+    tag,
+    EffectString.replace(attributePattern, `${updatedAttribute}="${escapeHtml(updatedValue)}"`),
+  );
+  return Effect2.pipe(html, EffectString.replace(tagPattern, updatedTag));
 }
 
 export function renderDocsArticleHtml(
@@ -71,21 +83,28 @@ export function renderDocsArticleHtml(
   html = replaceTagAttribute(html, 'meta', 'name', 'twitter:description', 'content', article.summary);
   if (!/<title>[^<]*<\/title>/i.test(html))
     throw ScriptError.make({message: 'Docs HTML template is missing its title'});
-  return html.replace(/<title>[^<]*<\/title>/i, `<title>${escapeHtml(pageTitle)}</title>`);
+  return Effect2.pipe(html, EffectString.replace(/<title>[^<]*<\/title>/i, `<title>${escapeHtml(pageTitle)}</title>`));
 }
 
 export function renderDocsSitemap(sitemap: string, articles: readonly Pick<DocsArticle, 'id'>[]): string {
-  const generated = [
-    generatedSitemapStart,
-    ...articles.map(article => `  <url><loc>${new URL(docsArticlePath(article.id), publicOrigin).href}</loc></url>`),
-    generatedSitemapEnd,
-  ].join('\n');
+  const generated = EffectArray.join(
+    [
+      generatedSitemapStart,
+      ...EffectArray.map(
+        articles,
+        article => `  <url><loc>${new URL(docsArticlePath(article.id), publicOrigin).href}</loc></url>`,
+      ),
+      generatedSitemapEnd,
+    ],
+    '\n',
+  );
   const generatedPattern = new RegExp(
     `${escapeRegExp(generatedSitemapStart)}[\\s\\S]*?${escapeRegExp(generatedSitemapEnd)}`,
   );
-  if (generatedPattern.test(sitemap)) return sitemap.replace(generatedPattern, generated);
-  if (!sitemap.includes('</urlset>')) throw ScriptError.make({message: 'Website sitemap is missing </urlset>'});
-  return sitemap.replace('</urlset>', `${generated}\n</urlset>`);
+  if (generatedPattern.test(sitemap)) return Effect2.pipe(sitemap, EffectString.replace(generatedPattern, generated));
+  if (!Effect2.pipe(sitemap, EffectString.includes('</urlset>')))
+    throw ScriptError.make({message: 'Website sitemap is missing </urlset>'});
+  return Effect2.pipe(sitemap, EffectString.replace('</urlset>', `${generated}\n</urlset>`));
 }
 
 export const generateDocsArticlePages = Effect.fn('siteDocs.generateArticlePages')(function* (siteDist?: string) {

@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {isJsonObject} from '@threadnote/platform/json';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -7,6 +9,9 @@ import {IntegrationsPanel} from '@threadnote/manager/integrations-view';
 import {superhumanIntegration} from '../src/manager-ui/index.js';
 import {SuperhumanConnectionForm} from '../src/manager-ui/connection-form.js';
 import type {SuperhumanSource} from '../src/manager-contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 let root: Root | undefined;
 afterEach(async () => {
@@ -16,15 +21,35 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+function parseJsonObject(text: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(text);
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 async function render(node: React.ReactNode): Promise<void> {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
   await act(async () => root?.render(<ManagerDialogProvider>{node}</ManagerDialogProvider>));
 }
 function button(label: string): HTMLButtonElement {
-  const match = [...document.querySelectorAll('button')].find(item => item.textContent?.trim().startsWith(label));
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(
+            item.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!match) throw new Error('Button not found: ' + label);
   return match;
 }
@@ -73,7 +98,7 @@ describe('Superhuman Docs connection', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_path: string, init: RequestInit) => {
-        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const body = parseJsonObject(String(init.body));
         calls.push(body);
         return new Response(JSON.stringify(body.action === 'resolve-links' ? savedSelection : {}));
       }),
@@ -91,15 +116,15 @@ describe('Superhuman Docs connection', () => {
     await act(async () => button('Add links').click());
     await choose(document.querySelector<HTMLSelectElement>('select')!, 'projectless');
     await act(async () => button('Create connection').click());
-    expect(calls.map(call => call.action)).toEqual(['resolve-links', 'save-source']);
-    expect(calls.every(call => !('token' in call) && !('credentialEnv' in call))).toBe(true);
+    expect(EffectArray.map(calls, call => call.action)).toEqual(['resolve-links', 'save-source']);
+    expect(EffectArray.every(calls, call => !('token' in call) && !('credentialEnv' in call))).toBe(true);
   });
   it('requires checked links, invalidates scope on edits, and saves only resolved IDs with an explicit project', async () => {
     const calls: {path: string; body: Record<string, unknown>}[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (path: string, init: RequestInit) => {
-        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const body = parseJsonObject(String(init.body));
         calls.push({path, body});
         return new Response(
           JSON.stringify(
@@ -167,7 +192,7 @@ describe('Superhuman Docs connection', () => {
     await render(
       <SuperhumanConnectionForm source={source} onClose={() => undefined} onSaved={async () => undefined} />,
     );
-    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe('');
     expect(document.querySelector('.integration-link-chip')?.textContent).toContain('Selected page');
     await act(async () => button('Save settings').click());
     expect(calls).toEqual([
@@ -214,7 +239,7 @@ describe('Superhuman Docs connection', () => {
       apply: true,
       confirm: true,
     });
-    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe('');
   });
   it('binds a new connection to an environment variable without sending a token', async () => {
     const calls: Record<string, unknown>[] = [];

@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+
 export interface LibraryHistory {
   readonly entries: readonly string[];
   readonly index: number;
@@ -17,5 +19,8 @@ export function canonicalizeLibraryHistory(
   resolved: string,
 ): LibraryHistory {
   if (requested === resolved || history.entries[history.index] !== requested) return history;
-  return {...history, entries: history.entries.map((uri, index) => (index === history.index ? resolved : uri))};
+  return {
+    ...history,
+    entries: EffectArray.map(history.entries, (uri, index) => (index === history.index ? resolved : uri)),
+  };
 }

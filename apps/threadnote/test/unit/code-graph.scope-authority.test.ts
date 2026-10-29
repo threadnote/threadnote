@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -25,11 +26,13 @@ import {migrateCodeGraphScopeAuthority} from '@threadnote/graph/store/scope/sche
 import {promoteSnapshot} from '@threadnote/graph/store/resolution';
 import {prepareSnapshotPromotionCapacity} from '@threadnote/graph/store/build/preparation';
 import {type RepositoryIdentity} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const worktreeId = 'a'.repeat(64);
-const repositoryId = 'b'.repeat(64);
+const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
+const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
 const timestamp = '2026-09-20T00:00:00.000Z';
-const snapshotId = (index: number) => `cgsn_${index.toString(16).padStart(40, '0')}`;
+const snapshotId = (index: number) => `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`;
 const identity: RepositoryIdentity = {
   repositoryId,
   worktreeId,
@@ -105,10 +108,10 @@ describe('composite code graph scope authority', () => {
         lookup_keys_json, exported, span_json)
         VALUES (${snapshotId(1)}, 'symbol', 'content', 'function', 'retained', 'retained', 'src/a.ts', 'typescript', '[]', 1, '{}')`;
       yield* sql`INSERT INTO removed_views (worktree_id, expected_snapshot_id, removed_at)
-        VALUES (${'d'.repeat(64)}, ${snapshotId(2)}, ${timestamp})`;
+        VALUES (${Effect2.pipe('d', EffectString.repeat(64))}, ${snapshotId(2)}, ${timestamp})`;
       yield* sql`INSERT INTO removed_view_cleanup (worktree_id, expected_snapshot_id, removed_at, epoch,
         phase, revision, attempts, next_attempt_at, updated_at)
-        VALUES (${'d'.repeat(64)}, ${snapshotId(2)}, ${timestamp}, 1, 'vector-pointers', 7, 2, 0, ${timestamp})`;
+        VALUES (${Effect2.pipe('d', EffectString.repeat(64))}, ${snapshotId(2)}, ${timestamp}, 1, 'vector-pointers', 7, 2, 0, ${timestamp})`;
       for (const statement of legacyCodeGraphAuthorityStatements) yield* sql.unsafe(statement);
       const factsBefore = yield* sql`SELECT * FROM symbols`;
       const rootPageBefore = yield* sql`SELECT rootpage FROM sqlite_master WHERE name = 'symbols'`;
@@ -133,7 +136,10 @@ describe('composite code graph scope authority', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeSchema(sql);
-      const scopes = [CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY, `code-graph-scope:${'c'.repeat(64)}`];
+      const scopes = [
+        CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY,
+        `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`,
+      ];
       for (const [index, scopeId] of scopes.entries()) {
         yield* seedSnapshot(index, scopeId);
         yield* sql`INSERT INTO active_snapshots (worktree_id, scope_id, snapshot_id, activated_at)
@@ -150,7 +156,7 @@ describe('composite code graph scope authority', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeSchema(sql);
-      const scopeId = `code-graph-scope:${'c'.repeat(64)}`;
+      const scopeId = `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`;
       for (const [index, scope] of [CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY, scopeId].entries()) {
         yield* seedSnapshot(index, scope);
         yield* sql`INSERT INTO active_snapshots (worktree_id, scope_id, snapshot_id, activated_at)
@@ -158,9 +164,9 @@ describe('composite code graph scope authority', () => {
       }
       const candidates = yield* claimWorktreeReconciliationCandidates(sql, 1);
       const next = yield* claimWorktreeReconciliationCandidates(sql, 1);
-      expect([...candidates, ...next].map(row => row.scopeId ?? CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY).sort()).toEqual(
-        [CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY, scopeId].sort(),
-      );
+      expect(
+        EffectArray.map([...candidates, ...next], row => row.scopeId ?? CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY).sort(),
+      ).toEqual([CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY, scopeId].sort());
       const result = yield* removeActiveView(sql, worktreeId, snapshotId(1), false, undefined, scopeId);
       expect(result.state).toBe('removed');
       expect((yield* selectActiveViewFence(worktreeId))?.snapshotId).toBe(snapshotId(0));
@@ -177,7 +183,7 @@ describe('composite code graph scope authority', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeSchema(sql);
-      const scopeId = `code-graph-scope:${'c'.repeat(64)}`;
+      const scopeId = `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`;
       for (const [index, scope] of [CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY, scopeId, scopeId].entries()) {
         yield* seedSnapshot(index, scope);
         if (index === 2) continue;
@@ -194,7 +200,7 @@ describe('composite code graph scope authority', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeSchema(sql);
-      const scopeKey = `code-graph-scope:${'c'.repeat(64)}`;
+      const scopeKey = `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`;
       yield* seedSnapshot(1, scopeKey);
       yield* sql`INSERT INTO active_snapshots (worktree_id, scope_id, snapshot_id, activated_at)
         VALUES (${worktreeId}, ${scopeKey}, ${snapshotId(1)}, ${timestamp})`;
@@ -227,14 +233,14 @@ describe('composite code graph scope authority', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeSchema(sql);
-      const scopeKey = `code-graph-scope:${'c'.repeat(64)}`;
+      const scopeKey = `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`;
       yield* seedSnapshot(1, scopeKey);
       yield* sql`INSERT INTO active_snapshots (worktree_id, scope_id, snapshot_id, activated_at)
         VALUES (${worktreeId}, ${scopeKey}, ${snapshotId(1)}, ${timestamp})`;
-      const first = '1'.repeat(64);
-      const last = 'f'.repeat(64);
-      const definitionDigest = 'd'.repeat(64);
-      const closureDigest = 'e'.repeat(64);
+      const first = Effect2.pipe('1', EffectString.repeat(64));
+      const last = Effect2.pipe('f', EffectString.repeat(64));
+      const definitionDigest = Effect2.pipe('d', EffectString.repeat(64));
+      const closureDigest = Effect2.pipe('e', EffectString.repeat(64));
       const evidence = {
         repositoryId,
         worktreeId,
@@ -272,15 +278,16 @@ describe('composite code graph scope authority', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeSchema(sql);
-      const scopeKey = `code-graph-scope:${'c'.repeat(64)}`;
+      const scopeKey = `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`;
       yield* seedSnapshot(1, scopeKey);
       yield* sql`INSERT INTO active_snapshots (worktree_id, scope_id, snapshot_id, activated_at)
         VALUES (${worktreeId}, ${scopeKey}, ${snapshotId(1)}, ${timestamp})`;
-      const definitionDigest = 'd'.repeat(64);
-      const closureDigest = 'e'.repeat(64);
+      const definitionDigest = Effect2.pipe('d', EffectString.repeat(64));
+      const closureDigest = Effect2.pipe('e', EffectString.repeat(64));
       const includedProjectIds = Array.from(
         {length: 1_025},
-        (_, index) => `${index.toString().padStart(6, '0')}${'x'.repeat(4_090)}`,
+        (_, index) =>
+          `${Effect2.pipe(index.toString(), EffectString.padStart(6, '0'))}${Effect2.pipe('x', EffectString.repeat(4_090))}`,
       );
       const attempt = yield* recordScopeApplicability(
         snapshotId(1),
@@ -324,20 +331,20 @@ describe('composite code graph scope authority', () => {
         const sql = yield* SqlClient.SqlClient;
         yield* initializeSchema(sql);
         for (const value of scopeNumbers) {
-          const scopeId = `code-graph-scope:${value.toString(16).padStart(64, '0')}`;
+          const scopeId = `code-graph-scope:${Effect2.pipe(value.toString(16), EffectString.padStart(64, '0'))}`;
           yield* seedSnapshot(value, scopeId);
           yield* sql`INSERT INTO active_snapshots (worktree_id, scope_id, snapshot_id, activated_at)
             VALUES (${worktreeId}, ${scopeId}, ${snapshotId(value)}, ${timestamp})`;
         }
         const before = yield* sql`SELECT * FROM active_snapshots ORDER BY scope_id`;
-        const scopeId = `code-graph-scope:${(scopeNumbers[0] ?? 1).toString(16).padStart(64, '0')}`;
+        const scopeId = `code-graph-scope:${Effect2.pipe((scopeNumbers[0] ?? 1).toString(16), EffectString.padStart(64, '0'))}`;
         yield* seedSnapshot(100, scopeId);
         yield* sql`INSERT INTO active_snapshots (worktree_id, scope_id, snapshot_id, activated_at)
           VALUES (${worktreeId}, ${scopeId}, ${snapshotId(100)}, ${timestamp})
           ON CONFLICT(worktree_id, scope_id) DO UPDATE SET snapshot_id = excluded.snapshot_id`;
         const after = yield* sql`SELECT * FROM active_snapshots ORDER BY scope_id`;
         expect(after).toEqual(
-          before.map(row => (row.scope_id === scopeId ? {...row, snapshot_id: snapshotId(100)} : row)),
+          EffectArray.map(before, row => (row.scope_id === scopeId ? {...row, snapshot_id: snapshotId(100)} : row)),
         );
       }).pipe(provideTestLayer(SqliteClient.layer({filename: ':memory:', disableWAL: true}))),
     {fastCheck: {numRuns: 12}},

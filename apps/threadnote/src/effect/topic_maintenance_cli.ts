@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem} from 'effect';
 import {Command} from 'effect/cli';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -18,6 +19,7 @@ import {
   previewTopicDependencyExpansion,
   restartTopicDependencyExpansion,
 } from '../memory/maintenance/topic_expansion.js';
+import {Option as EffectOption} from 'effect';
 
 export function makeContextTopicCommand(withRuntimeEffect: CliRuntimeRunner) {
   const target = {
@@ -89,12 +91,27 @@ function makeDependencyExpansionCommand(withRuntimeEffect: CliRuntimeRunner) {
               yield* writeFinalCliOutput(
                 options.json
                   ? JSON.stringify(result)
-                  : [
-                      result.warning,
-                      ...result.seeds.map(seed => `Seed: ${seed.label} (${seed.path})`),
-                      ...(result.choices?.eligible.map(node => `Available dependency: ${node.path}`) ?? []),
-                      ...(result.choices?.omissions.map(item => `Omitted: ${item.kind} (${item.id})`) ?? []),
-                    ].join('\n'),
+                  : EffectArray.join(
+                      [
+                        result.warning,
+                        ...EffectArray.map(result.seeds, seed => `Seed: ${seed.label} (${seed.path})`),
+                        ...(EffectOption.getOrUndefined(
+                          EffectOption.map(
+                            EffectOption.fromNullishOr(result.choices?.eligible),
+                            __effectArrayReceiver =>
+                              EffectArray.map(__effectArrayReceiver, node => `Available dependency: ${node.path}`),
+                          ),
+                        ) ?? []),
+                        ...(EffectOption.getOrUndefined(
+                          EffectOption.map(
+                            EffectOption.fromNullishOr(result.choices?.omissions),
+                            __effectArrayReceiver =>
+                              EffectArray.map(__effectArrayReceiver, item => `Omitted: ${item.kind} (${item.id})`),
+                          ),
+                        ) ?? []),
+                      ],
+                      '\n',
+                    ),
               );
             }),
           ),
@@ -116,20 +133,23 @@ function makeDependencyExpansionCommand(withRuntimeEffect: CliRuntimeRunner) {
               yield* writeFinalCliOutput(
                 options.json
                   ? JSON.stringify(result)
-                  : [
-                      'Only the selected dependencies will be added. Topic prose and paragraph authority stay unchanged.',
-                      ...result.preview.additions.map(item => `${item.kind}: ${item.citation.path}`),
-                      ...result.preview.omissions.map(item => `Omitted: ${item.kind}`),
-                      'Full proposed memory:',
-                      result.preview.content,
-                      `Revision: ${result.preview.revision}`,
-                      `Approval digest: ${result.preview.approvalDigest}`,
-                    ].join('\n\n'),
+                  : EffectArray.join(
+                      [
+                        'Only the selected dependencies will be added. Topic prose and paragraph authority stay unchanged.',
+                        ...EffectArray.map(result.preview.additions, item => `${item.kind}: ${item.citation.path}`),
+                        ...EffectArray.map(result.preview.omissions, item => `Omitted: ${item.kind}`),
+                        'Full proposed memory:',
+                        result.preview.content,
+                        `Revision: ${result.preview.revision}`,
+                        `Approval digest: ${result.preview.approvalDigest}`,
+                      ],
+                      '\n\n',
+                    ),
               );
             }),
           ),
       ),
-      ...(['apply', 'restart'] as const).map(action =>
+      ...EffectArray.map(['apply', 'restart'] as const, action =>
         Command.make(
           action,
           {
@@ -161,12 +181,15 @@ function makeDependencyExpansionCommand(withRuntimeEffect: CliRuntimeRunner) {
                   options.json
                     ? JSON.stringify(result)
                     : 'preview' in result
-                      ? [
-                          'Review the fresh full preview and approve it separately.',
-                          result.preview.content,
-                          `Revision: ${result.preview.revision}`,
-                          `Approval digest: ${result.preview.approvalDigest}`,
-                        ].join('\n\n')
+                      ? EffectArray.join(
+                          [
+                            'Review the fresh full preview and approve it separately.',
+                            result.preview.content,
+                            `Revision: ${result.preview.revision}`,
+                            `Approval digest: ${result.preview.approvalDigest}`,
+                          ],
+                          '\n\n',
+                        )
                       : `${result.status}: ${result.targetUri}`,
                 );
               }),

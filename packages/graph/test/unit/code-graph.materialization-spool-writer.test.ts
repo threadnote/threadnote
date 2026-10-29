@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import {Database} from 'bun:sqlite';
 import {expect, it} from '@effect/vitest';
 import {codeGraphPackageMoniker} from '@threadnote/graph/cross_repository/monikers';
@@ -14,11 +15,14 @@ import {
   prepareCodeGraphMaterializationSpoolFactBatch,
 } from '@threadnote/graph/materialization/spool/writer';
 import type {CodeGraphEdge, CodeGraphReference, CodeGraphSymbol} from '@threadnote/graph/types';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 it('appends every canonical fact surface under the exact durable batch receipt', () => {
   const database = new Database(':memory:', {strict: true});
   const symbol: CodeGraphSymbol = {
-    contentHash: 'a'.repeat(64),
+    contentHash: Effect.pipe('a', EffectString.repeat(64)),
     exported: true,
     id: 'symbol-source',
     kind: 'function',
@@ -49,7 +53,7 @@ it('appends every canonical fact surface under the exact durable batch receipt',
     directEdges: [directEdge],
     monikers: [
       codeGraphPackageMoniker({
-        componentId: `cgp_${'1'.repeat(32)}`,
+        componentId: `cgp_${Effect.pipe('1', EffectString.repeat(32))}`,
         evidence: {path: 'package.json', span: {column: 1, endColumn: 2, endLine: 1, line: 1}},
         packageName: '@scope/source',
         role: 'export',
@@ -71,17 +75,17 @@ it('appends every canonical fact surface under the exact durable batch receipt',
   try {
     configureCodeGraphMaterializationSpoolDatabase(database);
     initializeCodeGraphMaterializationSpoolDatabase(database, {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
       extractorSet: 'extractor-v1',
-      graphContentId: `cgc_${'b'.repeat(40)}`,
-      repositoryId: 'c'.repeat(64),
-      snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+      graphContentId: `cgc_${Effect.pipe('b', EffectString.repeat(40))}`,
+      repositoryId: Effect.pipe('c', EffectString.repeat(64)),
+      snapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}-direct`,
     });
     expect(
       commitCodeGraphMaterializationSpoolBatch(
         database,
         {
-          batchId: 'e'.repeat(64),
+          batchId: Effect.pipe('e', EffectString.repeat(64)),
           batchIndex: 0,
           candidateCount: 1,
           edgeCount: 2,
@@ -115,7 +119,7 @@ it('appends every canonical fact surface under the exact durable batch receipt',
     expect(readyPlan.lexicalTermCount).toBe(2);
     expect(readyPlan.batches).toEqual([
       {
-        batchId: 'e'.repeat(64),
+        batchId: Effect.pipe('e', EffectString.repeat(64)),
         batchIndex: 0,
         candidateCount: 1,
         edgeCount: 2,
@@ -129,7 +133,9 @@ it('appends every canonical fact surface under the exact durable batch receipt',
         termCount: 2,
       },
     ]);
-    expect(Object.fromEntries(readyPlan.surfaces.map(surface => [surface.name, surface.rowCount]))).toEqual({
+    expect(
+      EffectRecord.fromEntries(EffectArray.map(readyPlan.surfaces, surface => [surface.name, surface.rowCount])),
+    ).toEqual({
       edges: 1,
       lookup: 2,
       monikers: 1,
@@ -171,16 +177,12 @@ function edge(id: string, relation: CodeGraphEdge['relation']): CodeGraphEdge {
 }
 
 function rawSurfaceCounts(database: Database): Readonly<Record<string, number>> {
-  return Object.fromEntries(
-    ['edges', 'lookup', 'monikers', 'references', 'reexports', 'symbol_terms', 'symbols'].map(surface => [
+  return EffectRecord.fromEntries(
+    EffectArray.map(['edges', 'lookup', 'monikers', 'references', 'reexports', 'symbol_terms', 'symbols'], surface => [
       surface,
-      Number(
-        (
-          database.prepare(`SELECT COUNT(*) AS count FROM materialization_raw_${surface}`).get() as {
-            readonly count: number;
-          }
-        ).count,
-      ),
+      Schema.decodeUnknownSync(Schema.Struct({count: Schema.Finite}))(
+        database.prepare(`SELECT COUNT(*) AS count FROM materialization_raw_${surface}`).get(),
+      ).count,
     ]),
   );
 }

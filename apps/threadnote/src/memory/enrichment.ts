@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Path, Result} from 'effect';
 import {
   enrichMemoryWithInstalledLocalAi,
@@ -27,6 +28,9 @@ import {canonicalMemoryDocumentContent, formatMemoryDocumentWithKeywords} from '
 import {findUrisWithDeferredCodeAnchorIntents} from './deferred/code_anchor.js';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/hygiene';
 import {localUserMemoriesRoot, MemoryOperationError, NATIVE_RESOURCE_BACKEND} from './migrations.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface MemoryEnrichmentCandidate {
   readonly path: string;
@@ -54,15 +58,18 @@ export const runEnrichMemories = Effect.fn('runEnrichMemories')(function* (
   const plan = yield* withSharedRepositoryLock(config, memoryEnrichmentPlan(config, options.force === true));
   const candidates = limit === undefined ? plan.candidates : plan.candidates.slice(0, limit);
   yield* Console.log(
-    [
-      `Memory enrichment: ${candidates.length} ${dryRun ? 'would be processed' : 'to process'}`,
-      `${plan.alreadyEnriched} already enriched`,
-      `${plan.skippedKinds} handoff/smoke memory record(s) skipped`,
-      `${plan.invalid} non-memory file(s) skipped`,
-      `${plan.pendingAnchors} pending-anchor memory file(s) skipped`,
-      `${plan.personalScanned} personal markdown file(s) scanned`,
-      `${plan.sharedScanned} shared team memory file(s) scanned`,
-    ].join('; '),
+    EffectArray.join(
+      [
+        `Memory enrichment: ${candidates.length} ${dryRun ? 'would be processed' : 'to process'}`,
+        `${plan.alreadyEnriched} already enriched`,
+        `${plan.skippedKinds} handoff/smoke memory record(s) skipped`,
+        `${plan.invalid} non-memory file(s) skipped`,
+        `${plan.pendingAnchors} pending-anchor memory file(s) skipped`,
+        `${plan.personalScanned} personal markdown file(s) scanned`,
+        `${plan.sharedScanned} shared team memory file(s) scanned`,
+      ],
+      '; ',
+    ),
   );
   if (candidates.length === 0) {
     return;
@@ -209,12 +216,14 @@ export const runEnrichMemories = Effect.fn('runEnrichMemories')(function* (
     if (sharedTeam) {
       enrichedSharedTeams.set(sharedTeam, (enrichedSharedTeams.get(sharedTeam) ?? 0) + 1);
     }
-    yield* Console.log(`${prefix} Stored ${keywords.length} keyword(s): ${keywords.join(', ')}`);
+    yield* Console.log(`${prefix} Stored ${keywords.length} keyword(s): ${EffectArray.join(keywords, ', ')}`);
   }
   yield* Console.log(
     `Memory enrichment summary: ${enriched} enriched; ${noKeywords} unchanged; ${failed} failed; ${candidates.length} attempted.`,
   );
-  for (const [team, count] of [...enrichedSharedTeams].sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [team, count] of [...enrichedSharedTeams].sort(([left], [right]) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
+  )) {
     yield* Console.log(
       `Run \`threadnote share sync --team ${team}\` to publish ${count} enriched shared ${
         count === 1 ? 'memory' : 'memories'
@@ -237,13 +246,17 @@ const memoryEnrichmentPlan = Effect.fn('memory.memoryEnrichmentPlan')(function* 
   const root = yield* localUserMemoriesRoot(config);
   const personalFiles = yield* scanFilesWithinBoundary(fs, root, root, {
     includeDirectory: directory => {
-      const relative = path.relative(root, directory).split(path.sep);
-      return relative[0] !== 'shared' && !relative.some(segment => segment.startsWith('.'));
+      const relative = Effect2.pipe(path.relative(root, directory), EffectString.split(path.sep));
+      return (
+        relative[0] !== 'shared' &&
+        !EffectArray.some(relative, segment => Effect2.pipe(segment, EffectString.startsWith('.')))
+      );
     },
-    includeFile: (_filePath, name) => name.endsWith('.md') && !name.startsWith('.'),
+    includeFile: (_filePath, name) =>
+      Effect2.pipe(name, EffectString.endsWith('.md')) && !Effect2.pipe(name, EffectString.startsWith('.')),
   });
-  const personal = personalFiles.map(file => {
-    const relative = path.relative(root, file.path).split(path.sep).join('/');
+  const personal = EffectArray.map(personalFiles, file => {
+    const relative = EffectArray.join(Effect2.pipe(path.relative(root, file.path), EffectString.split(path.sep)), '/');
     return {
       path: file.path,
       uri: `threadnote://user/${uriSegment(config.user)}/memories/${relative}`,
@@ -251,19 +264,25 @@ const memoryEnrichmentPlan = Effect.fn('memory.memoryEnrichmentPlan')(function* 
   });
   const teams = yield* readTeamsFile(config);
   const sharedByTeam = yield* Effect.forEach(
-    Object.entries(teams.teams).sort(([left], [right]) => left.localeCompare(right)),
+    EffectRecord.toEntries(teams.teams).sort(([left], [right]) =>
+      Effect2.pipe(left, EffectString.localeCompare(right)),
+    ),
     ([team, settings]) =>
       Effect.gen(function* () {
         const files = yield* scanFilesWithinBoundary(fs, path.join(settings.worktree, 'durable'), settings.worktree, {
           includeDirectory: directory =>
-            !path
-              .relative(settings.worktree, directory)
-              .split(path.sep)
-              .some(segment => segment.startsWith('.')),
-          includeFile: (_filePath, name) => name.endsWith('.md') && !name.startsWith('.'),
+            !EffectArray.some(
+              Effect2.pipe(path.relative(settings.worktree, directory), EffectString.split(path.sep)),
+              segment => Effect2.pipe(segment, EffectString.startsWith('.')),
+            ),
+          includeFile: (_filePath, name) =>
+            Effect2.pipe(name, EffectString.endsWith('.md')) && !Effect2.pipe(name, EffectString.startsWith('.')),
         });
-        return files.map(file => {
-          const relative = path.relative(settings.worktree, file.path).split(path.sep).join('/');
+        return EffectArray.map(files, file => {
+          const relative = EffectArray.join(
+            Effect2.pipe(path.relative(settings.worktree, file.path), EffectString.split(path.sep)),
+            '/',
+          );
           return {
             path: file.path,
             uri: `threadnote://user/${uriSegment(config.user)}/memories/shared/${team}/${relative}`,
@@ -275,7 +294,7 @@ const memoryEnrichmentPlan = Effect.fn('memory.memoryEnrichmentPlan')(function* 
   const files = [...personal, ...shared];
   const pendingUris = yield* findUrisWithDeferredCodeAnchorIntents(
     config,
-    files.map(file => file.uri),
+    EffectArray.map(files, file => file.uri),
   );
   const candidates: MemoryEnrichmentCandidate[] = [];
   let alreadyEnriched = 0;
@@ -303,7 +322,9 @@ const memoryEnrichmentPlan = Effect.fn('memory.memoryEnrichmentPlan')(function* 
     }
     candidates.push({path: file.path, priority: memoryEnrichmentPriority(record), uri: file.uri});
   }
-  candidates.sort((left, right) => left.priority - right.priority || left.uri.localeCompare(right.uri));
+  candidates.sort(
+    (left, right) => left.priority - right.priority || Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+  );
   return {
     alreadyEnriched,
     candidates,

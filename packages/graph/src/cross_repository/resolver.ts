@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {compareCodeUnits} from '../ordering.js';
 import {codeGraphQualifiedRefHandle} from '../workset/evidence.js';
 import {canonicalCodeGraphMonikers} from './monikers.js';
 import type {CodeGraphMonikerV1, CodeGraphSourceEvidenceV1} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_CROSS_REPOSITORY_BRIDGE_VERSION = 1 as const;
 export const CODE_GRAPH_CROSS_REPOSITORY_RESOLVER_VERSION = 1 as const;
@@ -99,13 +102,16 @@ export function resolveCodeGraphCrossRepositoryBridges(
       // Local resolution owns a same-repository match. Without the local edge
       // result, choosing an identically named producer elsewhere would create
       // a false cross-repository edge.
-      if (allExactCandidates.some(candidate => candidate.repository.repositoryId === repository.repositoryId)) {
+      if (
+        EffectArray.some(allExactCandidates, candidate => candidate.repository.repositoryId === repository.repositoryId)
+      ) {
         continue;
       }
-      const exactCandidates = allExactCandidates.filter(
+      const exactCandidates = EffectArray.filter(
+        allExactCandidates,
         candidate => candidate.repository.repositoryId !== repository.repositoryId,
       );
-      const compatibleCandidates = exactCandidates.filter(candidate =>
+      const compatibleCandidates = EffectArray.filter(exactCandidates, candidate =>
         monikersAreCompatible(moniker, candidate.moniker),
       );
 
@@ -143,14 +149,13 @@ export function codeGraphNpmVersionsAreCompatible(
   if (importConstraint === undefined || exportVersion === undefined) return true;
   const version = parseExactSemver(exportVersion);
   if (version === undefined) return false;
-  const clauses = importConstraint
-    .trim()
-    .split('||')
-    .map(clause => clause.trim());
+  const clauses = EffectArray.map(Effect.pipe(importConstraint, EffectString.trim, EffectString.split('||')), clause =>
+    Effect.pipe(clause, EffectString.trim),
+  );
   return (
     clauses.length > 0 &&
-    clauses.every(clause => clause.length > 0) &&
-    clauses.some(clause => semverClauseMatches(version, clause))
+    EffectArray.every(clauses, clause => clause.length > 0) &&
+    EffectArray.some(clauses, clause => semverClauseMatches(version, clause))
   );
 }
 
@@ -159,7 +164,7 @@ function canonicalizeRepositories(
 ): readonly CanonicalRepository[] {
   const repositoryKeys = new Set<string>();
   const snapshotMembers = new Set<string>();
-  const canonical = repositories.map(repository => {
+  const canonical = EffectArray.map(repositories, repository => {
     if (!REPOSITORY_ID.test(repository.repositoryId)) {
       throw new Error('Cross-repository bridge repository identity is invalid.');
     }
@@ -196,14 +201,14 @@ function indexExports(repositories: readonly CanonicalRepository[]): ReadonlyMap
     }
   }
   return new Map(
-    [...mutable]
-      .map(([key, values]) => [key, values.sort(compareLocatedMonikers)] as const)
-      .sort(([left], [right]) => compareCodeUnits(left, right)),
+    EffectArray.map([...mutable], ([key, values]) => [key, values.sort(compareLocatedMonikers)] as const).sort(
+      ([left], [right]) => compareCodeUnits(left, right),
+    ),
   );
 }
 
 function exactIdentityKey(moniker: CodeGraphMonikerV1): string {
-  return [moniker.scheme, moniker.resolutionDomain, moniker.kind, moniker.identity].join('\0');
+  return EffectArray.join([moniker.scheme, moniker.resolutionDomain, moniker.kind, moniker.identity], '\0');
 }
 
 function monikersAreCompatible(importMoniker: CodeGraphMonikerV1, exportMoniker: CodeGraphMonikerV1): boolean {
@@ -232,19 +237,25 @@ function createBridge(source: LocatedMoniker, target: LocatedMoniker): CodeGraph
     ? 'declared-npm-package-compatible'
     : 'exact-protobuf-identity';
   const id = `cgb_${sha256HexSync(
-    [
-      'threadnote-code-graph-cross-repository-bridge-v1',
-      CODE_GRAPH_CROSS_REPOSITORY_RESOLVER_VERSION,
-      source.moniker.resolutionDomain,
-      source.moniker.kind,
-      source.moniker.identity,
-      source.repository.repositoryId,
-      source.repository.snapshotId,
-      source.moniker.id,
-      target.repository.repositoryId,
-      target.repository.snapshotId,
-      target.moniker.id,
-    ].join('\0'),
+    EffectArray.join(
+      EffectArray.map(
+        [
+          'threadnote-code-graph-cross-repository-bridge-v1',
+          CODE_GRAPH_CROSS_REPOSITORY_RESOLVER_VERSION,
+          source.moniker.resolutionDomain,
+          source.moniker.kind,
+          source.moniker.identity,
+          source.repository.repositoryId,
+          source.repository.snapshotId,
+          source.moniker.id,
+          target.repository.repositoryId,
+          target.repository.snapshotId,
+          target.moniker.id,
+        ],
+        item => (item === null || item === undefined ? '' : String(item)),
+      ),
+      '\0',
+    ),
   )}`;
   return {
     confidence: 1,
@@ -348,15 +359,21 @@ interface PartialSemver {
 }
 
 function semverClauseMatches(version: ParsedSemver, rawClause: string): boolean {
-  const clause = rawClause
-    .replace(/([<>]=?|[~^])\s+/gu, '$1')
-    .replaceAll(',', ' ')
-    .trim();
-  const exact = parseExactSemver(clause.replace(/^=/u, ''));
+  const clause = Effect.pipe(
+    rawClause,
+    EffectString.replace(/([<>]=?|[~^])\s+/gu, '$1'),
+    EffectString.replaceAll(',', ' '),
+    EffectString.trim,
+  );
+  const exact = parseExactSemver(Effect.pipe(clause, EffectString.replace(/^=/u, '')));
   if (exact !== undefined) return compareSemver(version, exact) === 0;
   if (version.prerelease.length > 0) return false;
 
-  const hyphen = clause.match(/^(\S+)\s+-\s+(\S+)$/u);
+  const hyphen = Effect.pipe(
+    clause,
+    EffectString.match(/^(\S+)\s+-\s+(\S+)$/u),
+    Effect.Option.getOrElse(() => null),
+  );
   if (hyphen !== null) {
     const lower = parseExactSemver(hyphen[1]);
     const upper = parseExactSemver(hyphen[2]);
@@ -368,14 +385,18 @@ function semverClauseMatches(version: ParsedSemver, rawClause: string): boolean 
     );
   }
 
-  const tokens = clause.split(/\s+/u).filter(Boolean);
-  return tokens.length > 0 && tokens.every(token => semverTokenMatches(version, token));
+  const tokens = EffectArray.filter(Effect.pipe(clause, EffectString.split(/\s+/u)), Boolean);
+  return tokens.length > 0 && EffectArray.every(tokens, token => semverTokenMatches(version, token));
 }
 
 function semverTokenMatches(version: ParsedSemver, token: string): boolean {
   if (/^(?:\*|x)$/iu.test(token)) return true;
 
-  const caret = token.match(/^\^(.+)$/u);
+  const caret = Effect.pipe(
+    token,
+    EffectString.match(/^\^(.+)$/u),
+    Effect.Option.getOrElse(() => null),
+  );
   if (caret !== null) {
     const partial = parsePartialSemver(caret[1]);
     const lower = partial === undefined ? parseExactSemver(caret[1]) : partialLowerBound(partial);
@@ -384,7 +405,11 @@ function semverTokenMatches(version: ParsedSemver, token: string): boolean {
     return compareSemver(version, lower) >= 0 && compareSemver(version, upper) < 0;
   }
 
-  const tilde = token.match(/^~(.+)$/u);
+  const tilde = Effect.pipe(
+    token,
+    EffectString.match(/^~(.+)$/u),
+    Effect.Option.getOrElse(() => null),
+  );
   if (tilde !== null) {
     const partial = parsePartialSemver(tilde[1]);
     const lower = partial === undefined ? undefined : partialLowerBound(partial);
@@ -394,7 +419,11 @@ function semverTokenMatches(version: ParsedSemver, token: string): boolean {
     return compareSemver(version, lower) >= 0 && compareSemver(version, upper) < 0;
   }
 
-  const comparator = token.match(/^(<=|>=|<|>)(.+)$/u);
+  const comparator = Effect.pipe(
+    token,
+    EffectString.match(/^(<=|>=|<|>)(.+)$/u),
+    Effect.Option.getOrElse(() => null),
+  );
   if (comparator !== null) {
     const bound = lowerBound(comparator[2]);
     if (bound === undefined) return false;
@@ -411,7 +440,7 @@ function semverTokenMatches(version: ParsedSemver, token: string): boolean {
     }
   }
 
-  const partial = parsePartialSemver(token.replace(/^=/u, ''));
+  const partial = parsePartialSemver(Effect.pipe(token, EffectString.replace(/^=/u, '')));
   if (partial === undefined || partial.major === undefined) return false;
   if (partial.minor === undefined) return version.major === partial.major;
   if (partial.patch === undefined) return version.major === partial.major && version.minor === partial.minor;
@@ -441,9 +470,9 @@ function caretUpperBound(lower: ParsedSemver, partial: PartialSemver | undefined
 }
 
 function parsePartialSemver(value: string): PartialSemver | undefined {
-  const normalized = value.trim().replace(/^v/u, '');
+  const normalized = Effect.pipe(value, EffectString.trim, EffectString.replace(/^v/u, ''));
   if (!normalized || /[-+]/u.test(normalized)) return undefined;
-  const parts = normalized.split('.');
+  const parts = Effect.pipe(normalized, EffectString.split('.'));
   if (parts.length > 3) return undefined;
   const output: {major?: number; minor?: number; patch?: number} = {};
   const keys = ['major', 'minor', 'patch'] as const;
@@ -467,16 +496,31 @@ function partialLowerBound(value: PartialSemver): ParsedSemver | undefined {
 }
 
 function parseExactSemver(value: string): ParsedSemver | undefined {
-  const match = value
-    .trim()
-    .match(
-      /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u,
+  const match = Effect.pipe(value, __effectPipeInput => {
+    const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.trim);
+    const __effectPipeStage1 = Effect.pipe(
+      __effectPipeStage0,
+      EffectString.match(
+        /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u,
+      ),
+      Effect.Option.getOrElse(() => null),
     );
+    return __effectPipeStage1;
+  });
   if (match === null) return undefined;
   const numbers = [Number(match[1]), Number(match[2]), Number(match[3])];
-  if (!numbers.every(Number.isSafeInteger)) return undefined;
-  const prerelease = match[4]?.split('.') ?? [];
-  if (prerelease.some(identifier => /^\d+$/u.test(identifier) && identifier.length > 1 && identifier.startsWith('0'))) {
+  if (!EffectArray.every(numbers, Number.isSafeInteger)) return undefined;
+  const prerelease =
+    Effect.pipe(match[4], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.split('.')),
+    ) ?? [];
+  if (
+    EffectArray.some(
+      prerelease,
+      identifier =>
+        /^\d+$/u.test(identifier) && identifier.length > 1 && Effect.pipe(identifier, EffectString.startsWith('0')),
+    )
+  ) {
     return undefined;
   }
   return {major: numbers[0], minor: numbers[1], patch: numbers[2], prerelease};
@@ -509,11 +553,24 @@ function compareSemver(left: ParsedSemver, right: ParsedSemver): number {
 }
 
 function boundedCanonicalText(value: string, label: string, maximumLength: number): string {
-  const normalized = value.normalize('NFC').trim();
+  const normalized = Effect.pipe(value, EffectString.normalize('NFC'), EffectString.trim);
   if (
     !normalized ||
     normalized.length > maximumLength ||
-    [...normalized].some(character => character.codePointAt(0)! < 32 || character.codePointAt(0) === 127)
+    EffectArray.some(
+      [...normalized],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        )! < 32 ||
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        ) === 127,
+    )
   ) {
     throw new Error(`Cross-repository bridge ${label} is invalid.`);
   }

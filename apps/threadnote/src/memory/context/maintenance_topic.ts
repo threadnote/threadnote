@@ -1,3 +1,5 @@
+import {isOneOf as checkedIsOneOf} from '@threadnote/platform/validation';
+import {Array as EffectArray, Predicate} from 'effect';
 import {isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import type {TopicMaintenanceReviewPayload} from '@threadnote/memory/topic-maintenance-draft';
@@ -25,13 +27,19 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MaintenanceWorkSchedule} from './maintenance_decisions.js';
 import {isObsidianTopic, inspectTopicObsidianState, readTopicObsidianPacket} from './maintenance_obsidian.js';
 import {verifyTopicMaintenanceReviewSource} from './maintenance_review_source.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const TOPIC_MAINTENANCE_FAMILY = 'topic-maintenance';
 export const TOPIC_MAINTENANCE_SLOT = 'declared-support';
 const MAX_TOPIC_CHECKPOINT_BYTES = 32 * 1024;
-class TopicMaintenanceError extends Schema.TaggedError<TopicMaintenanceError>()('TopicMaintenanceError', {
-  message: Schema.String,
-}) {}
+class TopicMaintenanceError extends Schema.TaggedError<TopicMaintenanceError, {readonly brand: unique symbol}>()(
+  'TopicMaintenanceError',
+  {
+    message: Schema.String,
+  },
+) {}
 const topicFail = (message: string) => TopicMaintenanceError.make({message});
 
 export interface TopicMaintenanceCheckpoint {
@@ -108,7 +116,7 @@ export function saveTopicReviewDecision<E, R>(
   persist: (state: MaintenanceState) => Effect.Effect<void, E, R>,
 ) {
   return Effect.gen(function* () {
-    const item = state.cases.find(item => item.caseId === input.caseId);
+    const item = Option.getOrUndefined(EffectArray.findFirst(state.cases, item => item.caseId === input.caseId));
     const checkpoint = state.topicCheckpoints?.[input.caseId];
     if (!['reject', 'defer', 'resume'].includes(input.action) || !/^[0-9a-f]{64}$/u.test(input.observationRevision))
       return yield* topicFail('Choose an exact topic review action and observation revision.');
@@ -155,7 +163,7 @@ export function saveTopicReviewDecision<E, R>(
           ? 'topic-review-deferred'
           : `topic-${checkpoint.outcome}`;
     const now = DateTime.formatIso(yield* DateTime.now);
-    const caseMap = new Map(state.cases.map(item => [item.caseId, item]));
+    const caseMap = new Map(EffectArray.map(state.cases, item => [item.caseId, item]));
     const next = {...item, ...upsertCase(caseMap, {...item, disposition, reason}, now)};
     caseMap.set(item.caseId, next);
     const cases = [...caseMap.values()];
@@ -163,9 +171,9 @@ export function saveTopicReviewDecision<E, R>(
       ...state,
       cases,
       topicCheckpoints: {...state.topicCheckpoints, [item.caseId]: nextCheckpoint},
-      state: cases.some(item => item.disposition === 'needs-decision')
+      state: EffectArray.some(cases, item => item.disposition === 'needs-decision')
         ? 'needs-decision'
-        : cases.some(item => item.disposition === 'waiting-evidence')
+        : EffectArray.some(cases, item => item.disposition === 'waiting-evidence')
           ? 'waiting-evidence'
           : 'idle',
     });
@@ -208,10 +216,16 @@ export function selectTopicMaintenanceRecord(
   records: readonly MemoryRecord[],
   lastMemoryId: string | undefined,
 ): MemoryRecord | undefined {
-  const eligible = records
-    .filter(enrolledTopicCandidate)
-    .sort((a, b) => a.metadata.memoryId!.localeCompare(b.metadata.memoryId!));
-  return eligible.find(record => record.metadata.memoryId! > (lastMemoryId ?? '')) ?? eligible[0];
+  const eligible = EffectArray.filter(
+    records,
+    (__effectFilterValue: (typeof records)[number], __effectFilterIndex: number) =>
+      __effectFilterIndex in records && enrolledTopicCandidate(__effectFilterValue),
+  ).sort((a, b) => Effect2.pipe(a.metadata.memoryId!, EffectString.localeCompare(b.metadata.memoryId!)));
+  return (
+    Option.getOrUndefined(
+      EffectArray.findFirst(eligible, record => record.metadata.memoryId! > (lastMemoryId ?? '')),
+    ) ?? eligible[0]
+  );
 }
 
 /** An attempted target consumes its fair turn even if its opening/closing fence races. */
@@ -225,56 +239,78 @@ export function advanceTopicMaintenanceCursor(
 /** Decode optional state without discarding a malformed recovery artifact. */
 export function validTopicMaintenanceCheckpoints(value: unknown): value is Record<string, TopicMaintenanceCheckpoint> {
   if (value === undefined) return true;
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const entries = Object.entries(value);
-  return entries.every(([key, item]) => {
-    if (!/^health-case-[0-9a-f]{40}$/u.test(key) || typeof item !== 'object' || item === null || Array.isArray(item))
-      return false;
-    const entry = item as Record<string, unknown>;
-    return (
-      Object.keys(entry).every(field =>
-        [
-          'targetHash',
-          'revision',
-          'outcome',
-          'checkedAt',
-          'coverage',
-          'suppressedRevision',
-          'suppressedDecision',
-          'observation',
-          'recoveryObservation',
-          'deferredAt',
-          'overflowReason',
-        ].includes(field),
-      ) &&
-      typeof entry.targetHash === 'string' &&
-      /^[0-9a-f]{64}$/u.test(entry.targetHash) &&
-      typeof entry.revision === 'string' &&
-      /^[0-9a-f]{64}$/u.test(entry.revision) &&
-      ['unchanged', 'review-required', 'unavailable'].includes(entry.outcome as string) &&
-      typeof entry.checkedAt === 'string' &&
-      entry.checkedAt.length <= 40 &&
-      entry.coverage === 'declared-only' &&
-      (entry.suppressedRevision === undefined ||
-        (typeof entry.suppressedRevision === 'string' && /^[0-9a-f]{64}$/u.test(entry.suppressedRevision))) &&
-      (entry.suppressedDecision === undefined ||
-        (entry.suppressedRevision !== undefined && ['reject', 'defer'].includes(entry.suppressedDecision as string))) &&
-      (entry.deferredAt === undefined || (typeof entry.deferredAt === 'string' && entry.deferredAt.length <= 40)) &&
-      (entry.overflowReason === undefined || entry.overflowReason === 'topic-observation-overflow') &&
-      (entry.observation === undefined
-        ? (entry.deferredAt !== undefined || entry.overflowReason !== undefined) && entry.outcome === 'unavailable'
-        : validObservation(entry.observation, entry.targetHash, entry.revision)) &&
-      (entry.recoveryObservation === undefined ||
-        (typeof entry.recoveryObservation === 'object' &&
-          entry.recoveryObservation !== null &&
-          validObservation(
-            entry.recoveryObservation,
-            (entry.recoveryObservation as TopicMaintenanceObservationV1).targetHash,
-            (entry.recoveryObservation as TopicMaintenanceObservationV1).revision,
-          ))) &&
-      checkpointFits(entry as unknown as TopicMaintenanceCheckpoint)
-    );
-  });
+  if (!Predicate.isObject(value)) return false;
+  return EffectArray.every(
+    EffectRecord.toEntries(value),
+    ([key, item]) => /^health-case-[0-9a-f]{40}$/u.test(key) && decodeTopicMaintenanceCheckpoint(item) !== undefined,
+  );
+}
+
+function decodeTopicMaintenanceCheckpoint(value: unknown): TopicMaintenanceCheckpoint | undefined {
+  if (!Predicate.isObject(value)) return undefined;
+  const entry = value;
+  if (
+    !EffectArray.every(EffectRecord.keys(entry), field =>
+      [
+        'targetHash',
+        'revision',
+        'outcome',
+        'checkedAt',
+        'coverage',
+        'suppressedRevision',
+        'suppressedDecision',
+        'observation',
+        'recoveryObservation',
+        'deferredAt',
+        'overflowReason',
+      ].includes(field),
+    ) ||
+    typeof entry.targetHash !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(entry.targetHash) ||
+    typeof entry.revision !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(entry.revision) ||
+    !checkedIsOneOf(['unchanged', 'review-required', 'unavailable'], entry.outcome) ||
+    typeof entry.checkedAt !== 'string' ||
+    entry.checkedAt.length > 40 ||
+    entry.coverage !== 'declared-only' ||
+    (entry.suppressedRevision !== undefined &&
+      (typeof entry.suppressedRevision !== 'string' || !/^[0-9a-f]{64}$/u.test(entry.suppressedRevision))) ||
+    (entry.suppressedDecision !== undefined &&
+      (entry.suppressedRevision === undefined || !checkedIsOneOf(['reject', 'defer'], entry.suppressedDecision))) ||
+    (entry.deferredAt !== undefined && (typeof entry.deferredAt !== 'string' || entry.deferredAt.length > 40)) ||
+    (entry.overflowReason !== undefined && entry.overflowReason !== 'topic-observation-overflow') ||
+    (entry.observation !== undefined && !validObservation(entry.observation, entry.targetHash, entry.revision)) ||
+    (entry.recoveryObservation !== undefined && !validRecoveryObservation(entry.recoveryObservation))
+  )
+    return undefined;
+
+  const checkpoint: TopicMaintenanceCheckpoint = {
+    targetHash: entry.targetHash,
+    revision: entry.revision,
+    outcome: entry.outcome,
+    checkedAt: entry.checkedAt,
+    coverage: entry.coverage,
+    ...(entry.suppressedRevision === undefined ? {} : {suppressedRevision: entry.suppressedRevision}),
+    ...(entry.suppressedDecision === undefined ? {} : {suppressedDecision: entry.suppressedDecision}),
+    ...(entry.observation === undefined ? {} : {observation: entry.observation}),
+    ...(entry.recoveryObservation === undefined ? {} : {recoveryObservation: entry.recoveryObservation}),
+    ...(entry.deferredAt === undefined ? {} : {deferredAt: entry.deferredAt}),
+    ...(entry.overflowReason === undefined ? {} : {overflowReason: entry.overflowReason}),
+  };
+  if (
+    checkpoint.observation === undefined &&
+    !(
+      (checkpoint.deferredAt !== undefined || checkpoint.overflowReason !== undefined) &&
+      checkpoint.outcome === 'unavailable'
+    )
+  )
+    return undefined;
+  return checkpointFits(checkpoint) ? checkpoint : undefined;
+}
+
+function validRecoveryObservation(value: unknown): value is TopicMaintenanceObservation {
+  if (!Predicate.isObject(value) || !('targetHash' in value) || !('revision' in value)) return false;
+  return validObservation(value, value.targetHash, value.revision);
 }
 
 function validObservation(
@@ -284,7 +320,8 @@ function validObservation(
 ): value is TopicMaintenanceObservation {
   if (typeof value === 'object' && value !== null && 'version' in value && value.version === 2) {
     if (
-      Object.keys(value).some(
+      EffectArray.some(
+        EffectRecord.keys(value),
         key =>
           ![
             'version',
@@ -314,15 +351,16 @@ function validObservation(
       ('inspectionDigest' in value &&
         (typeof value.inspectionDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(value.inspectionDigest))) ||
       !('sources' in value) ||
-      !Array.isArray(value.sources) ||
+      !EffectArray.isArray(value.sources) ||
       value.sources.length !== 1
     )
       return false;
-    return value.sources.every(
+    return EffectArray.every(
+      value.sources,
       (source: unknown) =>
         typeof source === 'object' &&
         source !== null &&
-        Object.keys(source).sort().join(',') ===
+        EffectArray.join(EffectRecord.keys(source).sort(), ',') ===
           'activeStatus,citationId,historicalAvailable,originStatus,reason,status' &&
         'citationId' in source &&
         typeof source.citationId === 'string' &&
@@ -351,28 +389,30 @@ function validCodeObservation(
   targetHash: unknown,
   revision: unknown,
 ): value is TopicMaintenanceObservationV1 {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const item = value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) return false;
+  const item = value;
   if (
-    Object.keys(item).some(
+    EffectArray.some(
+      EffectRecord.keys(item),
       key => !['version', 'targetHash', 'revision', 'coverage', 'outcome', 'sources', 'canDraft'].includes(key),
     ) ||
     item.version !== 1 ||
     item.targetHash !== targetHash ||
     item.revision !== revision ||
     item.coverage !== 'declared-only' ||
-    !['unchanged', 'review-required', 'unavailable'].includes(item.outcome as string) ||
+    !checkedIsOneOf(['unchanged', 'review-required', 'unavailable'], item.outcome) ||
     typeof item.canDraft !== 'boolean' ||
-    !Array.isArray(item.sources) ||
+    !EffectArray.isArray(item.sources) ||
     item.sources.length > 8
   )
     return false;
   const ids = new Set<string>();
-  return item.sources.every((raw: unknown) => {
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return false;
-    const source = raw as Record<string, unknown>;
+  return EffectArray.every(item.sources, (raw: unknown) => {
+    if (!Predicate.isObject(raw)) return false;
+    const source = raw;
     if (
-      Object.keys(source).some(
+      EffectArray.some(
+        EffectRecord.keys(source),
         key =>
           ![
             'citationId',
@@ -389,7 +429,7 @@ function validCodeObservation(
       typeof source.citationId !== 'string' ||
       !/^tncc_[0-9a-f]{40}$/u.test(source.citationId) ||
       ids.has(source.citationId) ||
-      !['exact', 'relocated', 'changed', 'deleted', 'unknown'].includes(source.status as string) ||
+      !checkedIsOneOf(['exact', 'relocated', 'changed', 'deleted', 'unknown'], source.status) ||
       typeof source.reason !== 'string' ||
       source.reason.length > 256 ||
       typeof source.historicalAvailable !== 'boolean' ||
@@ -419,7 +459,9 @@ export function pruneAbsentTopicCheckpoints(
   complete: boolean,
 ): Readonly<Record<string, TopicMaintenanceCheckpoint>> {
   if (!complete) return checkpoints;
-  return Object.fromEntries(Object.entries(checkpoints).filter(([id]) => activeCaseIds.has(id)));
+  return EffectRecord.fromEntries(
+    EffectArray.filter(EffectRecord.toEntries(checkpoints), ([id]) => activeCaseIds.has(id)),
+  );
 }
 
 /** Keep enrolled active identity while applying the ordinary terminal-history cap to proven absence. */
@@ -432,15 +474,22 @@ export function selectRetainedMaintenanceCases(
   if (exactCaseRefresh) return cases;
   const retainTopic = (item: ContextMaintenanceCaseV2) =>
     item.family === TOPIC_MAINTENANCE_FAMILY && (!completeUnscopedInventory || activeIds.has(item.memoryId));
-  const terminal = cases
-    .filter(
-      item => ['resolved', 'retired'].includes(item.disposition) && item.retirement === undefined && !retainTopic(item),
-    )
-    .sort((a, b) => b.lastChecked.localeCompare(a.lastChecked))
+  const terminal = EffectArray.filter(
+    cases,
+    (item, __effectArrayIndex) =>
+      __effectArrayIndex in cases &&
+      ['resolved', 'retired'].includes(item.disposition) &&
+      item.retirement === undefined &&
+      !retainTopic(item),
+  )
+    .sort((a, b) => Effect2.pipe(b.lastChecked, EffectString.localeCompare(a.lastChecked)))
     .slice(0, 200);
   return [
-    ...cases.filter(
-      item => !['resolved', 'retired'].includes(item.disposition) || item.retirement !== undefined || retainTopic(item),
+    ...EffectArray.filter(
+      cases,
+      (item, __effectArrayIndex) =>
+        __effectArrayIndex in cases &&
+        (!['resolved', 'retired'].includes(item.disposition) || item.retirement !== undefined || retainTopic(item)),
     ),
     ...terminal,
   ];
@@ -580,7 +629,7 @@ export function stateWithAcceptedTopicObservation(
     readonly checkpoint: TopicMaintenanceCheckpoint;
   },
 ): MaintenanceState {
-  const cases = state.cases.map(item => (item.caseId === observed.caseId ? observed.item : item));
+  const cases = EffectArray.map(state.cases, item => (item.caseId === observed.caseId ? observed.item : item));
   return {
     ...stateWithAcceptedCases(state, cases),
     topicCheckpoints: {...state.topicCheckpoints, [observed.caseId]: observed.checkpoint},
@@ -591,9 +640,9 @@ function stateWithAcceptedCases(state: MaintenanceState, cases: readonly Context
   return {
     ...state,
     cases,
-    state: cases.some(item => item.disposition === 'needs-decision')
+    state: EffectArray.some(cases, item => item.disposition === 'needs-decision')
       ? 'needs-decision'
-      : cases.some(item => item.disposition === 'waiting-evidence')
+      : EffectArray.some(cases, item => item.disposition === 'waiting-evidence')
         ? 'waiting-evidence'
         : state.state === 'needs-decision' || state.state === 'waiting-evidence'
           ? 'idle'
@@ -646,12 +695,12 @@ export function reconcileAcceptedTopicMaintenanceState<A, E, R, P, Q>(
           });
         if (payload.version === 3) {
           if (!hasAbsentMaintenanceAnchors(state.cases, current)) return yield* complete;
-          const cases = new Map(state.cases.map(item => [item.caseId, item]));
+          const cases = new Map(EffectArray.map(state.cases, item => [item.caseId, item]));
           reconcileAbsentMaintenanceAnchors(cases, current, DateTime.formatIso(yield* DateTime.now));
           return yield* persistAndComplete(stateWithAcceptedCases(state, [...cases.values()]));
         }
         const caseId = topicMaintenanceCaseId(original);
-        const prior = state.cases.find(item => item.caseId === caseId);
+        const prior = Option.getOrUndefined(EffectArray.findFirst(state.cases, item => item.caseId === caseId));
         const checkpoint = state.topicCheckpoints?.[caseId];
         if (!prior && !checkpoint) {
           if (payload.generation.origin === 'manual') return yield* complete;
@@ -668,7 +717,7 @@ export function reconcileAcceptedTopicMaintenanceState<A, E, R, P, Q>(
             checkpoint.targetHash !== maintenanceContentHash(acceptedContent))
         )
           return yield* topicFail('The topic case changed before maintenance verification.');
-        const cases = new Map(state.cases.map(item => [item.caseId, item]));
+        const cases = new Map(EffectArray.map(state.cases, item => [item.caseId, item]));
         const now = DateTime.formatIso(yield* DateTime.now);
         const observed = yield* observeTopicMaintenanceCase(
           config,
@@ -688,8 +737,13 @@ export function reconcileAcceptedTopicMaintenanceState<A, E, R, P, Q>(
           checkpoint.outcome === observed.checkpoint.outcome &&
           prior.disposition === observed.item.disposition &&
           prior.evidenceRevision === observed.item.evidenceRevision &&
-          prior.subjectContentHashes?.find(subject => subject.uri === original.uri)?.hash ===
-            maintenanceContentHash(acceptedContent) &&
+          Option.getOrUndefined(
+            Option.map(Option.fromNullishOr(prior.subjectContentHashes), __effectArrayReceiver =>
+              Option.getOrUndefined(
+                EffectArray.findFirst(__effectArrayReceiver, subject => subject.uri === original.uri),
+              ),
+            ),
+          )?.hash === maintenanceContentHash(acceptedContent) &&
           prior.sourceSnapshot?.revision === observed.item.sourceSnapshot?.revision
         )
           return yield* complete;
@@ -806,7 +860,8 @@ export function readTopicMaintenanceCasePacket<E, R>(
         checkpoint.deferredAt ||
         checkpoint.overflowReason ||
         checkpoint.revision !== item.evidenceRevision ||
-        Object.values(selection).some(value => value !== undefined)
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+        EffectArray.some(Object.values(selection), value => value !== undefined)
       )
         return yield* topicFail('The imported topic observation changed. Refresh maintenance.');
       const guard = Effect.gen(function* () {
@@ -875,12 +930,18 @@ export function readTopicMaintenanceCasePacket<E, R>(
       topicEvidence,
       evidenceCounts: {
         declared: observation.sources.length,
-        unavailable: observation.sources.filter(
+        unavailable: EffectArray.filter(
+          observation.sources,
           source => source.status === 'unknown' || source.status === 'deleted' || !source.current,
         ).length,
-        historicalUnavailable: observation.sources.filter(source => !source.historicalAvailable).length,
+        historicalUnavailable: EffectArray.filter(observation.sources, source => !source.historicalAvailable).length,
         truncated:
-          topicEvidence.truncatedExcerpts ?? observation.sources.filter(source => source.excerptTruncated).length,
+          topicEvidence.truncatedExcerpts ??
+          EffectArray.filter(
+            observation.sources,
+            (source, __effectArrayIndex) =>
+              __effectArrayIndex in observation.sources && Boolean(source.excerptTruncated),
+          ).length,
       },
       choices: ['Review the declared support and author a topic update'],
       allowedOperations: ['read_context_maintenance_packet'],

@@ -1,5 +1,8 @@
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed evaluation helper owns explicit operating-system process-group boundaries. */
 import {spawn, type ChildProcess} from 'node:child_process';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export interface CodeMemoryLinkProcessCaptureOptions {
   readonly allowFailure?: boolean;
@@ -175,13 +178,10 @@ export async function codeMemoryLinkProcessGroupMembers(groupId: number): Promis
         return;
       }
       resolvePromise(
-        Buffer.concat(stdout)
-          .toString('utf8')
-          .split(/\r?\n/u)
-          .flatMap(line => {
-            const match = /^\s*([0-9]+)\s+([0-9]+)\s*$/u.exec(line);
-            return match?.[2] === String(groupId) ? [Number(match[1])] : [];
-          }),
+        EffectArray.flatMap(Effect.pipe(Buffer.concat(stdout).toString('utf8'), EffectString.split(/\r?\n/u)), line => {
+          const match = /^\s*([0-9]+)\s+([0-9]+)\s*$/u.exec(line);
+          return match?.[2] === String(groupId) ? [Number(match[1])] : [];
+        }),
       );
     });
   });

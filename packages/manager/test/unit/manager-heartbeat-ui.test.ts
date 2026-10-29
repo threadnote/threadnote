@@ -1,11 +1,11 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 
 import {act} from 'react';
 import {expect, it, vi} from 'vitest';
 
 it('checks Manager health on connected heartbeat ticks without repeating runtime state requests', async () => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
-  const originalFetch = globalThis.fetch;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const requests: string[] = [];
   let heartbeat: (() => void) | undefined;
   const setInterval = vi.spyOn(window, 'setInterval').mockImplementation((handler, milliseconds) => {
@@ -15,7 +15,7 @@ it('checks Manager health on connected heartbeat ticks without repeating runtime
   const root = document.createElement('div');
   root.id = 'root';
   document.body.append(root);
-  globalThis.fetch = (async input => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
     const path = new URL(String(input), 'http://localhost').pathname;
     requests.push(path);
     if (path === '/api/state')
@@ -33,24 +33,24 @@ it('checks Manager health on connected heartbeat ticks without repeating runtime
     if (path === '/api/tree') return json({tree: undefined, resourcesTree: undefined});
     if (path === '/api/shares') return json({shares: []});
     return json({});
-  }) as typeof fetch;
+  });
 
   try {
     await act(async () => {
       (await import('@threadnote/manager/ui')).mountManager({integrations: []});
     });
     expect(heartbeat).toBeDefined();
-    const initialStateRequests = requests.filter(path => path === '/api/state').length;
+    const initialStateRequests = EffectArray.filter(requests, path => path === '/api/state').length;
     expect(initialStateRequests).toBe(1);
 
     await act(async () => {
       heartbeat?.();
       heartbeat?.();
     });
-    expect(requests.filter(path => path === '/api/health')).toHaveLength(2);
-    expect(requests.filter(path => path === '/api/state')).toHaveLength(initialStateRequests);
+    expect(EffectArray.filter(requests, path => path === '/api/health')).toHaveLength(2);
+    expect(EffectArray.filter(requests, path => path === '/api/state')).toHaveLength(initialStateRequests);
   } finally {
-    globalThis.fetch = originalFetch;
+    fetchMock.mockRestore();
     setInterval.mockRestore();
     document.body.replaceChildren();
   }

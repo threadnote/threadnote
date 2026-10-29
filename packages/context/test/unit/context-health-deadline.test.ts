@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {nextContextHealthChangeAt} from '@threadnote/context/health';
@@ -92,12 +93,12 @@ describe('nextContextHealthChangeAt', () => {
   it('returns the earliest future threshold across arbitrary validity dates', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({min: -10_000, max: 10_000}), {maxLength: 20}), offsets => {
-        const records = offsets.map((offset, index) =>
+        const records = EffectArray.map(offsets, (offset, index) =>
           record(`r${index}`, {
             validTo: new Date(NOW + offset).toISOString(),
           }),
         );
-        const expected = offsets.filter(offset => offset > 0).sort((left, right) => left - right)[0];
+        const expected = EffectArray.filter(offsets, offset => offset > 0).sort((left, right) => left - right)[0];
         expect(nextContextHealthChangeAt({records, project: 'threadnote', now: new Date(NOW)})).toBe(
           expected === undefined ? undefined : NOW + expected,
         );

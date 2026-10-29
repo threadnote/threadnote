@@ -1,3 +1,5 @@
+import {isOneOf} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Crypto, Effect, Exit, FileSystem, Option, Path, Predicate, Schema, Stdio, Stream} from 'effect';
 import {CommandExecutor, CommandTimedOut, type CommandExecutionError} from '@threadnote/platform/command';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -28,6 +30,8 @@ import {observeCodeGraphBackgroundDemand, type CodeGraphRefreshDemandIdentity} f
 import {resolveRepositoryIdentity} from '../repository.js';
 import {CodeGraphSnapshotUnavailable, type CodeGraphQueryResult, type RepositoryIdentity} from '../types.js';
 import type {CodeGraphRefreshContinuity} from '../watcher.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CODE_GRAPH_IMPACT_QUERY_PROTOCOL = 1 as const;
 const CODE_GRAPH_IMPACT_QUERY_INPUT_BYTES_MAXIMUM = 256 * 1_024;
@@ -182,21 +186,21 @@ export interface IsolatedCodeGraphReadUnavailable {
   };
 }
 
-export class IsolatedCodeGraphImpactQueryError extends Schema.TaggedError<IsolatedCodeGraphImpactQueryError>()(
-  'IsolatedCodeGraphImpactQueryError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class IsolatedCodeGraphImpactQueryError extends Schema.TaggedError<
+  IsolatedCodeGraphImpactQueryError,
+  {readonly brand: unique symbol}
+>()('IsolatedCodeGraphImpactQueryError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
-export class IsolatedCodeGraphImpactQueryTimedOut extends Schema.TaggedError<IsolatedCodeGraphImpactQueryTimedOut>()(
-  'IsolatedCodeGraphImpactQueryTimedOut',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class IsolatedCodeGraphImpactQueryTimedOut extends Schema.TaggedError<
+  IsolatedCodeGraphImpactQueryTimedOut,
+  {readonly brand: unique symbol}
+>()('IsolatedCodeGraphImpactQueryTimedOut', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const executeIsolatedQueryWorker = Effect.fn('codeGraph.executeIsolatedQuery')(function* (
   input: IsolatedCodeGraphQueryInput,
@@ -279,7 +283,7 @@ export const inspectCodeGraphReadIsolated = Effect.fn('codeGraph.readIsolated')(
     readonly timeoutMilliseconds?: number;
   } = {},
 ) {
-  if ((input as {readonly discover?: unknown}).discover !== true) {
+  if (input.discover !== true) {
     return yield* IsolatedCodeGraphImpactQueryError.make({message: 'Discovery reads require discover:true.'});
   }
   const result = yield* executeIsolatedQueryWorker(input, options);
@@ -342,8 +346,15 @@ export const serveCodeGraphDiscoveryRead = Effect.fn('codeGraph.serveDiscoveryRe
         };
       }
       const observation = codeGraphInspectionObservation(observationFromCodeGraphStatus(attached), request.operation);
-      const scopedSeedQueries = request.seedQueries?.filter(candidate =>
-        codeGraphScopeAdmitsPath(observation?.projectScope?.scope, candidate),
+      const scopedSeedQueries = Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(request.seedQueries), __effectSeedQueries =>
+          EffectArray.filter(
+            __effectSeedQueries,
+            (candidate, __effectSeedQueryIndex) =>
+              __effectSeedQueryIndex in __effectSeedQueries &&
+              codeGraphScopeAdmitsPath(observation?.projectScope?.scope, candidate),
+          ),
+        ),
       );
       const result = yield* query
         .inspect({
@@ -600,7 +611,7 @@ const readImpactQueryWorkerRequest = Effect.gen(function* () {
       },
     ),
   );
-  return decodeImpactQueryRequest(state.chunks.join(''));
+  return decodeImpactQueryRequest(EffectArray.join(state.chunks, ''));
 });
 
 const writeImpactQueryWorkerResponse = Effect.fn('codeGraph.impactQueryWorker.write')(function* (
@@ -618,7 +629,7 @@ const writeImpactQueryWorkerResponse = Effect.fn('codeGraph.impactQueryWorker.wr
 export function decodeImpactQueryRequest(content: string): CodeGraphImpactQueryRequest | undefined {
   if (new TextEncoder().encode(content).byteLength > CODE_GRAPH_IMPACT_QUERY_INPUT_BYTES_MAXIMUM) return undefined;
   try {
-    const parsed: unknown = JSON.parse(content.trim());
+    const parsed: unknown = JSON.parse(Effect2.pipe(content, EffectString.trim));
     return validImpactQueryRequest(parsed) ? parsed : undefined;
   } catch {
     return undefined;
@@ -679,13 +690,17 @@ function validImpactQueryRequest(value: unknown): value is CodeGraphImpactQueryR
   const seeds = record.seedQueries;
   if (seeds === undefined && record.seedQueryCount !== undefined) return false;
   if (seeds !== undefined) {
-    if (record.operation !== 'impact' || !Array.isArray(seeds) || seeds.length > CODE_GRAPH_IMPACT_QUERY_SEED_LIMIT) {
+    if (
+      record.operation !== 'impact' ||
+      !EffectArray.isArray(seeds) ||
+      seeds.length > CODE_GRAPH_IMPACT_QUERY_SEED_LIMIT
+    ) {
       return false;
     }
     const seedQueryCount = record.seedQueryCount ?? seeds.length;
     if (
       seedQueryCount < seeds.length ||
-      !seeds.every(value => validProtocolText(value)) ||
+      !EffectArray.every(seeds, value => validProtocolText(value)) ||
       (record.query === '' && seedQueryCount === 0)
     ) {
       return false;
@@ -841,7 +856,7 @@ function validProtocolText(value: unknown, allowEmpty = false): value is string 
   return (
     typeof value === 'string' &&
     (allowEmpty || value.length > 0) &&
-    !value.includes('\0') &&
+    !Effect2.pipe(value, EffectString.includes('\0')) &&
     new TextEncoder().encode(value).byteLength <= CODE_GRAPH_IMPACT_QUERY_TEXT_BYTES_MAXIMUM
   );
 }
@@ -857,7 +872,7 @@ function boundedTimeout(value: number | undefined, maximum: number): number {
 
 function decodeImpactQueryResponse(content: string): CodeGraphImpactQueryResponse | undefined {
   try {
-    const parsed: unknown = JSON.parse(content.trim());
+    const parsed: unknown = JSON.parse(Effect2.pipe(content, EffectString.trim));
     if (!Predicate.isObject(parsed)) return undefined;
     const record = parsed;
     if (record.protocol !== CODE_GRAPH_IMPACT_QUERY_PROTOCOL || typeof record.ok !== 'boolean') return undefined;
@@ -1017,20 +1032,23 @@ export function decodeCodeGraphIsolatedQueryTelemetry(
   value: unknown,
 ): readonly CodeGraphQueryTelemetryObservation[] | undefined {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 8) return undefined;
+  if (!EffectArray.isArray(value) || value.length > 8) return undefined;
   const observations: CodeGraphQueryTelemetryObservation[] = [];
   for (const observation of value) {
     if (!Predicate.isObject(observation)) return undefined;
     if (
       !boundedInteger(observation.durationMilliseconds, 0, CODE_GRAPH_ISOLATED_QUERY_TIMEOUT_MILLISECONDS) ||
-      !['failure', 'interrupted', 'success'].includes(String(observation.outcome)) ||
-      !['graph.query.execute', 'graph.query.snapshot', 'graph.query.status'].includes(String(observation.phase)) ||
-      ![
-        'query-repository-identity',
-        'query-serialization',
-        'query-strict-reobservation',
-        'query-worktree-observation',
-      ].includes(String(observation.stage)) ||
+      !isOneOf(['failure', 'interrupted', 'success'], observation.outcome) ||
+      !isOneOf(['graph.query.execute', 'graph.query.snapshot', 'graph.query.status'], observation.phase) ||
+      !isOneOf(
+        [
+          'query-repository-identity',
+          'query-serialization',
+          'query-strict-reobservation',
+          'query-worktree-observation',
+        ],
+        observation.stage,
+      ) ||
       (observation.disposition !== undefined &&
         observation.disposition !== 'fallback' &&
         observation.disposition !== 'skipped')
@@ -1040,9 +1058,9 @@ export function decodeCodeGraphIsolatedQueryTelemetry(
     observations.push({
       ...(observation.disposition === undefined ? {} : {disposition: observation.disposition}),
       durationMilliseconds: observation.durationMilliseconds,
-      outcome: observation.outcome as CodeGraphQueryTelemetryObservation['outcome'],
-      phase: observation.phase as CodeGraphQueryTelemetryPhase,
-      stage: observation.stage as CodeGraphQueryTelemetryStage,
+      outcome: observation.outcome,
+      phase: observation.phase,
+      stage: observation.stage,
     });
   }
   return observations;
@@ -1058,10 +1076,10 @@ function validImpactQueryResult(value: unknown): value is CodeGraphQueryResult {
     record.version === 1 &&
     isCodeGraphIsolatedQueryOperation(record.operation) &&
     (record.freshness === 'current' || record.freshness === 'stale' || record.freshness === 'deferred') &&
-    Array.isArray(record.nodes) &&
-    Array.isArray(record.edges) &&
-    Array.isArray(record.warnings) &&
-    record.warnings.every(warning => typeof warning === 'string') &&
+    EffectArray.isArray(record.nodes) &&
+    EffectArray.isArray(record.edges) &&
+    EffectArray.isArray(record.warnings) &&
+    EffectArray.every(record.warnings, warning => typeof warning === 'string') &&
     repository !== undefined &&
     typeof repository.displayName === 'string' &&
     typeof repository.repositoryId === 'string' &&
@@ -1109,7 +1127,11 @@ export function impactQueryWorkerInvocation(system: SystemInfoShape): {
   readonly arguments: readonly string[];
   readonly executable: string;
 } {
-  const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const executableName = Effect2.pipe(
+    Effect2.pipe(system.executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   if (executableName !== 'bun' && executableName !== 'bun.exe') {
     return {arguments: [CODE_GRAPH_IMPACT_QUERY_WORKER_ARGUMENT], executable: system.executablePath};
   }

@@ -1,3 +1,5 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from './effect/errors.js';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -5,6 +7,8 @@ import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
 import {installationRoot} from '@threadnote/threadnote/installations';
 import {readStandaloneProcessLeaseVerification} from '@threadnote/threadnote/process/standalone_lease';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const DEVELOPMENT_INSTALL_RECEIPT = 'development-install.json';
 export const DEVELOPMENT_INSTALL_RECEIPT_VERSION = 2 as const;
@@ -87,7 +91,7 @@ export function developmentBuildVersion(packageVersion: string, sourceCommit: st
       message: 'The checked-in package version must not already be a local development version.',
     });
   }
-  const separator = packageVersion.includes('-') ? '.' : '-';
+  const separator = Effect2.pipe(packageVersion, EffectString.includes('-')) ? '.' : '-';
   const version = `${packageVersion}${separator}local.g${sourceCommit}`;
   if (!isDevelopmentBuildVersion(version)) {
     throw ScriptError.make({message: 'Could not derive a valid local development version.'});
@@ -104,53 +108,63 @@ export function developmentVersionSourceCommit(version: string): Option.Option<s
 }
 
 export function parseDevelopmentInstallReceipt(value: unknown): Option.Option<DevelopmentInstallReceiptV1> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return Option.none();
-  const candidate = value as Partial<DevelopmentInstallReceiptV1>;
-  const payloadManifest = parsePayloadManifest(candidate.payloadManifest);
-  return candidate.schemaVersion === DEVELOPMENT_INSTALL_RECEIPT_VERSION &&
-    typeof candidate.builtAt === 'string' &&
-    Number.isFinite(Date.parse(candidate.builtAt)) &&
-    candidate.dependencyInstallation === 'bun install --frozen-lockfile' &&
-    typeof candidate.version === 'string' &&
-    isDevelopmentBuildVersion(candidate.version) &&
-    typeof candidate.sourceCommit === 'string' &&
-    SOURCE_COMMIT_PATTERN.test(candidate.sourceCommit) &&
-    candidate.sourceDirty === false &&
-    typeof candidate.executableSha256 === 'string' &&
-    SHA256_PATTERN.test(candidate.executableSha256) &&
+  return isDevelopmentInstallReceiptV1(value) ? Option.some(value) : Option.none();
+}
+
+function isDevelopmentInstallReceiptV1(value: unknown): value is DevelopmentInstallReceiptV1 {
+  if (!isJsonObject(value)) return false;
+  const payloadManifest = parsePayloadManifest(value.payloadManifest);
+  return (
+    value.schemaVersion === DEVELOPMENT_INSTALL_RECEIPT_VERSION &&
+    typeof value.builtAt === 'string' &&
+    Number.isFinite(Date.parse(value.builtAt)) &&
+    value.dependencyInstallation === 'bun install --frozen-lockfile' &&
+    typeof value.version === 'string' &&
+    isDevelopmentBuildVersion(value.version) &&
+    typeof value.sourceCommit === 'string' &&
+    SOURCE_COMMIT_PATTERN.test(value.sourceCommit) &&
+    value.sourceDirty === false &&
+    typeof value.executableSha256 === 'string' &&
+    SHA256_PATTERN.test(value.executableSha256) &&
     Option.isSome(payloadManifest) &&
-    typeof candidate.payloadManifestSha256 === 'string' &&
-    SHA256_PATTERN.test(candidate.payloadManifestSha256) &&
-    typeof candidate.releaseMetadataSha256 === 'string' &&
-    SHA256_PATTERN.test(candidate.releaseMetadataSha256) &&
-    typeof candidate.sourceLockfileSha256 === 'string' &&
-    SHA256_PATTERN.test(candidate.sourceLockfileSha256) &&
-    typeof candidate.sourcePackageManifestSha256 === 'string' &&
-    SHA256_PATTERN.test(candidate.sourcePackageManifestSha256) &&
-    typeof candidate.runtime === 'string' &&
-    candidate.runtime.length > 0 &&
-    typeof candidate.target === 'string' &&
-    candidate.target.length > 0
-    ? Option.some(candidate as DevelopmentInstallReceiptV1)
-    : Option.none();
+    typeof value.payloadManifestSha256 === 'string' &&
+    SHA256_PATTERN.test(value.payloadManifestSha256) &&
+    typeof value.releaseMetadataSha256 === 'string' &&
+    SHA256_PATTERN.test(value.releaseMetadataSha256) &&
+    typeof value.sourceLockfileSha256 === 'string' &&
+    SHA256_PATTERN.test(value.sourceLockfileSha256) &&
+    typeof value.sourcePackageManifestSha256 === 'string' &&
+    SHA256_PATTERN.test(value.sourcePackageManifestSha256) &&
+    typeof value.runtime === 'string' &&
+    value.runtime.length > 0 &&
+    typeof value.target === 'string' &&
+    value.target.length > 0
+  );
 }
 
 function isPayloadPath(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
-    if (value.charCodeAt(index) === 0) return false;
+    if (
+      Effect2.pipe(
+        value,
+        EffectString.charCodeAt(index),
+        Effect2.Option.getOrElse(() => NaN),
+      ) === 0
+    )
+      return false;
   }
   return PAYLOAD_PATH_PATTERN.test(value);
 }
 
 function parsePayloadManifest(value: unknown): Option.Option<readonly DevelopmentPayloadManifestEntryV1[]> {
-  if (!Array.isArray(value) || value.length === 0) return Option.none();
+  if (!EffectArray.isArray(value) || value.length === 0) return Option.none();
   const entries: DevelopmentPayloadManifestEntryV1[] = [];
   let priorPath = '';
   for (const candidate of value) {
     if (
       typeof candidate !== 'object' ||
       candidate === null ||
-      Array.isArray(candidate) ||
+      EffectArray.isArray(candidate) ||
       !('path' in candidate) ||
       typeof candidate.path !== 'string' ||
       !isPayloadPath(candidate.path) ||
@@ -176,7 +190,7 @@ function parsePayloadManifest(value: unknown): Option.Option<readonly Developmen
       size: Number(candidate.size),
     });
   }
-  if (entries.some(entry => entry.path === DEVELOPMENT_INSTALL_RECEIPT)) return Option.none();
+  if (EffectArray.some(entries, entry => entry.path === DEVELOPMENT_INSTALL_RECEIPT)) return Option.none();
   return Option.some(entries);
 }
 
@@ -227,7 +241,7 @@ export const collectDevelopmentPayloadManifest = Effect.fn('developmentRuntime.c
         return yield* ScriptError.make({message: 'The development payload must not contain symbolic links.'});
       }
       const info = yield* fs.stat(entry);
-      const expectedRealPath = path.join(realRoot, ...relative.split('/'));
+      const expectedRealPath = path.join(realRoot, ...Effect2.pipe(relative, EffectString.split('/')));
       const realEntry = yield* fs.realPath(entry);
       if (!canonicalPathEquals(path, system, realEntry, expectedRealPath)) {
         return yield* ScriptError.make({message: 'The development payload contains a non-canonical path.'});
@@ -332,7 +346,10 @@ export const verifyManagedDevelopmentRuntimeForSource = Effect.fn('developmentRu
     });
   }
   if (
-    live.verified.some(lease => lease.version !== evidence.version && lease.retirementPolicy !== 'preserve-session')
+    EffectArray.some(
+      live.verified,
+      lease => lease.version !== evidence.version && lease.retirementPolicy !== 'preserve-session',
+    )
   ) {
     return yield* ScriptError.make({
       message: 'Managed development runtime verification found a process pinned to a superseded release.',
@@ -477,8 +494,12 @@ export const readDevelopmentReleaseEvidence = Effect.fn('developmentRuntime.read
       message: 'The managed development release payload manifest does not match its files.',
     });
   }
-  const executableEntry = actualPayloadManifest.find(entry => entry.path === executableName);
-  const releaseMetadataEntry = actualPayloadManifest.find(entry => entry.path === 'release.json');
+  const executableEntry = Option.getOrUndefined(
+    EffectArray.findFirst(actualPayloadManifest, entry => entry.path === executableName),
+  );
+  const releaseMetadataEntry = Option.getOrUndefined(
+    EffectArray.findFirst(actualPayloadManifest, entry => entry.path === 'release.json'),
+  );
   if (!executableEntry || !releaseMetadataEntry) {
     return yield* ScriptError.make({message: 'The managed development release payload omits required files.'});
   }
@@ -497,14 +518,14 @@ export const readDevelopmentReleaseEvidence = Effect.fn('developmentRuntime.read
     executableEntry.sha256 !== receipt.value.executableSha256 ||
     releaseMetadataEntry.sha256 !== receipt.value.releaseMetadataSha256 ||
     (system.platform !== 'win32' && (executableInfo.mode & 0o111) === 0) ||
-    versionResult.stdout.trim() !== `threadnote v${receipt.value.version}`
+    Effect2.pipe(versionResult.stdout, EffectString.trim) !== `threadnote v${receipt.value.version}`
   ) {
     return yield* ScriptError.make({message: 'The managed development release failed its digest or version check.'});
   }
   return {
     dependencyInstallation: receipt.value.dependencyInstallation,
     executableSha256: executableEntry.sha256,
-    payloadBytes: actualPayloadManifest.reduce((total, entry) => total + entry.size, 0),
+    payloadBytes: EffectArray.reduce(actualPayloadManifest, 0, (total, entry) => total + entry.size),
     payloadFileCount: actualPayloadManifest.length,
     payloadManifestSha256: actualPayloadManifestSha256,
     releaseMetadataSha256: releaseMetadataEntry.sha256,
@@ -576,25 +597,31 @@ export const stageAndValidateDevelopmentRelease = Effect.fn('developmentRuntime.
 });
 
 function parseActiveReleasePointer(value: unknown): Option.Option<ActiveReleasePointer> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return Option.none();
-  const candidate = value as Partial<ActiveReleasePointer>;
-  return typeof candidate.releaseRoot === 'string' &&
-    typeof candidate.version === 'string' &&
-    isDevelopmentBuildVersion(candidate.version)
-    ? Option.some(candidate as ActiveReleasePointer)
-    : Option.none();
+  return isActiveReleasePointer(value) ? Option.some(value) : Option.none();
+}
+
+function isActiveReleasePointer(value: unknown): value is ActiveReleasePointer {
+  return (
+    isJsonObject(value) &&
+    typeof value.releaseRoot === 'string' &&
+    typeof value.version === 'string' &&
+    isDevelopmentBuildVersion(value.version)
+  );
 }
 
 function parseReleaseMetadata(value: unknown): Option.Option<ReleaseMetadata> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return Option.none();
-  const candidate = value as Partial<ReleaseMetadata>;
-  return typeof candidate.executable === 'string' &&
-    typeof candidate.runtime === 'string' &&
-    typeof candidate.target === 'string' &&
-    typeof candidate.version === 'string' &&
-    isDevelopmentBuildVersion(candidate.version)
-    ? Option.some(candidate as ReleaseMetadata)
-    : Option.none();
+  return isReleaseMetadata(value) ? Option.some(value) : Option.none();
+}
+
+function isReleaseMetadata(value: unknown): value is ReleaseMetadata {
+  return (
+    isJsonObject(value) &&
+    typeof value.executable === 'string' &&
+    typeof value.runtime === 'string' &&
+    typeof value.target === 'string' &&
+    typeof value.version === 'string' &&
+    isDevelopmentBuildVersion(value.version)
+  );
 }
 
 function canonicalPathEquals(
@@ -605,7 +632,7 @@ function canonicalPathEquals(
 ): boolean {
   const normalize = (value: string) => {
     const resolved = path.resolve(value);
-    return system.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
+    return system.platform === 'win32' ? Effect2.pipe(resolved, EffectString.toLocaleLowerCase('en-US')) : resolved;
   };
   return normalize(left) === normalize(right);
 }

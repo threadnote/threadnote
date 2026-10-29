@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
 import {syncWritableFile} from '@threadnote/platform/file/durability';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -19,6 +20,9 @@ import {
   type createGraphWorkerResultArtifact,
   type GraphWorkerResultAuthority,
 } from './result.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Quotas apply to one exact contributor authority scope. Revoked scopes remain private and inert. */
 export const GRAPH_WORKER_OUTBOX_MAX_OPERATIONS = 128;
@@ -175,7 +179,9 @@ export const prepareGraphWorkerDeliveryOutbox = Effect.fn('codeGraph.sharing.pre
         yield* registerPrincipalScope(input.threadnoteHome, scope);
         const current = yield* readOutbox(input.threadnoteHome, scope);
         yield* recoverOutboxStorage(input.threadnoteHome, scope, current);
-        const existing = current.operations.find(item => item.operationId === operation.operationId);
+        const existing = Option.getOrUndefined(
+          EffectArray.findFirst(current.operations, item => item.operationId === operation.operationId),
+        );
         if (existing !== undefined) {
           if (immutableIdentity(existing) !== immutableIdentity(operation)) return yield* invalid();
           // If a power loss retained metadata but lost a referenced blob, the still-queued
@@ -236,8 +242,11 @@ export const listGraphWorkerDeliveryOutboxOperations = Effect.fn('codeGraph.shar
 export const readGraphWorkerDeliveryOutboxOperation = Effect.fn('codeGraph.sharing.readWorkerDeliveryOperation')(
   function* (threadnoteHome: string, scope: GraphWorkerDeliveryScope, operationId: string) {
     if (!validScope(scope) || !SHA256_DIGEST.test(operationId)) return yield* invalid();
-    const operation = (yield* readOutbox(threadnoteHome, scope)).operations.find(
-      item => item.operationId === operationId,
+    const operation = Option.getOrUndefined(
+      EffectArray.findFirst(
+        (yield* readOutbox(threadnoteHome, scope)).operations,
+        item => item.operationId === operationId,
+      ),
     );
     if (operation === undefined) return undefined;
     return {
@@ -269,7 +278,7 @@ export const listGraphWorkerDeliveryPrincipalScopes = Effect.fn('codeGraph.shari
       );
       if (hasWork) active.push(scope);
     }
-    return active.some(scope => scope.workerId === current.workerId) ? active : [...active, current];
+    return EffectArray.some(active, scope => scope.workerId === current.workerId) ? active : [...active, current];
   },
 );
 
@@ -292,7 +301,9 @@ export const markGraphWorkerDeliveryAdmitted = Effect.fn('codeGraph.sharing.mark
       input.scope,
       Effect.gen(function* () {
         const current = yield* readOutbox(input.threadnoteHome, input.scope);
-        const operation = current.operations.find(item => item.operationId === input.operationId);
+        const operation = Option.getOrUndefined(
+          EffectArray.findFirst(current.operations, item => item.operationId === input.operationId),
+        );
         if (
           operation === undefined ||
           operation.candidateIdentity !== input.candidateIdentity ||
@@ -313,7 +324,9 @@ export const markGraphWorkerDeliveryAdmitted = Effect.fn('codeGraph.sharing.mark
           state: input.response.status === 'stale-source' ? ('superseded' as const) : ('admitted' as const),
         };
         yield* writeOutbox(input.threadnoteHome, input.scope, {
-          operations: current.operations.map(item => (item.operationId === input.operationId ? admitted : item)),
+          operations: EffectArray.map(current.operations, item =>
+            item.operationId === input.operationId ? admitted : item,
+          ),
           schemaVersion: 1,
         });
         return admitted;
@@ -339,7 +352,9 @@ export const retireGraphWorkerDeliveryOutbox = Effect.fn('codeGraph.sharing.reti
       input.scope,
       Effect.gen(function* () {
         const current = yield* readOutbox(input.threadnoteHome, input.scope);
-        const operation = current.operations.find(item => item.operationId === input.operationId);
+        const operation = Option.getOrUndefined(
+          EffectArray.findFirst(current.operations, item => item.operationId === input.operationId),
+        );
         if (operation === undefined) return false;
         if (
           (operation.state !== 'admitted' && operation.state !== 'superseded') ||
@@ -348,7 +363,7 @@ export const retireGraphWorkerDeliveryOutbox = Effect.fn('codeGraph.sharing.reti
         )
           return yield* invalid();
         const next = {
-          operations: current.operations.filter(item => item.operationId !== input.operationId),
+          operations: EffectArray.filter(current.operations, item => item.operationId !== input.operationId),
           schemaVersion: 1 as const,
         };
         yield* writeOutbox(input.threadnoteHome, input.scope, next);
@@ -377,8 +392,11 @@ export const retireSupersededGraphWorkerDeliveryOutbox = Effect.fn('codeGraph.sh
       canonicalJson(principalIdentity(input.admittedScope)) !== canonicalJson(principalIdentity(input.oldScope))
     )
       return yield* invalid();
-    const admitted = (yield* readOutbox(input.threadnoteHome, input.admittedScope)).operations.find(
-      item => item.operationId === input.admittedOperationId,
+    const admitted = Option.getOrUndefined(
+      EffectArray.findFirst(
+        (yield* readOutbox(input.threadnoteHome, input.admittedScope)).operations,
+        item => item.operationId === input.admittedOperationId,
+      ),
     );
     if (
       (admitted?.state !== 'admitted' && admitted?.state !== 'superseded') ||
@@ -392,7 +410,8 @@ export const retireSupersededGraphWorkerDeliveryOutbox = Effect.fn('codeGraph.sh
         const current = yield* readOutbox(input.threadnoteHome, input.oldScope);
         const next = {
           schemaVersion: 1 as const,
-          operations: current.operations.filter(
+          operations: EffectArray.filter(
+            current.operations,
             item =>
               item.operationId === input.admittedOperationId || item.candidateIdentity !== input.candidateIdentity,
           ),
@@ -422,7 +441,9 @@ export const retireExpiredPreparedGraphWorkerDeliveryOutbox = Effect.fn(
     input.scope,
     Effect.gen(function* () {
       const current = yield* readOutbox(input.threadnoteHome, input.scope);
-      const operation = current.operations.find(item => item.operationId === input.operationId);
+      const operation = Option.getOrUndefined(
+        EffectArray.findFirst(current.operations, item => item.operationId === input.operationId),
+      );
       if (operation?.state !== 'prepared' || operation.authority.expiresAt > (yield* Clock.currentTimeMillis) / 1000)
         return false;
       const original = yield* readGraphShareSignedCandidatePage(
@@ -431,15 +452,30 @@ export const retireExpiredPreparedGraphWorkerDeliveryOutbox = Effect.fn(
         operation.candidatePageId,
       );
       let candidateDurable =
-        original?.candidates.some(candidate => canonicalJson(candidate) === canonicalJson(operation.candidate)) ??
-        false;
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(original?.candidates), __effectArrayReceiver =>
+            EffectArray.some(
+              __effectArrayReceiver,
+              candidate => canonicalJson(candidate) === canonicalJson(operation.candidate),
+            ),
+          ),
+        ) ?? false;
       if (!candidateDurable)
         for (const pageId of yield* listGraphShareSignedCandidatePageIds(
           input.threadnoteHome,
           input.scope.repositoryId,
         )) {
           const page = yield* readGraphShareSignedCandidatePage(input.threadnoteHome, input.scope.repositoryId, pageId);
-          if (page?.candidates.some(candidate => canonicalJson(candidate) === canonicalJson(operation.candidate))) {
+          if (
+            Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(page?.candidates), __effectArrayReceiver =>
+                EffectArray.some(
+                  __effectArrayReceiver,
+                  candidate => canonicalJson(candidate) === canonicalJson(operation.candidate),
+                ),
+              ),
+            )
+          ) {
             candidateDurable = true;
             break;
           }
@@ -453,7 +489,7 @@ export const retireExpiredPreparedGraphWorkerDeliveryOutbox = Effect.fn(
       if (Option.isNone(cas) || cas.value.byteLength !== operation.resultSize) return false;
       const next = {
         schemaVersion: 1 as const,
-        operations: current.operations.filter(item => item.operationId !== input.operationId),
+        operations: EffectArray.filter(current.operations, item => item.operationId !== input.operationId),
       };
       yield* writeOutbox(input.threadnoteHome, input.scope, next);
       yield* recoverOutboxStorage(input.threadnoteHome, input.scope, next);
@@ -498,8 +534,9 @@ function validOperation(value: unknown): value is GraphWorkerDeliveryOutboxOpera
   const allowed =
     'admissionStatus,announcement,attestationDigest,attestationSize,authority,candidate,candidateIdentity,candidatePageId,manifestDigest,manifestSize,operationId,organization,preparedAtMilliseconds,resultDigest,resultSize,sourceCommit,state';
   if (
-    Object.keys(value).sort().join(',') !== allowed &&
-    Object.keys(value).sort().join(',') !== allowed.replace('admissionStatus,', '')
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') !== allowed &&
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') !==
+      Effect2.pipe(allowed, EffectString.replace('admissionStatus,', ''))
   )
     return false;
   try {
@@ -509,7 +546,7 @@ function validOperation(value: unknown): value is GraphWorkerDeliveryOutboxOpera
     return (
       validAnnouncement(announcement) &&
       isRecord(authority) &&
-      Object.keys(authority).sort().join(',') ===
+      EffectArray.join(EffectRecord.keys(authority).sort(), ',') ===
         'expiresAt,graphAbi,principalId,profileDigest,repositoryId,signingPublicKey,workerId' &&
       typeof value.candidateIdentity === 'string' &&
       value.candidateIdentity === exactCandidateIdentity(candidate) &&
@@ -580,7 +617,7 @@ function validOperation(value: unknown): value is GraphWorkerDeliveryOutboxOpera
 function validAnnouncement(value: unknown): value is GraphWorkerResultAnnouncement {
   if (
     !isRecord(value) ||
-    Object.keys(value).sort().join(',') !== 'algorithm,body,publicKey,schemaVersion,signature' ||
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') !== 'algorithm,body,publicKey,schemaVersion,signature' ||
     value.algorithm !== 'ed25519' ||
     value.schemaVersion !== 1 ||
     typeof value.publicKey !== 'string' ||
@@ -592,7 +629,7 @@ function validAnnouncement(value: unknown): value is GraphWorkerResultAnnounceme
     return false;
   const body = value.body;
   if (
-    Object.keys(body).sort().join(',') !==
+    EffectArray.join(EffectRecord.keys(body).sort(), ',') !==
     'actionKey,attestationDigest,batchId,idempotencyKey,principalId,profileDigest,repositoryId,resultManifestDigest,semanticDigest,workerId'
   )
     return false;
@@ -629,21 +666,22 @@ function validSize(value: unknown, maximum: number): value is number {
 function parseOutbox(value: unknown): GraphWorkerDeliveryOutboxV1 {
   if (
     !isRecord(value) ||
-    Object.keys(value).sort().join(',') !== 'operations,schemaVersion' ||
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') !== 'operations,schemaVersion' ||
     value.schemaVersion !== 1 ||
-    !Array.isArray(value.operations) ||
-    value.operations.length > GRAPH_WORKER_OUTBOX_MAX_OPERATIONS ||
-    value.operations.some(item => !validOperation(item))
+    !EffectArray.isArray(value.operations) ||
+    value.operations.length > GRAPH_WORKER_OUTBOX_MAX_OPERATIONS
   )
     throw graphSharingFailure('Graph worker delivery outbox metadata is invalid.');
-  const operations = value.operations as GraphWorkerDeliveryOutboxOperationV1[];
-  if (new Set(operations.map(item => item.operationId)).size !== operations.length)
+  const operations = EffectArray.filter(value.operations, validOperation);
+  if (operations.length !== value.operations.length)
+    throw graphSharingFailure('Graph worker delivery outbox metadata is invalid.');
+  if (new Set(EffectArray.map(operations, item => item.operationId)).size !== operations.length)
     throw graphSharingFailure('Graph worker delivery outbox contains duplicate operations.');
   return {operations, schemaVersion: 1};
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function copyArtifact(input: Artifact): Artifact {
@@ -655,10 +693,10 @@ function copyArtifact(input: Artifact): Artifact {
   };
 }
 
-function validScope(scope: GraphWorkerDeliveryScope): boolean {
+function validScope(scope: unknown): scope is GraphWorkerDeliveryScope {
   return (
     isRecord(scope) &&
-    Object.keys(scope).sort().join(',') ===
+    EffectArray.join(EffectRecord.keys(scope).sort(), ',') ===
       'organization,principalId,profileDigest,repositoryId,signingPublicKey,workerId' &&
     typeof scope.organization === 'string' &&
     ORG.test(scope.organization) &&
@@ -715,17 +753,23 @@ function readPrincipalIndex(home: string, scope: GraphWorkerDeliveryScope) {
     });
     if (
       !isRecord(value) ||
-      Object.keys(value).sort().join(',') !== 'schemaVersion,scopes' ||
+      EffectArray.join(EffectRecord.keys(value).sort(), ',') !== 'schemaVersion,scopes' ||
       value.schemaVersion !== 1 ||
-      !Array.isArray(value.scopes) ||
-      value.scopes.length > MAX_PRINCIPAL_SCOPES ||
-      value.scopes.some(
-        item => !validScope(item) || canonicalJson(principalIdentity(item)) !== canonicalJson(principalIdentity(scope)),
-      ) ||
-      new Set((value.scopes as GraphWorkerDeliveryScope[]).map(item => item.workerId)).size !== value.scopes.length
+      !EffectArray.isArray(value.scopes) ||
+      value.scopes.length > MAX_PRINCIPAL_SCOPES
     )
       return yield* invalid();
-    return {schemaVersion: 1 as const, scopes: value.scopes as GraphWorkerDeliveryScope[]};
+    const scopes = EffectArray.filter(value.scopes, validScope);
+    if (
+      scopes.length !== value.scopes.length ||
+      EffectArray.some(
+        scopes,
+        item => canonicalJson(principalIdentity(item)) !== canonicalJson(principalIdentity(scope)),
+      ) ||
+      new Set(EffectArray.map(scopes, item => item.workerId)).size !== scopes.length
+    )
+      return yield* invalid();
+    return {schemaVersion: 1 as const, scopes};
   });
 }
 
@@ -741,15 +785,15 @@ function mutatePrincipalIndex(home: string, scope: GraphWorkerDeliveryScope, add
       LOCK,
       Effect.gen(function* () {
         const current = yield* readPrincipalIndex(home, scope);
-        const scopes = current.scopes.filter(item => item.workerId !== scope.workerId);
+        const scopes = EffectArray.filter(current.scopes, item => item.workerId !== scope.workerId);
         if (add) scopes.push(scope);
         if (scopes.length > MAX_PRINCIPAL_SCOPES)
           return yield* graphSharingFailure('Graph worker principal scope index is full.');
         if (
           scopes.length === current.scopes.length &&
           (add
-            ? current.scopes.some(item => item.workerId === scope.workerId)
-            : !current.scopes.some(item => item.workerId === scope.workerId))
+            ? EffectArray.some(current.scopes, item => item.workerId === scope.workerId)
+            : !EffectArray.some(current.scopes, item => item.workerId === scope.workerId))
         )
           return;
         yield* writePrivateJsonFile(target, {schemaVersion: 1, scopes});
@@ -827,7 +871,7 @@ function readOutbox(home: string, scope: GraphWorkerDeliveryScope) {
       try: () => parseOutbox(JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes))),
       catch: () => graphSharingFailure('Graph worker delivery outbox metadata is invalid.'),
     });
-    if (parsed.operations.some(operation => !scopeMatches(operation, scope))) return yield* invalid();
+    if (EffectArray.some(parsed.operations, operation => !scopeMatches(operation, scope))) return yield* invalid();
     return parsed;
   });
 }
@@ -840,7 +884,7 @@ function writeOutbox(home: string, scope: GraphWorkerDeliveryScope, value: Graph
       new TextEncoder().encode(JSON.stringify(value)).byteLength + 1 > GRAPH_WORKER_OUTBOX_MAX_METADATA_BYTES
     )
       return yield* graphSharingFailure('Graph worker delivery outbox metadata quota is full.');
-    if (value.operations.some(operation => !scopeMatches(operation, scope))) return yield* invalid();
+    if (EffectArray.some(value.operations, operation => !scopeMatches(operation, scope))) return yield* invalid();
     const target = outboxPaths(path, home, scope).metadata;
     yield* writePrivateJsonFile(target, value);
     yield* syncExistingOutbox(home, scope);
@@ -943,8 +987,8 @@ function verifyOutboxCapacity(
 ) {
   return Effect.gen(function* () {
     const existing = yield* inspectBlobDirectory(home, scope);
-    const names = new Set(existing.map(blob => blob.name));
-    let size = existing.reduce((sum, blob) => sum + blob.size, 0);
+    const names = new Set(EffectArray.map(existing, blob => blob.name));
+    let size = EffectArray.reduce(existing, 0, (sum, blob) => sum + blob.size);
     for (const blob of required) {
       const name = sha256HexFromDigest(blob.digest);
       if (names.has(name)) continue;
@@ -965,16 +1009,21 @@ function recoverOutboxStorage(home: string, scope: GraphWorkerDeliveryScope, cur
     const directory = paths.blobs;
     yield* secureDirectory(directory, home);
     const referenced = new Set(
-      current.operations
-        .flatMap(item => [item.resultDigest, item.attestationDigest, item.manifestDigest])
-        .map(sha256HexFromDigest),
+      EffectArray.map(
+        EffectArray.flatMap(current.operations, item => [
+          item.resultDigest,
+          item.attestationDigest,
+          item.manifestDigest,
+        ]),
+        sha256HexFromDigest,
+      ),
     );
     const rootNames = yield* fs.readDirectory(paths.root);
     const blobNames = yield* fs.readDirectory(directory);
     let rootChanged = false;
     let blobsChanged = false;
     for (const name of rootNames.slice(0, MAX_RECOVERY_ENTRIES)) {
-      if (!TEMPORARY.test(name) || !name.startsWith('outbox.json.')) continue;
+      if (!TEMPORARY.test(name) || !Effect2.pipe(name, EffectString.startsWith('outbox.json.'))) continue;
       const target = path.join(paths.root, name);
       if (Option.isSome(yield* fs.readLink(target).pipe(Effect.option))) return yield* invalid();
       const stat = yield* fs.stat(target);

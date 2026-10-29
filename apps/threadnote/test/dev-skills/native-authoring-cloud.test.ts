@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
+import {Predicate} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
@@ -15,10 +17,13 @@ import {
   workflowExecutionDiagnostics,
   withWorkflowExecutionDiagnostics,
 } from './workflow-execution-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const object = (value: unknown): Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) throw new Error('Expected an object response');
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error('Expected an object response');
+  return value;
 };
 const payload = (value: unknown) => object(object(value).authoring);
 const reference = (value: unknown) => {
@@ -72,8 +77,11 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
     return withWorkflowExecutionDiagnostics(
       Effect.gen(function* () {
         const system = yield* SystemInfo;
-        const environment = Object.fromEntries(
-          Object.entries(system.environment()).filter(([key]) => !key.startsWith('THREADNOTE_')),
+        const environment = EffectRecord.fromEntries(
+          EffectArray.filter(
+            EffectRecord.toEntries(system.environment()),
+            ([key]) => !Effect2.pipe(key, EffectString.startsWith('THREADNOTE_')),
+          ),
         );
         if (profile === 'cursor-cloud-personal') environment.THREADNOTE_CURSOR_CLOUD_TEAM = 'default';
         const f = yield* nativeFixture(environment);
@@ -170,13 +178,16 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
 
         const rootRecord = parseMemoryDocument(root.uri, rootBytes);
         if (!rootRecord) throw new Error('Expected canonical root memory metadata.');
-        const storedRoot = decodeAuthoringArtifact(rootRecord.body.trimEnd() + '\n', AuthoringRootSchema);
+        const storedRoot = decodeAuthoringArtifact(
+          Effect2.pipe(rootRecord.body, EffectString.trimEnd) + '\n',
+          AuthoringRootSchema,
+        );
         executionDiagnosticPhase(diagnostics, 'authoring-child-reads');
         const reachable = new Map<string, ReturnType<typeof reference>>();
         const queue = [
           reference(root),
           reference(storedRoot.data),
-          ...storedRoot.documents.map(item => reference(item.reference)),
+          ...EffectArray.map(storedRoot.documents, item => reference(item.reference)),
         ];
         while (queue.length) {
           const current = queue.shift()!;
@@ -193,11 +204,15 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
           expect(artifact.uri).toContain('/memories/handoffs/active/fixture/');
           const record = parseMemoryDocument(artifact.uri, yield* f.store.read(f.location, artifact.uri));
           expect(record?.metadata.kind).toBe('handoff');
-          const marker = artifact.body.match(/<!-- threadnote-authoring:v1 (.+) -->\n?$/u);
+          const marker = Effect2.pipe(
+            artifact.body,
+            EffectString.match(/<!-- threadnote-authoring:v1 (.+) -->\n?$/u),
+            Effect2.Option.getOrElse(() => null),
+          );
           if (!marker) continue;
           const value = object(JSON.parse(marker[1]));
-          if (value.format === 'threadnote-native-authoring-index' && Array.isArray(value.children))
-            queue.push(...value.children.map(item => reference(item)));
+          if (value.format === 'threadnote-native-authoring-index' && EffectArray.isArray(value.children))
+            queue.push(...EffectArray.map(value.children, item => reference(item)));
         }
         expect(reachable.size).toBeGreaterThanOrEqual(3);
 
@@ -236,9 +251,15 @@ for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const
         expect(readyLoad.readiness).toBe('ready');
 
         executionDiagnosticPhase(diagnostics, 'authoring-private-remote');
-        expect((yield* git(remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+        expect(Effect2.pipe((yield* git(remote, ['rev-list', '--count', 'main'])).stdout, EffectString.trim)).toBe('1');
         expect(
-          (yield* git(remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout.split('\n').filter(Boolean),
+          EffectArray.filter(
+            Effect2.pipe(
+              (yield* git(remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout,
+              EffectString.split('\n'),
+            ),
+            Boolean,
+          ),
         ).toEqual(['README.md']);
         executionDiagnosticPhase(diagnostics, 'teardown');
       }).pipe(TestClock.withLive, provideNative),

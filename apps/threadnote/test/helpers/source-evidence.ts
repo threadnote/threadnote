@@ -30,18 +30,14 @@ import {
 } from '@threadnote/store/external-resource';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const codecs = {
   github: githubSourceCodec,
   linear: linearSourceCodec,
   pocket: pocketSourceCodec,
   superhuman: superhumanSourceCodec,
-};
-const fingerprints = {
-  github: githubFingerprint,
-  linear: linearFingerprint,
-  pocket: pocketFingerprint,
-  superhuman: superhumanFingerprint,
 };
 const coverage = {
   github: 'github-conversation',
@@ -70,15 +66,21 @@ export const sourceEvidenceFixture = Effect.fn('test.sourceEvidenceFixture')(fun
     project_ids: [uuid],
   };
   const source = codecs[provider].parse(raw, 'fixture');
-  // Each codec and matching fingerprint share the same discriminant.
-  const configFingerprint = fingerprints[provider](source as never);
+  const configFingerprint =
+    source.type === 'github'
+      ? githubFingerprint(source)
+      : source.type === 'linear'
+        ? linearFingerprint(source)
+        : source.type === 'pocket'
+          ? pocketFingerprint(source)
+          : superhumanFingerprint(source);
   yield* writeSourceConfiguration(config, {version: 2, sources: [source], projections: []});
   const token = 'pk_synthetic_evidence_fixture';
   yield* storeExternalCredential(config, source.id, Redacted.make(token), provider);
   const location = {home: config.agentContextHome, account: config.account, user: config.user};
   const store = yield* ResourceStore;
   const now = yield* Clock.currentTimeMillis;
-  const epoch = 'c'.repeat(64);
+  const epoch = Effect2.pipe('c', EffectString.repeat(64));
   const metadata: ExternalResourceMetadata = {
     version: 1,
     provider,

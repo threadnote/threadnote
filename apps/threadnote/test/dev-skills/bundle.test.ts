@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -6,6 +7,9 @@ import {describe, expect, it} from 'vitest';
 import {buildDevSkillsManifest, validDevSkillPath} from '../../../../scripts/build.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {AGENT_SKILLS} from '../../src/agent_integration/skills.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ids = ['dev-spec', 'dev-plan', 'dev-cycle', 'watch-pr'];
 const sourceManifest = () => ({
@@ -20,7 +24,7 @@ const sourceManifest = () => ({
   workflowProtocol: 1,
   stateSchema: 1,
   minimumRuntime: '5.3.0-beta.4',
-  skills: ids.map(id => ({
+  skills: EffectArray.map(ids, id => ({
     id,
     role: id === 'watch-pr' ? 'support' : 'primary',
     files: ['SKILL.md', 'references/helper.md'],
@@ -56,7 +60,7 @@ describe('first-party development bundle', () => {
   it('rejects escaping and nonportable paths for every generated prefix', () => {
     fc.assert(
       fc.property(fc.array(fc.constantFrom('scripts', 'references', 'nested'), {maxLength: 4}), parts => {
-        const prefix = parts.length ? `${parts.join('/')}/` : '';
+        const prefix = parts.length ? `${EffectArray.join(parts, '/')}/` : '';
         expect(validDevSkillPath(`${prefix}helper.py`)).toBe(true);
         for (const suffix of [
           '../escape',
@@ -85,11 +89,14 @@ describe('first-party development bundle', () => {
         manifestPath,
         JSON.stringify({
           ...manifest,
-          skills: [...manifest.skills].reverse().map(member => ({...member, files: [...member.files].reverse()})),
+          skills: EffectArray.map([...manifest.skills].reverse(), member => ({
+            ...member,
+            files: [...member.files].reverse(),
+          })),
         }),
       );
       expect(yield* buildDevSkillsManifest(root, '5.3.0-beta.4')).toEqual(first);
-      expect(Object.keys(first.hashes)).toHaveLength(8);
+      expect(EffectRecord.keys(first.hashes)).toHaveLength(8);
       expect(first.digest).toMatch(/^[a-f0-9]{64}$/u);
       expect((yield* buildDevSkillsManifest(root, '5.3.0-beta.5')).digest).not.toBe(first.digest);
       const path = yield* Path.Path;
@@ -131,14 +138,17 @@ describe('first-party development bundle', () => {
   effectIt.effect('validates the real first-party product inventory', () =>
     Effect.gen(function* () {
       const manifest = yield* buildDevSkillsManifest(process.cwd(), '5.3.0-beta.4');
-      expect(manifest.skills.filter(skill => skill.role === 'primary').map(skill => skill.id)).toEqual([
-        'dev-cycle',
-        'dev-plan',
-        'dev-spec',
-      ]);
+      expect(
+        EffectArray.map(
+          EffectArray.filter(manifest.skills, skill => skill.role === 'primary'),
+          skill => skill.id,
+        ),
+      ).toEqual(['dev-cycle', 'dev-plan', 'dev-spec']);
       expect(manifest.nativeRequirements).toEqual(sourceManifest().nativeRequirements);
       expect(manifest.prerequisites).not.toHaveProperty('python');
-      expect(Object.keys(manifest.hashes).some(file => file.endsWith('.py'))).toBe(false);
+      expect(
+        EffectArray.some(EffectRecord.keys(manifest.hashes), file => Effect2.pipe(file, EffectString.endsWith('.py'))),
+      ).toBe(false);
       expect(manifest.hashes['dev-plan/references/native-authoring.md']).toMatch(/^[a-f0-9]{64}$/u);
       expect(manifest.hashes['watch-pr/references/background-worker.md']).toMatch(/^[a-f0-9]{64}$/u);
     }).pipe(provideTestLayer(BunServices.layer)),

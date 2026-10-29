@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, utimes} from '@threadnote/testing/node-fs-promises';
@@ -7,13 +8,22 @@ import {promisify} from '@threadnote/testing/node-util';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {expect, it} from 'vitest';
+import * as Schema from 'effect/Schema';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execute = promisify(execFile);
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const childProcessOutput = (cause: unknown, key: 'stdout' | 'stderr'): unknown =>
+  typeof cause === 'object' && cause !== null && key in cause ? Reflect.get(cause, key) : undefined;
 const posixIt = process.platform === 'win32' ? it.skip : it;
 
 posixIt('POSIX bootstrap verifies and installs the standalone Bun release without Node or Bun in PATH', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-posix-bootstrap-')));
-  const packageManifest = (await Bun.file(join(process.cwd(), 'package.json')).json()) as {readonly version: string};
+  const packageManifest = Schema.decodeUnknownSync(
+    Schema.StructWithRest(Schema.Struct({version: Schema.String}), [JsonRecordSchema]),
+  )(await Bun.file(join(process.cwd(), 'package.json')).json());
   const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
   const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
   const artifactName = `threadnote-${platform}-${architecture}.tar.gz`;
@@ -59,7 +69,8 @@ posixIt('POSIX bootstrap verifies and installs the standalone Bun release withou
     const officialChecksum = join(root, `${officialArtifactName}.sha256`);
     const officialReleases = join(root, 'official-releases.json');
     const signatureLog = join(root, 'official-signatures.log');
-    const checksumHex = (await readFile(checksum, 'utf8')).trim().split(/\s+/, 1)[0];
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+    const checksumHex = Effect.pipe(await readFile(checksum, 'utf8'), EffectString.trim).split(/\s+/, 1)[0];
     await Promise.all([
       mkdir(officialToolsRoot),
       mkdir(officialInstallRoot),
@@ -133,7 +144,7 @@ esac
 `,
     } as const;
     await Promise.all(
-      Object.entries(fakeTools).map(async ([name, contents]) => {
+      EffectArray.map(EffectRecord.toEntries(fakeTools), async ([name, contents]) => {
         const file = join(officialToolsRoot, name);
         await Bun.write(file, contents);
         await chmod(file, 0o755);
@@ -161,11 +172,11 @@ esac
       },
     ).catch((cause: unknown) => cause);
     expect(
-      `${String((officialSignatureFailure as {readonly stdout?: unknown}).stdout)}${String(
-        (officialSignatureFailure as {readonly stderr?: unknown}).stderr,
+      `${String(childProcessOutput(officialSignatureFailure, 'stdout'))}${String(
+        childProcessOutput(officialSignatureFailure, 'stderr'),
       )}`,
     ).toContain('simulated signature failure detail');
-    expect(String((officialSignatureFailure as {readonly stderr?: unknown}).stderr)).toContain(
+    expect(String(childProcessOutput(officialSignatureFailure, 'stderr'))).toContain(
       'Release signature validation failed',
     );
     const officialInstall = await execute(
@@ -202,7 +213,7 @@ esac
       hostname: '127.0.0.1',
       port: 0,
       fetch(request) {
-        const name = new URL(request.url).pathname.slice(1);
+        const name = Effect.pipe(new URL(request.url).pathname, EffectString.slice(1));
         if (name === 'stable-winner-releases') {
           return Response.json([
             {
@@ -311,10 +322,8 @@ esac
           timeout: 60_000,
         },
       ).catch((cause: unknown) => cause);
-      expect(String((stableWinnerFailure as {readonly stdout?: unknown}).stdout)).toContain(
-        'Downloading Threadnote 9.0.0',
-      );
-      expect(String((stableWinnerFailure as {readonly stderr?: unknown}).stderr)).toContain(
+      expect(String(childProcessOutput(stableWinnerFailure, 'stdout'))).toContain('Downloading Threadnote 9.0.0');
+      expect(String(childProcessOutput(stableWinnerFailure, 'stderr'))).toContain(
         'Release metadata does not match 9.0.0',
       );
       const stableOnlyFailure = await execute('sh', [join(process.cwd(), 'scripts', 'install.sh'), '--no-start'], {
@@ -325,10 +334,8 @@ esac
         },
         timeout: 60_000,
       }).catch((cause: unknown) => cause);
-      expect(String((stableOnlyFailure as {readonly stdout?: unknown}).stdout)).toContain(
-        'Downloading Threadnote 4.1.1',
-      );
-      expect(String((stableOnlyFailure as {readonly stderr?: unknown}).stderr)).toContain(
+      expect(String(childProcessOutput(stableOnlyFailure, 'stdout'))).toContain('Downloading Threadnote 4.1.1');
+      expect(String(childProcessOutput(stableOnlyFailure, 'stderr'))).toContain(
         'Release metadata does not match 4.1.1',
       );
       for (const rejectedVersion of ['4.0.0-beta.6', '4.0.0-beta.5', '4.0.0-beta.4']) {
@@ -337,7 +344,7 @@ esac
           env: {...installEnvironment, THREADNOTE_VERSION: rejectedVersion},
           timeout: 60_000,
         }).catch((cause: unknown) => cause);
-        expect(String((failure as {readonly stderr?: unknown}).stderr)).toContain(
+        expect(String(childProcessOutput(failure, 'stderr'))).toContain(
           `Threadnote ${rejectedVersion} is not a published immutable release.`,
         );
         expect(assetRequests).toHaveLength(requestsBefore);
@@ -350,7 +357,7 @@ esac
         },
         timeout: 60_000,
       }).catch((cause: unknown) => cause);
-      expect(String((exactFailure as {readonly stdout?: unknown}).stdout)).toContain(
+      expect(String(childProcessOutput(exactFailure, 'stdout'))).toContain(
         `Downloading Threadnote ${packageManifest.version}`,
       );
       expect(assetRequests.at(-1)).toBe(`missing-assets/${artifactName}`);
@@ -367,8 +374,8 @@ esac
           timeout: 60_000,
         }).catch((cause: unknown) => cause);
         expect(
-          `${String((unsafeFailure as {readonly stdout?: unknown}).stdout)}${String(
-            (unsafeFailure as {readonly stderr?: unknown}).stderr,
+          `${String(childProcessOutput(unsafeFailure, 'stdout'))}${String(
+            childProcessOutput(unsafeFailure, 'stderr'),
           )}`,
         ).toContain(unsafeFixture.message);
       }
@@ -378,7 +385,7 @@ esac
       await Bun.write(installationLock, '');
       const staleInstallationLockDate = new Date(Date.now() - 120_000);
       await utimes(installationLock, staleInstallationLockDate, staleInstallationLockDate);
-      const archiveRequestsBeforeInstall = assetRequests.filter(name => name === artifactName).length;
+      const archiveRequestsBeforeInstall = EffectArray.filter(assetRequests, name => name === artifactName).length;
       const result = await execute('sh', [join(process.cwd(), 'scripts', 'install.sh'), '--beta', '--no-start'], {
         env: installEnvironment,
         timeout: 600_000,
@@ -398,7 +405,9 @@ esac
       expect(output).toContain('export PATH="$HOME/.local/bin:$PATH"');
       expect(output).toContain(`'${join(binRoot, 'threadnote')}' doctor --dry-run`);
       expect(output).not.toMatch(/\bnpm\b|Python|OpenViking/i);
-      expect(assetRequests.filter(name => name === artifactName)).toHaveLength(archiveRequestsBeforeInstall + 3);
+      expect(EffectArray.filter(assetRequests, name => name === artifactName)).toHaveLength(
+        archiveRequestsBeforeInstall + 3,
+      );
       const installedExecutable = join(installRoot, 'versions', packageManifest.version, 'threadnote');
       await expect(stat(installedExecutable)).resolves.toMatchObject({size: expect.any(Number)});
       await chmod(installedExecutable, 0o755);
@@ -438,10 +447,14 @@ esac
         },
       );
       expect(
-        profiledVersion.stdout
-          .split('\n')[0]
-          ?.split(':')
-          .filter(entry => entry === binRoot),
+        Effect.Option.getOrUndefined(
+          Effect.Option.map(
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native limited split and optional indexing preserve profile output parsing.
+            Effect.Option.fromNullishOr(profiledVersion.stdout.split('\n', 1)[0]?.split(':')),
+            __effectOptionalArrayReceiver =>
+              EffectArray.filter(__effectOptionalArrayReceiver, entry => entry === binRoot),
+          ),
+        ),
       ).toHaveLength(1);
       expect(profiledVersion.stdout).toContain(join(binRoot, 'threadnote'));
       expect(profiledVersion.stdout).toContain(packageManifest.version);
@@ -553,7 +566,7 @@ esac
           timeout: 600_000,
         },
       ).catch((cause: unknown) => cause);
-      expect(String((unmanagedInstall as {readonly stderr?: unknown}).stderr)).toContain(
+      expect(String(childProcessOutput(unmanagedInstall, 'stderr'))).toContain(
         `The cli launcher at ${join(unmanagedBinRoot, 'threadnote')} is not managed by this Threadnote release`,
       );
       await expect(stat(unmanagedExecuted)).rejects.toThrow();
@@ -584,8 +597,8 @@ esac
         },
       ).catch((cause: unknown) => cause);
       expect(
-        `${String((interruptedPromotion as {readonly stdout?: unknown}).stdout)}${String(
-          (interruptedPromotion as {readonly stderr?: unknown}).stderr,
+        `${String(childProcessOutput(interruptedPromotion, 'stdout'))}${String(
+          childProcessOutput(interruptedPromotion, 'stderr'),
         )}`,
       ).toContain('Injected installer interruption after promotion step: previous-backed-up');
       await expect(stat(releaseRoot)).rejects.toThrow();
@@ -605,8 +618,8 @@ esac
         },
       ).catch((cause: unknown) => cause);
       expect(
-        `${String((recoveredPromotion as {readonly stdout?: unknown}).stdout)}${String(
-          (recoveredPromotion as {readonly stderr?: unknown}).stderr,
+        `${String(childProcessOutput(recoveredPromotion, 'stdout'))}${String(
+          childProcessOutput(recoveredPromotion, 'stderr'),
         )}`,
       ).toContain('Injected installer interruption after promotion step: journaled');
       await expect(readFile(recoverySentinel, 'utf8')).resolves.toBe('preserve the previous release\n');
@@ -657,19 +670,51 @@ esac
         `Installed standalone Threadnote ${packageManifest.version}`,
       );
       expect(`${update.stdout}${update.stderr}`).toContain('Repairing local Threadnote setup after standalone update.');
-      const cursorConfig = JSON.parse(await readFile(cursorConfigPath, 'utf8')) as {
-        readonly mcpServers: Record<string, {readonly args?: readonly string[]; readonly command?: string}>;
-      };
+      const cursorConfig = Schema.decodeUnknownSync(
+        Schema.StructWithRest(
+          Schema.Struct({
+            mcpServers: Schema.Record(
+              Schema.String,
+              Schema.StructWithRest(
+                Schema.Struct({
+                  args: Schema.optionalKey(Schema.String.pipe(Schema.Array)),
+                  command: Schema.optionalKey(Schema.String),
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+      )(JSON.parse(await readFile(cursorConfigPath, 'utf8')));
       expect(cursorConfig.mcpServers.other).toEqual({args: ['serve'], command: '/opt/example-mcp'});
       expect(cursorConfig.mcpServers.threadnote).toMatchObject({
         args: ['mcp-server'],
         command: join(binRoot, 'threadnote'),
       });
-      const agentRegistry = JSON.parse(
-        await readFile(join(userHome, '.threadnote', 'integrations', 'agents.json'), 'utf8'),
-      ) as {
-        readonly hosts?: {readonly cursor?: {readonly mcp?: unknown; readonly status?: string}};
-      };
+      const agentRegistry = Schema.decodeUnknownSync(
+        Schema.StructWithRest(
+          Schema.Struct({
+            hosts: Schema.optionalKey(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  cursor: Schema.optionalKey(
+                    Schema.StructWithRest(
+                      Schema.Struct({
+                        mcp: Schema.optionalKey(Schema.Unknown),
+                        status: Schema.optionalKey(Schema.String),
+                      }),
+                      [JsonRecordSchema],
+                    ),
+                  ),
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+      )(JSON.parse(await readFile(join(userHome, '.threadnote', 'integrations', 'agents.json'), 'utf8')));
       expect(agentRegistry.hosts?.cursor).toMatchObject({
         mcp: {name: 'threadnote', repair: false},
         status: 'current',
@@ -697,16 +742,20 @@ esac
       const client = new Client({name: 'threadnote-posix-installer-e2e', version: packageManifest.version});
       try {
         await client.connect(transport);
-        expect((await client.listTools()).tools.map(tool => tool.name)).toContain('recall_context');
+        expect(EffectArray.map((await client.listTools()).tools, tool => tool.name)).toContain('recall_context');
       } finally {
         await client.close();
       }
       expect(
         JSON.parse(await readFile(join(installRoot, 'versions', packageManifest.version, 'release.json'), 'utf8')),
       ).toMatchObject({version: packageManifest.version});
-      expect((await readFile(join(userHome, '.zshrc'), 'utf8')).match(/>>> threadnote command path >>>/g)).toHaveLength(
-        1,
-      );
+      expect(
+        Effect.pipe(
+          await readFile(join(userHome, '.zshrc'), 'utf8'),
+          EffectString.match(/>>> threadnote command path >>>/g),
+          Effect.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(1);
     } finally {
       await server.stop(true);
     }
@@ -740,7 +789,7 @@ async function writeTarGzipFixture(file: string, entry: TarFixtureEntry): Promis
   writeTarText(header, 265, 32, 'threadnote');
   writeTarText(header, 297, 32, 'threadnote');
   const checksum = header.reduce((sum, value) => sum + value, 0);
-  const checksumText = checksum.toString(8).padStart(6, '0');
+  const checksumText = Effect.pipe(checksum.toString(8), EffectString.padStart(6, '0'));
   writeTarText(header, 148, 6, checksumText);
   header[154] = 0;
   header[155] = 0x20;
@@ -758,7 +807,7 @@ function writeTarText(target: Uint8Array, offset: number, length: number, value:
 }
 
 function writeTarOctal(target: Uint8Array, offset: number, length: number, value: number): void {
-  writeTarText(target, offset, length, `${value.toString(8).padStart(length - 1, '0')}\0`);
+  writeTarText(target, offset, length, `${Effect.pipe(value.toString(8), EffectString.padStart(length - 1, '0'))}\0`);
 }
 
 async function checksumDocument(file: string, artifactName: string): Promise<string> {

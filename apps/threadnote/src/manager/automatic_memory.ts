@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -38,6 +39,9 @@ import {automaticReviewIsAssessment} from '../memory/context/maintenance_review_
 import {readManagerReviewEligibility, reviewReadinessReason} from './review_actionability.js';
 import {isManagerProjectName} from './project/name.js';
 import {ManagerConsumerClockHints} from './live_consumer_sources.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const HASH = /^[a-f0-9]{64}$/u;
 const REVIEW = /^review-[a-f0-9]{24}$/u;
@@ -48,12 +52,14 @@ const unavailable = () => ({
   body: {error: 'The target or source access changed. Reload the memory and its exact review before continuing.'},
 });
 const exactKeys = (body: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []) =>
-  required.every(key => Object.hasOwn(body, key)) &&
-  Object.keys(body).every(key => required.includes(key) || optional.includes(key));
+  EffectArray.every(required, key => EffectRecord.has(body, key)) &&
+  EffectArray.every(EffectRecord.keys(body), key => required.includes(key) || optional.includes(key));
 const projectOf = (record: MemoryRecord) => record.metadata.project ?? 'unscoped';
 const normalizedHeader = (content: string) =>
-  content.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n\n', 1)[0];
-const reviewIdFor = (uri: string) => `review-${sha256HexSync(`topic-maintenance\0${uri}`).slice(0, 24)}`;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  Effect2.pipe(content, EffectString.replaceAll('\r\n', '\n'), EffectString.replaceAll('\r', '\n')).split('\n\n', 1)[0];
+const reviewIdFor = (uri: string) =>
+  `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${uri}`), EffectString.slice(0, 24))}`;
 
 const selectedAutomaticReview = Effect.fn('managerAutomaticMemory.selectedReview')(function* (
   config: RuntimeConfig,
@@ -176,7 +182,9 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
     const prepared = cached?.assessment.target.canonicalHash === targetHash ? cached : undefined;
     const checkpoint = yield* readDraftQueueTarget(config, sha256HexSync(record.uri));
     const cp = checkpoint?.materialRevision === prepared?.relevantRevision ? checkpoint : undefined;
-    const pending = background.queued.find(work => work.targetUri === record.uri);
+    const pending = EffectOption.getOrUndefined(
+      EffectArray.findFirst(background.queued, work => work.targetUri === record.uri),
+    );
     const active = background.active?.targetUri === record.uri;
     const loaded = yield* selectedAutomaticReview(config, project, reviewIdFor(record.uri)).pipe(Effect.result);
     const prior =
@@ -206,7 +214,12 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
       : record.metadata.reviewedSupport
         ? 'reviewed'
         : 'unknown';
-    let reason: string | undefined = prepared?.omissions.join(', ') || undefined;
+    let reason: string | undefined =
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(prepared?.omissions), __effectArrayJoinReceiver =>
+          EffectArray.join(__effectArrayJoinReceiver, ', '),
+        ),
+      ) || undefined;
     const noUpdate =
       review?.state === 'pending' &&
       (review.outcome === 'insufficient-evidence' || review.outcome === 'policy-conflict');
@@ -255,9 +268,13 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
     const item: ManagerAutomaticMemoryItem = {
       uri: record.uri,
       title:
-        record.body.match(/^#{1,6}\s+(.+)$/mu)?.[1] ??
+        Effect2.pipe(
+          record.body,
+          EffectString.match(/^#{1,6}\s+(.+)$/mu),
+          Effect2.Option.getOrElse(() => null),
+        )?.[1] ??
         record.metadata.topic ??
-        record.uri.split('/').at(-1) ??
+        Effect2.pipe(record.uri, EffectString.split('/')).at(-1) ??
         'Memory',
       targetHash,
       state,
@@ -278,22 +295,30 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
         omittedParagraphs: null,
       },
       paragraphs:
-        assessment?.paragraphs.map(p => ({
-          ordinal: p.ordinal,
-          role: p.role,
-          authority: p.roleAuthority,
-          support: p.support,
-        })) ??
-        accepted?.paragraphs.map(p => ({
-          ordinal: p.ordinal,
-          role: p.role,
-          authority: 'reviewed',
-          support: p.support,
-        })) ??
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(assessment?.paragraphs), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, p => ({
+              ordinal: p.ordinal,
+              role: p.role,
+              authority: p.roleAuthority,
+              support: p.support,
+            })),
+          ),
+        ) ??
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(accepted?.paragraphs), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, p => ({
+              ordinal: p.ordinal,
+              role: p.role,
+              authority: 'reviewed',
+              support: p.support,
+            })),
+          ),
+        ) ??
         [],
       route:
         assessment?.capabilities.reviewRoute ??
-        (record.uri.includes('/shared/')
+        (Effect2.pipe(record.uri, EffectString.includes('/shared/'))
           ? 'shared-owner-review'
           : record.metadata.visibility === 'external'
             ? 'read-only'
@@ -314,7 +339,7 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
     if (selectedUri || state !== 'reviewed') items.push(item);
   }
   const eligibility = yield* readManagerReviewEligibility(config, reviews);
-  const projectedItems = items.map(item => {
+  const projectedItems = EffectArray.map(items, item => {
     const state = item.reviewId ? eligibility.byReview.get(item.reviewId) : undefined;
     if (state !== 'waiting' && state !== 'obsolete') return item;
     const {reviewId: _reviewId, evidenceRevision: _evidenceRevision, ...backgroundItem} = item;
@@ -339,6 +364,10 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
 });
 
 /** HTTP is a Manager adapter; it owns no writer, provider registry or scheduling state. */
+function isAutomaticReviewAction(value: string): value is 'preview' | 'apply' | 'reject' | 'defer' | 'resume' {
+  return value === 'preview' || value === 'apply' || value === 'reject' || value === 'defer' || value === 'resume';
+}
+
 export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.handle')(function* (request: {
   readonly config: RuntimeConfig;
   readonly method: string;
@@ -354,9 +383,12 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
       const uri = request.url.searchParams.get('uri') ?? undefined;
       const afterUri = request.url.searchParams.get('afterUri') ?? undefined;
       if (
-        [...request.url.searchParams.keys()].some(key => !['project', 'uri', 'afterUri'].includes(key)) ||
-        [uri, afterUri].some(
-          value => value !== undefined && (value.length > 4096 || !value.startsWith(`threadnote://user/`)),
+        EffectArray.some([...request.url.searchParams.keys()], key => !['project', 'uri', 'afterUri'].includes(key)) ||
+        EffectArray.some(
+          [uri, afterUri],
+          value =>
+            value !== undefined &&
+            (value.length > 4096 || !Effect2.pipe(value, EffectString.startsWith(`threadnote://user/`))),
         ) ||
         (uri !== undefined && afterUri !== undefined)
       )
@@ -366,7 +398,7 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
     const reviewId = request.url.searchParams.get('reviewId') ?? '';
     if (
       !REVIEW.test(reviewId) ||
-      [...request.url.searchParams.keys()].some(key => !['project', 'reviewId'].includes(key))
+      EffectArray.some([...request.url.searchParams.keys()], key => !['project', 'reviewId'].includes(key))
     )
       return invalid();
     const read = yield* readAutomaticReviewResponse(request.config, project, reviewId).pipe(Effect.result);
@@ -406,11 +438,16 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
       return unavailable();
     let result: CandidateReview;
     if (manual) {
+      const manualReviewId = body.reviewId;
+      const manualRevision = typeof body.revision === 'number' ? body.revision : undefined;
       if (
         typeof body.desiredContent !== 'string' ||
         bytes(body.desiredContent) > 1100 * 1024 ||
-        (body.reviewId !== undefined &&
-          (typeof body.reviewId !== 'string' || !REVIEW.test(body.reviewId) || !Number.isSafeInteger(body.revision)))
+        (manualReviewId !== undefined &&
+          (typeof manualReviewId !== 'string' ||
+            !REVIEW.test(manualReviewId) ||
+            manualRevision === undefined ||
+            !Number.isSafeInteger(manualRevision)))
       )
         return invalid();
       const desired = parseMemoryDocument(body.uri, body.desiredContent);
@@ -427,7 +464,9 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
         uri: body.uri,
         expectedContentHash: body.expectedContentHash,
         desiredBody: desired.body,
-        ...(body.reviewId !== undefined ? {reviewId: body.reviewId, revision: body.revision as number} : {}),
+        ...(manualReviewId !== undefined && manualRevision !== undefined
+          ? {reviewId: manualReviewId, revision: manualRevision}
+          : {}),
       }).pipe(Effect.result);
       if (Result.isFailure(created) || !('reviewId' in created.success))
         return {
@@ -447,9 +486,22 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
       if (
         (body.backend !== 'local-ai' && body.backend !== 'effect-ai') ||
         typeof body.modelId !== 'string' ||
-        !body.modelId.trim() ||
+        !Effect2.pipe(body.modelId, EffectString.trim) ||
         bytes(body.modelId) > 256 ||
-        [...body.modelId].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+        EffectArray.some(
+          [...body.modelId],
+          character =>
+            Effect2.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect2.Option.getOrElse(() => NaN),
+            ) < 32 ||
+            Effect2.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect2.Option.getOrElse(() => NaN),
+            ) === 127,
+        )
       )
         return invalid();
       const generated = yield* requestAutomaticMemoryDraft(request.config, {
@@ -474,7 +526,7 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
   const action = body.action;
   if (
     typeof action !== 'string' ||
-    !['preview', 'apply', 'reject', 'defer', 'resume'].includes(action) ||
+    !isAutomaticReviewAction(action) ||
     !exactKeys(body, [
       'action',
       'project',
@@ -491,6 +543,7 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
       (body.approved !== true || typeof body.approvalDigest !== 'string' || !HASH.test(body.approvalDigest)))
   )
     return invalid();
+  const approvalDigest = typeof body.approvalDigest === 'string' ? body.approvalDigest : '';
   const checked = yield* selectedAutomaticReview(request.config, project, body.reviewId).pipe(Effect.result);
   if (Result.isFailure(checked) || !checked.success || checked.success.revision !== body.revision) return unavailable();
   let approvalRevision = body.revision;
@@ -513,12 +566,12 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
         ? yield* applyTopicMaintenanceReview(request.config, {
             ...selected,
             revision: approvalRevision,
-            approvalDigest: body.approvalDigest as string,
+            approvalDigest,
             approved: true,
           }).pipe(Effect.result)
         : yield* decideTopicMaintenanceReview(request.config, {
             ...selected,
-            action: action as 'reject' | 'defer' | 'resume',
+            action,
           }).pipe(Effect.result);
   if (Result.isFailure(outcome))
     return {

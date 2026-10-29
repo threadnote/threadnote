@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
@@ -24,6 +25,8 @@ import {
   parseContextBriefCitationRssRequest,
   type ContextBriefCitationRssObserverState,
 } from '../../../../scripts/context-brief-citation-rss-observer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Context Brief citation RSS observer protocol', () => {
   it('round-trips acknowledged begin/end/stop barriers into bounded root and tree evidence', () => {
@@ -143,7 +146,7 @@ describe('Context Brief citation RSS observer protocol', () => {
     expect(CONTEXT_BRIEF_CITATION_RSS_MAXIMUM_OBSERVATIONS).toBe(300);
     let current = state();
     for (let index = 0; index < CONTEXT_BRIEF_CITATION_RSS_MAXIMUM_OBSERVATIONS; index += 1) {
-      const observationId = `release-${String(index).padStart(3, '0')}`;
+      const observationId = `release-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}`;
       current = applyContextBriefCitationRssRequest(
         current,
         request('begin', index * 2 + 1, observationId),
@@ -243,8 +246,11 @@ describe('Context Brief citation RSS observer protocol', () => {
         (translation, baseline, observations) => {
           const original = modeledArtifact(baseline, observations);
           const translated = modeledArtifact(baseline + translation, observations);
-          const maximumRootGrowth = Math.max(0, ...observations.map(value => value.rootGrowthBytes));
-          const maximumTreeGrowth = Math.max(0, ...observations.map(value => value.rootGrowthBytes + value.childBytes));
+          const maximumRootGrowth = Math.max(0, ...EffectArray.map(observations, value => value.rootGrowthBytes));
+          const maximumTreeGrowth = Math.max(
+            0,
+            ...EffectArray.map(observations, value => value.rootGrowthBytes + value.childBytes),
+          );
           expect(original.observations[0]?.rootRssGrowthObservedBytes).toBe(maximumRootGrowth);
           expect(original.observations[0]?.treeRssGrowthObservedBytes).toBe(maximumTreeGrowth);
           expect(translated.observations[0]?.rootRssGrowthObservedBytes).toBe(maximumRootGrowth);
@@ -359,7 +365,7 @@ function sample(rootRssBytes: number, rssBytes: number, processCount = 1): Bench
   const processIds = Array.from({length: processCount}, (_, index) => index + 10);
   return {
     processIds,
-    processes: new Map(processIds.map(processId => [`${processId}:${processId}`, {cpuMilliseconds: 0}])),
+    processes: new Map(EffectArray.map(processIds, processId => [`${processId}:${processId}`, {cpuMilliseconds: 0}])),
     rootRssBytes,
     rootStartIdentity: '4242',
     rssBytes,

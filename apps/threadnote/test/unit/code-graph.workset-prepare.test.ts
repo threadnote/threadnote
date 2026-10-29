@@ -1,6 +1,8 @@
+import {Array as EffectArray} from 'effect';
+import * as BunPath from '@effect/platform-bun/BunPath';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Exit, Fiber, FileSystem, Path, Semaphore} from 'effect';
+import {Deferred, Effect, Exit, Fiber, FileSystem, Layer, Schema, Semaphore} from 'effect';
 import {TestClock} from 'effect/testing';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -27,6 +29,8 @@ import type {ResolvedWorkset, RuntimeConfig} from '@threadnote/workspace/config'
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mocks = vi.hoisted(() => ({
   maintainPage: vi.fn(),
@@ -99,9 +103,9 @@ describe('code graph workset mixed-coverage preparation', () => {
   const identity = repositoryIdentity('ready');
   const summary = indexSummary(identity);
   const generation: CodeGraphWorksetCatalogGenerationReceiptV1 = {
-    digest: 'd'.repeat(64),
-    id: `cgwg_${'e'.repeat(40)}`,
-    manifestDigest: 'f'.repeat(64),
+    digest: Effect2.pipe('d', EffectString.repeat(64)),
+    id: `cgwg_${Effect2.pipe('e', EffectString.repeat(40))}`,
+    manifestDigest: Effect2.pipe('f', EffectString.repeat(64)),
     memberCount: 1,
     state: 'staging',
     worksetName: 'engineering',
@@ -122,10 +126,10 @@ describe('code graph workset mixed-coverage preparation', () => {
           commitId: summary.snapshot.commit,
           componentCount: 1,
           extractorGeneration: 1,
-          projectionDigest: 'b'.repeat(64),
+          projectionDigest: Effect2.pipe('b', EffectString.repeat(64)),
           projectorVersion: CODE_GRAPH_WORKSET_CATALOG_PROJECTOR_VERSION,
           repositoryId: identity.repositoryId,
-          snapshotDigest: 'c'.repeat(64),
+          snapshotDigest: Effect2.pipe('c', EffectString.repeat(64)),
           snapshotId: summary.snapshot.id,
           symbolCount: 1,
           worktreeId: identity.worktreeId,
@@ -172,7 +176,7 @@ describe('code graph workset mixed-coverage preparation', () => {
         Effect.succeed({
           bridgeCount: input.bridges.length,
           coverage: input.coverage,
-          digest: '9'.repeat(64),
+          digest: Effect2.pipe('9', EffectString.repeat(64)),
           generationId: input.generationId,
           replacedAt: '2026-01-01T00:00:00.000Z',
           resolverVersion: 1,
@@ -183,7 +187,7 @@ describe('code graph workset mixed-coverage preparation', () => {
   });
 
   it('publishes the non-empty ready subset and keeps the missing member receipt', async () => {
-    const fs = {exists: (path: string) => Effect.succeed(path === '/ready')} as unknown as FileSystem.FileSystem;
+    const fs = FileSystem.makeNoop({exists: (path: string) => Effect.succeed(path === '/ready')});
     const indexer: CodeGraphIndexerShape = {
       ensureCommit: () => Effect.die('not used'),
       index: () => Effect.succeed(summary),
@@ -206,7 +210,7 @@ describe('code graph workset mixed-coverage preparation', () => {
     expect(mocks.stageGeneration.mock.calls[0]?.[1]).toMatchObject({
       members: [
         {
-          projectionDigest: 'b'.repeat(64),
+          projectionDigest: Effect2.pipe('b', EffectString.repeat(64)),
           repositoryId: identity.repositoryId,
           repositoryKey: 'ready',
           snapshotId: summary.snapshot.id,
@@ -230,10 +234,10 @@ describe('code graph workset mixed-coverage preparation', () => {
             checkoutId: identity.checkoutId,
             commitId: summary.snapshot.commit,
             ordinal: 0,
-            projectionDigest: 'b'.repeat(64),
+            projectionDigest: Effect2.pipe('b', EffectString.repeat(64)),
             repositoryId: identity.repositoryId,
             repositoryKey: 'ready',
-            snapshotDigest: 'c'.repeat(64),
+            snapshotDigest: Effect2.pipe('c', EffectString.repeat(64)),
             snapshotId: summary.snapshot.id,
             symbolCount: 1,
             worktreeId: identity.worktreeId,
@@ -256,7 +260,11 @@ describe('code graph workset mixed-coverage preparation', () => {
     const status = await runEffect(
       inspectCodeGraphWorksetStatus(config, 'engineering').pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
-        Effect.provideService(CodeGraphQueryService, query as never),
+        Effect.provideService(
+          CodeGraphQueryService,
+          // @ts-expect-error This focused adapter fixture supplies only the status method it exercises.
+          query,
+        ),
       ),
     );
     expect(status.members).toEqual([
@@ -267,7 +275,7 @@ describe('code graph workset mixed-coverage preparation', () => {
   });
 
   it('withholds every bridge when any ready member moniker surface is unreadable', async () => {
-    const fs = {exists: (path: string) => Effect.succeed(path === '/ready')} as unknown as FileSystem.FileSystem;
+    const fs = FileSystem.makeNoop({exists: (path: string) => Effect.succeed(path === '/ready')});
     const indexer: CodeGraphIndexerShape = {
       ensureCommit: () => Effect.die('not used'),
       index: () => Effect.succeed(summary),
@@ -303,7 +311,7 @@ describe('code graph workset mixed-coverage preparation', () => {
   });
 
   effectIt.effect('discards its exact staged generation when bridge preparation fails', () => {
-    const fs = {exists: (path: string) => Effect.succeed(path === '/ready')} as unknown as FileSystem.FileSystem;
+    const fs = FileSystem.makeNoop({exists: (path: string) => Effect.succeed(path === '/ready')});
     const indexer: CodeGraphIndexerShape = {
       ensureCommit: () => Effect.die('not used'),
       index: () => Effect.succeed(summary),
@@ -315,7 +323,6 @@ describe('code graph workset mixed-coverage preparation', () => {
     return Effect.gen(function* () {
       const failure = yield* prepareCodeGraphWorkset(config, 'engineering').pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
-        Effect.provideService(Path.Path, {join: (...parts: string[]) => parts.join('/')} as Path.Path),
         Effect.provideService(CodeGraphIndexer, indexer),
         Effect.flip,
       );
@@ -324,15 +331,15 @@ describe('code graph workset mixed-coverage preparation', () => {
       expect(mocks.retirePreparation).toHaveBeenCalledOnce();
       expect(mocks.retirePreparation).toHaveBeenCalledWith(config.agentContextHome, {
         generationId: generation.id,
-        projectionDigests: ['b'.repeat(64)],
+        projectionDigests: [Effect2.pipe('b', EffectString.repeat(64))],
       });
       expect(mocks.publishGeneration).not.toHaveBeenCalled();
-    }).pipe(provideTestLayer(ApplicationLayer));
+    }).pipe(provideTestLayer(Layer.mergeAll(ApplicationLayer, BunPath.layer)));
   });
 
   effectIt.effect('serializes identical prepares so a failed attempt cannot retire its successor', () =>
     Effect.gen(function* () {
-      const fs = {exists: (path: string) => Effect.succeed(path === '/ready')} as unknown as FileSystem.FileSystem;
+      const fs = FileSystem.makeNoop({exists: (path: string) => Effect.succeed(path === '/ready')});
       const indexer: CodeGraphIndexerShape = {
         ensureCommit: () => Effect.die('not used'),
         index: () => Effect.succeed(summary),
@@ -359,7 +366,7 @@ describe('code graph workset mixed-coverage preparation', () => {
               repositoryCount: 1,
               state: 'complete' as const,
             },
-            digest: '9'.repeat(64),
+            digest: Effect2.pipe('9', EffectString.repeat(64)),
             generationId: input.generationId,
             replacedAt: '2026-01-01T00:00:00.000Z',
             resolverVersion: 1 as const,
@@ -401,8 +408,8 @@ describe('code graph workset mixed-coverage preparation', () => {
         {concurrency: 2},
       );
 
-      expect(outcomes.filter(Exit.isFailure)).toHaveLength(1);
-      expect(outcomes.filter(Exit.isSuccess)).toHaveLength(1);
+      expect(EffectArray.filter(outcomes, Exit.isFailure)).toHaveLength(1);
+      expect(EffectArray.filter(outcomes, Exit.isSuccess)).toHaveLength(1);
       expect(mocks.retirePreparation).toHaveBeenCalledOnce();
       expect(mocks.publishGeneration).toHaveBeenCalledOnce();
       expect(events.indexOf('retired')).toBeGreaterThan(events.indexOf('bridge-failed'));
@@ -411,7 +418,7 @@ describe('code graph workset mixed-coverage preparation', () => {
   );
 
   effectIt.effect('rejects a definition changed after indexing but before the prepare lock', () => {
-    const fs = {exists: (path: string) => Effect.succeed(path === '/ready')} as unknown as FileSystem.FileSystem;
+    const fs = FileSystem.makeNoop({exists: (path: string) => Effect.succeed(path === '/ready')});
     const indexer: CodeGraphIndexerShape = {
       ensureCommit: () => Effect.die('not used'),
       index: () => Effect.succeed(summary),
@@ -433,7 +440,7 @@ describe('code graph workset mixed-coverage preparation', () => {
   });
 
   effectIt.effect('revalidates the definition in the final pointer fence', () => {
-    const fs = {exists: (path: string) => Effect.succeed(path === '/ready')} as unknown as FileSystem.FileSystem;
+    const fs = FileSystem.makeNoop({exists: (path: string) => Effect.succeed(path === '/ready')});
     const indexer: CodeGraphIndexerShape = {
       ensureCommit: () => Effect.die('not used'),
       index: () => Effect.succeed(summary),
@@ -453,13 +460,13 @@ describe('code graph workset mixed-coverage preparation', () => {
       expect(mocks.publishGeneration).toHaveBeenCalledOnce();
       expect(mocks.retirePreparation).toHaveBeenCalledWith(config.agentContextHome, {
         generationId: generation.id,
-        projectionDigests: ['b'.repeat(64)],
+        projectionDigests: [Effect2.pipe('b', EffectString.repeat(64))],
       });
     }).pipe(provideTestLayer(ApplicationLayer));
   });
 
   effectIt.effect('streams member progress and retries one typed transient index failure', () => {
-    const fs = {exists: (path: string) => Effect.succeed(path === '/ready')} as unknown as FileSystem.FileSystem;
+    const fs = FileSystem.makeNoop({exists: (path: string) => Effect.succeed(path === '/ready')});
     const progress: CodeGraphWorksetPrepareProgressV1[] = [];
     let attempts = 0;
     const indexer: CodeGraphIndexerShape = {
@@ -502,15 +509,15 @@ describe('code graph workset mixed-coverage preparation', () => {
           expect.objectContaining({completed: 2, phase: 'completed', resultState: 'ready'}),
         ]),
       );
-      expect(progress.map(event => event.completed)).toEqual(
-        [...progress.map(event => event.completed)].sort((left, right) => left - right),
+      expect(EffectArray.map(progress, event => event.completed)).toEqual(
+        [...EffectArray.map(progress, event => event.completed)].sort((left, right) => left - right),
       );
     }).pipe(provideTestLayer(ApplicationLayer));
   });
 
   effectIt.effect('overlaps isolated member builders up to the requested concurrency', () =>
     Effect.gen(function* () {
-      const fs = {exists: () => Effect.succeed(true)} as unknown as FileSystem.FileSystem;
+      const fs = FileSystem.makeNoop({exists: () => Effect.succeed(true)});
       const bothStarted = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let active = 0;
@@ -577,7 +584,7 @@ describe('code graph workset mixed-coverage preparation', () => {
       yield* Deferred.succeed(release, undefined);
       const result = yield* Fiber.join(fiber);
       expect(result.coverage).toMatchObject({complete: true, ready: 3, requested: 3});
-      expect(mocks.isolatedIndex.mock.calls.map(([options]) => options.cwd).sort()).toEqual([
+      expect(EffectArray.map(mocks.isolatedIndex.mock.calls, ([options]) => options.cwd).sort()).toEqual([
         '/api',
         '/web',
         '/worker',
@@ -588,7 +595,7 @@ describe('code graph workset mixed-coverage preparation', () => {
   );
 
   effectIt.effect('keeps actionable typed detail when every member index fails', () => {
-    const fs = {exists: (path: string) => Effect.succeed(path === '/ready')} as unknown as FileSystem.FileSystem;
+    const fs = FileSystem.makeNoop({exists: (path: string) => Effect.succeed(path === '/ready')});
     const indexer: CodeGraphIndexerShape = {
       ensureCommit: () => Effect.die('not used'),
       index: () => Effect.fail(CodeGraphStoreNoSpaceError.of('no space fixture', {operation: 'workset index'})),
@@ -617,7 +624,7 @@ describe('code graph workset mixed-coverage preparation', () => {
   });
 
   it('does not publish an empty successful subset', async () => {
-    const fs = {exists: () => Effect.succeed(false)} as unknown as FileSystem.FileSystem;
+    const fs = FileSystem.makeNoop({exists: () => Effect.succeed(false)});
     const indexer: CodeGraphIndexerShape = {
       ensureCommit: () => Effect.die('not used'),
       index: () => Effect.die('missing paths must not index'),
@@ -654,7 +661,7 @@ function repositoryIdentity(seed: string): RepositoryIdentity {
     checkoutId: digest,
     displayName: seed,
     gitCommonDirectory: '.git',
-    headCommit: 'a'.repeat(40),
+    headCommit: Effect2.pipe('a', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: `/${seed}`,
     repositoryId: digest,
@@ -684,11 +691,16 @@ function indexSummary(identity: RepositoryIdentity): CodeGraphIndexSummary {
   };
 }
 
+const stagedGenerationDigestSchema = Schema.StructWithRest(Schema.Struct({manifestDigest: Schema.String}), [
+  Schema.Record(Schema.String, Schema.Unknown),
+]);
+
 function codeGraphManifestDigestFromStage(): string {
-  const input = mocks.stageGeneration.mock.calls[0]?.[1] as CodeGraphWorksetCatalogGenerationReceiptInputV1 | undefined;
-  return input?.manifestDigest ?? generationFallbackDigest();
+  const input = mocks.stageGeneration.mock.calls[0]?.[1];
+  if (input === undefined) return generationFallbackDigest();
+  return Schema.decodeUnknownSync(stagedGenerationDigestSchema)(input).manifestDigest;
 }
 
 function generationFallbackDigest(): string {
-  return 'f'.repeat(64);
+  return Effect2.pipe('f', EffectString.repeat(64));
 }

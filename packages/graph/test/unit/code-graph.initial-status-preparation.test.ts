@@ -13,6 +13,10 @@ import {
   type RepositoryIdentityMetadata,
 } from '@threadnote/graph/repository';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -50,7 +54,7 @@ describe('initial status preparation', () => {
         const observed = FileSystem.FileSystem.of({
           ...f.fs,
           writeFileString: (file, data, options) => {
-            if (!file.endsWith('.tmp')) return f.fs.writeFileString(file, data, options);
+            if (!Effect2.pipe(file, EffectString.endsWith('.tmp'))) return f.fs.writeFileString(file, data, options);
             publications += 1;
             return Deferred.succeed(associationStarted, undefined).pipe(
               Effect.andThen(Deferred.await(releaseAssociation)),
@@ -97,7 +101,7 @@ describe('initial status preparation', () => {
         const observed = FileSystem.FileSystem.of({
           ...f.fs,
           writeFileString: (file, data, options) =>
-            file.endsWith('.tmp')
+            Effect2.pipe(file, EffectString.endsWith('.tmp'))
               ? Deferred.succeed(associationStarted, undefined).pipe(
                   Effect.andThen(Effect.never),
                   Effect.ensuring(
@@ -150,14 +154,17 @@ describe('initial status preparation', () => {
           expect(yield* prepared.observeTogether(bind(prepared.identity))).toBe(cwd === unborn ? undefined : false);
           if (cwd === unborn) expect(observed).toBeUndefined();
           else {
-            const expectedIndex = (yield* runCommandEffect('git', [
-              '-C',
-              cwd,
-              'rev-parse',
-              '--path-format=absolute',
-              '--git-path',
-              'index',
-            ])).stdout.trim();
+            const expectedIndex = Effect2.pipe(
+              (yield* runCommandEffect('git', [
+                '-C',
+                cwd,
+                'rev-parse',
+                '--path-format=absolute',
+                '--git-path',
+                'index',
+              ])).stdout,
+              EffectString.trim,
+            );
             expect(observed?.sourceIndex).toBe(expectedIndex);
             expect(f.path.isAbsolute(observed!.sourceIndex!)).toBe(true);
           }
@@ -217,7 +224,7 @@ describe('initial status preparation', () => {
           writeFileString: (file, data, options) =>
             f.fs.writeFileString(file, data, options).pipe(
               Effect.tap(() =>
-                file.endsWith('.tmp') && !changed
+                Effect2.pipe(file, EffectString.endsWith('.tmp')) && !changed
                   ? Effect.sync(() => {
                       changed = true;
                     }).pipe(
@@ -265,7 +272,7 @@ it('parses complete index-bearing metadata without accepting malformed frames or
   const utf8 = new TextEncoder();
   const segment = fc
     .array(fc.constantFrom('a', 'Z', '0', ' ', 'é', '東', '🦉', '\\'), {minLength: 1, maxLength: 24})
-    .map(chars => chars.join(''));
+    .map(chars => EffectArray.join(chars, ''));
   fc.assert(
     fc.property(segment, fc.constantFrom('sha1' as const, 'sha256' as const), (part, objectFormat) => {
       const expected = {
@@ -273,12 +280,12 @@ it('parses complete index-bearing metadata without accepting malformed frames or
         commonDirectory: '/common',
         gitDirectory: '/git',
         objectFormat,
-        headCommit: 'a'.repeat(objectFormat === 'sha1' ? 40 : 64),
+        headCommit: Effect2.pipe('a', EffectString.repeat(objectFormat === 'sha1' ? 40 : 64)),
         sourceIndex: `/index/${part}/index`,
         branch: {state: 'current', branch: 'feature/topic'},
       };
       const {branch, ...metadata} = expected;
-      const frame = `${Object.values(metadata).join('\n')}\n${branch.branch}\n`;
+      const frame = `${EffectArray.join(EffectRecord.values(metadata), '\n')}\n${branch.branch}\n`;
       const bytes = utf8.encode(frame);
       const before = bytes.slice();
       expect(parseRepositoryIdentityMetadata(bytes, true)).toEqual(expected);
@@ -288,20 +295,20 @@ it('parses complete index-bearing metadata without accepting malformed frames or
       expect(parseRepositoryIdentityMetadata(invalidUtf8, true)).toBeUndefined();
       expect(parseRepositoryIdentityMetadata(bytes)).toBeUndefined();
       for (const invalid of [
-        frame.slice(0, -1),
+        Effect2.pipe(frame, EffectString.slice(0, -1)),
         frame + '\n',
-        frame.replaceAll('\n', '\r\n'),
+        Effect2.pipe(frame, EffectString.replaceAll('\n', '\r\n')),
         frame + '\0',
-        frame.replace(expected.sourceIndex, ''),
-        frame.replace(expected.sourceIndex, 'a\0b'),
-        frame.replace(expected.headCommit, 'HEAD'),
+        Effect2.pipe(frame, EffectString.replace(expected.sourceIndex, '')),
+        Effect2.pipe(frame, EffectString.replace(expected.sourceIndex, 'a\0b')),
+        Effect2.pipe(frame, EffectString.replace(expected.headCommit, 'HEAD')),
       ])
         expect(parseRepositoryIdentityMetadata(utf8.encode(invalid), true)).toBeUndefined();
     }),
     {numRuns: 64},
   );
-  const prefix = `/repo\n/common\n/git\nsha1\n${'a'.repeat(40)}\n`;
-  const exactIndex = '/' + 'i'.repeat(16_384 - 2);
+  const prefix = `/repo\n/common\n/git\nsha1\n${Effect2.pipe('a', EffectString.repeat(40))}\n`;
+  const exactIndex = '/' + Effect2.pipe('i', EffectString.repeat(16_384 - 2));
   expect(parseRepositoryIdentityMetadata(utf8.encode(prefix + exactIndex + '\nmain\n'), true)?.sourceIndex).toBe(
     exactIndex,
   );

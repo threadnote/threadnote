@@ -1,6 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError} from './contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const WATCH_CONTROL_CHARACTER = /[^\u0020-\u007e\u00a0-\u{10ffff}]/u;
 
 export const nativeWatchEventLimit = 4096;
 export const nativeWatchWorkLimit = 4096;
@@ -15,7 +20,7 @@ const version = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const portable = Schema.String.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
   Schema.makeFilter(value =>
-    value.includes('..') || ['constructor', 'prototype', '__proto__'].includes(value)
+    Effect.pipe(value, EffectString.includes('..')) || ['constructor', 'prototype', '__proto__'].includes(value)
       ? 'Reserved identifier.'
       : undefined,
   ),
@@ -27,11 +32,7 @@ const boundedText = (maximum: number) =>
     Schema.isMinLength(1),
     Schema.isMaxLength(maximum),
     Schema.makeFilter(value =>
-      !value.trim() ||
-      [...value].some(character => {
-        const code = character.charCodeAt(0);
-        return code < 32 || (code >= 127 && code <= 159);
-      })
+      !Effect.pipe(value, EffectString.trim) || WATCH_CONTROL_CHARACTER.test(value)
         ? 'Text must be nonblank and contain no control characters.'
         : undefined,
     ),
@@ -41,10 +42,7 @@ const httpsUrl = Schema.String.check(
   Schema.makeFilter(value => {
     try {
       const url = new URL(value);
-      const hasControl = [...value].some(character => {
-        const code = character.charCodeAt(0);
-        return code < 32 || (code >= 127 && code <= 159);
-      });
+      const hasControl = WATCH_CONTROL_CHARACTER.test(value);
       return url.protocol !== 'https:' ||
         !url.hostname ||
         url.username ||
@@ -214,10 +212,15 @@ const parse = <A>(schema: Schema.ConstraintDecoder<A>, value: unknown, message: 
   }
 };
 const uniqueEntities = (items: readonly NativeWatchEntity[]): void => {
-  if (new Set(items.map(item => item.id)).size !== items.length) fail('Source contains duplicate entity IDs.');
+  if (new Set(EffectArray.map(items, item => item.id)).size !== items.length)
+    fail('Source contains duplicate entity IDs.');
 };
-const sourceOrder = (left: string, right: string): number =>
-  sources.indexOf(left as NativeWatchSource) - sources.indexOf(right as NativeWatchSource);
+const sourceIndex = (value: string): number =>
+  EffectOption.getOrElse(
+    EffectArray.findFirstIndex(sources, source => source === value),
+    () => -1,
+  );
+const sourceOrder = (left: string, right: string): number => sourceIndex(left) - sourceIndex(right);
 const portableWatchId = (value: string): string => parse(portable, value, 'Invalid watch ID.');
 
 function validateSourceResult(input: NativeWatchSourceResult): void {
@@ -226,7 +229,7 @@ function validateSourceResult(input: NativeWatchSourceResult): void {
 
 export function decodeNativeWatchSweep(value: unknown): NativeWatchSweep {
   const sweep = parse(sweepSchema, value, 'Malformed native watch sweep.');
-  if (new Set(sweep.sources.map(result => result.source)).size !== sweep.sources.length)
+  if (new Set(EffectArray.map(sweep.sources, result => result.source)).size !== sweep.sources.length)
     fail('Watch sweep contains duplicate sources.');
   for (const result of sweep.sources) validateSourceResult(result);
   if (sweep.ci.pending + sweep.ci.failed > sweep.ci.count) fail('CI counts exceed total checks.');
@@ -237,24 +240,30 @@ function validateState(state: NativeWatchState): void {
   if (state.acknowledged >= state.nextSequence || state.events.length !== state.nextSequence - state.acknowledged - 1)
     fail('Watch event sequence bounds are inconsistent.');
   const eventIds = new Set<string>();
-  state.events.forEach((event, index) => {
+  EffectArray.forEach(state.events, (event, index) => {
     const expected = state.acknowledged + index + 1;
     if (event.sequence !== expected || event.id !== `${state.watchId}:${expected}` || eventIds.has(event.id))
       fail('Watch event sequence or identity is inconsistent.');
     eventIds.add(event.id);
   });
-  if (new Set(state.sources.map(item => item.source)).size !== state.sources.length)
+  if (new Set(EffectArray.map(state.sources, item => item.source)).size !== state.sources.length)
     fail('Watch source checkpoints are duplicated.');
   if (new Set(state.ciEmittedVersions).size !== state.ciEmittedVersions.length)
     fail('Watch CI version history contains duplicates.');
   for (const checkpoint of state.sources) uniqueEntities(checkpoint.items);
-  if (new Set(state.work.map(item => item.eventId)).size !== state.work.length) fail('Watch work IDs are duplicated.');
-  if (state.work.filter(item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit)
+  if (new Set(EffectArray.map(state.work, item => item.eventId)).size !== state.work.length)
+    fail('Watch work IDs are duplicated.');
+  if (
+    EffectArray.filter(state.work, item => item.status === 'open' || item.status === 'blocked').length >
+    nativeWatchWorkLimit
+  )
     fail('Watch unresolved work exceeds its limit.');
   if (state.work.length > nativeWatchWorkLimit * 2) fail('Watch work history exceeds its limit.');
   for (const item of state.work) {
     const prefix = `${state.watchId}:`;
-    const sequence = item.eventId.startsWith(prefix) ? item.eventId.slice(prefix.length) : '';
+    const sequence = Effect.pipe(item.eventId, EffectString.startsWith(prefix))
+      ? Effect.pipe(item.eventId, EffectString.slice(prefix.length))
+      : '';
     const numericSequence = Number(sequence);
     if (
       !/^\d+$/u.test(sequence) ||
@@ -264,7 +273,9 @@ function validateState(state: NativeWatchState): void {
       item.event.sequence !== numericSequence
     )
       fail('Watch work points to an unknown event.');
-    const pending = state.events.find(event => event.id === item.eventId);
+    const pending = EffectOption.getOrUndefined(
+      EffectArray.findFirst(state.events, event => event.id === item.eventId),
+    );
     if (pending && JSON.stringify(pending) !== JSON.stringify(item.event))
       fail('Watch work provenance does not match the pending event.');
   }
@@ -329,7 +340,7 @@ function appendEvents(
   if (state.events.length + inputs.length > nativeWatchEventLimit)
     fail('Watch event capacity reached; retry after durable acknowledgement.');
   let next = state.nextSequence;
-  const appended = inputs.map(input => ({...input, sequence: next, id: `${state.watchId}:${next++}`}));
+  const appended = EffectArray.map(inputs, input => ({...input, sequence: next, id: `${state.watchId}:${next++}`}));
   return {...state, nextSequence: next, events: [...state.events, ...appended]};
 }
 
@@ -366,8 +377,8 @@ function eligibleCi(
     sweep.ci.complete &&
     sweep.ci.count > 0 &&
     sweep.ci.pending === 0 &&
-    sources.every(source => {
-      const result = sweep.sources.find(item => item.source === source);
+    EffectArray.every(sources, source => {
+      const result = EffectOption.getOrUndefined(EffectArray.findFirst(sweep.sources, item => item.source === source));
       if (!result?.complete) return false;
       return source !== 'checks' && source !== 'statuses' ? true : result.head === sweep.head;
     }) &&
@@ -375,10 +386,10 @@ function eligibleCi(
   );
 }
 
-export function reconcileNativeWatch(input: NativeWatchState, rawSweep: NativeWatchSweep): NativeWatchState {
+export function reconcileNativeWatch(input: NativeWatchState, rawSweep: unknown): NativeWatchState {
   const state = decodeNativeWatchState(input);
   const sweep = decodeNativeWatchSweep(rawSweep);
-  const checkpoints = new Map(state.sources.map(item => [item.source, item]));
+  const checkpoints = new Map(EffectArray.map(state.sources, item => [item.source, item]));
   const events: Omit<NativeWatchEvent, 'sequence' | 'id'>[] = [];
   let head = state.head;
   let prState = state.prState;
@@ -453,8 +464,8 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: NativeWa
       continue;
     }
     uniqueEntities(result.items);
-    const oldItems = new Map((prior?.items ?? []).map(item => [item.id, item]));
-    const newItems = new Map(result.items.map(item => [item.id, item]));
+    const oldItems = new Map(EffectArray.map(prior?.items ?? [], item => [item.id, item]));
+    const newItems = new Map(EffectArray.map(result.items, item => [item.id, item]));
     for (const item of result.items) {
       const isNonActionableCiUpdate =
         (result.source === 'checks' || result.source === 'statuses') && item.kind === 'ci_update';
@@ -527,7 +538,9 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: NativeWa
         at: sweep.at,
       });
   }
-  if (work.filter(item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit)
+  if (
+    EffectArray.filter(work, item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit
+  )
     fail('Unresolved watch work capacity reached.');
   const {mergeConflictVersion: _previousConflict, ...withoutConflict} = withDiff;
   return decodeNativeWatchState({
@@ -610,17 +623,19 @@ export function relayNativeWatch(
 }
 
 function compactWork(work: readonly NativeWatchWork[], acknowledged: number, watchId: string): NativeWatchWork[] {
-  const active = work.filter(item => item.status === 'open' || item.status === 'blocked');
+  const active = EffectArray.filter(work, item => item.status === 'open' || item.status === 'blocked');
   const prefix = `${watchId}:`;
-  const terminal = work.filter(item => item.status === 'resolved' || item.status === 'ignored');
-  const unacknowledged = terminal.filter(item => Number(item.eventId.slice(prefix.length)) > acknowledged);
-  const history = work
-    .filter(
-      item =>
-        (item.status === 'resolved' || item.status === 'ignored') &&
-        Number(item.eventId.slice(prefix.length)) <= acknowledged,
-    )
-    .slice(-nativeWatchWorkHistoryLimit);
+  const terminal = EffectArray.filter(work, item => item.status === 'resolved' || item.status === 'ignored');
+  const unacknowledged = EffectArray.filter(
+    terminal,
+    item => Number(Effect.pipe(item.eventId, EffectString.slice(prefix.length))) > acknowledged,
+  );
+  const history = EffectArray.filter(
+    work,
+    item =>
+      (item.status === 'resolved' || item.status === 'ignored') &&
+      Number(Effect.pipe(item.eventId, EffectString.slice(prefix.length))) <= acknowledged,
+  ).slice(-nativeWatchWorkHistoryLimit);
   return [...active, ...unacknowledged, ...history];
 }
 
@@ -628,7 +643,7 @@ export function recordNativeWatchDispositions(
   input: NativeWatchState,
   consumerId: string,
   deliveryId: string,
-  items: readonly NativeWatchDisposition[],
+  items: readonly unknown[],
   now: number,
 ): NativeWatchState {
   const state = decodeNativeWatchState(input);
@@ -637,13 +652,15 @@ export function recordNativeWatchDispositions(
   if (!delivery || delivery.id !== deliveryId)
     return fail('Disposition delivery does not match the current pending delivery.');
   parse(timestamp, now, 'Invalid disposition timestamp.');
-  const dispositions = items.map(item => parse(dispositionSchema, item, 'Invalid watch disposition.'));
-  if (new Set(dispositions.map(item => item.eventId)).size !== dispositions.length)
+  const dispositions = EffectArray.map(items, item => parse(dispositionSchema, item, 'Invalid watch disposition.'));
+  if (new Set(EffectArray.map(dispositions, item => item.eventId)).size !== dispositions.length)
     fail('Duplicate event disposition.');
-  const allowed = new Map(state.events.slice(0, delivery.last - state.acknowledged).map(event => [event.id, event]));
-  if (dispositions.some(item => !allowed.has(item.eventId)))
+  const allowed = new Map(
+    EffectArray.map(state.events.slice(0, delivery.last - state.acknowledged), event => [event.id, event]),
+  );
+  if (EffectArray.some(dispositions, item => !allowed.has(item.eventId)))
     fail('Disposition refers to an event outside the pending delivery.');
-  const work = new Map(state.work.map(item => [item.eventId, item]));
+  const work = new Map(EffectArray.map(state.work, item => [item.eventId, item]));
   for (const item of dispositions) {
     const event = allowed.get(item.eventId);
     if (!event) return fail('Disposition refers to an event outside the pending delivery.');
@@ -655,7 +672,9 @@ export function recordNativeWatchDispositions(
     work.set(item.eventId, {...item, event: prior?.event ?? event, at: now});
   }
   const all = [...work.values()];
-  if (all.filter(item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit)
+  if (
+    EffectArray.filter(all, item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit
+  )
     fail('Unresolved watch work capacity reached.');
   if (all.length > nativeWatchWorkLimit * 2)
     fail('Watch work capacity reached; acknowledge delivered events to compact resolved history.');
@@ -665,19 +684,20 @@ export function recordNativeWatchDispositions(
 export function updateNativeWatchWork(
   input: NativeWatchState,
   consumerId: string,
-  items: readonly NativeWatchDisposition[],
+  items: readonly unknown[],
   now: number,
 ): NativeWatchState {
   const state = decodeNativeWatchState(input);
   requireConsumer(state, consumerId, now);
   parse(timestamp, now, 'Invalid work update timestamp.');
   if (items.length > 32) fail('Work update exceeds its event limit.');
-  if (new Set(items.map(item => item.eventId)).size !== items.length) fail('Duplicate work update IDs.');
-  const work = new Map(state.work.map(item => [item.eventId, item]));
-  for (const inputItem of items) {
-    const prior = work.get(inputItem.eventId);
+  const dispositions = EffectArray.map(items, item => parse(dispositionSchema, item, 'Invalid watch work update.'));
+  if (new Set(EffectArray.map(dispositions, item => item.eventId)).size !== dispositions.length)
+    fail('Duplicate work update IDs.');
+  const work = new Map(EffectArray.map(state.work, item => [item.eventId, item]));
+  for (const disposition of dispositions) {
+    const prior = work.get(disposition.eventId);
     if (!prior) return fail('Work update must refer to an existing event disposition.');
-    const disposition = parse(dispositionSchema, inputItem, 'Invalid watch work update.');
     const item: NativeWatchWork = {...disposition, event: prior.event, at: now};
     if (prior.status === item.status && prior.reason === item.reason && prior.evidence === item.evidence) continue;
     if ((prior.status === 'resolved' || prior.status === 'ignored') && item.status !== 'open')
@@ -685,7 +705,9 @@ export function updateNativeWatchWork(
     work.set(item.eventId, item);
   }
   const next = [...work.values()];
-  if (next.filter(item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit)
+  if (
+    EffectArray.filter(next, item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit
+  )
     fail('Unresolved watch work exceeds its limit.');
   return decodeNativeWatchState({...state, work: compactWork(next, state.acknowledged, state.watchId)});
 }
@@ -703,8 +725,8 @@ export function acknowledgeNativeWatch(
   const delivery = state.delivery;
   if (!delivery || delivery.id !== deliveryId) return fail('Acknowledgement does not match the current delivery.');
   const delivered = state.events.slice(0, delivery.last - state.acknowledged);
-  const work = new Map(state.work.map(item => [item.eventId, item]));
-  if (delivered.some(event => !work.has(event.id)))
+  const work = new Map(EffectArray.map(state.work, item => [item.eventId, item]));
+  if (EffectArray.some(delivered, event => !work.has(event.id)))
     fail('Every delivered event needs a durable disposition before acknowledgement.');
   const remaining = state.events.slice(delivered.length);
   return decodeNativeWatchState({

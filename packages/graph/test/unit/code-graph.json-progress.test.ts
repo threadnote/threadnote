@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   CODE_GRAPH_JSON_PROGRESS_INTERVAL_MILLISECONDS,
@@ -20,7 +21,7 @@ describe('code graph JSON progress coalescing', () => {
     expect(emitted).toHaveLength(51);
     expect(emitted[0]).toMatchObject({completed: 0, phase: 'scanning'});
     expect(emitted.at(-1)).toMatchObject({completed: 100_000, phase: 'scanning'});
-    expect(emitted.slice(1, -1).every(progress => progress.completed % 2_000 === 0)).toBe(true);
+    expect(EffectArray.every(emitted.slice(1, -1), progress => progress.completed % 2_000 === 0)).toBe(true);
   });
 
   it('bounds an adversarial stream that alternates previously observed substages', () => {

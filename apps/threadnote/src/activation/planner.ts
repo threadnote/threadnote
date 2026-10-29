@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {
   ACTIVATION_PLAN_VERSION,
   ACTIVATION_RECEIPT_VERSION,
@@ -66,7 +68,9 @@ export function previewActivationResumeV1(
   const receipt = parseActivationReceiptV1(suppliedReceipt);
   const drift = activationDriftV1(plan, receipt);
   if (drift !== undefined) return drift;
-  const next = receipt.operations.find(operation => !operationIsComplete(operation.status));
+  const next = EffectOption.getOrUndefined(
+    EffectArray.findFirst(receipt.operations, operation => !operationIsComplete(operation.status)),
+  );
   if (next === undefined) {
     return {
       planHash: plan.planHash,
@@ -75,7 +79,9 @@ export function previewActivationResumeV1(
       version: ACTIVATION_RECEIPT_VERSION,
     };
   }
-  const operation = plan.operations.find(candidate => candidate.id === next.id)!;
+  const operation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(plan.operations, candidate => candidate.id === next.id),
+  )!;
   const common = {
     operationId: operation.id,
     planHash: plan.planHash,
@@ -96,39 +102,48 @@ export function planActivationUndoV1(
   const plan = parseActivationPlanV1(suppliedPlan);
   const receipt = parseActivationReceiptV1(suppliedReceipt);
   if (activationDriftV1(plan, receipt) !== undefined) throw new Error('Cannot plan activation undo after drift.');
-  const operations = receipt.operations
-    .flatMap(receiptOperation => {
-      const planned = plan.operations.find(operation => operation.id === receiptOperation.id)!;
-      if (
-        !operationIsComplete(receiptOperation.status) ||
-        !planned.reversible ||
-        receiptOperation.ownership !== 'activation-created' ||
-        receiptOperation.undoEligible !== true ||
-        receiptOperation.outcomeHash === undefined ||
-        receiptOperation.subsystemReceiptHash === undefined
-      ) {
-        return [];
-      }
-      return [
-        {
-          inputHash: receiptOperation.inputHash,
-          operationId: receiptOperation.id,
-          outcomeHash: receiptOperation.outcomeHash,
-          subsystemReceiptHash: receiptOperation.subsystemReceiptHash,
-        },
-      ];
-    })
-    .reverse();
-  const selected = new Set(operations.map(operation => operation.operationId));
+  const operations = EffectArray.flatMap(receipt.operations, receiptOperation => {
+    const planned = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.operations, operation => operation.id === receiptOperation.id),
+    )!;
+    if (
+      !operationIsComplete(receiptOperation.status) ||
+      !planned.reversible ||
+      receiptOperation.ownership !== 'activation-created' ||
+      receiptOperation.undoEligible !== true ||
+      receiptOperation.outcomeHash === undefined ||
+      receiptOperation.subsystemReceiptHash === undefined
+    ) {
+      return [];
+    }
+    return [
+      {
+        inputHash: receiptOperation.inputHash,
+        operationId: receiptOperation.id,
+        outcomeHash: receiptOperation.outcomeHash,
+        subsystemReceiptHash: receiptOperation.subsystemReceiptHash,
+      },
+    ];
+  }).reverse();
+  const selected = new Set(EffectArray.map(operations, operation => operation.operationId));
   const body = {
     activationId: plan.activationId,
     operations,
     planHash: plan.planHash,
     receiptRevision: receipt.revision,
     requiresApproval: 'undo-apply' as const,
-    retainedOperationIds: receipt.operations
-      .filter(operation => operationIsComplete(operation.status) && !selected.has(operation.id))
-      .map(operation => operation.id),
+    retainedOperationIds: EffectArray.map(
+      EffectArrayPipe(receipt.operations, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (operation, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues &&
+            operationIsComplete(operation.status) &&
+            !selected.has(operation.id),
+        ),
+      ),
+      operation => operation.id,
+    ),
     type: 'threadnote-activation-undo-plan' as const,
     version: ACTIVATION_RECEIPT_VERSION,
   };
@@ -139,8 +154,8 @@ function activationDriftV1(
   plan: ActivationPlanV1,
   receipt: ActivationReceiptV1,
 ): Extract<ActivationResumePlanV1, {status: 'drifted'}> | undefined {
-  const driftedOperationIds = plan.operations
-    .filter((operation, index) => {
+  const driftedOperationIds = EffectArray.map(
+    EffectArray.filter(plan.operations, (operation, index) => {
       const prior = receipt.operations[index];
       return (
         prior === undefined ||
@@ -148,12 +163,13 @@ function activationDriftV1(
         prior.kind !== operation.kind ||
         prior.inputHash !== operation.inputHash
       );
-    })
-    .map(operation => operation.id);
+    }),
+    operation => operation.id,
+  );
   if (receipt.activationId !== plan.activationId) {
     return {
       code: 'activation-target-drift',
-      driftedOperationIds: plan.operations.map(operation => operation.id),
+      driftedOperationIds: EffectArray.map(plan.operations, operation => operation.id),
       planHash: plan.planHash,
       receiptRevision: receipt.revision,
       status: 'drifted',

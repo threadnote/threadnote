@@ -1,4 +1,5 @@
-import postgres, {type JSONValue, type Sql, type TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import postgres, {type JSONValue, type Sql, type ISql} from 'postgres';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {randomUuidV4} from '@threadnote/platform/uuid';
@@ -18,7 +19,7 @@ import type {
 import {canonicalCursorRepositoryBinding, cursorAttestationMaximumAttempts} from '../cursor_oidc.js';
 import {remoteMemoryError} from '../errors.js';
 import {provisionGitIngestPrincipal} from '../git/ingest_principal.js';
-import {isJsonObject} from '../json.js';
+import {isJsonObject, requireJsonValue} from '../json.js';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import {
   remoteMemoryDatabaseTimeoutMilliseconds,
@@ -32,6 +33,10 @@ import type {
   RemoteMemoryProvisioningReceiptV1,
   RemoteMemoryProvisioningStateV1,
 } from '../provisioning.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const DATABASE_TIMEOUT_MILLISECONDS = 5_000;
 export const STORED_SHARE_POLICY_MAX_BYTES = 4 * 1024 * 1024;
@@ -479,7 +484,7 @@ export class PostgresRemoteControlPlane implements RemoteAuthorizationStore, Cur
         SELECT id, status FROM remote_memory.principals
         WHERE tenant_id = ${input.tenantId} AND id = ANY(${transaction.array([input.principalId, retentionPrincipalId])})
       `;
-      if (principals.length !== 2 || principals.some(principal => principal.status !== 'active')) {
+      if (principals.length !== 2 || EffectArray.some(principals, principal => principal.status !== 'active')) {
         throw remoteMemoryError('conflict', 'A provisioning principal is disabled or unavailable.');
       }
       await transaction`
@@ -726,7 +731,7 @@ export class PostgresRemoteControlPlane implements RemoteAuthorizationStore, Cur
       `;
       await provisionGitIngestPrincipal(transaction, input);
       if (replaceSharePolicy) {
-        const configuredProjects = [...new Set(input.projects ?? Object.keys(input.repositoryBindings ?? {}))];
+        const configuredProjects = [...new Set(input.projects ?? EffectRecord.keys(input.repositoryBindings ?? {}))];
         for (const project of configuredProjects) {
           await transaction`
             INSERT INTO remote_memory.projects(tenant_id, share_id, name, status)
@@ -780,7 +785,7 @@ export class PostgresRemoteControlPlane implements RemoteAuthorizationStore, Cur
           INSERT INTO remote_memory.provisioning_receipts(tenant_id, plan_id, plan_digest, outcome)
           VALUES (
             ${input.tenantId}, ${application.plan.planId}, ${application.plan.planDigest},
-            ${transaction.json(application.receipt as unknown as JSONValue)}
+            ${transaction.json(requireJsonValue(application.receipt))}
           )
         `;
         return application.receipt;
@@ -801,7 +806,7 @@ export class PostgresRemoteControlPlane implements RemoteAuthorizationStore, Cur
   }
 
   private async inspectProvisioningStateTransaction(
-    transaction: TransactionSql,
+    transaction: ISql,
     input: Pick<
       RemoteMemoryProvisioningInput,
       'clientId' | 'issuer' | 'principalId' | 'shareId' | 'subject' | 'tenantId'
@@ -938,7 +943,7 @@ export class PostgresRemoteControlPlane implements RemoteAuthorizationStore, Cur
   }
 
   private async readDirectory<A>(
-    use: (transaction: TransactionSql) => Promise<A>,
+    use: (transaction: ISql) => Promise<A>,
     execution?: RemoteMemoryRequestExecution,
   ): Promise<A> {
     requireActiveRemoteMemoryRequest(execution);
@@ -953,7 +958,7 @@ export class PostgresRemoteControlPlane implements RemoteAuthorizationStore, Cur
 
   private async withTenant<A>(
     tenantId: string,
-    use: (transaction: TransactionSql) => Promise<A>,
+    use: (transaction: ISql) => Promise<A>,
     execution?: RemoteMemoryRequestExecution,
   ): Promise<A> {
     requireActiveRemoteMemoryRequest(execution);
@@ -968,7 +973,7 @@ export class PostgresRemoteControlPlane implements RemoteAuthorizationStore, Cur
 }
 
 export function remoteRetentionPrincipalId(tenantId: string): string {
-  return `system:retention:${sha256HexSync(tenantId).slice(0, 32)}`;
+  return `system:retention:${Effect.pipe(sha256HexSync(tenantId), EffectString.slice(0, 32))}`;
 }
 
 export function validateRemoteMemoryProvisioningInput(input: RemoteMemoryProvisioningInput): void {
@@ -990,13 +995,21 @@ export function validateRemoteMemoryProvisioningInput(input: RemoteMemoryProvisi
   if (!managedShareId.test(input.shareId)) {
     throw remoteMemoryError('invalid_request', 'Provisioning shareId is invalid.');
   }
-  if (input.principalId.startsWith('system:') || input.principalId === remoteRetentionPrincipalId(input.tenantId)) {
+  if (
+    Effect.pipe(input.principalId, EffectString.startsWith('system:')) ||
+    input.principalId === remoteRetentionPrincipalId(input.tenantId)
+  ) {
     throw remoteMemoryError(
       'invalid_request',
       'Provisioning principal id is reserved for an internal service identity.',
     );
   }
-  if (!input.displayName.trim() || input.displayName.length > 256 || !input.region.trim() || input.region.length > 64) {
+  if (
+    !Effect.pipe(input.displayName, EffectString.trim) ||
+    input.displayName.length > 256 ||
+    !Effect.pipe(input.region, EffectString.trim) ||
+    input.region.length > 64
+  ) {
     throw remoteMemoryError('invalid_request', 'Provisioning display name or region is invalid.');
   }
   validateProvisioningIdentity(input.issuer, input.subject);
@@ -1011,10 +1024,16 @@ export function validateRemoteMemoryProvisioningInput(input: RemoteMemoryProvisi
   ) {
     throw remoteMemoryError('invalid_request', 'Provisioning grant expiry must be an exact ISO timestamp.');
   }
-  if (input.capabilities.length === 0 || input.capabilities.some(value => !isRemoteMemoryScope(value))) {
+  if (input.capabilities.length === 0 || EffectArray.some(input.capabilities, value => !isRemoteMemoryScope(value))) {
     throw remoteMemoryError('invalid_request', 'Provisioning capabilities are invalid.');
   }
-  if (input.featureFlags?.some(value => !isRemoteMemoryFeatureFlag(value))) {
+  if (
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(input.featureFlags), __effectArrayReceiver =>
+        EffectArray.some(__effectArrayReceiver, value => !isRemoteMemoryFeatureFlag(value)),
+      ),
+    )
+  ) {
     throw remoteMemoryError('invalid_request', 'Provisioning feature flags are invalid.');
   }
   const requiresCursorIdentity =
@@ -1029,7 +1048,13 @@ export function validateRemoteMemoryProvisioningInput(input: RemoteMemoryProvisi
     if (!cursorOwnerSubject.test(subject))
       throw remoteMemoryError('invalid_request', 'Provisioning Cursor subjects are invalid.');
   }
-  if (input.cursorOwnerIds?.some(ownerId => !decimalIdentifier.test(ownerId))) {
+  if (
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(input.cursorOwnerIds), __effectArrayReceiver =>
+        EffectArray.some(__effectArrayReceiver, ownerId => !decimalIdentifier.test(ownerId)),
+      ),
+    )
+  ) {
     throw remoteMemoryError('invalid_request', 'Provisioning Cursor owner ids are invalid.');
   }
   if (input.cursorTeamId !== undefined && !decimalIdentifier.test(input.cursorTeamId)) {
@@ -1038,7 +1063,7 @@ export function validateRemoteMemoryProvisioningInput(input: RemoteMemoryProvisi
   for (const project of input.allowedProjects ?? []) validateProjectName(project);
   for (const project of input.projects ?? []) validateProjectName(project);
   const shareProjects = input.projects ? new Set(input.projects) : undefined;
-  for (const [project, repositories] of Object.entries(input.repositoryBindings ?? {})) {
+  for (const [project, repositories] of EffectRecord.toEntries(input.repositoryBindings ?? {})) {
     validateProjectName(project);
     if (shareProjects && !shareProjects.has(project)) {
       throw remoteMemoryError(
@@ -1064,28 +1089,48 @@ function validateProvisioningIdentity(issuer: string, subject: string): void {
     parsed.password ||
     parsed.search ||
     parsed.hash ||
-    (issuer !== parsed.toString() && issuer !== parsed.toString().replace(/\/$/u, ''))
+    (issuer !== parsed.toString() && issuer !== Effect.pipe(parsed.toString(), EffectString.replace(/\/$/u, '')))
   ) {
     throw remoteMemoryError(
       'invalid_request',
       'Provisioning issuer must be one canonical credential-free HTTPS URL, or loopback HTTP.',
     );
   }
-  const hasControlCharacter = [...subject].some(character => {
-    const codePoint = character.codePointAt(0) ?? 0;
+  const hasControlCharacter = EffectArray.some([...subject], character => {
+    const codePoint =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return codePoint <= 0x1f || codePoint === 0x7f;
   });
-  if (!subject.trim() || subject !== subject.trim() || subject.length > 1024 || hasControlCharacter) {
+  if (
+    !Effect.pipe(subject, EffectString.trim) ||
+    subject !== Effect.pipe(subject, EffectString.trim) ||
+    subject.length > 1024 ||
+    hasControlCharacter
+  ) {
     throw remoteMemoryError('invalid_request', 'Provisioning OAuth subject is invalid.');
   }
 }
 
 function validateProvisioningClientId(clientId: string): void {
-  const hasControlCharacter = [...clientId].some(character => {
-    const codePoint = character.codePointAt(0) ?? 0;
+  const hasControlCharacter = EffectArray.some([...clientId], character => {
+    const codePoint =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return codePoint <= 0x1f || codePoint === 0x7f;
   });
-  if (!clientId.trim() || clientId !== clientId.trim() || clientId.length > 512 || hasControlCharacter) {
+  if (
+    !Effect.pipe(clientId, EffectString.trim) ||
+    clientId !== Effect.pipe(clientId, EffectString.trim) ||
+    clientId.length > 512 ||
+    hasControlCharacter
+  ) {
     throw remoteMemoryError('invalid_request', 'Provisioning OAuth client id is invalid.');
   }
 }
@@ -1122,16 +1167,19 @@ export function remoteMemoryProvisioningSharePolicy(input: RemoteMemoryProvision
   readonly digest: string;
   readonly document: JsonObject;
 } {
-  const repositoryBindings = Object.fromEntries(
-    Object.entries(input.repositoryBindings ?? {})
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([project, repositories]) => [project, [...new Set(repositories)].sort()]),
+  const repositoryBindings = EffectRecord.fromEntries(
+    EffectArray.map(
+      EffectRecord.toEntries(input.repositoryBindings ?? {}).sort(([left], [right]) =>
+        Effect.pipe(left, EffectString.localeCompare(right)),
+      ),
+      ([project, repositories]) => [project, [...new Set(repositories)].sort()],
+    ),
   );
   const document = {
     cursorTeamId: input.cursorTeamId ?? null,
     displayName: input.displayName,
     featureFlags: [...new Set(input.featureFlags ?? ['remote_memory_read'])].sort(),
-    projects: [...new Set(input.projects ?? Object.keys(repositoryBindings))].sort(),
+    projects: [...new Set(input.projects ?? EffectRecord.keys(repositoryBindings))].sort(),
     repositoryBindings,
   };
   return {digest: sha256HexSync(JSON.stringify(document)), document};
@@ -1177,14 +1225,18 @@ export function requireNoImplicitSharePolicyChange(
     ...(input.projects !== undefined ? {projects: [...new Set(input.projects)].sort()} : {}),
     ...(input.repositoryBindings !== undefined
       ? {
-          repositoryBindings: Object.fromEntries(
-            Object.entries(input.repositoryBindings)
-              .sort(([left], [right]) => left.localeCompare(right))
-              .map(([project, repositories]) => [project, [...new Set(repositories)].sort()]),
+          repositoryBindings: EffectRecord.fromEntries(
+            EffectArray.map(
+              EffectRecord.toEntries(input.repositoryBindings).sort(([left], [right]) =>
+                Effect.pipe(left, EffectString.localeCompare(right)),
+              ),
+              ([project, repositories]) => [project, [...new Set(repositories)].sort()],
+            ),
           ),
         }
       : {}),
   };
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   for (const [key, value] of Object.entries(explicit)) {
     if (stablePolicyJson(document[key]) !== stablePolicyJson(value)) {
       throw remoteMemoryError(
@@ -1197,9 +1249,9 @@ export function requireNoImplicitSharePolicyChange(
 
 function stablePolicyJson(value: unknown): string | undefined {
   return JSON.stringify(value, (_key, current) => {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
-    return Object.fromEntries(
-      Object.entries(current).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+    if (!current || typeof current !== 'object' || EffectArray.isArray(current)) return current;
+    return EffectRecord.fromEntries(
+      EffectRecord.toEntries(current).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
     );
   });
 }
@@ -1214,19 +1266,19 @@ function validateProjectName(value: string): void {
 
 function validateRepositoryUrl(value: string): void {
   try {
-    if (!value.includes('://')) throw new Error('repository binding is not a URL');
+    if (!Effect.pipe(value, EffectString.includes('://'))) throw new Error('repository binding is not a URL');
     canonicalCursorRepositoryBinding(value);
   } catch {
     throw remoteMemoryError('invalid_request', 'Provisioning repository bindings must use credential-free HTTPS URLs.');
   }
 }
 
-async function setTenant(transaction: TransactionSql, tenantId: string, timeout = DATABASE_TIMEOUT_MILLISECONDS) {
+async function setTenant(transaction: ISql, tenantId: string, timeout = DATABASE_TIMEOUT_MILLISECONDS) {
   await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
   await setDatabaseTimeouts(transaction, timeout);
 }
 
-async function setDatabaseTimeouts(transaction: TransactionSql, timeout: number): Promise<void> {
+async function setDatabaseTimeouts(transaction: ISql, timeout: number): Promise<void> {
   const milliseconds = String(timeout);
   await transaction`SELECT set_config('statement_timeout', ${milliseconds}, true)`;
   await transaction`SELECT set_config('lock_timeout', ${milliseconds}, true)`;
@@ -1235,7 +1287,7 @@ async function setDatabaseTimeouts(transaction: TransactionSql, timeout: number)
 
 function authorizedPrincipal(row: AuthorizationRow, OAuth: OAuthPrincipalClaims): AuthorizedRemotePrincipal {
   const repositoriesByProject = new Map(
-    Object.entries(row.project_repository_bindings ?? {}).map(([project, repositories]) => [
+    EffectArray.map(EffectRecord.toEntries(row.project_repository_bindings ?? {}), ([project, repositories]) => [
       project,
       new Set(repositories),
     ]),
@@ -1243,17 +1295,43 @@ function authorizedPrincipal(row: AuthorizationRow, OAuth: OAuthPrincipalClaims)
   return {
     allowedProjects: row.allowed_projects === null ? 'all' : new Set(row.allowed_projects),
     attestationRequiredForWrites: row.cursor_attestation_required || row.feature_flags.includes('cursor_oidc_required'),
-    capabilities: new Set(row.capabilities.filter(isRemoteMemoryScope)),
+    capabilities: new Set(
+      EffectArray.filter(
+        row.capabilities,
+        (
+          __effectFilterValue: (typeof row.capabilities)[number],
+          __effectFilterIndex: number,
+        ): __effectFilterValue is RemoteMemoryScope =>
+          __effectFilterIndex in row.capabilities && isRemoteMemoryScope(__effectFilterValue),
+      ),
+    ),
     cloudAdmissionRequired: row.cloud_admission_required,
     cursorOwnerIds: new Set(row.cursor_owner_ids),
     cursorSubjects: new Set(row.cursor_subjects),
     cursorTeamId: row.cursor_team_id ?? undefined,
-    featureFlags: new Set(row.feature_flags.filter(isRemoteMemoryFeatureFlag)),
+    featureFlags: new Set(
+      EffectArray.filter(
+        row.feature_flags,
+        (
+          __effectFilterValue: (typeof row.feature_flags)[number],
+          __effectFilterIndex: number,
+        ): __effectFilterValue is
+          | 'remote_memory_read'
+          | 'remote_memory_durable_write'
+          | 'remote_memory_handoff_write'
+          | 'cursor_oidc_required'
+          | 'git_beta_import'
+          | 'remote_memory_ga' =>
+          __effectFilterIndex in row.feature_flags && isRemoteMemoryFeatureFlag(__effectFilterValue),
+      ),
+    ),
     OAuth,
     policyVersion: row.grant_policy_version,
     policyDigest: row.grant_policy_digest,
     principalId: row.principal_id,
-    repositoryBindings: new Set([...repositoriesByProject.values()].flatMap(repositories => [...repositories])),
+    repositoryBindings: new Set(
+      EffectArray.flatMap([...repositoriesByProject.values()], repositories => [...repositories]),
+    ),
     repositoriesByProject,
     shareId: row.share_id,
     sharePolicyDigest: row.policy_digest,

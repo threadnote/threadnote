@@ -11,6 +11,9 @@ import {
 } from '@threadnote/graph/workset_catalog/isolated_prepare';
 import type {SystemInfoShape} from '@threadnote/platform/system';
 import {Effect} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 function systemInfoStub(overrides: Partial<SystemInfoShape> = {}): SystemInfoShape {
   return {
@@ -68,21 +71,21 @@ const progress = {
 
 const result = {
   coverage: {complete: true, excluded: 0, failed: 0, missing: 0, ready: 1, requested: 1},
-  manifestDigest: 'a'.repeat(64),
+  manifestDigest: Effect2.pipe('a', EffectString.repeat(64)),
   members: [
     {
       project: 'api',
-      projectionDigest: 'b'.repeat(64),
-      repositoryId: 'c'.repeat(64),
-      snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+      projectionDigest: Effect2.pipe('b', EffectString.repeat(64)),
+      repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+      snapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`,
       state: 'ready',
       symbolCount: 42,
     },
   ],
   published: {
-    digest: 'e'.repeat(64),
+    digest: Effect2.pipe('e', EffectString.repeat(64)),
     id: 'cgwg_fixture',
-    manifestDigest: 'a'.repeat(64),
+    manifestDigest: Effect2.pipe('a', EffectString.repeat(64)),
     memberCount: 1,
     state: 'ready',
     worksetName: 'platform',
@@ -147,7 +150,7 @@ describe('isolated Manager workset preparation', () => {
 
         expect(plan.arguments[plan.arguments.indexOf('--concurrency') + 1]).toBe(String(concurrency));
         expect(plan.arguments.at(-1)).toBe('platform');
-        expect(plan.arguments.filter(argument => argument === 'workset')).toHaveLength(1);
+        expect(EffectArray.filter(plan.arguments, argument => argument === 'workset')).toHaveLength(1);
         expect(plan.arguments.includes('/apps/threadnote/src/standalone.ts')).toBe(development);
       }),
       {numRuns: 40},
@@ -169,9 +172,9 @@ describe('isolated Manager workset preparation', () => {
     const lines = makeIsolatedWorksetProgressLineDecoder();
     const encoder = new TextEncoder();
 
-    expect(lines.push(encoder.encode('x'.repeat(40 * 1_024)))).toEqual([]);
+    expect(lines.push(encoder.encode(Effect2.pipe('x', EffectString.repeat(40 * 1_024))))).toEqual([]);
     expect(lines.bufferedBytes()).toBe(40 * 1_024);
-    expect(lines.push(encoder.encode('x'.repeat(30 * 1_024)))).toEqual([]);
+    expect(lines.push(encoder.encode(Effect2.pipe('x', EffectString.repeat(30 * 1_024))))).toEqual([]);
     expect(lines.bufferedBytes()).toBe(0);
 
     const valid = JSON.stringify(progress);

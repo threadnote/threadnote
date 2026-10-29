@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Console, Effect, FileSystem, Path, Predicate, Result} from 'effect';
 
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -90,6 +91,8 @@ import {
 } from '../core.js';
 
 import {assertSharedWorktreeFileReady, publishShareGitChange, writeSharedWorktreeFile} from '../git.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runSharePublish = Effect.fn('share.runSharePublish')(function* (
   config: ShareRuntime,
@@ -233,7 +236,7 @@ export const runSharePublish = Effect.fn('share.runSharePublish')(function* (
     });
     if (!dryRun) {
       const sourceBeforeRemoval = yield* readMemoryContent(config, ov, sourceUri, false);
-      if (sourceBeforeRemoval.trim() !== currentRawContent.trim()) {
+      if (Effect2.pipe(sourceBeforeRemoval, EffectString.trim) !== Effect2.pipe(currentRawContent, EffectString.trim)) {
         throw ShareOperationError.make({
           message: `Memory ${sourceUri} changed during publication; personal source preserved.`,
         });
@@ -309,14 +312,14 @@ const shareSingleArtifact = Effect.fn('share.shareSingleArtifact')(function* (
   const dryRun = options.dryRun === true;
   const preview = options.preview === true;
   const rawContent = yield* readFile(resolvedSourcePath, 'utf8');
-  if (!rawContent.trim()) {
+  if (!Effect2.pipe(rawContent, EffectString.trim)) {
     throw ShareOperationError.make({message: `Refusing to share empty agent artifact: ${resolvedSourcePath}`});
   }
   // Agent artifacts are published byte-for-byte. The memory-share scrubber stays
   // on durable `share publish`; --redact is ignored here.
   const content = rawContent;
   const relativePath = sharedArtifactRelativePath(artifact);
-  const targetPath = yield* pathJoin(team.config.worktree, ...relativePath.split('/'));
+  const targetPath = yield* pathJoin(team.config.worktree, ...Effect2.pipe(relativePath, EffectString.split('/')));
   const targetUri = yield* workfileToResourceUri(config, team.config, targetPath);
   const messages: string[] = [
     `${preview ? 'Previewing' : dryRun ? 'Would share' : 'Sharing'} ${artifact.kind} ${artifact.agent}/${artifact.name}`,
@@ -392,7 +395,10 @@ const shareBundleArtifact = Effect.fn('share.shareBundleArtifact')(function* (
   const dryRun = options.dryRun === true;
   const preview = options.preview === true;
   const skillRootRelative = `${SHAREABLE_ARTIFACT_DIR}/skills/${artifact.agent}/${artifact.name}`;
-  const skillRootTargetDir = yield* pathJoin(team.config.worktree, ...skillRootRelative.split('/'));
+  const skillRootTargetDir = yield* pathJoin(
+    team.config.worktree,
+    ...Effect2.pipe(skillRootRelative, EffectString.split('/')),
+  );
   const skillMdTargetPath = yield* pathJoin(skillRootTargetDir, 'SKILL.md');
   const skillMdTargetUri = yield* workfileToResourceUri(config, team.config, skillMdTargetPath);
   const skillRootTargetUri = parentUri(skillMdTargetUri);
@@ -401,11 +407,13 @@ const shareBundleArtifact = Effect.fn('share.shareBundleArtifact')(function* (
   const prepared = yield* Effect.forEach(members, member =>
     prepareBundleMember(config, team, member, skillRootTargetDir, options),
   );
-  const skillMd = prepared.find(entry => entry.relativePath === 'SKILL.md');
+  const skillMd = EffectOption.getOrUndefined(
+    EffectArray.findFirst(prepared, entry => entry.relativePath === 'SKILL.md'),
+  );
   if (skillMd === undefined) {
     throw ShareOperationError.make({message: `Skill bundle ${artifact.agent}/${artifact.name} is missing SKILL.md.`});
   }
-  if (!skillMd.binary && typeof skillMd.content === 'string' && !skillMd.content.trim()) {
+  if (!skillMd.binary && typeof skillMd.content === 'string' && !Effect2.pipe(skillMd.content, EffectString.trim)) {
     throw ShareOperationError.make({message: `Refusing to share empty agent artifact: ${skillMdSourcePath}`});
   }
 
@@ -416,12 +424,12 @@ const shareBundleArtifact = Effect.fn('share.shareBundleArtifact')(function* (
   ];
   appendIgnoredArtifactRedactNote(messages, options);
 
-  const blockers = prepared.filter(entry => entry.blocker !== undefined);
+  const blockers = EffectArray.filter(prepared, entry => entry.blocker !== undefined);
   if (preview) {
     for (const entry of prepared) {
       const flags = entry.binary ? ['binary'] : [];
       const note = entry.blocker !== undefined ? ` BLOCKED: ${entry.blocker}` : '';
-      messages.push(`  ${entry.relativePath}${flags.length > 0 ? ` [${flags.join(', ')}]` : ''}${note}`);
+      messages.push(`  ${entry.relativePath}${flags.length > 0 ? ` [${EffectArray.join(flags, ', ')}]` : ''}${note}`);
     }
     return {
       artifact,
@@ -436,9 +444,10 @@ const shareBundleArtifact = Effect.fn('share.shareBundleArtifact')(function* (
 
   if (blockers.length > 0) {
     throw ShareOperationError.make({
-      message: `Refusing to share skill ${artifact.agent}/${artifact.name}: ${blockers
-        .map(entry => `${entry.relativePath} (${entry.blocker})`)
-        .join('; ')}. Strip the value or pass --allow-binary for binary files.`,
+      message: `Refusing to share skill ${artifact.agent}/${artifact.name}: ${EffectArray.join(
+        EffectArray.map(blockers, entry => `${entry.relativePath} (${entry.blocker})`),
+        '; ',
+      )}. Strip the value or pass --allow-binary for binary files.`,
     });
   }
 
@@ -468,8 +477,17 @@ const shareBundleArtifact = Effect.fn('share.shareBundleArtifact')(function* (
   // share sync would auto-commit without ingestion. Companion files and the
   // manifest are materialized only after every markdown write succeeds.
   const ov = NATIVE_RESOURCE_BACKEND;
-  const markdownMembers = orderSkillMdFirst(prepared.filter(entry => entry.relativePath.endsWith('.md')));
-  const otherMembers = prepared.filter(entry => !entry.relativePath.endsWith('.md'));
+  const markdownMembers = orderSkillMdFirst(
+    EffectArray.filter(
+      prepared,
+      (entry, __effectArrayIndex) =>
+        __effectArrayIndex in prepared && Effect2.pipe(entry.relativePath, EffectString.endsWith('.md')),
+    ),
+  );
+  const otherMembers = EffectArray.filter(
+    prepared,
+    entry => !Effect2.pipe(entry.relativePath, EffectString.endsWith('.md')),
+  );
   for (const entry of markdownMembers) {
     const content = bundleTextContent(entry);
     if (content === undefined) {
@@ -493,7 +511,7 @@ const shareBundleArtifact = Effect.fn('share.shareBundleArtifact')(function* (
   });
 
   const stagedPaths = [
-    ...prepared.map(entry => `${skillRootRelative}/${entry.relativePath}`),
+    ...EffectArray.map(prepared, entry => `${skillRootRelative}/${entry.relativePath}`),
     `${skillRootRelative}/${BUNDLE_MANIFEST_FILE}`,
   ];
   const message =
@@ -520,7 +538,7 @@ const prepareBundleMember = Effect.fn('share.prepareBundleMember')(function* (
   options: SharePublishArtifactOptions,
 ) {
   const buffer = yield* readFile(member.absolutePath);
-  const targetPath = yield* pathJoin(skillRootTargetDir, ...member.relativePath.split('/'));
+  const targetPath = yield* pathJoin(skillRootTargetDir, ...Effect2.pipe(member.relativePath, EffectString.split('/')));
   const targetUri = yield* workfileToResourceUri(config, team.config, targetPath);
   if (isProbablyBinary(buffer)) {
     const credential = detectBinaryCredential(buffer);
@@ -566,9 +584,11 @@ function orderSkillMdFirst(entries: readonly PreparedBundleMember[]): readonly P
 function buildBundleManifest(artifact: ShareArtifactMetadata, prepared: readonly PreparedBundleMember[]): string {
   const manifest = {
     artifact,
-    members: prepared
-      .map(entry => ({binary: entry.binary, path: entry.relativePath, sha256: entry.sha256}))
-      .sort((a, b) => compareStrings(a.path, b.path)),
+    members: EffectArray.map(prepared, entry => ({
+      binary: entry.binary,
+      path: entry.relativePath,
+      sha256: entry.sha256,
+    })).sort((a, b) => compareStrings(a.path, b.path)),
     version: BUNDLE_MANIFEST_VERSION,
   };
   return `${JSON.stringify(manifest, undefined, 2)}\n`;
@@ -604,7 +624,7 @@ const parsePackManifest = Effect.fn('share.parsePackManifest')(function* (raw: s
     throw ShareOperationError.make({message: `Invalid pack manifest (not a JSON object): ${manifestPath}`});
   }
   const name = parsed.name;
-  if (typeof name !== 'string' || name.trim().length === 0) {
+  if (typeof name !== 'string' || Effect2.pipe(name, EffectString.trim).length === 0) {
     throw ShareOperationError.make({message: `Pack manifest must set a non-empty "name": ${manifestPath}`});
   }
   const agent = parsed.agent;
@@ -614,7 +634,7 @@ const parsePackManifest = Effect.fn('share.parsePackManifest')(function* (raw: s
     });
   }
   const stringArray = (value: unknown): string[] =>
-    Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+    EffectArray.isArray(value) ? EffectArray.filter(value, (item): item is string => typeof item === 'string') : [];
   const skills = stringArray(parsed.skills);
   if (skills.length === 0) {
     throw ShareOperationError.make({
@@ -622,19 +642,24 @@ const parsePackManifest = Effect.fn('share.parsePackManifest')(function* (raw: s
     });
   }
   const depsValue = Predicate.isObject(parsed.deps) ? parsed.deps : {};
-  const pathRewrites = Array.isArray(parsed.pathRewrites)
-    ? parsed.pathRewrites
-        .map(entry => (typeof entry === 'string' ? entry : Predicate.isObject(entry) ? entry.from : undefined))
-        .filter((item): item is string => typeof item === 'string')
-        // Strip trailing slashes so a declared "/repo/" still matches a bare
-        // "/repo" reference (otherwise the slash-suffixed root never appears and
-        // the path leaks past tokenize + the residual check).
-        .map(rewrite => rewrite.replace(/\/+$/, ''))
+  const pathRewrites = EffectArray.isArray(parsed.pathRewrites)
+    ? EffectArray.map(
+        EffectArray.filter(
+          EffectArray.map(parsed.pathRewrites, entry =>
+            typeof entry === 'string' ? entry : Predicate.isObject(entry) ? entry.from : undefined,
+          ),
+          (item): item is string => typeof item === 'string',
+        ),
+        rewrite => Effect2.pipe(rewrite, EffectString.replace(/\/+$/, '')),
+      )
     : [];
   // pathRewrites are matched as whole repo-root prefixes; a short or relative
   // value would corrupt unrelated content via substring replacement.
   for (const rewrite of pathRewrites) {
-    if (!(yield* pathIsAbsolute(rewrite)) || rewrite.split('/').filter(Boolean).length < 2) {
+    if (
+      !(yield* pathIsAbsolute(rewrite)) ||
+      EffectArray.filter(Effect2.pipe(rewrite, EffectString.split('/')), Boolean).length < 2
+    ) {
       throw ShareOperationError.make({
         message: `Pack manifest pathRewrites entry must be an absolute repo-root path (got "${rewrite}"): ${manifestPath}`,
       });
@@ -666,14 +691,17 @@ const collectPackMembers = Effect.fn('share.collectPackMembers')(function* (
 ) {
   const members = new Map<string, BundleMemberFile>();
   const addEntry = Effect.fn('share.callback')(function* (entry: string) {
-    const normalized = entry.split('/').filter(Boolean).join('/');
-    if (normalized.split('/').includes('..')) {
+    const normalized = EffectArray.join(EffectArray.filter(Effect2.pipe(entry, EffectString.split('/')), Boolean), '/');
+    if (Effect2.pipe(normalized, EffectString.split('/')).includes('..')) {
       throw ShareOperationError.make({
         message: `Pack manifest entries must stay within the pack root (got "${entry}").`,
       });
     }
-    const absolute = yield* pathJoin(manifestDir, ...normalized.split('/'));
-    if (absolute !== manifestDir && !absolute.startsWith(manifestDir + (yield* pathSeparator))) {
+    const absolute = yield* pathJoin(manifestDir, ...Effect2.pipe(normalized, EffectString.split('/')));
+    if (
+      absolute !== manifestDir &&
+      !Effect2.pipe(absolute, EffectString.startsWith(manifestDir + (yield* pathSeparator)))
+    ) {
       throw ShareOperationError.make({message: `Pack manifest entry escapes the pack root: ${entry}`});
     }
     if (yield* isDirectory(absolute)) {
@@ -691,8 +719,8 @@ const collectPackMembers = Effect.fn('share.collectPackMembers')(function* (
   });
   for (const skill of manifest.skills) {
     // Accept either a skill directory or a path to its SKILL.md.
-    const skillRel = skill.replace(/\/SKILL\.md$/i, '');
-    const skillDir = yield* pathJoin(manifestDir, ...skillRel.split('/'));
+    const skillRel = Effect2.pipe(skill, EffectString.replace(/\/SKILL\.md$/i, ''));
+    const skillDir = yield* pathJoin(manifestDir, ...Effect2.pipe(skillRel, EffectString.split('/')));
     if (!(yield* isFile(yield* pathJoin(skillDir, 'SKILL.md')))) {
       throw ShareOperationError.make({message: `Pack skill "${skill}" must be a directory containing SKILL.md.`});
     }
@@ -705,7 +733,7 @@ const collectPackMembers = Effect.fn('share.collectPackMembers')(function* (
 });
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return Effect2.pipe(value, EffectString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 }
 
 // Replaces each repo-root prefix with the portable token, anchored on BOTH
@@ -718,9 +746,12 @@ function tokenizePackPaths(text: string, rewriteRoots: readonly string[]): strin
   let out = text;
   for (const root of rewriteRoots) {
     if (root.length > 0) {
-      out = out.replace(
-        new RegExp(`(?<![A-Za-z0-9/._~-])${escapeRegExp(root)}(?=[/\\\\]|["'\`\\s),>:\\]};=]|$)`, 'g'),
-        PACK_ROOT_TOKEN,
+      out = Effect2.pipe(
+        out,
+        EffectString.replace(
+          new RegExp(`(?<![A-Za-z0-9/._~-])${escapeRegExp(root)}(?=[/\\\\]|["'\`\\s),>:\\]};=]|$)`, 'g'),
+          PACK_ROOT_TOKEN,
+        ),
       );
     }
   }
@@ -755,14 +786,23 @@ const PORTABLE_PATH_PREFIXES: readonly string[] = [
 function unportableAbsolutePaths(content: string): readonly string[] {
   // Drop the portable pack-root token (and the path that follows it) so paths
   // anchored to the install root are not mistaken for machine-local leaks.
-  const scan = content.split(`${PACK_ROOT_TOKEN}/`).join('').split(PACK_ROOT_TOKEN).join('');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+  const scan = EffectArray.join(EffectArray.join(content.split(`${PACK_ROOT_TOKEN}/`), '').split(PACK_ROOT_TOKEN), '');
   const found = new Set<string>();
-  for (const path of scan.match(/(?<![A-Za-z0-9._~$-])\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+/g) ?? []) {
-    if (!PORTABLE_PATH_PREFIXES.some(prefix => path.startsWith(prefix))) {
+  for (const path of Effect2.pipe(
+    scan,
+    EffectString.match(/(?<![A-Za-z0-9._~$-])\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+/g),
+    Effect2.Option.getOrElse(() => null),
+  ) ?? []) {
+    if (!EffectArray.some(PORTABLE_PATH_PREFIXES, prefix => Effect2.pipe(path, EffectString.startsWith(prefix)))) {
       found.add(path);
     }
   }
-  for (const path of scan.match(/[A-Za-z]:\\[^\s"']+/g) ?? []) {
+  for (const path of Effect2.pipe(
+    scan,
+    EffectString.match(/[A-Za-z]:\\[^\s"']+/g),
+    Effect2.Option.getOrElse(() => null),
+  ) ?? []) {
     found.add(path);
   }
   return [...found].sort((a, b) => compareStrings(a, b));
@@ -777,7 +817,7 @@ const preparePackMember = Effect.fn('share.preparePackMember')(function* (
   options: SharePublishArtifactOptions,
 ) {
   const buffer = yield* readFile(member.absolutePath);
-  const targetPath = yield* pathJoin(filesTargetDir, ...member.relativePath.split('/'));
+  const targetPath = yield* pathJoin(filesTargetDir, ...Effect2.pipe(member.relativePath, EffectString.split('/')));
   const targetUri = yield* workfileToResourceUri(config, team.config, targetPath);
   if (isProbablyBinary(buffer)) {
     // Binary members cannot be tokenized or scrubbed, so an embedded credential
@@ -806,7 +846,7 @@ const preparePackMember = Effect.fn('share.preparePackMember')(function* (
   const text = new TextDecoder().decode(buffer);
   // A member that already contains the reserved token would have it expanded to
   // the installer's absolute path at install — block it as an authoring error.
-  if (text.includes(PACK_ROOT_TOKEN)) {
+  if (Effect2.pipe(text, EffectString.includes(PACK_ROOT_TOKEN))) {
     return {
       binary: false,
       blocker: `contains the reserved ${PACK_ROOT_TOKEN} token`,
@@ -842,7 +882,7 @@ function buildPackIndex(
     `name: ${artifact.name}`,
     `agent: ${artifact.agent}`,
     'kind: pack',
-    `skills: [${skillNames.join(', ')}]`,
+    `skills: [${EffectArray.join(skillNames, ', ')}]`,
     '---',
     '',
     `# ${artifact.name} (skill pack)`,
@@ -851,25 +891,25 @@ function buildPackIndex(
       `A Threadnote skill pack bundling ${skillNames.length} skill(s) and their shared support files (${memberCount} files total).`,
     '',
     '## Skills',
-    ...skillNames.map(skill => `- ${skill}`),
+    ...EffectArray.map(skillNames, skill => `- ${skill}`),
     '',
     '## Requirements',
     'Threadnote installs files only. Ensure these exist on the target machine before running:',
   ];
   if (manifest.deps.runtime.length > 0) {
-    lines.push(`- runtime: ${manifest.deps.runtime.join(', ')}`);
+    lines.push(`- runtime: ${EffectArray.join(manifest.deps.runtime, ', ')}`);
   }
   if (manifest.deps.cli.length > 0) {
-    lines.push(`- CLI: ${manifest.deps.cli.join(', ')}`);
+    lines.push(`- CLI: ${EffectArray.join(manifest.deps.cli, ', ')}`);
   }
   if (manifest.deps.os.length > 0) {
-    lines.push(`- OS: ${manifest.deps.os.join(', ')}`);
+    lines.push(`- OS: ${EffectArray.join(manifest.deps.os, ', ')}`);
   }
   if (manifest.deps.mcp.length > 0) {
-    lines.push(`- MCP (configure separately): ${manifest.deps.mcp.join(', ')}`);
+    lines.push(`- MCP (configure separately): ${EffectArray.join(manifest.deps.mcp, ', ')}`);
   }
   lines.push('', `Install: threadnote share install-artifacts --kind pack --name ${artifact.name} --apply`, '');
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }
 
 function buildPackManifestJson(
@@ -880,16 +920,18 @@ function buildPackManifestJson(
   const data = {
     artifact,
     deps: manifest.deps,
-    members: prepared
-      .map(entry => ({binary: entry.binary, path: entry.relativePath, sha256: entry.sha256}))
-      .sort((a, b) => compareStrings(a.path, b.path)),
+    members: EffectArray.map(prepared, entry => ({
+      binary: entry.binary,
+      path: entry.relativePath,
+      sha256: entry.sha256,
+    })).sort((a, b) => compareStrings(a.path, b.path)),
     version: BUNDLE_MANIFEST_VERSION,
   };
   return `${JSON.stringify(data, undefined, 2)}\n`;
 }
 
 const packSkillName = Effect.fn('share.packSkillName')(function* (skillEntry: string) {
-  const trimmed = skillEntry.replace(/\/SKILL\.md$/i, '');
+  const trimmed = Effect2.pipe(skillEntry, EffectString.replace(/\/SKILL\.md$/i, ''));
   return yield* pathBasename(trimmed);
 });
 
@@ -915,7 +957,8 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
   // Auto-derive the manifest dir as a rewrite root only when it is a plausible
   // repo root (>= 2 path segments); a short top-level dir like /tmp would
   // substring-corrupt unrelated paths. Declared pathRewrites are already guarded.
-  const autoRoots = manifestDir.split('/').filter(Boolean).length >= 2 ? [manifestDir] : [];
+  const autoRoots =
+    EffectArray.filter(Effect2.pipe(manifestDir, EffectString.split('/')), Boolean).length >= 2 ? [manifestDir] : [];
   // Longest-first so a nested declared root rewrites before its parent.
   const rewriteRoots = [...new Set([...autoRoots, ...manifest.pathRewrites])].sort((a, b) => b.length - a.length);
 
@@ -923,9 +966,15 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
   const filesRelative = `${packRootRelative}/${PACK_FILES_DIR}`;
   const indexRelative = `${packRootRelative}/${artifact.name}${PACK_INDEX_SUFFIX}`;
   const manifestRelative = `${packRootRelative}/${artifact.name}${PACK_MANIFEST_SUFFIX}`;
-  const filesTargetDir = yield* pathJoin(team.config.worktree, ...filesRelative.split('/'));
-  const packRootTargetDir = yield* pathJoin(team.config.worktree, ...packRootRelative.split('/'));
-  const indexTargetPath = yield* pathJoin(team.config.worktree, ...indexRelative.split('/'));
+  const filesTargetDir = yield* pathJoin(team.config.worktree, ...Effect2.pipe(filesRelative, EffectString.split('/')));
+  const packRootTargetDir = yield* pathJoin(
+    team.config.worktree,
+    ...Effect2.pipe(packRootRelative, EffectString.split('/')),
+  );
+  const indexTargetPath = yield* pathJoin(
+    team.config.worktree,
+    ...Effect2.pipe(indexRelative, EffectString.split('/')),
+  );
   const indexTargetUri = yield* workfileToResourceUri(config, team.config, indexTargetPath);
 
   const prepared = yield* Effect.forEach(members, member =>
@@ -943,12 +992,12 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
   ];
   appendIgnoredArtifactRedactNote(messages, options);
 
-  const blockers = prepared.filter(entry => entry.blocker !== undefined);
+  const blockers = EffectArray.filter(prepared, entry => entry.blocker !== undefined);
   if (preview) {
     for (const entry of prepared) {
       const flags = entry.binary ? ['binary'] : [];
       const note = entry.blocker !== undefined ? ` BLOCKED: ${entry.blocker}` : '';
-      messages.push(`  ${entry.relativePath}${flags.length > 0 ? ` [${flags.join(', ')}]` : ''}${note}`);
+      messages.push(`  ${entry.relativePath}${flags.length > 0 ? ` [${EffectArray.join(flags, ', ')}]` : ''}${note}`);
     }
     return {
       artifact,
@@ -963,9 +1012,10 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
 
   if (blockers.length > 0) {
     throw ShareOperationError.make({
-      message: `Refusing to share pack ${artifact.agent}/${artifact.name}: ${blockers
-        .map(entry => `${entry.relativePath} (${entry.blocker})`)
-        .join('; ')}. Strip the value or pass --allow-binary for binary files.`,
+      message: `Refusing to share pack ${artifact.agent}/${artifact.name}: ${EffectArray.join(
+        EffectArray.map(blockers, entry => `${entry.relativePath} (${entry.blocker})`),
+        '; ',
+      )}. Strip the value or pass --allow-binary for binary files.`,
     });
   }
   const packJson = tokenizePackPaths(buildPackManifestJson(artifact, manifest, prepared), rewriteRoots);
@@ -988,7 +1038,7 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
   }
   if (unportable.size > 0) {
     messages.push(
-      `Warning: possible machine-local absolute path(s) that will not resolve on a teammate's machine (declare in pathRewrites or strip if not portable): ${[...unportable].join('; ')}`,
+      `Warning: possible machine-local absolute path(s) that will not resolve on a teammate's machine (declare in pathRewrites or strip if not portable): ${EffectArray.join([...unportable], '; ')}`,
     );
   }
   for (const entry of prepared) {
@@ -1024,7 +1074,10 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
   const rollbacks: Array<
     () => Effect.Effect<void, unknown, CommandExecutor | FileSystem.FileSystem | Path.Path | ResourceStore | SystemInfo>
   > = [];
-  const manifestTargetPath = yield* pathJoin(team.config.worktree, ...manifestRelative.split('/'));
+  const manifestTargetPath = yield* pathJoin(
+    team.config.worktree,
+    ...Effect2.pipe(manifestRelative, EffectString.split('/')),
+  );
   const publishResult = yield* Effect.result(
     Effect.gen(function* () {
       const writeMarkdownMember = Effect.fn('share.callback')(function* (
@@ -1034,9 +1087,12 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
       ) {
         const priorBytes = yield* readFileBytesIfExists(worktreePath);
         const hadResource = yield* resourceExists(ov, config, uri);
-        const worktreeRelativePath = (yield* pathRelative(team.config.worktree, worktreePath))
-          .split(yield* pathSeparator)
-          .join('/');
+        const worktreeRelativePath = EffectArray.join(
+          (yield* pathRelative(team.config.worktree, worktreePath))
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+            .split(yield* pathSeparator),
+          '/',
+        );
         yield* ensureSharedDirectoryChain(config, ov, uri, dryRun, {quiet: true});
         yield* writeMemoryFile(config, ov, uri, content, hadResource ? 'replace' : 'create', dryRun, {quiet: true});
         yield* writeSharedWorktreeFile(team.config.worktree, worktreeRelativePath, content, dryRun);
@@ -1062,7 +1118,11 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
         );
       });
       yield* writeMarkdownMember(indexTargetUri, indexContent, indexTargetPath);
-      for (const entry of prepared.filter(member => member.relativePath.endsWith('.md'))) {
+      for (const entry of EffectArray.filter(
+        prepared,
+        (member, __effectArrayIndex) =>
+          __effectArrayIndex in prepared && Effect2.pipe(member.relativePath, EffectString.endsWith('.md')),
+      )) {
         const content = bundleTextContent(entry);
         if (content === undefined) {
           throw ShareOperationError.make({message: `Refusing binary markdown pack member: ${entry.relativePath}`});
@@ -1070,7 +1130,10 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
         yield* writeMarkdownMember(entry.targetUri, content, entry.targetPath);
       }
       yield* ensureDirectory(filesTargetDir, false);
-      for (const entry of prepared.filter(member => !member.relativePath.endsWith('.md'))) {
+      for (const entry of EffectArray.filter(
+        prepared,
+        member => !Effect2.pipe(member.relativePath, EffectString.endsWith('.md')),
+      )) {
         const priorBytes = yield* readFileBytesIfExists(entry.targetPath);
         yield* ensureDirectory(yield* pathDirname(entry.targetPath), false);
         yield* writeFile(
@@ -1103,17 +1166,19 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
 
       // Prune files orphaned by a re-publish (members dropped from the manifest) so
       // stale code is neither carried in the shared repo nor installed by teammates.
-      const currentFiles = new Set(prepared.map(entry => `${filesRelative}/${entry.relativePath}`));
+      const currentFiles = new Set(EffectArray.map(prepared, entry => `${filesRelative}/${entry.relativePath}`));
       const git = yield* requiredExecutable('git');
       const tracked = yield* runCommand(git, ['-C', team.config.worktree, 'ls-files', '--', filesRelative], {
         allowFailure: true,
       });
       const stalePaths =
         tracked.exitCode === 0
-          ? tracked.stdout
-              .split('\n')
-              .map(line => line.trim())
-              .filter(line => line.length > 0 && !currentFiles.has(line))
+          ? EffectArray.filter(
+              EffectArray.map(Effect2.pipe(tracked.stdout, EffectString.split('\n')), line =>
+                Effect2.pipe(line, EffectString.trim),
+              ),
+              line => line.length > 0 && !currentFiles.has(line),
+            )
           : [];
       for (const stale of stalePaths) {
         yield* runCommand(git, ['-C', team.config.worktree, 'rm', '-f', '--ignore-unmatch', '--', stale], {
@@ -1124,11 +1189,11 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
         // Best-effort: the `git rm` deletion is already staged, so a single OV
         // removal failure must not abort the publish (which would leave a staged
         // deletion behind for a later sync); surface it as a warning instead.
-        if (stale.endsWith('.md')) {
+        if (Effect2.pipe(stale, EffectString.endsWith('.md'))) {
           const staleUri = yield* workfileToResourceUri(
             config,
             team.config,
-            yield* pathJoin(team.config.worktree, ...stale.split('/')),
+            yield* pathJoin(team.config.worktree, ...Effect2.pipe(stale, EffectString.split('/'))),
           );
           const pruneResult = yield* Effect.result(
             Effect.gen(function* () {
@@ -1158,7 +1223,7 @@ export const shareBundlePack = Effect.fn('share.shareBundlePack')(function* (
   const stagedPaths = [
     indexRelative,
     manifestRelative,
-    ...prepared.map(entry => `${filesRelative}/${entry.relativePath}`),
+    ...EffectArray.map(prepared, entry => `${filesRelative}/${entry.relativePath}`),
   ];
   const message =
     options.message ?? `share: publish pack ${artifact.agent}/${artifact.name} (${prepared.length} files)`;
@@ -1180,25 +1245,35 @@ const inferShareArtifact = Effect.fn('share.inferShareArtifact')(function* (
   path: string,
   options: SharePublishArtifactOptions,
 ) {
-  const normalizedPath = path.split(yield* pathSeparator).join('/');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+  const normalizedPath = EffectArray.join(path.split(yield* pathSeparator), '/');
   const fileName = yield* pathBasename(path);
-  const lowerFileName = fileName.toLowerCase();
-  const lowerPath = normalizedPath.toLowerCase();
+  const lowerFileName = Effect2.pipe(fileName, EffectString.toLowerCase);
+  const lowerPath = Effect2.pipe(normalizedPath, EffectString.toLowerCase);
   const inferredKind: ShareAgentArtifactKind | undefined =
     lowerFileName === 'skill.md'
       ? 'skill'
-      : lowerPath.includes('/.claude/commands/') && lowerFileName.endsWith('.md')
+      : Effect2.pipe(lowerPath, EffectString.includes('/.claude/commands/')) &&
+          Effect2.pipe(lowerFileName, EffectString.endsWith('.md'))
         ? 'command'
         : undefined;
-  const inferredAgent: ShareAgentArtifactAgent | undefined = lowerPath.includes('/.codex/skills/')
+  const inferredAgent: ShareAgentArtifactAgent | undefined = Effect2.pipe(
+    lowerPath,
+    EffectString.includes('/.codex/skills/'),
+  )
     ? 'codex'
-    : lowerPath.includes('/.claude/skills/') || lowerPath.includes('/.claude/commands/')
+    : Effect2.pipe(lowerPath, EffectString.includes('/.claude/skills/')) ||
+        Effect2.pipe(lowerPath, EffectString.includes('/.claude/commands/'))
       ? 'claude'
-      : lowerPath.includes('/.cursor/skills/')
+      : Effect2.pipe(lowerPath, EffectString.includes('/.cursor/skills/'))
         ? 'cursor'
         : undefined;
-  const extensionIndex = fileName.lastIndexOf('.');
-  const stem = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+  const extensionIndex = Effect2.pipe(
+    fileName,
+    EffectString.lastIndexOf('.'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const stem = extensionIndex > 0 ? Effect2.pipe(fileName, EffectString.slice(0, extensionIndex)) : fileName;
   const inferredName = lowerFileName === 'skill.md' ? yield* pathBasename(yield* pathDirname(path)) : stem;
   const kind = options.kind ?? inferredKind;
   const agent = options.agent ?? inferredAgent;
@@ -1215,13 +1290,13 @@ const inferShareArtifact = Effect.fn('share.inferShareArtifact')(function* (
   if (kind === 'skill' && lowerFileName !== 'skill.md') {
     throw ShareOperationError.make({message: 'Skill artifacts must point at a SKILL.md file.'});
   }
-  if (kind === 'command' && !lowerFileName.endsWith('.md')) {
+  if (kind === 'command' && !Effect2.pipe(lowerFileName, EffectString.endsWith('.md'))) {
     throw ShareOperationError.make({message: 'Command artifacts must be Markdown files.'});
   }
   if (kind === 'command' && agent !== 'claude') {
     throw ShareOperationError.make({message: 'Only Claude command artifacts are supported.'});
   }
-  if (name.trim().length === 0) {
+  if (Effect2.pipe(name, EffectString.trim).length === 0) {
     throw ShareOperationError.make({message: 'Artifact name cannot be empty.'});
   }
   return {agent, kind, name: uriSegment(name)};

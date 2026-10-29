@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 
@@ -10,6 +11,8 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {hasScriptHelpFlag, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TARGET = new URL('./benchmark-code-memory-link-scale-target.ts', import.meta.url);
 
@@ -26,10 +29,17 @@ export const buildCodeMemoryLinkScaleTarget = Effect.fn('codeMemoryLinkScale.bui
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const target = yield* path.fromFileUrl(TARGET);
-  const packageManifest = JSON.parse(
+  const packageManifest: unknown = JSON.parse(
     yield* fs.readFileString(path.join(path.dirname(target), '..', 'package.json')),
-  ) as {readonly version?: unknown};
-  if (typeof packageManifest.version !== 'string' || packageManifest.version.length === 0) {
+  );
+  if (
+    typeof packageManifest !== 'object' ||
+    packageManifest === null ||
+    EffectArray.isArray(packageManifest) ||
+    !('version' in packageManifest) ||
+    typeof packageManifest.version !== 'string' ||
+    packageManifest.version.length === 0
+  ) {
     return yield* ScriptError.make({message: 'package.json does not declare a scale benchmark source version.'});
   }
   const executablePath = path.join(outputDirectory, 'code-memory-link-inverse-scale.mjs');
@@ -51,10 +61,13 @@ export const buildCodeMemoryLinkScaleTarget = Effect.fn('codeMemoryLinkScale.bui
   if (!result.success) {
     return yield* ScriptError.make({
       message:
-        result.logs
-          .map(log => log.message)
-          .filter(Boolean)
-          .join('\n') || 'Benchmark build failed.',
+        EffectArray.join(
+          EffectArray.filter(
+            EffectArray.map(result.logs, log => log.message),
+            Boolean,
+          ),
+          '\n',
+        ) || 'Benchmark build failed.',
     });
   }
   return {
@@ -92,7 +105,8 @@ const program = Effect.scoped(
       [built.executablePath, ...args, '--built-artifact-sha256', built.sha256],
       {maxOutputBytes: 0, timeoutMs: 3 * 60 * 60 * 1_000},
     );
-    if (child.stdout.trim()) yield* Console.log(child.stdout.trimEnd());
+    if (Effect2.pipe(child.stdout, EffectString.trim))
+      yield* Console.log(Effect2.pipe(child.stdout, EffectString.trimEnd));
   }),
 );
 
@@ -101,14 +115,17 @@ const commandLayer = ScriptCommandExecutorLayer.pipe(Layer.provide(systemLayer))
 const wrapperLayer = Layer.mergeAll(systemLayer, commandLayer).pipe(Layer.provideMerge(BunServices.layer));
 
 function usage(): string {
-  return [
-    'Usage: bun run bench:code-memory-link-scale -- [options]',
-    '',
-    'Builds and runs the code-memory-link inverse-selector scale benchmark.',
-    'Required: --candidate-commit <40-hex>',
-    'Optional: --budget <json> --output <json> --development-smoke',
-    '  --memory-candidates <count> --samples <count> --warmups <count>',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Usage: bun run bench:code-memory-link-scale -- [options]',
+      '',
+      'Builds and runs the code-memory-link inverse-selector scale benchmark.',
+      'Required: --candidate-commit <40-hex>',
+      'Optional: --budget <json> --output <json> --development-smoke',
+      '  --memory-candidates <count> --samples <count> --warmups <count>',
+    ],
+    '\n',
+  );
 }
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(program, wrapperLayer));

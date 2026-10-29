@@ -1,9 +1,12 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
   classifyPurePrivateReleaseEvidenceDiff,
   privateReleaseEvidenceFamilies,
 } from '../private-release-evidence-family.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const expectedPrivateReleaseEvidenceFamilies = [
   {
@@ -38,7 +41,7 @@ const expectedPrivateReleaseEvidenceFamilies = [
 ] as const;
 
 function sorted(values: readonly string[]): string[] {
-  return [...values].sort((left, right) => left.localeCompare(right));
+  return [...values].sort((left, right) => Effect.pipe(left, EffectString.localeCompare(right)));
 }
 
 function expectSelection(
@@ -53,13 +56,17 @@ function expectSelection(
 
 describe('private release-evidence family registry', () => {
   it('has unique family names and exact paths', () => {
-    const names = privateReleaseEvidenceFamilies.map(family => family.name);
-    const paths = privateReleaseEvidenceFamilies.flatMap(family => family.paths);
+    const names = EffectArray.map(privateReleaseEvidenceFamilies, family => family.name);
+    const paths = EffectArray.flatMap(privateReleaseEvidenceFamilies, family => family.paths);
     expect(new Set(names).size).toBe(names.length);
     expect(new Set(paths).size).toBe(paths.length);
-    expect(sorted(names)).toEqual(sorted(expectedPrivateReleaseEvidenceFamilies.map(family => family.name)));
+    expect(sorted(names)).toEqual(
+      sorted(EffectArray.map(expectedPrivateReleaseEvidenceFamilies, family => family.name)),
+    );
     for (const expectedFamily of expectedPrivateReleaseEvidenceFamilies) {
-      const actualFamily = privateReleaseEvidenceFamilies.find(family => family.name === expectedFamily.name);
+      const actualFamily = EffectOption.getOrUndefined(
+        EffectArray.findFirst(privateReleaseEvidenceFamilies, family => family.name === expectedFamily.name),
+      );
       expect(actualFamily).toBeDefined();
       if (!actualFamily) continue;
       expect(sorted(actualFamily.paths)).toEqual(sorted(expectedFamily.paths));
@@ -70,7 +77,7 @@ describe('private release-evidence family registry', () => {
       expect(family.focusedTestPaths.length).toBeGreaterThan(0);
       expect(new Set(family.focusedTestPaths).size).toBe(family.focusedTestPaths.length);
       const familyPaths = new Set<string>(family.paths);
-      expect(family.focusedTestPaths.every(path => familyPaths.has(path))).toBe(true);
+      expect(EffectArray.every(family.focusedTestPaths, path => familyPaths.has(path))).toBe(true);
     }
   });
 
@@ -94,8 +101,12 @@ describe('private release-evidence family registry', () => {
           expectSelection(classifyPurePrivateReleaseEvidenceDiff([...paths].reverse()), family);
           expectSelection(classifyPurePrivateReleaseEvidenceDiff([...paths, ...paths]), family);
           expect(classifyPurePrivateReleaseEvidenceDiff([...paths, 'src/evaluation/not-listed.ts'])).toBeUndefined();
-          expect(classifyPurePrivateReleaseEvidenceDiff(paths.map(path => `./${path}`))).toBeUndefined();
-          expect(classifyPurePrivateReleaseEvidenceDiff(paths.map(path => path.replaceAll('/', '\\')))).toBeUndefined();
+          expect(classifyPurePrivateReleaseEvidenceDiff(EffectArray.map(paths, path => `./${path}`))).toBeUndefined();
+          expect(
+            classifyPurePrivateReleaseEvidenceDiff(
+              EffectArray.map(paths, path => Effect.pipe(path, EffectString.replaceAll('/', '\\'))),
+            ),
+          ).toBeUndefined();
         }),
         {numRuns: 100},
       );
@@ -105,6 +116,7 @@ describe('private release-evidence family registry', () => {
     expect(
       classifyPurePrivateReleaseEvidenceDiff(['../apps/threadnote/src/evaluation/threadnote-5-product-capture.ts']),
     ).toBeUndefined();
-    expect(classifyPurePrivateReleaseEvidenceDiff([undefined] as unknown as Iterable<string>)).toBeUndefined();
+    // @ts-expect-error A malformed iterable item must be rejected without widening the production input type.
+    expect(classifyPurePrivateReleaseEvidenceDiff([undefined])).toBeUndefined();
   });
 });

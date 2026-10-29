@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -9,9 +10,11 @@ import {
   stripPersonalProvenance,
   stripPersonalProvenanceForSharedPublication,
 } from '@threadnote/threadnote/share/index';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function fixture(...parts: readonly string[]): string {
-  return parts.join('');
+  return EffectArray.join(parts, '');
 }
 
 describe('applyScrubber', () => {
@@ -81,7 +84,9 @@ describe('applyScrubber', () => {
     const redacted = applyScrubber(input, {redact: true});
     expect(redacted.blocker).toBeUndefined();
     expect(redacted.cleaned).toBe('see <local-path> in the log');
-    expect(redacted.redactions.find(r => r.name === 'macOS home path')?.count).toBe(1);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(redacted.redactions, r => r.name === 'macOS home path'))?.count,
+    ).toBe(1);
   });
 
   it.each([
@@ -135,7 +140,9 @@ describe('applyScrubber', () => {
   it('counts multiple matches per pattern when redacting', () => {
     const input = 'a /Users/a/x b /Users/b/y c /Users/c/z d';
     const result = applyScrubber(input, {redact: true});
-    const macHits = result.redactions.find(r => r.name === 'macOS home path');
+    const macHits = EffectOption.getOrUndefined(
+      EffectArray.findFirst(result.redactions, r => r.name === 'macOS home path'),
+    );
     expect(macHits?.count).toBe(3);
     expect(result.cleaned).toBe('a <local-path> b <local-path> c <local-path> d');
   });
@@ -160,16 +167,19 @@ describe('scrubberBlocker', () => {
 
 describe('stripPersonalProvenance', () => {
   it('removes supersedes and archived_from lines from the header block', () => {
-    const input = [
-      'MEMORY',
-      'kind: durable',
-      'project: foo',
-      'supersedes: threadnote://user/me/memories/old.md',
-      'archived_from: threadnote://user/me/memories/archive.md',
-      '',
-      'Body text mentioning supersedes: should NOT be stripped.',
-      'archived_from: also kept here.',
-    ].join('\n');
+    const input = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'project: foo',
+        'supersedes: threadnote://user/me/memories/old.md',
+        'archived_from: threadnote://user/me/memories/archive.md',
+        '',
+        'Body text mentioning supersedes: should NOT be stripped.',
+        'archived_from: also kept here.',
+      ],
+      '\n',
+    );
     const out = stripPersonalProvenance(input);
     expect(out).not.toMatch(/^supersedes:/m);
     expect(out).not.toMatch(/^archived_from: threadnote/m);
@@ -178,34 +188,40 @@ describe('stripPersonalProvenance', () => {
   });
 
   it('removes references lines from the header block but not the body', () => {
-    const input = [
-      'MEMORY',
-      'kind: durable',
-      'project: foo',
-      'references: threadnote://user/me/memories/durable/projects/foo/a.md',
-      'references: threadnote://user/me/memories/handoffs/active/foo/b.md',
-      '',
-      'Body mentioning references: should NOT be stripped.',
-    ].join('\n');
+    const input = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'project: foo',
+        'references: threadnote://user/me/memories/durable/projects/foo/a.md',
+        'references: threadnote://user/me/memories/handoffs/active/foo/b.md',
+        '',
+        'Body mentioning references: should NOT be stripped.',
+      ],
+      '\n',
+    );
     const out = stripPersonalProvenance(input);
     expect(out).not.toMatch(/^references:/m);
     expect(out).toContain('Body mentioning references:');
   });
 
   it('removes local candidate, session, evidence, and relation provenance', () => {
-    const input = [
-      'MEMORY',
-      'schema_version: 2',
-      'kind: durable',
-      'candidate_id: review-abc-1',
-      'source_session_id: local-session',
-      'evidence: /Users/me/repo/file.ts',
-      'relation: evidence_for threadnote://user/me/memories/private.md',
-      'authority: user_approved',
-      'trust: approved',
-      '',
-      'Reviewed body.',
-    ].join('\n');
+    const input = EffectArray.join(
+      [
+        'MEMORY',
+        'schema_version: 2',
+        'kind: durable',
+        'candidate_id: review-abc-1',
+        'source_session_id: local-session',
+        'evidence: /Users/me/repo/file.ts',
+        'relation: evidence_for threadnote://user/me/memories/private.md',
+        'authority: user_approved',
+        'trust: approved',
+        '',
+        'Reviewed body.',
+      ],
+      '\n',
+    );
 
     const out = stripPersonalProvenance(input);
 
@@ -216,20 +232,23 @@ describe('stripPersonalProvenance', () => {
   });
 
   it('preserves only validated stable memory relations for shared publication', () => {
-    const input = [
-      'MEMORY',
-      'kind: durable',
-      'project: foo',
-      'relation: depends_on threadnote://memory/tn_shared_dependency',
-      'relation:references threadnote://memory/tn_compact_shared_dependency',
-      'relation: references threadnote://user/me/memories/durable/projects/foo/private.md',
-      'relation:depends_on threadnote://user/me/memories/durable/projects/foo/compact-private.md',
-      ' relation: depends_on threadnote://user/me/memories/durable/projects/foo/indented-private.md',
-      'relation: unknown threadnote://memory/tn_not_allowed',
-      'relation: evidence_for threadnote://memory/not-a-memory-id',
-      '',
-      'Shared body.',
-    ].join('\n');
+    const input = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'project: foo',
+        'relation: depends_on threadnote://memory/tn_shared_dependency',
+        'relation:references threadnote://memory/tn_compact_shared_dependency',
+        'relation: references threadnote://user/me/memories/durable/projects/foo/private.md',
+        'relation:depends_on threadnote://user/me/memories/durable/projects/foo/compact-private.md',
+        ' relation: depends_on threadnote://user/me/memories/durable/projects/foo/indented-private.md',
+        'relation: unknown threadnote://memory/tn_not_allowed',
+        'relation: evidence_for threadnote://memory/not-a-memory-id',
+        '',
+        'Shared body.',
+      ],
+      '\n',
+    );
 
     expect(stripPersonalProvenance(input)).not.toMatch(/^relation:/m);
 
@@ -245,17 +264,15 @@ describe('stripPersonalProvenance', () => {
   });
 
   it('blocks enrolled-topic projection before removing any provenance, including malformed manifest headers', () => {
-    const input = [
-      'MEMORY',
-      'kind: durable',
-      'consolidation: retained origin',
-      'topic_maintenance: {}',
-      '',
-      'Body.',
-    ].join('\n');
+    const input = EffectArray.join(
+      ['MEMORY', 'kind: durable', 'consolidation: retained origin', 'topic_maintenance: {}', '', 'Body.'],
+      '\n',
+    );
     expect(() => stripPersonalProvenanceForSharedPublication(input)).toThrow(/reviewed existing-target Git proposal/);
     expect(() =>
-      stripPersonalProvenanceForSharedPublication(input.replace('topic_maintenance:', ' topic_maintenance :')),
+      stripPersonalProvenanceForSharedPublication(
+        Effect.pipe(input, EffectString.replace('topic_maintenance:', ' topic_maintenance :')),
+      ),
     ).toThrow(/reviewed existing-target Git proposal/);
     expect(input).toContain('consolidation: retained origin');
     expect(
@@ -277,12 +294,12 @@ describe('stripPersonalProvenance', () => {
       ),
     },
     ({rows}) => {
-      const headers = rows.map(row =>
+      const headers = EffectArray.map(rows, row =>
         row.kind === 'alias'
           ? `relation: ${row.type} threadnote://memory/${row.id}`
           : `relation: ${row.type} threadnote://user/me/memories/durable/projects/foo/${row.id}.md`,
       );
-      const input = ['MEMORY', 'kind: durable', ...headers, '', 'Body.'].join('\n');
+      const input = EffectArray.join(['MEMORY', 'kind: durable', ...headers, '', 'Body.'], '\n');
       const published = stripPersonalProvenanceForSharedPublication(input);
 
       expect(stripPersonalProvenance(input)).not.toMatch(/^relation:/m);
@@ -304,7 +321,7 @@ describe('stripPersonalProvenance', () => {
   });
 
   it('handles input with no blank line (entire content is header)', () => {
-    const input = ['MEMORY', 'supersedes: threadnote://x', 'project: y'].join('\n');
+    const input = EffectArray.join(['MEMORY', 'supersedes: threadnote://x', 'project: y'], '\n');
     const out = stripPersonalProvenance(input);
     expect(out).not.toMatch(/^supersedes:/m);
     expect(out).toContain('project: y');
@@ -312,30 +329,39 @@ describe('stripPersonalProvenance', () => {
 
   it('strips generated hygiene trailers before sharing without removing authored prose', () => {
     const personalUri = 'threadnote://user/me/memories/handoffs/archived/threadnote/private-task.md';
-    const generated = [
-      'MEMORY',
-      'kind: durable',
-      'project: threadnote',
-      '',
-      'Public durable contract.',
-      '',
-      '<!-- threadnote:hygiene-sources:v1 -->',
-      '## Threadnote Hygiene Sources',
-      '',
-      `- ${personalUri}`,
-    ].join('\n');
-    const authored = [
-      'MEMORY',
-      'kind: durable',
-      'project: threadnote',
-      '',
-      'Public durable contract.',
-      '',
-      '## Threadnote Hygiene Sources',
-      '',
-      'This heading is ordinary user-authored prose.',
-    ].join('\n');
-    const legacyGenerated = generated.replace('<!-- threadnote:hygiene-sources:v1 -->\n', '');
+    const generated = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'project: threadnote',
+        '',
+        'Public durable contract.',
+        '',
+        '<!-- threadnote:hygiene-sources:v1 -->',
+        '## Threadnote Hygiene Sources',
+        '',
+        `- ${personalUri}`,
+      ],
+      '\n',
+    );
+    const authored = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'project: threadnote',
+        '',
+        'Public durable contract.',
+        '',
+        '## Threadnote Hygiene Sources',
+        '',
+        'This heading is ordinary user-authored prose.',
+      ],
+      '\n',
+    );
+    const legacyGenerated = Effect.pipe(
+      generated,
+      EffectString.replace('<!-- threadnote:hygiene-sources:v1 -->\n', ''),
+    );
 
     const scrubbed = stripPersonalProvenance(generated);
 
@@ -349,17 +375,20 @@ describe('stripPersonalProvenance', () => {
 
 describe('setMemoryVisibility', () => {
   it('changes visibility without changing stable identity or unknown headers', () => {
-    const personal = [
-      'MEMORY',
-      'schema_version: 3',
-      'memory_id: tn_stable',
-      'kind: durable',
-      'timestamp: 2026-07-27T00:00:00.000Z',
-      'visibility: personal',
-      'future_field: preserved',
-      '',
-      'Body.',
-    ].join('\n');
+    const personal = EffectArray.join(
+      [
+        'MEMORY',
+        'schema_version: 3',
+        'memory_id: tn_stable',
+        'kind: durable',
+        'timestamp: 2026-07-27T00:00:00.000Z',
+        'visibility: personal',
+        'future_field: preserved',
+        '',
+        'Body.',
+      ],
+      '\n',
+    );
 
     const shared = setMemoryVisibility(personal, 'shared');
 
@@ -370,7 +399,10 @@ describe('setMemoryVisibility', () => {
   });
 
   it('adds missing visibility to legacy memory headers and ignores non-memory documents', () => {
-    const legacy = ['HANDOFF', 'kind: handoff', 'timestamp: 2026-07-27T00:00:00.000Z', '', 'Body.'].join('\n');
+    const legacy = EffectArray.join(
+      ['HANDOFF', 'kind: handoff', 'timestamp: 2026-07-27T00:00:00.000Z', '', 'Body.'],
+      '\n',
+    );
     expect(setMemoryVisibility(legacy, 'shared')).toContain(
       'timestamp: 2026-07-27T00:00:00.000Z\nvisibility: shared\n\nBody.',
     );

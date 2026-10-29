@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Context, Deferred, Effect, Exit, Fiber, FileSystem, Option, Tracer} from 'effect';
@@ -46,6 +47,7 @@ effectIt.effect('keeps tracing opt-in and runs the original measured effect exac
     expect(calls).toBe(2);
     expect(enabled.result).toBe(2);
     expect(enabled.observation.spans?.['recall.prepareSections']?.count).toBe(1);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     for (const value of Object.values(enabled.observation.spans?.['recall.prepareSections'] ?? {})) {
       expect(Number.isFinite(value)).toBe(true);
       expect(value).toBeGreaterThanOrEqual(0);
@@ -240,23 +242,25 @@ it('keeps bounded closed aggregates, repeated-end idempotence and detached snaps
           measured.end(0n, exit);
         }
         const snapshot = tracing.snapshot();
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         expect(Object.keys(snapshot).length).toBeLessThanOrEqual(12);
         for (const name of RECALL_EVALUATION_SPAN_NAMES) {
-          const matching = inputs.filter(input => input.name === name);
+          const matching = EffectArray.filter(inputs, input => input.name === name);
           if (matching.length === 0) {
             expect(snapshot[name]).toBeUndefined();
             continue;
           }
           expect(snapshot[name]).toEqual({
             count: matching.length,
-            wallTotalMilliseconds: matching.reduce((total, input) => total + input.milliseconds, 0),
-            wallMaximumMilliseconds: Math.max(...matching.map(input => input.milliseconds)),
-            successCount: matching.filter(input => input.success).length,
-            failureCount: matching.filter(input => !input.success).length,
+            wallTotalMilliseconds: EffectArray.reduce(matching, 0, (total, input) => total + input.milliseconds),
+            wallMaximumMilliseconds: Math.max(...EffectArray.map(matching, input => input.milliseconds)),
+            successCount: EffectArray.filter(matching, input => input.success).length,
+            failureCount: EffectArray.filter(matching, input => !input.success).length,
           });
         }
         const serialized = JSON.stringify(snapshot);
         Object.assign(snapshot, {private: 'snapshot-only'});
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         const first = Object.values(snapshot)[0];
         if (typeof first === 'object') Object.assign(first, {count: -1});
         expect(JSON.stringify(tracing.snapshot())).toBe(serialized);
@@ -293,7 +297,7 @@ effectIt.effect(
         coldDecode: [observation(0)],
         exactNoHit: [observation(0)],
         exactSubstring: [observation(0)],
-        hotQuery: durations.map(observation),
+        hotQuery: EffectArray.map(durations, observation),
         incrementalUpdate: [observation(0)],
         sourceValidation: [observation(0)],
       };

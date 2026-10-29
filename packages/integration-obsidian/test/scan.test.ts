@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
@@ -40,7 +41,9 @@ describe('Obsidian directory pages', () => {
         expect(inspections).toBe(2);
         expect(last.files).toHaveLength(2);
         expect(last.nextOffset).toBeUndefined();
-        expect(new Set([...first.files, ...second.files, ...last.files].map(file => file.path)).size).toBe(130);
+        expect(new Set(EffectArray.map([...first.files, ...second.files, ...last.files], file => file.path)).size).toBe(
+          130,
+        );
       }).pipe(effect =>
         Effect.scoped(
           Layer.build(BunServices.layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),

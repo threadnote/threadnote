@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {isReadonlyArray} from '@threadnote/platform/readonly-array';
 import {Effect, Result} from 'effect';
 import {
   recordAnonymousTelemetryFields,
@@ -85,7 +87,7 @@ export function contextBriefCitationTelemetryFields(
     summary.staleCitations,
     summary.unknownCitations,
   ];
-  if (!counts.every(isPrivateCount)) return undefined;
+  if (!EffectArray.every(counts, isPrivateCount)) return undefined;
   if (
     summary.citedMemories > summary.citations ||
     summary.cacheHits > summary.citations ||
@@ -142,23 +144,23 @@ export function contextBriefCodeAnchorTelemetryFields(
   if (
     typeof summary.complete !== 'boolean' ||
     typeof summary.recoveryPresent !== 'boolean' ||
-    !Array.isArray(summary.gaps) ||
-    !summary.gaps.every(gap => typeof gap === 'string') ||
-    ![summary.requested, summary.resolved, summary.matchedMemories].every(isPrivateCount) ||
+    !isReadonlyArray(summary.gaps) ||
+    !EffectArray.every(summary.gaps, gap => typeof gap === 'string') ||
+    !EffectArray.every([summary.requested, summary.resolved, summary.matchedMemories], isPrivateCount) ||
     summary.requested === 0 ||
     summary.resolved > summary.requested ||
     summary.complete !== (summary.resolved === summary.requested)
   ) {
     return undefined;
   }
-  const resolutionUnavailable = summary.gaps.some(gap =>
+  const resolutionUnavailable = EffectArray.some(summary.gaps, gap =>
     ['code-anchor-ref-unsupported', 'code-anchor-resolution-unavailable', 'code-anchor-scope-unsupported'].includes(
       gap,
     ),
   );
   const unavailable =
     resolutionUnavailable ||
-    summary.gaps.some(gap =>
+    EffectArray.some(summary.gaps, gap =>
       ['code-anchor-recall-unavailable', 'code-anchor-selector-matches-unvalidated'].includes(gap),
     );
   const unresolved = !summary.complete && !resolutionUnavailable;

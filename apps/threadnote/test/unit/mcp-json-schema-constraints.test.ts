@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {AjvJsonSchemaValidator} from '@modelcontextprotocol/sdk/validation/ajv';
 import {Schema} from 'effect';
 import fc from 'fast-check';
@@ -33,10 +34,14 @@ describe('MCP JSON Schema constraint projection', () => {
             type,
             minimum: Number.MIN_SAFE_INTEGER,
             maximum: Number.MAX_SAFE_INTEGER,
-            allOf: bounds.map(([minimum, maximum]) => ({minimum, maximum})),
+            allOf: EffectArray.map(bounds, ([minimum, maximum]) => ({minimum, maximum})),
           };
           const before = JSON.stringify(original);
-          const projected = flattenJsonSchemaConstraints(original) as Record<string, unknown>;
+          const projectedValue = flattenJsonSchemaConstraints(original);
+          if (!Schema.is(Schema.Record(Schema.String, Schema.Unknown))(projectedValue)) {
+            throw new Error('Expected a JSON Schema record projection.');
+          }
+          const projected = projectedValue;
           const validator = new AjvJsonSchemaValidator();
           const acceptsOriginal = validator.getValidator(original);
           const acceptsProjected = validator.getValidator(projected);

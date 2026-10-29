@@ -1,3 +1,5 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {promisify} from '@threadnote/testing/node-util';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
@@ -8,7 +10,10 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256Digest, sha256HexFromDigest} from '@threadnote/graph/sharing/digest';
+import {isJsonObject} from '@threadnote/platform/json';
 import {defaultGraphShareProfile, graphShareProfileDigest} from '@threadnote/graph/sharing/profile';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('MCP-owned signed graph contribution', () => {
   it('queues and delivers a signed candidate from a strict graph inspection without a contribute command', async () => {
@@ -45,18 +50,17 @@ describe('MCP-owned signed graph contribution', () => {
         const url = new URL(request.url);
         requests.push(`${request.method} ${url.pathname}`);
         if (url.pathname === '/v1/enroll') {
-          const body = (await request.json()) as {
-            profileDigest: string;
-            repositoryId: string;
-            signingPublicKey: string;
-          };
+          const body = requireRecord(await request.json());
+          const profileDigest = requireString(body.profileDigest);
+          const bodyRepositoryId = requireString(body.repositoryId);
+          const signingPublicKey = requireString(body.signingPublicKey);
           enrolledWorker = {
             expiresAt: Math.floor(Date.now() / 1000) + 3600,
             principalId: sha256Digest(JSON.stringify(['https://identity.example.test/', 'signed-mcp-fixture'])),
-            profileDigest: body.profileDigest,
-            repositoryId: body.repositoryId,
-            signingPublicKey: body.signingPublicKey,
-            workerId: `gw_${'1'.repeat(32)}`,
+            profileDigest,
+            repositoryId: bodyRepositoryId,
+            signingPublicKey,
+            workerId: `gw_${Effect.pipe('1', EffectString.repeat(32))}`,
           };
           return Response.json({...enrolledWorker, schemaVersion: 1}, {status: 201});
         }
@@ -65,11 +69,12 @@ describe('MCP-owned signed graph contribution', () => {
           await resultGate;
           if (!evidenceVerified) return Response.json({error: 'invalid synthetic evidence'}, {status: 400});
           delivered = true;
-          const body = pendingResult as {body: {idempotencyKey: string}};
-          return Response.json({idempotencyKey: body.body.idempotencyKey, status: 'accepted'}, {status: 201});
+          const result = requireRecord(pendingResult);
+          const body = requireRecord(result.body);
+          return Response.json({idempotencyKey: requireString(body.idempotencyKey), status: 'accepted'}, {status: 201});
         }
-        if (url.pathname.startsWith('/v2/acme/worker/')) {
-          const suffix = url.pathname.slice('/v2/acme/worker/'.length);
+        if (Effect.pipe(url.pathname, EffectString.startsWith('/v2/acme/worker/'))) {
+          const suffix = Effect.pipe(url.pathname, EffectString.slice('/v2/acme/worker/'.length));
           if (request.method === 'POST' && suffix === 'blobs/uploads/')
             return new Response(null, {
               status: 202,
@@ -78,17 +83,17 @@ describe('MCP-owned signed graph contribution', () => {
           if (request.method === 'PUT') {
             const bytes = new Uint8Array(await request.arrayBuffer());
             const digest = sha256Digest(bytes);
-            if (suffix.startsWith('blobs/uploads/')) {
+            if (Effect.pipe(suffix, EffectString.startsWith('blobs/uploads/'))) {
               if (url.searchParams.get('digest') !== digest) return new Response(null, {status: 400});
               registryBlobs.set(digest, bytes);
-            } else if (suffix.startsWith('manifests/')) {
-              registryManifests.set(suffix.slice('manifests/'.length), bytes);
+            } else if (Effect.pipe(suffix, EffectString.startsWith('manifests/'))) {
+              registryManifests.set(Effect.pipe(suffix, EffectString.slice('manifests/'.length)), bytes);
             } else return new Response(null, {status: 400});
             return new Response(null, {status: 201, headers: {'docker-content-digest': digest}});
           }
-          const isManifest = suffix.startsWith('manifests/');
+          const isManifest = Effect.pipe(suffix, EffectString.startsWith('manifests/'));
           const bytes = (isManifest ? registryManifests : registryBlobs).get(
-            suffix.slice(isManifest ? 'manifests/'.length : 'blobs/'.length),
+            Effect.pipe(suffix, EffectString.slice(isManifest ? 'manifests/'.length : 'blobs/'.length)),
           );
           if (bytes === undefined) return new Response(null, {status: 404});
           return new Response(request.method === 'HEAD' ? null : Uint8Array.from(bytes), {
@@ -286,7 +291,12 @@ globalThis.fetch = Object.assign(async (input, init) => {
       await waitFor(() => pendingResult !== undefined, 20_000);
       const candidates = await readJournalCandidates(candidatePath);
       const packageVersion = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')).version;
-      const currentCandidate = candidates.find(candidate => candidate.sourceCommit === sourceCommit.trim());
+      const currentCandidate = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          candidates,
+          candidate => candidate.sourceCommit === Effect.pipe(sourceCommit, EffectString.trim),
+        ),
+      );
       expect(currentCandidate).toBeDefined();
       expect(currentCandidate).toMatchObject({
         casRoot: cas,
@@ -295,18 +305,21 @@ globalThis.fetch = Object.assign(async (input, init) => {
         profileDigest,
         releaseIdentity: packageVersion,
         resourceLimits: [],
-        sourceCommit: sourceCommit.trim(),
+        sourceCommit: Effect.pipe(sourceCommit, EffectString.trim),
       });
       expect(currentCandidate!.graphAbi).toMatch(/^[0-9a-f]{64}$/u);
       expect(currentCandidate!.snapshotId).toMatch(/^cgsn_[0-9a-f]{40}/u);
       expect(enrolledWorker).toBeDefined();
-      const announcement = pendingResult as {
-        algorithm: string;
-        body: Record<string, string>;
-        publicKey: string;
-        signature: string;
+      const announcementValue = requireRecord(pendingResult);
+      const announcement = {
+        algorithm: requireString(announcementValue.algorithm),
+        body: requireStringRecord(announcementValue.body),
+        publicKey: requireString(announcementValue.publicKey),
+        signature: requireString(announcementValue.signature),
       };
-      const deliveredCandidate = candidates.find(candidate => candidate.actionKey === announcement.body.actionKey);
+      const deliveredCandidate = EffectOption.getOrUndefined(
+        EffectArray.findFirst(candidates, candidate => candidate.actionKey === announcement.body.actionKey),
+      );
       expect(deliveredCandidate).toBeDefined();
       const {idempotencyKey, ...announcementFields} = announcement.body;
       expect(announcement.algorithm).toBe('ed25519');
@@ -319,7 +332,7 @@ globalThis.fetch = Object.assign(async (input, init) => {
       ).toBe(true);
       expect(announcement.body).toMatchObject({
         actionKey: deliveredCandidate!.actionKey,
-        batchId: String(deliveredCandidate!.sourceCommit).slice(0, 40),
+        batchId: Effect.pipe(String(deliveredCandidate!.sourceCommit), EffectString.slice(0, 40)),
         principalId: enrolledWorker!.principalId,
         profileDigest,
         repositoryId,
@@ -329,32 +342,37 @@ globalThis.fetch = Object.assign(async (input, init) => {
       const manifestBytes = registryManifests.get(announcement.body.resultManifestDigest);
       expect(manifestBytes).toBeDefined();
       expect(sha256Digest(manifestBytes!)).toBe(announcement.body.resultManifestDigest);
-      const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as {
-        config: {digest: string; size: number};
-        layers: Array<{digest: string; size: number}>;
-      };
-      expect(manifest.layers).toHaveLength(2);
-      expect(manifest.layers[0].digest).toBe(deliveredCandidate!.resultDigest);
-      expect(manifest.layers[1].digest).toBe(announcement.body.attestationDigest);
-      for (const entry of [manifest.config, ...manifest.layers]) {
+      const manifest = requireRecord(JSON.parse(new TextDecoder().decode(manifestBytes)));
+      const config = requireDigestSize(manifest.config);
+      const layers = requireDigestSizeArray(manifest.layers);
+      expect(layers).toHaveLength(2);
+      expect(layers[0]?.digest).toBe(deliveredCandidate!.resultDigest);
+      expect(layers[1]?.digest).toBe(announcement.body.attestationDigest);
+      for (const entry of [config, ...layers]) {
         const bytes = registryBlobs.get(entry.digest);
         expect(bytes).toBeDefined();
         expect(bytes!.byteLength).toBe(entry.size);
         expect(sha256Digest(bytes!)).toBe(entry.digest);
       }
-      const resultBytes = registryBlobs.get(manifest.layers[0].digest)!;
-      const resultArtifact = JSON.parse(new TextDecoder().decode(resultBytes)) as Record<string, unknown>;
+      const resultLayer = layers[0];
+      const attestationLayer = layers[1];
+      if (!resultLayer || !attestationLayer) throw new Error('Expected result and attestation layers.');
+      const resultBytes = registryBlobs.get(resultLayer.digest);
+      if (!resultBytes) throw new Error('Expected result artifact bytes.');
+      const resultArtifact = requireRecord(JSON.parse(new TextDecoder().decode(resultBytes)));
       expect(resultArtifact).toMatchObject({
         actionKey: deliveredCandidate!.actionKey,
         repositoryId,
         semanticDigest: deliveredCandidate!.semanticDigest,
       });
-      const attestationBytes = registryBlobs.get(manifest.layers[1].digest)!;
-      const attestation = JSON.parse(new TextDecoder().decode(attestationBytes)) as {
-        algorithm: string;
-        claims: Record<string, unknown>;
-        publicKey: string;
-        signature: string;
+      const attestationBytes = registryBlobs.get(attestationLayer.digest);
+      if (!attestationBytes) throw new Error('Expected attestation bytes.');
+      const attestationValue = requireRecord(JSON.parse(new TextDecoder().decode(attestationBytes)));
+      const attestation = {
+        algorithm: requireString(attestationValue.algorithm),
+        claims: requireRecord(attestationValue.claims),
+        publicKey: requireString(attestationValue.publicKey),
+        signature: requireString(attestationValue.signature),
       };
       expect(attestation.algorithm).toBe('ed25519');
       expect(attestation.publicKey).toBe(enrolledWorker!.signingPublicKey);
@@ -380,7 +398,8 @@ globalThis.fetch = Object.assign(async (input, init) => {
       expect(requests).toContain('POST /v1/results');
       await waitFor(
         async () =>
-          !(await readJournalCandidates(candidatePath)).some(
+          !EffectArray.some(
+            await readJournalCandidates(candidatePath),
             candidate => candidate.actionKey === deliveredCandidate!.actionKey,
           ),
         5_000,
@@ -394,13 +413,42 @@ globalThis.fetch = Object.assign(async (input, init) => {
   }, 60_000);
 });
 
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string value.');
+  return value;
+}
+
+function requireStringRecord(value: unknown): Record<string, string> {
+  const record = requireRecord(value);
+  const output: Record<string, string> = {};
+  for (const [key, entry] of EffectRecord.toEntries(record)) output[key] = requireString(entry);
+  return output;
+}
+
+function requireDigestSize(value: unknown): {readonly digest: string; readonly size: number} {
+  const record = requireRecord(value);
+  if (typeof record.size !== 'number' || !Number.isFinite(record.size) || record.size < 0)
+    throw new Error('Expected a nonnegative byte size.');
+  return {digest: requireString(record.digest), size: record.size};
+}
+
+function requireDigestSizeArray(value: unknown): Array<{readonly digest: string; readonly size: number}> {
+  if (!EffectArray.isArray(value)) throw new Error('Expected a manifest layer list.');
+  return EffectArray.map(value, requireDigestSize);
+}
+
 async function readJournalCandidates(path: string): Promise<Array<Record<string, unknown>>> {
   const manifestText = await readFile(path, 'utf8');
   const manifest = JSON.parse(manifestText);
   const pages = await Promise.all(
     manifest.segments.map((segment: {id: string}) => readFile(join(`${path}.d`, `${segment.id}.json`), 'utf8')),
   );
-  return pages.flatMap(page => JSON.parse(page).candidates);
+  return EffectArray.flatMap(pages, page => JSON.parse(page).candidates);
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, milliseconds: number): Promise<void> {

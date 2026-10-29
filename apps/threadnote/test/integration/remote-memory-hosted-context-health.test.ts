@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import postgres, {type Sql, type TransactionSql} from 'postgres';
 import {afterAll, beforeAll, describe, expect, it} from 'vitest';
 
@@ -24,12 +25,14 @@ import {
   createRemoteMemoryPostgresFixture,
   type RemoteMemoryPostgresFixture,
 } from '../helpers/remote-memory-postgres.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const databaseUrl = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const tenantId = 'hosted-health-tenant';
 const shareId = 'hosted-health-share';
 const project = 'threadnote';
-const repositoryCommit = '1'.repeat(40);
+const repositoryCommit = Effect.pipe('1', EffectString.repeat(40));
 const evaluationKey = 'test-context-health-evaluation-key-32-bytes';
 
 (databaseUrl ? describe : describe.skip)('hosted organization context health PostgreSQL receipts', () => {
@@ -41,15 +44,20 @@ const evaluationKey = 'test-context-health-evaluation-key-32-bytes';
   beforeAll(async () => {
     database = await createRemoteMemoryPostgresFixture(databaseUrl!);
     admin = postgres(databaseUrl!, {max: 1, onnotice: () => undefined});
-    healthWorkerRoleName = database.runtimeRoleName.replace('runtime', 'context_health_worker');
-    const password = randomUuidV4().replaceAll('-', '');
+    healthWorkerRoleName = Effect.pipe(
+      database.runtimeRoleName,
+      EffectString.replace('runtime', 'context_health_worker'),
+    );
+    const password = Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''));
     await admin.unsafe(
       `CREATE ROLE ${healthWorkerRoleName} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`,
     );
     await admin.unsafe(`GRANT CONNECT ON DATABASE ${database.databaseName} TO ${healthWorkerRoleName}`);
-    const healthGrants = (await Bun.file('deploy/remote-memory/grants/002-context-health-worker.sql').text())
-      .replace(/^\\set .*$/gm, '')
-      .replaceAll('threadnote_context_health_worker', healthWorkerRoleName);
+    const healthGrants = Effect.pipe(
+      await Bun.file('deploy/remote-memory/grants/002-context-health-worker.sql').text(),
+      EffectString.replace(/^\\set .*$/gm, ''),
+      EffectString.replaceAll('threadnote_context_health_worker', healthWorkerRoleName),
+    );
     await database.migratorSql.unsafe(healthGrants);
     const healthUrl = new URL(databaseUrl!);
     healthUrl.pathname = `/${database.databaseName}`;
@@ -211,8 +219,8 @@ const evaluationKey = 'test-context-health-evaluation-key-32-bytes';
       claimHostedContextHealthJobs(healthWorker, 1),
       claimHostedContextHealthJobs(healthWorker, 1),
     ]);
-    expect(competing.map(batch => batch.claims.length).sort()).toEqual([0, 1]);
-    const claimed = competing.flatMap(batch => batch.claims)[0];
+    expect(EffectArray.map(competing, batch => batch.claims.length).sort()).toEqual([0, 1]);
+    const claimed = EffectArray.flatMap(competing, batch => batch.claims)[0];
     const follower = await claimHostedContextHealthJobs(healthWorker, 1);
     expect(follower.claims).toEqual([]);
     await expect(
@@ -242,7 +250,7 @@ const evaluationKey = 'test-context-health-evaluation-key-32-bytes';
         resign(
           {
             ...runInput(claimed, aggregate()),
-            repositoryCommit: 'f'.repeat(40),
+            repositoryCommit: Effect.pipe('f', EffectString.repeat(40)),
           },
           claimed,
         ),
@@ -357,7 +365,7 @@ const evaluationKey = 'test-context-health-evaluation-key-32-bytes';
 
     const batch = await claimHostedContextHealthJobs(healthWorker, 1);
     expect(batch).toMatchObject({unavailableCount: 1});
-    expect(batch.claims.map(claim => claim.schedule.scheduleId)).toEqual([healthySchedule.scheduleId]);
+    expect(EffectArray.map(batch.claims, claim => claim.schedule.scheduleId)).toEqual([healthySchedule.scheduleId]);
     let poisonedState: {consecutive_failures: number; next_due_at: Date} | undefined;
     await withTenant(database.migratorSql, poisonedTenant, async transaction => {
       [poisonedState] = await transaction<{consecutive_failures: number; next_due_at: Date}[]>`
@@ -462,7 +470,7 @@ function aggregate(unknown = false) {
       unknown
         ? {reason: 'evidence-incomplete', scope: 'team', state: 'unknown', team: 'canonical'}
         : {
-            evidenceRevision: '3'.repeat(64),
+            evidenceRevision: Effect.pipe('3', EffectString.repeat(64)),
             report: report(),
             scope: 'team',
             state: 'complete',

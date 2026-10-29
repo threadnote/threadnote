@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   Context,
   Crypto,
@@ -36,6 +37,8 @@ import {
 import {threadnoteStorageLayout} from '@threadnote/store/layout';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ExternalSourcePolicy, externalResourceAccess} from './external-resource.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ResourceStoreLocation {
   readonly account: string;
@@ -106,40 +109,58 @@ export interface ResourceStoreMultiGrepMatch extends ResourceStoreGrepMatch {
   readonly term: string;
 }
 
-export class ResourceAccessDenied extends Schema.TaggedError<ResourceAccessDenied>()('ResourceAccessDenied', {
-  message: Schema.String,
-  uri: Schema.String,
-}) {}
+export class ResourceAccessDenied extends Schema.TaggedError<ResourceAccessDenied, {readonly brand: unique symbol}>()(
+  'ResourceAccessDenied',
+  {
+    message: Schema.String,
+    uri: Schema.String,
+  },
+) {}
 
-export class ResourceAlreadyExists extends Schema.TaggedError<ResourceAlreadyExists>()('ResourceAlreadyExists', {
-  message: Schema.String,
-  uri: Schema.String,
-}) {}
+export class ResourceAlreadyExists extends Schema.TaggedError<ResourceAlreadyExists, {readonly brand: unique symbol}>()(
+  'ResourceAlreadyExists',
+  {
+    message: Schema.String,
+    uri: Schema.String,
+  },
+) {}
 
-export class ResourceConflict extends Schema.TaggedError<ResourceConflict>()('ResourceConflict', {
-  actualFingerprint: Schema.String,
-  expectedFingerprint: Schema.String,
-  message: Schema.String,
-  uri: Schema.String,
-}) {}
+export class ResourceConflict extends Schema.TaggedError<ResourceConflict, {readonly brand: unique symbol}>()(
+  'ResourceConflict',
+  {
+    actualFingerprint: Schema.String,
+    expectedFingerprint: Schema.String,
+    message: Schema.String,
+    uri: Schema.String,
+  },
+) {}
 
-export class ResourceIoFailed extends Schema.TaggedError<ResourceIoFailed>()('ResourceIoFailed', {
-  cause: Schema.Defect(),
-  message: Schema.String,
-  operation: Schema.String,
-  uri: Schema.String,
-}) {}
+export class ResourceIoFailed extends Schema.TaggedError<ResourceIoFailed, {readonly brand: unique symbol}>()(
+  'ResourceIoFailed',
+  {
+    cause: Schema.Defect(),
+    message: Schema.String,
+    operation: Schema.String,
+    uri: Schema.String,
+  },
+) {}
 
-export class ResourceNotFound extends Schema.TaggedError<ResourceNotFound>()('ResourceNotFound', {
-  message: Schema.String,
-  uri: Schema.String,
-}) {}
+export class ResourceNotFound extends Schema.TaggedError<ResourceNotFound, {readonly brand: unique symbol}>()(
+  'ResourceNotFound',
+  {
+    message: Schema.String,
+    uri: Schema.String,
+  },
+) {}
 
-export class ResourcePathUnsafe extends Schema.TaggedError<ResourcePathUnsafe>()('ResourcePathUnsafe', {
-  message: Schema.String,
-  path: Schema.String,
-  uri: Schema.String,
-}) {}
+export class ResourcePathUnsafe extends Schema.TaggedError<ResourcePathUnsafe, {readonly brand: unique symbol}>()(
+  'ResourcePathUnsafe',
+  {
+    message: Schema.String,
+    path: Schema.String,
+    uri: Schema.String,
+  },
+) {}
 
 export type ResourceStoreError =
   | InvalidResourceId
@@ -552,10 +573,17 @@ function createResourceStoreOperations(
     glob: (location, uri, pattern) =>
       Effect.gen(function* () {
         const resolved = yield* resolve(location, uri);
-        const matcher = globToRegExp(pattern.replaceAll('\\', '/'));
+        const matcher = globToRegExp(Effect2.pipe(pattern, EffectString.replaceAll('\\', '/')));
         const entries = yield* visibleEntries(location, yield* listEntries(fs, path, resolved, true));
-        return entries.filter(entry => {
-          const relative = entry.uri.slice(resolved.id.canonicalUri.replace(/#.*$/, '').length).replace(/^\/+/, '');
+        return EffectArray.filter(entries, entry => {
+          const relative = Effect2.pipe(entry.uri, __effectPipeInput => {
+            const __effectPipeStage0 = Effect2.pipe(
+              __effectPipeInput,
+              EffectString.slice(Effect2.pipe(resolved.id.canonicalUri, EffectString.replace(/#.*$/, '')).length),
+            );
+            const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/^\/+/, ''));
+            return __effectPipeStage1;
+          });
           return matcher.test(relative);
         });
       }).pipe(mapIoError('glob', uri)),
@@ -563,17 +591,27 @@ function createResourceStoreOperations(
       Effect.gen(function* () {
         if (!term) return [];
         const resolved = yield* resolve(location, uri);
-        return (yield* grepManyInTree(fs, path, resolved, [term], limit, (entry, content) =>
-          externalAllowed(location, entry.uri, content),
-        )).map(({line, text, uri}) => ({
-          line,
-          text,
-          uri,
-        }));
+        return EffectArray.map(
+          yield* grepManyInTree(fs, path, resolved, [term], limit, (entry, content) =>
+            externalAllowed(location, entry.uri, content),
+          ),
+          ({line, text, uri}) => ({
+            line,
+            text,
+            uri,
+          }),
+        );
       }).pipe(mapIoError('grep', uri)),
     grepMany: (location, uri, terms, limitPerTerm = 100) =>
       Effect.gen(function* () {
-        const normalizedTerms = [...new Set(terms.map(term => term.trim()).filter(Boolean))];
+        const normalizedTerms = [
+          ...new Set(
+            EffectArray.filter(
+              EffectArray.map(terms, term => Effect2.pipe(term, EffectString.trim)),
+              Boolean,
+            ),
+          ),
+        ];
         if (normalizedTerms.length === 0 || limitPerTerm <= 0) return [];
         const resolved = yield* resolve(location, uri);
         return yield* grepManyInTree(fs, path, resolved, normalizedTerms, limitPerTerm, (entry, content) =>
@@ -758,7 +796,7 @@ function makeSafeDirectoryChain(fs: FileSystem.FileSystem, path: Path.Path, reso
       return yield* unsafe(resolved, 'Directory path escapes its boundary.');
     }
     let current = logicalBoundary;
-    for (const segment of relative.split(path.sep).filter(Boolean)) {
+    for (const segment of EffectArray.filter(Effect2.pipe(relative, EffectString.split(path.sep)), Boolean)) {
       yield* assertCaseCompatible(fs, current, segment, resolved.id);
       current = path.join(current, segment);
       if (!(yield* fs.exists(current))) {
@@ -802,7 +840,10 @@ function verifyPathAtExpectedLocation(
     const info = yield* fs.stat(logicalPath);
     if (info.type === 'SymbolicLink') return yield* unsafe(resolved, 'Symbolic links are not allowed.');
     if (expectedType && info.type !== expectedType) {
-      return yield* unsafe(resolved, `Expected a ${expectedType.toLowerCase()}, found ${info.type}.`);
+      return yield* unsafe(
+        resolved,
+        `Expected a ${Effect2.pipe(expectedType, EffectString.toLowerCase)}, found ${info.type}.`,
+      );
     }
     return info;
   });
@@ -907,11 +948,16 @@ function sameOpenedResourceState(before: FileSystem.File.Info, after: FileSystem
 function assertCaseCompatible(fs: FileSystem.FileSystem, parent: string, desired: string, id: ResourceId) {
   return Effect.gen(function* () {
     if (!(yield* fs.exists(parent))) return;
-    const desiredNfc = desired.normalize('NFC');
-    const collision = (yield* fs.readDirectory(parent)).find(entry => {
-      const entryNfc = entry.normalize('NFC');
-      return entryNfc.toLocaleLowerCase() === desiredNfc.toLocaleLowerCase() && entryNfc !== desiredNfc;
-    });
+    const desiredNfc = Effect2.pipe(desired, EffectString.normalize('NFC'));
+    const collision = Option.getOrUndefined(
+      EffectArray.findFirst(yield* fs.readDirectory(parent), entry => {
+        const entryNfc = Effect2.pipe(entry, EffectString.normalize('NFC'));
+        return (
+          Effect2.pipe(entryNfc, EffectString.toLocaleLowerCase()) ===
+            Effect2.pipe(desiredNfc, EffectString.toLocaleLowerCase()) && entryNfc !== desiredNfc
+        );
+      }),
+    );
     if (collision) {
       return yield* ResourcePathUnsafe.make({
         message: `Portable path collision between "${desired}" and existing "${collision}".`,
@@ -954,7 +1000,7 @@ function listEntries(fs: FileSystem.FileSystem, path: Path.Path, resolved: Resol
             const childResolved = {...resolved, path: childPath};
             const info = yield* verifyPathAtExpectedLocation(fs, path, childResolved, childPath);
             if (info.type !== 'Directory' && info.type !== 'File') return [];
-            const childSegments = [...segments, name.normalize('NFC')];
+            const childSegments = [...segments, Effect2.pipe(name, EffectString.normalize('NFC'))];
             const uri = canonicalResourceUri(resolved.id.namespace, [...resolved.id.segments, ...childSegments]);
             const children = recursive && info.type === 'Directory' ? yield* visit(childPath, childSegments) : [];
             return [entryForInfo(uri, info), ...children];
@@ -976,8 +1022,11 @@ function grepManyInTree(
   allowed: (entry: ResourceStoreEntry, content?: string) => Effect.Effect<boolean>,
 ) {
   return Effect.gen(function* () {
-    const normalized = terms.map(term => ({lower: term.toLocaleLowerCase(), term}));
-    const counts = new Map(normalized.map(({term}) => [term, 0]));
+    const normalized = EffectArray.map(terms, term => ({
+      lower: Effect2.pipe(term, EffectString.toLocaleLowerCase()),
+      term,
+    }));
+    const counts = new Map(EffectArray.map(normalized, ({term}) => [term, 0]));
     const matches: ResourceStoreMultiGrepMatch[] = [];
     const entries = yield* listEntries(fs, path, resolved, true);
     for (const entry of entries) {
@@ -988,15 +1037,16 @@ function grepManyInTree(
       yield* verifyExistingPath(fs, path, fileResolved, 'File');
       const content = yield* fs.readFileString(fileResolved.path);
       if (!(yield* allowed(entry, content))) continue;
-      for (const [index, line] of content.split(/\r?\n/).entries()) {
-        const lowerLine = line.toLocaleLowerCase();
+      for (const [index, line] of Effect2.pipe(content, EffectString.split(/\r?\n/)).entries()) {
+        const lowerLine = Effect2.pipe(line, EffectString.toLocaleLowerCase());
         for (const {lower, term} of normalized) {
-          if ((counts.get(term) ?? 0) >= limitPerTerm || !lowerLine.includes(lower)) continue;
+          if ((counts.get(term) ?? 0) >= limitPerTerm || !Effect2.pipe(lowerLine, EffectString.includes(lower)))
+            continue;
           matches.push({line: index + 1, term, text: line, uri: entry.uri});
           counts.set(term, (counts.get(term) ?? 0) + 1);
         }
       }
-      if (normalized.every(({term}) => (counts.get(term) ?? 0) >= limitPerTerm)) break;
+      if (EffectArray.every(normalized, ({term}) => (counts.get(term) ?? 0) >= limitPerTerm)) break;
     }
     return matches;
   });
@@ -1059,7 +1109,7 @@ function removeTemporarySiblings(
     if (!(yield* fs.exists(parent))) return;
     const prefix = `.${path.basename(resolved.path)}.`;
     for (const entry of yield* fs.readDirectory(parent)) {
-      if (entry.startsWith(prefix) && entry.endsWith('.tmp')) {
+      if (Effect2.pipe(entry, EffectString.startsWith(prefix)) && Effect2.pipe(entry, EffectString.endsWith('.tmp'))) {
         yield* fs.remove(path.join(parent, entry), {force: true});
       }
     }
@@ -1076,7 +1126,9 @@ function syncDirectory(fs: FileSystem.FileSystem, directory: string): Effect.Eff
 }
 
 function escapesBoundary(relative: string, path: Path.Path): boolean {
-  return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  return (
+    relative === '..' || Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)) || path.isAbsolute(relative)
+  );
 }
 
 function unsafe(resolved: ResolvedResourcePath, message: string): ResourcePathUnsafe {

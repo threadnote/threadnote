@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 
@@ -10,6 +11,8 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {hasScriptHelpFlag, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TARGET = new URL('./benchmark-memory-connections-scale-target.ts', import.meta.url);
 
@@ -57,7 +60,8 @@ const program = Effect.scoped(
       [built.executablePath, ...args, '--built-artifact-sha256', built.sha256],
       {maxOutputBytes: 0, timeoutMs: 3 * 60 * 60 * 1_000},
     );
-    if (child.stdout.trim()) yield* Console.log(child.stdout.trimEnd());
+    if (Effect2.pipe(child.stdout, EffectString.trim))
+      yield* Console.log(Effect2.pipe(child.stdout, EffectString.trimEnd));
   }),
 );
 
@@ -66,14 +70,17 @@ const commandLayer = ScriptCommandExecutorLayer.pipe(Layer.provide(systemLayer))
 const wrapperLayer = Layer.mergeAll(systemLayer, commandLayer).pipe(Layer.provideMerge(BunServices.layer));
 
 function usage(): string {
-  return [
-    'Usage: bun run bench:memory-connections-scale -- [options]',
-    '',
-    'Builds and runs the memory-connections scale benchmark.',
-    'Required: --candidate-commit <40-hex>',
-    'Optional: --budget <json> --output <json> --development-smoke',
-    '  --memory-candidates <count> --samples <count> --warmups <count>',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Usage: bun run bench:memory-connections-scale -- [options]',
+      '',
+      'Builds and runs the memory-connections scale benchmark.',
+      'Required: --candidate-commit <40-hex>',
+      'Optional: --budget <json> --output <json> --development-smoke',
+      '  --memory-candidates <count> --samples <count> --warmups <count>',
+    ],
+    '\n',
+  );
 }
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(program, wrapperLayer));

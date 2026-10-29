@@ -9,6 +9,8 @@ import {
   type CodeGraphHeavyTailBenchmarkArtifact,
 } from './benchmark-code-graph-heavy-tail.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const generate = Effect.gen(function* () {
   const {artifacts, candidateCommit, freshness, outputPath, ratchetPath, runnerClass, runnerIdentity} = parseArguments(
@@ -63,7 +65,12 @@ function parseArguments(args: readonly string[]): {
     const argument = args[index];
     if (argument === '--output') {
       const value = args[++index];
-      if (!value?.trim()) throw ScriptError.make({message: '--output requires a path.'});
+      if (
+        !Effect2.pipe(value, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
+        throw ScriptError.make({message: '--output requires a path.'});
       outputPath = value;
     } else if (argument === '--candidate-commit') {
       const value = args[++index];
@@ -72,15 +79,30 @@ function parseArguments(args: readonly string[]): {
       candidateCommit = value;
     } else if (argument === '--runner-class') {
       const value = args[++index];
-      if (!value?.trim()) throw ScriptError.make({message: '--runner-class requires a value.'});
+      if (
+        !Effect2.pipe(value, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
+        throw ScriptError.make({message: '--runner-class requires a value.'});
       runnerClass = value;
     } else if (argument === '--runner-identity') {
       const value = args[++index];
-      if (!value?.trim()) throw ScriptError.make({message: '--runner-identity requires a value.'});
+      if (
+        !Effect2.pipe(value, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
+        throw ScriptError.make({message: '--runner-identity requires a value.'});
       runnerIdentity = value;
     } else if (argument === '--ratchet') {
       const value = args[++index];
-      if (!value?.trim()) throw ScriptError.make({message: '--ratchet requires a path.'});
+      if (
+        !Effect2.pipe(value, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
+        throw ScriptError.make({message: '--ratchet requires a path.'});
       ratchetPath = value;
     } else if (argument === '--release-observed-at') {
       releaseObservedAt = timestamp(args[++index], argument);
@@ -92,7 +114,7 @@ function parseArguments(args: readonly string[]): {
       maximumRunSpanMilliseconds = integer(args[++index], argument, 1);
     } else if (argument === '--future-skew-ms') {
       futureSkewMilliseconds = integer(args[++index], argument, 0);
-    } else if (argument.startsWith('-')) {
+    } else if (Effect2.pipe(argument, EffectString.startsWith('-'))) {
       throw ScriptError.make({message: `Unknown heavy-tail ratchet generator option: ${argument}`});
     } else {
       artifacts.push(argument);

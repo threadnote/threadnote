@@ -5,6 +5,7 @@ import {createServer} from '@threadnote/testing/node-net';
 import {networkInterfaces, tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {afterEach, describe, expect, it} from 'vitest';
+import * as EffectRecord from 'effect/Record';
 
 let child: ChildProcess | undefined;
 
@@ -134,7 +135,7 @@ async function spawnManager(home: string, uiPort: number): Promise<ChildProcess>
 }
 
 function firstNonLoopbackIpv4Address(): string | undefined {
-  for (const addresses of Object.values(networkInterfaces())) {
+  for (const addresses of EffectRecord.values(networkInterfaces())) {
     for (const address of addresses ?? []) {
       if (address.family === 'IPv4' && !address.internal) return address.address;
     }

@@ -1,11 +1,12 @@
-import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {validateNativeCycleReview, validateNativeCycleReviewHistory} from '../src/cycle_review.js';
 import type {NativeCycleReview, NativeCycleSnapshot} from '../src/cycle_review.js';
+import {Array as EffectArray, String as EffectString} from 'effect';
+import * as Effect2 from 'effect';
 
-const hash = (char: string) => char.repeat(64);
-const objectId = (char: string) => char.repeat(40);
+const hash = (char: string) => Effect2.pipe(char, EffectString.repeat(64));
+const objectId = (char: string) => Effect2.pipe(char, EffectString.repeat(40));
 
 const snapshot = (overrides: Partial<NativeCycleSnapshot> = {}): NativeCycleSnapshot => ({
   format: 'threadnote-native-cycle-snapshot',
@@ -407,7 +408,7 @@ describe('native cycle review validation', () => {
     ];
     const invalidFindings = [
       [finding(), finding({id: 'finding-1', line: 13})],
-      ...badLocations.map(file => [finding({file})]),
+      ...EffectArray.map(badLocations, file => [finding({file})]),
       [finding({evidence: '  '})],
       [finding({body: ''})],
       [finding({state: 'resolved', reason: '   '})],
@@ -434,19 +435,23 @@ describe('native cycle review validation', () => {
             }),
             {minLength: 1, maxLength: 24},
           )
-          .filter(items => new Set(items.map(item => item.id)).size === items.length),
+          .filter(items => new Set(EffectArray.map(items, item => item.id)).size === items.length),
         items => {
           const current = snapshot({previous: undefined, previousTree: undefined});
-          const findings = items.map(item =>
+          const findings = EffectArray.map(items, item =>
             finding({id: `finding-${item.id}`, severity: item.severity, state: 'new'}),
           );
           const result = validateNativeCycleReview(current, review({findings, mode: 'full'}, current));
-          const expected = items.reduce((counts, item) => ({...counts, [item.severity]: counts[item.severity] + 1}), {
-            critical: 0,
-            important: 0,
-            minor: 0,
-            informational: 0,
-          });
+          const expected = EffectArray.reduce(
+            items,
+            {
+              critical: 0,
+              important: 0,
+              minor: 0,
+              informational: 0,
+            },
+            (counts, item) => ({...counts, [item.severity]: counts[item.severity] + 1}),
+          );
           expect(result.summary.counts).toEqual(expected);
           expect(result.summary.blockingIssueCount).toBe(expected.critical + expected.important);
         },
@@ -464,7 +469,7 @@ describe('native cycle review validation', () => {
         }),
         severities => {
           const current = snapshot();
-          const priorFindings = severities.map((severity, index) =>
+          const priorFindings = EffectArray.map(severities, (severity, index) =>
             finding({
               id: `finding-${index}`,
               severity,
@@ -473,18 +478,25 @@ describe('native cycle review validation', () => {
           );
           const before = {...previous, review: {...priorReview, findings: priorFindings}};
           const resolvedIds = new Set(
-            priorFindings
-              .filter(item => item.severity === 'critical' || item.severity === 'important')
-              .filter((_, index) => index % 2 === 0)
-              .map(item => item.id),
+            EffectArray.map(
+              EffectArray.filter(
+                EffectArray.filter(
+                  priorFindings,
+                  item => item.severity === 'critical' || item.severity === 'important',
+                ),
+                (_, index) => index % 2 === 0,
+              ),
+              item => item.id,
+            ),
           );
-          const afterFindings = priorFindings.map(item =>
+          const afterFindings = EffectArray.map(priorFindings, item =>
             resolvedIds.has(item.id)
               ? {...item, state: 'resolved' as const, reason: 'The reported path is now guarded.'}
               : {...item, state: 'carried' as const},
           );
           const result = validateNativeCycleReview(current, review({findings: afterFindings}, current), before);
-          const remainingBlockers = priorFindings.filter(
+          const remainingBlockers = EffectArray.filter(
+            priorFindings,
             item => (item.severity === 'critical' || item.severity === 'important') && !resolvedIds.has(item.id),
           ).length;
           expect(result.summary.blockingIssueCount).toBe(remainingBlockers);

@@ -3,6 +3,8 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {describe, expect} from 'vitest';
 import {forEachFileWithinBoundary} from '@threadnote/platform/safe_scan';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('bounded live file scanning', () => {
   effectIt.layer(BunServices.layer)(layerIt => {
@@ -25,7 +27,7 @@ describe('bounded live file scanning', () => {
             fs,
             root,
             root,
-            {includeFile: candidate => candidate.endsWith('.md')},
+            {includeFile: candidate => Effect2.pipe(candidate, EffectString.endsWith('.md'))},
             file => Effect.sync(() => visited.push(file.path)),
           );
 

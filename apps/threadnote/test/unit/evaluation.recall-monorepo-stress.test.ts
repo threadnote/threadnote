@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -41,7 +42,9 @@ describe('recall monorepo/share stress fixture', () => {
     const siblingChallenger = evaluate(options, 'sibling-package-target', 'cross-scope-challenger');
 
     expect(createMonorepoShareRecallStressFixture(options)).toEqual(currentFull.fixture);
-    expect(currentFull.fixture.candidates.every(candidate => candidate.exactTerms === undefined)).toBe(true);
+    expect(EffectArray.every(currentFull.fixture.candidates, candidate => candidate.exactTerms === undefined)).toBe(
+      true,
+    );
     expect(currentFull.summary).toMatchObject({
       aliasCompressionRate: 2 / 3,
       candidateRecords: 36,
@@ -147,7 +150,7 @@ describe('recall monorepo/share stress fixture', () => {
       expect(currentFixture.candidates).toHaveLength(
         packages * logicalMemoriesPerPackage * (shareAliasesPerMemory + 1),
       );
-      expect(new Set(currentFixture.candidates.map(candidate => candidate.memoryId)).size).toBe(
+      expect(new Set(EffectArray.map(currentFixture.candidates, candidate => candidate.memoryId)).size).toBe(
         packages * logicalMemoriesPerPackage,
       );
       expect(currentScoped.summary.candidateRecords).toBe(logicalMemoriesPerPackage * (shareAliasesPerMemory + 1));

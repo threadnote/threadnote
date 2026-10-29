@@ -1,8 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {THREADNOTE_MCP_NAME} from '../constants.js';
 import {COMPOSER_OAUTH_CLIENT_ID} from '../remote_memory/local_idp.js';
 import {COMPOSER_OAUTH_SCOPES} from '@threadnote/remote-memory/oauth';
 import type {JsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const THREADNOTE_ORG_MCP_NAME = 'threadnote-org' as const;
 export const THREADNOTE_COMPOSER_SHARE_ID_HEADER = 'threadnote-share-id';
@@ -15,10 +19,13 @@ export const ORG_COMPOSER_POLICY = {
   shareBinding: 'header',
 } as const;
 
-export class ComposerAttachError extends Schema.TaggedError<ComposerAttachError>()('ComposerAttachError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+export class ComposerAttachError extends Schema.TaggedError<ComposerAttachError, {readonly brand: unique symbol}>()(
+  'ComposerAttachError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export interface ComposerShareBinding {
   readonly clientId?: string;
@@ -61,8 +68,12 @@ export interface ComposerAttachOptions {
 }
 
 export function resolveComposerAttach(options: ComposerAttachOptions): ComposerShareBinding | undefined {
-  const composerUrl = options.composerUrl?.trim();
-  const shareId = options.shareId?.trim();
+  const composerUrl = Effect.pipe(options.composerUrl, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
+  const shareId = Effect.pipe(options.shareId, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if (
     !composerUrl &&
     !shareId &&
@@ -81,8 +92,9 @@ export function resolveComposerAttach(options: ComposerAttachOptions): ComposerS
     ...(options.composerClientId === undefined ? {} : {clientId: composerOAuthClientId(options.composerClientId)}),
     ...(options.composerOAuthScopes?.length
       ? {
-          additionalScopes: composerOAuthScopes(options.composerOAuthScopes).filter(
-            scope => !COMPOSER_OAUTH_SCOPES.some(required => required === scope),
+          additionalScopes: EffectArray.filter(
+            composerOAuthScopes(options.composerOAuthScopes),
+            scope => !EffectArray.some(COMPOSER_OAUTH_SCOPES, required => required === scope),
           ),
         }
       : {}),
@@ -97,11 +109,15 @@ export function resolveComposerAttach(options: ComposerAttachOptions): ComposerS
 }
 
 export function resolveComposerServeShareId(teamName: string, shareId?: string): string {
-  return composerShareId(shareId?.trim() || teamName);
+  return composerShareId(
+    Effect.pipe(shareId, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) || teamName,
+  );
 }
 
 export function composerShareId(shareId: string): string {
-  const normalized = shareId.trim();
+  const normalized = Effect.pipe(shareId, EffectString.trim);
   if (!COMPOSER_SHARE_ID_PATTERN.test(normalized)) {
     throw ComposerAttachError.make({
       message:
@@ -112,9 +128,14 @@ export function composerShareId(shareId: string): string {
 }
 
 export function composerMcpUrl(endpoint: string): string {
-  const normalized = endpoint.trim();
-  const hasUnsafeCharacter = [...normalized].some(character => {
-    const codePoint = character.codePointAt(0) ?? 0;
+  const normalized = Effect.pipe(endpoint, EffectString.trim);
+  const hasUnsafeCharacter = EffectArray.some([...normalized], character => {
+    const codePoint =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return /\s/u.test(character) || codePoint <= 0x1f || codePoint === 0x7f;
   });
   if (!normalized || hasUnsafeCharacter) {
@@ -228,25 +249,26 @@ export function isManagedComposerHttpEntry(actual: unknown): boolean {
     (actual.type === 'http' ? actual.oauth.clientId : actual.auth.CLIENT_ID) === COMPOSER_OAUTH_CLIENT_ID &&
     (actual.type === 'http' ||
       (actual.auth.scopes.length === COMPOSER_OAUTH_SCOPES.length &&
-        actual.auth.scopes.every((scope, index) => scope === COMPOSER_OAUTH_SCOPES[index])))
+        EffectArray.every(actual.auth.scopes, (scope, index) => scope === COMPOSER_OAUTH_SCOPES[index])))
   );
 }
 
 export function isComposerHttpEntry(actual: unknown): actual is ComposerClientHttpMcpEntry {
   if (!isRecord(actual) || typeof actual.url !== 'string' || !isRecord(actual.headers)) return false;
   const shareId = actual.headers[THREADNOTE_COMPOSER_SHARE_ID_HEADER];
-  if (typeof shareId !== 'string' || Object.keys(actual.headers).length !== 1) return false;
+  if (typeof shareId !== 'string' || EffectRecord.keys(actual.headers).length !== 1) return false;
   let clientId: string;
   if (actual.type === 'http') {
-    if (Object.keys(actual).some(key => !['type', 'url', 'headers', 'oauth'].includes(key))) return false;
+    if (EffectArray.some(EffectRecord.keys(actual), key => !['type', 'url', 'headers', 'oauth'].includes(key)))
+      return false;
     if (!isRecord(actual.oauth) || typeof actual.oauth.clientId !== 'string') return false;
-    if (Object.keys(actual.oauth).length !== 1) return false;
+    if (EffectRecord.keys(actual.oauth).length !== 1) return false;
     clientId = actual.oauth.clientId;
   } else {
-    if (Object.keys(actual).some(key => !['url', 'headers', 'auth'].includes(key))) return false;
-    if (!isRecord(actual.auth) || typeof actual.auth.CLIENT_ID !== 'string' || !Array.isArray(actual.auth.scopes))
+    if (EffectArray.some(EffectRecord.keys(actual), key => !['url', 'headers', 'auth'].includes(key))) return false;
+    if (!isRecord(actual.auth) || typeof actual.auth.CLIENT_ID !== 'string' || !EffectArray.isArray(actual.auth.scopes))
       return false;
-    if (Object.keys(actual.auth).some(key => key !== 'CLIENT_ID' && key !== 'scopes')) return false;
+    if (EffectArray.some(EffectRecord.keys(actual.auth), key => key !== 'CLIENT_ID' && key !== 'scopes')) return false;
     if (!validComposerOAuthScopes(actual.auth.scopes)) return false;
     clientId = actual.auth.CLIENT_ID;
   }
@@ -261,7 +283,7 @@ export function isComposerHttpEntry(actual: unknown): actual is ComposerClientHt
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
 }
 
 function composerOAuthClientId(value: string): string {
@@ -276,18 +298,19 @@ function composerOAuthClientId(value: string): string {
 export function composerOAuthScopes(additionalScopes: readonly string[] = []): readonly string[] {
   if (
     additionalScopes.length > 32 ||
-    additionalScopes.some(scope => !/^[\x21\x23-\x5b\x5d-\x7e]{1,256}$/u.test(scope))
+    EffectArray.some(additionalScopes, scope => !/^[\x21\x23-\x5b\x5d-\x7e]{1,256}$/u.test(scope))
   ) {
     throw ComposerAttachError.make({
       message:
         'OAuth scopes require at most 32 non-empty RFC 6749 scope tokens of at most 256 ASCII characters each (no spaces, quotes, or backslashes).',
     });
   }
-  const extras = [...new Set(additionalScopes)]
-    .filter(scope => !COMPOSER_OAUTH_SCOPES.some(required => required === scope))
-    .sort();
+  const extras = EffectArray.filter(
+    [...new Set(additionalScopes)],
+    scope => !EffectArray.some(COMPOSER_OAUTH_SCOPES, required => required === scope),
+  ).sort();
   const scopes = [...COMPOSER_OAUTH_SCOPES, ...extras];
-  if (scopes.length > 32 || scopes.join(' ').length > 2048) {
+  if (scopes.length > 32 || EffectArray.join(scopes, ' ').length > 2048) {
     throw ComposerAttachError.make({
       message: 'The complete OAuth scope set must contain at most 32 tokens and 2048 bytes.',
     });
@@ -299,12 +322,12 @@ export function composerOAuthScopesMatch(actual: readonly string[], expected: re
   return (
     actual.length === expected.length &&
     new Set(actual).size === actual.length &&
-    expected.every(scope => actual.includes(scope))
+    EffectArray.every(expected, scope => actual.includes(scope))
   );
 }
 
 function validComposerOAuthScopes(scopes: readonly unknown[]): scopes is readonly string[] {
-  if (!scopes.every(scope => typeof scope === 'string')) return false;
+  if (!EffectArray.every(scopes, scope => typeof scope === 'string')) return false;
   try {
     return composerOAuthScopesMatch(scopes, composerOAuthScopes(scopes));
   } catch {

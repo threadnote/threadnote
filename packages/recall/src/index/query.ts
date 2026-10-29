@@ -1,4 +1,5 @@
 import {indexTerms} from './lexical.js';
+import {Array as EffectArray} from 'effect';
 
 const LOGICAL_RESULT_OVERFETCH_MULTIPLIER = 8;
 const MINIMUM_LOGICAL_RESULT_OVERFETCH = 256;
@@ -25,9 +26,9 @@ export function recallStatisticTerms(options: RecallStatisticRequest): readonly 
   if ('terms' in options) return [];
   const queries =
     'selections' in options
-      ? options.selections.flatMap(selection => (selection.query === undefined ? [] : [selection.query]))
+      ? EffectArray.flatMap(options.selections, selection => (selection.query === undefined ? [] : [selection.query]))
       : options.query === undefined
         ? []
         : [options.query];
-  return [...new Set(queries.flatMap(indexTerms))];
+  return [...new Set(EffectArray.flatMap(queries, indexTerms))];
 }

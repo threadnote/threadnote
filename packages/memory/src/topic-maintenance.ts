@@ -1,3 +1,5 @@
+import {isOneOf as checkedIsOneOf} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {reviewedSupportReplacementError} from './reviewed-support.js';
 import {
   assertMemoryCodeCitation,
@@ -16,6 +18,9 @@ import {
 } from './document.js';
 import {consolidationRevision, consolidationSections} from './consolidation.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const TOPIC_MAINTENANCE_VERSION = 1 as const;
 export const TOPIC_MAINTENANCE_ACCEPTED_VERSION = 2 as const;
@@ -113,24 +118,27 @@ export function isCodeTopicMaintenanceManifest(
 /** Opaque immutable provider pin identity, independent of code citation grammar. */
 export function topicMaintenanceObsidianCitationId(citation: MemoryObsidianEvidenceV1): string {
   assertTopicMaintenanceObsidianEvidence(citation);
-  return `tnob_${sha256HexSync(
-    JSON.stringify([
-      citation.version,
-      citation.sourceId,
-      citation.sourceInstanceId,
-      citation.vaultHash,
-      citation.accessHash,
-      citation.noteId,
-      citation.relativePath,
-      citation.revisionHash,
-      citation.sanitizerVersion,
-      citation.fragmentHash,
-      citation.fragmentStart,
-      citation.fragmentEnd,
-      citation.pinId,
-      citation.expiresAt,
-    ]),
-  ).slice(0, 40)}`;
+  return `tnob_${Effect.pipe(
+    sha256HexSync(
+      JSON.stringify([
+        citation.version,
+        citation.sourceId,
+        citation.sourceInstanceId,
+        citation.vaultHash,
+        citation.accessHash,
+        citation.noteId,
+        citation.relativePath,
+        citation.revisionHash,
+        citation.sanitizerVersion,
+        citation.fragmentHash,
+        citation.fragmentStart,
+        citation.fragmentEnd,
+        citation.pinId,
+        citation.expiresAt,
+      ]),
+    ),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 export function assertTopicMaintenanceObsidianEvidence(value: unknown): asserts value is MemoryObsidianEvidenceV1 {
@@ -166,7 +174,8 @@ export function assertTopicMaintenanceSameObsidianNote(
   assertTopicMaintenanceObsidianEvidence(origin);
   assertTopicMaintenanceObsidianEvidence(active);
   if (
-    (['sourceId', 'sourceInstanceId', 'vaultHash', 'accessHash', 'noteId'] as const).some(
+    EffectArray.some(
+      ['sourceId', 'sourceInstanceId', 'vaultHash', 'accessHash', 'noteId'] as const,
       key => origin[key] !== active[key],
     )
   )
@@ -186,12 +195,12 @@ export function validateTopicMaintenanceParagraphs(
 ): asserts paragraphs is readonly TopicMaintenanceParagraphV1[] {
   const sections = consolidationSections(body);
   if (
-    !Array.isArray(paragraphs) ||
+    !EffectArray.isArray(paragraphs) ||
     paragraphs.length !== sections.length ||
     paragraphs.length > MAX_TOPIC_MAINTENANCE_PARAGRAPHS
   )
     throw new Error('Topic maintenance paragraph count exceeds 64 or differs from the body.');
-  paragraphs.forEach((paragraph: unknown, ordinal: number) => {
+  EffectArray.forEach(paragraphs, (paragraph: unknown, ordinal: number) => {
     if (
       !plainObject(paragraph) ||
       !exactKeys(paragraph, ['ordinal', 'hash', 'role', 'support', 'citationIds'], ['scope', 'validity'])
@@ -207,10 +216,10 @@ export function validateTopicMaintenanceParagraphs(
     )
       throw new Error(`Topic maintenance paragraph ${ordinal + 1} has an invalid role or support.`);
     if (
-      !Array.isArray(paragraph.citationIds) ||
+      !EffectArray.isArray(paragraph.citationIds) ||
       paragraph.citationIds.length > MAX_MEMORY_CODE_CITATIONS ||
       new Set(paragraph.citationIds).size !== paragraph.citationIds.length ||
-      paragraph.citationIds.some((id: unknown) => typeof id !== 'string' || !admittedIds.has(id))
+      EffectArray.some(paragraph.citationIds, (id: unknown) => typeof id !== 'string' || !admittedIds.has(id))
     )
       throw new Error(`Topic maintenance paragraph ${ordinal + 1} cites an unknown citation.`);
     if ((paragraph.support === 'unresolved') !== (paragraph.citationIds.length === 0))
@@ -269,7 +278,7 @@ function validateObsidianManifest(
     manifest.originCitationId !== topicMaintenanceObsidianCitationId(origin) ||
     manifest.bodyHash !== consolidationRevision(record.body) ||
     manifest.coverage !== 'declared-only' ||
-    !Array.isArray(manifest.additionalDependencies) ||
+    !EffectArray.isArray(manifest.additionalDependencies) ||
     manifest.additionalDependencies.length
   )
     throw new Error('Topic maintenance imported identity, body, or declared scope changed.');
@@ -299,7 +308,7 @@ export function buildTopicMaintenanceObsidianManifest(
     memoryId: record.metadata.memoryId!,
     bodyHash: consolidationRevision(record.body),
     coverage: 'declared-only',
-    paragraphs: consolidationSections(record.body).map((section, ordinal) => ({
+    paragraphs: EffectArray.map(consolidationSections(record.body), (section, ordinal) => ({
       ...input.paragraphs[ordinal],
       ordinal,
       hash: consolidationRevision(section),
@@ -319,6 +328,64 @@ export interface TopicMaintenanceEnrollmentInput {
   readonly additionalDependencies?: readonly TopicMaintenanceDependencyV1[];
 }
 
+const TopicMaintenanceEnrollmentInputSchema = Schema.Struct({
+  paragraphs: Schema.Array(
+    Schema.Struct({
+      role: Schema.Literals(['descriptive', 'normative', 'historical']),
+      support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+      citationIds: Schema.Array(Schema.String),
+      scope: Schema.optional(Schema.String),
+      validity: Schema.optional(Schema.String),
+    }),
+  ),
+  additionalDependencies: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        kind: Schema.Literals(['configuration', 'dependency']),
+        citationId: Schema.String,
+      }),
+    ),
+  ),
+});
+
+const TopicMaintenanceParagraphManifestSchema = Schema.Struct({
+  role: Schema.Literals(['descriptive', 'normative', 'historical']),
+  support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+  citationIds: Schema.Array(Schema.String),
+  scope: Schema.optional(Schema.String),
+  validity: Schema.optional(Schema.String),
+  ordinal: Schema.Finite,
+  hash: Schema.String,
+});
+const TopicMaintenanceDependencySchema = Schema.Struct({
+  kind: Schema.Literals(['configuration', 'dependency']),
+  citationId: Schema.String,
+});
+const TopicMaintenanceManifestV1Schema = Schema.Struct({
+  version: Schema.Literal(1),
+  memoryId: Schema.String,
+  repositoryId: Schema.String,
+  bodyHash: Schema.String,
+  coverage: Schema.Literal('declared-only'),
+  paragraphs: Schema.Array(TopicMaintenanceParagraphManifestSchema),
+  additionalDependencies: Schema.Array(TopicMaintenanceDependencySchema),
+});
+const TopicMaintenanceManifestV2Schema = Schema.Struct({
+  version: Schema.Literal(2),
+  memoryId: Schema.String,
+  repositoryId: Schema.String,
+  bodyHash: Schema.String,
+  coverage: Schema.Literal('declared-only'),
+  paragraphs: Schema.Array(TopicMaintenanceParagraphManifestSchema),
+  additionalDependencies: Schema.Array(TopicMaintenanceDependencySchema),
+  acceptedSources: Schema.Array(Schema.Struct({citationId: Schema.String, acceptedCitationId: Schema.String})),
+  originCitationIds: Schema.Array(Schema.String),
+});
+const TopicMaintenanceLegacyManifestSchema = Schema.Union([
+  TopicMaintenanceManifestV1Schema,
+  TopicMaintenanceManifestV2Schema,
+]);
+
 /** Malformed enrollment still protects the topic from unrelated automatic lifecycle changes. */
 export function hasTopicMaintenanceEnrollment(record: Pick<MemoryRecord, 'metadata'>): boolean {
   return record.metadata.topicMaintenance !== undefined || record.metadata.topicMaintenanceError !== undefined;
@@ -329,7 +396,7 @@ export function validateTopicMaintenanceEnrollmentInput(input: unknown): TopicMa
   if (
     !plainObject(input) ||
     !exactKeys(input, ['paragraphs'], ['additionalDependencies']) ||
-    !Array.isArray(input.paragraphs) ||
+    !EffectArray.isArray(input.paragraphs) ||
     !input.paragraphs.length ||
     input.paragraphs.length > MAX_TOPIC_MAINTENANCE_PARAGRAPHS
   )
@@ -338,22 +405,25 @@ export function validateTopicMaintenanceEnrollmentInput(input: unknown): TopicMa
     if (!plainObject(paragraph) || !exactKeys(paragraph, ['role', 'support', 'citationIds'], ['scope', 'validity']))
       throw new Error('Topic maintenance paragraph input has unknown or missing fields.');
     if (
-      !['descriptive', 'normative', 'historical'].includes(paragraph.role as string) ||
-      !['direct', 'contextual', 'unresolved'].includes(paragraph.support as string) ||
-      !Array.isArray(paragraph.citationIds)
+      !checkedIsOneOf(['descriptive', 'normative', 'historical'], paragraph.role) ||
+      !checkedIsOneOf(['direct', 'contextual', 'unresolved'], paragraph.support) ||
+      !EffectArray.isArray(paragraph.citationIds)
     )
       throw new Error('Topic maintenance paragraph input has an invalid role or support.');
   }
   if (
     input.additionalDependencies !== undefined &&
-    (!Array.isArray(input.additionalDependencies) ||
+    (!EffectArray.isArray(input.additionalDependencies) ||
       input.additionalDependencies.length > MAX_MEMORY_CODE_CITATIONS ||
-      input.additionalDependencies.some(
+      EffectArray.some(
+        input.additionalDependencies,
         (dependency: unknown) => !plainObject(dependency) || !exactKeys(dependency, ['kind', 'citationId']),
       ))
   )
     throw new Error('Topic maintenance dependency input has unknown fields or exceeds citation budget.');
-  return input as unknown as TopicMaintenanceEnrollmentInput;
+  if (!Schema.is(TopicMaintenanceEnrollmentInputSchema)(input))
+    throw new Error('Topic maintenance input has an invalid shape.');
+  return input;
 }
 
 export function buildTopicMaintenanceManifest(
@@ -368,10 +438,10 @@ export function buildTopicMaintenanceManifest(
   const manifest: TopicMaintenanceManifestV1 = {
     version: TOPIC_MAINTENANCE_VERSION,
     memoryId: record.metadata.memoryId!,
-    repositoryId: record.metadata.codeCitations![0].repositoryId,
+    repositoryId: requiredCodeCitations(record)[0].repositoryId,
     bodyHash: consolidationRevision(record.body),
     coverage: 'declared-only',
-    paragraphs: sections.map((section, ordinal) => {
+    paragraphs: EffectArray.map(sections, (section, ordinal) => {
       const decision = input.paragraphs[ordinal];
       return {
         ordinal,
@@ -416,9 +486,9 @@ function assertCodeManifestV3(
   const {sourceKind: _sourceKind, dependencyExpansions, ...legacy} = manifest;
   validateTopicMaintenanceManifest({...legacy, version: 2}, record);
   if (dependencyExpansions !== undefined) {
-    if (!Array.isArray(dependencyExpansions) || !dependencyExpansions.length || dependencyExpansions.length > 8)
+    if (!EffectArray.isArray(dependencyExpansions) || !dependencyExpansions.length || dependencyExpansions.length > 8)
       throw new Error('Topic maintenance expansion history is invalid.');
-    const known = new Set(record.metadata.codeCitations!.map(citation => citation.id));
+    const known = new Set(EffectArray.map(requiredCodeCitations(record), citation => citation.id));
     for (const receipt of dependencyExpansions) {
       if (
         !plainObject(receipt) ||
@@ -432,23 +502,29 @@ function assertCodeManifestV3(
           'citationIds',
         ]) ||
         receipt.version !== 1 ||
-        ![receipt.revision, receipt.proofDigest, receipt.requestDigest, receipt.previousManifestHash].every(
+        !EffectArray.every(
+          [receipt.revision, receipt.proofDigest, receipt.requestDigest, receipt.previousManifestHash],
           value => typeof value === 'string' && HASH.test(value),
         ) ||
         typeof receipt.sourceCommit !== 'string' ||
         !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(receipt.sourceCommit) ||
-        !Array.isArray(receipt.citationIds) ||
-        !receipt.citationIds.length ||
-        receipt.citationIds.length > 8 ||
-        receipt.citationIds.some(
-          (id, index, ids) => typeof id !== 'string' || !known.has(id) || (index > 0 && id <= ids[index - 1]),
-        )
+        !isOrderedKnownCitationIds(receipt.citationIds, known)
       )
         throw new Error('Topic maintenance expansion receipt is malformed or has missing evidence.');
     }
   }
   if (encodedBytes(JSON.stringify(manifest)) > MAX_TOPIC_MAINTENANCE_BYTES)
     throw new Error('Topic maintenance manifest exceeds the 32 KiB limit.');
+}
+
+function isOrderedKnownCitationIds(value: unknown, known: ReadonlySet<string>): value is readonly string[] {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > 8) return false;
+  let previous: string | undefined;
+  for (const id of value) {
+    if (typeof id !== 'string' || !known.has(id) || (previous !== undefined && id <= previous)) return false;
+    previous = id;
+  }
+  return true;
 }
 
 export function validateTopicMaintenanceManifest(manifest: unknown, record: MemoryRecord): TopicMaintenanceManifest {
@@ -471,40 +547,43 @@ export function validateTopicMaintenanceManifest(manifest: unknown, record: Memo
     throw new Error('Topic maintenance manifest has an unsupported version.');
   if (
     manifest.version === 2 &&
-    (!Object.hasOwn(manifest, 'acceptedSources') || !Object.hasOwn(manifest, 'originCitationIds'))
+    (!EffectRecord.has(manifest, 'acceptedSources') || !EffectRecord.has(manifest, 'originCitationIds'))
   )
     throw new Error('Topic maintenance accepted source vector is missing.');
-  if (manifest.memoryId !== record.metadata.memoryId || !MEMORY_ID.test(manifest.memoryId as string))
+  if (
+    typeof manifest.memoryId !== 'string' ||
+    manifest.memoryId !== record.metadata.memoryId ||
+    !MEMORY_ID.test(manifest.memoryId)
+  )
     throw new Error('Topic maintenance memory identity changed.');
-  if (manifest.repositoryId !== record.metadata.codeCitations![0].repositoryId)
+  if (manifest.repositoryId !== requiredCodeCitations(record)[0].repositoryId)
     throw new Error('Topic maintenance repository identity changed.');
   if (manifest.bodyHash !== consolidationRevision(record.body) || !HASH.test(manifest.bodyHash))
     throw new Error('Topic maintenance body changed after enrollment.');
   if (manifest.coverage !== 'declared-only') throw new Error('Topic maintenance coverage must be declared-only.');
-  const citationIds = new Set(record.metadata.codeCitations!.map(citation => citation.id));
+  const citationIds = new Set(EffectArray.map(requiredCodeCitations(record), citation => citation.id));
   validateTopicMaintenanceParagraphs(record.body, manifest.paragraphs, citationIds);
-  if (
-    !Array.isArray(manifest.additionalDependencies) ||
-    manifest.additionalDependencies.length > MAX_MEMORY_CODE_CITATIONS
-  )
+  const rawDependencies = manifest.additionalDependencies;
+  if (!EffectArray.isArray(rawDependencies) || rawDependencies.length > MAX_MEMORY_CODE_CITATIONS)
     throw new Error('Topic maintenance additional dependency count exceeds citation budget.');
+  const isKnownDependency = (value: unknown): value is TopicMaintenanceDependencyV1 =>
+    plainObject(value) &&
+    exactKeys(value, ['kind', 'citationId']) &&
+    (value.kind === 'configuration' || value.kind === 'dependency') &&
+    typeof value.citationId === 'string' &&
+    citationIds.has(value.citationId);
+  const additionalDependencies = EffectArray.filter(rawDependencies, isKnownDependency);
+  if (additionalDependencies.length !== rawDependencies.length)
+    throw new Error('Topic maintenance additional dependency cites an unknown citation.');
   const seen = new Set<string>();
-  for (const dependency of manifest.additionalDependencies) {
-    if (
-      !plainObject(dependency) ||
-      !exactKeys(dependency, ['kind', 'citationId']) ||
-      !['configuration', 'dependency'].includes(dependency.kind as string) ||
-      typeof dependency.citationId !== 'string' ||
-      !citationIds.has(dependency.citationId)
-    )
-      throw new Error('Topic maintenance additional dependency cites an unknown citation.');
+  for (const dependency of additionalDependencies) {
     if (seen.has(dependency.citationId)) throw new Error('Topic maintenance additional dependency is duplicated.');
     seen.add(dependency.citationId);
   }
   if (manifest.version === 2) {
     let priorOrigin = '';
     if (
-      !Array.isArray(manifest.originCitationIds) ||
+      !EffectArray.isArray(manifest.originCitationIds) ||
       manifest.originCitationIds.length < 1 ||
       manifest.originCitationIds.length > MAX_MEMORY_CODE_CITATIONS
     )
@@ -515,12 +594,12 @@ export function validateTopicMaintenanceManifest(manifest: unknown, record: Memo
       priorOrigin = id;
     }
     const declared = new Set<string>([
-      ...manifest.paragraphs.flatMap(paragraph => paragraph.citationIds),
-      ...manifest.additionalDependencies.map(dependency => dependency.citationId),
+      ...EffectArray.flatMap(manifest.paragraphs, paragraph => paragraph.citationIds),
+      ...EffectArray.map(additionalDependencies, dependency => dependency.citationId),
     ]);
-    const citations = new Map(record.metadata.codeCitations!.map(citation => [citation.id, citation]));
+    const citations = new Map(EffectArray.map(requiredCodeCitations(record), citation => [citation.id, citation]));
     if (
-      !Array.isArray(manifest.acceptedSources) ||
+      !EffectArray.isArray(manifest.acceptedSources) ||
       manifest.acceptedSources.length !== declared.size ||
       manifest.acceptedSources.length > MAX_MEMORY_CODE_CITATIONS
     )
@@ -552,7 +631,9 @@ export function validateTopicMaintenanceManifest(manifest: unknown, record: Memo
   }
   if (encodedBytes(JSON.stringify(manifest)) > MAX_TOPIC_MAINTENANCE_BYTES)
     throw new Error('Topic maintenance manifest exceeds the 32 KiB limit.');
-  return manifest as unknown as TopicMaintenanceManifest;
+  if (!Schema.is(TopicMaintenanceLegacyManifestSchema)(manifest))
+    throw new Error('Topic maintenance manifest has an invalid shape.');
+  return manifest;
 }
 
 /** Resolve the accepted comparison pin without changing the paragraph's historical support citation. */
@@ -562,15 +643,22 @@ export function topicMaintenanceAcceptedCitation(record: MemoryRecord, citationI
   const validated = validateTopicMaintenanceManifest(manifest, record);
   if (!isCodeTopicMaintenanceManifest(validated)) throw new Error('Imported evidence cannot be read as code.');
   const declared = new Set([
-    ...validated.paragraphs.flatMap(paragraph => paragraph.citationIds),
-    ...validated.additionalDependencies.map(dependency => dependency.citationId),
+    ...EffectArray.flatMap(validated.paragraphs, paragraph => paragraph.citationIds),
+    ...EffectArray.map(validated.additionalDependencies, dependency => dependency.citationId),
   ]);
   if (!declared.has(citationId)) throw new Error('Topic maintenance citation is not declared.');
   const acceptedId =
     validated.version !== 1
-      ? validated.acceptedSources.find(source => source.citationId === citationId)!.acceptedCitationId
+      ? EffectOption.getOrUndefined(
+          EffectArray.findFirst(validated.acceptedSources, source => source.citationId === citationId),
+        )!.acceptedCitationId
       : citationId;
-  return record.metadata.codeCitations!.find(citation => citation.id === acceptedId)!;
+  return EffectOption.getOrElse(
+    EffectArray.findFirst(requiredCodeCitations(record), citation => citation.id === acceptedId),
+    () => {
+      throw new Error('Topic maintenance accepted citation is missing.');
+    },
+  );
 }
 
 /** A pure proposal; the application owns exact-target CAS and the approved write. */
@@ -596,15 +684,20 @@ export function proposeTopicMaintenanceObsidianEnrollment(
 function proposeEnrollmentWithManifest<M extends TopicMaintenanceManifest>(record: MemoryRecord, manifest: M) {
   const raw = canonicalMemoryDocumentContent(record.content);
   const separator = /\r?\n\r?\n/u.exec(raw);
-  const header = separator ? raw.slice(0, separator.index) : raw;
-  const body = separator ? raw.slice(separator.index + separator[0].length) : '';
-  if (header.split(/\r?\n/u).some(line => /^\s*topic_maintenance\s*:/u.test(line)))
+  const header = separator ? Effect.pipe(raw, EffectString.slice(0, separator.index)) : raw;
+  const body = separator ? Effect.pipe(raw, EffectString.slice(separator.index + separator[0].length)) : '';
+  if (
+    EffectArray.some(Effect.pipe(header, EffectString.split(/\r?\n/u)), line => /^\s*topic_maintenance\s*:/u.test(line))
+  )
     throw new Error('Topic maintenance is already enrolled; use an accepted update proposal.');
-  const ending = header.includes('\r\n') ? '\r\n' : '\n';
+  const ending = Effect.pipe(header, EffectString.includes('\r\n')) ? '\r\n' : '\n';
   const versioned =
     record.metadata.schemaVersion === undefined
       ? `${header}${ending}schema_version: ${MEMORY_SCHEMA_VERSION}`
-      : header.replace(/^schema_version: [1-9][0-9]*(?=\r?$)/mu, `schema_version: ${MEMORY_SCHEMA_VERSION}`);
+      : Effect.pipe(
+          header,
+          EffectString.replace(/^schema_version: [1-9][0-9]*(?=\r?$)/mu, `schema_version: ${MEMORY_SCHEMA_VERSION}`),
+        );
   const updatedHeader = `${versioned}${ending}topic_maintenance: ${JSON.stringify(manifest)}`;
   return {
     manifest,
@@ -678,8 +771,14 @@ function validEvidence(record: MemoryRecord): void {
   }
 }
 
+function requiredCodeCitations(record: MemoryRecord): readonly MemoryCodeCitationV1[] {
+  const citations = record.metadata.codeCitations;
+  if (citations === undefined) throw new Error('Topic maintenance code evidence is required.');
+  return citations;
+}
+
 function plainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function exactKeys(
@@ -688,7 +787,7 @@ function exactKeys(
   optional: readonly string[] = [],
 ): boolean {
   return (
-    required.every(key => Object.hasOwn(value, key)) &&
-    Object.keys(value).every(key => required.includes(key) || optional.includes(key))
+    EffectArray.every(required, key => EffectRecord.has(value, key)) &&
+    EffectArray.every(EffectRecord.keys(value), key => required.includes(key) || optional.includes(key))
   );
 }

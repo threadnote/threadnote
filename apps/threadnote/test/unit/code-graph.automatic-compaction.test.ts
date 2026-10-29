@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -33,6 +34,8 @@ import {CODE_GRAPH_WAL_JOURNAL_SIZE_LIMIT_BYTES} from '@threadnote/graph/store/s
 import {CODE_GRAPH_SCHEMA_VERSION} from '@threadnote/graph/types';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const GIB = 1024 * 1024 * 1024;
 const AUTOMATIC_COMPACTION_RECEIPT_FILE = 'automatic-compaction-v1.json';
@@ -42,13 +45,13 @@ const AutomaticCompactionIsolatedTestLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(BunServices.layer),
 );
 
-class AutomaticCompactionTestError extends Schema.TaggedError<AutomaticCompactionTestError>()(
-  'AutomaticCompactionTestError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class AutomaticCompactionTestError extends Schema.TaggedError<
+  AutomaticCompactionTestError,
+  {readonly brand: unique symbol}
+>()('AutomaticCompactionTestError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 function availableStorage(
   checkoutId: string,
@@ -126,7 +129,7 @@ function makeCompactionReceiptFixture(checkoutId: string) {
 
 describe('automatic code graph compaction', () => {
   it('reports physical, in-use, and reusable bytes without exposing a local path', () => {
-    const storage = availableStorage('a'.repeat(64), {
+    const storage = availableStorage(Effect2.pipe('a', EffectString.repeat(64)), {
       availableBytes: 16 * GIB,
       opportunityBytes: GIB,
     });
@@ -148,9 +151,11 @@ describe('automatic code graph compaction', () => {
   });
 
   it('distinguishes unknown disk capacity from verified insufficient space', () => {
-    const unknown = managerGraphStorageSummary(availableStorage('a'.repeat(64), {opportunityBytes: GIB}));
+    const unknown = managerGraphStorageSummary(
+      availableStorage(Effect2.pipe('a', EffectString.repeat(64)), {opportunityBytes: GIB}),
+    );
     const insufficient = managerGraphStorageSummary(
-      availableStorage('b'.repeat(64), {availableBytes: GIB, opportunityBytes: GIB}),
+      availableStorage(Effect2.pipe('b', EffectString.repeat(64)), {availableBytes: GIB, opportunityBytes: GIB}),
     );
 
     expect(unknown).toMatchObject({pageStorage: {automaticCompaction: 'space-unknown'}});
@@ -159,14 +164,16 @@ describe('automatic code graph compaction', () => {
 
   it('prioritizes an active repository beyond the bounded lexical prefix', () => {
     const statuses = Array.from({length: 10}, (_, index) => ({
-      identity: {checkoutId: index.toString(16).padStart(64, '0')},
+      identity: {checkoutId: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'))},
       state: index === 9 ? ('running' as const) : ('completed' as const),
-      timestamps: {lastProgressAt: `2026-08-12T00:00:${index.toString().padStart(2, '0')}.000Z`},
+      timestamps: {
+        lastProgressAt: `2026-08-12T00:00:${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}.000Z`,
+      },
     }));
     const selected = managerGraphStorageStatusCheckoutIds(statuses);
 
     expect(selected).toHaveLength(8);
-    expect(selected[0]).toBe('9'.padStart(64, '0'));
+    expect(selected[0]).toBe(Effect2.pipe('9', EffectString.padStart(64, '0')));
   });
 
   effectIt.layer(AutomaticCompactionReceiptTestLayer)(it => {
@@ -178,7 +185,7 @@ describe('automatic code graph compaction', () => {
         const repositories = codeGraphRepositoriesRoot(path, home);
         yield* fs.makeDirectory(repositories, {mode: 0o700, recursive: true});
         yield* Effect.forEach(
-          Array.from({length: 129}, (_, index) => index.toString(16).padStart(64, '0')),
+          Array.from({length: 129}, (_, index) => Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'))),
           checkoutId => fs.makeDirectory(path.join(repositories, checkoutId), {mode: 0o700}),
           {concurrency: 8},
         );
@@ -193,7 +200,7 @@ describe('automatic code graph compaction', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const checkoutId = 'f'.repeat(64);
+        const checkoutId = Effect2.pipe('f', EffectString.repeat(64));
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-automatic-compaction-list-link-'});
         const external = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-automatic-compaction-external-'});
         const repositories = codeGraphRepositoriesRoot(path, home);
@@ -207,7 +214,7 @@ describe('automatic code graph compaction', () => {
 
     it.effect('selects a sidecar checkpoint over structural-only VACUUM work without disk headroom', () =>
       Effect.gen(function* () {
-        const checkoutId = 'e'.repeat(64);
+        const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
         const compacted = yield* Ref.make<readonly {readonly checkoutId: string; readonly operation: string}[]>([]);
         const result = yield* runCodeGraphAutomaticCompactionPassWith(
           {
@@ -242,7 +249,7 @@ describe('automatic code graph compaction', () => {
 
     it.effect('does not select a rollback journal that checkpoint-only maintenance cannot shrink', () =>
       Effect.gen(function* () {
-        const checkoutId = 'f'.repeat(64);
+        const checkoutId = Effect2.pipe('f', EffectString.repeat(64));
         const compacted = yield* Ref.make(false);
         const result = yield* runCodeGraphAutomaticCompactionPassWith(
           {
@@ -268,7 +275,7 @@ describe('automatic code graph compaction', () => {
 
     it.effect('allows exactly one winner when two Managers concurrently claim the same repository', () =>
       Effect.gen(function* () {
-        const checkoutId = '1'.repeat(64);
+        const checkoutId = Effect2.pipe('1', EffectString.repeat(64));
         const candidate = compactionCandidate(checkoutId);
         const {home} = yield* makeCompactionReceiptFixture(checkoutId);
 
@@ -280,15 +287,15 @@ describe('automatic code graph compaction', () => {
           {concurrency: 'unbounded'},
         );
 
-        expect(claims.filter(Boolean)).toHaveLength(1);
+        expect(EffectArray.filter(claims, Boolean)).toHaveLength(1);
         expect(yield* codeGraphAutomaticCompactionCandidateAllowed(home, candidate)).toBe(false);
       }),
     );
 
     it.effect('persists low-yield success and failure cooldowns across fresh scheduler passes', () =>
       Effect.gen(function* () {
-        const lowYieldId = '2'.repeat(64);
-        const failedId = '3'.repeat(64);
+        const lowYieldId = Effect2.pipe('2', EffectString.repeat(64));
+        const failedId = Effect2.pipe('3', EffectString.repeat(64));
         const lowYield = compactionCandidate(lowYieldId);
         const failed = compactionCandidate(failedId);
         const {fs, home, path} = yield* makeCompactionReceiptFixture(lowYieldId);
@@ -327,8 +334,8 @@ describe('automatic code graph compaction', () => {
 
     it.effect('fails closed for malformed and oversized receipts', () =>
       Effect.gen(function* () {
-        const malformedId = '4'.repeat(64);
-        const oversizedId = '5'.repeat(64);
+        const malformedId = Effect2.pipe('4', EffectString.repeat(64));
+        const oversizedId = Effect2.pipe('5', EffectString.repeat(64));
         const malformed = compactionCandidate(malformedId);
         const oversized = compactionCandidate(oversizedId);
         const {fs, home, path, repositoryRoot} = yield* makeCompactionReceiptFixture(malformedId);
@@ -338,10 +345,14 @@ describe('automatic code graph compaction', () => {
           flag: 'wx',
           mode: 0o600,
         });
-        yield* fs.writeFileString(path.join(oversizedRoot, AUTOMATIC_COMPACTION_RECEIPT_FILE), 'x'.repeat(4_097), {
-          flag: 'wx',
-          mode: 0o600,
-        });
+        yield* fs.writeFileString(
+          path.join(oversizedRoot, AUTOMATIC_COMPACTION_RECEIPT_FILE),
+          Effect2.pipe('x', EffectString.repeat(4_097)),
+          {
+            flag: 'wx',
+            mode: 0o600,
+          },
+        );
 
         expect(yield* codeGraphAutomaticCompactionCandidateAllowed(home, malformed)).toBe(false);
         expect(yield* claimCodeGraphAutomaticCompactionCandidate(home, malformed)).toBe(false);
@@ -354,8 +365,8 @@ describe('automatic code graph compaction', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const checkoutLinkId = '6'.repeat(64);
-        const parentLinkId = '7'.repeat(64);
+        const checkoutLinkId = Effect2.pipe('6', EffectString.repeat(64));
+        const parentLinkId = Effect2.pipe('7', EffectString.repeat(64));
 
         const checkoutLinkHome = yield* fs.makeTempDirectoryScoped({
           prefix: 'threadnote-automatic-compaction-checkout-link-',
@@ -393,7 +404,7 @@ describe('automatic code graph compaction', () => {
 
     it.effect('shares a recorded manual compaction outcome with the automatic candidate fence', () =>
       Effect.gen(function* () {
-        const checkoutId = '8'.repeat(64);
+        const checkoutId = Effect2.pipe('8', EffectString.repeat(64));
         const {home} = yield* makeCompactionReceiptFixture(checkoutId);
         expect(yield* compactCodeGraphStorage(home, checkoutId, {dryRun: false})).toMatchObject({
           action: 'missing',
@@ -420,7 +431,7 @@ describe('automatic code graph compaction', () => {
 
     it.effect('propagates an explicit force request across the isolated worker boundary', () =>
       Effect.gen(function* () {
-        const checkoutId = '9'.repeat(64);
+        const checkoutId = Effect2.pipe('9', EffectString.repeat(64));
         const baseSystem = yield* SystemInfo;
         const system = SystemInfo.of({
           ...baseSystem,
@@ -494,7 +505,7 @@ describe('automatic code graph compaction', () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-automatic-compaction-worker-'});
-          const checkoutId = 'a'.repeat(64);
+          const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
 
           expect(
             yield* compactCodeGraphStorageIsolated(home, checkoutId).pipe(
@@ -509,8 +520,8 @@ describe('automatic code graph compaction', () => {
 
   effectIt.effect('compacts only the largest eligible database in one pass', () =>
     Effect.gen(function* () {
-      const first = 'a'.repeat(64);
-      const largest = 'b'.repeat(64);
+      const first = Effect2.pipe('a', EffectString.repeat(64));
+      const largest = Effect2.pipe('b', EffectString.repeat(64));
       const compacted: string[] = [];
       const result = yield* runCodeGraphAutomaticCompactionPassWith(
         {
@@ -542,8 +553,8 @@ describe('automatic code graph compaction', () => {
 
   effectIt.effect('waits when the reviewed threshold or disk-headroom gate is not satisfied', () =>
     Effect.gen(function* () {
-      const lowSpace = 'c'.repeat(64);
-      const belowThreshold = 'd'.repeat(64);
+      const lowSpace = Effect2.pipe('c', EffectString.repeat(64));
+      const belowThreshold = Effect2.pipe('d', EffectString.repeat(64));
       const compacted: string[] = [];
       const result = yield* runCodeGraphAutomaticCompactionPassWith(
         {
@@ -577,7 +588,7 @@ describe('automatic code graph compaction', () => {
 
   effectIt.effect('does not select a structural-slack-only recommendation for automatic compaction', () =>
     Effect.gen(function* () {
-      const checkoutId = 'c'.repeat(64);
+      const checkoutId = Effect2.pipe('c', EffectString.repeat(64));
       const compacted = yield* Ref.make(false);
       const result = yield* runCodeGraphAutomaticCompactionPassWith(
         {
@@ -603,7 +614,9 @@ describe('automatic code graph compaction', () => {
 
   effectIt.effect('advances its bounded scan so large homes cannot starve later databases', () =>
     Effect.gen(function* () {
-      const checkoutIds = Array.from({length: 130}, (_, index) => index.toString(16).padStart(64, '0'));
+      const checkoutIds = Array.from({length: 130}, (_, index) =>
+        Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+      );
       const target = checkoutIds.at(-1)!;
       const compacted: string[] = [];
       const dependencies = {
@@ -650,10 +663,12 @@ describe('automatic code graph compaction', () => {
     });
     fc.assert(
       fc.property(fc.array(candidate, {maxLength: 64}), fc.array(fc.integer()), (candidates, ordering) => {
-        const permuted = candidates
-          .map((value, index) => ({index, order: ordering[index] ?? 0, value}))
-          .sort((left, right) => left.order - right.order || left.index - right.index)
-          .map(entry => entry.value);
+        const permuted = EffectArray.map(
+          EffectArray.map(candidates, (value, index) => ({index, order: ordering[index] ?? 0, value})).sort(
+            (left, right) => left.order - right.order || left.index - right.index,
+          ),
+          entry => entry.value,
+        );
         expect(selectCodeGraphAutomaticCompactionCandidate(permuted)).toEqual(
           selectCodeGraphAutomaticCompactionCandidate(candidates),
         );
@@ -679,7 +694,7 @@ describe('automatic code graph compaction', () => {
   });
 
   it('strictly validates the bounded worker protocol and target binding', () => {
-    const checkoutId = 'a'.repeat(64);
+    const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
     const request = JSON.stringify({
       checkoutId,
       force: true,
@@ -723,6 +738,7 @@ describe('automatic code graph compaction', () => {
           force: false,
           operation: 'compact',
           protocol: 1,
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           threadnoteHome: 'x'.repeat(CODE_GRAPH_AUTOMATIC_COMPACTION_INPUT_BYTES_MAXIMUM + 1),
         }),
       ),
@@ -737,7 +753,9 @@ describe('automatic code graph compaction', () => {
       ok: true,
       result: {action: 'compacted', checkoutId},
     });
-    expect(decodeAutomaticCompactionWorkerResponse(response, 'b'.repeat(64))).toBeUndefined();
+    expect(
+      decodeAutomaticCompactionWorkerResponse(response, Effect2.pipe('b', EffectString.repeat(64))),
+    ).toBeUndefined();
     expect(
       decodeAutomaticCompactionWorkerResponse(
         JSON.stringify({
@@ -797,7 +815,7 @@ describe('automatic code graph compaction', () => {
   it('uses the supplied development entrypoint independently of package placement', () => {
     fc.assert(
       fc.property(fc.array(fc.constantFrom('a', 'b', 'c', ' ', '-'), {minLength: 1, maxLength: 40}), segments => {
-        const developmentEntrypoint = `/arbitrary/${segments.join('')}/entry.ts`;
+        const developmentEntrypoint = `/arbitrary/${EffectArray.join(segments, '')}/entry.ts`;
         const invocation = codeGraphAutomaticCompactionWorkerInvocation({
           developmentEntrypoint,
           executablePath: '/opt/bun/bin/bun',
@@ -811,7 +829,7 @@ describe('automatic code graph compaction', () => {
 
   effectIt.effect('publishes running status before a long compaction and interrupts it with Manager scope', () =>
     Effect.gen(function* () {
-      const checkoutId = 'e'.repeat(64);
+      const checkoutId = Effect2.pipe('e', EffectString.repeat(64));
       const running = yield* Deferred.make<void>();
       const cancelled = yield* Ref.make(false);
       const statuses = yield* Ref.make<string[]>([]);
@@ -840,7 +858,7 @@ describe('automatic code graph compaction', () => {
   effectIt.layer(AutomaticCompactionReceiptTestLayer)(it => {
     it.effect('elects one inventory leader and lets a waiting host take over after it exits', () =>
       Effect.gen(function* () {
-        const checkoutId = 'c'.repeat(64);
+        const checkoutId = Effect2.pipe('c', EffectString.repeat(64));
         const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({
           prefix: 'threadnote-automatic-compaction-scheduler-',
         });
@@ -902,7 +920,7 @@ describe('automatic code graph compaction', () => {
 
     it.effect('retries a deferred active build after its five-minute receipt cooldown', () =>
       Effect.gen(function* () {
-        const checkoutId = 'd'.repeat(64);
+        const checkoutId = Effect2.pipe('d', EffectString.repeat(64));
         const {home} = yield* makeCompactionReceiptFixture(checkoutId);
         const candidate = compactionCandidate(checkoutId);
         yield* recordCodeGraphAutomaticCompactionAttempt(home, candidate, {
@@ -932,7 +950,7 @@ describe('automatic code graph compaction', () => {
 
   effectIt.effect('retains the failed candidate so Manager can render a human repository label', () =>
     Effect.gen(function* () {
-      const checkoutId = 'd'.repeat(64);
+      const checkoutId = Effect2.pipe('d', EffectString.repeat(64));
       const failed = yield* Deferred.make<{readonly checkoutId?: string; readonly state: string}>();
       const fiber = yield* runCodeGraphAutomaticCompactionLoopWith(
         {

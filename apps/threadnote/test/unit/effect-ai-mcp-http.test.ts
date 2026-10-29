@@ -1,4 +1,5 @@
-import {Effect, Layer} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Effect, Layer, Predicate, Schema} from 'effect';
 import * as HttpRouter from 'effect/http/HttpRouter';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import {McpSchema} from 'effect/ai';
@@ -14,10 +15,16 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const HTTP_CONTEXT_TOOL = 'request_context_fixture';
 
-interface JsonRpcResponse {
-  readonly id?: number | string;
-  readonly jsonrpc: '2.0';
-  readonly result?: Record<string, unknown>;
+function isMcpRequestContextWithProgress(
+  value: unknown,
+): value is McpRequestContext & {readonly progressEnabled: boolean} {
+  return (
+    Predicate.isObject(value) &&
+    (value.transport === 'http' || value.transport === 'stdio') &&
+    typeof value.progressEnabled === 'boolean' &&
+    (value.correlationId === undefined || typeof value.correlationId === 'string') &&
+    (value.deadlineEpochMilliseconds === undefined || typeof value.deadlineEpochMilliseconds === 'number')
+  );
 }
 
 interface McpHttpFixture {
@@ -140,7 +147,12 @@ async function rpcRequest(
   }
   if (options.origin !== undefined) headers.origin = options.origin;
   if (options.sessionId !== undefined) headers['mcp-session-id'] = options.sessionId;
-  const body = Array.isArray(message) ? message.map(item => ({jsonrpc: '2.0', ...item})) : {jsonrpc: '2.0', ...message};
+  const isBatch = (
+    value: Readonly<Record<string, unknown>> | readonly Readonly<Record<string, unknown>>[],
+  ): value is readonly Readonly<Record<string, unknown>>[] => EffectArray.isArray(value);
+  const body = isBatch(message)
+    ? EffectArray.map(message, item => ({jsonrpc: '2.0', ...item}))
+    : {jsonrpc: '2.0', ...message};
   return fixture.handler(
     new Request('https://memory.example.test/mcp', {
       body: JSON.stringify(body),
@@ -166,9 +178,15 @@ async function callContextTool(
     {principal, requestId, sessionId},
   );
   expect(response.status).toBe(200);
-  const envelope = (await response.json()) as JsonRpcResponse;
-  const result = envelope.result as {readonly structuredContent?: unknown};
-  return result.structuredContent as McpRequestContext & {readonly progressEnabled: boolean};
+  const envelope = Schema.decodeUnknownSync(McpSchema.JsonRpcResponse)(await response.json());
+  if (!('result' in envelope) || !Predicate.isObject(envelope.result)) {
+    throw new Error('Expected the MCP tool call response to contain a result object.');
+  }
+  const structuredContent = envelope.result.structuredContent;
+  if (!isMcpRequestContextWithProgress(structuredContent)) {
+    throw new Error('Expected the MCP tool result to contain a valid request context.');
+  }
+  return structuredContent;
 }
 
 describe('Effect MCP Streamable HTTP transport', () => {
@@ -465,5 +483,5 @@ describe('Effect MCP Streamable HTTP transport', () => {
 function headerValue(): fc.Arbitrary<string> {
   return fc
     .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'), {maxLength: 16, minLength: 1})
-    .map(characters => characters.join(''));
+    .map(characters => EffectArray.join(characters, ''));
 }

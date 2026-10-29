@@ -1,3 +1,5 @@
+import {isOneOf as checkedIsOneOf} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {isManagerProjectName} from './project/name.js';
 import {Effect, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -20,22 +22,25 @@ import {
   inspectTopicDependencyExpansionRecovery,
 } from '../memory/maintenance/topic_expansion.js';
 import {managerAttentionProjectRoot} from './attention.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class ManagerTopicExpansionError extends Schema.TaggedError<ManagerTopicExpansionError>()(
-  'ManagerTopicExpansionError',
-  {
-    message: Schema.String,
-    recovery: Schema.optionalKey(
-      Schema.Struct({
-        action: Schema.Literal('restart'),
-        targetUri: Schema.String,
-        project: Schema.String,
-        revision: Schema.String,
-        approvalDigest: Schema.String,
-      }),
-    ),
-  },
-) {}
+export class ManagerTopicExpansionError extends Schema.TaggedError<
+  ManagerTopicExpansionError,
+  {readonly brand: unique symbol}
+>()('ManagerTopicExpansionError', {
+  message: Schema.String,
+  recovery: Schema.optionalKey(
+    Schema.Struct({
+      action: Schema.Literal('restart'),
+      targetUri: Schema.String,
+      project: Schema.String,
+      revision: Schema.String,
+      approvalDigest: Schema.String,
+    }),
+  ),
+}) {}
 const fail = () =>
   ManagerTopicExpansionError.make({
     message:
@@ -46,17 +51,17 @@ const privateUri = (uri: unknown): uri is string =>
   typeof uri === 'string' &&
   uri.length <= 4096 &&
   /^threadnote:\/\/user\/[^/]+\/memories\/durable\/projects\//u.test(uri) &&
-  !uri.includes('/shared/');
+  !Effect2.pipe(uri, EffectString.includes('/shared/'));
 const exactKeys = (value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []) =>
-  required.every(key => Object.hasOwn(value, key)) &&
-  Object.keys(value).every(key => required.includes(key) || optional.includes(key));
+  EffectArray.every(required, key => EffectRecord.has(value, key)) &&
+  EffectArray.every(EffectRecord.keys(value), key => required.includes(key) || optional.includes(key));
 const publicSelection = ({
   root: _root,
   project: _project,
   ...selection
 }: TopicDependencyExpansionPreview['input']): ManagerTopicExpansionSelection => selection;
 const coverage = (preview: TopicDependencyExpansionPreview) =>
-  preview.proof.reads.map(read => ({
+  EffectArray.map(preview.proof.reads, read => ({
     seedId: read.seedId,
     status: 'exhaustive' as const,
     visitedNodes: read.coverage.visitedNodes,
@@ -94,10 +99,16 @@ export const runTopicExpansionSurface = Effect.fn('topicExpansion.surface')(func
       configDigest: initial.configDigest,
       body: initial.body,
       warning: initial.warning,
-      currentScope: initial.currentScope.map(item => ({
+      currentScope: EffectArray.map(initial.currentScope, item => ({
         ...item,
-        ...(initial.seeds.find(seed => seed.citationId === item.citationId)
-          ? {path: initial.seeds.find(seed => seed.citationId === item.citationId)!.path}
+        ...(EffectOption.getOrUndefined(
+          EffectArray.findFirst(initial.seeds, seed => seed.citationId === item.citationId),
+        )
+          ? {
+              path: EffectOption.getOrUndefined(
+                EffectArray.findFirst(initial.seeds, seed => seed.citationId === item.citationId),
+              )!.path,
+            }
           : {}),
       })),
       seeds: initial.seeds,
@@ -106,8 +117,10 @@ export const runTopicExpansionSurface = Effect.fn('topicExpansion.surface')(func
   if (
     !input.selection ||
     typeof input.selection !== 'object' ||
-    Array.isArray(input.selection) ||
+    EffectArray.isArray(input.selection) ||
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     Object.hasOwn(input.selection, 'root') ||
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     Object.hasOwn(input.selection, 'project')
   )
     return yield* fail();
@@ -134,12 +147,16 @@ export const runTopicExpansionSurface = Effect.fn('topicExpansion.surface')(func
       currentScope: inspected.currentScope,
       seeds: inspected.seeds,
       choices: inspected.choices,
-      coverage: inspected.coverage?.map(read => ({
-        seedId: read.seedId,
-        status: read.status,
-        visitedNodes: read.visitedNodes,
-        inspectedEdges: read.inspectedEdges,
-      })),
+      coverage: EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(inspected.coverage), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, read => ({
+            seedId: read.seedId,
+            status: read.status,
+            visitedNodes: read.visitedNodes,
+            inspectedEdges: read.inspectedEdges,
+          })),
+        ),
+      ),
     } satisfies ManagerTopicExpansionInspection;
   }
   if (
@@ -219,7 +236,7 @@ export const runTopicExpansionSurface = Effect.fn('topicExpansion.surface')(func
     approvalDigest: preview.approvalDigest,
     content: preview.content,
     body: initial.body,
-    additions: preview.additions.map(item => ({
+    additions: EffectArray.map(preview.additions, item => ({
       kind: item.kind,
       ref: item.ref,
       path: item.citation.path,
@@ -255,10 +272,13 @@ export const handleManagerTopicExpansion = Effect.fn('managerTopicExpansion.hand
     !privateUri(uri) ||
     typeof project !== 'string' ||
     !isManagerProjectName(project) ||
-    !['inspect', 'discover', 'preview', 'apply', 'restart'].includes(action as string)
+    !checkedIsOneOf(['inspect', 'discover', 'preview', 'apply', 'restart'], action)
   )
     return invalid();
-  if (request.method === 'GET' && [...request.url.searchParams.keys()].some(key => key !== 'uri' && key !== 'project'))
+  if (
+    request.method === 'GET' &&
+    EffectArray.some([...request.url.searchParams.keys()], key => key !== 'uri' && key !== 'project')
+  )
     return invalid();
   if (
     body &&
@@ -274,7 +294,11 @@ export const handleManagerTopicExpansion = Effect.fn('managerTopicExpansion.hand
     return invalid();
   if (
     (action === 'apply' || action === 'restart') &&
-    (body?.approved !== true || !HASH.test(body?.revision as string) || !HASH.test(body?.approvalDigest as string))
+    (body?.approved !== true ||
+      typeof body.revision !== 'string' ||
+      !HASH.test(body.revision) ||
+      typeof body.approvalDigest !== 'string' ||
+      !HASH.test(body.approvalDigest))
   )
     return invalid();
   const root = yield* managerAttentionProjectRoot(request.config, project);
@@ -287,13 +311,13 @@ export const handleManagerTopicExpansion = Effect.fn('managerTopicExpansion.hand
       },
     };
   const result = yield* runTopicExpansionSurface(request.config, {
-    action: action as TopicExpansionSurfaceInput['action'],
+    action: action,
     uri,
     project,
     callerCwd: root.cwd,
     selection: body?.selection,
-    revision: body?.revision as string | undefined,
-    approvalDigest: body?.approvalDigest as string | undefined,
+    revision: typeof body?.revision === 'string' ? body.revision : undefined,
+    approvalDigest: typeof body?.approvalDigest === 'string' ? body.approvalDigest : undefined,
     approved: body?.approved === true,
   }).pipe(Effect.result);
   return Result.isSuccess(result)

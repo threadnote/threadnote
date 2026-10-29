@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {DevSkillsAction, DevSkillsBundle, DevSkillsResult, DevSkillsSelector} from './contract.js';
@@ -8,6 +9,8 @@ import {fail, stableJson} from './files.js';
 import {commitMutation, readTransactionConsumer, recoverTransaction} from './transaction.js';
 import {validateLease, withDevSkillsMutationLease, withPhysicalLock, type DevSkillsMutationLease} from './lease.js';
 import {devSkillsReadiness} from './readiness.js';
+import * as EffectRecord from 'effect/Record';
+
 export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(function* (
   config: RuntimeConfig,
   bundle: DevSkillsBundle,
@@ -25,7 +28,13 @@ export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(funct
   if (options.expectedDigest && initial.plan.previewDigest !== options.expectedDigest)
     return yield* fail('stale-preview', 'Development skills changed since preview. Preview the operation again.');
   if (!initial.plan.canApply && (initial.missingStoreAttempt || initial.plan.installationState !== 'recovery-needed'))
-    return yield* fail('installation-conflict', initial.plan.issues.map(issue => issue.message).join(' '));
+    return yield* fail(
+      'installation-conflict',
+      EffectArray.join(
+        EffectArray.map(initial.plan.issues, issue => issue.message),
+        ' ',
+      ),
+    );
   if (initial.missingStoreReinstall && options.lease)
     return yield* fail('invalid-lease', 'A missing-store install requires its own no-replay mutation lease.');
   if (
@@ -54,7 +63,13 @@ export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(funct
         if (options.expectedDigest && options.expectedDigest !== locked.plan.previewDigest)
           return yield* fail('stale-preview', 'Enrollment changed since preview.');
         if (!locked.plan.canApply)
-          return yield* fail('installation-conflict', locked.plan.issues.map(issue => issue.message).join(' '));
+          return yield* fail(
+            'installation-conflict',
+            EffectArray.join(
+              EffectArray.map(locked.plan.issues, issue => issue.message),
+              ' ',
+            ),
+          );
         yield* disableEnrollment(config, locked.consumer);
         return {
           ...locked.plan,
@@ -87,7 +102,13 @@ export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(funct
               })
             : locked;
           if (!mutation.plan.canApply)
-            return yield* fail('installation-conflict', mutation.plan.issues.map(issue => issue.message).join(' '));
+            return yield* fail(
+              'installation-conflict',
+              EffectArray.join(
+                EffectArray.map(mutation.plan.issues, issue => issue.message),
+                ' ',
+              ),
+            );
           const applied = yield* commitMutation(mutation);
           const receipt = (yield* readReceipt(target)).receipt;
           return {
@@ -99,7 +120,7 @@ export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(funct
               ? yield* devSkillsReadiness(
                   config,
                   target,
-                  receipt && Object.keys(receipt.consumers).length ? receipt.manifest : undefined,
+                  receipt && EffectRecord.keys(receipt.consumers).length ? receipt.manifest : undefined,
                 )
               : undefined,
           } satisfies DevSkillsResult;

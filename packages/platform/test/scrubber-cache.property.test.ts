@@ -1,20 +1,37 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {applyScrubber, redactSensitiveText, SCRUBBER_PATTERNS} from '@threadnote/platform/scrubber';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const text = FC.array(FC.constantFrom('a', 'b', 'c', 'A', 'B', 'C', '0', '1', ' ', '\n', 'é', '😀'), {
   maxLength: 60,
-}).map(characters => characters.join(''));
+}).map(characters => EffectArray.join(characters, ''));
 const flags = FC.constantFrom('', 'g', 'i', 'gi', 'm', 'gm', 's', 'gs', 'y', 'gy', 'iy', 'giy', 'u', 'gu', 'uy', 'guy');
 const source = FC.constantFrom('[a-c]+', 'a|b', '(?=a)', '^a', 'a$', '\\s+', '[é😀]', 'a.*?b', '[01]');
 
 function uncachedCustomRedaction(content: string, regex: RegExp, placeholder: string) {
   if (!new RegExp(regex.source, regex.flags).test(content)) return {cleaned: content, redactions: []};
-  const global = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : `${regex.flags}g`);
+  const global = new RegExp(
+    regex.source,
+    Effect.pipe(regex.flags, EffectString.includes('g')) ? regex.flags : `${regex.flags}g`,
+  );
   return {
-    cleaned: content.replace(global, placeholder),
-    redactions: [{count: (content.match(global) ?? []).length, name: 'custom'}],
+    cleaned: Effect.pipe(content, EffectString.replace(global, placeholder)),
+    redactions: [
+      {
+        count: (
+          Effect.pipe(
+            content,
+            EffectString.match(global),
+            Effect.Option.getOrElse(() => null),
+          ) ?? []
+        ).length,
+        name: 'custom',
+      },
+    ],
   };
 }
 
@@ -70,7 +87,7 @@ describe('private scrubber matching clones', () => {
   });
 
   it('keeps repeated credential and local-path redaction byte-compatible', () => {
-    const token = ['ghp_', 'abcdefghijklmnopqrst'].join('');
+    const token = EffectArray.join(['ghp_', 'abcdefghijklmnopqrst'], '');
     const input = `token=value ${token} /Users/example/work C:\\Users\\example\\work`;
     for (let repeat = 0; repeat < 3; repeat += 1) {
       expect(redactSensitiveText(input)).toBe('token=[REDACTED] <secret> <local-path> <local-path>');
@@ -81,18 +98,22 @@ describe('private scrubber matching clones', () => {
   it('redacts quoted and bearer assignments while preserving labels and separators', () => {
     expect(
       redactSensitiveText(
-        ['api_key = "two words"', 'authorization: Bearer abc.def', "session='opaque'", 'url=https://example.com'].join(
+        EffectArray.join(
+          ['api_key = "two words"', 'authorization: Bearer abc.def', "session='opaque'", 'url=https://example.com'],
           '\n',
         ),
       ),
     ).toBe(
-      ['api_key = [REDACTED]', 'authorization: [REDACTED]', 'session=[REDACTED]', 'url=https://example.com'].join('\n'),
+      EffectArray.join(
+        ['api_key = [REDACTED]', 'authorization: [REDACTED]', 'session=[REDACTED]', 'url=https://example.com'],
+        '\n',
+      ),
     );
   });
 
   it('preserves output when an oversized pattern evicts the retained clone', () => {
     const regex = /a/;
-    for (const pattern of ['a', 'a'.repeat(65_537), 'a']) {
+    for (const pattern of ['a', Effect.pipe('a', EffectString.repeat(65_537)), 'a']) {
       regex.compile(pattern, 'g');
       regex.lastIndex = 7;
       const content = pattern;

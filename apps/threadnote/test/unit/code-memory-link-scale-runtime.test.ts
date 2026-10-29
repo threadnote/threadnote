@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -27,27 +28,44 @@ describe('code-memory-link inverse-selector scale runtime', () => {
       expect(capture.corpus.corpusBytes).toBeGreaterThan(0);
       expect(capture.resources.recallDatabaseBytes).toBeGreaterThan(0);
       expect(capture.resources.recallStorageBytes).toBeGreaterThanOrEqual(capture.resources.recallDatabaseBytes);
-      expect(capture.scenarios.map(scenario => scenario.id)).toEqual(CODE_MEMORY_LINK_SCALE_SCENARIOS);
+      expect(EffectArray.map(capture.scenarios, scenario => scenario.id)).toEqual(CODE_MEMORY_LINK_SCALE_SCENARIOS);
       for (const scenario of capture.scenarios) {
         const observations = [scenario.cold, ...scenario.warmups, ...scenario.samples];
         expect(observations).toHaveLength(5);
-        expect(observations.every(observation => observation.canonicalMismatchCount === 0)).toBe(true);
+        expect(EffectArray.every(observations, observation => observation.canonicalMismatchCount === 0)).toBe(true);
         expect(
-          observations.every(
+          EffectArray.every(
+            observations,
             observation => observation.truncatedSelectorCount === scenario.expectedTruncatedSelectorCount,
           ),
         ).toBe(true);
-        expect(observations.every(observation => observation.returnedUris.length <= 8)).toBe(true);
+        expect(EffectArray.every(observations, observation => observation.returnedUris.length <= 8)).toBe(true);
         expect(
-          observations.every(
+          EffectArray.every(
+            observations,
             observation => JSON.stringify(observation.returnedUris) === JSON.stringify(scenario.expectedUris),
           ),
         ).toBe(true);
       }
-      expect(capture.scenarios.find(scenario => scenario.id === 'file-backlinks')?.expectedUris).toHaveLength(2);
-      expect(capture.scenarios.find(scenario => scenario.id === 'symbol-backlink')?.expectedUris).toHaveLength(1);
-      expect(capture.scenarios.find(scenario => scenario.id === 'dense-shared-selector')?.expectedUris).toHaveLength(8);
-      expect(capture.scenarios.find(scenario => scenario.id === 'no-answer')?.expectedUris).toEqual([]);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(capture.scenarios, scenario => scenario.id === 'file-backlinks'),
+        )?.expectedUris,
+      ).toHaveLength(2);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(capture.scenarios, scenario => scenario.id === 'symbol-backlink'),
+        )?.expectedUris,
+      ).toHaveLength(1);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(capture.scenarios, scenario => scenario.id === 'dense-shared-selector'),
+        )?.expectedUris,
+      ).toHaveLength(8);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(capture.scenarios, scenario => scenario.id === 'no-answer'))
+          ?.expectedUris,
+      ).toEqual([]);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 

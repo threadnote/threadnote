@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
@@ -24,16 +25,19 @@ import {
 } from '../share/core.js';
 import {scrubberBlocker} from '@threadnote/platform/scrubber';
 import {parseResourceId, validatePortableSegment} from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const GIT_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const REVIEW_ID = /^review-[0-9a-f]{16}$/u;
 const MAXIMUM_ARTIFACT_BYTES = 256 * 1_024;
 
-export class KnowledgeDeltaGitProposalError extends Schema.TaggedError<KnowledgeDeltaGitProposalError>()(
-  'KnowledgeDeltaGitProposalError',
-  {message: Schema.String},
-) {}
+export class KnowledgeDeltaGitProposalError extends Schema.TaggedError<
+  KnowledgeDeltaGitProposalError,
+  {readonly brand: unique symbol}
+>()('KnowledgeDeltaGitProposalError', {message: Schema.String}) {}
 
 export interface ReviewedSharedMemoryMutationV1 {
   readonly approval: {
@@ -138,17 +142,20 @@ export function buildKnowledgeDeltaGitProposalV1(
   if (input.mutations.length > 3) invalid('A Git proposal can contain at most three Knowledge Delta mutations.');
   if (delta.noAction) invalid('A no-action Knowledge Delta cannot produce a Git mutation proposal.');
 
-  const itemsById = new Map(delta.items.map(item => [item.candidateId, item] as const));
+  const itemsById = new Map(EffectArray.map(delta.items, item => [item.candidateId, item] as const));
   if (itemsById.size !== delta.items.length) invalid('Knowledge Delta candidate IDs must be unique.');
-  const files = [...input.mutations]
-    .sort((left, right) => left.candidateId.localeCompare(right.candidateId))
-    .map(mutation => proposalFile(project, delta, itemsById, mutation));
+  const files = EffectArray.map(
+    [...input.mutations].sort((left, right) =>
+      Effect.pipe(left.candidateId, EffectString.localeCompare(right.candidateId)),
+    ),
+    mutation => proposalFile(project, delta, itemsById, mutation),
+  );
   assertUnique(
-    files.map(file => file.approval.candidateId),
+    EffectArray.map(files, file => file.approval.candidateId),
     'approved candidate',
   );
   assertUnique(
-    files.map(file => file.path),
+    EffectArray.map(files, file => file.path),
     'target path',
   );
 
@@ -167,7 +174,9 @@ export function buildKnowledgeDeltaGitProposalV1(
   );
   const unsigned = {
     base: {expectedCommit: baseCommit},
-    branch: {name: `threadnote/knowledge-delta/${delta.reviewId}-${contentSetHash.slice(0, 12)}`},
+    branch: {
+      name: `threadnote/knowledge-delta/${delta.reviewId}-${Effect.pipe(contentSetHash, EffectString.slice(0, 12))}`,
+    },
     commit: {message: `threadnote: propose ${project} knowledge delta ${delta.reviewId}`},
     files,
     knowledgeDelta: {
@@ -220,15 +229,16 @@ export function verifyKnowledgeDeltaGitProposalV1(proposal: KnowledgeDeltaGitPro
     invalid('Git proposal commit message is not reproducible.');
   }
   assertUnique(
-    proposal.files.map(file => file.approval.candidateId),
+    EffectArray.map(proposal.files, file => file.approval.candidateId),
     'approved candidate',
   );
   assertUnique(
-    proposal.files.map(file => file.path),
+    EffectArray.map(proposal.files, file => file.path),
     'target path',
   );
   const ordered = [...proposal.files].sort(compareFile);
-  if (ordered.some((file, index) => file !== proposal.files[index])) invalid('Git proposal files are not canonical.');
+  if (EffectArray.some(ordered, (file, index) => file !== proposal.files[index]))
+    invalid('Git proposal files are not canonical.');
   for (const file of proposal.files) {
     const record = verifyProposalFile(proposal, file);
     if (record.metadata.topicMaintenance !== undefined || record.metadata.reviewedSupport !== undefined)
@@ -302,7 +312,7 @@ function proposalFile(
   const path = sharedDurablePath(project, topic);
   const target = buildTargetPrecondition(project, topic, memoryId, mutation);
   if (
-    relations.some(relation => {
+    EffectArray.some(relations, relation => {
       const relatedMemoryId = memoryIdFromIdentityAlias(relation.uri);
       return relatedMemoryId === memoryId || relatedMemoryId === target.memoryId;
     })
@@ -464,10 +474,12 @@ function verifyProposalFileContract(
         record.metadata.topic !== topic)) ||
     (automatic &&
       (!['durable', 'handoff', 'incident', 'preference', 'smoke'].includes(record.metadata.kind) ||
-        file.path.split('/')[0] !== record.metadata.kind ||
-        !file.path.endsWith('.md') ||
+        Effect.pipe(file.path, EffectString.split('/'))[0] !== record.metadata.kind ||
+        !Effect.pipe(file.path, EffectString.endsWith('.md')) ||
         file.operation !== 'replace' ||
-        (record.metadata.topic ?? file.path.split('/').at(-1)!.slice(0, -3)) !== topic)) ||
+        (record.metadata.topic ??
+          Effect.pipe(Effect.pipe(file.path, EffectString.split('/')).at(-1)!, EffectString.slice(0, -3))) !==
+          topic)) ||
     record.metadata.status !== 'active' ||
     record.metadata.visibility !== 'shared' ||
     record.metadata.memoryId !== file.memory.id
@@ -476,7 +488,7 @@ function verifyProposalFileContract(
   }
   const relations = canonicalRelations(record.metadata.relations ?? [], file.approval.candidateId);
   if (
-    relations.some(relation => {
+    EffectArray.some(relations, relation => {
       const relatedMemoryId = memoryIdFromIdentityAlias(relation.uri);
       return relatedMemoryId === file.approval.expectedSourceMemoryId || relatedMemoryId === file.memory.id;
     })
@@ -522,25 +534,30 @@ export function canonicalRelations(
     }
   }
   const canonical = [...relations].sort(
-    (left, right) => left.type.localeCompare(right.type) || left.uri.localeCompare(right.uri),
+    (left, right) =>
+      Effect.pipe(left.type, EffectString.localeCompare(right.type)) ||
+      Effect.pipe(left.uri, EffectString.localeCompare(right.uri)),
   );
   assertUnique(
-    canonical.map(relation => `${relation.type}\n${relation.uri}`),
+    EffectArray.map(canonical, relation => `${relation.type}\n${relation.uri}`),
     'memory relation',
   );
   return canonical;
 }
 
 function setMemoryId(content: string, memoryId: string): string {
-  const lines = content.split('\n');
-  const headerEnd = lines.findIndex(line => line.trim() === '');
+  const lines = Effect.pipe(content, EffectString.split('\n'));
+  const headerEnd = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(lines, line => Effect.pipe(line, EffectString.trim) === ''),
+    () => -1,
+  );
   if (headerEnd === -1) invalid('Shared memory projection has no header boundary.');
-  const memoryIdIndexes = lines
-    .slice(0, headerEnd)
-    .flatMap((line, index) => (line.startsWith('memory_id:') ? [index] : []));
+  const memoryIdIndexes = EffectArray.flatMap(lines.slice(0, headerEnd), (line, index) =>
+    Effect.pipe(line, EffectString.startsWith('memory_id:')) ? [index] : [],
+  );
   if (memoryIdIndexes.length !== 1) invalid('Shared memory projection must have exactly one stable memory identity.');
   lines[memoryIdIndexes[0]] = `memory_id: ${memoryId}`;
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }
 
 function assertPersonalSourceUri(uri: string, project: string, topic: string, candidateId: string): void {
@@ -585,7 +602,7 @@ export function expectedBranchName(
       ...(proposal.maintenance === undefined ? {} : {maintenance: proposal.maintenance}),
     }),
   );
-  return `threadnote/knowledge-delta/${proposal.knowledgeDelta.reviewId}-${contentSetHash.slice(0, 12)}`;
+  return `threadnote/knowledge-delta/${proposal.knowledgeDelta.reviewId}-${Effect.pipe(contentSetHash, EffectString.slice(0, 12))}`;
 }
 
 function requireReview(reviewId: string, revision: number): void {
@@ -617,11 +634,14 @@ function assertUnique(values: readonly string[], label: string): void {
 }
 
 function compareCandidate(left: KnowledgeDeltaItemV1, right: KnowledgeDeltaItemV1): number {
-  return left.candidateId.localeCompare(right.candidateId);
+  return Effect.pipe(left.candidateId, EffectString.localeCompare(right.candidateId));
 }
 
 function compareFile(left: KnowledgeDeltaGitProposalFileV1, right: KnowledgeDeltaGitProposalFileV1): number {
-  return left.approval.candidateId.localeCompare(right.approval.candidateId) || left.path.localeCompare(right.path);
+  return (
+    Effect.pipe(left.approval.candidateId, EffectString.localeCompare(right.approval.candidateId)) ||
+    Effect.pipe(left.path, EffectString.localeCompare(right.path))
+  );
 }
 
 function invalid(message: string): never {

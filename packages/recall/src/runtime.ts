@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Console, DateTime, Effect, Option, Result, Schema} from 'effect';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
 import {MAX_RECALL_SELECTION_CANDIDATES, type RecallSelectionCandidate} from '@threadnote/recall/selection';
@@ -57,6 +59,8 @@ import {
   type McpRecallBackgroundRefreshSchedule,
 } from './mcp/refresh.js';
 import {retrieveRecallMemoryConnections, type RecallMemoryConnectionsResult} from './memory/connections.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface RecallRuntimeConfig {
   readonly account: string;
@@ -150,7 +154,10 @@ export function createRecallRerankerCache(): RecallRerankerCache {
 
 export function deterministicRecallQueryVariants(query: string): readonly string[] {
   const clauses = splitRecallQueryClauses(query);
-  if (clauses.length < 2 || clauses.some(clause => recallTokens(clause).length < MINIMUM_QUERY_VARIANT_TERMS)) {
+  if (
+    clauses.length < 2 ||
+    EffectArray.some(clauses, clause => recallTokens(clause).length < MINIMUM_QUERY_VARIANT_TERMS)
+  ) {
     return [];
   }
   return clauses.slice(0, MAX_DETERMINISTIC_QUERY_VARIANTS);
@@ -158,19 +165,29 @@ export function deterministicRecallQueryVariants(query: string): readonly string
 
 function splitRecallQueryClauses(query: string): readonly string[] {
   const clauses: string[] = [];
-  for (const segment of query.replaceAll(',', ';').split(';')) {
-    const trimmed = segment.trim();
+  for (const segment of Effect2.pipe(query, EffectString.replaceAll(',', ';'), EffectString.split(';'))) {
+    const trimmed = Effect2.pipe(segment, EffectString.trim);
     if (!trimmed) continue;
-    const segmentWords = trimmed.split(/\s+/u);
+    const segmentWords = Effect2.pipe(trimmed, EffectString.split(/\s+/u));
     const leadingWhitespace = segment[0] !== trimmed[0];
-    const trailingWhitespace = segment.at(-1) !== trimmed.at(-1);
+    const trailingWhitespace =
+      Effect2.pipe(
+        segment,
+        EffectString.at(-1),
+        Effect2.Option.getOrElse(() => undefined),
+      ) !==
+      Effect2.pipe(
+        trimmed,
+        EffectString.at(-1),
+        Effect2.Option.getOrElse(() => undefined),
+      );
     let words: string[] = [];
     const flush = (): void => {
-      if (words.length > 0) clauses.push(words.join(' '));
+      if (words.length > 0) clauses.push(EffectArray.join(words, ' '));
       words = [];
     };
     for (const [index, word] of segmentWords.entries()) {
-      const normalized = word.toLowerCase();
+      const normalized = Effect2.pipe(word, EffectString.toLowerCase);
       const surroundedByWhitespace =
         (index > 0 || leadingWhitespace) && (index < segmentWords.length - 1 || trailingWhitespace);
       if ((normalized === 'and' || normalized === 'or') && surroundedByWhitespace) flush();
@@ -182,11 +199,11 @@ function splitRecallQueryClauses(query: string): readonly string[] {
 }
 
 function recallQueryVariants(query: string, supplied: readonly string[] | undefined): readonly string[] {
-  const seen = new Set([query.trim().toLowerCase()]);
+  const seen = new Set([Effect2.pipe(query, EffectString.trim, EffectString.toLowerCase)]);
   const variants: string[] = [];
   for (const variant of [...deterministicRecallQueryVariants(query), ...(supplied ?? [])]) {
-    const normalized = variant.trim();
-    const key = normalized.toLowerCase();
+    const normalized = Effect2.pipe(variant, EffectString.trim);
+    const key = Effect2.pipe(normalized, EffectString.toLowerCase);
     if (!normalized || seen.has(key)) continue;
     seen.add(key);
     variants.push(normalized);
@@ -260,14 +277,25 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         relationTypes: input.relationTypes,
       })
     : undefined;
-  const navigationOnly = input.query.trim().length === 0 && memoryConnections !== undefined;
+  const navigationOnly = Effect2.pipe(input.query, EffectString.trim).length === 0 && memoryConnections !== undefined;
   const semanticScores = Option.getOrUndefined(semanticResult.scores);
   const rankingUris = [
     ...new Set([
-      ...input.passes.flatMap(pass => pass.map(hit => hit.uri.replace(/#.*$/, ''))),
-      ...input.exactMatches.map(match => match.uri.replace(/#.*$/, '')),
+      ...EffectArrayPipe(input.passes, __effectArrayValues =>
+        EffectArray.flatMap(__effectArrayValues, (pass, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues
+            ? EffectArray.map(pass, hit => Effect2.pipe(hit.uri, EffectString.replace(/#.*$/, '')))
+            : [],
+        ),
+      ),
+      ...EffectArray.map(input.exactMatches, match => Effect2.pipe(match.uri, EffectString.replace(/#.*$/, ''))),
       ...(!navigationOnly ? (semanticScores?.keys() ?? []) : []),
-      ...(memoryConnections?.candidates.map(candidate => candidate.uri) ?? []),
+      ...Option.getOrElse(
+        Option.map(Option.fromNullishOr(memoryConnections?.candidates), candidates =>
+          EffectArray.map(candidates, candidate => candidate.uri),
+        ),
+        () => [],
+      ),
     ]),
   ];
   const records = yield* input.readRecords(rankingUris);
@@ -282,19 +310,25 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   const indexCandidateLimit = recallIndexPreselectionLimit(input.limit);
   const recencyIntent = originalQueryRequestsRecency(input.query);
   const laneBudgets = recallCrossScopeLaneBudgets(input.limit);
-  const topicalIndexSelections = indexQueries.flatMap(indexQuery =>
-    scopeSets.map(allowedUriScopes => ({
-      allowedUriScopes,
-      eligibility: input.eligibility,
-      limit: indexCandidateLimit,
-      query: indexQuery,
-      recencyIntent,
-      requiredUris: rankingUris,
-    })),
+  const topicalIndexSelections = EffectArray.flatMap(indexQueries, (indexQuery, __effectArrayIndex) =>
+    __effectArrayIndex in indexQueries
+      ? EffectArray.map(scopeSets, allowedUriScopes => ({
+          allowedUriScopes,
+          eligibility: input.eligibility,
+          limit: indexCandidateLimit,
+          query: indexQuery,
+          recencyIntent,
+          requiredUris: rankingUris,
+        }))
+      : [],
   );
-  const workspaceScope = navigationOnly ? undefined : input.workspaceScope?.trim();
+  const workspaceScope = navigationOnly
+    ? undefined
+    : Effect2.pipe(input.workspaceScope, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
   const workspaceIndexSelections = workspaceScope
-    ? scopeSets.map(allowedUriScopes => ({
+    ? EffectArray.map(scopeSets, allowedUriScopes => ({
         allowedUriScopes,
         eligibility: input.eligibility,
         limit: indexCandidateLimit,
@@ -303,9 +337,13 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         workspaceScope,
       }))
     : [];
-  const workspaceBranch = navigationOnly ? undefined : input.workspaceBranch?.trim();
+  const workspaceBranch = navigationOnly
+    ? undefined
+    : Effect2.pipe(input.workspaceBranch, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
   const branchIndexSelections = workspaceBranch
-    ? scopeSets.map(allowedUriScopes => ({
+    ? EffectArray.map(scopeSets, allowedUriScopes => ({
         allowedUriScopes,
         eligibility: input.eligibility,
         limit: indexCandidateLimit,
@@ -331,33 +369,38 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   const operationalWarnings = Result.isFailure(recallIndexResult) ? [lexicalIndexUnavailableWarning()] : [];
   const flattenedRecallIndexes = recallIndexes;
   const generations = [
-    ...new Set(flattenedRecallIndexes.flatMap(index => (index?.generation ? [index.generation] : []))),
+    ...new Set(
+      EffectArray.flatMap(flattenedRecallIndexes, (index, effectFlatMapIndex) =>
+        effectFlatMapIndex in flattenedRecallIndexes ? (index?.generation ? [index.generation] : []) : [],
+      ),
+    ),
   ];
   const topicalRecallIndexes = flattenedRecallIndexes.slice(0, topicalIndexSelections.length);
-  const broadTopicalRecallIndexes = indexQueries.map(
+  const broadTopicalRecallIndexes = EffectArray.map(
+    indexQueries,
     (_query, index) => topicalRecallIndexes[index * scopeSets.length + Math.max(0, scopeSets.length - 1)],
   );
   const workspaceSelectionEnd = topicalIndexSelections.length + workspaceIndexSelections.length;
   const workspaceRecallIndexes = flattenedRecallIndexes.slice(topicalIndexSelections.length, workspaceSelectionEnd);
   const branchRecallIndexes = flattenedRecallIndexes.slice(workspaceSelectionEnd);
-  const recallIndex = topicalRecallIndexes.find(index => index !== undefined);
-  const topicalRecallIndexCandidateSets = topicalRecallIndexes.map(index => index?.candidates ?? []);
-  const recentRecallIndexCandidateSets = topicalRecallIndexes.map(index => index?.recentCandidates ?? []);
-  const workspaceRecallIndexCandidateSets = workspaceRecallIndexes.map(index => index?.candidates ?? []);
-  const branchRecallIndexCandidateSets = branchRecallIndexes.map(index => index?.candidates ?? []);
+  const recallIndex = Option.getOrUndefined(EffectArray.findFirst(topicalRecallIndexes, index => index !== undefined));
+  const topicalRecallIndexCandidateSets = EffectArray.map(topicalRecallIndexes, index => index?.candidates ?? []);
+  const recentRecallIndexCandidateSets = EffectArray.map(topicalRecallIndexes, index => index?.recentCandidates ?? []);
+  const workspaceRecallIndexCandidateSets = EffectArray.map(workspaceRecallIndexes, index => index?.candidates ?? []);
+  const branchRecallIndexCandidateSets = EffectArray.map(branchRecallIndexes, index => index?.candidates ?? []);
   const recallIndexCandidateSets = [
     ...topicalRecallIndexCandidateSets,
     ...workspaceRecallIndexCandidateSets,
     ...branchRecallIndexCandidateSets,
   ];
   const withSemanticScore = (candidate: RecallCandidate): RecallCandidate => {
-    const semantic = semanticScores?.get(candidate.uri.replace(/#.*$/, ''));
+    const semantic = semanticScores?.get(Effect2.pipe(candidate.uri, EffectString.replace(/#.*$/, '')));
     return semantic === undefined ? candidate : {...candidate, semantic};
   };
   const prioritizedWorkspaceCandidates = workspaceScope
     ? prioritizeWorkspaceRecallCandidates(
         input.query,
-        mergeRecallIndexCandidates(workspaceRecallIndexCandidateSets).map(withSemanticScore),
+        EffectArray.map(mergeRecallIndexCandidates(workspaceRecallIndexCandidateSets), withSemanticScore),
         {
           includeInactive: input.includeInactive,
           now,
@@ -371,7 +414,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   const prioritizedBranchCandidates = workspaceBranch
     ? prioritizeBranchRecallCandidates(
         input.query,
-        mergeRecallIndexCandidates(branchRecallIndexCandidateSets).map(withSemanticScore),
+        EffectArray.map(mergeRecallIndexCandidates(branchRecallIndexCandidateSets), withSemanticScore),
         {
           includeInactive: input.includeInactive,
           now,
@@ -384,7 +427,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   const topicalCrossScopeCandidates = workspaceScope
     ? prioritizeCrossScopeRecallCandidates(
         input.query,
-        mergeRecallIndexCandidates(topicalRecallIndexCandidateSets).map(withSemanticScore),
+        EffectArray.map(mergeRecallIndexCandidates(topicalRecallIndexCandidateSets), withSemanticScore),
         {
           includeInactive: input.includeInactive,
           now,
@@ -396,25 +439,29 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
       )
     : [];
   const prioritizedRecentCandidates = recencyIntent
-    ? rankRecallCandidates(
-        input.query,
-        mergeRecallIndexCandidates(recentRecallIndexCandidateSets).map(withSemanticScore),
-        {
-          eligibility: input.eligibility,
-          includeInactive: input.includeInactive,
-          now,
-          project: input.project,
-          queryVariants,
-          workspaceBranch: input.workspaceBranch,
-          workspaceScope,
-        },
-      ).results.map(result => result.candidate)
+    ? EffectArray.map(
+        rankRecallCandidates(
+          input.query,
+          EffectArray.map(mergeRecallIndexCandidates(recentRecallIndexCandidateSets), withSemanticScore),
+          {
+            eligibility: input.eligibility,
+            includeInactive: input.includeInactive,
+            now,
+            project: input.project,
+            queryVariants,
+            workspaceBranch: input.workspaceBranch,
+            workspaceScope,
+          },
+        ).results,
+        result => result.candidate,
+      )
     : [];
   const shouldLoadCrossScopeFallback =
     Result.isSuccess(recallIndexResult) &&
     workspaceScope !== undefined &&
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain behavior for the optional project scope.
     (input.eligibility !== undefined || (input.project?.trim().length ?? 0) > 0) &&
-    broadTopicalRecallIndexes.some(index => recallCrossScopeFallbackRequired(index?.queryExhaustive));
+    EffectArray.some(broadTopicalRecallIndexes, index => recallCrossScopeFallbackRequired(index?.queryExhaustive));
   const crossScopeFallbackResult = shouldLoadCrossScopeFallback
     ? yield* loadRecallIndexData(config, {
         // An explicit URI restriction is a hard authorization boundary. Soft
@@ -429,7 +476,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         // Query variants are topical evidence too. Combining them keeps this
         // to one bounded sibling selection while rescuing a relevant memory
         // whose wording is reachable only through an approved rewrite.
-        query: indexQueries.join(' '),
+        query: EffectArray.join(indexQueries, ' '),
         workspaceScope,
         workspaceScopeMode: 'sibling',
       }).pipe(Effect.result)
@@ -471,7 +518,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
     generations.push(crossScopeFallbackResult.success.generation);
   }
   const semanticCandidates = mergeRecallCandidateLanes(
-    [mergeRecallIndexCandidates(topicalRecallIndexCandidateSets).map(withSemanticScore)],
+    [EffectArray.map(mergeRecallIndexCandidates(topicalRecallIndexCandidateSets), withSemanticScore)],
     [memoryConnections?.candidates ?? [], prioritizedBranchCandidates, prioritizedWorkspaceCandidates],
     [prioritizedCrossScopeCandidates],
     {
@@ -499,14 +546,25 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
       );
   const unreadIndexedMemoryUris = unreadIndexedMemoryRecordUris(indexedCandidates, records);
   const extraRecords = unreadIndexedMemoryUris.length > 0 ? yield* input.readRecords(unreadIndexedMemoryUris) : [];
-  const extraRecordUris = new Set(extraRecords.map(record => record.uri.replace(/#.*$/, '')));
-  const absentMemoryUris = unreadIndexedMemoryUris.filter(uri => !extraRecordUris.has(uri.replace(/#.*$/, '')));
+  const extraRecordUris = new Set(
+    EffectArray.map(extraRecords, record => Effect2.pipe(record.uri, EffectString.replace(/#.*$/, ''))),
+  );
+  const absentMemoryUris = EffectArray.filter(
+    unreadIndexedMemoryUris,
+    (uri, __effectArrayIndex) =>
+      __effectArrayIndex in unreadIndexedMemoryUris &&
+      !extraRecordUris.has(Effect2.pipe(uri, EffectString.replace(/#.*$/, ''))),
+  );
   const liveRecords = extraRecords.length > 0 ? [...records, ...extraRecords] : records;
-  const expansionCandidates = mergeRecallExpansionCandidates(
-    recallIndexCandidateSets,
-    rankingUris,
-    topicalRecallIndexCandidateSets.length,
-  ).filter(candidate => recallRuntimeCandidateIsEligible(candidate, input.eligibility));
+  const expansionCandidates = EffectArrayPipe(
+    mergeRecallExpansionCandidates(recallIndexCandidateSets, rankingUris, topicalRecallIndexCandidateSets.length),
+    __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (candidate, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues && recallRuntimeCandidateIsEligible(candidate, input.eligibility),
+      ),
+  );
   const sections = buildRecallSections(input.passes, input.exactMatches, input.limit, {
     absentMemoryUris,
     allowExactRescue: input.allowExactRescue,
@@ -524,7 +582,11 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
     query: input.query,
     queryVariants,
     records: liveRecords,
-    protectedUris: memoryConnections?.candidates.map(candidate => candidate.uri),
+    protectedUris: Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(memoryConnections?.candidates), candidates =>
+        EffectArray.map(candidates, candidate => candidate.uri),
+      ),
+    ),
     seedUris: input.seedUris,
     workspaceBranch: input.workspaceBranch,
     workspaceScope,
@@ -576,14 +638,14 @@ export function emptyRecallSemanticScoresResult(
 
 export function boundedRecallSemanticRetrieval<A, E, R>(
   retrieval: Effect.Effect<A, E, R>,
-): Effect.Effect<BoundedRecallSemanticRetrieval<A>, never, R> {
+): Effect.Effect<BoundedRecallSemanticRetrieval<A>, E, R> {
   return retrieval.pipe(
     Effect.map(value => ({status: 'completed' as const, value})),
     Effect.catchCauseIf(
       cause => !Cause.hasInterrupts(cause),
       cause => Effect.succeed({cause: cause, status: 'failed' as const}),
     ),
-    Effect.catchCause(cause => Effect.failCause(cause as Cause.Cause<never>)),
+    Effect.catchCause(cause => Effect.failCause(cause)),
     Effect.timeoutOrElse({
       duration: MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS,
       orElse: () => Effect.succeed({status: 'timed-out' as const}),
@@ -597,7 +659,7 @@ export function createMcpRecallSemanticRetrievalGate() {
   return <A, E, R>(
     runtime: object,
     retrieval: Effect.Effect<A, E, R>,
-  ): Effect.Effect<GatedRecallSemanticRetrieval<A>, never, R> =>
+  ): Effect.Effect<GatedRecallSemanticRetrieval<A>, E, R> =>
     Effect.gen(function* () {
       const now = yield* Clock.monotonicTimeNanos;
       const previousCooldown = retryAfterByRuntime.get(runtime);
@@ -696,7 +758,7 @@ const loadReadOnlySemanticScoresAttempt = Effect.fn('recall.loadReadOnlySemantic
   if (lexicalDisposition === 'refreshable') {
     return {manifest, state: 'refreshable'} satisfies McpReadOnlySemanticScoresAttempt;
   }
-  if (lexicalDisposition === 'unsafe' || !lexicalStatus.generation) {
+  if (lexicalDisposition === 'unsafe' || !('generation' in lexicalStatus) || !lexicalStatus.generation) {
     return {state: 'structurally-unavailable'} satisfies McpReadOnlySemanticScoresAttempt;
   }
   const corpusGeneration = lexicalStatus.generation;
@@ -868,7 +930,7 @@ function semanticRecallFailureWarning(cause: Cause.Cause<unknown>): string {
     error._tag === 'EmbeddingFailed' &&
     'message' in error &&
     typeof error.message === 'string' &&
-    error.message.includes('isolated worker retry was exhausted')
+    Effect2.pipe(error.message, EffectString.includes('isolated worker retry was exhausted'))
       ? 'LocalModelWorkerRetryExhausted'
       : semanticRecallFailureType(error);
   return (
@@ -936,14 +998,16 @@ const applySelectedNativeReranker = Effect.fn('recall.applySelectedNativeReranke
 ) {
   const shortlist = candidates.slice(0, NATIVE_RERANK_CANDIDATE_LIMIT);
   if (shortlist.length === 0) return candidates;
-  const missing = shortlist.filter(candidate => !cache?.scores.has(rerankerCacheKey(candidate)));
+  const missing = EffectArray.filter(shortlist, candidate => !cache?.scores.has(rerankerCacheKey(candidate)));
   if (missing.length === 0 || cache?.unavailable === true) {
     return applyCachedRerankerScores(candidates, cache);
   }
   const scores = yield* rerankWithSelectedLocalModel(
     home,
     query,
-    missing.map(candidate => candidate.text.slice(0, NATIVE_RERANK_DOCUMENT_LIMIT)),
+    EffectArray.map(missing, candidate =>
+      Effect2.pipe(candidate.text, EffectString.slice(0, NATIVE_RERANK_DOCUMENT_LIMIT)),
+    ),
   );
   if (!scores) {
     if (cache) cache.unavailable = true;
@@ -961,7 +1025,7 @@ function applyCachedRerankerScores(
   cache: RecallRerankerCache | undefined,
 ): readonly RecallCandidate[] {
   if (!cache || cache.scores.size === 0) return candidates;
-  return candidates.map(candidate => {
+  return EffectArray.map(candidates, candidate => {
     const reranker = cache.scores.get(rerankerCacheKey(candidate));
     return reranker === undefined ? candidate : {...candidate, reranker};
   });
@@ -975,12 +1039,12 @@ function unreadIndexedMemoryRecordUris(
   indexedCandidates: readonly RecallCandidate[],
   records: readonly MemoryRecord[],
 ): readonly string[] {
-  const live = new Set(records.map(record => record.uri.replace(/#.*$/, '')));
+  const live = new Set(EffectArray.map(records, record => Effect2.pipe(record.uri, EffectString.replace(/#.*$/, ''))));
   const unread = new Set<string>();
   for (const candidate of indexedCandidates) {
     for (const uri of [candidate.uri, ...(candidate.equivalentUris ?? [])]) {
-      const documentUri = uri.replace(/#.*$/, '');
-      if (documentUri.includes('/memories/') && !live.has(documentUri)) {
+      const documentUri = Effect2.pipe(uri, EffectString.replace(/#.*$/, ''));
+      if (Effect2.pipe(documentUri, EffectString.includes('/memories/')) && !live.has(documentUri)) {
         unread.add(documentUri);
       }
     }
@@ -993,29 +1057,51 @@ export function buildRecallSelectionCandidates(
   indexedCandidates: readonly RecallCandidate[],
   limit: number,
 ): readonly RecallSelectionCandidate[] {
-  const indexedByUri = new Map(indexedCandidates.map(candidate => [stripFragment(candidate.uri), candidate]));
-  return ranked.slice(0, Math.min(limit, MAX_RECALL_SELECTION_CANDIDATES)).map((hit, index) => {
+  const indexedByUri = new Map(
+    EffectArray.map(indexedCandidates, candidate => [stripFragment(candidate.uri), candidate]),
+  );
+  return EffectArray.map(ranked.slice(0, Math.min(limit, MAX_RECALL_SELECTION_CANDIDATES)), (hit, index) => {
     const uri = stripFragment(hit.uri);
     const indexed = indexedByUri.get(uri);
-    const uriTopic = uri.slice(uri.lastIndexOf('/') + 1).replace(/\.[a-z0-9]+$/i, '');
+    const uriTopic = Effect2.pipe(uri, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(
+        __effectPipeInput,
+        EffectString.slice(
+          Effect2.pipe(
+            uri,
+            EffectString.lastIndexOf('/'),
+            Effect2.Option.getOrElse(() => -1),
+          ) + 1,
+        ),
+      );
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\.[a-z0-9]+$/i, ''));
+      return __effectPipeStage1;
+    });
     const project =
       indexed?.fields?.project ??
       memoryUriProjectSegment(uri) ??
       /^threadnote:\/\/resources\/repos\/([^/]+)/.exec(uri)?.[1];
-    const fields = [
-      `category=${hit.category}`,
-      project ? `project=${project}` : undefined,
-      `topic=${indexed?.fields?.topic ?? uriTopic}`,
-      indexed?.fields?.workspaceScope ? `workspace_scope=${indexed.fields.workspaceScope}` : undefined,
-      indexed?.fields?.title ? `title=${indexed.fields.title}` : undefined,
-      indexed?.fields?.keywords?.length ? `keywords=${indexed.fields.keywords.join(', ')}` : undefined,
-    ].filter((field): field is string => field !== undefined);
+    const fields = EffectArray.filter(
+      [
+        `category=${hit.category}`,
+        project ? `project=${project}` : undefined,
+        `topic=${indexed?.fields?.topic ?? uriTopic}`,
+        indexed?.fields?.workspaceScope ? `workspace_scope=${indexed.fields.workspaceScope}` : undefined,
+        indexed?.fields?.title ? `title=${indexed.fields.title}` : undefined,
+        indexed?.fields?.keywords?.length ? `keywords=${EffectArray.join(indexed.fields.keywords, ', ')}` : undefined,
+      ],
+      (field): field is string => field !== undefined,
+    );
     const excerpt = recallSelectionExcerpt(indexed?.text || hit.snippet || '');
     return {
       id: `c${index + 1}`,
-      summary: [...fields, excerpt ? `excerpt=${excerpt}` : undefined]
-        .filter((part): part is string => part !== undefined)
-        .join(' | '),
+      summary: EffectArray.join(
+        EffectArray.filter(
+          [...fields, excerpt ? `excerpt=${excerpt}` : undefined],
+          (part): part is string => part !== undefined,
+        ),
+        ' | ',
+      ),
       uri,
     };
   });
@@ -1027,29 +1113,67 @@ export function buildRecallIndexSelectionCandidates(
   limit: number,
   eligibility?: RecallEligibilityPolicy,
 ): readonly RecallSelectionCandidate[] {
-  const normalizedProject = project?.trim().toLowerCase();
-  const candidates = indexedCandidates.filter(candidate =>
-    eligibility === undefined
-      ? !normalizedProject || candidate.fields?.project?.trim().toLowerCase() === normalizedProject
-      : recallRuntimeCandidateIsEligible(candidate, eligibility),
+  const normalizedProject = Effect2.pipe(
+    project,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
   );
-  return candidates.slice(0, Math.min(limit, MAX_RECALL_SELECTION_CANDIDATES)).map((candidate, index) => {
-    const uri = candidate.uri.replace(/#.*$/, '');
-    const uriTopic = uri.slice(uri.lastIndexOf('/') + 1).replace(/\.[a-z0-9]+$/i, '');
-    const fields = [
-      candidate.kind ? `kind=${candidate.kind}` : 'category=resource',
-      candidate.fields?.project ? `project=${candidate.fields.project}` : undefined,
-      `topic=${candidate.fields?.topic ?? uriTopic}`,
-      candidate.fields?.workspaceScope ? `workspace_scope=${candidate.fields.workspaceScope}` : undefined,
-      candidate.fields?.title ? `title=${candidate.fields.title}` : undefined,
-      candidate.fields?.keywords?.length ? `keywords=${candidate.fields.keywords.join(', ')}` : undefined,
-    ].filter((field): field is string => field !== undefined);
+  const candidates = EffectArray.filter(
+    indexedCandidates,
+    (candidate, __effectArrayIndex2) =>
+      __effectArrayIndex2 in indexedCandidates &&
+      (eligibility === undefined
+        ? !normalizedProject ||
+          Effect2.pipe(
+            candidate.fields?.project,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+          ) === normalizedProject
+        : recallRuntimeCandidateIsEligible(candidate, eligibility)),
+  );
+  return EffectArray.map(candidates.slice(0, Math.min(limit, MAX_RECALL_SELECTION_CANDIDATES)), (candidate, index) => {
+    const uri = Effect2.pipe(candidate.uri, EffectString.replace(/#.*$/, ''));
+    const uriTopic = Effect2.pipe(uri, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(
+        __effectPipeInput,
+        EffectString.slice(
+          Effect2.pipe(
+            uri,
+            EffectString.lastIndexOf('/'),
+            Effect2.Option.getOrElse(() => -1),
+          ) + 1,
+        ),
+      );
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\.[a-z0-9]+$/i, ''));
+      return __effectPipeStage1;
+    });
+    const fields = EffectArray.filter(
+      [
+        candidate.kind ? `kind=${candidate.kind}` : 'category=resource',
+        candidate.fields?.project ? `project=${candidate.fields.project}` : undefined,
+        `topic=${candidate.fields?.topic ?? uriTopic}`,
+        candidate.fields?.workspaceScope ? `workspace_scope=${candidate.fields.workspaceScope}` : undefined,
+        candidate.fields?.title ? `title=${candidate.fields.title}` : undefined,
+        candidate.fields?.keywords?.length
+          ? `keywords=${EffectArray.join(candidate.fields.keywords, ', ')}`
+          : undefined,
+      ],
+      (field): field is string => field !== undefined,
+    );
     const excerpt = recallSelectionExcerpt(candidate.text);
     return {
       id: `c${index + 1}`,
-      summary: [...fields, excerpt ? `excerpt=${excerpt}` : undefined]
-        .filter((part): part is string => part !== undefined)
-        .join(' | '),
+      summary: EffectArray.join(
+        EffectArray.filter(
+          [...fields, excerpt ? `excerpt=${excerpt}` : undefined],
+          (part): part is string => part !== undefined,
+        ),
+        ' | ',
+      ),
       uri,
     };
   });
@@ -1063,41 +1187,60 @@ export function recallSelectionQueries(
   limit: number,
 ): readonly string[] {
   const selectedUris = new Set(
-    candidates.filter(candidate => selectedIds.includes(candidate.id)).map(candidate => candidate.uri),
+    EffectArray.map(
+      EffectArray.filter(candidates, candidate => selectedIds.includes(candidate.id)),
+      candidate => candidate.uri,
+    ),
   );
   const queryTerms = new Map(
-    recallTokens(originalQuery).flatMap(term => {
-      const weight = /^\p{Lu}[\p{Lu}\p{N}_.-]{2,}$/u.test(term) ? 4 : 1;
-      return recallLexicalTerms(term).map(normalized => [normalized, weight] as const);
-    }),
+    EffectArrayPipe(recallTokens(originalQuery), __effectArrayValues =>
+      EffectArray.flatMap(__effectArrayValues, (term, __effectArrayIndex) => {
+        if (!(__effectArrayIndex in __effectArrayValues)) return [];
+        const weight = /^\p{Lu}[\p{Lu}\p{N}_.-]{2,}$/u.test(term) ? 4 : 1;
+        return EffectArray.map(recallLexicalTerms(term), normalized => [normalized, weight] as const);
+      }),
+    ),
   );
-  const selectedCandidates = indexedCandidates
-    .map((candidate, index) => {
+  const selectedCandidates = EffectArray.filter(
+    EffectArray.map(indexedCandidates, (candidate, index) => {
       const fieldTerms = new Set(
         recallLexicalTerms(
-          [candidate.fields?.topic, candidate.fields?.title, ...(candidate.fields?.keywords ?? [])]
-            .filter((value): value is string => value !== undefined)
-            .join(' '),
+          EffectArray.join(
+            EffectArray.filter(
+              [candidate.fields?.topic, candidate.fields?.title, ...(candidate.fields?.keywords ?? [])],
+              (value): value is string => value !== undefined,
+            ),
+            ' ',
+          ),
         ),
       );
       const bodyTerms = new Set(recallLexicalTerms(candidate.text));
       return {
         candidate,
         index,
-        overlap: [...queryTerms].reduce(
+        overlap: EffectArray.reduce(
+          [...queryTerms],
+          0,
           (score, [term, weight]) =>
             score + (fieldTerms.has(term) ? weight * 2 : 0) + (bodyTerms.has(term) ? weight : 0),
-          0,
         ),
       };
-    })
-    .filter(({candidate}) => selectedUris.has(candidate.uri.replace(/#.*$/, '')))
-    .sort((left, right) => right.overlap - left.overlap || left.index - right.index);
+    }),
+    ({candidate}) => selectedUris.has(Effect2.pipe(candidate.uri, EffectString.replace(/#.*$/, ''))),
+  ).sort((left, right) => right.overlap - left.overlap || left.index - right.index);
   const seen = new Set<string>();
   const queries: string[] = [];
   for (const {candidate} of selectedCandidates) {
-    const query = candidate.fields?.topic?.trim() || candidate.fields?.title?.trim();
-    const key = query?.toLowerCase();
+    const query =
+      Effect2.pipe(candidate.fields?.topic, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) ||
+      Effect2.pipe(candidate.fields?.title, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
+    const key = Effect2.pipe(query, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+    );
     if (!query || !key || seen.has(key)) continue;
     seen.add(key);
     queries.push(query);
@@ -1109,25 +1252,42 @@ export function recallSelectionQueries(
 function recallSelectionExcerpt(value: string): string {
   const terms: string[] = [];
   let previous = '';
-  for (const term of value.replace(/\s+/g, ' ').trim().split(' ')) {
-    const key = term.toLowerCase();
+  for (const term of Effect2.pipe(
+    value,
+    EffectString.replace(/\s+/g, ' '),
+    EffectString.trim,
+    EffectString.split(' '),
+  )) {
+    const key = Effect2.pipe(term, EffectString.toLowerCase);
     if (!term || key === previous) continue;
     terms.push(term);
     previous = key;
   }
-  return terms.join(' ').slice(0, 240).trim();
+  return Effect2.pipe(EffectArray.join(terms, ' '), EffectString.slice(0, 240), EffectString.trim);
 }
 
 export function recallSelectionAnchorIds(
   candidates: readonly RecallSelectionCandidate[],
   ranked: readonly RecallHit[],
 ): readonly string[] {
-  const idByUri = new Map(candidates.map(candidate => [candidate.uri, candidate.id]));
-  return ranked
-    .slice(0, 2)
-    .filter(hit => !hit.rankWarnings?.some(warning => warning.includes('lexical-only')))
-    .map(hit => idByUri.get(hit.uri.replace(/#.*$/, '')))
-    .filter((id): id is string => id !== undefined);
+  const idByUri = new Map(EffectArray.map(candidates, candidate => [candidate.uri, candidate.id]));
+  const limited = ranked.slice(0, 2);
+  const anchorHits = EffectArray.filter(limited, (hit, index) => {
+    if (!(index in limited)) return false;
+    const warnings = hit.rankWarnings;
+    return (
+      warnings === undefined ||
+      !EffectArray.some(
+        warnings,
+        (warning, warningIndex) =>
+          warningIndex in warnings && Effect2.pipe(warning, EffectString.includes('lexical-only')),
+      )
+    );
+  });
+  const anchorIds = EffectArray.map(anchorHits, hit =>
+    idByUri.get(Effect2.pipe(hit.uri, EffectString.replace(/#.*$/, ''))),
+  );
+  return EffectArray.filter(anchorIds, (id): id is string => id !== undefined);
 }
 
 export function selectedRecallCandidateUris(
@@ -1136,10 +1296,10 @@ export function selectedRecallCandidateUris(
   anchorIds: readonly string[] = [],
 ): readonly string[] {
   const selected = new Set([...anchorIds, ...selectedIds]);
-  return candidates
-    .filter(candidate => selected.has(candidate.id))
-    .slice(0, 8)
-    .map(candidate => candidate.uri);
+  return EffectArray.map(
+    EffectArray.filter(candidates, candidate => selected.has(candidate.id)).slice(0, 8),
+    candidate => candidate.uri,
+  );
 }
 
 export const loadRecallExpansionVocabulary = Effect.fn('recall.loadExpansionVocabulary')(function* (
@@ -1153,10 +1313,14 @@ export const loadRecallExpansionVocabulary = Effect.fn('recall.loadExpansionVoca
   },
 ) {
   if (!input.project) return [];
-  const rankedCandidates = (input.rankedCandidates ?? []).filter(
-    candidate =>
-      recallUriMatchesScopes(candidate.uri, input.allowedUriScopes) &&
-      recallRuntimeCandidateIsEligible(candidate, input.eligibility),
+  const rankedCandidates = EffectArrayPipe(input.rankedCandidates ?? [], __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (candidate, __effectArrayIndex2) =>
+        __effectArrayIndex2 in __effectArrayValues &&
+        recallUriMatchesScopes(candidate.uri, input.allowedUriScopes) &&
+        recallRuntimeCandidateIsEligible(candidate, input.eligibility),
+    ),
   );
   const rankedVocabulary = recallExpansionVocabulary(rankedCandidates, input.project, input.eligibility);
   if (rankedVocabulary.length >= EXPANSION_VOCABULARY_LIMIT) {
@@ -1180,7 +1344,7 @@ export function mergeRecallIndexCandidates(
   candidateSets: readonly (readonly RecallCandidate[])[],
 ): readonly RecallCandidate[] {
   const mergedByUri = new Map<string, RecallCandidate>();
-  const maximumLength = Math.max(0, ...candidateSets.map(candidates => candidates.length));
+  const maximumLength = Math.max(0, ...EffectArray.map(candidateSets, candidates => candidates.length));
   for (let index = 0; index < maximumLength; index += 1) {
     for (const candidates of candidateSets) {
       const candidate = candidates[index];
@@ -1223,8 +1387,11 @@ export function mergePrioritizedRecallIndexCandidates(
 
   const reserve = Math.min(requestedReserve, supplemental.length, admissionLimit);
   const supplementalHead = supplemental.slice(0, reserve);
-  const supplementalHeadUris = new Set(supplementalHead.map(candidate => candidate.uri));
-  const topicalWithoutReserved = topical.filter(candidate => !supplementalHeadUris.has(candidate.uri));
+  const supplementalHeadUris = new Set(EffectArray.map(supplementalHead, candidate => candidate.uri));
+  const topicalWithoutReserved = EffectArray.filter(
+    topical,
+    (candidate, __effectArrayIndex) => __effectArrayIndex in topical && !supplementalHeadUris.has(candidate.uri),
+  );
   const topicalHeadLength = Math.max(0, admissionLimit - supplementalHead.length);
   return deduplicateLogicalRecallCandidates(
     uniqueRecallCandidatesByUri([
@@ -1283,7 +1450,11 @@ export function mergeRecallCandidateLanes(
     reservedKeys,
   );
   const reserved = [...recentHead, ...protectedHead, ...crossHead];
-  const topicalWithoutReserved = topical.filter(candidate => !reservedKeys.has(recallCandidateAdmissionKey(candidate)));
+  const topicalWithoutReserved = EffectArray.filter(
+    topical,
+    (candidate, __effectArrayIndex) =>
+      __effectArrayIndex in topical && !reservedKeys.has(recallCandidateAdmissionKey(candidate)),
+  );
   const topicalHeadLength = Math.max(0, admissionLimit - reserved.length);
   return deduplicateLogicalRecallCandidates(
     uniqueRecallCandidatesByUri([
@@ -1312,10 +1483,10 @@ export function prioritizeWorkspaceRecallCandidates(
     readonly workspaceScope: string;
   },
 ): readonly RecallCandidate[] {
-  const scopedCandidates = candidates.filter(candidate =>
+  const scopedCandidates = EffectArray.filter(candidates, candidate =>
     workspaceScopeContains(context.workspaceScope, candidate.fields?.workspaceScope),
   );
-  return rankRecallCandidates(query, scopedCandidates, context).results.map(result => result.candidate);
+  return EffectArray.map(rankRecallCandidates(query, scopedCandidates, context).results, result => result.candidate);
 }
 
 /**
@@ -1332,20 +1503,37 @@ export function prioritizeCrossScopeRecallCandidates(
     readonly workspaceScope: string;
   },
 ): readonly RecallCandidate[] {
-  const project = context.project?.trim().toLowerCase();
-  const crossScopeCandidates = candidates.filter(
+  const project = Effect2.pipe(
+    context.project,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
+  const crossScopeCandidates = EffectArray.filter(
+    candidates,
     candidate =>
       recallWorkspaceScopeMatches(context.workspaceScope, candidate.fields?.workspaceScope, 'sibling') &&
       (context.eligibility === undefined
-        ? !project || candidate.fields?.project?.trim().toLowerCase() === project
+        ? !project ||
+          Effect2.pipe(
+            candidate.fields?.project,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+          ) === project
         : recallRuntimeCandidateIsEligible(candidate, context.eligibility)),
   );
-  return rankRecallCandidates(query, crossScopeCandidates, {
-    includeInactive: context.includeInactive,
-    now: context.now,
-    project: context.project,
-    queryVariants: context.queryVariants,
-  }).results.map(result => result.candidate);
+  return EffectArray.map(
+    rankRecallCandidates(query, crossScopeCandidates, {
+      includeInactive: context.includeInactive,
+      now: context.now,
+      project: context.project,
+      queryVariants: context.queryVariants,
+    }).results,
+    result => result.candidate,
+  );
 }
 
 export function prioritizeBranchRecallCandidates(
@@ -1355,10 +1543,10 @@ export function prioritizeBranchRecallCandidates(
     readonly workspaceBranch: string;
   },
 ): readonly RecallCandidate[] {
-  const branchCandidates = candidates.filter(candidate =>
+  const branchCandidates = EffectArray.filter(candidates, candidate =>
     recallCandidateMatchesWorkspaceBranch(context.workspaceBranch, candidate),
   );
-  return rankRecallCandidates(query, branchCandidates, context).results.map(result => result.candidate);
+  return EffectArray.map(rankRecallCandidates(query, branchCandidates, context).results, result => result.candidate);
 }
 
 function workspaceScopeContains(currentScope: string, candidateScope: string | undefined): boolean {
@@ -1366,18 +1554,27 @@ function workspaceScopeContains(currentScope: string, candidateScope: string | u
   if (current !== undefined && candidateScope === undefined) return true;
   const candidate = normalizeWorkspaceScope(candidateScope);
   return (
-    current !== undefined && candidate !== undefined && (candidate === current || current.startsWith(`${candidate}/`))
+    current !== undefined &&
+    candidate !== undefined &&
+    (candidate === current || Effect2.pipe(current, EffectString.startsWith(`${candidate}/`)))
   );
 }
 
 function normalizeWorkspaceScope(scope: string | undefined): string | undefined {
-  const normalized = scope
-    ?.trim()
-    .replaceAll('\\', '/')
-    .split('/')
-    .filter(segment => segment.length > 0 && segment !== '.')
-    .join('/')
-    .toLowerCase();
+  const normalized = Option.getOrUndefined(
+    Option.map(Option.fromNullishOr(scope), value =>
+      Effect2.pipe(
+        EffectArray.join(
+          EffectArray.filter(
+            Effect2.pipe(value, EffectString.trim, EffectString.replaceAll('\\', '/'), EffectString.split('/')),
+            segment => segment.length > 0 && segment !== '.',
+          ),
+          '/',
+        ),
+        EffectString.toLowerCase,
+      ),
+    ),
+  );
   return normalized || undefined;
 }
 
@@ -1403,7 +1600,7 @@ function recallCandidateAdmissionKey(candidate: RecallCandidate): string {
 
 function uniqueRecallCandidatesByUri(candidates: readonly RecallCandidate[]): readonly RecallCandidate[] {
   const seen = new Set<string>();
-  return candidates.filter(candidate => {
+  return EffectArray.filter(candidates, candidate => {
     if (seen.has(candidate.uri)) return false;
     seen.add(candidate.uri);
     return true;
@@ -1415,10 +1612,10 @@ export function mergeRecallExpansionCandidates(
   requiredUris: readonly string[],
   topicalSetCount = candidateSets.length,
 ): readonly RecallCandidate[] {
-  const required = new Set(requiredUris.map(stripFragment));
-  const reorderedCandidateSets = candidateSets.map(candidates => [
-    ...candidates.filter(candidate => !required.has(stripFragment(candidate.uri))),
-    ...candidates.filter(candidate => required.has(stripFragment(candidate.uri))),
+  const required = new Set(EffectArray.map(requiredUris, stripFragment));
+  const reorderedCandidateSets = EffectArray.map(candidateSets, candidates => [
+    ...EffectArray.filter(candidates, candidate => !required.has(stripFragment(candidate.uri))),
+    ...EffectArray.filter(candidates, candidate => required.has(stripFragment(candidate.uri))),
   ]);
   return mergePrioritizedRecallIndexCandidates(
     reorderedCandidateSets.slice(0, topicalSetCount),
@@ -1432,31 +1629,61 @@ export function recallExpansionVocabulary(
   eligibility?: RecallEligibilityPolicy,
 ): readonly string[] {
   if (!project) return [];
-  const normalizedProject = project.trim().toLowerCase();
+  const normalizedProject = Effect2.pipe(project, EffectString.trim, EffectString.toLowerCase);
   const seen = new Set<string>();
   const vocabulary: string[] = [];
-  const eligibleCandidates = candidates.filter(candidate =>
+  const eligibleCandidates = EffectArray.filter(candidates, candidate =>
     eligibility === undefined
-      ? candidate.fields?.project?.trim().toLowerCase() === normalizedProject
+      ? Effect2.pipe(
+          candidate.fields?.project,
+          effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+        ) === normalizedProject
       : recallRuntimeCandidateIsEligible(candidate, eligibility),
   );
   const projectCandidates = [...prioritizeRecallExpansionCandidates(eligibleCandidates)].sort(
     (left, right) =>
-      Number(right.fields?.project?.trim().toLowerCase() === normalizedProject) -
-      Number(left.fields?.project?.trim().toLowerCase() === normalizedProject),
+      Number(
+        Effect2.pipe(
+          right.fields?.project,
+          effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+        ) === normalizedProject,
+      ) -
+      Number(
+        Effect2.pipe(
+          left.fields?.project,
+          effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+        ) === normalizedProject,
+      ),
   );
 
   const append = (term: string | undefined, dedupeTerm = term): boolean => {
-    const value = term?.trim();
-    const dedupeValue = dedupeTerm?.trim();
-    const key = dedupeValue?.toLowerCase();
+    const value = Effect2.pipe(term, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const dedupeValue = Effect2.pipe(dedupeTerm, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const key = Effect2.pipe(dedupeValue, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+    );
     if (!value || !dedupeValue || dedupeValue.length > 120 || !key || seen.has(key)) return false;
     seen.add(key);
     vocabulary.push(value);
     return vocabulary.length === EXPANSION_VOCABULARY_LIMIT;
   };
   for (const candidate of projectCandidates) {
-    const topic = candidate.fields?.topic?.trim();
+    const topic = Effect2.pipe(candidate.fields?.topic, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
     const description = recallExpansionDescription(candidate.text);
     if (append(topic && description ? `${topic}${EXPANSION_DESCRIPTION_SEPARATOR}${description}` : topic, topic)) {
       return vocabulary;
@@ -1495,13 +1722,17 @@ function timestampValue(candidate: RecallCandidate): number {
 function recallExpansionDescription(text: string): string {
   const terms: string[] = [];
   let previous = '';
-  for (const rawTerm of text.split(/\s+/)) {
-    const term = rawTerm.trim();
-    const key = term.toLowerCase();
+  for (const rawTerm of Effect2.pipe(text, EffectString.split(/\s+/))) {
+    const term = Effect2.pipe(rawTerm, EffectString.trim);
+    const key = Effect2.pipe(term, EffectString.toLowerCase);
     if (!term || key === previous) continue;
     terms.push(term);
     previous = key;
     if (terms.length === EXPANSION_DESCRIPTION_TERM_LIMIT) break;
   }
-  return terms.join(' ').slice(0, EXPANSION_DESCRIPTION_LENGTH_LIMIT).trim();
+  return Effect2.pipe(
+    EffectArray.join(terms, ' '),
+    EffectString.slice(0, EXPANSION_DESCRIPTION_LENGTH_LIMIT),
+    EffectString.trim,
+  );
 }

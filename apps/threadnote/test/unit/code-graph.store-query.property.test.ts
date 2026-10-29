@@ -1,6 +1,8 @@
+import {TestError} from '@threadnote/testing/test-error';
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -29,6 +31,13 @@ import {neighborQuery, pathQuery} from '@threadnote/graph/query';
 import {codeGraphIdentitySelectors} from '@threadnote/graph/store/utilities';
 import type {CodeGraphEdge, CodeGraphProvenance} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const baseSnapshotId = 'snapshot-base';
 const currentSnapshotId = 'snapshot-current';
@@ -70,7 +79,7 @@ const lexicalPostingSpec = FC.record({
 const bazelLabelSegment = FC.array(
   FC.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-'),
   {maxLength: 16, minLength: 1},
-).map(characters => characters.join(''));
+).map(characters => EffectArray.join(characters, ''));
 
 const symbolPathDirectory = FC.constantFrom(
   '__tests__',
@@ -101,20 +110,36 @@ describe('code graph indexed query properties', () => {
     const database = cacheAuthorityDatabase();
     try {
       const statement = codeGraphCachedCommittedFileKeysStatement('extractor-current');
-      const plan = database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-        readonly detail: string;
-      }[];
-      const bytecode = database.query(`EXPLAIN ${statement.text}`).all(...statement.parameters) as readonly {
-        readonly opcode: string;
-        readonly p4: unknown;
-      }[];
+      const plan = database
+        .query<
+          {
+            readonly detail: string;
+          },
+          SQLQueryBindings[]
+        >(`EXPLAIN QUERY PLAN ${statement.text}`)
+        .all(...statement.parameters);
+      const bytecode = database
+        .query<
+          {
+            readonly opcode: string;
+            readonly p4: unknown;
+          },
+          SQLQueryBindings[]
+        >(`EXPLAIN ${statement.text}`)
+        .all(...statement.parameters);
 
-      expect(plan.map(row => row.detail).join('\n')).toContain(
-        `SEARCH ${CODE_GRAPH_FILE_BLOB_AUTHORITY_TABLE} USING PRIMARY KEY (extractor_set=?)`,
-      );
-      expect(bytecode.filter(row => row.opcode === 'Function').map(row => row.p4)).not.toContainEqual(
-        expect.stringMatching(/^json_/u),
-      );
+      expect(
+        EffectArray.join(
+          EffectArray.map(plan, row => row.detail),
+          '\n',
+        ),
+      ).toContain(`SEARCH ${CODE_GRAPH_FILE_BLOB_AUTHORITY_TABLE} USING PRIMARY KEY (extractor_set=?)`);
+      expect(
+        EffectArray.map(
+          EffectArray.filter(bytecode, row => row.opcode === 'Function'),
+          row => row.p4,
+        ),
+      ).not.toContainEqual(expect.stringMatching(/^json_/u));
     } finally {
       database.close(false);
     }
@@ -129,21 +154,31 @@ describe('code graph indexed query properties', () => {
          ) VALUES (?, 'extractor-current', ?, NULL, NULL, ?, '2026-08-22T00:00:00.000Z')`,
       );
       for (const [path, contentHash] of [
-        ['src/changed.ts', 'a'.repeat(40)],
-        ['src/unchanged.ts', 'b'.repeat(40)],
+        ['src/changed.ts', Effect2.pipe('a', EffectString.repeat(40))],
+        ['src/unchanged.ts', Effect2.pipe('b', EffectString.repeat(40))],
       ] as const) {
         insert.run(contentHash, path, JSON.stringify({path}));
       }
       const statement = codeGraphCachedCommittedFileKeysStatement('extractor-current', [
-        {contentHash: 'a'.repeat(40), path: 'src/changed.ts'},
+        {contentHash: Effect2.pipe('a', EffectString.repeat(40)), path: 'src/changed.ts'},
       ]);
-      const rows = database.query(statement.text).all(...statement.parameters) as readonly {
-        readonly content_hash: string;
-        readonly path_hint: string;
-      }[];
+      const rows = database
+        .query<
+          {
+            readonly content_hash: string;
+            readonly path_hint: string;
+          },
+          SQLQueryBindings[]
+        >(statement.text)
+        .all(...statement.parameters);
 
       expect(rows).toEqual([
-        {content_hash: 'a'.repeat(40), path_hint: 'src/changed.ts', blob_id: null, reuse_class: null},
+        {
+          content_hash: Effect2.pipe('a', EffectString.repeat(40)),
+          path_hint: 'src/changed.ts',
+          blob_id: null,
+          reuse_class: null,
+        },
       ]);
       expect(database.query(`EXPLAIN ${statement.text}`).all(...statement.parameters)).not.toContainEqual(
         expect.objectContaining({p4: expect.stringMatching(/^json_/u)}),
@@ -163,7 +198,7 @@ describe('code graph indexed query properties', () => {
          ) VALUES (?, 'extractor-current', ?, NULL, NULL, ?, '2026-08-22T00:00:00.000Z')`,
       );
       const statement = codeGraphCachedCommittedFileKeysStatement('extractor-current');
-      insert.run('a'.repeat(40), path, JSON.stringify({path}));
+      insert.run(Effect2.pipe('a', EffectString.repeat(40)), path, JSON.stringify({path}));
       expect(database.query(statement.text).all(...statement.parameters)).toHaveLength(1);
 
       database.query('UPDATE file_blobs SET facts_json = ?').run('{');
@@ -212,10 +247,10 @@ describe('code graph indexed query properties', () => {
                   ? JSON.stringify({path: `${path}.other`})
                   : JSON.stringify({diagnostics: []});
           insert.run(
-            index.toString(16).padStart(40, '0'),
+            Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
             extractorSet,
             path,
-            (index + 1).toString(16).padStart(40, '0'),
+            Effect2.pipe((index + 1).toString(16), EffectString.padStart(40, '0')),
             'structured-object-v1:json:full',
             factsJson,
           );
@@ -223,11 +258,10 @@ describe('code graph indexed query properties', () => {
         }
 
         const statement = codeGraphCachedCommittedFileKeysStatement('extractor-current');
-        const actual = (
-          database.query(statement.text).all(...statement.parameters) as readonly {readonly path_hint: string}[]
-        )
-          .map(row => row.path_hint)
-          .sort();
+        const actual = EffectArray.map(
+          database.query<{readonly path_hint: string}, SQLQueryBindings[]>(statement.text).all(...statement.parameters),
+          row => row.path_hint,
+        ).sort();
         expect(actual).toEqual(expectedPaths.sort());
       } finally {
         database.close(false);
@@ -245,14 +279,14 @@ describe('code graph indexed query properties', () => {
       queryTerms: FC.array(symbolQueryTerm, {maxLength: 3}),
     },
     ({directories, fileName, queryTerms}) => {
-      const symbolPath = [...directories, fileName].join('/');
+      const symbolPath = EffectArray.join([...directories, fileName], '/');
       const pathClass = codeGraphSymbolPathClass(symbolPath);
       const multiplier = codeGraphSymbolPathScoreMultiplier(symbolPath, queryTerms);
 
       expect(multiplier).toBeGreaterThan(0);
       expect(multiplier).toBeLessThanOrEqual(codeGraphSymbolPathScoreMultiplier('src/implementation.ts', queryTerms));
-      expect(codeGraphSymbolPathClass(symbolPath.replaceAll('/', '\\'))).toBe(pathClass);
-      expect(codeGraphSymbolPathClass(symbolPath.toUpperCase())).toBe(pathClass);
+      expect(codeGraphSymbolPathClass(Effect2.pipe(symbolPath, EffectString.replaceAll('/', '\\')))).toBe(pathClass);
+      expect(codeGraphSymbolPathClass(Effect2.pipe(symbolPath, EffectString.toUpperCase))).toBe(pathClass);
       expect(codeGraphSymbolPathScoreMultiplier(symbolPath, [])).toBeLessThanOrEqual(multiplier);
       expect(
         codeGraphSymbolPathScoreMultiplier(symbolPath, [...queryTerms, pathClass === 'test' ? 'test' : 'docs']),
@@ -272,11 +306,11 @@ describe('code graph indexed query properties', () => {
     },
     ({identity, prefix, suffix}) => {
       const selectors = codeGraphIdentitySelectors(
-        [...prefix, 'src/router/node.ts', `${identity}()`, ...suffix].join(' '),
+        EffectArray.join([...prefix, 'src/router/node.ts', `${identity}()`, ...suffix], ' '),
       );
       expect(selectors).toContain(identity);
       expect(selectors).not.toContain('src/router/node.ts');
-      expect(selectors.filter(selector => selector === identity)).toHaveLength(1);
+      expect(EffectArray.filter(selectors, selector => selector === identity)).toHaveLength(1);
     },
     {fastCheck: {numRuns: 64}},
   );
@@ -289,7 +323,7 @@ describe('code graph indexed query properties', () => {
       namespace: FC.array(FC.stringMatching(/^[a-z][a-z0-9]{1,12}$/), {minLength: 1, maxLength: 4}),
     },
     ({leaf, namespace}) => {
-      const qualified = [...namespace, leaf].join('.');
+      const qualified = EffectArray.join([...namespace, leaf], '.');
       const selectors = codeGraphIdentitySelectors(`src/fields.py trace ${qualified} callers`);
 
       expect(selectors).toContain(qualified);
@@ -375,12 +409,12 @@ describe('code graph indexed query properties', () => {
 
           const baseById = lastEdgeById(base);
           const currentById = lastEdgeById(current);
-          const deletions = new Set(deletedIds.map(edgeId));
+          const deletions = new Set(EffectArray.map(deletedIds, edgeId));
           yield* Effect.sync(() =>
             insertOverlayFixture(databasePath, [...baseById.values()], [...currentById.values()], deletions),
           );
 
-          const requestedIds = nodeIds.map(nodeId);
+          const requestedIds = EffectArray.map(nodeIds, nodeId);
           const actual = yield* store.edgesForNodes(
             databasePath,
             currentSnapshotId,
@@ -399,8 +433,8 @@ describe('code graph indexed query properties', () => {
             new Set(allowedProvenances),
           );
 
-          expect(actual.map(edgeIdentity)).toEqual(expected.map(edgeIdentity));
-          expect(new Set(actual.map(edge => edge.id)).size).toBe(actual.length);
+          expect(EffectArray.map(actual, edgeIdentity)).toEqual(EffectArray.map(expected, edgeIdentity));
+          expect(new Set(EffectArray.map(actual, edge => edge.id)).size).toBe(actual.length);
         }),
       ).pipe(provideTestLayer(ApplicationLayer)),
     {fastCheck: {numRuns: 35}},
@@ -442,7 +476,7 @@ describe('code graph indexed query properties', () => {
 
         expect(actual).toHaveLength(64);
         expect(actual[0]).toMatchObject({id: sourceImport.id, relation: 'imports'});
-        expect(actual.filter(edge => edge.relation === 'contains')).toHaveLength(63);
+        expect(EffectArray.filter(actual, edge => edge.relation === 'contains')).toHaveLength(63);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -484,7 +518,7 @@ describe('code graph indexed query properties', () => {
         const found = yield* pathQuery(store, databasePath, currentSnapshotId, start, target, 8, 8, 3, ['resolved']);
         const bounded = yield* pathQuery(store, databasePath, currentSnapshotId, start, missing, 8, 8, 3, ['resolved']);
 
-        expect(found.edges.map(edge => edge.id)).toEqual([direct.id]);
+        expect(EffectArray.map(found.edges, edge => edge.id)).toEqual([direct.id]);
         expect(found.searchCoverage).toMatchObject({status: 'found', directEdgeChecked: true});
         expect(bounded.edges).toEqual([]);
         expect(bounded.searchCoverage).toMatchObject({status: 'bounded', directEdgeChecked: true});
@@ -534,7 +568,7 @@ describe('code graph indexed query properties', () => {
           const statement = codeGraphDirectEdgeQueryStatement(currentSnapshotId, baseSnapshotId, nodeId(0), nodeId(2), [
             'resolved',
           ]);
-          const plan = queryPlan(database, statement.text, statement.parameters).join('\n');
+          const plan = EffectArray.join(queryPlan(database, statement.text, statement.parameters), '\n');
           expect(plan).toContain('edges_endpoints');
           expect(plan).toContain('snapshot_id=? AND source_id=? AND target_id=?');
         } finally {
@@ -673,12 +707,12 @@ describe('code graph indexed query properties', () => {
           confidence: 1,
           evidencePath: `src/unresolved-${index}.ts`,
           evidenceSpan: {column: 1, endColumn: 2, endLine: 1, line: 1},
-          id: `unresolved-import-${String(index).padStart(2, '0')}`,
+          id: `unresolved-import-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
           provenance: 'syntactic',
           relation: 'imports',
           sourceId,
           sourceName: sourceId,
-          targetName: `missing-${String(index).padStart(2, '0')}`,
+          targetName: `missing-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
         }));
         const usableCall = graphEdge({
           confidence: 100,
@@ -715,9 +749,9 @@ describe('code graph indexed query properties', () => {
         expect(adjacency).toHaveLength(64);
         expect(adjacency[0]).toMatchObject({id: usableCall.id, targetId});
         expect(adjacency[1]).toMatchObject({id: heuristicImport.id});
-        expect(adjacency.filter(edge => edge.targetId === undefined)).toHaveLength(62);
-        expect(neighbors.nodes.map(node => node.id)).toEqual([sourceId, targetId]);
-        expect(neighbors.edges.map(edge => edge.id)).toEqual([usableCall.id]);
+        expect(EffectArray.filter(adjacency, edge => edge.targetId === undefined)).toHaveLength(62);
+        expect(EffectArray.map(neighbors.nodes, node => node.id)).toEqual([sourceId, targetId]);
+        expect(EffectArray.map(neighbors.edges, edge => edge.id)).toEqual([usableCall.id]);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -748,8 +782,8 @@ describe('code graph indexed query properties', () => {
           store.relationshipSummaryForNode(databasePath, currentSnapshotId, nodeId(0), allProvenances),
         ]);
 
-        expect(outgoing.map(edge => edge.id)).toEqual([edgeId(3), edgeId(1)]);
-        expect(both.map(edge => edge.id)).toEqual([edgeId(3), edgeId(1)]);
+        expect(EffectArray.map(outgoing, edge => edge.id)).toEqual([edgeId(3), edgeId(1)]);
+        expect(EffectArray.map(both, edge => edge.id)).toEqual([edgeId(3), edgeId(1)]);
         expect(summary).toMatchObject({incoming: 1, outgoing: 2});
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -796,17 +830,46 @@ describe('code graph indexed query properties', () => {
             ['declared', 'resolved', 'syntactic'],
           );
           const adjacencyPlan = queryPlan(database, adjacency.text, adjacency.parameters);
-          expect(adjacencyPlan.filter(detail => detail.includes('edges_source'))).toHaveLength(2);
-          expect(adjacencyPlan.filter(detail => detail.includes('edges_target_resolved'))).toHaveLength(2);
-          expect(adjacencyPlan.join('\n')).not.toMatch(/SCAN (?:current_edges|base_edges|effective_edges)/u);
-          expect(adjacency.text.match(/LIMIT \?/gu)).toHaveLength(5);
+          expect(
+            EffectArray.filter(
+              adjacencyPlan,
+              (detail, __effectArrayIndex) =>
+                __effectArrayIndex in adjacencyPlan && Effect2.pipe(detail, EffectString.includes('edges_source')),
+            ),
+          ).toHaveLength(2);
+          expect(
+            EffectArray.filter(
+              adjacencyPlan,
+              (detail, __effectArrayIndex) =>
+                __effectArrayIndex in adjacencyPlan &&
+                Effect2.pipe(detail, EffectString.includes('edges_target_resolved')),
+            ),
+          ).toHaveLength(2);
+          expect(EffectArray.join(adjacencyPlan, '\n')).not.toMatch(
+            /SCAN (?:current_edges|base_edges|effective_edges)/u,
+          );
+          expect(
+            Effect2.pipe(
+              adjacency.text,
+              EffectString.match(/LIMIT \?/gu),
+              Effect2.Option.getOrElse(() => null),
+            ),
+          ).toHaveLength(5);
 
           const exact = codeGraphExactSymbolQueryStatement(currentSnapshotId, baseSnapshotId, 'ProgressManager', 20);
           const exactPlan = queryPlan(database, exact.text, exact.parameters);
           for (const index of ['symbols_name_nocase', 'symbols_qualified_nocase', 'symbols_path_nocase']) {
-            expect(exactPlan.filter(detail => detail.includes(index))).toHaveLength(2);
+            expect(
+              EffectArray.filter(
+                exactPlan,
+                (detail, __effectArrayIndex) =>
+                  __effectArrayIndex in exactPlan && Effect2.pipe(detail, EffectString.includes(index)),
+              ),
+            ).toHaveLength(2);
           }
-          expect(exactPlan.join('\n')).not.toMatch(/SCAN (?:current_symbols|base_symbols|effective_symbols)/u);
+          expect(EffectArray.join(exactPlan, '\n')).not.toMatch(
+            /SCAN (?:current_symbols|base_symbols|effective_symbols)/u,
+          );
 
           const byIds = codeGraphSymbolsByIdsQueryStatement(currentSnapshotId, baseSnapshotId, [
             'symbol-a',
@@ -815,7 +878,9 @@ describe('code graph indexed query properties', () => {
           const byIdsPlan = queryPlan(database, byIds.text, byIds.parameters);
           expect(byIdsPlan).toContain('SEARCH current_symbols USING PRIMARY KEY (snapshot_id=? AND id=?)');
           expect(byIdsPlan).toContain('SEARCH base_symbols USING PRIMARY KEY (snapshot_id=? AND id=?)');
-          expect(byIdsPlan.join('\n')).not.toMatch(/SCAN (?:current_symbols|base_symbols|effective_symbols)/u);
+          expect(EffectArray.join(byIdsPlan, '\n')).not.toMatch(
+            /SCAN (?:current_symbols|base_symbols|effective_symbols)/u,
+          );
 
           const terms = codeGraphTermCandidateQueryStatement(
             currentSnapshotId,
@@ -836,19 +901,23 @@ describe('code graph indexed query properties', () => {
             'SEARCH base_compact_terms USING COVERING INDEX sqlite_autoindex_lexical_compact_terms_1 (snapshot_key=? AND term=?)',
           );
           expect(termPlan).toContain('SEARCH base_compact_postings USING PRIMARY KEY (snapshot_key=? AND term_key=?)');
-          expect(termPlan.join('\n')).not.toMatch(
+          expect(EffectArray.join(termPlan, '\n')).not.toMatch(
             /SCAN (?:current_legacy_terms|base_legacy_terms|current_compact_postings|base_compact_postings|current_compact_symbols|base_compact_symbols|symbol_terms)/u,
           );
-          const compactSnapshot = database
-            .query('SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ?')
-            .get(currentSnapshotId) as {readonly snapshot_key: number};
+          const compactSnapshot = requiredRow(
+            database
+              .query<{readonly snapshot_key: number}, SQLQueryBindings[]>(
+                'SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ?',
+              )
+              .get(currentSnapshotId),
+          );
           for (const table of [
             'lexical_compact_postings',
             'lexical_compact_symbols',
             'lexical_compact_terms',
           ] as const) {
             const cleanup = codeGraphCompactLexicalCleanupPageStatement(table, compactSnapshot.snapshot_key, 5_000);
-            const cleanupPlan = queryPlan(database, cleanup.text, cleanup.parameters).join('\n');
+            const cleanupPlan = EffectArray.join(queryPlan(database, cleanup.text, cleanup.parameters), '\n');
             expect(cleanupPlan).toMatch(/SEARCH candidate USING (?:PRIMARY KEY|COVERING INDEX).*snapshot_key=/u);
             expect(cleanupPlan).not.toMatch(/SCAN candidate|USE TEMP B-TREE/u);
           }
@@ -888,7 +957,7 @@ describe('code graph indexed query properties', () => {
               databasePath,
               base,
               current,
-              new Set(deletedSymbols.map(lexicalSymbolId)),
+              new Set(EffectArray.map(deletedSymbols, lexicalSymbolId)),
               baseFormat,
               currentFormat,
             ),
@@ -898,16 +967,26 @@ describe('code graph indexed query properties', () => {
             const database = new Database(databasePath, {readonly: true, strict: true});
             try {
               const candidates = codeGraphTermCandidateQueryStatement(currentSnapshotId, baseSnapshotId, terms, limit);
-              const rows = database.query(candidates.text).all(...candidates.parameters) as readonly {
-                readonly score: number;
-                readonly symbol_id: string;
-              }[];
+              const rows = database
+                .query<
+                  {
+                    readonly score: number;
+                    readonly symbol_id: string;
+                  },
+                  SQLQueryBindings[]
+                >(candidates.text)
+                .all(...candidates.parameters);
               const canonical = codeGraphEffectiveSymbolTermsQueryStatement(currentSnapshotId, baseSnapshotId);
-              const canonicalRows = database.query(canonical.text).all(...canonical.parameters) as readonly {
-                readonly symbol_id: string;
-                readonly term: string;
-                readonly weight: number;
-              }[];
+              const canonicalRows = database
+                .query<
+                  {
+                    readonly symbol_id: string;
+                    readonly term: string;
+                    readonly weight: number;
+                  },
+                  SQLQueryBindings[]
+                >(canonical.text)
+                .all(...canonical.parameters);
               return {canonicalRows, rows};
             } finally {
               database.close(false);
@@ -915,7 +994,7 @@ describe('code graph indexed query properties', () => {
           });
           const expectedScores = lexicalCandidateReference(expected, new Set(terms), limit);
           expect(actual.canonicalRows).toEqual(expected);
-          expect(actual.rows.map(row => ({score: Number(row.score), symbol_id: row.symbol_id}))).toEqual(
+          expect(EffectArray.map(actual.rows, row => ({score: Number(row.score), symbol_id: row.symbol_id}))).toEqual(
             expectedScores,
           );
         }),
@@ -936,13 +1015,13 @@ describe('code graph indexed query properties', () => {
           confidence: (100 - (index % 100)) / 100,
           evidencePath: `src/high-degree-${index}.ts`,
           evidenceSpan: {column: 1, endColumn: 2, endLine: 1, line: 1},
-          id: `high-degree-${String(index).padStart(6, '0')}`,
+          id: `high-degree-${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}`,
           provenance: allProvenances[index % allProvenances.length],
           relation: relations[index % relations.length],
           sourceId: 'hub',
           sourceName: 'hub',
           targetId: `leaf-${index}`,
-          targetName: `leaf-${String(index).padStart(6, '0')}`,
+          targetName: `leaf-${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}`,
         }));
         yield* Effect.sync(() => insertOverlayFixture(databasePath, [], edges, new Set()));
 
@@ -958,7 +1037,7 @@ describe('code graph indexed query properties', () => {
         const elapsedMilliseconds = performance.now() - startedAt;
         const expected = [...edges].sort(compareEdges).slice(0, 40);
 
-        expect(actual.map(edge => edge.id)).toEqual(expected.map(edge => edge.id));
+        expect(EffectArray.map(actual, edge => edge.id)).toEqual(EffectArray.map(expected, edge => edge.id));
         expect(elapsedMilliseconds).toBeLessThan(2_000);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -977,7 +1056,7 @@ describe('code graph indexed query properties', () => {
 
         const results = yield* store.searchSymbols(databasePath, currentSnapshotId, 'ProgressManager', 20);
 
-        expect(results.map(result => [result.kind, result.name, result.score])).toEqual([
+        expect(EffectArray.map(results, result => [result.kind, result.name, result.score])).toEqual([
           ['class', 'ProgressManager', 1],
           ['property', 'progressManager', 0.98],
           ['property', 'progressManager', 0.98],
@@ -1053,7 +1132,7 @@ describe('code graph indexed query properties', () => {
 
         const results = yield* store.searchSymbols(databasePath, currentSnapshotId, '.\\src\\feature\\button.ts', 20);
 
-        expect(results.map(result => [result.kind, result.name, result.path, result.score])).toEqual([
+        expect(EffectArray.map(results, result => [result.kind, result.name, result.path, result.score])).toEqual([
           ['module', 'src/feature/button.ts', 'src/feature/button.ts', 1],
           ['function', 'createButton', 'src/feature/button.ts', 0.9],
         ]);
@@ -1106,10 +1185,10 @@ describe('code graph indexed query properties', () => {
     ({packageSegments, repository, target}) =>
       Effect.sync(() => {
         const repositoryPrefix = repository === undefined ? '' : `@${repository}`;
-        const label = `${repositoryPrefix}//${packageSegments.join('/')}:${target}`;
+        const label = `${repositoryPrefix}//${EffectArray.join(packageSegments, '/')}:${target}`;
         expect(isCanonicalAbsoluteBazelLabel(label)).toBe(true);
-        expect(isCanonicalAbsoluteBazelLabel(label.replace('//', '/'))).toBe(false);
-        expect(isCanonicalAbsoluteBazelLabel(`${packageSegments.join('/')}/${target}.ts`)).toBe(false);
+        expect(isCanonicalAbsoluteBazelLabel(Effect2.pipe(label, EffectString.replace('//', '/')))).toBe(false);
+        expect(isCanonicalAbsoluteBazelLabel(`${EffectArray.join(packageSegments, '/')}/${target}.ts`)).toBe(false);
       }),
     {fastCheck: {numRuns: 100}},
   );
@@ -1129,7 +1208,7 @@ function cacheAuthorityDatabase(): Database {
       PRIMARY KEY (content_hash, extractor_set, path_hint)
     ) WITHOUT ROWID;
     ${CODE_GRAPH_FILE_BLOB_AUTHORITY_TABLE_SQL};
-    ${CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGER_SQL.join(';\n')};
+    ${EffectArray.join(CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGER_SQL, ';\n')};
   `);
   return database;
 }
@@ -1170,16 +1249,15 @@ function referenceAdjacency(
   for (const [id, edge] of base) {
     if (!current.has(id) && !deletions.has(id)) effective.set(id, edge);
   }
-  return [...effective.values()]
-    .filter(edge => {
-      if (!allowedProvenances.has(edge.provenance)) return false;
-      if (direction === 'incoming') return edge.targetId !== undefined && nodeIds.has(edge.targetId);
-      if (direction === 'outgoing') return edge.sourceId !== undefined && nodeIds.has(edge.sourceId);
-      return (
-        (edge.sourceId !== undefined && nodeIds.has(edge.sourceId)) ||
-        (edge.targetId !== undefined && nodeIds.has(edge.targetId))
-      );
-    })
+  return EffectArray.filter([...effective.values()], edge => {
+    if (!allowedProvenances.has(edge.provenance)) return false;
+    if (direction === 'incoming') return edge.targetId !== undefined && nodeIds.has(edge.targetId);
+    if (direction === 'outgoing') return edge.sourceId !== undefined && nodeIds.has(edge.sourceId);
+    return (
+      (edge.sourceId !== undefined && nodeIds.has(edge.sourceId)) ||
+      (edge.targetId !== undefined && nodeIds.has(edge.targetId))
+    );
+  })
     .sort(compareEdges)
     .slice(0, limit);
 }
@@ -1250,7 +1328,7 @@ function insertLexicalOverlayFixture(
 ): readonly LexicalCanonicalRow[] {
   const base = normalizedLexicalPostings(baseInput);
   const current = normalizedLexicalPostings(currentInput);
-  const currentSymbolIds = new Set(current.map(row => row.symbol_id));
+  const currentSymbolIds = new Set(EffectArray.map(current, row => row.symbol_id));
   const database = new Database(databasePath, {strict: true});
   try {
     database.transaction(() => {
@@ -1267,9 +1345,11 @@ function insertLexicalOverlayFixture(
   }
   return [
     ...current,
-    ...base.filter(row => !currentSymbolIds.has(row.symbol_id) && !deletedSymbolIds.has(row.symbol_id)),
+    ...EffectArray.filter(base, row => !currentSymbolIds.has(row.symbol_id) && !deletedSymbolIds.has(row.symbol_id)),
   ].sort(
-    (left, right) => left.term.localeCompare(right.term, 'en') || left.symbol_id.localeCompare(right.symbol_id, 'en'),
+    (left, right) =>
+      Effect2.pipe(left.term, EffectString.localeCompare(right.term, ['en'])) ||
+      Effect2.pipe(left.symbol_id, EffectString.localeCompare(right.symbol_id, ['en'])),
   );
 }
 
@@ -1284,7 +1364,9 @@ function normalizedLexicalPostings(input: readonly LexicalPostingSpec[]): readon
     }
   }
   return [...rows.values()].sort(
-    (left, right) => left.term.localeCompare(right.term, 'en') || left.symbol_id.localeCompare(right.symbol_id, 'en'),
+    (left, right) =>
+      Effect2.pipe(left.term, EffectString.localeCompare(right.term, ['en'])) ||
+      Effect2.pipe(left.symbol_id, EffectString.localeCompare(right.symbol_id, ['en'])),
   );
 }
 
@@ -1294,7 +1376,7 @@ function insertLexicalSnapshot(
   postings: readonly LexicalCanonicalRow[],
   format: LexicalFixtureFormat,
 ): void {
-  const symbolIds = [...new Set(postings.map(row => row.symbol_id))].sort();
+  const symbolIds = [...new Set(EffectArray.map(postings, row => row.symbol_id))].sort();
   const insertSymbol = database.query(`INSERT INTO symbols (
     snapshot_id, id, content_hash, kind, name, qualified_name, path, language, arity,
     lookup_keys_json, resolution_domain, resolution_scope_id, package_name, exported,
@@ -1320,14 +1402,18 @@ function insertLexicalSnapshot(
     return;
   }
   database.query('INSERT INTO lexical_compact_snapshots (snapshot_id) VALUES (?)').run(snapshotId);
-  const compact = database
-    .query('SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ?')
-    .get(snapshotId) as {readonly snapshot_key: number};
+  const compact = requiredRow(
+    database
+      .query<{readonly snapshot_key: number}, SQLQueryBindings[]>(
+        'SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ?',
+      )
+      .get(snapshotId),
+  );
   const insertCompactSymbol = database.query(
     'INSERT INTO lexical_compact_symbols (snapshot_key, symbol_id) VALUES (?, ?)',
   );
   for (const symbolId of symbolIds) insertCompactSymbol.run(compact.snapshot_key, symbolId);
-  const terms = [...new Set(postings.map(row => row.term))].sort();
+  const terms = [...new Set(EffectArray.map(postings, row => row.term))].sort();
   const insertTerm = database.query('INSERT INTO lexical_compact_terms (snapshot_key, term) VALUES (?, ?)');
   for (const term of terms) insertTerm.run(compact.snapshot_key, term);
   const insertPosting = database.query(
@@ -1365,9 +1451,11 @@ function lexicalCandidateReference(
   for (const row of rows) {
     if (terms.has(row.term)) scores.set(row.symbol_id, (scores.get(row.symbol_id) ?? 0) + row.weight);
   }
-  return [...scores]
-    .map(([symbol_id, score]) => ({score, symbol_id}))
-    .sort((left, right) => right.score - left.score || left.symbol_id.localeCompare(right.symbol_id, 'en'))
+  return EffectArray.map([...scores], ([symbol_id, score]) => ({score, symbol_id}))
+    .sort(
+      (left, right) =>
+        right.score - left.score || Effect2.pipe(left.symbol_id, EffectString.localeCompare(right.symbol_id, ['en'])),
+    )
     .slice(0, limit);
 }
 
@@ -1599,11 +1687,17 @@ function insertEdge(database: Database, snapshotId: string, edge: CodeGraphEdge)
 }
 
 function queryPlan(database: Database, statement: string, parameters: readonly (number | string)[]): readonly string[] {
-  return (
-    database.query(`EXPLAIN QUERY PLAN ${statement}`).all(...parameters) as readonly {
-      readonly detail: string;
-    }[]
-  ).map(row => row.detail);
+  return EffectArray.map(
+    database
+      .query<
+        {
+          readonly detail: string;
+        },
+        SQLQueryBindings[]
+      >(`EXPLAIN QUERY PLAN ${statement}`)
+      .all(...parameters),
+    row => row.detail,
+  );
 }
 
 function edgeId(value: number): string {
@@ -1615,7 +1709,7 @@ function nodeId(value: number): string {
 }
 
 function stableNodeId(value: number): string {
-  return `cgs_${value.toString(16).padStart(32, '0')}`;
+  return `cgs_${Effect2.pipe(value.toString(16), EffectString.padStart(32, '0'))}`;
 }
 
 const spanJson = JSON.stringify({column: 1, endColumn: 2, endLine: 1, line: 1});

@@ -1,5 +1,6 @@
 import type {CodeMemoryLinkAgentAbResultV1} from './code-memory-link-agent-ab.js';
 import type {CodeMemoryLinkDogfoodResultV1} from './code-memory-link-dogfood.js';
+import {Array as EffectArray} from 'effect';
 
 export const CODE_MEMORY_LINK_RETAINED_RESULT_VERSION = 1 as const;
 
@@ -15,9 +16,9 @@ export function codeMemoryLinkRetentionBlockers(input: {
 }): readonly string[] {
   return [
     ...input.agentAb.gate.qualityFailures,
-    ...input.agentAb.gate.insufficiencies.filter(value => !AGENT_ALLOWLIST_INSUFFICIENCIES.has(value)),
+    ...EffectArray.filter(input.agentAb.gate.insufficiencies, value => !AGENT_ALLOWLIST_INSUFFICIENCIES.has(value)),
     ...input.dogfood.gate.qualityFailures,
-    ...input.dogfood.gate.insufficiencies.filter(value => value !== DOGFOOD_ALLOWLIST_INSUFFICIENCY),
+    ...EffectArray.filter(input.dogfood.gate.insufficiencies, value => value !== DOGFOOD_ALLOWLIST_INSUFFICIENCY),
   ].sort();
 }
 

@@ -2,10 +2,10 @@ import {Schema} from 'effect';
 import {isMemoryRelationType, MAX_MEMORY_RELATIONS, type MemoryRelation} from '../document.js';
 import {parseRemoteShareAddress} from './address.js';
 
-export class InvalidRemoteMemoryRelations extends Schema.TaggedError<InvalidRemoteMemoryRelations>()(
-  'InvalidRemoteMemoryRelations',
-  {message: Schema.String},
-) {}
+export class InvalidRemoteMemoryRelations extends Schema.TaggedError<
+  InvalidRemoteMemoryRelations,
+  {readonly brand: unique symbol}
+>()('InvalidRemoteMemoryRelations', {message: Schema.String}) {}
 
 export function normalizeRemoteMemoryRelations(
   inputs: readonly Readonly<{readonly type: string; readonly uri: string}>[] | undefined,

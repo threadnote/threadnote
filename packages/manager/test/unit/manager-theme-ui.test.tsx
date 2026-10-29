@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot} from 'react-dom/client';
@@ -5,6 +6,28 @@ import {beforeEach, afterEach, expect, it, vi} from 'vitest';
 import {ThemeSwitch, MANAGER_THEME_KEY} from '../../src/theme.js';
 import {readManagerPreference, writeManagerPreference} from '../../src/preferences.js';
 import {NavigationToggle, useNavigationCollapse} from '../../src/navigation.js';
+
+class MutableMediaQueryList extends EventTarget implements MediaQueryList {
+  readonly media = '(prefers-color-scheme: dark)';
+  onchange: MediaQueryList['onchange'] = null;
+  private currentMatches = false;
+
+  get matches(): boolean {
+    return this.currentMatches;
+  }
+
+  set matches(value: boolean) {
+    this.currentMatches = value;
+  }
+
+  addListener(listener: MediaQueryList['onchange']): void {
+    void listener;
+  }
+
+  removeListener(listener: MediaQueryList['onchange']): void {
+    void listener;
+  }
+}
 
 const preferenceKeys = [MANAGER_THEME_KEY, 'threadnote.manager.navigationCollapsed'];
 function clearPreferences(): void {
@@ -16,9 +39,8 @@ afterEach(clearPreferences);
 
 it('persists explicit appearance and follows system changes only in System mode', async () => {
   Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', {configurable: true, value: true});
-  const media = new EventTarget() as EventTarget & {matches: boolean};
-  media.matches = false;
-  const match = vi.spyOn(window, 'matchMedia').mockReturnValue(media as MediaQueryList);
+  const media = new MutableMediaQueryList();
+  const match = vi.spyOn(window, 'matchMedia').mockReturnValue(media);
   localStorage.setItem(MANAGER_THEME_KEY, 'dark');
   const container = document.createElement('div');
   document.body.append(container);
@@ -26,7 +48,10 @@ it('persists explicit appearance and follows system changes only in System mode'
   try {
     await act(async () => root.render(<ThemeSwitch />));
     expect(document.documentElement.dataset.theme).toBe('dark');
-    const button = (text: string) => [...container.querySelectorAll('button')].find(item => item.textContent === text)!;
+    const button = (text: string) =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst([...container.querySelectorAll('button')], item => item.textContent === text),
+      )!;
     await act(async () => button('Light').click());
     expect(localStorage.getItem(MANAGER_THEME_KEY)).toBe('light');
     await act(async () => {

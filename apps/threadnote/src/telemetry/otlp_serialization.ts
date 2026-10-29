@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Effect, Layer} from 'effect';
 import {OtlpSerialization, type OtlpTracer} from 'effect/observability';
 
@@ -11,13 +13,19 @@ const RESOURCE_ATTRIBUTES = new Set([
 
 export function normalizeAnonymousTelemetryTraceData(data: OtlpTracer.TraceData): OtlpTracer.TraceData {
   return {
-    resourceSpans: data.resourceSpans.map(group => ({
+    resourceSpans: EffectArray.map(data.resourceSpans, group => ({
       ...group,
       resource: {
         ...group.resource,
-        attributes: group.resource.attributes.filter(attribute => RESOURCE_ATTRIBUTES.has(attribute.key)),
+        attributes: EffectArrayPipe(group.resource.attributes, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (attribute, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues && RESOURCE_ATTRIBUTES.has(attribute.key),
+          ),
+        ),
       },
-      scopeSpans: group.scopeSpans.map(scope => ({...scope, scope: {name: 'threadnote'}})),
+      scopeSpans: EffectArray.map(group.scopeSpans, scope => ({...scope, scope: {name: 'threadnote'}})),
     })),
   };
 }

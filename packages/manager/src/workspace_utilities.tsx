@@ -1,3 +1,4 @@
+import {isOutputResponse, isOutputResponse2} from './api/response_guards.js';
 import {Download, Upload, Sprout, Blocks, BrushCleaning} from 'lucide-react';
 import React, {useState} from 'react';
 import {ActionMenu, type MenuAction} from './action_menu.js';
@@ -52,7 +53,14 @@ export function WorkspaceUtilities({
       fields: [{id: 'path', label: 'Local .ovpack path', required: true, placeholder: '/path/to/library.ovpack'}],
     });
     if (values)
-      await report(await api(importing ? '/api/import-pack' : '/api/export-pack', {path: values.path, confirm: true}));
+      await report(
+        await api(
+          importing ? '/api/import-pack' : '/api/export-pack',
+          {path: values.path, confirm: true},
+          undefined,
+          isOutputResponse2,
+        ),
+      );
   }
   async function hygiene(): Promise<void> {
     const scope = await dialogs.prompt({
@@ -64,7 +72,7 @@ export function WorkspaceUtilities({
       ],
     });
     if (!scope) return;
-    const preview = await api<{readonly output: string}>('/api/compact', scope);
+    const preview = await api<{readonly output: string}>('/api/compact', scope, undefined, isOutputResponse);
     if (
       await dialogs.confirm({
         title: 'Apply memory hygiene?',
@@ -73,7 +81,7 @@ export function WorkspaceUtilities({
         confirmLabel: 'Apply',
       })
     ) {
-      await report(await api('/api/compact', {...scope, apply: true, confirm: true}));
+      await report(await api('/api/compact', {...scope, apply: true, confirm: true}, undefined, isOutputResponse2));
     }
   }
   async function seed(skills: boolean): Promise<void> {
@@ -86,7 +94,9 @@ export function WorkspaceUtilities({
         confirmLabel: 'Set up',
       })
     ) {
-      await report(await api('/api/seed', {confirm: true, ...(skills ? {skills: true} : {})}));
+      await report(
+        await api('/api/seed', {confirm: true, ...(skills ? {skills: true} : {})}, undefined, isOutputResponse2),
+      );
     }
   }
   const actions: readonly MenuAction[] =

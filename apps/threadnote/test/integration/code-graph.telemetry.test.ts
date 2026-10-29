@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import * as BunPath from '@effect/platform-bun/BunPath';
@@ -12,7 +13,7 @@ import {TestClock} from 'effect/testing';
 import {McpSchema, McpServer} from 'effect/ai';
 import {describe, expect} from 'vitest';
 import {CodeGraphAnalysis, analyzeCodeGraph} from '@threadnote/graph/analysis';
-import {serveCodeGraphAnalysisRead, type CodeGraphAnalysisReadInput} from '@threadnote/graph/isolated/analysis';
+import {serveCodeGraphAnalysisRead} from '@threadnote/graph/isolated/analysis';
 import {codeGraphIsolatedQueryTelemetryRecorder} from '@threadnote/graph/isolated/impact_query';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -28,6 +29,53 @@ import type {CommandResult} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {analysisSnapshot, pagedAnalysisStore} from '@threadnote/graph/test/helpers/code-graph-analysis';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const codeGraphAnalysisReadInputSchema = Schema.Struct({
+  budget: Schema.optional(
+    Schema.Struct({
+      maxEdgeVisits: Schema.optional(Schema.Int),
+      maxEdges: Schema.optional(Schema.Int),
+      maxNodes: Schema.optional(Schema.Int),
+    }),
+  ),
+  communityId: Schema.optional(Schema.String),
+  cwd: Schema.String,
+  deadlineMilliseconds: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0)),
+  freshness: Schema.Literals(['current', 'ready', 'allow-stale']),
+  includeHeuristic: Schema.optional(Schema.Boolean),
+  includeModelAssociations: Schema.optional(Schema.Boolean),
+  limits: Schema.optional(
+    Schema.Struct({
+      communities: Schema.optional(Schema.Int),
+      communityMembers: Schema.optional(Schema.Int),
+      components: Schema.optional(Schema.Int),
+      confidenceFindings: Schema.optional(Schema.Int),
+      hubs: Schema.optional(Schema.Int),
+      memberships: Schema.optional(Schema.Int),
+      relationshipGroupMembers: Schema.optional(Schema.Int),
+      relationshipGroups: Schema.optional(Schema.Int),
+      surprisingLinks: Schema.optional(Schema.Int),
+    }),
+  ),
+  manifestPath: Schema.optional(Schema.String),
+  memberLimit: Schema.optional(Schema.Int),
+  operation: Schema.Literals([
+    'stats',
+    'communities',
+    'community',
+    'groups',
+    'hubs',
+    'surprises',
+    'confidence',
+    'full',
+  ]),
+  project: Schema.optional(Schema.String),
+  refresh: Schema.optional(Schema.Boolean),
+  threadnoteHome: Schema.String,
+});
 
 describe('code graph terminal telemetry wiring', () => {
   effectIt.effect('emits complete privacy-safe inspect and analyze lifecycles through the registered MCP tools', () => {
@@ -46,19 +94,20 @@ describe('code graph terminal telemetry wiring', () => {
 
       expect(result.isError).not.toBe(true);
       expect(watcherEnrollments).toBe(1);
-      const spans = capture.spans
-        .map(span => Object.fromEntries(span.attributes))
-        .filter(attributes => attributes['threadnote.operation'] === 'inspect_code_graph');
+      const spans = EffectArray.filter(
+        EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
+        attributes => attributes['threadnote.operation'] === 'inspect_code_graph',
+      );
 
       expect(spans).toHaveLength(5);
-      expect(spans.map(attributes => attributes['threadnote.phase'])).toEqual([
+      expect(EffectArray.map(spans, attributes => attributes['threadnote.phase'])).toEqual([
         'graph.query.status',
         'graph.query.execute',
         'graph.query.execute',
         'graph.query.execute',
         'graph.query.execute',
       ]);
-      expect(spans.map(attributes => attributes['threadnote.stage'])).toEqual([
+      expect(EffectArray.map(spans, attributes => attributes['threadnote.stage'])).toEqual([
         'query-repository-identity',
         'query-strict-reobservation',
         undefined,
@@ -98,11 +147,12 @@ describe('code graph terminal telemetry wiring', () => {
       });
 
       expect(analyzeResult.isError).not.toBe(true);
-      const analyzeSpans = capture.spans
-        .map(span => Object.fromEntries(span.attributes))
-        .filter(attributes => attributes['threadnote.operation'] === 'analyze_code_graph');
+      const analyzeSpans = EffectArray.filter(
+        EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
+        attributes => attributes['threadnote.operation'] === 'analyze_code_graph',
+      );
       expect(analyzeSpans).toHaveLength(7);
-      expect(analyzeSpans.slice(0, 6).map(attributes => attributes['threadnote.phase'])).toEqual([
+      expect(EffectArray.map(analyzeSpans.slice(0, 6), attributes => attributes['threadnote.phase'])).toEqual([
         'graph.query.status',
         'graph.query.status',
         'graph.query.status',
@@ -110,7 +160,7 @@ describe('code graph terminal telemetry wiring', () => {
         'graph.query.execute',
         'graph.query.execute',
       ]);
-      expect(analyzeSpans.slice(0, 6).map(attributes => attributes['threadnote.stage'])).toEqual([
+      expect(EffectArray.map(analyzeSpans.slice(0, 6), attributes => attributes['threadnote.stage'])).toEqual([
         'query-repository-identity',
         'query-worktree-observation',
         'query-repository-identity',
@@ -185,9 +235,10 @@ describe('code graph terminal telemetry wiring', () => {
           });
 
           expect(lease.snapshot.commit).toBe(fixture.commit);
-          const lifecycle = capture.spans
-            .map(span => Object.fromEntries(span.attributes))
-            .filter(attributes => attributes['threadnote.event'] === 'lifecycle');
+          const lifecycle = EffectArray.filter(
+            EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
+            attributes => attributes['threadnote.event'] === 'lifecycle',
+          );
           expect(lifecycle).toHaveLength(1);
           expect(lifecycle[0]).toMatchObject({
             'threadnote.component': 'cli',
@@ -238,9 +289,10 @@ describe('code graph terminal telemetry wiring', () => {
             mode: 'incremental-overlay',
             resolutionClosure: 'project',
           });
-          const lifecycle = capture.spans
-            .map(span => Object.fromEntries(span.attributes))
-            .filter(attributes => attributes['threadnote.event'] === 'lifecycle');
+          const lifecycle = EffectArray.filter(
+            EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
+            attributes => attributes['threadnote.event'] === 'lifecycle',
+          );
           expect(lifecycle).toHaveLength(2);
           expect(lifecycle[1]).toMatchObject({
             'threadnote.graph.build_kind': 'dirty',
@@ -296,9 +348,10 @@ describe('code graph terminal telemetry wiring', () => {
             resolutionClosure: 'project',
           });
           expect(cachedDirty.reusedFiles).toBe(cachedDirty.materialization?.totalFiles);
-          const lifecycle = capture.spans
-            .map(span => Object.fromEntries(span.attributes))
-            .filter(attributes => attributes['threadnote.event'] === 'lifecycle');
+          const lifecycle = EffectArray.filter(
+            EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
+            attributes => attributes['threadnote.event'] === 'lifecycle',
+          );
           expect(lifecycle).toHaveLength(4);
           expect(lifecycle.at(-1)).toMatchObject({
             'threadnote.graph.cached_fact_replay_bytes_bucket': '0',
@@ -343,9 +396,10 @@ describe('code graph terminal telemetry wiring', () => {
 
           expect(changedDuringFirstAttempt).toBe(true);
           expect(summary.snapshot.state).toBe('ready');
-          const lifecycle = capture.spans
-            .map(span => Object.fromEntries(span.attributes))
-            .filter(attributes => attributes['threadnote.event'] === 'lifecycle');
+          const lifecycle = EffectArray.filter(
+            EffectArray.map(capture.spans, span => EffectRecord.fromEntries(span.attributes)),
+            attributes => attributes['threadnote.event'] === 'lifecycle',
+          );
           expect(lifecycle).toHaveLength(1);
           expect(lifecycle[0]).toMatchObject({
             'threadnote.event': 'lifecycle',
@@ -362,7 +416,7 @@ const TELEMETRY_HOME = '/threadnote-telemetry-handler-home';
 const TELEMETRY_REPOSITORY_ROOT = '/workspace/private-telemetry-repository';
 
 function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnrollment: () => void) {
-  const snapshot = {...analysisSnapshot([], []), id: `cgsn_${'1'.repeat(40)}`};
+  const snapshot = {...analysisSnapshot([], []), id: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`};
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
     checkoutId: 'telemetry-checkout',
@@ -436,23 +490,31 @@ function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnrollment: 
       arguments_.at(-1) === '--threadnote-code-graph-analysis-worker'
         ? Effect.gen(function* () {
             if (options?.input === undefined) throw new Error('Missing isolated graph analysis request.');
-            const request = JSON.parse(new TextDecoder().decode(options.input)) as CodeGraphAnalysisReadInput;
+            const request = yield* Schema.decodeUnknownEffect(codeGraphAnalysisReadInputSchema)(
+              JSON.parse(new TextDecoder().decode(options.input)),
+            );
             const telemetry: Parameters<typeof codeGraphIsolatedQueryTelemetryRecorder>[0] = [];
             const result = yield* serveCodeGraphAnalysisRead(request, {
               telemetry: codeGraphIsolatedQueryTelemetryRecorder(telemetry),
             }).pipe(
               Effect.provideService(CodeGraphQueryService, query),
               Effect.provideService(CodeGraphAnalysis, analysis),
-              Effect.provideService(CodeGraphIndexer, {} as import('@threadnote/graph/indexer').CodeGraphIndexerShape),
+              Effect.provideService(
+                CodeGraphIndexer,
+                CodeGraphIndexer.of({
+                  ensureCommit: () => Effect.die('Unexpected commit lease request.'),
+                  index: () => Effect.die('Unexpected graph index request.'),
+                }),
+              ),
               Effect.orDie,
             );
             return commandResult(JSON.stringify({protocol: 1, ok: true, result, telemetry}));
-          })
-        : Effect.sync(() => {
+          }).pipe(Effect.orDie)
+        : Effect.gen(function* () {
             if (options?.input === undefined) throw new Error('Missing isolated graph inspection request.');
-            const request = JSON.parse(new TextDecoder().decode(options.input)) as {
-              readonly operation: CodeGraphQueryResult['operation'];
-            };
+            const request = yield* Schema.decodeUnknownEffect(
+              Schema.Struct({operation: Schema.Literals(['explain', 'impact', 'neighbors', 'node', 'path', 'query'])}),
+            )(JSON.parse(new TextDecoder().decode(options.input)));
             return commandResult(
               JSON.stringify({
                 ok: true,
@@ -480,7 +542,7 @@ function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnrollment: 
                 ],
               }),
             );
-          }),
+          }).pipe(Effect.orDie),
     executeStreaming: () => Effect.die('Unexpected streaming command.'),
   });
   const server = new EffectMcpServerAdapter('threadnote-graph-telemetry-test', '1.0.0', 'Test server.');
@@ -488,14 +550,28 @@ function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnrollment: 
   type AddedTool = Parameters<EffectMcpServer['addTool']>[0];
   let analyzeHandle: AddedTool['handle'] | undefined;
   let inspectHandle: AddedTool['handle'] | undefined;
-  const mcpLayer = Layer.succeed(McpServer.McpServer, {
+  const mcpLayer = Layer.mock(McpServer.McpServer, {
+    notifications: {
+      'notifications/cancelled': () => Effect.die('Unexpected MCP cancellation notification.'),
+      'notifications/message': () => Effect.die('Unexpected MCP logging notification.'),
+      'notifications/progress': () => Effect.die('Unexpected MCP progress notification.'),
+      'notifications/prompts/list_changed': () => Effect.die('Unexpected MCP prompts notification.'),
+      'notifications/resources/list_changed': () => Effect.die('Unexpected MCP resources notification.'),
+      'notifications/resources/updated': () => Effect.die('Unexpected MCP resource update notification.'),
+      'notifications/tools/list_changed': () => Effect.die('Unexpected MCP tools notification.'),
+    },
+    prompts: [],
+    resourceTemplates: [],
+    resources: [],
+    tools: [],
     addTool: (options: AddedTool) =>
       Effect.sync(() => {
         if (options.tool.name === 'analyze_code_graph') analyzeHandle = options.handle;
         if (options.tool.name === 'inspect_code_graph') inspectHandle = options.handle;
       }),
-  } as unknown as EffectMcpServer);
+  });
   const applicationLayer = Layer.mergeAll(
+    ApplicationLayer,
     BunFileSystem.layer,
     BunPath.layer,
     Layer.succeed(CommandExecutor, command),
@@ -505,15 +581,7 @@ function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnrollment: 
     Layer.succeed(SystemInfo, telemetrySystemInfoStub()),
     anonymousTelemetryTestLayer({system: telemetrySystemInfoStub(), tracer}),
   );
-  // The registry contains only the two handlers exercised here. Its production
-  // type is conservative because arbitrary registries may capture any service.
-  // oxlint-disable effecttsgo/unsafe-effect-type-assertion -- narrow this test-only registry to its actual services
-  const registrationLayer = server.registrationLayer() as Layer.Layer<
-    never,
-    never,
-    McpServer.McpServer | Layer.Success<typeof applicationLayer>
-  >;
-  // oxlint-enable effecttsgo/unsafe-effect-type-assertion
+  const registrationLayer = server.registrationLayer();
   const layer = registrationLayer.pipe(Layer.provideMerge(mcpLayer), Layer.provideMerge(applicationLayer));
   const invoke = (handle: AddedTool['handle'] | undefined, name: string, arguments_: Record<string, unknown>) =>
     Effect.suspend(() => {
@@ -586,7 +654,7 @@ function createRepositoryFixture(): {commit: string; home: string; root: string}
   git(root, ['add', '.']);
   git(root, ['commit', '-qm', 'fixture']);
   return {
-    commit: git(root, ['rev-parse', 'HEAD']).trim(),
+    commit: Effect2.pipe(git(root, ['rev-parse', 'HEAD']), EffectString.trim),
     home: join(root, '.threadnote-test-home'),
     root,
   };

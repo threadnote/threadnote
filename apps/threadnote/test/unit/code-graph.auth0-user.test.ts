@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -13,10 +14,20 @@ import {
 } from '@threadnote/graph/sharing/oauth/user';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {graphSharingUnavailable} from '@threadnote/graph/sharing/errors';
+import {isJsonObject} from '@threadnote/platform/json';
 
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 const systemLayer = TestSystemInfoLayer;
 const layer = Layer.merge(systemLayer, TestCommandExecutorLayer.pipe(Layer.provide(systemLayer))).pipe(
@@ -36,7 +47,7 @@ const request = {
   issuer: config.issuer,
   organization: config.organization,
   profileDigest: sha256Digest('profile'),
-  repositoryId: 'a'.repeat(64),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   schemaVersion: 1,
   scopes: ['graph:contribute'],
 };
@@ -127,13 +138,13 @@ const fixture = Effect.fn('test.auth0User.fixture')(function* () {
   return {
     backend,
     expireSaved: () => {
-      saved = JSON.stringify({...JSON.parse(saved), expiresAt: now + 5});
+      saved = JSON.stringify({...requireJsonObject(JSON.parse(saved)), expiresAt: now + 5});
     },
     home,
     get: () => getGraphAuth0UserCredential(home, request, backend),
     reads: () => reads,
     refreshes: () => refreshes,
-    saved: () => JSON.parse(saved) as Record<string, unknown>,
+    saved: () => requireJsonObject(JSON.parse(saved)),
     setFailFinalWrite: () => {
       failFinalWrite = true;
     },
@@ -157,7 +168,7 @@ describe('Auth0 user graph credentials', () => {
         const f = yield* fixture();
         const results = yield* Effect.forEach(Array.from({length: callers}), () => f.get(), {concurrency: callers});
         expect(results).toHaveLength(callers);
-        expect(new Set(results.map(result => result.accessToken))).toEqual(new Set(['next.token']));
+        expect(new Set(EffectArray.map(results, result => result.accessToken))).toEqual(new Set(['next.token']));
         expect(f.refreshes()).toBe(1);
         expect(f.writes()).toBe(2);
         expect(f.reads()).toBe(callers);
@@ -258,7 +269,7 @@ describe('Auth0 user graph credentials', () => {
         post: (_config, endpoint, form) =>
           Effect.sync(() => {
             expect(form.client_id).toBe(config.clientId);
-            expect(Object.keys(form)).not.toContain('client_secret');
+            expect(EffectRecord.keys(form)).not.toContain('client_secret');
             if (endpoint === 'device') {
               expect(form.audience).toBe(config.audience);
               expect(form.scope).toContain('offline_access');
@@ -351,7 +362,7 @@ describe('Auth0 user graph credentials', () => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-auth0-config-'});
-      yield* configureGraphAuth0User({agentContextHome: home} as RuntimeConfig, config);
+      yield* configureGraphAuth0User(runtimeConfigForTest({agentContextHome: home}), config);
       const root = path.join(home, 'graph-sharing');
       const binding = JSON.parse(yield* fs.readFileString(path.join(root, 'control-credentials.json')));
       expect(binding.bindings).toEqual([
@@ -380,7 +391,7 @@ describe('Auth0 user graph credentials', () => {
         coordinatorUrl: 'https://graph.example.test/second',
         organization: 'another',
       };
-      const runtime = {agentContextHome: home} as RuntimeConfig;
+      const runtime = runtimeConfigForTest({agentContextHome: home});
       yield* configureGraphAuth0User(runtime, config);
       yield* configureGraphAuth0User(runtime, second);
       const accounts: string[] = [];

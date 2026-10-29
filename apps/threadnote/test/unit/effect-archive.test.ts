@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {describe, expect} from 'vitest';
 import {extractGzipTar, type ArchiveExtractionLimits} from '@threadnote/threadnote/effect/archive';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TAR_BLOCK_BYTES = 512;
 
@@ -181,7 +185,7 @@ function extractFixture(tar: Uint8Array, limits: ArchiveExtractionLimits = {}) {
         for (const relative of yield* fs.readDirectory(destination, {recursive: true})) {
           const file = path.join(destination, relative);
           if ((yield* fs.stat(file)).type === 'File')
-            files.set(relative.replaceAll('\\', '/'), yield* fs.readFileString(file));
+            files.set(Effect2.pipe(relative, EffectString.replaceAll('\\', '/')), yield* fs.readFileString(file));
         }
       }
       return {failure, files};
@@ -214,14 +218,14 @@ function tarEntry(
   writeText(header, 257, 6, 'ustar');
   writeText(header, 263, 2, '00');
   const checksum = header.reduce((total, byte) => total + byte, 0);
-  writeText(header, 148, 8, `${checksum.toString(8).padStart(6, '0')}\0 `);
+  writeText(header, 148, 8, `${Effect2.pipe(checksum.toString(8), EffectString.padStart(6, '0'))}\0 `);
   return joinBytes([header, content, new Uint8Array(tarPadding(content.length))]);
 }
 
 function paxRecords(values: Readonly<Record<string, string>>): Uint8Array {
   return bytes(
-    Object.entries(values)
-      .map(([key, value]) => {
+    EffectArray.join(
+      EffectArray.map(EffectRecord.toEntries(values), ([key, value]) => {
         const body = `${key}=${value}\n`;
         let length = new TextEncoder().encode(body).length + 2;
         while (true) {
@@ -230,8 +234,9 @@ function paxRecords(values: Readonly<Record<string, string>>): Uint8Array {
           if (actual === length) return record;
           length = actual;
         }
-      })
-      .join(''),
+      }),
+      '',
+    ),
   );
 }
 
@@ -240,7 +245,7 @@ function writeText(target: Uint8Array, offset: number, length: number, value: st
 }
 
 function writeOctal(target: Uint8Array, offset: number, length: number, value: number): void {
-  writeText(target, offset, length, `${value.toString(8).padStart(length - 1, '0')}\0`);
+  writeText(target, offset, length, `${Effect2.pipe(value.toString(8), EffectString.padStart(length - 1, '0'))}\0`);
 }
 
 function tarPadding(size: number): number {
@@ -252,7 +257,7 @@ function bytes(value: string): Uint8Array {
 }
 
 function joinBytes(chunks: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
+  const output = new Uint8Array(EffectArray.reduce(chunks, 0, (total, chunk) => total + chunk.length));
   let offset = 0;
   for (const chunk of chunks) {
     output.set(chunk, offset);

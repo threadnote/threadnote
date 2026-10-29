@@ -5,6 +5,8 @@ import {
   runtimeReadBoundedStableRegularFile,
   type RuntimeBigIntStats,
 } from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_GITDIR_BACKLINK_BYTES_LIMIT = 16 * 1_024;
 
@@ -58,9 +60,17 @@ export function codeGraphGitdirBacklinkMatchesCanonicalWorktree(
   if (content.byteLength === 0 || content.byteLength > CODE_GRAPH_GITDIR_BACKLINK_BYTES_LIMIT) return undefined;
   try {
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(content);
-    if (!decoded.endsWith('\n')) return undefined;
-    const backlink = decoded.endsWith('\r\n') ? decoded.slice(0, -2) : decoded.slice(0, -1);
-    if (!backlink || backlink.includes('\0') || backlink.includes('\r') || backlink.includes('\n')) return undefined;
+    if (!Effect.pipe(decoded, EffectString.endsWith('\n'))) return undefined;
+    const backlink = Effect.pipe(decoded, EffectString.endsWith('\r\n'))
+      ? Effect.pipe(decoded, EffectString.slice(0, -2))
+      : Effect.pipe(decoded, EffectString.slice(0, -1));
+    if (
+      !backlink ||
+      Effect.pipe(backlink, EffectString.includes('\0')) ||
+      Effect.pipe(backlink, EffectString.includes('\r')) ||
+      Effect.pipe(backlink, EffectString.includes('\n'))
+    )
+      return undefined;
     const path = platformPathFor(platform);
     if (!path.isAbsolute(canonicalWorktreePath) || !path.isAbsolute(adminEntry)) return undefined;
     const observedPath = path.isAbsolute(backlink) ? path.normalize(backlink) : path.resolve(adminEntry, backlink);
@@ -96,5 +106,5 @@ function sameStableDirectory(left: RuntimeBigIntStats, right: RuntimeBigIntStats
 }
 
 function comparablePath(value: string, platform: NodeJS.Platform): string {
-  return platform === 'win32' ? value.normalize('NFC').toLowerCase() : value;
+  return platform === 'win32' ? Effect.pipe(value, EffectString.normalize('NFC'), EffectString.toLowerCase) : value;
 }

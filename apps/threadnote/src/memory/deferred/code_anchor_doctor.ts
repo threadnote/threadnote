@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type {DoctorCheck} from '../../types.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {observeDeferredCodeAnchorCallerCheckout} from './code_anchor_checkout.js';
 import {listDeferredCodeAnchorIntents, type StoredDeferredCodeAnchorIntent} from './code_anchor.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAX_INSPECTIONS = 25;
 const CONCURRENCY = 4;
@@ -11,7 +14,7 @@ export const deferredCodeAnchorDoctorCheck = Effect.fn('memoryCodeAnchor.doctorC
   config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>,
 ) {
   const entries = yield* listDeferredCodeAnchorIntents(config);
-  const invalid = entries.filter(entry => entry.kind === 'invalid').length;
+  const invalid = EffectArray.filter(entries, entry => entry.kind === 'invalid').length;
   if (invalid > 0) {
     return {
       detail: `${invalid} malformed or unreadable private intent(s); run \`threadnote finalize-code-refs\` for a bounded failure receipt`,
@@ -26,7 +29,10 @@ export const deferredCodeAnchorDoctorCheck = Effect.fn('memoryCodeAnchor.doctorC
       status: 'ok',
     } satisfies DoctorCheck;
   }
-  const inspected = entries.slice(0, MAX_INSPECTIONS) as readonly StoredDeferredCodeAnchorIntent[];
+  const inspected = EffectArray.filter(
+    entries.slice(0, MAX_INSPECTIONS),
+    (entry): entry is StoredDeferredCodeAnchorIntent => entry.kind === 'valid',
+  );
   const attribution = yield* Effect.forEach(
     inspected,
     entry =>
@@ -42,14 +48,14 @@ export const deferredCodeAnchorDoctorCheck = Effect.fn('memoryCodeAnchor.doctorC
                     observation.worktreeId === entry.intent.worktreeId
                   ? 'present matching'
                   : 'caller repository identity changed';
-          return `${entry.intent.worktreeId.slice(0, 12)} ${reason}`;
+          return `${Effect2.pipe(entry.intent.worktreeId, EffectString.slice(0, 12))} ${reason}`;
         }),
       ),
     {concurrency: CONCURRENCY},
   );
   const remaining = entries.length - inspected.length;
   return {
-    detail: `${entries.length} private code-anchor intent(s) are pending finalization across ${new Set(inspected.map(entry => entry.intent.worktreeId)).size} worktree(s): ${[...new Set(attribution)].join(', ')}${remaining > 0 ? `; attribution partial (${remaining} remaining)` : ''}`,
+    detail: `${entries.length} private code-anchor intent(s) are pending finalization across ${new Set(EffectArray.map(inspected, entry => entry.intent.worktreeId)).size} worktree(s): ${EffectArray.join([...new Set(attribution)], ', ')}${remaining > 0 ? `; attribution partial (${remaining} remaining)` : ''}`,
     name: 'deferred code anchors',
     status: 'warn',
   } satisfies DoctorCheck;

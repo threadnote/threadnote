@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   buildRecallCorpusStatistics,
@@ -7,6 +8,8 @@ import {
   recallMemoryContentHash,
   RECALL_RANKER_VERSION,
 } from '@threadnote/recall/rank';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('hybrid recall ranker', () => {
   it('collapses authorized share aliases only when logical identity and body both agree', () => {
@@ -53,9 +56,9 @@ describe('hybrid recall ranker', () => {
     ]);
 
     expect(deduplicated).toHaveLength(2);
-    expect(deduplicated.every(result => result.identityConflict)).toBe(true);
+    expect(EffectArray.every(deduplicated, result => result.identityConflict === true)).toBe(true);
     expect(
-      rankRecallCandidates('package repo', deduplicated).results.every(result =>
+      EffectArray.every(rankRecallCandidates('package repo', deduplicated).results, result =>
         result.warnings.includes('logical memory id has divergent bodies; review before relying on it'),
       ),
     ).toBe(true);
@@ -75,21 +78,30 @@ describe('hybrid recall ranker', () => {
     const result = deduplicateLogicalRecallCandidates([candidate(body, 'alpha'), candidate(`${body} `, 'beta')]);
 
     expect(result).toHaveLength(2);
-    expect(result.every(item => item.identityConflict)).toBe(true);
+    expect(EffectArray.every(result, item => item.identityConflict === true)).toBe(true);
   });
 
   it('ignores generated hygiene provenance, but not authored lookalikes, in alias identity hashes', () => {
     const body = 'Use package-local recall scope.';
-    const generated = [
-      body,
-      '',
-      '<!-- threadnote:hygiene-sources:v1 -->',
-      '## Threadnote Hygiene Sources',
-      '',
-      '- threadnote://user/me/memories/handoffs/archived/threadnote/old-task.md',
-    ].join('\n');
-    const legacyGenerated = generated.replace('<!-- threadnote:hygiene-sources:v1 -->\n', '');
-    const authored = [body, '', '## Threadnote Hygiene Sources', '', 'This is authored guidance.'].join('\n');
+    const generated = EffectArray.join(
+      [
+        body,
+        '',
+        '<!-- threadnote:hygiene-sources:v1 -->',
+        '## Threadnote Hygiene Sources',
+        '',
+        '- threadnote://user/me/memories/handoffs/archived/threadnote/old-task.md',
+      ],
+      '\n',
+    );
+    const legacyGenerated = Effect.pipe(
+      generated,
+      EffectString.replace('<!-- threadnote:hygiene-sources:v1 -->\n', ''),
+    );
+    const authored = EffectArray.join(
+      [body, '', '## Threadnote Hygiene Sources', '', 'This is authored guidance.'],
+      '\n',
+    );
 
     expect(recallMemoryContentHash(generated)).toBe(recallMemoryContentHash(body));
     expect(recallMemoryContentHash(legacyGenerated)).toBe(recallMemoryContentHash(body));
@@ -145,14 +157,18 @@ describe('hybrid recall ranker', () => {
       {project: 'monorepo', workspaceScope: 'apps/search/packages/query'},
     );
 
-    expect(ranked.results.map(result => result.candidate.uri)).toEqual([
+    expect(EffectArray.map(ranked.results, result => result.candidate.uri)).toEqual([
       'threadnote://exact.md',
       'threadnote://ancestor.md',
       'threadnote://repo-wide.md',
       'threadnote://sibling.md',
     ]);
-    expect(ranked.results.map(result => result.signals.workspace)).toEqual([1, 0.75, 0.5, 0.25]);
-    expect(ranked.results.every(result => result.reasons.some(reason => reason.code === 'workspace_scope'))).toBe(true);
+    expect(EffectArray.map(ranked.results, result => result.signals.workspace)).toEqual([1, 0.75, 0.5, 0.25]);
+    expect(
+      EffectArray.every(ranked.results, result =>
+        EffectArray.some(result.reasons, reason => reason.code === 'workspace_scope'),
+      ),
+    ).toBe(true);
   });
 
   it('prefers an older current-branch handoff over a newer sibling branch without query enrichment', () => {
@@ -178,8 +194,8 @@ describe('hybrid recall ranker', () => {
       workspaceBranch: 'feature/search-recall',
     });
     expect(query).not.toContain('search-recall');
-    expect(scoped.results.map(result => result.candidate.uri)).toEqual([current.uri, sibling.uri]);
-    expect(scoped.results.map(result => result.signals.branch)).toEqual([1, 0.25]);
+    expect(EffectArray.map(scoped.results, result => result.candidate.uri)).toEqual([current.uri, sibling.uri]);
+    expect(EffectArray.map(scoped.results, result => result.signals.branch)).toEqual([1, 0.25]);
     expect(scoped.results[0]?.reasons).toEqual(
       expect.arrayContaining([expect.objectContaining({code: 'workspace_branch'})]),
     );
@@ -189,7 +205,7 @@ describe('hybrid recall ranker', () => {
       project: 'threadnote',
     });
     expect(detached.results[0]?.candidate.uri).toBe(sibling.uri);
-    expect(detached.results.every(result => result.signals.branch === 0)).toBe(true);
+    expect(EffectArray.every(detached.results, result => result.signals.branch === 0)).toBe(true);
   });
 
   it('uses explicit original-query recency intent to surface a newer topical release handoff', () => {
@@ -239,18 +255,32 @@ describe('hybrid recall ranker', () => {
     const latest = rankRecallCandidates('latest release status', candidates, context);
 
     expect(ordinary.results[0]?.candidate.uri).toBe(oldRelease.uri);
-    expect(generatedOnly.results.map(result => result.candidate.uri)).toEqual(
-      ordinary.results.map(result => result.candidate.uri),
+    expect(EffectArray.map(generatedOnly.results, result => result.candidate.uri)).toEqual(
+      EffectArray.map(ordinary.results, result => result.candidate.uri),
     );
     expect(latest.results[0]?.candidate.uri).toBe(recentRelease.uri);
-    expect(latest.results.map(result => result.candidate.uri)).not.toContain(freshButUnrelated.uri);
-    expect(latest.results.find(result => result.candidate.uri === oldRelease.uri)?.reasons).toEqual(
+    expect(EffectArray.map(latest.results, result => result.candidate.uri)).not.toContain(freshButUnrelated.uri);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(latest.results, result => result.candidate.uri === oldRelease.uri),
+      )?.reasons,
+    ).toEqual(
       expect.arrayContaining([expect.objectContaining({code: 'query_recency', contribution: expect.any(Number)})]),
     );
     expect(
-      latest.results
-        .find(result => result.candidate.uri === oldRelease.uri)
-        ?.reasons.find(reason => reason.code === 'query_recency')?.contribution,
+      EffectOption.getOrUndefined(
+        EffectOption.map(
+          EffectOption.fromNullishOr(
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(latest.results, result => result.candidate.uri === oldRelease.uri),
+            )?.reasons,
+          ),
+          __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(__effectArrayReceiver, reason => reason.code === 'query_recency'),
+            ),
+        ),
+      )?.contribution,
     ).toBeLessThan(0);
   });
 
@@ -382,7 +412,7 @@ describe('hybrid recall ranker', () => {
       fields: {project: 'threadnote', title: `Production benchmark ${index}`, topic: String(index)},
       text: `Production benchmark common retrieval document ${index}`,
       trust: 'untrusted' as const,
-      uri: `threadnote://resources/repos/threadnote/${String(index).padStart(5, '0')}.md`,
+      uri: `threadnote://resources/repos/threadnote/${Effect.pipe(String(index), EffectString.padStart(5, '0'))}.md`,
     }));
 
     const ranked = rankRecallCandidates('benchmark-update-000', [target, ...distractors], {project: 'threadnote'});
@@ -553,9 +583,13 @@ describe('hybrid recall ranker', () => {
 
     expect(ranked.rankerVersion).toBe(RECALL_RANKER_VERSION);
     expect(ranked.results[0]?.candidate.uri).toContain('alpha-42.md');
-    expect(ranked.results[0]?.reasons.map(reason => reason.code)).toEqual(
-      expect.arrayContaining(['semantic_similarity', 'bm25_lexical', 'field_match', 'project_scope']),
-    );
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(ranked.results[0]?.reasons), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, reason => reason.code),
+        ),
+      ),
+    ).toEqual(expect.arrayContaining(['semantic_similarity', 'bm25_lexical', 'field_match', 'project_scope']));
   });
 
   it('keeps an untrusted seeded resource below an active durable memory that owns the topic', () => {
@@ -595,7 +629,7 @@ describe('hybrid recall ranker', () => {
     );
 
     expect(ranked.results[0]?.candidate.uri).toBe(memoryUri);
-    expect(ranked.results.map(result => result.candidate.uri)).toContain(resourceUri);
+    expect(EffectArray.map(ranked.results, result => result.candidate.uri)).toContain(resourceUri);
   });
 
   it('uses native reranker evidence as a bounded, explained ranking signal', () => {
@@ -620,7 +654,13 @@ describe('hybrid recall ranker', () => {
 
     expect(ranked.results[0]?.candidate.uri).toBe('threadnote://high-reranker');
     expect(ranked.results[0]?.signals.reranker).toBe(0.94);
-    expect(ranked.results[0]?.reasons.map(reason => reason.code)).toContain('native_reranker');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(ranked.results[0]?.reasons), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, reason => reason.code),
+        ),
+      ),
+    ).toContain('native_reranker');
   });
 
   it('uses expanded query vocabulary without weakening original-query evidence', () => {
@@ -647,7 +687,11 @@ describe('hybrid recall ranker', () => {
 
     expect(original.results[0]?.candidate.uri).toContain('install-troubleshooting.md');
     expect(expanded.results[0]?.candidate.uri).toContain('beta-update-channel.md');
-    expect(expanded.results.some(result => result.candidate.uri.includes('install-troubleshooting.md'))).toBe(true);
+    expect(
+      EffectArray.some(expanded.results, result =>
+        Effect.pipe(result.candidate.uri, EffectString.includes('install-troubleshooting.md')),
+      ),
+    ).toBe(true);
     expect(expanded.results[0]?.signals.bm25).toBeGreaterThan(original.results[0]?.signals.bm25 ?? 0);
   });
 
@@ -682,7 +726,13 @@ describe('hybrid recall ranker', () => {
     );
 
     expect(ranked.results[0]?.candidate.uri).toContain('release-notes.md');
-    expect(ranked.results[0]?.reasons.map(reason => reason.code)).toContain('memory_kind_intent');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(ranked.results[0]?.reasons), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, reason => reason.code),
+        ),
+      ),
+    ).toContain('memory_kind_intent');
     expect(ranked.results[0]?.signals.field).toBeGreaterThan(ranked.results[1]?.signals.field ?? 0);
   });
 
@@ -755,7 +805,17 @@ describe('hybrid recall ranker', () => {
 
     expect(ranked.results[0]?.candidate.uri).toContain('windows-installation-support.md');
     expect(ranked.results[0]?.signals.exact).toBe(1);
-    expect(ranked.results.find(result => result.candidate.uri.includes('macos-native-app'))).toBeUndefined();
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          ranked.results,
+          __effectArrayValue =>
+            !!(result => Effect.pipe(result.candidate.uri, EffectString.includes('macos-native-app')))(
+              __effectArrayValue,
+            ),
+        ),
+      ),
+    ).toBeUndefined();
   });
 
   it('weights discriminative exact terms above common project-name matches', () => {
@@ -909,7 +969,7 @@ describe('hybrid recall ranker', () => {
       {allowExactRescue: true, project: 'orion-worker'},
     );
 
-    expect(ranked.results.map(result => result.candidate.uri)).toEqual([
+    expect(EffectArray.map(ranked.results, result => result.candidate.uri)).toEqual([
       'threadnote://user/me/memories/durable/projects/orion-worker/qx7-lease-flow.md',
     ]);
   });
@@ -955,9 +1015,17 @@ describe('hybrid recall ranker', () => {
       {seedUris: [seedUri]},
     );
 
-    expect(ranked.results.map(result => result.candidate.uri)).toEqual(['threadnote://user/me/memories/candidate.md']);
+    expect(EffectArray.map(ranked.results, result => result.candidate.uri)).toEqual([
+      'threadnote://user/me/memories/candidate.md',
+    ]);
     expect(ranked.results[0]?.signals.graph).toBeGreaterThan(0);
-    expect(ranked.results[0]?.reasons.map(reason => reason.code)).toContain('graph_proximity');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(ranked.results[0]?.reasons), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, reason => reason.code),
+        ),
+      ),
+    ).toContain('graph_proximity');
   });
 
   it('does not let graph proximity alone bypass the topical relevance gate', () => {
@@ -1127,7 +1195,13 @@ describe('hybrid recall ranker', () => {
     ]);
 
     expect(ranked.results[0]?.candidate.uri).toContain('upranked.md');
-    expect(ranked.results[0]?.reasons.map(reason => reason.code)).toContain('user_feedback');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(ranked.results[0]?.reasons), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, reason => reason.code),
+        ),
+      ),
+    ).toContain('user_feedback');
   });
 
   it('keeps BM25 corpus statistics stable when the preselected result pool changes', () => {

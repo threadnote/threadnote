@@ -1,8 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect, it} from 'vitest';
 import {Effect, Fiber, Layer} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {SystemInfo} from '@threadnote/platform/system';
+import {citationSystemInfoLayer} from '../helpers/citation-platform.js';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {CodeGraphStoreTransientIoError} from '@threadnote/graph/types';
@@ -21,20 +22,19 @@ import type {
   ContextBriefLogicalResultV1,
 } from '../../src/types.js';
 import {projectContextBrief} from '../../src/projector.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const REPOSITORY_ID = 'a'.repeat(64);
-const COMMIT = 'b'.repeat(40);
-const SNAPSHOT_ID = `cgsn_${'c'.repeat(40)}`;
+const REPOSITORY_ID = Effect2.pipe('a', EffectString.repeat(64));
+const COMMIT = Effect2.pipe('b', EffectString.repeat(40));
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`;
 const WORKFLOW = 'packages/context/src/native-workflow.ts';
 const INCIDENTAL = 'scripts/finalize-matched-continuation-study.ts';
 const TASK = 'Verify installed native workflow foundation contracts and source replacement baseline.';
 const TRUST = {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'} as const;
 
 function provideFixtureServices<A, E, R>(effect: Effect.Effect<A, E, R>) {
-  const layer = Layer.merge(
-    BunServices.layer,
-    Layer.succeed(SystemInfo, {environment: () => process.env, platform: process.platform} as never),
-  );
+  const layer = Layer.merge(BunServices.layer, citationSystemInfoLayer);
   return Effect.scoped(Layer.build(layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
 }
 
@@ -46,7 +46,7 @@ function candidate(): ContextBriefMemoryCandidateV1 {
     uri: 'threadnote://user/test/memories/durable/projects/threadnote/native-workflow.md',
     excerpt: 'Historical workflow foundation contracts.',
     citationErrorCount: 0,
-    sourceCommit: '1'.repeat(40),
+    sourceCommit: Effect2.pipe('1', EffectString.repeat(40)),
     codeCitations: [
       {
         version: 1,
@@ -54,11 +54,11 @@ function candidate(): ContextBriefMemoryCandidateV1 {
         path: WORKFLOW,
         repositoryId: REPOSITORY_ID,
         repositoryIdentityKind: 'remote',
-        sourceCommit: '1'.repeat(40),
+        sourceCommit: Effect2.pipe('1', EffectString.repeat(40)),
         sourceDirty: false,
         sourceSnapshotId: 'cgsn_old',
         extractorSet: 'test',
-        fileContentHash: {algorithm: 'sha256', value: 'd'.repeat(64)},
+        fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('d', EffectString.repeat(64))},
         target: {kind: 'file'},
       },
     ],
@@ -98,7 +98,7 @@ function compile(candidates: readonly ContextBriefMemoryCandidateV1[], options: 
           nodes:
             options.missing && call.operation !== 'query'
               ? []
-              : [sourceNode(`cgs_${'d'.repeat(32)}`, path, path, 'module')],
+              : [sourceNode(`cgs_${Effect2.pipe('d', EffectString.repeat(32))}`, path, path, 'module')],
           operation: call.operation ?? 'query',
         });
         const result = {
@@ -113,7 +113,7 @@ function compile(candidates: readonly ContextBriefMemoryCandidateV1[], options: 
           return Effect.succeed({...result, snapshot: {...result.snapshot, id: 'cgsn_foreign'}});
         return Effect.succeed(
           options.foreign && call.operation !== 'query'
-            ? {...result, repository: {...result.repository, repositoryId: 'f'.repeat(64)}}
+            ? {...result, repository: {...result.repository, repositoryId: Effect2.pipe('f', EffectString.repeat(64))}}
             : result,
         );
       }),
@@ -125,8 +125,12 @@ function compile(candidates: readonly ContextBriefMemoryCandidateV1[], options: 
           options.advanceGeneration && statusReads === 2
             ? {
                 ...STATUS,
-                identity: {...STATUS.identity, headCommit: '2'.repeat(40)},
-                readySnapshot: {...STATUS.readySnapshot!, commit: '2'.repeat(40), id: `cgsn_${'2'.repeat(40)}`},
+                identity: {...STATUS.identity, headCommit: Effect2.pipe('2', EffectString.repeat(40))},
+                readySnapshot: {
+                  ...STATUS.readySnapshot!,
+                  commit: Effect2.pipe('2', EffectString.repeat(40)),
+                  id: `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`,
+                },
               }
             : STATUS;
         return currentStatus;
@@ -146,9 +150,9 @@ function compile(candidates: readonly ContextBriefMemoryCandidateV1[], options: 
               Effect.sync(() => {
                 validationFences.push(fence);
                 const changed = fence?.kind === 'repository' && fence.snapshotId !== SNAPSHOT_ID;
-                return memories.map(memory => ({
+                return EffectArray.map(memories, memory => ({
                   uri: memory.uri,
-                  receipts: memory.codeCitations.map(citation => ({
+                  receipts: EffectArray.map(memory.codeCitations, citation => ({
                     candidateCount: 1,
                     citationId: citation.id,
                     coverage: 'current-complete' as const,
@@ -182,7 +186,7 @@ function compile(candidates: readonly ContextBriefMemoryCandidateV1[], options: 
                 excerpts:
                   options.deleted && request.result.nodes[0]?.path !== INCIDENTAL
                     ? []
-                    : request.result.nodes.map(node => ({
+                    : EffectArray.map(request.result.nodes, node => ({
                         content:
                           request.result.snapshot.id === SNAPSHOT_ID
                             ? 'export const workflow = true;'
@@ -234,10 +238,11 @@ describe('task-aligned ordinary Context Brief anchors', () => {
       };
       const {result, calls, logical, sourceRequests} = yield* compile([incidental, relevant]);
       expect(result.structuredContent.graph.cards[0]?.symbol.path).toBe(WORKFLOW);
-      expect(calls.map(call => call.operation)).toEqual(['query', 'impact', 'neighbors']);
+      expect(EffectArray.map(calls, call => call.operation)).toEqual(['query', 'impact', 'neighbors']);
       expect(sourceRequests).toHaveLength(2);
       expect(
-        sourceRequests.every(
+        EffectArray.every(
+          sourceRequests,
           request =>
             request.maximumContentBytes ===
             planContextBrief({
@@ -250,8 +255,12 @@ describe('task-aligned ordinary Context Brief anchors', () => {
       ).toBe(true);
       expect(result.structuredContent.graph.sources?.[0]?.path).toBe(WORKFLOW);
       // Resolving current source does not validate the historical memory claim.
-      expect(logical.durableDecisions.find(memory => memory.uri === relevant.uri)?.freshness).toBe('unknown');
-      expect(calls.every(call => call.refresh === false && call.requestMaintenance === false)).toBe(true);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(logical.durableDecisions, memory => memory.uri === relevant.uri),
+        )?.freshness,
+      ).toBe('unknown');
+      expect(EffectArray.every(calls, call => call.refresh === false && call.requestMaintenance === false)).toBe(true);
     }),
   );
   effectIt.effect('revalidates initial exact receipts before adopting a new current source generation', () =>
@@ -260,7 +269,7 @@ describe('task-aligned ordinary Context Brief anchors', () => {
       const memory = {
         ...base,
         sourceCommit: COMMIT,
-        codeCitations: base.codeCitations.map(citation => ({
+        codeCitations: EffectArray.map(base.codeCitations, citation => ({
           ...citation,
           sourceCommit: COMMIT,
           sourceSnapshotId: SNAPSHOT_ID,
@@ -270,16 +279,19 @@ describe('task-aligned ordinary Context Brief anchors', () => {
         advanceGeneration: true,
         validateCitations: true,
       });
-      const secondSnapshot = `cgsn_${'2'.repeat(40)}`;
+      const secondSnapshot = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
       expect(validationFences).toEqual([
         {kind: 'repository', repositoryId: REPOSITORY_ID, snapshotId: SNAPSHOT_ID},
         {kind: 'repository', repositoryId: REPOSITORY_ID, snapshotId: secondSnapshot},
       ]);
-      expect(sourceRequests.map(request => request.result.snapshot.id)).toEqual([SNAPSHOT_ID, secondSnapshot]);
+      expect(EffectArray.map(sourceRequests, request => request.result.snapshot.id)).toEqual([
+        SNAPSHOT_ID,
+        secondSnapshot,
+      ]);
       expect(logical.graph.citationValidationFence).toEqual(validationFences[1]);
       expect(logical.graph.resolvedSnapshots[0]).toMatchObject({
         snapshotId: secondSnapshot,
-        commit: '2'.repeat(40),
+        commit: Effect2.pipe('2', EffectString.repeat(40)),
         freshness: 'fresh',
       });
       expect(result.structuredContent.graph.sources?.[0]).toMatchObject({
@@ -287,18 +299,29 @@ describe('task-aligned ordinary Context Brief anchors', () => {
         content: 'export const workflow = 2;',
         freshness: 'fresh',
       });
-      expect(logical.durableDecisions.find(decision => decision.uri === memory.uri)).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(logical.durableDecisions, decision => decision.uri === memory.uri),
+        ),
+      ).toMatchObject({
         freshness: 'stale',
         preciseStatus: 'changed',
       });
       expect(
-        logical.stalenessAndConflicts.some(issue => issue.kind === 'stale-memory' && issue.uris.includes(memory.uri)),
+        EffectArray.some(
+          logical.stalenessAndConflicts,
+          issue => issue.kind === 'stale-memory' && issue.uris.includes(memory.uri),
+        ),
       ).toBe(true);
-      expect(calls.map(call => call.operation)).toEqual(['query', 'impact', 'neighbors']);
+      expect(EffectArray.map(calls, call => call.operation)).toEqual(['query', 'impact', 'neighbors']);
 
       const stable = yield* compile([memory], {validateCitations: true});
       expect(stable.validationFences).toHaveLength(1);
-      expect(stable.logical.durableDecisions.find(decision => decision.uri === memory.uri)).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(stable.logical.durableDecisions, decision => decision.uri === memory.uri),
+        ),
+      ).toMatchObject({
         freshness: 'fresh',
         preciseStatus: 'exact',
       });
@@ -309,8 +332,8 @@ describe('task-aligned ordinary Context Brief anchors', () => {
     Effect.gen(function* () {
       for (const mode of ['brief', 'explain'] as const) {
         const exact = yield* compile([candidate()], {mode, codeRefs: [WORKFLOW]});
-        expect(exact.calls.map(call => call.operation)).toEqual(['impact', 'neighbors']);
-        expect(exact.calls.every(call => call.query !== TASK)).toBe(true);
+        expect(EffectArray.map(exact.calls, call => call.operation)).toEqual(['impact', 'neighbors']);
+        expect(EffectArray.every(exact.calls, call => call.query !== TASK)).toBe(true);
         const missing = yield* compile([candidate()], {mode, codeRefs: ['missing.ts'], missing: true});
         expect(missing.calls).toHaveLength(1);
         expect(missing.result.structuredContent.graph.cards).toEqual([]);
@@ -335,15 +358,24 @@ describe('task-aligned ordinary Context Brief anchors', () => {
       for (const item of [
         {...base, topic: 'matched-continuation-study'},
         {...base, topic: 'verify installed contracts source replacement baseline'},
-        {...base, codeCitations: base.codeCitations.map(citation => ({...citation, repositoryId: 'f'.repeat(64)}))},
-        {...base, codeCitations: []},
-        ...['../outside.ts', '/absolute.ts', 'src/./file.ts', 'src\\file.ts', ' c.ts', 'src//file.ts'].map(path => ({
+        {
           ...base,
-          codeCitations: base.codeCitations.map(citation => ({...citation, path})),
-        })),
+          codeCitations: EffectArray.map(base.codeCitations, citation => ({
+            ...citation,
+            repositoryId: Effect2.pipe('f', EffectString.repeat(64)),
+          })),
+        },
+        {...base, codeCitations: []},
+        ...EffectArray.map(
+          ['../outside.ts', '/absolute.ts', 'src/./file.ts', 'src\\file.ts', ' c.ts', 'src//file.ts'],
+          path => ({
+            ...base,
+            codeCitations: EffectArray.map(base.codeCitations, citation => ({...citation, path})),
+          }),
+        ),
       ]) {
         const {result, calls} = yield* compile([item]);
-        expect(calls.map(call => call.operation)).toEqual(['query']);
+        expect(EffectArray.map(calls, call => call.operation)).toEqual(['query']);
         expect(result.structuredContent.graph.cards[0]?.symbol.path).toBe(INCIDENTAL);
       }
     }),
@@ -381,7 +413,13 @@ describe('task-aligned ordinary Context Brief anchors', () => {
       expect(attempts.get('impact')).toBe(1);
       yield* TestClock.adjust(25);
       const {calls, result} = yield* Fiber.join(fiber);
-      expect(calls.map(call => call.operation)).toEqual(['query', 'query', 'impact', 'impact', 'neighbors']);
+      expect(EffectArray.map(calls, call => call.operation)).toEqual([
+        'query',
+        'query',
+        'impact',
+        'impact',
+        'neighbors',
+      ]);
       // The exhausted relationship read preserves the exact resolved module.
       expect(result.structuredContent.graph.cards[0]?.symbol.path).toBe(WORKFLOW);
       expect(attempts.get('neighbors')).toBe(1);
@@ -419,12 +457,12 @@ describe('task-aligned ordinary Context Brief anchors', () => {
     const a = {
       ...candidate(),
       uri: 'threadnote://a',
-      codeCitations: candidate().codeCitations.map(citation => ({...citation, path: 'src/a.ts'})),
+      codeCitations: EffectArray.map(candidate().codeCitations, citation => ({...citation, path: 'src/a.ts'})),
     };
     const b = {
       ...candidate(),
       uri: 'threadnote://b',
-      codeCitations: candidate().codeCitations.map(citation => ({...citation, path: 'src/b.ts'})),
+      codeCitations: EffectArray.map(candidate().codeCitations, citation => ({...citation, path: 'src/b.ts'})),
     };
     for (const candidates of [
       [a, b],
@@ -449,8 +487,8 @@ describe('task-aligned ordinary Context Brief anchors', () => {
       };
       const {calls} = yield* compile([many], {detail: 'compact'});
       expect(calls).toHaveLength(17);
-      expect(calls.filter(call => call.operation === 'impact')).toHaveLength(8);
-      expect(calls.filter(call => call.operation === 'neighbors')).toHaveLength(8);
+      expect(EffectArray.filter(calls, call => call.operation === 'impact')).toHaveLength(8);
+      expect(EffectArray.filter(calls, call => call.operation === 'neighbors')).toHaveLength(8);
     }),
   );
 
@@ -459,15 +497,18 @@ describe('task-aligned ordinary Context Brief anchors', () => {
       fc.property(fc.array(fc.integer({min: 0, max: 20}), {maxLength: 12}), values => {
         const base = candidate();
         const graph = fromRepositoryQuery(queryResult({edges: [], nodes: [], operation: 'query'}));
-        const selected = {...base, codeCitations: [...base.codeCitations, ...values.map(() => base.codeCitations[0])]};
-        const noise = values.map((value, index) => ({
+        const selected = {
+          ...base,
+          codeCitations: [...base.codeCitations, ...EffectArray.map(values, () => base.codeCitations[0])],
+        };
+        const noise = EffectArray.map(values, (value, index) => ({
           ...base,
           uri: `${base.uri}/${index}`,
           rank: value,
           topic: index % 2 === 0 ? base.topic : 'unrelated remote telemetry',
-          codeCitations: base.codeCitations.map(citation => ({
+          codeCitations: EffectArray.map(base.codeCitations, citation => ({
             ...citation,
-            repositoryId: index % 2 === 0 ? 'e'.repeat(64) : REPOSITORY_ID,
+            repositoryId: index % 2 === 0 ? Effect2.pipe('e', EffectString.repeat(64)) : REPOSITORY_ID,
           })),
         }));
         const memory = (candidates: readonly ContextBriefMemoryCandidateV1[]) => ({
@@ -505,7 +546,7 @@ function queryResult(input: {
 
 function sourceNode(id: string, name: string, path: string, kind: string, language = 'typescript'): CodeGraphQueryNode {
   return {
-    contentHash: '0'.repeat(64),
+    contentHash: Effect2.pipe('0', EffectString.repeat(64)),
     exported: true,
     id,
     kind,

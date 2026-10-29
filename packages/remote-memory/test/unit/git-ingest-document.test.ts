@@ -2,6 +2,8 @@ import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {classifyGitIngestDocument} from '@threadnote/remote-memory/git/ingest_document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const path = {kind: 'durable' as const, project: 'threadnote', topic: 'contract'};
 const header = 'MEMORY\nkind: durable\nproject: threadnote\ntopic: contract';
@@ -34,7 +36,12 @@ describe('Git ingestion metadata boundary', () => {
   });
 
   it('supports omitted legacy status and the project alias', () => {
-    expect(classifyGitIngestDocument(`${header.replace('project:', 'repo:')}\n\nSafe body.`, path)).toEqual({
+    expect(
+      classifyGitIngestDocument(
+        `${Effect.pipe(header, EffectString.replace('project:', 'repo:'))}\n\nSafe body.`,
+        path,
+      ),
+    ).toEqual({
       accepted: true,
       status: 'active',
     });
@@ -45,13 +52,13 @@ describe('Git ingestion metadata boundary', () => {
       version: 1,
       sourceId: 'notes',
       sourceInstanceId: '12345678-1234-1234-1234-123456789abc',
-      vaultHash: 'a'.repeat(64),
-      accessHash: 'a'.repeat(64),
+      vaultHash: Effect.pipe('a', EffectString.repeat(64)),
+      accessHash: Effect.pipe('a', EffectString.repeat(64)),
       noteId: '12345678-1234-1234-1234-123456789abc',
       relativePath: 'Decision.md',
-      revisionHash: 'a'.repeat(64),
+      revisionHash: Effect.pipe('a', EffectString.repeat(64)),
       sanitizerVersion: 'scrubber-redact-v1',
-      fragmentHash: 'a'.repeat(64),
+      fragmentHash: Effect.pipe('a', EffectString.repeat(64)),
       fragmentStart: 0,
       fragmentEnd: 4,
       pinId: '12345678-1234-1234-1234-123456789abc',
@@ -82,14 +89,14 @@ describe('Git ingestion metadata boundary', () => {
       version: 1,
       provider: 'github',
       sourceId: 'issues',
-      sourceInstanceId: 'a'.repeat(64),
+      sourceInstanceId: Effect.pipe('a', EffectString.repeat(64)),
       resourceUri: 'threadnote://resources/external/github/issues/docs/r-1-issue-1/pages/main/chunk-1.md',
-      accessHash: 'a'.repeat(64),
-      revisionHash: 'a'.repeat(64),
-      contentHash: 'a'.repeat(64),
+      accessHash: Effect.pipe('a', EffectString.repeat(64)),
+      revisionHash: Effect.pipe('a', EffectString.repeat(64)),
+      contentHash: Effect.pipe('a', EffectString.repeat(64)),
       rendererVersion: 'github-v1',
       sanitizerVersion: 'scrubber-redact-v1',
-      fragmentHash: 'a'.repeat(64),
+      fragmentHash: Effect.pipe('a', EffectString.repeat(64)),
       fragmentStart: 0,
       fragmentEnd: 4,
       pinId: '12345678-1234-4234-8234-123456789abc',
@@ -171,13 +178,13 @@ function privateEvidence() {
     version: 1,
     sourceId: 'notes',
     sourceInstanceId: '12345678-1234-1234-1234-123456789abc',
-    vaultHash: 'a'.repeat(64),
-    accessHash: 'a'.repeat(64),
+    vaultHash: Effect.pipe('a', EffectString.repeat(64)),
+    accessHash: Effect.pipe('a', EffectString.repeat(64)),
     noteId: '12345678-1234-1234-1234-123456789abc',
     relativePath: 'Decision.md',
-    revisionHash: 'a'.repeat(64),
+    revisionHash: Effect.pipe('a', EffectString.repeat(64)),
     sanitizerVersion: 'scrubber-redact-v1',
-    fragmentHash: 'a'.repeat(64),
+    fragmentHash: Effect.pipe('a', EffectString.repeat(64)),
     fragmentStart: 0,
     fragmentEnd: 4,
     pinId: '12345678-1234-1234-1234-123456789abc',

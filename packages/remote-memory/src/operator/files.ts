@@ -1,13 +1,15 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {canonicalResourceUri, validatePortableSegment} from '@threadnote/store/resource-id';
 import {
   REMOTE_MEMORY_PORTABILITY_VERSION,
-  verifyGitBetaImportPlan,
+  parseGitBetaImportPlan,
   verifyRemoteMemoryExportPlan,
-  type GitBetaImportPlanV1,
   type GitBetaMemorySourceV1,
   type RemoteMemoryExportPlanV1,
 } from '../portability.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAX_IMPORT_FILES = 10_000;
 const MAX_IMPORT_TREE_ENTRIES = 50_000;
@@ -15,10 +17,10 @@ const MAX_IMPORT_FILE_BYTES = 1024 * 1024;
 const MAX_IMPORT_TOTAL_BYTES = 100 * 1024 * 1024;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 
-export class RemoteMemoryOperatorFileError extends Schema.TaggedError<RemoteMemoryOperatorFileError>()(
-  'RemoteMemoryOperatorFileError',
-  {message: Schema.String},
-) {}
+export class RemoteMemoryOperatorFileError extends Schema.TaggedError<
+  RemoteMemoryOperatorFileError,
+  {readonly brand: unique symbol}
+>()('RemoteMemoryOperatorFileError', {message: Schema.String}) {}
 
 export const readGitBetaMemorySources = Effect.fn('remoteMemory.operator.readGitBetaMemorySources')(function* (input: {
   readonly directory: string;
@@ -52,7 +54,7 @@ export const readGitBetaMemorySources = Effect.fn('remoteMemory.operator.readGit
     if (totalBytes > MAX_IMPORT_TOTAL_BYTES) {
       return yield* operatorFileError('Git beta import exceeds the total size limit.');
     }
-    const segments = path.relative(sourceRoot, sourcePath).split(path.sep);
+    const segments = Effect2.pipe(path.relative(sourceRoot, sourcePath), EffectString.split(path.sep));
     const sourceUri = yield* tryOperatorFile(() =>
       canonicalResourceUri('user', [user, 'memories', 'shared', team, 'durable', 'projects', ...segments]),
     );
@@ -61,19 +63,18 @@ export const readGitBetaMemorySources = Effect.fn('remoteMemory.operator.readGit
   return sources.sort((left, right) => compareCodeUnits(left.sourceUri, right.sourceUri));
 });
 
-export const readOperatorJson = Effect.fn('remoteMemory.operator.readJson')(function* <T>(file: string) {
+export const readOperatorJson = Effect.fn('remoteMemory.operator.readJson')(function* (file: string) {
   const content = yield* readRegularFileWithoutSymlink(
     file,
     MAX_JSON_BYTES,
     'Operator JSON input is not a bounded file.',
   );
-  return yield* tryOperatorFile(() => JSON.parse(content) as T);
+  return yield* tryOperatorFile((): unknown => JSON.parse(content));
 });
 
 export const readGitBetaImportPlan = Effect.fn('remoteMemory.operator.readGitBetaImportPlan')(function* (file: string) {
-  const plan = yield* readOperatorJson<GitBetaImportPlanV1>(file);
-  yield* tryOperatorFile(() => verifyGitBetaImportPlan(plan));
-  return plan;
+  const raw = yield* readOperatorJson(file);
+  return yield* tryOperatorFile(() => parseGitBetaImportPlan(raw));
 });
 
 export const writeOperatorJsonExclusive = Effect.fn('remoteMemory.operator.writeJsonExclusive')(function* (
@@ -108,7 +109,7 @@ export const writeRemoteMemoryExportBundle = Effect.fn('remoteMemory.operator.wr
     }
     const manifest = {
       bundleDigest: plan.bundleDigest,
-      files: plan.files.map(file => ({
+      files: EffectArray.map(plan.files, file => ({
         aliases: file.aliases,
         contentHash: file.contentHash,
         relativePath: file.relativePath,
@@ -147,7 +148,7 @@ const markdownFiles = Effect.fn('remoteMemory.operator.markdownFiles')(function*
       }
       const info = yield* fs.stat(candidate);
       if (info.type === 'Directory') pending.push(candidate);
-      else if (info.type === 'File' && name.endsWith('.md')) {
+      else if (info.type === 'File' && Effect2.pipe(name, EffectString.endsWith('.md'))) {
         found.push(candidate);
         if (found.length > MAX_IMPORT_FILES) {
           return yield* operatorFileError(`Git beta import exceeds ${MAX_IMPORT_FILES} Markdown files.`);
@@ -175,7 +176,12 @@ function containedExportPath(path: Path.Path, root: string, relativePath: string
     throw new Error('Remote export contains an invalid relative path.');
   const target = path.resolve(root, relativePath);
   const suffix = path.relative(root, target);
-  if (!suffix || suffix === '..' || suffix.startsWith(`..${path.sep}`) || path.isAbsolute(suffix)) {
+  if (
+    !suffix ||
+    suffix === '..' ||
+    Effect2.pipe(suffix, EffectString.startsWith(`..${path.sep}`)) ||
+    path.isAbsolute(suffix)
+  ) {
     throw new Error('Remote export path escapes the output directory.');
   }
   return target;

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {isManagerProjectName} from './project/name.js';
 import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import {Effect, Result} from 'effect';
@@ -20,6 +22,9 @@ import {normalizeContextHealthSelector} from '../memory/context/health_selector.
 import {SystemInfo} from '@threadnote/platform/system';
 import {managerProjectPathIsForeign} from './project/roots.js';
 import {maintenanceContentHash} from '../memory/context/maintenance_policy.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 import {readManagerReviewEligibility} from './review_actionability.js';
 
 type ManagerAttentionResponse =
@@ -33,7 +38,10 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
 }) {
   if (request.method !== 'GET') return undefined;
   if (request.url.pathname !== '/api/reviews' && request.url.pathname !== '/api/context-health') return undefined;
-  const project = request.url.searchParams.get('project')?.trim() ?? '';
+  const project =
+    Effect2.pipe(request.url.searchParams.get('project'), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ?? '';
   if ((!project && request.url.pathname !== '/api/reviews') || (project && !isManagerProjectName(project))) {
     return {
       body: {code: 'invalid-project', error: 'Select a valid project to inspect its attention queue.'},
@@ -49,16 +57,17 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
         status: 400,
       } satisfies ManagerAttentionResponse;
     }
-    const reviews = (yield* listCandidateReviews(request.config.agentContextHome)).filter(
+    const reviews = EffectArray.filter(
+      yield* listCandidateReviews(request.config.agentContextHome),
       review => (!project || review.project === project) && !(review.maintenanceCapture && !review.maintenance),
     );
     const eligibility = yield* readManagerReviewEligibility(request.config, reviews);
     const {pendingCount, background} = eligibility;
-    const visibleReviews = reviews.filter(review => {
+    const visibleReviews = EffectArray.filter(reviews, review => {
       const queue = eligibility.byReview.get(review.reviewId);
       if (queue === 'assessment' || queue === 'obsolete') return view === 'history';
       if (queue === 'waiting') return false;
-      return review.candidates.some(candidate =>
+      return EffectArray.some(review.candidates, candidate =>
         view === 'history'
           ? !isPending(candidate.state)
           : view === 'deferred'
@@ -69,28 +78,30 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
       );
     });
     // Typed review cards display metadata only. Opening the exact review owns live authorization and source proof.
-    const items = visibleReviews
-      .map(review => {
+    const items = EffectArray.filter(
+      EffectArray.map(visibleReviews, review => {
         const metadataOnly = review.maintenance?.version === 2 || review.maintenance?.version === 3;
+        const queueStatus = eligibility.byReview.get(review.reviewId);
         return {
-          ...(['assessment', 'obsolete'].includes(eligibility.byReview.get(review.reviewId) ?? '')
-            ? {queueStatus: eligibility.byReview.get(review.reviewId) as 'assessment' | 'obsolete'}
-            : {}),
+          ...(queueStatus === 'assessment' || queueStatus === 'obsolete' ? {queueStatus} : {}),
           ...(review.maintenance
             ? {kind: review.maintenance.version === 3 ? ('automatic-memory' as const) : ('topic-maintenance' as const)}
             : {}),
-          candidates: review.candidates
-            .filter(candidate =>
-              view === 'history'
-                ? ['assessment', 'obsolete'].includes(eligibility.byReview.get(review.reviewId) ?? '') ||
-                  !isPending(candidate.state)
-                : view === 'deferred'
-                  ? candidate.state === 'deferred'
-                  : view === 'pending'
-                    ? candidate.state === 'pending' || candidate.state === 'applying'
-                    : isPending(candidate.state),
-            )
-            .map(candidate => ({
+          candidates: EffectArray.map(
+            EffectArray.filter(
+              review.candidates,
+              (candidate, index) =>
+                index in review.candidates &&
+                (view === 'history'
+                  ? ['assessment', 'obsolete'].includes(eligibility.byReview.get(review.reviewId) ?? '') ||
+                    !isPending(candidate.state)
+                  : view === 'deferred'
+                    ? candidate.state === 'deferred'
+                    : view === 'pending'
+                      ? candidate.state === 'pending' || candidate.state === 'applying'
+                      : isPending(candidate.state)),
+            ),
+            candidate => ({
               candidateId: candidate.candidateId,
               categories: candidate.categories,
               comparison: candidate.comparison,
@@ -100,7 +111,8 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
               recommendation: candidate.recommendation,
               state: candidate.state,
               ...(metadataOnly || candidate.targetUri === undefined ? {} : {targetUri: candidate.targetUri}),
-            })),
+            }),
+          ),
           createdAt: review.createdAt,
           project: review.project,
           reviewId: review.reviewId,
@@ -115,11 +127,13 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
                   : review.task,
           topic: metadataOnly ? 'Private topic update' : review.topic,
         };
-      })
-      .filter(review => review.candidates.length > 0)
-      .sort(
-        (left, right) => right.createdAt.localeCompare(left.createdAt) || left.reviewId.localeCompare(right.reviewId),
-      );
+      }),
+      review => review.candidates.length > 0,
+    ).sort(
+      (left, right) =>
+        Effect2.pipe(right.createdAt, EffectString.localeCompare(left.createdAt)) ||
+        Effect2.pipe(left.reviewId, EffectString.localeCompare(right.reviewId)),
+    );
     return {
       body: {
         items,
@@ -134,7 +148,10 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
 
   const selector = normalizeContextHealthSelector({after: request.url.searchParams.get('after') ?? undefined});
   const corpus = yield* readMaintenanceMemoryRecords(request.config);
-  const records = corpus.filter(record => record.metadata.status === 'active' && record.metadata.project === project);
+  const records = EffectArray.filter(
+    corpus,
+    record => record.metadata.status === 'active' && record.metadata.project === project,
+  );
   const root = yield* managerAttentionProjectRoot(request.config, project);
   if (root.state === 'unavailable') {
     return {
@@ -165,8 +182,12 @@ export const managerAttentionProjectRoot = Effect.fn('managerAttention.projectRo
 ) {
   const manifest = yield* readSeedManifest(config.manifestPath).pipe(Effect.result);
   if (Result.isFailure(manifest)) return unavailableRoot('manifest-unavailable');
-  const project = manifest.success.projects.find(
-    candidate => candidate.name.toLowerCase() === projectName.toLowerCase(),
+  const project = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      manifest.success.projects,
+      candidate =>
+        Effect2.pipe(candidate.name, EffectString.toLowerCase) === Effect2.pipe(projectName, EffectString.toLowerCase),
+    ),
   );
   if (project === undefined) return unavailableRoot('project-not-configured');
   const system = yield* SystemInfo;
@@ -186,14 +207,14 @@ function unavailableRoot(reason: ManagerRepositoryEvidenceUnavailableReasonV1) {
 export const managerContextHealthRecordPreviews = Effect.fn('managerAttention.recordPreviews')(
   (records: readonly MemoryRecord[], findings: ManagerContextHealthResponseV1['findings']) =>
     Effect.sync(() => {
-      const recordsByUri = new Map(records.map(record => [record.uri, record] as const));
+      const recordsByUri = new Map(EffectArray.map(records, record => [record.uri, record] as const));
       const findingsByRecord = new Map<string, typeof findings>();
       for (const finding of findings) {
         const uri = finding.repair.subjectUri ?? finding.uris[0];
         if (uri === undefined || !recordsByUri.has(uri)) continue;
         findingsByRecord.set(uri, [...(findingsByRecord.get(uri) ?? []), finding]);
       }
-      return [...findingsByRecord.entries()].flatMap(([uri, recordFindings]) => {
+      return EffectArray.flatMap([...findingsByRecord.entries()], ([uri, recordFindings]) => {
         const record = recordsByUri.get(uri);
         if (record === undefined) return [];
         const citationFindings = new Map<string, string[]>();
@@ -202,18 +223,23 @@ export const managerContextHealthRecordPreviews = Effect.fn('managerAttention.re
           if (citationId === undefined) continue;
           citationFindings.set(citationId, [...(citationFindings.get(citationId) ?? []), finding.id]);
         }
-        const code = (record.metadata.codeCitations ?? [])
-          .filter(citation => citationFindings.has(citation.id))
-          .map(
-            citation =>
-              ({
-                citationId: citation.id,
-                findingIds: citationFindings.get(citation.id) ?? [],
-                ...(citation.target.kind === 'symbol' ? {line: citation.target.span.line} : {}),
-                path: citation.path,
-                ...(citation.target.kind === 'symbol' ? {targetLabel: citation.target.qualifiedName} : {}),
-              }) satisfies ManagerContextHealthCodePreviewV1,
-          );
+        const code = EffectArray.map(
+          EffectArrayPipe(record.metadata.codeCitations ?? [], __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (citation, __effectArrayIndex) =>
+                __effectArrayIndex in __effectArrayValues && citationFindings.has(citation.id),
+            ),
+          ),
+          citation =>
+            ({
+              citationId: citation.id,
+              findingIds: citationFindings.get(citation.id) ?? [],
+              ...(citation.target.kind === 'symbol' ? {line: citation.target.span.line} : {}),
+              path: citation.path,
+              ...(citation.target.kind === 'symbol' ? {targetLabel: citation.target.qualifiedName} : {}),
+            }) satisfies ManagerContextHealthCodePreviewV1,
+        );
         return [
           {
             contentHash: maintenanceContentHash(record.content),
@@ -231,29 +257,68 @@ export const managerContextHealthRecordPreviews = Effect.fn('managerAttention.re
 
 function citationIdFromFinding(targetUri: string | undefined): string | undefined {
   if (targetUri === undefined) return undefined;
-  const value = targetUri.slice(targetUri.lastIndexOf('#') + 1);
+  const value = Effect2.pipe(
+    targetUri,
+    EffectString.slice(
+      Effect2.pipe(
+        targetUri,
+        EffectString.lastIndexOf('#'),
+        Effect2.Option.getOrElse(() => -1),
+      ) + 1,
+    ),
+  );
   return value !== undefined && /^tncc_[0-9a-f]{40}$/u.test(value) ? value : undefined;
 }
 
 function memoryTitle(record: MemoryRecord): string {
-  const heading = record.body.split(/\r?\n/u).find(line => /^#{1,6}\s+\S/u.test(line));
-  return heading?.replace(/^#{1,6}\s+/u, '').trim() ?? record.metadata.topic ?? memorySlug(record.uri);
+  const heading = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      Effect2.pipe(record.body, EffectString.split(/\r?\n/u)),
+      __effectArrayValue => !!(line => /^#{1,6}\s+\S/u.test(line))(__effectArrayValue),
+    ),
+  );
+  return (
+    Effect2.pipe(
+      heading,
+      effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect2.pipe(effectOptionalString, EffectString.replace(/^#{1,6}\s+/u, '')),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ??
+    record.metadata.topic ??
+    memorySlug(record.uri)
+  );
 }
 
 function memoryExcerpt(body: string): string {
-  const plain = body
-    .replace(/^#{1,6}\s+.*$/gmu, '')
-    .replace(/```[\s\S]*?```/gu, '')
-    .replace(/\s+/gu, ' ')
-    .trim();
-  return plain.length > 360 ? `${plain.slice(0, 357).trimEnd()}…` : plain;
+  const plain = Effect2.pipe(
+    body,
+    EffectString.replace(/^#{1,6}\s+.*$/gmu, ''),
+    EffectString.replace(/```[\s\S]*?```/gu, ''),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
+  return plain.length > 360 ? `${Effect2.pipe(plain, EffectString.slice(0, 357), EffectString.trimEnd)}…` : plain;
 }
 
 function memorySlug(uri: string): string {
-  const value = uri
-    .slice(uri.lastIndexOf('/') + 1)
-    .replace(/\.md$/u, '')
-    .replaceAll('-', ' ');
+  const value = Effect2.pipe(uri, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(
+      __effectPipeInput,
+      EffectString.slice(
+        Effect2.pipe(
+          uri,
+          EffectString.lastIndexOf('/'),
+          Effect2.Option.getOrElse(() => -1),
+        ) + 1,
+      ),
+    );
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\.md$/u, ''));
+    const __effectPipeStage2 = Effect2.pipe(__effectPipeStage1, EffectString.replaceAll('-', ' '));
+    return __effectPipeStage2;
+  });
   return value || 'Untitled memory';
 }
 
@@ -262,7 +327,8 @@ function unavailableContextHealth(
   records: readonly MemoryRecord[],
   reason: ManagerRepositoryEvidenceUnavailableReasonV1,
 ): ManagerContextHealthResponseV1 {
-  const eligibleRecords = records.filter(
+  const eligibleRecords = EffectArray.filter(
+    records,
     record =>
       record.metadata.kind === 'durable' && record.metadata.status === 'active' && record.metadata.project === project,
   ).length;

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import type {Node} from 'web-tree-sitter';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -9,6 +10,8 @@ import {
 import {jvmReferenceLookupTiers, jvmSymbolLookupKeys, parseJvmImport, parseJvmNamespace} from '../jvm/lookup.js';
 import {KOTLIN_GRAMMAR} from '../tree_sitter_assets.js';
 import type {CodeGraphLanguagePack} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const DECLARATIONS = `
 (class_declaration (type_identifier) @name) @definition.class
@@ -41,7 +44,7 @@ const REFERENCES = `
 const definition: TreeSitterLanguageDefinition = {
   asset: KOTLIN_GRAMMAR,
   declarationKind: (capture, node) => {
-    if (capture !== 'definition.class') return capture.replace(/^definition\./, '');
+    if (capture !== 'definition.class') return Effect.pipe(capture, EffectString.replace(/^definition\./, ''));
     const declaration = header(node);
     if (/\bannotation\s+class\b/.test(declaration)) return 'annotation';
     if (/\benum\s+class\b/.test(declaration)) return 'enum';
@@ -50,12 +53,19 @@ const definition: TreeSitterLanguageDefinition = {
   },
   declarationName: (capture, declaration, name) => {
     if (capture === 'definition.object' && declaration.type === 'companion_object') {
-      return declaration.namedChildren.find(child => child.type === 'type_identifier')?.text ?? 'Companion';
+      return (
+        Option.getOrUndefined(
+          EffectArray.findFirst(declaration.namedChildren, child => child.type === 'type_identifier'),
+        )?.text ?? 'Companion'
+      );
     }
     if (capture === 'definition.constructor') {
       for (let current = declaration.parent; current; current = current.parent) {
         if (current.type !== 'class_declaration') continue;
-        return current.namedChildren.find(child => child.type === 'type_identifier')?.text ?? name.text;
+        return (
+          Option.getOrUndefined(EffectArray.findFirst(current.namedChildren, child => child.type === 'type_identifier'))
+            ?.text ?? name.text
+        );
       }
     }
     return name.text;
@@ -72,7 +82,7 @@ const definition: TreeSitterLanguageDefinition = {
   referenceRelation: (capture, node) => {
     if (capture === 'reference.call') {
       const target = callTarget(node);
-      return /^[A-Z]/.test(target.split('.').at(-1) ?? '') ? 'constructs' : 'calls';
+      return /^[A-Z]/.test(Effect.pipe(target, EffectString.split('.')).at(-1) ?? '') ? 'constructs' : 'calls';
     }
     if (capture === 'reference.import') return 'imports';
     if (capture === 'reference.extend') return 'extends';
@@ -82,10 +92,12 @@ const definition: TreeSitterLanguageDefinition = {
   },
   referenceTarget: (capture, node) => {
     if (capture === 'reference.import') {
-      return node.text
-        .replace(/^\s*import\s+/, '')
-        .replace(/\s+as\s+[A-Za-z_$][\w$]*\s*$/, '')
-        .trim();
+      return Effect.pipe(
+        node.text,
+        EffectString.replace(/^\s*import\s+/, ''),
+        EffectString.replace(/\s+as\s+[A-Za-z_$][\w$]*\s*$/, ''),
+        EffectString.trim,
+      );
     }
     return capture === 'reference.call' ? callTarget(node) : node.text;
   },
@@ -114,10 +126,20 @@ export const codeGraphLanguagePack: CodeGraphLanguagePack = {
 };
 
 function callTarget(node: Node): string {
-  const target = node.namedChildren.find(child => child.type !== 'call_suffix');
-  return target?.text.trim() ?? node.text.split('(', 1)[0].trim();
+  const target = Option.getOrUndefined(
+    EffectArray.findFirst(node.namedChildren, child => child.type !== 'call_suffix'),
+  );
+  return (
+    Effect.pipe(
+      target?.text,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+    ) ?? Effect.pipe(node.text.split('(', 1)[0], EffectString.trim)
+  );
 }
 
 function header(node: Node): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   return node.text.split(/[={\n]/, 1)[0] ?? '';
 }

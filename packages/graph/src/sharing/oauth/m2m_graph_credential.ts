@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey} from 'jose';
 import {
   canonicalOAuthUrl,
@@ -5,6 +6,9 @@ import {
   parseOAuthM2MProviderConfig,
   type OAuthM2MProviderConfig,
 } from './m2m_config.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MAX_INPUT_BYTES = 8192;
 const MAX_RESPONSE_BYTES = 32768;
@@ -101,7 +105,7 @@ export function parseOAuthM2MGraphCredentialRequest(value: unknown): OAuthM2MGra
     !REPOSITORY_ID.test(value.repositoryId) ||
     value.interactive !== false ||
     value.schemaVersion !== 1 ||
-    !Array.isArray(value.scopes) ||
+    !EffectArray.isArray(value.scopes) ||
     value.scopes.length !== 1 ||
     (value.scopes[0] !== 'graph:read' && value.scopes[0] !== 'graph:contribute')
   )
@@ -137,7 +141,11 @@ export function parseOAuthM2MGraphCredentialConfig(environment: NodeJS.ProcessEn
   const repositoryId = environment.THREADNOTE_OAUTH_GRAPH_M2M_REPOSITORY_ID;
   const rawScopes = environment.THREADNOTE_OAUTH_GRAPH_M2M_SCOPES;
   const subject = environment.THREADNOTE_OAUTH_GRAPH_M2M_SUBJECT;
-  const scopes = new Set(rawScopes?.split(' '));
+  const scopes = new Set(
+    Effect.pipe(rawScopes, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.split(' ')),
+    ),
+  );
   if (
     !audience ||
     !canonicalOAuthUrl(audience) ||
@@ -158,9 +166,9 @@ export function parseOAuthM2MGraphCredentialConfig(environment: NodeJS.ProcessEn
     !subject ||
     !validSubject(subject) ||
     !rawScopes ||
-    [...scopes].some(scope => !GRAPH_SCOPES.has(scope)) ||
+    EffectArray.some([...scopes], scope => !GRAPH_SCOPES.has(scope)) ||
     scopes.size === 0 ||
-    rawScopes !== [...scopes].join(' ')
+    rawScopes !== EffectArray.join([...scopes], ' ')
   )
     throw credentialFailure();
   return {
@@ -236,7 +244,7 @@ export async function requestVerifiedOAuthM2MToken(
     if (config.audienceParameter !== undefined) bodyParameters.set('audience', config.audienceParameter);
     const headers: Record<string, string> = {'content-type': 'application/x-www-form-urlencoded'};
     if (config.clientAuthentication === 'client_secret_basic') {
-      const encode = (value: string) => new URLSearchParams({value}).toString().slice(6);
+      const encode = (value: string) => Effect.pipe(new URLSearchParams({value}).toString(), EffectString.slice(6));
       headers.authorization = `Basic ${Buffer.from(`${encode(config.clientId)}:${encode(config.clientSecret)}`).toString('base64')}`;
     } else {
       bodyParameters.set('client_id', config.clientId);
@@ -252,7 +260,7 @@ export async function requestVerifiedOAuthM2MToken(
     if (response.status !== 200) throw credentialFailure();
     const body = parseTokenResponse(await boundedResponse(response, MAX_RESPONSE_BYTES));
     if (
-      body.token_type.toLowerCase() !== 'bearer' ||
+      Effect.pipe(body.token_type, EffectString.toLowerCase) !== 'bearer' ||
       body.expires_in < 1 ||
       body.expires_in > MAX_TOKEN_LIFETIME_SECONDS
     )
@@ -331,7 +339,7 @@ function validateClaims(
     payload.sub !== config.subject ||
     client !== config.clientId ||
     (typeof audience !== 'string'
-      ? !Array.isArray(audience) || audience.length !== 1 || audience[0] !== config.audience
+      ? !EffectArray.isArray(audience) || audience.length !== 1 || audience[0] !== config.audience
       : audience !== config.audience) ||
     !Number.isSafeInteger(issuedAt) ||
     !Number.isSafeInteger(expiresAt) ||
@@ -349,28 +357,32 @@ function validateClaims(
     throw credentialFailure();
 }
 
+const isScopeList = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) &&
+  EffectArray.every(value, (item): item is string => typeof item === 'string' && !/\s/u.test(item));
+
 function scopeList(value: unknown): string[] | undefined {
-  if (typeof value === 'string') return value.split(' ');
-  if (Array.isArray(value) && value.every(item => typeof item === 'string' && !/\s/u.test(item))) return value;
+  if (typeof value === 'string') return Effect.pipe(value, EffectString.split(' '));
+  if (isScopeList(value)) return [...value];
   return undefined;
 }
 
 function tokenScopes(payload: JWTPayload): unknown {
   if (payload.scope !== undefined && payload.scp !== undefined) {
     const scope = typeof payload.scope === 'string' ? scopeList(payload.scope) : undefined;
-    const scp = Array.isArray(payload.scp) ? scopeList(payload.scp) : undefined;
+    const scp = EffectArray.isArray(payload.scp) ? scopeList(payload.scp) : undefined;
     if (
       !scope ||
       !scp ||
       new Set(scope).size !== scope.length ||
       new Set(scp).size !== scp.length ||
       scope.length !== scp.length ||
-      scope.some(item => !scp.includes(item))
+      EffectArray.some(scope, item => !scp.includes(item))
     )
       return undefined;
   }
   if (payload.scope !== undefined) return typeof payload.scope === 'string' ? payload.scope : undefined;
-  return Array.isArray(payload.scp) ? payload.scp : undefined;
+  return EffectArray.isArray(payload.scp) ? payload.scp : undefined;
 }
 
 function hasAuthorizedScopes(claim: unknown, requested: string, configured: ReadonlySet<string> | undefined): boolean {
@@ -382,15 +394,17 @@ function hasAuthorizedScopes(claim: unknown, requested: string, configured: Read
     granted.length <= allowed.size &&
     new Set(granted).size === granted.length &&
     granted.includes(requested) &&
-    granted.every(scope => allowed.has(scope))
+    EffectArray.every(granted, scope => allowed.has(scope))
   );
 }
 
 function hasMatchingAuthorizedScopes(response: string, token: unknown, config: OAuthM2MTokenAuthority): boolean {
   if (!hasAuthorizedScopes(response, config.scope, config.allowedScopes) || !scopeList(token)) return false;
-  const responseScopes = response.split(' ');
+  const responseScopes = Effect.pipe(response, EffectString.split(' '));
   const tokenScopes = new Set(scopeList(token));
-  return responseScopes.length === tokenScopes.size && responseScopes.every(scope => tokenScopes.has(scope));
+  return (
+    responseScopes.length === tokenScopes.size && EffectArray.every(responseScopes, scope => tokenScopes.has(scope))
+  );
 }
 
 async function boundedResponse(response: Response, limit: number): Promise<string> {
@@ -422,9 +436,10 @@ function isObjectWithKeys(value: unknown, keys: readonly string[]): value is Rec
   return (
     typeof value === 'object' &&
     value !== null &&
-    !Array.isArray(value) &&
-    Object.keys(value).length === keys.length &&
-    keys.every(key => Object.hasOwn(value, key))
+    !EffectArray.isArray(value) &&
+    EffectRecord.keys(value).length === keys.length &&
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    EffectArray.every(keys, key => Object.hasOwn(value, key))
   );
 }
 
@@ -432,7 +447,20 @@ function validSubject(value: string): boolean {
   return (
     value.length > 0 &&
     value.length <= 512 &&
-    [...value].every(character => character.charCodeAt(0) > 32 && character.charCodeAt(0) !== 127)
+    EffectArray.every(
+      [...value],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) > 32 &&
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) !== 127,
+    )
   );
 }
 

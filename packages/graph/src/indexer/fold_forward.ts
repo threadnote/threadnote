@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import type {CommittedBaseResult} from './types.js';
 import {planCodeGraphIncrementalFoldForwardPaths} from '../incremental/work.js';
@@ -99,7 +100,7 @@ export function foldForwardMaterializationCounts(
   freshFiles: readonly {readonly path: string}[],
   deletedPaths: readonly string[] = [],
 ): {readonly carriedFiles: number; readonly freshStagedFiles: number; readonly stagedFiles: number} | undefined {
-  const freshPaths = [...freshFiles.map(file => file.path), ...deletedPaths];
+  const freshPaths = [...EffectArray.map(freshFiles, file => file.path), ...deletedPaths];
   const plan = planCodeGraphIncrementalFoldForwardPaths(priorPaths, freshPaths);
   return plan
     ? {

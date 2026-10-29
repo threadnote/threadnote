@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Context, Effect, Layer, Option, Schema} from 'effect';
 import {CodeGraphStoreBusyError} from './types.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -7,8 +8,6 @@ import {
   resolveLimits,
   withCodeGraphAnalysisTiming,
   type CodeGraphAnalysisOptions,
-  type ResolvedCodeGraphAnalysisBudget,
-  type ResolvedCodeGraphAnalysisLimits,
 } from './analysis/configuration.js';
 import {compareCodeUnits} from './ordering.js';
 import {sanitizeCodeGraphPresentationText} from './presentation_text.js';
@@ -19,13 +18,57 @@ import type {
   CodeGraphAnalysisSymbolAggregatePage,
   CodeGraphAnalysisSummary,
   CodeGraphEdgeCursor,
-  CodeGraphStoreShape,
   CodeGraphSymbolCursor,
 } from './store.js';
 import {CodeGraphStore} from './store.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export const CODE_GRAPH_ANALYSIS_VERSION = 3 as const;
-
+import {CODE_GRAPH_ANALYSIS_VERSION} from './analysis/contracts.js';
+import type {
+  CodeGraphAnalysisStore,
+  CodeGraphAnalysisLeasedStore,
+  CodeGraphAnalysisCount,
+  CodeGraphAnalysisNodeReference,
+  CodeGraphConnectedComponent,
+  CodeGraphCommunity,
+  CodeGraphCommunityMembership,
+  CodeGraphCommunityDrillDown,
+  CodeGraphHub,
+  CodeGraphSurprisingLink,
+  CodeGraphStructuralRelationshipGroup,
+  CodeGraphConfidenceBandName,
+  CodeGraphConfidenceProvenanceSummary,
+  CodeGraphConfidenceFinding,
+  CodeGraphConfidenceAudit,
+  CodeGraphAnalysisCoverage,
+  CodeGraphAnalysisResult,
+  CodeGraphAnalysisShape,
+} from './analysis/contracts.js';
+export {CODE_GRAPH_ANALYSIS_VERSION} from './analysis/contracts.js';
+export type {
+  CodeGraphAnalysisStore,
+  CodeGraphAnalysisLeasedStore,
+  CodeGraphAnalysisCount,
+  CodeGraphAnalysisNodeReference,
+  CodeGraphConnectedComponent,
+  CodeGraphCommunity,
+  CodeGraphCommunityMembership,
+  CodeGraphCommunityDrillDown,
+  CodeGraphHub,
+  CodeGraphSurprisingLink,
+  CodeGraphStructuralRelationshipGroup,
+  CodeGraphConfidenceBandName,
+  CodeGraphConfidenceBand,
+  CodeGraphConfidenceProvenanceSummary,
+  CodeGraphConfidenceFinding,
+  CodeGraphConfidenceAudit,
+  CodeGraphAnalysisStatistics,
+  CodeGraphAnalysisCoverage,
+  CodeGraphAnalysisUsage,
+  CodeGraphAnalysisResult,
+  CodeGraphAnalysisShape,
+} from './analysis/contracts.js';
 export type {
   CodeGraphAnalysisBudget,
   CodeGraphAnalysisLimits,
@@ -34,282 +77,13 @@ export type {
   ResolvedCodeGraphAnalysisLimits,
 } from './analysis/configuration.js';
 
-export interface CodeGraphAnalysisCount {
-  readonly count: number;
-  readonly value: string;
-}
-
-export interface CodeGraphAnalysisNodeReference {
-  readonly id: string;
-  readonly kind: string;
-  readonly label: string;
-  readonly path: string;
-  readonly qualifiedName: string;
-}
-
-export interface CodeGraphConnectedComponent {
-  readonly communityCount: number;
-  readonly edgeCount: number;
-  readonly id: string;
-  readonly label: string;
-  readonly memberCount: number;
-  readonly representative: CodeGraphAnalysisNodeReference;
-}
-
-export interface CodeGraphCommunity {
-  readonly componentId: string;
-  readonly crossCommunityIncoming: number;
-  readonly crossCommunityOutgoing: number;
-  readonly id: string;
-  readonly internalEdgeCount: number;
-  readonly label: string;
-  readonly memberCount: number;
-  readonly representative: CodeGraphAnalysisNodeReference;
-}
-
-export interface CodeGraphCommunityMembership {
-  readonly communityId: string;
-  readonly componentId: string;
-  readonly node: CodeGraphAnalysisNodeReference;
-}
-
-export type CodeGraphCommunityDrillDown =
-  | {
-      readonly community: CodeGraphCommunity;
-      readonly coverage: {
-        readonly complete: boolean;
-        readonly shownMemberCount: number;
-        readonly totalMemberCount: number;
-      };
-      readonly members: readonly CodeGraphCommunityMembership[];
-      readonly requestedId: string;
-      readonly state: 'found';
-    }
-  | {
-      /** A complete analysis proves absence; a partial analysis only reports that the ID was not observed. */
-      readonly complete: boolean;
-      readonly requestedId: string;
-      readonly state: 'not-found';
-    };
-
-export interface CodeGraphHub {
-  readonly classification: 'god-node' | 'hub';
-  readonly communityId: string;
-  readonly componentId: string;
-  readonly degree: number;
-  readonly degreeShare: number;
-  readonly incoming: number;
-  readonly node: CodeGraphAnalysisNodeReference;
-  readonly outgoing: number;
-  readonly zScore: number;
-}
-
-export interface CodeGraphSurprisingLink {
-  readonly confidence: number;
-  readonly edgeId: string;
-  readonly provenance: CodeGraphProvenance;
-  readonly relation: CodeGraphRelation;
-  readonly score: number;
-  readonly signals: {
-    readonly degreeExpectation: number;
-    readonly relationRarity: number;
-    readonly structuralScopeBoundary: boolean;
-  };
-  readonly source: CodeGraphAnalysisNodeReference & {
-    readonly communityId: string;
-    readonly communityLabel: string;
-  };
-  readonly target: CodeGraphAnalysisNodeReference & {
-    readonly communityId: string;
-    readonly communityLabel: string;
-  };
-}
-
-/**
- * A deterministic n-ary structural relationship derived from high-degree fan-in or fan-out.
- * It is derived evidence rather than a new source fact. Members are a bounded, stable sample;
- * `relationshipCount` remains the exact count from the analyzed topology pass.
- */
-export interface CodeGraphStructuralRelationshipGroup {
-  readonly center: CodeGraphAnalysisNodeReference;
-  readonly direction: 'fan-in' | 'fan-out';
-  readonly id: string;
-  readonly kind: 'structural-hyperedge';
-  readonly members: readonly CodeGraphAnalysisNodeReference[];
-  readonly memberSampleComplete: boolean;
-  readonly relationshipCount: number;
-}
-
-export type CodeGraphConfidenceBandName = 'high' | 'low' | 'medium';
-
-export interface CodeGraphConfidenceBand {
-  readonly band: CodeGraphConfidenceBandName;
-  readonly count: number;
-  readonly share: number;
-}
-
-export interface CodeGraphConfidenceProvenanceSummary {
-  readonly averageConfidence: number;
-  readonly count: number;
-  readonly lowestConfidence: number;
-  readonly provenance: CodeGraphProvenance;
-  readonly share: number;
-}
-
-export interface CodeGraphConfidenceFinding {
-  readonly confidence: number;
-  readonly edgeId: string;
-  readonly evidencePath: string;
-  readonly expectedMinimumConfidence: number;
-  readonly issues: readonly ('below-provenance-baseline' | 'invalid-confidence')[];
-  readonly provenance: CodeGraphProvenance;
-  readonly relation: CodeGraphRelation;
-  readonly source: {
-    readonly id?: string;
-    readonly name: string;
-  };
-  readonly target: {
-    readonly id?: string;
-    readonly name: string;
-  };
-}
-
-export interface CodeGraphConfidenceAudit {
-  readonly averageConfidence: number;
-  readonly bands: readonly CodeGraphConfidenceBand[];
-  readonly complete: boolean;
-  readonly findingsComplete: boolean;
-  readonly findings: readonly CodeGraphConfidenceFinding[];
-  readonly highConfidenceThreshold: number;
-  readonly invalidConfidenceEdgeCount: number;
-  readonly lowConfidenceThreshold: number;
-  readonly provenances: readonly CodeGraphConfidenceProvenanceSummary[];
-  readonly reviewThresholds: readonly {
-    readonly minimumExpectedConfidence: number;
-    readonly provenance: CodeGraphProvenance;
-  }[];
-  readonly selectedEdgeCount: number;
-  readonly summaryComplete: boolean;
-  readonly unresolvedEndpointEdgeCount: number;
-  readonly unresolvedEndpointShare: number;
-}
-
-export interface CodeGraphAnalysisStatistics {
-  /** Relationships whose endpoints were both present in the observed topology pass. */
-  readonly analyzedEdgeCount: number;
-  /** Symbols retained by the observed topology pass. */
-  readonly analyzedNodeCount: number;
-  /** Edge rows included in the bounded aggregate pass. */
-  readonly aggregatedEdgeCount: number;
-  /** Symbol rows included in the bounded aggregate pass. */
-  readonly aggregatedNodeCount: number;
-  readonly averageDegree: number;
-  readonly communityCount: number;
-  readonly connectedComponentCount: number;
-  readonly filteredEdgeCount: number;
-  readonly isolatedNodeCount: number;
-  readonly kinds: readonly CodeGraphAnalysisCount[];
-  readonly languages: readonly CodeGraphAnalysisCount[];
-  readonly maximumDegree: number;
-  readonly provenances: readonly CodeGraphAnalysisCount[];
-  readonly relations: readonly CodeGraphAnalysisCount[];
-  readonly scannedEdgeCount: number;
-  readonly selectedEdgeCount: number;
-  readonly selfLoopCount: number;
-  readonly snapshotEdgeCount: number;
-  readonly snapshotNodeCount: number;
-  readonly unresolvedEndpointEdgeCount: number;
-}
-
-export interface CodeGraphAnalysisCoverage {
-  readonly aggregates: {
-    readonly edges: {
-      readonly complete: boolean;
-      readonly rows: number;
-      readonly source: 'paged-fallback' | 'persisted-summary';
-    };
-    readonly symbols: {
-      readonly complete: boolean;
-      readonly rows: number;
-      readonly source: 'paged-fallback' | 'persisted-summary';
-    };
-  };
-  readonly complete: boolean;
-  readonly edgeMetricsComplete: boolean;
-  readonly edgesComplete: boolean;
-  /** Every snapshot symbol participated; false means topology is a bounded path-prefix observation. */
-  readonly nodesComplete: boolean;
-  readonly topology: {
-    readonly complete: boolean;
-    readonly state: 'complete' | 'not-requested' | 'partial' | 'unavailable';
-  };
-}
-
-export interface CodeGraphAnalysisUsage {
-  readonly aggregateSummaryReads: number;
-  readonly aggregateEdgePageReads: number;
-  readonly aggregateEdgeRows: number;
-  readonly aggregateSymbolPageReads: number;
-  readonly aggregateSymbolRows: number;
-  readonly durationMilliseconds: number;
-  readonly edgePageReads: number;
-  readonly edgeVisits: number;
-  readonly nodePageReads: number;
-}
-
-export class CodeGraphAnalysisDeferred extends Schema.TaggedError<CodeGraphAnalysisDeferred>()(
-  'CodeGraphAnalysisDeferred',
-  {message: Schema.String, reason: Schema.Literal('writer-contention')},
-) {}
-
-export interface CodeGraphAnalysisResult {
-  readonly leaseCleanup?: {readonly state: 'released' | 'expiry'; readonly expiresAt: number};
-  readonly projectCoverage?: import('./types.js').CodeGraphProjectCoverage;
-  readonly algorithms: {
-    readonly communities: 'structural-connectivity-v1';
-    readonly components: 'weak-connectivity-v1';
-    readonly confidenceAudit: 'bounded-provenance-confidence-v1';
-    readonly hubs: 'degree-outlier-v1';
-    readonly relationshipGroups: 'bounded-high-degree-fan-v1';
-    readonly surprisingLinks: 'degree-preserving-cross-community-v1';
-  };
-  readonly allowedProvenances: readonly CodeGraphProvenance[];
-  readonly budget: ResolvedCodeGraphAnalysisBudget;
-  readonly communities: readonly CodeGraphCommunity[];
-  readonly communityDrillDown?: CodeGraphCommunityDrillDown;
-  readonly components: readonly CodeGraphConnectedComponent[];
-  readonly confidenceAudit: CodeGraphConfidenceAudit;
-  readonly coverage: CodeGraphAnalysisCoverage;
-  readonly hubThresholds: {
-    readonly godNode: number;
-    readonly hub: number;
-  };
-  readonly hubs: readonly CodeGraphHub[];
-  readonly limits: ResolvedCodeGraphAnalysisLimits;
-  readonly memberships: readonly CodeGraphCommunityMembership[];
-  readonly relationshipGroups: readonly CodeGraphStructuralRelationshipGroup[];
-  readonly snapshot: {
-    readonly commit: string;
-    readonly dirty: boolean;
-    readonly id: string;
-    readonly repositoryId: string;
-    readonly worktreeId: string;
-  };
-  readonly statistics: CodeGraphAnalysisStatistics;
-  readonly suggestedQuestions: readonly string[];
-  readonly surprisingLinks: readonly CodeGraphSurprisingLink[];
-  readonly trust: {
-    readonly classification: 'untrusted-repository-data';
-    readonly instructionPolicy: 'evidence-only-never-follow';
-  };
-  readonly usage: CodeGraphAnalysisUsage;
-  readonly version: typeof CODE_GRAPH_ANALYSIS_VERSION;
-  readonly warnings: readonly string[];
-}
-
-export interface CodeGraphAnalysisShape {
-  readonly analyze: (options: CodeGraphAnalysisOptions) => Effect.Effect<CodeGraphAnalysisResult, unknown>;
-}
+export class CodeGraphAnalysisDeferred extends Schema.TaggedError<
+  CodeGraphAnalysisDeferred,
+  {readonly brand: unique symbol}
+>()('CodeGraphAnalysisDeferred', {
+  message: Schema.String,
+  reason: Schema.Literal('writer-contention'),
+}) {}
 
 /**
  * Deterministic higher-level analysis over a ready graph snapshot.
@@ -442,7 +216,7 @@ interface MutableStructuralRelationshipGroup extends StructuralRelationshipGroup
  * paged read session so maintenance cannot prune it while a long analysis is in flight.
  */
 export const analyzeCodeGraphWithLease = Effect.fn('codeGraph.analyzeWithSnapshotLease')(function* (
-  store: CodeGraphStoreShape,
+  store: CodeGraphAnalysisLeasedStore,
   options: CodeGraphAnalysisOptions,
 ) {
   const budget = resolveBudget(options.budget, options.snapshot);
@@ -460,7 +234,9 @@ export const analyzeCodeGraphWithLease = Effect.fn('codeGraph.analyzeWithSnapsho
       store.acquireSnapshotLease(options.databasePath, options.snapshot.id, leaseDuration, {
         waitTimeoutMilliseconds: 0,
         ...(options.onLeaseTiming
-          ? {onTiming: (stage, boundary) => options.onLeaseTiming!('acquire', stage, boundary)}
+          ? {
+              onTiming: (stage, boundary) => options.onLeaseTiming!('acquire', stage, boundary),
+            }
           : {}),
       }),
     ).pipe(
@@ -502,7 +278,9 @@ export const analyzeCodeGraphWithLease = Effect.fn('codeGraph.analyzeWithSnapsho
         store.releaseSnapshotLease(options.databasePath, lease, {
           waitTimeoutMilliseconds: 0,
           ...(options.onLeaseTiming
-            ? {onTiming: (stage, boundary) => options.onLeaseTiming!('release', stage, boundary)}
+            ? {
+                onTiming: (stage, boundary) => options.onLeaseTiming!('release', stage, boundary),
+              }
             : {}),
         }),
       ).pipe(
@@ -516,12 +294,15 @@ export const analyzeCodeGraphWithLease = Effect.fn('codeGraph.analyzeWithSnapsho
   );
   return {
     ...result,
-    leaseCleanup: {state: released ? 'released' : 'expiry', expiresAt: leaseExpiresAt},
+    leaseCleanup: {
+      state: released ? 'released' : 'expiry',
+      expiresAt: leaseExpiresAt,
+    },
   } satisfies CodeGraphAnalysisResult;
 });
 
 export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
-  store: CodeGraphStoreShape,
+  store: CodeGraphAnalysisStore,
   options: CodeGraphAnalysisOptions,
 ) {
   const budget = resolveBudget(options.budget, options.snapshot);
@@ -540,15 +321,17 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
     mergePersistedAnalysisSummary(symbolAggregates, edgeAggregates, persistedSummary.value, allowed);
   }
   const persistedAggregateSource = Option.isSome(persistedSummary);
-  const symbolPageAggregateSupported = typeof store.loadAnalysisSymbolAggregatePage === 'function';
-  const edgePageAggregateSupported = typeof store.loadAnalysisEdgeAggregatePage === 'function';
+  const loadSymbolAggregatePage = store.loadAnalysisSymbolAggregatePage;
+  const loadEdgeAggregatePage = store.loadAnalysisEdgeAggregatePage;
+  const symbolPageAggregateSupported = typeof loadSymbolAggregatePage === 'function';
+  const edgePageAggregateSupported = typeof loadEdgeAggregatePage === 'function';
   const symbolAggregateSupported = persistedAggregateSource || symbolPageAggregateSupported;
   const edgeAggregateSupported = persistedAggregateSource || edgePageAggregateSupported;
   const symbolAggregateScan = persistedAggregateSource
     ? completeAggregateScan(persistedSummary.value.symbolCount)
     : symbolPageAggregateSupported
       ? yield* scanSymbolAggregatePages(
-          store,
+          loadSymbolAggregatePage,
           options,
           budget.aggregatePageSize,
           Math.min(budget.maxNodes, options.snapshot.symbolCount),
@@ -560,7 +343,7 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
     ? completeAggregateScan(persistedSummary.value.edgeCount)
     : edgePageAggregateSupported
       ? yield* scanEdgeAggregatePages(
-          store,
+          loadEdgeAggregatePage,
           options,
           budget.aggregatePageSize,
           Math.min(budget.maxEdges, options.snapshot.edgeCount),
@@ -614,7 +397,11 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
       if (nodes.length >= budget.maxNodes) break;
     }
     const last = page.at(-1)!;
-    symbolCursor = {id: last.id, path: last.path, qualifiedName: last.qualifiedName};
+    symbolCursor = {
+      id: last.id,
+      path: last.path,
+      qualifiedName: last.qualifiedName,
+    };
     yield* Effect.yieldNow;
     if (page.length < requested) {
       break;
@@ -868,8 +655,12 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
     if (isCooperativeCheckpoint(index)) yield* Effect.yieldNow;
   }
 
-  const mutableRelationshipGroups: MutableStructuralRelationshipGroup[] = relationshipGroupCandidates.map(
-    candidate => ({...candidate, members: []}),
+  const mutableRelationshipGroups: MutableStructuralRelationshipGroup[] = EffectArray.map(
+    relationshipGroupCandidates,
+    candidate => ({
+      ...candidate,
+      members: [],
+    }),
   );
   const fanInGroups = new Map<number, MutableStructuralRelationshipGroup>();
   const fanOutGroups = new Map<number, MutableStructuralRelationshipGroup>();
@@ -1079,15 +870,18 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
             state: 'found',
           } satisfies CodeGraphCommunityDrillDown);
 
-  const relationshipGroups: CodeGraphStructuralRelationshipGroup[] = mutableRelationshipGroups.map(group => ({
-    center: nodeReference(nodes[group.centerIndex]),
-    direction: group.direction,
-    id: structuralRelationshipGroupId(nodes[group.centerIndex], group.direction),
-    kind: 'structural-hyperedge',
-    members: group.members,
-    memberSampleComplete: edgeMetricsComplete && group.relationshipCount <= limits.relationshipGroupMembers,
-    relationshipCount: group.relationshipCount,
-  }));
+  const relationshipGroups: CodeGraphStructuralRelationshipGroup[] = EffectArray.map(
+    mutableRelationshipGroups,
+    group => ({
+      center: nodeReference(nodes[group.centerIndex]),
+      direction: group.direction,
+      id: structuralRelationshipGroupId(nodes[group.centerIndex], group.direction),
+      kind: 'structural-hyperedge',
+      members: group.members,
+      memberSampleComplete: edgeMetricsComplete && group.relationshipCount <= limits.relationshipGroupMembers,
+      relationshipCount: group.relationshipCount,
+    }),
+  );
 
   const finishedAt = yield* Clock.currentTimeMillis;
   const warnings: string[] = [];
@@ -1151,7 +945,7 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
       `Showing ${limits.relationshipGroups} of ${relationshipGroupCandidateCount} structural relationship groups.`,
     );
   }
-  if (relationshipGroups.some(group => !group.memberSampleComplete)) {
+  if (EffectArray.some(relationshipGroups, group => !group.memberSampleComplete)) {
     warnings.push('Structural relationship-group members are bounded samples; relationship counts remain exact.');
   }
   if (communityDrillDown?.state === 'not-found' && !communityDrillDown.complete) {
@@ -1167,7 +961,7 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
 
   const confidenceAudit: CodeGraphConfidenceAudit = {
     averageConfidence: stableNumber(confidenceTotal / Math.max(1, counters.selectedEdges)),
-    bands: (['high', 'medium', 'low'] as const).map(band => ({
+    bands: EffectArray.map(['high', 'medium', 'low'] as const, band => ({
       band,
       count: confidenceBands.get(band) ?? 0,
       share: stableNumber((confidenceBands.get(band) ?? 0) / Math.max(1, counters.selectedEdges)),
@@ -1178,16 +972,17 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
     highConfidenceThreshold: HIGH_CONFIDENCE_THRESHOLD,
     invalidConfidenceEdgeCount,
     lowConfidenceThreshold: LOW_CONFIDENCE_THRESHOLD,
-    provenances: [...confidenceByProvenance]
-      .map(([provenance, summary]): CodeGraphConfidenceProvenanceSummary => ({
+    provenances: EffectArray.map(
+      [...confidenceByProvenance],
+      ([provenance, summary]): CodeGraphConfidenceProvenanceSummary => ({
         averageConfidence: stableNumber(summary.total / summary.count),
         count: summary.count,
         lowestConfidence: stableNumber(summary.lowest),
         provenance,
         share: stableNumber(summary.count / Math.max(1, counters.selectedEdges)),
-      }))
-      .sort((left, right) => right.count - left.count || compareCodeUnits(left.provenance, right.provenance)),
-    reviewThresholds: allowedProvenances.map(provenance => ({
+      }),
+    ).sort((left, right) => right.count - left.count || compareCodeUnits(left.provenance, right.provenance)),
+    reviewThresholds: EffectArray.map(allowedProvenances, provenance => ({
       minimumExpectedConfidence: minimumExpectedConfidence(provenance),
       provenance,
     })),
@@ -1295,7 +1090,7 @@ export const analyzeCodeGraph = Effect.fn('codeGraph.analyze')(function* (
 });
 
 const scanSymbolAggregatePages = Effect.fn('codeGraph.scanAnalysisSymbolAggregates')(function* (
-  store: CodeGraphStoreShape,
+  loadPage: NonNullable<CodeGraphAnalysisStore['loadAnalysisSymbolAggregatePage']>,
   options: CodeGraphAnalysisOptions,
   pageSize: number,
   rowLimit: number,
@@ -1313,12 +1108,7 @@ const scanSymbolAggregatePages = Effect.fn('codeGraph.scanAnalysisSymbolAggregat
       break;
     }
     const requested = Math.min(pageSize, rowLimit - rows);
-    const page = yield* store.loadAnalysisSymbolAggregatePage(
-      options.databasePath,
-      options.snapshot.id,
-      cursorId,
-      requested,
-    );
+    const page = yield* loadPage(options.databasePath, options.snapshot.id, cursorId, requested);
     pageReads += 1;
     validateAggregatePage(page, requested, cursorId, 'symbol');
     if (page.rows === 0) {
@@ -1334,11 +1124,16 @@ const scanSymbolAggregatePages = Effect.fn('codeGraph.scanAnalysisSymbolAggregat
       break;
     }
   }
-  return {pageReads, reachedEnd, rows, timedOut} satisfies AggregateScanResult;
+  return {
+    pageReads,
+    reachedEnd,
+    rows,
+    timedOut,
+  } satisfies AggregateScanResult;
 });
 
 const scanEdgeAggregatePages = Effect.fn('codeGraph.scanAnalysisEdgeAggregates')(function* (
-  store: CodeGraphStoreShape,
+  loadPage: NonNullable<CodeGraphAnalysisStore['loadAnalysisEdgeAggregatePage']>,
   options: CodeGraphAnalysisOptions,
   pageSize: number,
   rowLimit: number,
@@ -1357,12 +1152,7 @@ const scanEdgeAggregatePages = Effect.fn('codeGraph.scanAnalysisEdgeAggregates')
       break;
     }
     const requested = Math.min(pageSize, rowLimit - rows);
-    const page = yield* store.loadAnalysisEdgeAggregatePage(
-      options.databasePath,
-      options.snapshot.id,
-      cursorId,
-      requested,
-    );
+    const page = yield* loadPage(options.databasePath, options.snapshot.id, cursorId, requested);
     pageReads += 1;
     validateAggregatePage(page, requested, cursorId, 'relationship');
     if (page.rows === 0) {
@@ -1378,7 +1168,12 @@ const scanEdgeAggregatePages = Effect.fn('codeGraph.scanAnalysisEdgeAggregates')
       break;
     }
   }
-  return {pageReads, reachedEnd, rows, timedOut} satisfies AggregateScanResult;
+  return {
+    pageReads,
+    reachedEnd,
+    rows,
+    timedOut,
+  } satisfies AggregateScanResult;
 });
 
 function validateAggregatePage(
@@ -1497,11 +1292,11 @@ function emptyConfidenceBands(): Map<CodeGraphConfidenceBandName, number> {
 function cloneConfidenceSummaries(
   values: ReadonlyMap<CodeGraphProvenance, MutableConfidenceSummary>,
 ): Map<CodeGraphProvenance, MutableConfidenceSummary> {
-  return new Map([...values].map(([key, value]) => [key, {...value}]));
+  return new Map(EffectArray.map([...values], ([key, value]) => [key, {...value}]));
 }
 
 const scanEdgePages = Effect.fn('codeGraph.scanAnalysisEdges')(function* (
-  store: CodeGraphStoreShape,
+  store: CodeGraphAnalysisStore,
   options: CodeGraphAnalysisOptions,
   pageSize: number,
   visitLimit: number,
@@ -1531,7 +1326,12 @@ const scanEdgePages = Effect.fn('codeGraph.scanAnalysisEdges')(function* (
       if (visits >= visitLimit) break;
     }
     const last = page.at(-1)!;
-    cursor = {id: last.id, relation: last.relation, sourceName: last.sourceName, targetName: last.targetName};
+    cursor = {
+      id: last.id,
+      relation: last.relation,
+      sourceName: last.sourceName,
+      targetName: last.targetName,
+    };
     yield* Effect.yieldNow;
     if (page.length < requested) {
       reachedEnd = true;
@@ -1604,7 +1404,7 @@ function updateGroup(
 }
 
 function groupId(group: MutableGroup, recipe: string, prefix: string): string {
-  return `${prefix}_${sha256HexSync(`${recipe}\n${group.minimumNodeId}`).slice(0, 32)}`;
+  return `${prefix}_${Effect2.pipe(sha256HexSync(`${recipe}\n${group.minimumNodeId}`), EffectString.slice(0, 32))}`;
 }
 
 function nodeState(symbol: CodeGraphSymbol): NodeState {
@@ -1624,13 +1424,21 @@ function nodeState(symbol: CodeGraphSymbol): NodeState {
 }
 
 function nodeReference(node: NodeState): CodeGraphAnalysisNodeReference {
-  return {id: node.id, kind: node.kind, label: node.name, path: node.path, qualifiedName: node.qualifiedName};
+  return {
+    id: node.id,
+    kind: node.kind,
+    label: node.name,
+    path: node.path,
+    qualifiedName: node.qualifiedName,
+  };
 }
 
 function structuralScope(symbol: CodeGraphSymbol): string {
-  const packageName = symbol.packageName?.trim();
-  const normalizedPath = normalizeGraphPath(symbol.path).toLowerCase();
-  return `${packageName ? `package:${packageName.normalize('NFKC').toLowerCase()}\0` : ''}file:${normalizedPath}`;
+  const packageName = Effect2.pipe(symbol.packageName, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  const normalizedPath = Effect2.pipe(normalizeGraphPath(symbol.path), EffectString.toLowerCase);
+  return `${packageName ? `package:${Effect2.pipe(packageName, EffectString.normalize('NFKC'), EffectString.toLowerCase)}\0` : ''}file:${normalizedPath}`;
 }
 
 function displayScope(node: NodeState): string {
@@ -1639,13 +1447,28 @@ function displayScope(node: NodeState): string {
 
 function structuralScopeLabel(symbol: CodeGraphSymbol): string {
   const path = normalizeGraphPath(symbol.path);
-  const basename = path.slice(path.lastIndexOf('/') + 1).replace(/\.[^.]+$/, '');
-  const packageName = symbol.packageName?.trim();
+  const basename = Effect2.pipe(path, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(
+      __effectPipeInput,
+      EffectString.slice(
+        Effect2.pipe(
+          path,
+          EffectString.lastIndexOf('/'),
+          Effect2.Option.getOrElse(() => -1),
+        ) + 1,
+      ),
+    );
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\.[^.]+$/, ''));
+    return __effectPipeStage1;
+  });
+  const packageName = Effect2.pipe(symbol.packageName, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   return packageName ? `${packageName}/${basename}` : path;
 }
 
 function normalizeGraphPath(value: string): string {
-  return value.replaceAll('\\', '/').replace(/^\.\/+/, '');
+  return Effect2.pipe(value, EffectString.replaceAll('\\', '/'), EffectString.replace(/^\.\/+/, ''));
 }
 
 function communityLabel(representative: NodeState, memberCount: number): string {
@@ -1668,8 +1491,16 @@ function compareRepresentatives(left: NodeState, right: NodeState): number {
 }
 
 function compareGroups(
-  left: {readonly id: string; readonly label: string; readonly memberCount: number},
-  right: {readonly id: string; readonly label: string; readonly memberCount: number},
+  left: {
+    readonly id: string;
+    readonly label: string;
+    readonly memberCount: number;
+  },
+  right: {
+    readonly id: string;
+    readonly label: string;
+    readonly memberCount: number;
+  },
 ): number {
   return (
     right.memberCount - left.memberCount ||
@@ -1767,7 +1598,7 @@ function structuralRelationshipGroupId(
   center: NodeState,
   direction: CodeGraphStructuralRelationshipGroup['direction'],
 ): string {
-  return `cgrg_${sha256HexSync(`structural-relationship-group-v1\n${direction}\n${center.id}`).slice(0, 32)}`;
+  return `cgrg_${Effect2.pipe(sha256HexSync(`structural-relationship-group-v1\n${direction}\n${center.id}`), EffectString.slice(0, 32))}`;
 }
 
 function compareSurprisingLinks(left: CodeGraphSurprisingLink, right: CodeGraphSurprisingLink): number {
@@ -1817,7 +1648,10 @@ function retainBestDistinct<T>(
   key: (value: T) => string,
 ): void {
   const candidateKey = key(candidate);
-  const duplicate = values.findIndex(value => key(value) === candidateKey);
+  const duplicate = Option.getOrElse(
+    EffectArray.findFirstIndex(values, value => key(value) === candidateKey),
+    () => -1,
+  );
   if (duplicate >= 0) {
     if (compare(candidate, values[duplicate]) >= 0) return;
     values.splice(duplicate, 1);
@@ -1826,7 +1660,7 @@ function retainBestDistinct<T>(
 }
 
 function surprisingCommunityPair(link: CodeGraphSurprisingLink): string {
-  return [link.source.communityId, link.target.communityId].sort().join('\0');
+  return EffectArray.join([link.source.communityId, link.target.communityId].sort(), '\0');
 }
 
 function provenanceWeight(provenance: CodeGraphProvenance): number {
@@ -1886,9 +1720,10 @@ function relationWeight(relation: CodeGraphRelation): number {
 }
 
 function orderedCounts(counts: ReadonlyMap<string, number>): readonly CodeGraphAnalysisCount[] {
-  return [...counts]
-    .map(([value, count]) => ({count, value}))
-    .sort((left, right) => right.count - left.count || compareCodeUnits(left.value, right.value));
+  return EffectArray.map([...counts], ([value, count]) => ({
+    count,
+    value,
+  })).sort((left, right) => right.count - left.count || compareCodeUnits(left.value, right.value));
 }
 
 function architectureQuestions(input: {
@@ -1899,7 +1734,8 @@ function architectureQuestions(input: {
   readonly surprisingLinks: readonly CodeGraphSurprisingLink[];
 }): readonly string[] {
   const questions: string[] = [];
-  const godNode = input.hubs.find(hub => hub.classification === 'god-node') ?? input.hubs[0];
+  const godNode =
+    Option.getOrUndefined(EffectArray.findFirst(input.hubs, hub => hub.classification === 'god-node')) ?? input.hubs[0];
   if (godNode) {
     questions.push(`What responsibilities converge on ${godNode.node.label}, and which callers are most exposed?`);
   }
@@ -1969,5 +1805,12 @@ function completeAggregateScan(rows: number): AggregateScanResult {
 
 function resolveProvenances(values: readonly CodeGraphProvenance[] | undefined): readonly CodeGraphProvenance[] {
   const requested = values ?? DEFAULT_PROVENANCES;
-  return [...new Set(requested.filter(value => ALL_PROVENANCES.has(value)))].sort();
+  return [
+    ...new Set(
+      EffectArray.filter(
+        requested,
+        (value, __effectArrayIndex) => __effectArrayIndex in requested && ALL_PROVENANCES.has(value),
+      ),
+    ),
+  ].sort();
 }

@@ -21,6 +21,8 @@ import {
   type SitePage,
 } from './lib/routes';
 import './styles.css';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type PageModule = {default: ComponentType};
 
@@ -103,9 +105,9 @@ function scrollToRouteTarget(href: string): void {
   }
   let id: string;
   try {
-    id = decodeURIComponent(url.hash.slice(1));
+    id = decodeURIComponent(Effect.pipe(url.hash, EffectString.slice(1)));
   } catch {
-    id = url.hash.slice(1);
+    id = Effect.pipe(url.hash, EffectString.slice(1));
   }
   const target = document.getElementById(id);
   if (!target) return;

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -29,6 +30,7 @@ import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/regist
 import {codeGraphLanguagePackStatuses} from '@threadnote/graph/query/status_helpers';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {isJsonObject} from '@threadnote/platform/json';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 
 import {
@@ -41,13 +43,36 @@ import {
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {join, mkdir, mkdtemp, rm, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function object(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function objects(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array of JSON objects.');
+  return EffectArray.map(value, object);
+}
+
+function string(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string.');
+  return value;
+}
+
+function number(value: unknown): number {
+  if (typeof value !== 'number') throw new Error('Expected a number.');
+  return value;
+}
 
 describe('code graph cross-process build status', () => {
   const homes: string[] = [];
   const languagePackTotal = codeGraphLanguagePackStatuses(BUILTIN_LANGUAGE_PACK_REGISTRY).length;
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('calibrates ETA confidence from variance, prediction error, and silent intervals', () => {
@@ -123,21 +148,27 @@ describe('code graph cross-process build status', () => {
       });
 
       const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
-      const statusFile = (yield* fs.readDirectory(directory)).find(name => name.endsWith('.json'))!;
+      const statusFile = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          yield* fs.readDirectory(directory),
+          __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+        ),
+      )!;
       const statusPath = path.join(directory, statusFile);
-      const status = JSON.parse(yield* fs.readFileString(statusPath)) as {
-        materialization: {metrics: {fallbackBoundary: Record<string, unknown>}};
-      };
+      const status = object(JSON.parse(yield* fs.readFileString(statusPath)));
+      const materialization = object(status.materialization);
+      const metrics = object(materialization.metrics);
+      const fallbackBoundary = object(metrics.fallbackBoundary);
       yield* fs.writeFileString(
         statusPath,
         `${JSON.stringify({
           ...status,
           materialization: {
-            ...status.materialization,
+            ...materialization,
             metrics: {
-              ...status.materialization.metrics,
+              ...metrics,
               fallbackBoundary: {
-                ...status.materialization.metrics.fallbackBoundary,
+                ...fallbackBoundary,
                 metric: 'candidate-projection-observations',
                 stage: 'resolution-candidate-scan',
               },
@@ -165,10 +196,10 @@ describe('code graph cross-process build status', () => {
           `${JSON.stringify({
             ...status,
             materialization: {
-              ...status.materialization,
+              ...materialization,
               metrics: {
-                ...status.materialization.metrics,
-                fallbackBoundary: {...status.materialization.metrics.fallbackBoundary, metric, stage},
+                ...metrics,
+                fallbackBoundary: {...fallbackBoundary, metric, stage},
               },
             },
           })}\n`,
@@ -268,11 +299,15 @@ describe('code graph cross-process build status', () => {
     const statuses = result.scoped;
 
     expect(statuses).toHaveLength(2);
-    expect(new Set(statuses.map(status => status.buildId)).size).toBe(2);
-    expect(statuses.every(status => status.observation.liveness === 'active')).toBe(true);
-    expect(statuses.map(status => status.state).sort()).toEqual(['queued', 'running']);
-    expect(statuses.find(status => status.state === 'queued')?.subphase).toBe('database-writer');
-    expect(statuses.find(status => status.state === 'running')?.counters).toMatchObject({
+    expect(new Set(EffectArray.map(statuses, status => status.buildId)).size).toBe(2);
+    expect(EffectArray.every(statuses, status => status.observation.liveness === 'active')).toBe(true);
+    expect(EffectArray.map(statuses, status => status.state).sort()).toEqual(['queued', 'running']);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(statuses, status => status.state === 'queued'))?.subphase,
+    ).toBe('database-writer');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(statuses, status => status.state === 'running'))?.counters,
+    ).toMatchObject({
       completed: 8,
       reused: 5,
       total: 20,
@@ -280,8 +315,12 @@ describe('code graph cross-process build status', () => {
     });
     expect(JSON.stringify(statuses)).not.toContain(home);
     expect(result.global).toHaveLength(2);
-    expect(result.global.every(status => status.managerContext?.worktreePath === `${home}/repository`)).toBe(true);
-    expect(result.global.every(status => status.managerContext?.branch === 'feature/manager-labels')).toBe(true);
+    expect(
+      EffectArray.every(result.global, status => status.managerContext?.worktreePath === `${home}/repository`),
+    ).toBe(true);
+    expect(EffectArray.every(result.global, status => status.managerContext?.branch === 'feature/manager-labels')).toBe(
+      true,
+    );
   });
 
   effectIt.effect('keeps scoped Manager progress separate and verifies each scope-specific owner lock', () =>
@@ -296,7 +335,7 @@ describe('code graph cross-process build status', () => {
           );
           const identity = fixtureIdentity(home);
           const fullLayout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
-          const scopeId = `code-graph-scope:${'a'.repeat(64)}`;
+          const scopeId = `code-graph-scope:${Effect2.pipe('a', EffectString.repeat(64))}`;
           const scopedLayout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId, scopeId);
           const full = yield* makeCodeGraphBuildReporter(identity, fullLayout);
           const scoped = yield* makeCodeGraphBuildReporter(identity, scopedLayout);
@@ -304,8 +343,10 @@ describe('code graph cross-process build status', () => {
           const fullStatuses = yield* readCodeGraphBuildStatuses(fullLayout);
           const scopedStatuses = yield* readCodeGraphBuildStatuses(scopedLayout);
 
-          expect(fullStatuses.map(status => status.identity.scopeId ?? 'full-repository')).toEqual(['full-repository']);
-          expect(scopedStatuses.map(status => status.identity.scopeId)).toEqual([scopeId]);
+          expect(EffectArray.map(fullStatuses, status => status.identity.scopeId ?? 'full-repository')).toEqual([
+            'full-repository',
+          ]);
+          expect(EffectArray.map(scopedStatuses, status => status.identity.scopeId)).toEqual([scopeId]);
 
           const observed = yield* withExclusiveFileLock(
             fs,
@@ -331,13 +372,14 @@ describe('code graph cross-process build status', () => {
           const selected = selectCodeGraphBuildStatuses(observed);
 
           expect(selected.builds).toHaveLength(2);
-          expect(selected.builds.map(status => status.identity.scopeId ?? 'full-repository').sort()).toEqual([
-            scopeId,
-            'full-repository',
-          ]);
-          expect(selected.builds.every(status => status.coordination?.role === 'owner')).toBe(true);
-          expect(selected.builds.every(status => status.coordination?.lockVerified === true)).toBe(true);
-          expect(selected.builds.every(status => status.managerContext?.worktreePath === identity.repoRoot)).toBe(true);
+          expect(
+            EffectArray.map(selected.builds, status => status.identity.scopeId ?? 'full-repository').sort(),
+          ).toEqual([scopeId, 'full-repository']);
+          expect(EffectArray.every(selected.builds, status => status.coordination?.role === 'owner')).toBe(true);
+          expect(EffectArray.every(selected.builds, status => status.coordination?.lockVerified === true)).toBe(true);
+          expect(
+            EffectArray.every(selected.builds, status => status.managerContext?.worktreePath === identity.repoRoot),
+          ).toBe(true);
         }).pipe(provideTestLayer(ApplicationLayer)),
       ),
     ),
@@ -927,8 +969,8 @@ describe('code graph cross-process build status', () => {
         return yield* readCodeGraphBuildStatuses(layout);
       }),
     );
-    const running = statuses.find(status => status.state === 'running')!;
-    const waiting = statuses.find(status => status.state === 'queued')!;
+    const running = EffectOption.getOrUndefined(EffectArray.findFirst(statuses, status => status.state === 'running'))!;
+    const waiting = EffectOption.getOrUndefined(EffectArray.findFirst(statuses, status => status.state === 'queued'))!;
     const owner = {
       ...running,
       coordination: {lockVerified: true, role: 'owner' as const},
@@ -968,8 +1010,8 @@ describe('code graph cross-process build status', () => {
 
     const otherCheckout = {
       ...owner,
-      buildId: `${owner.buildId.slice(0, -1)}0`,
-      identity: {...owner.identity, checkoutId: 'f'.repeat(64)},
+      buildId: `${Effect2.pipe(owner.buildId, EffectString.slice(0, -1))}0`,
+      identity: {...owner.identity, checkoutId: Effect2.pipe('f', EffectString.repeat(64))},
     };
     expect(selectCodeGraphBuildStatuses([owner, otherCheckout]).builds).toHaveLength(2);
   });
@@ -987,17 +1029,21 @@ describe('code graph cross-process build status', () => {
         yield* reporter.progress({completed: 1, phase: 'materializing', reused: 0, total: 10, unit: 'files'});
         yield* reporter.markWorktreeLockHeld(true);
         const directory = path.join(layout.repositoryRoot, 'build-status', identity.worktreeId);
-        const statusFile = (yield* fs.readDirectory(directory)).find(name => name.endsWith('.json'))!;
+        const statusFile = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            yield* fs.readDirectory(directory),
+            __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+          ),
+        )!;
         const statusPath = path.join(directory, statusFile);
-        const status = JSON.parse(yield* fs.readFileString(statusPath)) as {
-          timestamps: Record<string, string>;
-        };
+        const status = object(JSON.parse(yield* fs.readFileString(statusPath)));
+        const timestamps = object(status.timestamps);
         const stale = DateTime.formatIso(
           DateTime.makeUnsafe((yield* Clock.currentTimeMillis) - CODE_GRAPH_BUILD_STALE_AFTER_MILLISECONDS - 5_000),
         );
         yield* fs.writeFileString(
           statusPath,
-          `${JSON.stringify({...status, timestamps: {...status.timestamps, heartbeatAt: stale}})}\n`,
+          `${JSON.stringify({...status, timestamps: {...timestamps, heartbeatAt: stale}})}\n`,
         );
         return yield* withExclusiveFileLock(
           fs,
@@ -1057,7 +1103,9 @@ describe('code graph cross-process build status', () => {
           expect(selections.running.builds[0]?.state).toBe('running');
           expect(selections.running.builds[0]?.coordination?.role).toBe('owner');
           expect(selections.running.waiters).toHaveLength(3);
-          expect(selections.running.waiters.every(status => status.coordination?.role === 'waiter')).toBe(true);
+          expect(EffectArray.every(selections.running.waiters, status => status.coordination?.role === 'waiter')).toBe(
+            true,
+          );
           expect(selections.writerQueued.builds[0]?.state).toBe('queued');
           expect(selections.writerQueued.builds[0]?.coordination?.role).toBe('owner');
           expect(selections.writerQueued.waiters).toHaveLength(3);
@@ -1160,14 +1208,10 @@ describe('code graph cross-process build status', () => {
               }),
             ),
           );
-          const status = JSON.parse(outputs.json) as {
-            readonly locks?: {
-              readonly databaseWriter?: {readonly owner?: {readonly processId: number}; readonly state: string};
-              readonly repository?: {readonly owner?: {readonly processId: number}; readonly state: string};
-            };
-          };
-          expect(status.locks?.databaseWriter).toMatchObject({state: 'active', owner: {processId: process.pid}});
-          expect(status.locks?.repository).toMatchObject({state: 'active', owner: {processId: process.pid}});
+          const status = object(JSON.parse(outputs.json));
+          const locks = status.locks === undefined ? undefined : object(status.locks);
+          expect(locks?.databaseWriter).toMatchObject({state: 'active', owner: {processId: process.pid}});
+          expect(locks?.repository).toMatchObject({state: 'active', owner: {processId: process.pid}});
           expect(outputs.human).toContain(`Database writer lock: PID ${process.pid}`);
           expect(outputs.human).toContain(`Repository lock: PID ${process.pid}`);
           expect(outputs.ownerHuman).toContain('Build: queued · active · waiting/database-writer');
@@ -1209,7 +1253,7 @@ describe('code graph cross-process build status', () => {
             user: 'tester',
           };
           const identity = yield* resolveRepositoryIdentity(repository);
-          const otherIdentity = {...identity, worktreeId: 'e'.repeat(64)};
+          const otherIdentity = {...identity, worktreeId: Effect2.pipe('e', EffectString.repeat(64))};
           const requestedLayout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
           const otherLayout = codeGraphLayout(path, home, otherIdentity.checkoutId, otherIdentity.worktreeId);
           const reporter = yield* makeCodeGraphBuildReporter(otherIdentity, otherLayout);
@@ -1230,16 +1274,9 @@ describe('code graph cross-process build status', () => {
             }),
           );
           expect(yield* fs.exists(requestedLayout.lockPath)).toBe(false);
-          const status = JSON.parse(outputs.json) as {
-            readonly locks?: {
-              readonly repository?: {
-                readonly owner?: {readonly processId: number};
-                readonly state: string;
-                readonly worktreeId: string;
-              };
-            };
-          };
-          expect(status.locks?.repository).toMatchObject({
+          const status = object(JSON.parse(outputs.json));
+          const locks = status.locks === undefined ? undefined : object(status.locks);
+          expect(locks?.repository).toMatchObject({
             owner: {processId: process.pid},
             state: 'active',
             worktreeId: otherIdentity.worktreeId,
@@ -1266,11 +1303,13 @@ describe('code graph cross-process build status', () => {
       }),
     );
 
-    expect(result.find(status => status.state === 'completed')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result, status => status.state === 'completed')),
+    ).toMatchObject({
       observation: {liveness: 'completed'},
       result: {edges: 34, files: 12, symbols: 56},
     });
-    const failure = result.find(status => status.state === 'failed');
+    const failure = EffectOption.getOrUndefined(EffectArray.findFirst(result, status => status.state === 'failed'));
     expect(failure?.observation.liveness).toBe('failed');
     expect(failure?.error?.summary).toContain('<local-path>');
     expect(failure?.error?.summary).not.toContain(home);
@@ -1377,15 +1416,15 @@ describe('code graph cross-process build status', () => {
           databasePath: layout.databasePath,
           elapsedMilliseconds: (yield* Clock.currentTimeMillis) - startedAt,
           human: human.output,
-          idleOutput: idleOutput.output.trim(),
-          output: output.output.trim(),
+          idleOutput: Effect2.pipe(idleOutput.output, EffectString.trim),
+          output: Effect2.pipe(output.output, EffectString.trim),
         };
       }),
     );
 
     expect(existsSync(result.databasePath)).toBe(false);
     expect(result.elapsedMilliseconds).toBeLessThan(2_000);
-    const status = JSON.parse(result.output) as Record<string, unknown>;
+    const status = object(JSON.parse(result.output));
     expect(status).toMatchObject({
       build: {index: 0},
       builds: [{counters: {completed: 3, reused: 2, total: 10}, state: 'running'}],
@@ -1402,9 +1441,9 @@ describe('code graph cross-process build status', () => {
     expect(JSON.stringify(status)).not.toContain('fallbackAssessment');
     expect(JSON.stringify(status)).not.toContain('temporaryDatabaseHighWaterBytes');
     expect(Buffer.byteLength(result.output)).toBeLessThan(9_000);
-    const idleStatus = JSON.parse(result.idleOutput) as Record<string, unknown>;
+    const idleStatus = object(JSON.parse(result.idleOutput));
     expect(idleStatus).toMatchObject({build: null, builds: [], type: 'code-graph-status', version: 5});
-    expect(Object.keys(idleStatus).sort()).toEqual(Object.keys(status).sort());
+    expect(EffectRecord.keys(idleStatus).sort()).toEqual(EffectRecord.keys(status).sort());
     expect(result.human).toContain('Current activity: writing graph facts');
     expect(result.human).toContain('full materialization');
     expect(result.human).toContain('incremental fallback: project closure incomplete');
@@ -1481,7 +1520,7 @@ describe('code graph cross-process build status', () => {
       const result = yield* captureConsole(
         runCodeGraphStatus(config, {cwd: repository, json: true, project: 'scoped'}),
       );
-      const output = result.output.trim();
+      const output = Effect2.pipe(result.output, EffectString.trim);
 
       expect(JSON.parse(output)).toMatchObject({
         build: {index: 0},
@@ -1527,28 +1566,29 @@ describe('code graph cross-process build status', () => {
           force: true,
           recursive: true,
         });
-        const otherIdentity = {...summary.identity, worktreeId: 'e'.repeat(64)};
+        const otherIdentity = {...summary.identity, worktreeId: Effect2.pipe('e', EffectString.repeat(64))};
         const otherLayout = codeGraphLayout(path, home, otherIdentity.checkoutId, otherIdentity.worktreeId);
         const other = yield* makeCodeGraphBuildReporter(otherIdentity, otherLayout);
         yield* other.completeSnapshot({...summary.snapshot, worktreeId: otherIdentity.worktreeId});
         return {
           human: (yield* captureConsole(runCodeGraphStatus(config, {cwd: repository}))).output,
-          json: (yield* captureConsole(runCodeGraphStatus(config, {cwd: repository, json: true}))).output.trim(),
+          json: Effect2.pipe(
+            (yield* captureConsole(runCodeGraphStatus(config, {cwd: repository, json: true}))).output,
+            EffectString.trim,
+          ),
         };
       }),
     );
-    const status = JSON.parse(output.json) as {
-      readonly build?: unknown;
-      readonly builds: readonly {readonly identity: {readonly worktreeId: string}}[];
-      readonly readySnapshot?: {readonly id: string};
-      readonly stale: boolean;
-    };
-
+    const status = object(JSON.parse(output.json));
     expect(status.build).toBeNull();
-    expect(status.builds).toEqual([
-      expect.objectContaining({identity: expect.objectContaining({worktreeId: 'e'.repeat(64)})}),
+    const builds = objects(status.builds);
+    expect(builds).toEqual([
+      expect.objectContaining({
+        identity: expect.objectContaining({worktreeId: Effect2.pipe('e', EffectString.repeat(64))}),
+      }),
     ]);
-    expect(status.readySnapshot?.id).toMatch(/^cgsn_/);
+    const readySnapshot = status.readySnapshot === undefined ? undefined : object(status.readySnapshot);
+    expect(string(readySnapshot?.id)).toMatch(/^cgsn_/);
     expect(status.stale).toBe(false);
     expect(output.human).toContain('Ready snapshot: cgsn_');
   });
@@ -1578,7 +1618,7 @@ describe('code graph cross-process build status', () => {
         const identity = yield* resolveRepositoryIdentity(repository);
         const identities = [identity];
         for (let index = 1; index <= 12; index += 1) {
-          identities.push({...identity, worktreeId: index.toString(16).repeat(64)});
+          identities.push({...identity, worktreeId: Effect2.pipe(index.toString(16), EffectString.repeat(64))});
         }
         for (const candidate of identities) {
           const reporter = yield* makeCodeGraphBuildReporter(
@@ -1610,48 +1650,36 @@ describe('code graph cross-process build status', () => {
           human: human.output,
           humanLanguagePackLimitError,
           humanLimitError,
-          json: json.output.trim(),
+          json: Effect2.pipe(json.output, EffectString.trim),
           worktreeId: identity.worktreeId,
         };
       }),
     );
-    const status = JSON.parse(result.json) as {
-      readonly build: {readonly index: number; readonly worktreeId: string} | null;
-      readonly builds: readonly {
-        readonly buildId: string;
-        readonly identity: {readonly worktreeId: string};
-      }[];
-      readonly projection: {
-        readonly builds: {
-          readonly limit: number;
-          readonly omitted: number;
-          readonly returned: number;
-          readonly total: number;
-        };
-        readonly languagePacks: {
-          readonly limit: number;
-          readonly omitted: number;
-          readonly returned: number;
-          readonly total: number;
-        };
-      };
-      readonly languagePacks: readonly unknown[];
-      readonly version: number;
-    };
-
-    expect(status.version).toBe(5);
-    expect(status.build?.worktreeId).toBe(result.worktreeId);
-    expect(status.builds).toHaveLength(2);
-    expect(status.builds.map(build => build.identity.worktreeId)).toContain(result.worktreeId);
-    expect(status.builds[status.build!.index]?.buildId).toBe(
-      status.builds.find(build => build.identity.worktreeId === result.worktreeId)?.buildId,
+    const status = object(JSON.parse(result.json));
+    const build = status.build === null ? null : object(status.build);
+    const builds = objects(status.builds);
+    const projection = object(status.projection);
+    const projectedBuilds = object(projection.builds);
+    const projectedLanguagePacks = object(projection.languagePacks);
+    if (build === null) throw new Error('Expected an active build.');
+    const buildIndex = number(build.index);
+    expect(number(status.version)).toBe(5);
+    expect(string(build.worktreeId)).toBe(result.worktreeId);
+    expect(builds).toHaveLength(2);
+    expect(EffectArray.map(builds, entry => string(object(entry.identity).worktreeId))).toContain(result.worktreeId);
+    expect(string(object(builds[buildIndex]).buildId)).toBe(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(builds, entry => string(object(entry.identity).worktreeId) === result.worktreeId),
+      )?.buildId,
     );
-    expect(status.projection.builds).toEqual({limit: 2, omitted: 11, returned: 2, total: 13});
-    expect(status.languagePacks).toHaveLength(2);
-    expect(status.projection.languagePacks).toEqual({
+    expect(projectedBuilds).toEqual({limit: 2, omitted: 11, returned: 2, total: 13});
+    if (!EffectArray.isArray(status.languagePacks)) throw new Error('Expected language-pack summaries.');
+    const languagePacks = status.languagePacks;
+    expect(languagePacks).toHaveLength(2);
+    expect(projectedLanguagePacks).toEqual({
       limit: 2,
-      omitted: languagePackTotal - status.languagePacks.length,
-      returned: status.languagePacks.length,
+      omitted: languagePackTotal - languagePacks.length,
+      returned: languagePacks.length,
       total: languagePackTotal,
     });
     expect(result.human).toContain('Build: completed');
@@ -1698,7 +1726,7 @@ function checkProgressWriteThrottle(phase: 'scanning' | 'materializing', unitSca
         fs.rename(from, to).pipe(
           Effect.tap(() =>
             Effect.sync(() => {
-              if (to.endsWith('.json')) writes += 1;
+              if (Effect2.pipe(to, EffectString.endsWith('.json'))) writes += 1;
             }),
           ),
         ),
@@ -1765,15 +1793,15 @@ function fixtureIdentity(home: string): RepositoryIdentity {
   return {
     branch: 'feature/manager-labels',
     caseMode: 'sensitive',
-    checkoutId: 'a'.repeat(64),
+    checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
     displayName: 'example/repository',
     gitCommonDirectory: `${home}/repository/.git`,
-    headCommit: 'd'.repeat(40),
+    headCommit: Effect2.pipe('d', EffectString.repeat(40)),
     objectFormat: 'sha1',
     remoteIdentity: 'example.invalid/repository',
     repoRoot: `${home}/repository`,
-    repositoryId: 'b'.repeat(64),
-    worktreeId: 'c'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
   };
 }
 

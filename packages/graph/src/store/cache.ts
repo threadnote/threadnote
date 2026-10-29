@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -32,6 +33,9 @@ import {
 import {CodeGraphCacheCapacityPlanChanged} from './internal_models.js';
 import {lastStatementChangeCount} from './activation/core.js';
 import {assertPersistentBuildOwner} from './build/core.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 interface PlannedFreshFactCacheRow extends CodeGraphCacheCapacityRow {
   readonly blobId?: string;
@@ -60,7 +64,10 @@ function freshFactCacheCapacityKey(contentHash: string, extractorSet: string, pa
 
 function cacheCapacityPlanningError(label: string, cause: unknown): CodeGraphStoreFailure {
   if (isCodeGraphStoreError(cause)) return cause;
-  const reason = cause instanceof Error && cause.message.includes('payload ceiling') ? ' payload ceiling' : ' input';
+  const reason =
+    cause instanceof Error && Effect2.pipe(cause.message, EffectString.includes('payload ceiling'))
+      ? ' payload ceiling'
+      : ' input';
   return CodeGraphStoreError.of(`Code graph cache ${label}${reason} is invalid.`);
 }
 
@@ -71,7 +78,7 @@ function prepareFreshFactCacheRows(
   createdAt: string,
 ): readonly PlannedFreshFactCacheRow[] {
   const inputs = pairCacheInputs(files, facts, 'Fresh parser facts');
-  return inputs.map(({bounded, file}) => {
+  return EffectArray.map(inputs, ({bounded, file}) => {
     const reuseClass = codeGraphBlobExtractionReuseClass(file);
     const stored = encodeStoredCodeGraphFact(bounded);
     const row = {
@@ -105,10 +112,10 @@ function prepareFreshFactCacheBatchChunks(
 ): readonly CodeGraphCacheCapacityChunk<PlannedFreshFactCacheRow>[] {
   return planCodeGraphCacheCapacityChunks(
     'cache code graph file facts',
-    batches.flatMap(batch =>
+    EffectArray.flatMap(batches, batch =>
       prepareFreshFactCacheRows(
         batch.files,
-        batch.facts.map(ensureBoundedCodeGraphFact),
+        EffectArray.map(batch.facts, ensureBoundedCodeGraphFact),
         batch.extractorSet,
         createdAt,
       ),
@@ -122,13 +129,16 @@ function storeFreshFactRows(sql: SqlClient.SqlClient, rows: readonly PlannedFres
       yield* sql.unsafe(
         `INSERT INTO file_blobs (
            content_hash, extractor_set, path_hint, blob_id, reuse_class, facts_json, created_at
-         ) VALUES ${page.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}
+         ) VALUES ${EffectArray.join(
+           EffectArray.map(page, () => '(?, ?, ?, ?, ?, ?, ?)'),
+           ', ',
+         )}
          ON CONFLICT(content_hash, extractor_set, path_hint) DO UPDATE SET
            blob_id = excluded.blob_id,
            reuse_class = excluded.reuse_class,
            facts_json = excluded.facts_json,
            created_at = excluded.created_at`,
-        page.flatMap(row => [
+        EffectArray.flatMap(page, row => [
           row.contentHash,
           row.extractorSet,
           row.path,
@@ -156,9 +166,10 @@ export function materializedShardDerivationIdentity(
   workspaceFingerprint: string,
   graphContentId: string,
 ): string {
-  return `cgfd_${sha256HexSync(
-    `materialized-file-derivation-v3\n${extractorSet}\n${workspaceFingerprint}\n${graphContentId}`,
-  ).slice(0, 40)}`;
+  return `cgfd_${Effect2.pipe(
+    sha256HexSync(`materialized-file-derivation-v3\n${extractorSet}\n${workspaceFingerprint}\n${graphContentId}`),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 type MaterializedShardRepositoryEnvelopeFile = Pick<
@@ -167,8 +178,17 @@ type MaterializedShardRepositoryEnvelopeFile = Pick<
 >;
 
 function retainedMaterializationContext(path: string): boolean {
-  const name = path.slice(path.lastIndexOf('/') + 1);
-  return name.toLowerCase() === 'package.json' || /^tsconfig(?:\.[^/]+)?\.json$/iu.test(name);
+  const name = Effect2.pipe(
+    path,
+    EffectString.slice(
+      Effect2.pipe(
+        path,
+        EffectString.lastIndexOf('/'),
+        Effect2.Option.getOrElse(() => -1),
+      ) + 1,
+    ),
+  );
+  return Effect2.pipe(name, EffectString.toLowerCase) === 'package.json' || /^tsconfig(?:\.[^/]+)?\.json$/iu.test(name);
 }
 
 /**
@@ -179,18 +199,11 @@ function retainedMaterializationContext(path: string): boolean {
 export function materializedShardRepositorySemanticEnvelope(
   files: readonly MaterializedShardRepositoryEnvelopeFile[],
 ): string {
-  const entries = [...files]
-    .sort((left, right) => compareCodeUnits(left.path, right.path))
-    .map(file => [
-      file.path,
-      file.language,
-      file.mode,
-      retainedMaterializationContext(file.path) ? file.contentHash : null,
-    ]);
-  return `cgfe_${sha256HexSync(`materialized-repository-semantic-envelope-v1\n${JSON.stringify(entries)}`).slice(
-    0,
-    40,
-  )}`;
+  const entries = EffectArray.map(
+    [...files].sort((left, right) => compareCodeUnits(left.path, right.path)),
+    file => [file.path, file.language, file.mode, retainedMaterializationContext(file.path) ? file.contentHash : null],
+  );
+  return `cgfe_${Effect2.pipe(sha256HexSync(`materialized-repository-semantic-envelope-v1\n${JSON.stringify(entries)}`), EffectString.slice(0, 40))}`;
 }
 
 /**
@@ -204,12 +217,21 @@ export function materializedBatchShardDerivationIdentity(
   repositorySemanticEnvelope: string,
   files: readonly MaterializedShardRepositoryEnvelopeFile[],
 ): string {
-  const orderedBatchMembers = files.map(file => [file.path, file.contentHash, file.language, file.mode, file.source]);
-  return `cgfd_${sha256HexSync(
-    `materialized-file-derivation-v4\n${extractorSet}\n${workspaceFingerprint}\n${repositorySemanticEnvelope}\n${JSON.stringify(
-      orderedBatchMembers,
-    )}`,
-  ).slice(0, 40)}`;
+  const orderedBatchMembers = EffectArray.map(files, file => [
+    file.path,
+    file.contentHash,
+    file.language,
+    file.mode,
+    file.source,
+  ]);
+  return `cgfd_${Effect2.pipe(
+    sha256HexSync(
+      `materialized-file-derivation-v4\n${extractorSet}\n${workspaceFingerprint}\n${repositorySemanticEnvelope}\n${JSON.stringify(
+        orderedBatchMembers,
+      )}`,
+    ),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 export function materializedFileShardIdentity(
@@ -218,13 +240,14 @@ export function materializedFileShardIdentity(
   derivationIdentity: string,
   path: string,
 ): string {
-  return `cgfs_${sha256HexSync(
-    `materialized-file-shard-v1\n${contentHash}\n${extractorSet}\n${derivationIdentity}\n${path}`,
-  ).slice(0, 40)}`;
+  return `cgfs_${Effect2.pipe(
+    sha256HexSync(`materialized-file-shard-v1\n${contentHash}\n${extractorSet}\n${derivationIdentity}\n${path}`),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 export function shardDonorIds(...candidates: readonly (string | undefined)[]): readonly string[] {
-  return [...new Set(candidates.filter((value): value is string => value !== undefined))].slice(0, 2);
+  return [...new Set(EffectArray.filter(candidates, (value): value is string => value !== undefined))].slice(0, 2);
 }
 
 const associateMaterializedFileShardBatch = Effect.fn('codeGraph.associateMaterializedFileShardBatch')(function* (
@@ -238,17 +261,17 @@ const associateMaterializedFileShardBatch = Effect.fn('codeGraph.associateMateri
 ) {
   if (
     files.length === 0 ||
-    new Set(files.map(file => file.path)).size !== files.length ||
+    new Set(EffectArray.map(files, file => file.path)).size !== files.length ||
     selectedShardIds.size !== files.length
   ) {
     return yield* CodeGraphStoreError.of('Materialized file shard batch association is incomplete.');
   }
-  const expected = files.map(file => ({
+  const expected = EffectArray.map(files, file => ({
     contentHash: file.contentHash,
     id: materializedFileShardIdentity(file.contentHash, extractorSet, derivationIdentity, file.path),
     path: file.path,
   }));
-  if (expected.some(row => selectedShardIds.get(row.path) !== row.id)) {
+  if (EffectArray.some(expected, row => selectedShardIds.get(row.path) !== row.id)) {
     return yield* CodeGraphStoreError.of('Materialized file shard batch selection changed.');
   }
 
@@ -272,10 +295,10 @@ const associateMaterializedFileShardBatch = Effect.fn('codeGraph.associateMateri
      AND shard.extractor_set = ${extractorSet}
      AND shard.derivation_identity = ${derivationIdentity}
   `;
-  const stored = new Map(rows.map(row => [row.path, row]));
+  const stored = new Map(EffectArray.map(rows, row => [row.path, row]));
   if (
     stored.size !== expected.length ||
-    expected.some(row => {
+    EffectArray.some(expected, row => {
       const actual = stored.get(row.path);
       return actual?.id !== row.id || actual.content_hash !== row.contentHash;
     })
@@ -284,9 +307,12 @@ const associateMaterializedFileShardBatch = Effect.fn('codeGraph.associateMateri
   }
   yield* sql.unsafe(
     `INSERT INTO snapshot_file_shards (snapshot_id, path, shard_id)
-     VALUES ${expected.map(() => '(?, ?, ?)').join(', ')}
+     VALUES ${EffectArray.join(
+       EffectArray.map(expected, () => '(?, ?, ?)'),
+       ', ',
+     )}
      ON CONFLICT(snapshot_id, path) DO UPDATE SET shard_id = excluded.shard_id`,
-    expected.flatMap(row => [snapshotId, row.path, row.id]),
+    EffectArray.flatMap(expected, row => [snapshotId, row.path, row.id]),
   );
 });
 
@@ -347,7 +373,7 @@ function prepareMaterializedShardCacheChunks(
   const inputs = pairCacheInputs(files, facts, 'Materialized file shard');
   return planCodeGraphCacheCapacityChunks(
     'cache materialized code graph file shards',
-    inputs.map(({bounded, file}) => {
+    EffectArray.map(inputs, ({bounded, file}) => {
       const stored = encodeStoredCodeGraphFact(bounded);
       const row = {
         contentHash: file.contentHash,
@@ -370,14 +396,17 @@ function prepareMaterializedShardCacheBatchChunks(
   batches: readonly CodeGraphMaterializedShardCacheBatch[],
   now: string,
 ): readonly CodeGraphCacheCapacityChunk<PlannedMaterializedShardCacheRow>[] {
-  const rows = batches.flatMap(batch =>
-    prepareMaterializedShardCacheChunks(
-      batch.files,
-      batch.facts.map(ensureBoundedCodeGraphFact),
-      batch.extractorSet,
-      batch.derivationIdentity,
-      now,
-    ).flatMap(chunk => chunk.rows),
+  const rows = EffectArray.flatMap(batches, batch =>
+    EffectArray.flatMap(
+      prepareMaterializedShardCacheChunks(
+        batch.files,
+        EffectArray.map(batch.facts, ensureBoundedCodeGraphFact),
+        batch.extractorSet,
+        batch.derivationIdentity,
+        now,
+      ),
+      chunk => chunk.rows,
+    ),
   );
   return planCodeGraphCacheCapacityChunks('cache materialized code graph file shards', rows);
 }
@@ -387,19 +416,20 @@ function pairCacheInputs(
   facts: readonly BoundedCodeGraphFact[],
   label: string,
 ): readonly {readonly bounded: BoundedCodeGraphFact; readonly file: CodeGraphInventoryFile}[] {
-  const filesByPath = new Map(files.map(file => [file.path, file]));
-  const factsByPath = new Map(facts.map(bounded => [bounded.facts.path, bounded]));
+  const filesByPath = new Map(EffectArray.map(files, file => [file.path, file]));
+  const factsByPath = new Map(EffectArray.map(facts, bounded => [bounded.facts.path, bounded]));
   if (
     files.length !== facts.length ||
     filesByPath.size !== files.length ||
     factsByPath.size !== facts.length ||
-    [...filesByPath.keys()].some(path => !factsByPath.has(path))
+    EffectArray.some([...filesByPath.keys()], path => !factsByPath.has(path))
   ) {
     throw CodeGraphStoreError.of(`${label} inputs are inconsistent.`);
   }
-  return [...filesByPath]
-    .sort(([left], [right]) => compareCodeUnits(left, right))
-    .map(([path, file]) => ({bounded: factsByPath.get(path)!, file}));
+  return EffectArray.map(
+    [...filesByPath].sort(([left], [right]) => compareCodeUnits(left, right)),
+    ([path, file]) => ({bounded: factsByPath.get(path)!, file}),
+  );
 }
 
 interface MaterializedShardMetadataRow {
@@ -478,7 +508,10 @@ const writeMaterializedShardCacheRows = Effect.fn('codeGraph.writeMaterializedSh
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         const existing = yield* materializedShardMetadata(sql, pending);
-        return pending.findIndex(row => materializedShardConflicts(row, existing).length > 0);
+        return EffectOption.getOrElse(
+          EffectArray.findFirstIndex(pending, row => materializedShardConflicts(row, existing).length > 0),
+          () => -1,
+        );
       }),
     );
     if (collisionIndex > 0) {
@@ -584,7 +617,10 @@ function storeNormalMaterializedShardRows(sql: SqlClient.SqlClient, rows: readon
         `INSERT INTO materialized_file_shards (
            id, content_hash, extractor_set, derivation_identity, path_hint,
            facts_json, created_at, last_used_at
-         ) VALUES ${page.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}
+         ) VALUES ${EffectArray.join(
+           EffectArray.map(page, () => '(?, ?, ?, ?, ?, ?, ?, ?)'),
+           ', ',
+         )}
          ON CONFLICT(id) DO UPDATE SET
            facts_json = excluded.facts_json,
            last_used_at = excluded.last_used_at
@@ -594,7 +630,7 @@ function storeNormalMaterializedShardRows(sql: SqlClient.SqlClient, rows: readon
            AND materialized_file_shards.path_hint = excluded.path_hint
          ON CONFLICT(content_hash, extractor_set, derivation_identity, path_hint) DO NOTHING
          RETURNING id`,
-        page.flatMap(row => [
+        EffectArray.flatMap(page, row => [
           row.id,
           row.contentHash,
           row.extractorSet,
@@ -607,8 +643,8 @@ function storeNormalMaterializedShardRows(sql: SqlClient.SqlClient, rows: readon
       );
       if (
         !sameMaterializedShardWriteIds(
-          page.map(row => row.id),
-          stored.map(row => row.id),
+          EffectArray.map(page, row => row.id),
+          EffectArray.map(stored, row => row.id),
         )
       ) {
         return yield* CodeGraphCacheCapacityPlanChanged.make({});
@@ -623,7 +659,9 @@ export function sameMaterializedShardWriteIds(expectedIds: readonly string[], st
   const expected = new Set(expectedIds);
   const stored = new Set(storedIds);
   return (
-    expected.size === expectedIds.length && stored.size === storedIds.length && expectedIds.every(id => stored.has(id))
+    expected.size === expectedIds.length &&
+    stored.size === storedIds.length &&
+    EffectArray.every(expectedIds, id => stored.has(id))
   );
 }
 
@@ -637,7 +675,7 @@ const prepareMaterializedShardRepairPlan = Effect.fn('codeGraph.prepareMateriali
   if (conflicts.length > 2) {
     return yield* CodeGraphStoreError.of(`Materialized file shard identity collision: ${row.id}.`);
   }
-  const conflictIds = conflicts.map(conflict => conflict.id);
+  const conflictIds = EffectArray.map(conflicts, conflict => conflict.id);
   const associationPage = yield* materializedShardAssociationPage(
     sql,
     conflictIds,
@@ -677,9 +715,8 @@ const prepareMaterializedShardRepairPlan = Effect.fn('codeGraph.prepareMateriali
     } as const satisfies MaterializedShardRepairPlan;
   }
 
-  const conflictBytes = conflicts.reduce(
-    (total, conflict) => saturatingCapacityAdd(total, materializedShardMetadataCapacityBytes(conflict)),
-    0,
+  const conflictBytes = EffectArray.reduce(conflicts, 0, (total, conflict) =>
+    saturatingCapacityAdd(total, materializedShardMetadataCapacityBytes(conflict)),
   );
   const payloadBytes = saturatingCapacityAdd(conflictBytes, row.payloadBytes);
   if (payloadBytes > CODE_GRAPH_CACHE_TRANSACTION_LIMITS.payloadBytes) {
@@ -705,7 +742,7 @@ const applyMaterializedShardRepairPlan = Effect.fn('codeGraph.applyMaterializedS
   if (!sameMaterializedShardMetadata(current, plan.conflicts)) {
     return yield* CodeGraphCacheCapacityPlanChanged.make({});
   }
-  const conflictIds = plan.conflicts.map(conflict => conflict.id);
+  const conflictIds = EffectArray.map(plan.conflicts, conflict => conflict.id);
   const associationPage = yield* materializedShardAssociationPage(
     sql,
     conflictIds,
@@ -756,9 +793,9 @@ const applyMaterializedShardRepairPlan = Effect.fn('codeGraph.applyMaterializedS
 
 function materializedShardMetadata(sql: SqlClient.SqlClient, rows: readonly PlannedMaterializedShardCacheRow[]) {
   if (rows.length === 0) return Effect.succeed([] as readonly MaterializedShardMetadataRow[]);
-  const ids = rows.map(row => row.id);
+  const ids = EffectArray.map(rows, row => row.id);
   const requested = JSON.stringify(
-    rows.map(row => ({
+    EffectArray.map(rows, row => ({
       contentHash: row.contentHash,
       derivationIdentity: row.derivationIdentity,
       extractorSet: row.extractorSet,
@@ -841,14 +878,15 @@ function decodeMaterializedShardAssociationPageRow(row: RawMaterializedShardAsso
 }
 
 function validMaterializedShardText(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && !value.includes('\0');
+  return typeof value === 'string' && value.length > 0 && !Effect2.pipe(value, EffectString.includes('\0'));
 }
 
 function materializedShardConflicts(
   row: PlannedMaterializedShardCacheRow,
   existing: readonly MaterializedShardMetadataRow[],
 ): readonly MaterializedShardMetadataRow[] {
-  return existing.filter(candidate => {
+  return EffectArray.filter(existing, (candidate, __effectArrayIndex) => {
+    if (!(__effectArrayIndex in existing)) return false;
     const tupleMatches = materializedShardTupleMatches(row, candidate);
     const relevant = candidate.id === row.id || tupleMatches;
     return relevant && !(candidate.id === row.id && tupleMatches);

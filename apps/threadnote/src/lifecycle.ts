@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {queueAutomaticModelSetup} from './models/setup_lifecycle.js';
 import {stopModelSetup} from './models/setup.js';
 import {hasManagedCursorHooks} from './cursor/hooks.js';
@@ -102,11 +103,17 @@ import {assertSafeThreadnoteHomeForErase, formatStatus} from './utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {memoryFrontmatterField, memoryUriProjectSegment} from '@threadnote/recall/results';
 import {toolRoot} from '@threadnote/workspace/installation';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class LifecycleOperationError extends Schema.TaggedError<LifecycleOperationError>()('LifecycleOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class LifecycleOperationError extends Schema.TaggedError<LifecycleOperationError, {readonly brand: unique symbol}>()(
+  'LifecycleOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const LAYOUT_RECEIPT = 'layout.json';
 export const RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT = 2;
@@ -184,8 +191,8 @@ export const runDoctor = Effect.fn('lifecycle.doctor')(function* (config: Runtim
   for (const check of checks) {
     yield* Console.log(`${formatStatus(check.status)} ${check.name}: ${check.detail}`);
   }
-  const failureCount = checks.filter(check => check.status === 'fail').length;
-  const warningCount = checks.filter(check => check.status === 'warn').length;
+  const failureCount = EffectArray.filter(checks, check => check.status === 'fail').length;
+  const warningCount = EffectArray.filter(checks, check => check.status === 'warn').length;
   yield* Console.log(`\nSummary: ${failureCount} failure(s), ${warningCount} warning(s)`);
   if (options.strict === true && failureCount > 0) {
     yield* Effect.sync(() => system.setExitCode(1));
@@ -267,7 +274,7 @@ export const collectDoctorChecks = Effect.fn('lifecycle.collectDoctorChecks')(fu
     yield* safeDoctorCheck('deferred code anchors', deferredCodeAnchorDoctorCheck(config)),
   );
   checks.push(...(yield* safeDoctorChecks('agent integrations', agentAdapterDoctorChecks(config, inferredMcpClients))));
-  if (config.agentContextHome.endsWith('.openviking')) {
+  if (Effect2.pipe(config.agentContextHome, EffectString.endsWith('.openviking'))) {
     checks.push({
       detail: 'THREADNOTE_HOME still targets a legacy .openviking directory; run `threadnote migrate`',
       name: 'legacy home override',
@@ -390,9 +397,9 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
     home: config.agentContextHome,
   });
   if (modelMigration.action === 'dry_run') {
-    yield* Console.log(`Would preserve installed local model(s): ${modelMigration.models.join(', ')}.`);
+    yield* Console.log(`Would preserve installed local model(s): ${EffectArray.join(modelMigration.models, ', ')}.`);
   } else if (modelMigration.action === 'migrated' || modelMigration.action === 'resumed') {
-    yield* Console.log(`Preserved installed local model(s): ${modelMigration.models.join(', ')}.`);
+    yield* Console.log(`Preserved installed local model(s): ${EffectArray.join(modelMigration.models, ', ')}.`);
   }
   yield* stopVerifiedLegacyLocalAi({dryRun});
   const layout = threadnoteStorageLayout(path, config.agentContextHome, config.account, uriSegment(config.user));
@@ -481,24 +488,28 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
     const inferredMcpClients = yield* inferConfiguredMcpClients(config);
     yield* migrateLegacyAgentIntegrations(config, inferredMcpClients, dryRun);
     const repairedIntegrationClients = yield* repairAgentIntegrations(config, dryRun);
-    if (options.mcp === undefined || ['all', 'available'].includes(options.mcp.trim().toLowerCase())) {
+    if (
+      options.mcp === undefined ||
+      ['all', 'available'].includes(Effect2.pipe(options.mcp, EffectString.trim, EffectString.toLowerCase))
+    ) {
       yield* repairRegisteredAgentAdapters(config, dryRun);
     }
     const registry = yield* readAgentIntegrationRegistry(config);
     const registeredClients = registry === undefined ? inferredMcpClients : registeredAgentClients(registry);
     const repairableClients = repairableAgentClients(registry);
-    const receipts = Object.fromEntries(
-      registeredClients.flatMap(agent =>
+    const receipts = EffectRecord.fromEntries(
+      EffectArray.flatMap(registeredClients, agent =>
         registry?.hosts[agent]?.mcp === undefined ? [] : [[agent, registry.hosts[agent].mcp]],
       ),
     );
-    const requestedMcpClients = options.mcp ?? (repairableClients.length === 0 ? 'none' : repairableClients.join(','));
+    const requestedMcpClients =
+      options.mcp ?? (repairableClients.length === 0 ? 'none' : EffectArray.join(repairableClients, ','));
     const mcpClients = yield* resolveMcpClients(requestedMcpClients, 'repair', receipts);
     yield* repairRegisteredMcpClients(config, registry, mcpClients, dryRun);
     if (
       repairedIntegrationClients.length === 0 &&
       registeredClients.length === 0 &&
-      Object.keys(registry?.surfaces ?? {}).length === 0
+      EffectRecord.keys(registry?.surfaces ?? {}).length === 0
     ) {
       yield* Console.log('No agent integrations are registered; skipping host-specific repair.');
     }
@@ -586,14 +597,18 @@ export const runDevelopmentInstallIntegrationActivation = Effect.fn(
   yield* migrateLegacyAgentIntegrations(config, inferredMcpClients, false);
   yield* repairAgentIntegrations(config, false);
   yield* repairRegisteredAgentAdapters(config, false);
-  const incomplete = (yield* agentAdapterDoctorChecks(config, inferredMcpClients, {
-    includeRetainedUnsupported: false,
-  })).filter(check => check.status !== 'ok');
+  const incomplete = EffectArray.filter(
+    yield* agentAdapterDoctorChecks(config, inferredMcpClients, {
+      includeRetainedUnsupported: false,
+    }),
+    check => check.status !== 'ok',
+  );
   if (incomplete.length > 0) {
     return yield* LifecycleOperationError.make({
-      message: `Development agent integration activation remains incomplete: ${incomplete
-        .map(check => check.name)
-        .join(', ')}.`,
+      message: `Development agent integration activation remains incomplete: ${EffectArray.join(
+        EffectArray.map(incomplete, check => check.name),
+        ', ',
+      )}.`,
     });
   }
   yield* requireExpectedActive;
@@ -780,9 +795,9 @@ const runUninstallInTransaction = Effect.fn('lifecycle.uninstallInTransaction')(
   const registry = yield* readAgentIntegrationRegistry(config);
   const registeredClients = registeredAgentClients(registry);
   if (
-    Object.keys(registry?.surfaces ?? {}).length > 0 &&
+    EffectRecord.keys(registry?.surfaces ?? {}).length > 0 &&
     options.mcp !== undefined &&
-    !['all', 'available'].includes(options.mcp.trim().toLowerCase())
+    !['all', 'available'].includes(Effect2.pipe(options.mcp, EffectString.trim, EffectString.toLowerCase))
   ) {
     return yield* LifecycleOperationError.make({
       message:
@@ -790,17 +805,17 @@ const runUninstallInTransaction = Effect.fn('lifecycle.uninstallInTransaction')(
     });
   }
   const selectedMcpClients =
-    options.mcp ?? (registeredClients.length === 0 ? 'available' : registeredClients.join(','));
-  const receipts = Object.fromEntries(
-    registeredClients.flatMap(agent =>
+    options.mcp ?? (registeredClients.length === 0 ? 'available' : EffectArray.join(registeredClients, ','));
+  const receipts = EffectRecord.fromEntries(
+    EffectArray.flatMap(registeredClients, agent =>
       registry?.hosts[agent]?.mcp === undefined ? [] : [[agent, registry.hosts[agent].mcp]],
     ),
   );
   const removedClients = yield* removeMcpConfigs(selectedMcpClients, dryRun, receipts);
-  const retainedClients = registeredClients.filter(client => !removedClients.includes(client));
+  const retainedClients = EffectArray.filter(registeredClients, client => !removedClients.includes(client));
   if (retainedClients.length > 0) {
     const message =
-      `Could not remove MCP configuration for ${retainedClients.join(', ')}; ` +
+      `Could not remove MCP configuration for ${EffectArray.join(retainedClients, ', ')}; ` +
       'preserving command launchers, host artifacts, and receipts for retry.';
     if (dryRun) {
       yield* Console.log(`WARN ${message}`);
@@ -832,7 +847,7 @@ const runUninstallInTransaction = Effect.fn('lifecycle.uninstallInTransaction')(
       `${dryRun ? 'Would remove' : 'Removed enrollment for'} development workflows: ${workflow.target.surfaceId} (${workflow.target.skillRoot})`,
     );
     if ('retainedPaths' in workflow && workflow.retainedPaths.length > 0)
-      yield* Console.log(`Preserved modified workflow files: ${workflow.retainedPaths.join(', ')}`);
+      yield* Console.log(`Preserved modified workflow files: ${EffectArray.join(workflow.retainedPaths, ', ')}`);
   }
   yield* removeCommandShim(dryRun);
   yield* removeAgentIntegrationsInTransaction(config, dryRun);
@@ -859,8 +874,13 @@ export const memoryProjectConsistencyCheck = Effect.fn('lifecycle.memoryProjectC
     const mismatches: string[] = [];
     let checked = 0;
     for (const entry of entries) {
-      if (!entry.endsWith('.md') || entry.endsWith('.summary.md') || entry.endsWith('.overview.md')) continue;
-      const uri = `threadnote://user/${uriSegment(config.user)}/memories/${entry.split(path.sep).join('/')}`;
+      if (
+        !Effect2.pipe(entry, EffectString.endsWith('.md')) ||
+        Effect2.pipe(entry, EffectString.endsWith('.summary.md')) ||
+        Effect2.pipe(entry, EffectString.endsWith('.overview.md'))
+      )
+        continue;
+      const uri = `threadnote://user/${uriSegment(config.user)}/memories/${EffectArray.join(Effect2.pipe(entry, EffectString.split(path.sep)), '/')}`;
       const pathProject = memoryUriProjectSegment(uri);
       if (!pathProject) continue;
       const content = yield* fs
@@ -876,7 +896,7 @@ export const memoryProjectConsistencyCheck = Effect.fn('lifecycle.memoryProjectC
     if (mismatches.length === 0) {
       return {detail: `${checked} project-scoped memories consistent`, name, status: 'ok' as const};
     }
-    const sample = mismatches.slice(0, 3).join('; ');
+    const sample = EffectArray.join(mismatches.slice(0, 3), '; ');
     const extra = Math.max(0, mismatches.length - 3);
     return {
       detail:

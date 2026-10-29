@@ -7,6 +7,8 @@ import {CliOutput} from '@threadnote/threadnote/effect/cli/output';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mocks = vi.hoisted(() => ({
   healWorkset: vi.fn(),
@@ -90,7 +92,7 @@ function worksetResult(state: 'failed' | 'ready'): CodeGraphWorksetPrepareResult
       ready: state === 'ready' ? 1 : 0,
       requested: 1,
     },
-    manifestDigest: 'a'.repeat(64),
+    manifestDigest: Effect2.pipe('a', EffectString.repeat(64)),
     members: [],
     state,
     type: 'code-graph-workset-prepare',

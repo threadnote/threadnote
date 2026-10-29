@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Layer, Schema, Sink, Stdio, Stream} from 'effect';
 import * as ChildProcess from 'effect/process/ChildProcess';
 import {ChildProcessSpawner} from 'effect/process/ChildProcessSpawner';
 import {redactSensitiveText} from '@threadnote/platform/scrubber';
 import {ChildEnvironmentPolicy, type ChildEnvironmentPolicyShape} from './child-environment-policy.js';
 import {SystemInfo, type SystemInfoShape} from './system.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface CommandOptions {
   readonly allowFailure?: boolean;
@@ -65,30 +68,39 @@ const CommandFields = {
   message: Schema.String,
 };
 
-export class CommandFailed extends Schema.TaggedError<CommandFailed>()('CommandFailed', {
-  ...CommandFields,
-  exitCode: Schema.Finite,
-  stderr: Schema.String,
-  stdout: Schema.String,
-}) {}
-
-export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut>()('CommandTimedOut', {
-  ...CommandFields,
-  timeoutMs: Schema.Finite,
-}) {}
-
-export class CommandOutputLimitExceeded extends Schema.TaggedError<CommandOutputLimitExceeded>()(
-  'CommandOutputLimitExceeded',
+export class CommandFailed extends Schema.TaggedError<CommandFailed, {readonly brand: unique symbol}>()(
+  'CommandFailed',
   {
     ...CommandFields,
-    maxOutputBytes: Schema.Finite,
+    exitCode: Schema.Finite,
+    stderr: Schema.String,
+    stdout: Schema.String,
   },
 ) {}
 
-export class CommandSpawnFailed extends Schema.TaggedError<CommandSpawnFailed>()('CommandSpawnFailed', {
+export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut, {readonly brand: unique symbol}>()(
+  'CommandTimedOut',
+  {
+    ...CommandFields,
+    timeoutMs: Schema.Finite,
+  },
+) {}
+
+export class CommandOutputLimitExceeded extends Schema.TaggedError<
+  CommandOutputLimitExceeded,
+  {readonly brand: unique symbol}
+>()('CommandOutputLimitExceeded', {
   ...CommandFields,
-  cause: Schema.Defect(),
+  maxOutputBytes: Schema.Finite,
 }) {}
+
+export class CommandSpawnFailed extends Schema.TaggedError<CommandSpawnFailed, {readonly brand: unique symbol}>()(
+  'CommandSpawnFailed',
+  {
+    ...CommandFields,
+    cause: Schema.Defect(),
+  },
+) {}
 
 export type CommandExecutionError = CommandFailed | CommandOutputLimitExceeded | CommandSpawnFailed | CommandTimedOut;
 
@@ -245,7 +257,7 @@ const executeCommand = Effect.fn('CommandExecutor.execute')(function* (
           collectCommandOutput(handle.stderr, maxOutputBytes, outputExceeded).pipe(
             Effect.mapError(cause => (Schema.is(CommandOutputLimitExceeded)(cause) ? cause : spawnFailed(cause))),
           ),
-          handle.exitCode.pipe(Effect.map(Number), Effect.mapError(spawnFailed)),
+          handle.exitCode.pipe(Effect.mapBoth({onSuccess: Number, onFailure: spawnFailed})),
         ],
         {concurrency: 'unbounded'},
       );
@@ -336,7 +348,7 @@ const executeBinaryCommand = Effect.fn('CommandExecutor.executeBinary')(function
           collectCommandOutput(handle.stderr, maxOutputBytes, outputExceeded).pipe(
             Effect.mapError(cause => (Schema.is(CommandOutputLimitExceeded)(cause) ? cause : spawnFailed(cause))),
           ),
-          handle.exitCode.pipe(Effect.map(Number), Effect.mapError(spawnFailed)),
+          handle.exitCode.pipe(Effect.mapBoth({onSuccess: Number, onFailure: spawnFailed})),
         ],
         {concurrency: 'unbounded'},
       );
@@ -480,7 +492,7 @@ function collectCommandOutput(
         return Effect.succeed({chunks: current.chunks, size});
       },
     ),
-    Effect.map(output => output.chunks.join('')),
+    Effect.map(output => EffectArray.join(output.chunks, '')),
   );
 }
 
@@ -533,7 +545,7 @@ function collectStreamingOutput(
 
 function appendOutputTail(current: string, chunk: string, maxOutputChars: number): string {
   const next = `${current}${chunk}`;
-  return next.length <= maxOutputChars ? next : next.slice(next.length - maxOutputChars);
+  return next.length <= maxOutputChars ? next : Effect2.pipe(next, EffectString.slice(next.length - maxOutputChars));
 }
 
 function commandSpawnFailure(
@@ -583,38 +595,42 @@ export function resolveCommandInvocation(
     return {args, executable};
   }
   for (const value of [executable, ...args]) {
-    if (value.includes('\0') || /[\r\n]/.test(value)) {
+    if (Effect2.pipe(value, EffectString.includes('\0')) || /[\r\n]/.test(value)) {
       throw new Error('Windows batch commands do not accept NUL, CR, or LF characters.');
     }
   }
   const doubleEscape = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(executable);
   const command = escapeWindowsCommand(executable);
-  const escapedArgs = args.map(arg => escapeWindowsArgument(arg, doubleEscape));
+  const escapedArgs = EffectArray.map(args, arg => escapeWindowsArgument(arg, doubleEscape));
   return {
     args: [],
-    executable: [command, ...escapedArgs].join(' '),
+    executable: EffectArray.join([command, ...escapedArgs], ' '),
     shell: comspec,
   };
 }
 
 function escapeWindowsCommand(value: string): string {
-  return value.replace(WINDOWS_COMMAND_META, '^$1');
+  return Effect2.pipe(value, EffectString.replace(WINDOWS_COMMAND_META, '^$1'));
 }
 
 function escapeWindowsArgument(value: string, doubleEscape: boolean): string {
-  let escaped = value.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"').replace(/(?=(\\+?)?)\1$/, '$1$1');
-  escaped = `"${escaped}"`.replace(WINDOWS_COMMAND_META, '^$1');
-  return doubleEscape ? escaped.replace(WINDOWS_COMMAND_META, '^$1') : escaped;
+  let escaped = Effect2.pipe(
+    value,
+    EffectString.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"'),
+    EffectString.replace(/(?=(\\+?)?)\1$/, '$1$1'),
+  );
+  escaped = Effect2.pipe(`"${escaped}"`, EffectString.replace(WINDOWS_COMMAND_META, '^$1'));
+  return doubleEscape ? Effect2.pipe(escaped, EffectString.replace(WINDOWS_COMMAND_META, '^$1')) : escaped;
 }
 
 export function isGitExecutable(executable: string): boolean {
-  const name = executable.replaceAll('\\', '/').split('/').at(-1) ?? '';
+  const name = Effect2.pipe(executable, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1) ?? '';
   return /^(?:git)(?:\.(?:bat|cmd|com|exe))?$/i.test(name);
 }
 
 export const windowsTaskkillExecutable = Effect.fn('CommandExecutor.windowsTaskkillExecutable')(function* () {
   const environment = (yield* SystemInfo).environment();
-  return `${(environment.SystemRoot ?? 'C:\\Windows').replace(/[\\/]+$/, '')}\\System32\\taskkill.exe`;
+  return `${Effect2.pipe(environment.SystemRoot ?? 'C:\\Windows', EffectString.replace(/[\\/]+$/, ''))}\\System32\\taskkill.exe`;
 });
 
 const GIT_ENVIRONMENT_KEYS = [
@@ -653,7 +669,7 @@ export function commandEnvironment(
 
 export function formatShellCommand(executable: string, args: readonly string[]): string {
   const values = isGitExecutable(executable) ? formatGitCommandValues(executable, args) : [executable, ...args];
-  return redactSensitiveText(values.map(shellQuote).join(' '));
+  return redactSensitiveText(EffectArray.join(EffectArray.map(values, shellQuote), ' '));
 }
 
 const GIT_PATH_ARGUMENT_ROLES = new Map<string, 'gitdir' | 'worktree'>([
@@ -677,8 +693,9 @@ function formatGitCommandValues(executable: string, args: readonly string[]): re
     }
     for (const [option, optionRole] of GIT_PATH_ARGUMENT_ROLES) {
       const prefix = `${option}=`;
-      if (argument.startsWith(prefix)) {
-        formattedArgs[index] = `${prefix}${replaceSensitiveValueWithRole(argument.slice(prefix.length), optionRole)}`;
+      if (Effect2.pipe(argument, EffectString.startsWith(prefix))) {
+        formattedArgs[index] =
+          `${prefix}${replaceSensitiveValueWithRole(Effect2.pipe(argument, EffectString.slice(prefix.length)), optionRole)}`;
         break;
       }
     }
@@ -702,7 +719,7 @@ export function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_./:@=-]+$/.test(value)) {
     return value;
   }
-  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+  return `'${Effect2.pipe(value, EffectString.replaceAll("'", "'\"'\"'"))}'`;
 }
 
 export function commandTimeoutMs(environment: Readonly<Record<string, string | undefined>>): number {
@@ -726,9 +743,9 @@ function positiveIntegerFromEnv(
 }
 
 function redactCommandArgs(args: readonly string[]): readonly string[] {
-  const combined = args.join(' ');
+  const combined = EffectArray.join(args, ' ');
   if (redactSensitiveText(combined) !== combined) {
     return ['[REDACTED]'];
   }
-  return args.map(redactSensitiveText);
+  return EffectArray.map(args, redactSensitiveText);
 }

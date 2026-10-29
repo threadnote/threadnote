@@ -8,6 +8,8 @@ import {
   observeProcessInstanceIdentity,
   processInstanceIdentityMatches,
 } from '@threadnote/threadnote/process/process_identity';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
@@ -24,7 +26,7 @@ const darwinCLocaleStart = fc
   )
   .map(([weekday, month, day, hour, minute, second, year]) => {
     const dayField = day < 10 ? ` ${day}` : String(day);
-    const time = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`;
+    const time = `${Effect2.pipe(String(hour), EffectString.padStart(2, '0'))}:${Effect2.pipe(String(minute), EffectString.padStart(2, '0'))}:${Effect2.pipe(String(second), EffectString.padStart(2, '0'))}`;
     return `${weekday} ${month} ${dayField} ${time} ${year}`;
   });
 

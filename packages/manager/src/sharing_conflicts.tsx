@@ -1,3 +1,5 @@
+import {isConflictsResponse, isSharingConflictDetail} from './api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useState} from 'react';
 import {AlertTriangle, Check, ChevronRight, GitCompareArrows, Pencil, RefreshCw} from 'lucide-react';
 import type {SharingConflict, SharingConflictDetail} from './sharing_contracts.js';
@@ -7,6 +9,8 @@ import {memoryDocumentParts} from './library_model.js';
 import {MemoryEditor} from './memory_editor.js';
 import {DetailModal} from './detail_modal.js';
 import {useManagerDialogs} from './dialog.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function SharingConflicts({
   refreshVersion,
@@ -27,7 +31,12 @@ export function SharingConflicts({
     const controller = new AbortController();
     setLoading(true);
     setError('');
-    void api<{conflicts: readonly SharingConflict[]}>('/api/shares/conflicts', undefined, {signal: controller.signal})
+    void api<{conflicts: readonly SharingConflict[]}>(
+      '/api/shares/conflicts',
+      undefined,
+      {signal: controller.signal},
+      isConflictsResponse,
+    )
       .then(result => {
         if (!controller.signal.aborted) {
           setConflicts(result.conflicts);
@@ -67,7 +76,7 @@ export function SharingConflicts({
           <p className="workspace-pad muted">
             These memories have different local and shared versions. Compare them before choosing what to keep.
           </p>
-          {conflicts.map(conflict => (
+          {EffectArray.map(conflicts, conflict => (
             <button className="conflict-list-row" key={conflict.id} onClick={() => setSelected(conflict.id)}>
               <AlertTriangle aria-hidden="true" />
               <span>
@@ -113,9 +122,11 @@ export function SharingConflicts({
 }
 
 function conflictTitle(conflict: SharingConflict): string {
-  return (conflict.relativePath.split('/').at(-1) ?? conflict.relativePath)
-    .replace(/\.md$/u, '')
-    .replace(/[-_]/gu, ' ');
+  return Effect.pipe(
+    Effect.pipe(conflict.relativePath, EffectString.split('/')).at(-1) ?? conflict.relativePath,
+    EffectString.replace(/\.md$/u, ''),
+    EffectString.replace(/[-_]/gu, ' '),
+  );
 }
 
 export function ConflictResolver({
@@ -140,9 +151,14 @@ export function ConflictResolver({
     const controller = new AbortController();
     setDetail(undefined);
     setError('');
-    void api<SharingConflictDetail>('/api/shares/conflicts/detail?id=' + encodeURIComponent(id), undefined, {
-      signal: controller.signal,
-    })
+    void api<SharingConflictDetail>(
+      '/api/shares/conflicts/detail?id=' + encodeURIComponent(id),
+      undefined,
+      {
+        signal: controller.signal,
+      },
+      isSharingConflictDetail,
+    )
       .then(value => {
         if (!controller.signal.aborted) {
           setDetail(value);
@@ -260,10 +276,16 @@ export function ConflictResolver({
           <details className="conflict-diff">
             <summary>See exact changes and metadata</summary>
             <pre>
-              {detail.diff.split('\n').map((line, index) => (
+              {EffectArray.map(Effect.pipe(detail.diff, EffectString.split('\n')), (line, index) => (
                 <span
                   key={index}
-                  data-change={line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : undefined}
+                  data-change={
+                    Effect.pipe(line, EffectString.startsWith('+'))
+                      ? 'add'
+                      : Effect.pipe(line, EffectString.startsWith('-'))
+                        ? 'remove'
+                        : undefined
+                  }
                 >
                   {line}
                   {'\n'}

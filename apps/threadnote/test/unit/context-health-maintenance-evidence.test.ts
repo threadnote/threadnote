@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, Ref, Result, Schema} from 'effect';
@@ -25,7 +26,7 @@ import type {
   ContextBriefCitationValidationReceiptV2,
   ContextHealthCitationSubjectV1,
 } from '@threadnote/context/types';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {contextHealthCitationCoverageV2} from '@threadnote/context/health_maintenance';
 import {
@@ -45,6 +46,10 @@ import {
 } from '@threadnote/threadnote/memory/context/maintenance_evidence';
 import {collectContextHealthEvidence} from '@threadnote/threadnote/memory/context/health_commands';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
 const citationEnvironmentPolicy = Layer.mergeAll(
   Layer.succeed(ChildEnvironmentPolicy, {
@@ -70,20 +75,20 @@ const status: CodeGraphStatus = {
     checkoutId: 'checkout',
     displayName: 'fixture',
     gitCommonDirectory: '/synthetic/git',
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: repository,
-    repositoryId: '2'.repeat(64),
+    repositoryId: Effect2.pipe('2', EffectString.repeat(64)),
     worktreeId: 'worktree',
   },
   readySnapshot: {
-    commit: '1'.repeat(40),
+    commit: Effect2.pipe('1', EffectString.repeat(40)),
     dirty: false,
     edgeCount: 0,
     extractorSet: 'test',
     fileCount: 1,
-    id: `cgsn_${'3'.repeat(40)}`,
-    repositoryId: '2'.repeat(64),
+    id: `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`,
+    repositoryId: Effect2.pipe('2', EffectString.repeat(64)),
     state: 'ready',
     symbolCount: 0,
     worktreeId: 'worktree',
@@ -91,7 +96,7 @@ const status: CodeGraphStatus = {
 };
 const citation = createMemoryCodeCitation({
   extractorSet: 'test',
-  fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
   path: 'source.ts',
   repositoryId: status.identity.repositoryId,
   repositoryIdentityKind: 'remote',
@@ -123,7 +128,10 @@ function recordWithCitations(index: number, codeCitations: readonly ReturnType<t
     },
     `Supported claim ${index}.`,
   );
-  const parsed = parseMemoryDocument(`threadnote://memory/fixture-${index.toString().padStart(5, '0')}`, content);
+  const parsed = parseMemoryDocument(
+    `threadnote://memory/fixture-${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}`,
+    content,
+  );
   if (parsed === undefined) throw new Error('Invalid fixture memory.');
   return parsed;
 }
@@ -158,17 +166,62 @@ function receipt(now: string): ContextBriefCitationValidationReceiptV2 {
 }
 const narrow = Layer.mergeAll(
   BunServices.layer,
-  Layer.succeed(CommandExecutor, {} as CommandExecutor['Service']),
-  Layer.succeed(SystemInfo, {
-    processId: 1,
-    platform: 'linux',
-    isProcessRunning: () => true,
-    processStartIdentity: () => Effect.succeed('fixture'),
-  } as unknown as SystemInfo['Service']),
+  Layer.succeed(
+    CommandExecutor,
+    CommandExecutor.of({
+      execute: () => Effect.die(new Error('Unexpected command execution in context health evidence test.')),
+      executeStreaming: () => Effect.die(new Error('Unexpected command execution in context health evidence test.')),
+    }),
+  ),
+  Layer.succeed(
+    SystemInfo,
+    SystemInfo.of({
+      architecture: 'x64',
+      availableDiskBytes: () => Effect.die(new Error('Unexpected disk query in context health evidence test.')),
+      currentDirectory: () => repository,
+      environment: () => ({}),
+      developmentEntrypoint: '/test/threadnote.ts',
+      intendedChildEnvironment: environment => environment,
+      executablePath: '/usr/bin/node',
+      homeDirectory: '/tmp',
+      hardwareInfo: Effect.succeed({
+        cpuModel: 'test',
+        memoryBytes: 1,
+        effectiveMemoryBytes: 1,
+        operatingSystem: 'test',
+      }),
+      memoryUsage: () => ({external: 0, heapUsed: 0, rss: 0}),
+      runtimeVersion: 'test',
+      pathDelimiter: ':',
+      processArguments: [],
+      readLine: () => () => undefined,
+      signalProcess: () => undefined,
+      setExitCode: () => undefined,
+      setEnvironmentVariable: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+      tempDirectory: '/tmp',
+      userName: 'test',
+      processId: 1,
+      platform: 'linux',
+      isProcessRunning: () => true,
+      processStartIdentity: () => Effect.succeed('fixture'),
+    }),
+  ),
 );
-const coldQuery = CodeGraphQueryService.of({
+const unexpectedQueryCall = () => Effect.die(new Error('Unexpected code graph query in context health evidence test.'));
+const codeGraphQueryService = (
+  overrides: Partial<CodeGraphQueryService['Service']> = {},
+): CodeGraphQueryService['Service'] => ({
+  attachSharedReadySnapshot: unexpectedQueryCall,
+  inspect: unexpectedQueryCall,
+  purge: unexpectedQueryCall,
   status: () => Effect.succeed(status),
-} as unknown as CodeGraphQueryService['Service']);
+  statusForIdentity: unexpectedQueryCall,
+  statusForPublishedIdentity: unexpectedQueryCall,
+  ...overrides,
+});
+const coldQuery = CodeGraphQueryService.of(codeGraphQueryService());
 
 describe('generation-bound maintenance citation evidence', () => {
   it('keeps bounded request page identities distinct while preserving legacy page zero', () => {
@@ -177,8 +230,8 @@ describe('generation-bound maintenance citation evidence', () => {
         const root = {project: 'fixture', cwd: repository, uris: []};
         const legacy = contextMaintenanceEvidenceRequestFileName(root);
         expect(contextMaintenanceEvidenceRequestFileName({...root, page: 0})).toBe(legacy);
-        const names = pages.map(page => contextMaintenanceEvidenceRequestFileName({...root, page}));
-        const keys = pages.map(page => contextMaintenanceEvidenceRequestKey({...root, page}));
+        const names = EffectArray.map(pages, page => contextMaintenanceEvidenceRequestFileName({...root, page}));
+        const keys = EffectArray.map(pages, page => contextMaintenanceEvidenceRequestKey({...root, page}));
         expect(new Set([legacy, ...names]).size).toBe(pages.length + 1);
         expect(new Set([contextMaintenanceEvidenceRequestKey(root), ...keys]).size).toBe(pages.length + 1);
       }),
@@ -191,11 +244,11 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-poisoned-'});
-        const config = {
+        const config = runtimeConfigForTest({
           account: 'fixture',
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
-        } as RuntimeConfig;
+        });
         const subject = recordWithCitations(0, [citation]);
         const canonical = parseMemoryDocument(
           'threadnote://user/tester/memories/durable/projects/fixture/fixture-0.md',
@@ -225,23 +278,32 @@ describe('generation-bound maintenance citation evidence', () => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-union-'});
-          const config = {
+          const config = runtimeConfigForTest({
             account: 'fixture',
             agentContextHome: home,
             manifestPath: path.join(home, 'manifest'),
-          } as RuntimeConfig;
+          });
           const unique = Array.from({length: count}, (_, index) => recordWithCitations(index, [citation]));
           const ordered = reverse ? [...unique].reverse() : unique;
           const records = [...ordered, ...ordered.slice(0, Math.floor(count / 3))];
           const enqueue = () =>
-            collectContextMaintenanceCitationEvidence(config, 'fixture', records, records.map(candidate), repository, {
-              validate: () => Effect.succeed([]),
-            }).pipe(Effect.provideService(CodeGraphQueryService, coldQuery));
+            collectContextMaintenanceCitationEvidence(
+              config,
+              'fixture',
+              records,
+              EffectArray.map(records, candidate),
+              repository,
+              {
+                validate: () => Effect.succeed([]),
+              },
+            ).pipe(Effect.provideService(CodeGraphQueryService, coldQuery));
           yield* enqueue();
           const first = yield* readContextMaintenanceEvidenceRequestPage(config);
-          const expected = new Set(unique.map(record => record.uri));
-          expect(new Set(first.requests.flatMap(request => request.uris))).toEqual(expected);
-          expect(first.requests.reduce((count, request) => count + request.uris.length, 0)).toBe(expected.size);
+          const expected = new Set(EffectArray.map(unique, record => record.uri));
+          expect(new Set(EffectArray.flatMap(first.requests, request => request.uris))).toEqual(expected);
+          expect(EffectArray.reduce(first.requests, 0, (count, request) => count + request.uris.length)).toBe(
+            expected.size,
+          );
           yield* enqueue();
           expect((yield* readContextMaintenanceEvidenceRequestPage(config)).requests).toEqual(first.requests);
         }),
@@ -252,26 +314,30 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-pages-'});
-        const config = {
+        const config = runtimeConfigForTest({
           account: 'fixture',
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
-        } as RuntimeConfig;
+        });
         const records = Array.from({length: 125}, (_, index) => recordWithCitations(index, [citation]));
-        const candidates = records.map(candidate);
-        const query = CodeGraphQueryService.of({
-          status: () => Effect.succeed(status),
-        } as unknown as CodeGraphQueryService['Service']);
+        const candidates = EffectArray.map(records, candidate);
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () => Effect.succeed(status),
+          }),
+        );
         yield* collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
           validate: () => Effect.succeed([]),
         }).pipe(Effect.provideService(CodeGraphQueryService, query));
         const page = yield* readContextMaintenanceEvidenceRequestPage(config);
-        expect(new Set(page.requests.flatMap(request => request.uris))).toEqual(
-          new Set(records.map(record => record.uri)),
+        expect(new Set(EffectArray.flatMap(page.requests, request => request.uris))).toEqual(
+          new Set(EffectArray.map(records, record => record.uri)),
         );
-        expect(page.requests.every(request => request.project === 'fixture' && request.cwd === repository)).toBe(true);
+        expect(
+          EffectArray.every(page.requests, request => request.project === 'fixture' && request.cwd === repository),
+        ).toBe(true);
         expect(page.requests).toHaveLength(2);
-        const before = new Map(page.requests.map(request => [request.page ?? 0, request]));
+        const before = new Map(EffectArray.map(page.requests, request => [request.page ?? 0, request]));
         yield* collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
           validate: () => Effect.succeed([]),
         }).pipe(Effect.provideService(CodeGraphQueryService, query));
@@ -293,8 +359,12 @@ describe('generation-bound maintenance citation evidence', () => {
         expect((yield* readContextMaintenanceEvidenceRequestPage(config)).requests).toEqual(page.requests);
         yield* clearContextMaintenanceEvidenceRequest(config, 'fixture', repository, [secondUri], second.revision, 1);
         const after = yield* readContextMaintenanceEvidenceRequestPage(config);
-        expect(after.requests.find(request => (request.page ?? 0) === 0)).toEqual(first);
-        expect(after.requests.find(request => request.page === 1)?.uris).not.toContain(secondUri);
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(after.requests, request => (request.page ?? 0) === 0)),
+        ).toEqual(first);
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(after.requests, request => request.page === 1))?.uris,
+        ).not.toContain(secondUri);
       }),
     );
     layerIt.effect('bounds UTF-8 request pages while admitting the full explicit scope', () =>
@@ -302,27 +372,27 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-byte-pages-'});
-        const config = {
+        const config = runtimeConfigForTest({
           account: 'fixture',
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
-        } as RuntimeConfig;
+        });
         const records = Array.from({length: 50}, (_, index) => {
           const value = recordWithCitations(index, [citation]);
-          return {...value, uri: `${value.uri}/${'é'.repeat(2_000)}`};
+          return {...value, uri: `${value.uri}/${Effect2.pipe('é', EffectString.repeat(2_000))}`};
         });
         yield* collectContextMaintenanceCitationEvidence(
           config,
           'fixture',
           records,
-          records.map(candidate),
+          EffectArray.map(records, candidate),
           repository,
           {validate: () => Effect.succeed([])},
         ).pipe(Effect.provideService(CodeGraphQueryService, coldQuery));
         const page = yield* readContextMaintenanceEvidenceRequestPage(config);
         expect(page.requests.length).toBeGreaterThan(1);
-        expect(new Set(page.requests.flatMap(request => request.uris))).toEqual(
-          new Set(records.map(record => record.uri)),
+        expect(new Set(EffectArray.flatMap(page.requests, request => request.uris))).toEqual(
+          new Set(EffectArray.map(records, record => record.uri)),
         );
         for (const name of page.files) {
           const info = yield* fs.stat(path.join(home, 'context-maintenance', 'evidence', name));
@@ -335,13 +405,13 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-oversize-'});
-        const config = {
+        const config = runtimeConfigForTest({
           account: 'fixture',
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
-        } as RuntimeConfig;
+        });
         const subject = recordWithCitations(0, [citation]);
-        const oversized = {...subject, uri: `${subject.uri}/${'x'.repeat(100_000)}`};
+        const oversized = {...subject, uri: `${subject.uri}/${Effect2.pipe('x', EffectString.repeat(100_000))}`};
         const result = yield* collectContextMaintenanceCitationEvidence(
           config,
           'fixture',
@@ -359,16 +429,18 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citations-'});
-        const config = {
+        const config = runtimeConfigForTest({
           account: 'fixture',
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
-        } as RuntimeConfig;
+        });
         const cited = recordWithCitations(0, [citation]);
         const plain = recordWithCitations(1, []);
-        const query = CodeGraphQueryService.of({
-          status: () => Effect.succeed(status),
-        } as unknown as CodeGraphQueryService['Service']);
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () => Effect.succeed(status),
+          }),
+        );
         expect(
           yield* collectContextMaintenanceCitationEvidence(
             config,
@@ -405,18 +477,20 @@ describe('generation-bound maintenance citation evidence', () => {
         const record = recordWithCitations(0, [citation]);
         for (const reason of ['repository-unavailable', 'graph-stale'] as const) {
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-evidence-'});
-          const config = {
+          const config = runtimeConfigForTest({
             account: 'fixture',
             agentContextHome: home,
             manifestPath: path.join(home, 'manifest'),
-          } as RuntimeConfig;
+          });
           yield* fs.writeFileString(config.manifestPath, 'stable manifest');
-          const query = CodeGraphQueryService.of({
-            status: () =>
-              Effect.succeed(
-                attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
-              ),
-          } as unknown as CodeGraphQueryService['Service']);
+          const query = CodeGraphQueryService.of(
+            codeGraphQueryService({
+              status: () =>
+                Effect.succeed(
+                  attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+                ),
+            }),
+          );
           let observation: ContextMaintenanceWorkerObservation | undefined;
           const now = (yield* DateTime.nowAsDate).toISOString();
           yield* collectContextMaintenanceCitationEvidence(
@@ -433,9 +507,9 @@ describe('generation-bound maintenance citation evidence', () => {
                 }),
               validate: selected =>
                 Effect.succeed(
-                  selected.map(value => ({
+                  EffectArray.map(selected, value => ({
                     uri: value.uri,
-                    receipts: value.codeCitations.map(codeCitation => ({
+                    receipts: EffectArray.map(value.codeCitations, codeCitation => ({
                       ...receipt(now),
                       citationId: codeCitation.id,
                       coverage: 'incomplete' as const,
@@ -460,11 +534,11 @@ describe('generation-bound maintenance citation evidence', () => {
     const values = Array.from({length: 200}, (_, index) => {
       const codeCitation = createMemoryCodeCitation({
         extractorSet: 'test',
-        fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+        fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
         path: 'source.ts',
         repositoryId: status.identity.repositoryId,
         repositoryIdentityKind: 'remote',
-        sourceCommit: index.toString(16).padStart(40, '0'),
+        sourceCommit: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
         sourceDirty: false,
         sourceSnapshotId: status.readySnapshot!.id,
         target: {kind: 'file'},
@@ -472,8 +546,8 @@ describe('generation-bound maintenance citation evidence', () => {
       });
       return recordWithCitation(index, codeCitation);
     });
-    const candidates = values.map(candidate);
-    const entries: Parameters<typeof foregroundReceiptCandidates>[0] = values.map((value, index) => {
+    const candidates = EffectArray.map(values, candidate);
+    const entries: Parameters<typeof foregroundReceiptCandidates>[0] = EffectArray.map(values, (value, index) => {
       const codeCitation = value.metadata.codeCitations![0];
       const selector = `${codeCitation.repositoryId}:${codeCitation.sourceCommit}`;
       const original = receipt('1970-01-01T00:00:00.000Z');
@@ -500,9 +574,11 @@ describe('generation-bound maintenance citation evidence', () => {
       };
     });
     const selected = foregroundReceiptCandidates(entries, values.slice(0, 199), candidates, 61_000);
-    expect(candidates.flatMap(value => value.codeCitations)).toHaveLength(200);
-    expect(selected.candidates.map(value => value.uri)).toEqual(values.slice(0, 198).map(value => value.uri));
-    expect(selected.candidates.flatMap(value => value.codeCitations)).toHaveLength(198);
+    expect(EffectArray.flatMap(candidates, value => value.codeCitations)).toHaveLength(200);
+    expect(EffectArray.map(selected.candidates, value => value.uri)).toEqual(
+      EffectArray.map(values.slice(0, 198), value => value.uri),
+    );
+    expect(EffectArray.flatMap(selected.candidates, value => value.codeCitations)).toHaveLength(198);
     expect(selected.entries).toHaveLength(198);
   });
   effectIt.layer(narrow)(test => {
@@ -511,38 +587,43 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-budget-'});
-        const config = {
+        const config = runtimeConfigForTest({
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
           account: 'fixture',
-        } as RuntimeConfig;
+        });
         const records = [record(0), record(1)];
-        const candidates = records.map(candidate);
+        const candidates = EffectArray.map(records, candidate);
         const entered = yield* Deferred.make<void>();
         const release = yield* Deferred.make<void>();
         const interrupted = yield* Ref.make(false);
         let block = false;
-        const query = CodeGraphQueryService.of({
-          status: () =>
-            block
-              ? Deferred.succeed(entered, undefined).pipe(
-                  Effect.andThen(Deferred.await(release)),
-                  Effect.onInterrupt(() => Ref.set(interrupted, true)),
-                  Effect.as(
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () =>
+              block
+                ? Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.onInterrupt(() => Ref.set(interrupted, true)),
+                    Effect.as(
+                      attachCodeGraphStatusObservation(
+                        {...status},
+                        {identity: status.identity, overlay: {dirty: false}},
+                      ),
+                    ),
+                  )
+                : Effect.succeed(
                     attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
                   ),
-                )
-              : Effect.succeed(
-                  attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
-                ),
-        } as unknown as CodeGraphQueryService['Service']);
+          }),
+        );
         const collect = (mode: 'diagnostic' | 'foreground') =>
           collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
             mode,
             validate: selected =>
               Effect.gen(function* () {
                 const now = (yield* DateTime.nowAsDate).toISOString();
-                return selected.map(value => ({uri: value.uri, receipts: [receipt(now)]}));
+                return EffectArray.map(selected, value => ({uri: value.uri, receipts: [receipt(now)]}));
               }),
           }).pipe(Effect.provideService(CodeGraphQueryService, query));
         expect(yield* collect('diagnostic')).toHaveLength(2);
@@ -554,7 +635,9 @@ describe('generation-bound maintenance citation evidence', () => {
         expect(yield* Fiber.join(foreground)).toEqual([]);
         expect(yield* Ref.get(interrupted)).toBe(true);
         const requests = yield* readContextMaintenanceEvidenceRequests(config);
-        expect(new Set(requests.flatMap(request => request.uris))).toEqual(new Set(records.map(record => record.uri)));
+        expect(new Set(EffectArray.flatMap(requests, request => request.uris))).toEqual(
+          new Set(EffectArray.map(records, record => record.uri)),
+        );
       }),
     );
 
@@ -563,17 +646,19 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-worker-budget-'});
-        const config = {
+        const config = runtimeConfigForTest({
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
           account: 'fixture',
-        } as RuntimeConfig;
+        });
         const value = record(0);
         const entered = yield* Deferred.make<void>();
         const release = yield* Deferred.make<void>();
-        const query = CodeGraphQueryService.of({
-          status: () => Effect.succeed(status),
-        } as unknown as CodeGraphQueryService['Service']);
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () => Effect.succeed(status),
+          }),
+        );
         const worker = yield* Effect.forkScoped(
           collectContextMaintenanceCitationEvidence(config, 'fixture', [value], [candidate(value, 0)], repository, {
             mode: 'worker',
@@ -593,17 +678,17 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-selectors-'});
-        const config = {
+        const config = runtimeConfigForTest({
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
           account: 'fixture',
-        } as RuntimeConfig;
+        });
         yield* fs.writeFileString(config.manifestPath, 'stable manifest');
         const records = Array.from({length: 120}, (_, index) => {
-          const sourceCommit = index.toString(16).padStart(40, '0');
+          const sourceCommit = Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'));
           const value = createMemoryCodeCitation({
             extractorSet: 'test',
-            fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+            fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
             path: 'source.ts',
             repositoryId: status.identity.repositoryId,
             repositoryIdentityKind: 'remote',
@@ -615,17 +700,19 @@ describe('generation-bound maintenance citation evidence', () => {
           });
           return recordWithCitation(index, value);
         });
-        const candidates = records.map(candidate);
+        const candidates = EffectArray.map(records, candidate);
         let validations = 0;
         let sourceChecks = 0;
-        const query = CodeGraphQueryService.of({
-          status: () => {
-            sourceChecks += 1;
-            return Effect.succeed(
-              attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
-            );
-          },
-        } as unknown as CodeGraphQueryService['Service']);
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () => {
+              sourceChecks += 1;
+              return Effect.succeed(
+                attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+              );
+            },
+          }),
+        );
         const collect = (
           selectedRecords: readonly ReturnType<typeof record>[],
           selectedCandidates: readonly ContextBriefMemoryCandidateV1[],
@@ -641,11 +728,11 @@ describe('generation-bound maintenance citation evidence', () => {
               mode,
               validate: selected =>
                 Effect.gen(function* () {
-                  validations += selected.reduce((count, value) => count + value.codeCitations.length, 0);
+                  validations += EffectArray.reduce(selected, 0, (count, value) => count + value.codeCitations.length);
                   const now = (yield* DateTime.nowAsDate).toISOString();
-                  return selected.map(value => ({
+                  return EffectArray.map(selected, value => ({
                     uri: value.uri,
-                    receipts: value.codeCitations.map(codeCitation => ({
+                    receipts: EffectArray.map(value.codeCitations, codeCitation => ({
                       ...receipt(now),
                       citationId: codeCitation.id,
                     })),
@@ -659,7 +746,7 @@ describe('generation-bound maintenance citation evidence', () => {
         expect(validations).toBe(120);
         const beforeReport = sourceChecks;
         const report = yield* collect(records, candidates, undefined);
-        expect(report.flatMap(value => value.receipts)).toHaveLength(120);
+        expect(EffectArray.flatMap(report, value => value.receipts)).toHaveLength(120);
         expect(sourceChecks - beforeReport).toBe(2);
         expect(validations).toBe(120);
       }),
@@ -671,29 +758,34 @@ describe('generation-bound maintenance citation evidence', () => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-'});
-          const config = {
+          const config = runtimeConfigForTest({
             agentContextHome: home,
             manifestPath: path.join(home, 'manifest'),
             account: 'fixture',
-          } as RuntimeConfig;
+          });
           yield* fs.writeFileString(config.manifestPath, 'stable manifest');
           const records = Array.from({length: 2_000}, (_, index) => record(index));
-          const candidates = records.map(candidate);
+          const candidates = EffectArray.map(records, candidate);
           let sourceChecks = 0;
           let validations = 0;
-          const query = CodeGraphQueryService.of({
-            status: () => {
-              sourceChecks += 1;
-              return Effect.succeed(
-                attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
-              );
-            },
-          } as unknown as CodeGraphQueryService['Service']);
+          const query = CodeGraphQueryService.of(
+            codeGraphQueryService({
+              status: () => {
+                sourceChecks += 1;
+                return Effect.succeed(
+                  attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+                );
+              },
+            }),
+          );
           const validate = (selected: readonly ContextHealthCitationSubjectV1[]) =>
             Effect.gen(function* () {
-              validations += selected.reduce((count, value) => count + value.codeCitations.length, 0);
+              validations += EffectArray.reduce(selected, 0, (count, value) => count + value.codeCitations.length);
               const now = (yield* DateTime.nowAsDate).toISOString();
-              return selected.map(value => ({uri: value.uri, receipts: value.codeCitations.map(() => receipt(now))}));
+              return EffectArray.map(selected, value => ({
+                uri: value.uri,
+                receipts: EffectArray.map(value.codeCitations, () => receipt(now)),
+              }));
             });
           const collect = (
             selectedRecords = records,
@@ -720,13 +812,13 @@ describe('generation-bound maintenance citation evidence', () => {
             state: 'unavailable',
           });
           const requests = yield* readContextMaintenanceEvidenceRequests(config);
-          expect(requests.flatMap(request => request.uris)).toHaveLength(2_000);
+          expect(EffectArray.flatMap(requests, request => request.uris)).toHaveLength(2_000);
           const acknowledged = requests[0]?.uris[0];
           if (acknowledged === undefined) return yield* Effect.die(new Error('Missing queued citation work.'));
           yield* clearContextMaintenanceEvidenceRequest(config, 'fixture', repository, [acknowledged]);
           expect((yield* readContextMaintenanceEvidenceRequests(config))[0]?.uris).toHaveLength(99);
           const diagnostic = yield* collect(records, candidates, 'diagnostic');
-          expect(diagnostic.flatMap(value => value.receipts)).toHaveLength(96);
+          expect(EffectArray.flatMap(diagnostic, value => value.receipts)).toHaveLength(96);
           expect(validations).toBe(96);
           expect(sourceChecks).toBe(2);
           for (let index = 96; index < records.length; index += 64)
@@ -736,7 +828,11 @@ describe('generation-bound maintenance citation evidence', () => {
           for (let page = 0; page < 5; page++) {
             const evidence = yield* collect();
             expect(evidence).toHaveLength(2_000);
-            expect(evidence.every(value => value.receipts.every(value => value.status === 'exact'))).toBe(true);
+            expect(
+              EffectArray.every(evidence, value =>
+                EffectArray.every(value.receipts, value => value.status === 'exact'),
+              ),
+            ).toBe(true);
           }
           expect(validations).toBe(2_000);
           expect(sourceChecks - before).toBe(10);
@@ -748,34 +844,39 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-race-'});
-        const config = {
+        const config = runtimeConfigForTest({
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
           account: 'fixture',
-        } as RuntimeConfig;
+        });
         const records = [record(0)];
-        const candidates = records.map(candidate);
+        const candidates = EffectArray.map(records, candidate);
         let current = status;
         let race = false;
         let checks = 0;
         let validations = 0;
-        const query = CodeGraphQueryService.of({
-          status: () =>
-            Effect.sync(() => {
-              checks += 1;
-              if (race && checks % 2 === 0)
-                current = {...status, readySnapshot: {...status.readySnapshot!, id: `cgsn_${'5'.repeat(40)}`}};
-              return attachCodeGraphStatusObservation(
-                {...current},
-                {identity: current.identity, overlay: {dirty: false}},
-              );
-            }),
-        } as unknown as CodeGraphQueryService['Service']);
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () =>
+              Effect.sync(() => {
+                checks += 1;
+                if (race && checks % 2 === 0)
+                  current = {
+                    ...status,
+                    readySnapshot: {...status.readySnapshot!, id: `cgsn_${Effect2.pipe('5', EffectString.repeat(40))}`},
+                  };
+                return attachCodeGraphStatusObservation(
+                  {...current},
+                  {identity: current.identity, overlay: {dirty: false}},
+                );
+              }),
+          }),
+        );
         const validate = (selected: readonly ContextHealthCitationSubjectV1[]) =>
           Effect.gen(function* () {
             validations += selected.length;
             const now = (yield* DateTime.nowAsDate).toISOString();
-            return selected.map(value => ({uri: value.uri, receipts: [receipt(now)]}));
+            return EffectArray.map(selected, value => ({uri: value.uri, receipts: [receipt(now)]}));
           });
         const collect = () =>
           collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
@@ -793,18 +894,18 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-partial-'});
-        const config = {
+        const config = runtimeConfigForTest({
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
           account: 'fixture',
-        } as RuntimeConfig;
+        });
         const expiredCitation = createMemoryCodeCitation({
           extractorSet: 'test',
-          fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
           path: 'expired.ts',
           repositoryId: citation.repositoryId,
           repositoryIdentityKind: 'remote',
-          sourceCommit: '6'.repeat(40),
+          sourceCommit: Effect2.pipe('6', EffectString.repeat(40)),
           sourceDirty: false,
           sourceSnapshotId: status.readySnapshot!.id,
           target: {kind: 'file'},
@@ -812,11 +913,11 @@ describe('generation-bound maintenance citation evidence', () => {
         });
         const historicalCitation = createMemoryCodeCitation({
           extractorSet: 'test',
-          fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
           path: 'historical.ts',
           repositoryId: citation.repositoryId,
           repositoryIdentityKind: 'remote',
-          sourceCommit: '7'.repeat(40),
+          sourceCommit: Effect2.pipe('7', EffectString.repeat(40)),
           sourceDirty: false,
           sourceSnapshotId: status.readySnapshot!.id,
           target: {kind: 'file'},
@@ -826,32 +927,40 @@ describe('generation-bound maintenance citation evidence', () => {
           recordWithCitations(0, [citation, expiredCitation]),
           recordWithCitation(1, historicalCitation),
         ];
-        const candidates = records.map(candidate);
+        const candidates = EffectArray.map(records, candidate);
         let calls = 0;
         let race = false;
-        const query = CodeGraphQueryService.of({
-          status: () =>
-            Effect.sync(() => {
-              calls++;
-              const current =
-                race && calls >= 2
-                  ? {...status, readySnapshot: {...status.readySnapshot!, id: `cgsn_${'5'.repeat(40)}`}}
-                  : status;
-              return attachCodeGraphStatusObservation(
-                {...current},
-                {identity: current.identity, overlay: {dirty: false}},
-              );
-            }),
-        } as unknown as CodeGraphQueryService['Service']);
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () =>
+              Effect.sync(() => {
+                calls++;
+                const current =
+                  race && calls >= 2
+                    ? {
+                        ...status,
+                        readySnapshot: {
+                          ...status.readySnapshot!,
+                          id: `cgsn_${Effect2.pipe('5', EffectString.repeat(40))}`,
+                        },
+                      }
+                    : status;
+                return attachCodeGraphStatusObservation(
+                  {...current},
+                  {identity: current.identity, overlay: {dirty: false}},
+                );
+              }),
+          }),
+        );
         const collect = (mode: 'worker' | 'foreground') =>
           collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
             mode,
             validate: selected =>
               Effect.gen(function* () {
                 const now = (yield* DateTime.nowAsDate).toISOString();
-                return selected.map(value => ({
+                return EffectArray.map(selected, value => ({
                   uri: value.uri,
-                  receipts: value.codeCitations.map(codeCitation => ({
+                  receipts: EffectArray.map(value.codeCitations, codeCitation => ({
                     ...receipt(now),
                     citationId: codeCitation.id,
                     ...(codeCitation.id === expiredCitation.id
@@ -868,15 +977,15 @@ describe('generation-bound maintenance citation evidence', () => {
                 }));
               }),
           }).pipe(Effect.provideService(CodeGraphQueryService, query));
-        expect((yield* collect('worker')).flatMap(value => value.receipts)).toHaveLength(3);
+        expect(EffectArray.flatMap(yield* collect('worker'), value => value.receipts)).toHaveLength(3);
         yield* TestClock.adjust('61 seconds');
         calls = 0;
         const reused = yield* collect('foreground');
         expect(
-          reused
-            .flatMap(value => value.receipts)
-            .map(value => value.citationId)
-            .sort(),
+          EffectArray.map(
+            EffectArray.flatMap(reused, value => value.receipts),
+            value => value.citationId,
+          ).sort(),
         ).toEqual([citation.id, expiredCitation.id, historicalCitation.id].sort());
         race = true;
         calls = 0;
@@ -890,25 +999,27 @@ describe('generation-bound maintenance citation evidence', () => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-retry-'});
-          const config = {
+          const config = runtimeConfigForTest({
             agentContextHome: home,
             manifestPath: path.join(home, 'manifest'),
             account: 'fixture',
-          } as RuntimeConfig;
+          });
           const records = [record(0)];
-          const candidates = records.map(candidate);
+          const candidates = EffectArray.map(records, candidate);
           let validations = 0;
-          const query = CodeGraphQueryService.of({
-            status: () =>
-              Effect.succeed(
-                attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
-              ),
-          } as unknown as CodeGraphQueryService['Service']);
+          const query = CodeGraphQueryService.of(
+            codeGraphQueryService({
+              status: () =>
+                Effect.succeed(
+                  attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+                ),
+            }),
+          );
           const validate = (selected: readonly ContextHealthCitationSubjectV1[]) =>
             Effect.gen(function* () {
               validations += selected.length;
               const now = (yield* DateTime.nowAsDate).toISOString();
-              return selected.map(value => ({
+              return EffectArray.map(selected, value => ({
                 uri: value.uri,
                 receipts: [
                   {
@@ -945,35 +1056,43 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-last-attempt-'});
-        const config = {
+        const config = runtimeConfigForTest({
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
           account: 'fixture',
-        } as RuntimeConfig;
+        });
         const value = record(0);
         let race = false;
         let checks = 0;
-        const query = CodeGraphQueryService.of({
-          status: () =>
-            Effect.sync(() => {
-              checks += 1;
-              const current =
-                race && checks % 2 === 0
-                  ? {...status, readySnapshot: {...status.readySnapshot!, id: `cgsn_${'5'.repeat(40)}`}}
-                  : status;
-              return attachCodeGraphStatusObservation(
-                {...current},
-                {identity: current.identity, overlay: {dirty: false}},
-              );
-            }),
-        } as unknown as CodeGraphQueryService['Service']);
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () =>
+              Effect.sync(() => {
+                checks += 1;
+                const current =
+                  race && checks % 2 === 0
+                    ? {
+                        ...status,
+                        readySnapshot: {
+                          ...status.readySnapshot!,
+                          id: `cgsn_${Effect2.pipe('5', EffectString.repeat(40))}`,
+                        },
+                      }
+                    : status;
+                return attachCodeGraphStatusObservation(
+                  {...current},
+                  {identity: current.identity, overlay: {dirty: false}},
+                );
+              }),
+          }),
+        );
         const collect = (records: readonly ReturnType<typeof record>[], mode: 'diagnostic' | 'foreground') =>
           collectContextMaintenanceCitationEvidence(config, 'fixture', records, [candidate(value, 0)], repository, {
             mode,
             validate: selected =>
               Effect.gen(function* () {
                 const now = (yield* DateTime.nowAsDate).toISOString();
-                return selected.map(item => ({
+                return EffectArray.map(selected, item => ({
                   uri: item.uri,
                   receipts: [
                     {
@@ -1012,24 +1131,26 @@ describe('generation-bound maintenance citation evidence', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-memory-race-'});
-        const config = {
+        const config = runtimeConfigForTest({
           agentContextHome: home,
           manifestPath: path.join(home, 'manifest'),
           account: 'fixture',
-        } as RuntimeConfig;
+        });
         const records = [record(0)];
         const generation = path.join(home, 'locks', 'resources', 'fixture', 'canonical-generation-v1');
-        const query = CodeGraphQueryService.of({
-          status: () =>
-            Effect.succeed(
-              attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
-            ),
-        } as unknown as CodeGraphQueryService['Service']);
+        const query = CodeGraphQueryService.of(
+          codeGraphQueryService({
+            status: () =>
+              Effect.succeed(
+                attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+              ),
+          }),
+        );
         const result = yield* collectContextMaintenanceCitationEvidence(
           config,
           'fixture',
           records,
-          records.map(candidate),
+          EffectArray.map(records, candidate),
           repository,
           {
             mode: 'diagnostic',
@@ -1038,7 +1159,7 @@ describe('generation-bound maintenance citation evidence', () => {
                 yield* fs.makeDirectory(path.dirname(generation), {recursive: true});
                 yield* fs.writeFileString(generation, 'v1:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
                 const now = (yield* DateTime.nowAsDate).toISOString();
-                return selected.map(value => ({uri: value.uri, receipts: [receipt(now)]}));
+                return EffectArray.map(selected, value => ({uri: value.uri, receipts: [receipt(now)]}));
               }),
           },
         ).pipe(Effect.provideService(CodeGraphQueryService, query));
@@ -1077,15 +1198,15 @@ describe('generation-bound maintenance citation evidence', () => {
             yield* git(repo, ['worktree', 'remove', '--force', linked]);
             yield* git(repo, ['remote', 'set-url', 'origin', 'https://example.invalid/new/repository.git']);
             const current = yield* resolveRepositoryIdentity(repo);
-            const config = {
+            const config = runtimeConfigForTest({
               agentContextHome: home,
               manifestPath: path.join(home, 'manifest'),
               account: 'fixture',
-            } as RuntimeConfig;
+            });
             const makeCitation = (repositoryId: string, sourceCommit: string, file: string) =>
               createMemoryCodeCitation({
                 extractorSet: 'test',
-                fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+                fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
                 path: file,
                 repositoryId,
                 repositoryIdentityKind: 'remote',
@@ -1118,23 +1239,25 @@ describe('generation-bound maintenance citation evidence', () => {
             );
             let mutatePrior = false;
             let statusCalls = 0;
-            const query = CodeGraphQueryService.of({
-              status: () =>
-                Effect.gen(function* () {
-                  statusCalls++;
-                  if (mutatePrior && statusCalls === 1) yield* fs.writeFileString(priorFile, '{}');
-                  return attachCodeGraphStatusObservation({...ready}, {identity: current, overlay: {dirty: false}});
-                }),
-            } as unknown as CodeGraphQueryService['Service']);
+            const query = CodeGraphQueryService.of(
+              codeGraphQueryService({
+                status: () =>
+                  Effect.gen(function* () {
+                    statusCalls++;
+                    if (mutatePrior && statusCalls === 1) yield* fs.writeFileString(priorFile, '{}');
+                    return attachCodeGraphStatusObservation({...ready}, {identity: current, overlay: {dirty: false}});
+                  }),
+              }),
+            );
             const collect = (mode: 'worker' | 'foreground', selected: readonly ContextBriefMemoryCandidateV1[]) =>
               collectContextMaintenanceCitationEvidence(config, 'fixture', records, selected, repo, {
                 mode,
                 validate: values =>
                   Effect.gen(function* () {
                     const now = (yield* DateTime.nowAsDate).toISOString();
-                    return values.map(value => ({
+                    return EffectArray.map(values, value => ({
                       uri: value.uri,
-                      receipts: value.codeCitations.map(codeCitation => ({
+                      receipts: EffectArray.map(value.codeCitations, codeCitation => ({
                         ...receipt(now),
                         citationId: codeCitation.id,
                         repositoryId: codeCitation.repositoryId,
@@ -1143,8 +1266,10 @@ describe('generation-bound maintenance citation evidence', () => {
                     }));
                   }),
               }).pipe(Effect.provideService(CodeGraphQueryService, query));
-            const allCandidates = records.map(candidate);
-            expect((yield* collect('worker', allCandidates)).flatMap(value => value.receipts)).toHaveLength(3);
+            const allCandidates = EffectArray.map(records, candidate);
+            expect(EffectArray.flatMap(yield* collect('worker', allCandidates), value => value.receipts)).toHaveLength(
+              3,
+            );
             const projection = path.join(
               home,
               'context-maintenance',
@@ -1154,22 +1279,27 @@ describe('generation-bound maintenance citation evidence', () => {
             const stored = JSON.parse(yield* fs.readFileString(projection));
             const qEntry = stored.entries.find((entry: {uri: string}) => entry.uri === records[1].uri);
             if (qEntry === undefined) return yield* Effect.die('Expected Q projection.');
-            qEntry.sources = Object.fromEntries(Object.keys(qEntry.sources).map(root => [root, 'incompatible-source']));
+            qEntry.sources = EffectRecord.fromEntries(
+              EffectArray.map(EffectRecord.keys(qEntry.sources), root => [root, 'incompatible-source']),
+            );
             yield* fs.writeFileString(projection, JSON.stringify(stored));
             const stable = yield* collect('foreground', allCandidates);
             expect(
-              stable
-                .flatMap(value => value.receipts)
-                .map(value => value.citationId)
-                .sort(),
+              EffectArray.map(
+                EffectArray.flatMap(stable, value => value.receipts),
+                value => value.citationId,
+              ).sort(),
             ).toEqual([a.id, b.id].sort());
             const partial = [{...allCandidates[0], codeCitations: [a]}, allCandidates[1]];
             mutatePrior = true;
             statusCalls = 0;
             const raced = yield* collect('foreground', scenario === 'selected' ? allCandidates : partial);
-            expect(raced.flatMap(value => value.receipts).map(value => value.citationId)).toEqual(
-              scenario === 'selected' ? [] : [a.id],
-            );
+            expect(
+              EffectArray.map(
+                EffectArray.flatMap(raced, value => value.receipts),
+                value => value.citationId,
+              ),
+            ).toEqual(scenario === 'selected' ? [] : [a.id]);
           }),
         ),
     );
@@ -1237,11 +1367,11 @@ describe('generation-bound maintenance citation evidence', () => {
       fc.property(fc.string(), suffix => {
         const other = createMemoryCodeCitation({
           extractorSet: 'test',
-          fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('4', EffectString.repeat(64))},
           path: 'other.ts',
           repositoryId: citation.repositoryId,
           repositoryIdentityKind: 'remote',
-          sourceCommit: '6'.repeat(40),
+          sourceCommit: Effect2.pipe('6', EffectString.repeat(40)),
           sourceDirty: false,
           sourceSnapshotId: status.readySnapshot!.id,
           target: {kind: 'file'},

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -22,7 +23,7 @@ import {runEffect} from '../helpers/effect-runtime.js';
 const homes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 async function makeConfig(): Promise<RuntimeConfig> {
@@ -44,17 +45,21 @@ function memoriesDir(config: RuntimeConfig): string {
 async function writeMemory(root: string, relPath: string, project: string | undefined): Promise<void> {
   const full = join(root, relPath);
   await mkdir(dirname(full), {recursive: true});
-  const header = [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    project ? `project: ${project}` : undefined,
-    'topic: t',
-    '',
-    'Body.',
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join('\n');
+  const header = EffectArray.join(
+    EffectArray.filter(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        project ? `project: ${project}` : undefined,
+        'topic: t',
+        '',
+        'Body.',
+      ],
+      (line): line is string => line !== undefined,
+    ),
+    '\n',
+  );
   await writeFile(full, header);
 }
 

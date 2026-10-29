@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -17,6 +18,9 @@ import {
   runLexicalRecallEvaluationV2,
   type RecallEvaluationRunV1,
 } from '@threadnote/threadnote/evaluation/recall';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const RECALL_EVALUATION_TEST_TIMEOUT = 20_000;
 
@@ -27,9 +31,11 @@ describe('recall evaluation contract v2', () => {
     expect(fixture.documents).toHaveLength(200);
     expect(fixture.queries).toHaveLength(250);
     expect(fixture.metadata.reviewed).toBe(true);
-    expect(fixture.documents.every(document => document.semantic === undefined)).toBe(true);
-    expect(fixture.documents.every(document => document.provenance.length > 0)).toBe(true);
-    expect(fixture.queries.every(query => query.provenance.length > 0 && query.expectedStages.length > 0)).toBe(true);
+    expect(EffectArray.every(fixture.documents, document => document.semantic === undefined)).toBe(true);
+    expect(EffectArray.every(fixture.documents, document => document.provenance.length > 0)).toBe(true);
+    expect(
+      EffectArray.every(fixture.queries, query => query.provenance.length > 0 && query.expectedStages.length > 0),
+    ).toBe(true);
 
     const counts = recallEvaluationCategoryCounts(fixture);
     for (const category of RECALL_EVALUATION_CATEGORIES) {
@@ -84,7 +90,7 @@ describe('recall evaluation contract v2', () => {
       const result = evaluateRecallRunV2(fixture, run);
 
       expect(run.queries).toHaveLength(fixture.queries.length);
-      expect(run.queries.every(query => query.stages.includes('lexical'))).toBe(true);
+      expect(EffectArray.every(run.queries, query => query.stages.includes('lexical'))).toBe(true);
       expect(result.metrics.queryCount).toBe(fixture.queries.length);
       expect(result.categories.exact_lexical?.recallAt5).toBeGreaterThan(0.9);
       expect(result.categories.semantic?.recallAt5).toBeLessThanOrEqual(1);
@@ -182,9 +188,11 @@ describe('recall evaluation contract v2', () => {
 
       expect(unchanged.passed).toBe(true);
       expect(swappedContractFailure.passed).toBe(false);
-      expect(swappedContractFailure.failures.some(failure => failure.includes('new contract failure identities'))).toBe(
-        true,
-      );
+      expect(
+        EffectArray.some(swappedContractFailure.failures, failure =>
+          Effect.pipe(failure, EffectString.includes('new contract failure identities')),
+        ),
+      ).toBe(true);
       expect(regressed.passed).toBe(false);
       expect(regressed.failures).toContain('aggregate.forbiddenHitRate regressed by 0.001000; maximum 0.000000');
     },
@@ -223,7 +231,7 @@ describe('recall evaluation contract v2', () => {
       expect(left.documents).toHaveLength(documentCount);
       expect(left.queries).toEqual(fixture.queries);
       expect(left).toEqual(right);
-      expect(new Set(left.documents.map(document => document.uri)).size).toBe(documentCount);
+      expect(new Set(EffectArray.map(left.documents, document => document.uri)).size).toBe(documentCount);
     },
     {fastCheck: {numRuns: 25}},
   );
@@ -310,21 +318,26 @@ function oracleRun(fixture: ReturnType<typeof createRecallEvaluationFixtureV2>):
     createdAt: '2026-07-27T00:00:00.000Z',
     fixtureHash: 'fixture-hash',
     pipeline: {name: 'oracle'},
-    queries: fixture.queries.map(query => {
-      const relevant = Object.entries(query.relevance)
-        .filter(([, grade]) => grade > 0)
-        .sort((left, right) => right[1] - left[1])
-        .map(([uri]) => ({
+    queries: EffectArray.map(fixture.queries, query => {
+      const relevant = EffectArray.map(
+        EffectArray.filter(EffectRecord.toEntries(query.relevance), ([, grade]) => grade > 0).sort(
+          (left, right) => right[1] - left[1],
+        ),
+        ([uri]) => ({
           reasonCodes: query.requiredReasonCodes ?? ['oracle_relevance'],
           score: query.relevance[uri],
           uri,
-        }));
+        }),
+      );
       return {
         candidatesRead: 0,
-        contextCharacters: relevant.reduce(
-          (characters, hit) =>
-            characters + (fixture.documents.find(document => document.uri === hit.uri)?.text.length ?? 0),
+        contextCharacters: EffectArray.reduce(
+          relevant,
           0,
+          (characters, hit) =>
+            characters +
+            (EffectOption.getOrUndefined(EffectArray.findFirst(fixture.documents, document => document.uri === hit.uri))
+              ?.text.length ?? 0),
         ),
         id: query.id,
         predictedAnswerability: query.expectedAnswerability,

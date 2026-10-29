@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {isJsonObject} from '@threadnote/platform/json';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -15,10 +17,24 @@ import type {ManagerAutomaticMemoryItem, ManagerAutomaticReview} from '../../src
 import type {MemoryResponse} from '../../src/ui/contracts.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalMemoryDocumentContent} from '@threadnote/memory/document';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
-const hash = 'a'.repeat(64);
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string.');
+  return value;
+}
+
+const hash = Effect.pipe('a', EffectString.repeat(64));
 const uri = 'threadnote://user/test/memories/durable/projects/project/ordinary.md';
-const reviewId = `review-${'a'.repeat(24)}`;
+const reviewId = `review-${Effect.pipe('a', EffectString.repeat(24))}`;
 const coverage = {
   outcome: 'unknown' as const,
   scope: 'none' as const,
@@ -154,8 +170,8 @@ it('retains the automatic card and model choice while checking, preserves failur
         return Promise.resolve(
           json({
             models: [
-              {id: 'first', label: 'First'},
-              {id: 'chosen', label: 'Chosen'},
+              {id: 'first', label: 'First', isDefault: true},
+              {id: 'chosen', label: 'Chosen', isDefault: false},
             ],
           }),
         );
@@ -171,6 +187,7 @@ it('retains the automatic card and model choice while checking, preserves failur
     disclosure.dispatchEvent(new Event('toggle'));
   });
   const model = document.querySelector<HTMLSelectElement>('[aria-label="Consolidation model"]')!;
+  expect(model.value).toBe('first');
   await act(async () => {
     model.value = 'chosen';
     model.dispatchEvent(new Event('change', {bubbles: true}));
@@ -229,7 +246,16 @@ async function render(element: React.ReactElement) {
   await act(async () => root?.render(element));
 }
 const button = (text: string) =>
-  [...document.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent?.includes(text))!;
+  EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      __effectArrayValue =>
+        !!(node =>
+          Effect.pipe(node.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+          ))(__effectArrayValue),
+    ),
+  )!;
 async function click(text: string) {
   await act(async () => button(text).click());
 }
@@ -242,7 +268,7 @@ it('groups uncited legacy coverage once, sorts ready reviews first, and never mu
         {selector: row => row.name, maxLength: 30},
       ),
       rows => {
-        const items = rows.map(row =>
+        const items = EffectArray.map(rows, row =>
           item({
             uri: `${uri}/${row.name}`,
             state: row.ready ? 'ready' : 'unknown',
@@ -254,11 +280,11 @@ it('groups uncited legacy coverage once, sorts ready reviews first, and never mu
         const output = automaticMemoryGroups(items);
         expect(automaticMemoryGroups([...items].reverse())).toEqual(output);
         expect(JSON.stringify(items)).toBe(before);
-        expect([...output.coverage, ...output.items].map(row => row.uri).sort()).toEqual(
-          items.map(row => row.uri).sort(),
+        expect(EffectArray.map([...output.coverage, ...output.items], row => row.uri).sort()).toEqual(
+          EffectArray.map(items, row => row.uri).sort(),
         );
-        expect(output.items.map(row => (row.state === 'ready' ? 0 : 1))).toEqual(
-          output.items.map(row => (row.state === 'ready' ? 0 : 1)).sort(),
+        expect(EffectArray.map(output.items, row => (row.state === 'ready' ? 0 : 1))).toEqual(
+          EffectArray.map(output.items, row => (row.state === 'ready' ? 0 : 1)).sort(),
         );
       },
     ),
@@ -274,7 +300,7 @@ it('labels a no-update policy review as an assessment and retains update actions
       omitted: 0,
       items: [
         item({state: 'policy', reviewId, reason: 'No update proposed. Waiting for sufficient evidence.'}),
-        ...(['ready', 'generating', 'queued'] as const).map(state =>
+        ...EffectArray.map(['ready', 'generating', 'queued'] as const, state =>
           item({
             uri: `${uri}/${state}`,
             state,
@@ -319,7 +345,7 @@ it('shows ordinary new and upgraded unenrolled memories with truthful progress a
       items: [
         item({title: 'New ordinary memory', state: 'queued'}),
         item({uri: `${uri}/upgraded`, title: 'Upgraded ordinary memory', state: 'ready', reviewId}),
-        ...states.map(state =>
+        ...EffectArray.map(states, state =>
           item({uri: `${uri}/${state}`, title: state, state, nextEligibleAt: 1_790_000_000_000, retryCount: 1}),
         ),
         item({uri: `${uri}/legacy`, legacyUncited: true}),
@@ -362,7 +388,7 @@ it('shows ordinary new and upgraded unenrolled memories with truthful progress a
     deferred: 'neutral',
     verification: 'warning',
   };
-  for (const [state, tone] of Object.entries(tones)) {
+  for (const [state, tone] of EffectRecord.toEntries(tones)) {
     const card = document.querySelector(`.automatic-memory-card[data-state="${state}"]`)!;
     expect(card.getAttribute('data-tone')).toBe(tone);
     expect(card.querySelector('header .review-badge')?.getAttribute('data-tone')).toBe(tone);
@@ -385,7 +411,7 @@ it('reconciles only the exact verified project, review, target and evidence, ide
         const row = item({
           reviewId: sameReview ? reviewId : 'other-review',
           uri: sameTarget ? uri : `${uri}/other`,
-          evidenceRevision: sameEvidence ? hash : 'b'.repeat(64),
+          evidenceRevision: sameEvidence ? hash : Effect.pipe('b', EffectString.repeat(64)),
         });
         const project = sameProject ? 'project' : 'other';
         const result = reconcileAutomaticMemoryItems([row], project, [completed]);
@@ -431,7 +457,7 @@ it('automatically prepares the exact full preview and applies only on explicit c
   let current = review();
   vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.body) {
-      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const body = requireJsonObject(JSON.parse(String(init.body)));
       posts.push(body);
       current =
         body.action === 'preview'
@@ -510,10 +536,10 @@ it('keeps the Library preview open and refreshes canonical content only after ve
   const legacyChanged = vi.fn();
   let current = review();
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (String(input).includes('/automatic-memory?'))
+    if (Effect.pipe(String(input), EffectString.includes('/automatic-memory?')))
       return json({version: 1, project: 'project', omitted: 0, items: [item({state: 'ready', reviewId})]});
     if (init?.body) {
-      const body = JSON.parse(String(init.body)) as {action: string};
+      const body = requireJsonObject(JSON.parse(String(init.body)));
       current =
         body.action === 'preview'
           ? review({revision: 2, approval: approval(), canApply: true})
@@ -558,7 +584,13 @@ it('freezes preview controls synchronously and ignores a delayed response after 
       calls.push(String(init.body));
       return delayed.promise;
     }
-    return json(review({project: 'other', reviewId: `review-${'b'.repeat(24)}`, targetUri: `${uri}/other`}));
+    return json(
+      review({
+        project: 'other',
+        reviewId: `review-${Effect.pipe('b', EffectString.repeat(24))}`,
+        targetUri: `${uri}/other`,
+      }),
+    );
   });
   const first = review();
   await render(
@@ -575,7 +607,7 @@ it('freezes preview controls synchronously and ignores a delayed response after 
   await render(
     <AutomaticMemoryReviewDialog
       project="other"
-      reviewId={`review-${'b'.repeat(24)}`}
+      reviewId={`review-${Effect.pipe('b', EffectString.repeat(24))}`}
       onClose={() => undefined}
       onApplied={applied}
     />,
@@ -610,7 +642,7 @@ it('removes verified updates immediately and keeps them resolved after reselect,
   const row = item({state: 'ready', reviewId, evidenceRevision: hash});
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
-    if (url.pathname.endsWith('/automatic-memory'))
+    if (Effect.pipe(url.pathname, EffectString.endsWith('/automatic-memory')))
       return json({version: 1, project: url.searchParams.get('project'), omitted: 0, items: completed ? [] : [row]});
     if (init?.body) completed = true;
     return json(
@@ -677,7 +709,7 @@ it('routes approved-support Save through manual preview with a full-content hash
             void edit
               .preview(
                 supported ? memory : {...memory, content: 'MEMORY\nkind: durable\n\nBefore.'},
-                content.replace('Before.', 'After.'),
+                Effect.pipe(content, EffectString.replace('Before.', 'After.')),
                 'project',
               )
               .then(handled => {
@@ -692,7 +724,7 @@ it('routes approved-support Save through manual preview with a full-content hash
     );
   }
   vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
-    posts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    posts.push(requireJsonObject(JSON.parse(String(init?.body))));
     return json(
       review({
         purpose: 'manual-edit',
@@ -708,7 +740,7 @@ it('routes approved-support Save through manual preview with a full-content hash
   expect(posts[0]).toMatchObject({
     action: 'manual-preview',
     expectedContentHash: sha256HexSync(canonicalMemoryDocumentContent(content)),
-    desiredContent: content.replace('Before.', 'After.'),
+    desiredContent: Effect.pipe(content, EffectString.replace('Before.', 'After.')),
   });
   expect(saved).not.toHaveBeenCalled();
   expect(document.body.textContent).toContain('Affected support will be invalidated');
@@ -733,16 +765,22 @@ it.each([1, 7, 101])('retains rejected manual review revision %s for the next re
     const edit = useManualSupportEdit({selectedUri: uri, onError, onApplied: saved});
     return (
       <>
-        <button onClick={() => void edit.preview(memory, content.replace('Before.', desired), 'project')}>Save</button>
+        <button
+          onClick={() =>
+            void edit.preview(memory, Effect.pipe(content, EffectString.replace('Before.', desired)), 'project')
+          }
+        >
+          Save
+        </button>
         <button onClick={() => setDesired('Revised edit.')}>Revise edit</button>
         {edit.dialog}
       </>
     );
   }
   vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
-    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const request = requireJsonObject(JSON.parse(String(init?.body)));
     posts.push(request);
-    if (request.action === 'reject') {
+    if (requireString(request.action) === 'reject') {
       expect(request).toMatchObject({project: 'project', reviewId, revision});
       return json({
         version: 1,
@@ -775,7 +813,7 @@ it.each([1, 7, 101])('retains rejected manual review revision %s for the next re
     project: 'project',
     reviewId,
     revision: revision + 1,
-    desiredContent: content.replace('Before.', 'Revised edit.'),
+    desiredContent: Effect.pipe(content, EffectString.replace('Before.', 'Revised edit.')),
   });
   expect(onError).not.toHaveBeenCalled();
   expect(saved).not.toHaveBeenCalled();
@@ -801,7 +839,7 @@ it.each(['reviewed_support: example', '```yaml\nreviewed_support: example\n```']
                   content,
                   node: {uri, name: 'ordinary.md', relativePath: '', isDir: false, isShared: false, isSystem: false},
                 },
-                content.replace('Before.', 'After.'),
+                Effect.pipe(content, EffectString.replace('Before.', 'After.')),
                 'project',
               )
               .then(handled => {
@@ -840,7 +878,7 @@ it.each(['pending', 'conflict'] as const)(
     };
     vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (!init?.body) return json(recovery);
-      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      posts.push(requireJsonObject(JSON.parse(String(init.body))));
       return json({...recovery, revision: 6, state: 'rejected', recovery: undefined});
     });
     await render(
@@ -867,7 +905,7 @@ it.each(['pending', 'conflict'] as const)(
 );
 
 it('navigates bounded pages to a late ready review and resets the cursor when the project changes', async () => {
-  const lateUri = uri.replace('ordinary.md', 'late-139.md');
+  const lateUri = Effect.pipe(uri, EffectString.replace('ordinary.md', 'late-139.md'));
   const calls: URL[] = [];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://localhost');
@@ -932,7 +970,7 @@ it('shows preview progress at the action and focuses a ready preview with explic
   const posts: Record<string, unknown>[] = [];
   vi.stubGlobal('fetch', (_input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.body) {
-      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      posts.push(requireJsonObject(JSON.parse(String(init.body))));
       return preview.promise;
     }
     return Promise.resolve(json(review()));
@@ -974,7 +1012,7 @@ it('bounds an unresponsive selected-review read and enables retry without an end
 it('prepares once across StrictMode and same-selection renders without approving a write', async () => {
   const posts: Record<string, unknown>[] = [];
   vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
-    if (init?.body) posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    if (init?.body) posts.push(requireJsonObject(JSON.parse(String(init.body))));
     return json(init?.body ? review({revision: 2, approval: approval(), canApply: true}) : review());
   });
   const view = () => (
@@ -1001,7 +1039,7 @@ it.each(['conflict', 'missing-preview', 'ineligible-preview'])(
         reads++;
         return json(recovered ? review({revision: 3, approval: approval(), canApply: true}) : review());
       }
-      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      posts.push(requireJsonObject(JSON.parse(String(init.body))));
       return failure === 'conflict'
         ? json({error: 'Source changed before approval'}, 409)
         : json(review(failure === 'ineligible-preview' ? {approval: approval(), canApply: false} : {}));
@@ -1030,7 +1068,7 @@ it('recovers an unknown preparation outcome by reusing canonical preview without
   vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
     if (!init?.body)
       return json(++reads === 1 ? review() : review({revision: 2, approval: approval(), canApply: true}));
-    posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    posts.push(requireJsonObject(JSON.parse(String(init.body))));
     throw new TypeError('Connection closed after preparation');
   });
   await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
@@ -1042,12 +1080,12 @@ it('recovers an unknown preparation outcome by reusing canonical preview without
 
 it('keeps failed Apply blocked until explicit reload and uses the newly displayed revision and digest', async () => {
   const posts: Record<string, unknown>[] = [];
-  const nextDigest = 'b'.repeat(64);
+  const nextDigest = Effect.pipe('b', EffectString.repeat(64));
   let current = review({revision: 2, approval: approval(), canApply: true});
   const close = vi.fn();
   vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
     if (!init?.body) return json(current);
-    posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    posts.push(requireJsonObject(JSON.parse(String(init.body))));
     return json({error: 'Stale approval revision'}, 409);
   });
   await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={close} />);
@@ -1098,7 +1136,7 @@ it('bounds preparation timeout and reuses its completed preview on the reconcili
         return Promise.resolve(
           json(++reads === 1 ? review() : review({revision: 2, approval: approval(), canApply: true})),
         );
-      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      posts.push(requireJsonObject(JSON.parse(String(init.body))));
       const pending = Promise.withResolvers<Response>();
       init.signal?.addEventListener('abort', () => pending.reject(new DOMException('Aborted', 'AbortError')), {
         once: true,
@@ -1138,7 +1176,7 @@ it('uses in-app links for both previews and blocks navigation while an explicit 
     />,
   );
   const links = [...document.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')];
-  expect(links.map(node => node.getAttribute('href'))).toEqual([`${uri}/related`, `${uri}/related`]);
+  expect(EffectArray.map(links, node => node.getAttribute('href'))).toEqual([`${uri}/related`, `${uri}/related`]);
   for (const node of links)
     await act(async () => node.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
   expect(open.mock.calls).toEqual([[`${uri}/related`], [`${uri}/related`]]);
@@ -1155,7 +1193,7 @@ it('prepares a parked review only after explicit resume and uses its current rev
   const posts: Record<string, unknown>[] = [];
   vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.body) {
-      const request = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const request = requireJsonObject(JSON.parse(String(init.body)));
       posts.push(request);
       current =
         request.action === 'resume'

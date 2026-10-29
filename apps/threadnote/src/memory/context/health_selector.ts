@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import type {MemoryKind} from '@threadnote/memory/types';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import type {ContextHealthFindingCategoryV1} from '@threadnote/context/health';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_HEALTH_SELECTOR_MAXIMUM_BYTES = 256 as const;
 const FORBIDDEN_SELECTOR_CHARACTERS = /[\p{Cc}\u2028\u2029]/u;
@@ -37,6 +40,14 @@ export interface ContextHealthSelectorInputV1 {
   readonly topic?: string;
 }
 
+function isContextHealthFindingCategory(value: string): value is ContextHealthFindingCategoryV1 {
+  return EffectArray.some(CONTEXT_HEALTH_FINDING_CATEGORIES, category => category === value);
+}
+
+function isContextHealthMemoryKind(value: string): value is MemoryKind {
+  return EffectArray.some(CONTEXT_HEALTH_MEMORY_KINDS, kind => kind === value);
+}
+
 /** Canonical exact selector. Every supplied field intersects with the others. */
 export interface ContextHealthSelectorV1 {
   readonly after?: string;
@@ -52,21 +63,18 @@ export function normalizeContextHealthSelector(
   const findingCategory = optionalSelectorText(input.findingCategory, '--finding-category');
   const kind = optionalSelectorText(input.kind, '--kind');
   const topic = optionalSelectorText(input.topic, '--topic');
-  if (
-    findingCategory !== undefined &&
-    !CONTEXT_HEALTH_FINDING_CATEGORIES.includes(findingCategory as ContextHealthFindingCategoryV1)
-  ) {
+  if (findingCategory !== undefined && !isContextHealthFindingCategory(findingCategory)) {
     throw new Error(`Unknown --finding-category: ${findingCategory}.`);
   }
-  if (kind !== undefined && !CONTEXT_HEALTH_MEMORY_KINDS.includes(kind as MemoryKind)) {
+  if (kind !== undefined && !isContextHealthMemoryKind(kind)) {
     throw new Error(`Unknown --kind: ${kind}.`);
   }
   if (after === undefined && findingCategory === undefined && kind === undefined && topic === undefined)
     return undefined;
   return {
     ...(after === undefined ? {} : {after}),
-    ...(findingCategory === undefined ? {} : {findingCategory: findingCategory as ContextHealthFindingCategoryV1}),
-    ...(kind === undefined ? {} : {kind: kind as MemoryKind}),
+    ...(findingCategory === undefined ? {} : {findingCategory}),
+    ...(kind === undefined ? {} : {kind}),
     ...(topic === undefined ? {} : {topic}),
   };
 }
@@ -76,7 +84,8 @@ export function projectContextHealthRecords(
   selector: ContextHealthSelectorV1 | undefined,
 ): readonly MemoryRecord[] {
   if (!contextHealthSelectorHasRecordScope(selector)) return records;
-  return records.filter(
+  return EffectArray.filter(
+    records,
     record =>
       (selector.kind === undefined || record.metadata.kind === selector.kind) &&
       (selector.topic === undefined || record.metadata.topic === selector.topic),
@@ -93,7 +102,9 @@ export function contextHealthSelectorFindingUris(
   selector: ContextHealthSelectorV1 | undefined,
   selectedRecords: readonly MemoryRecord[],
 ): readonly string[] | undefined {
-  return contextHealthSelectorHasRecordScope(selector) ? selectedRecords.map(record => record.uri) : undefined;
+  return contextHealthSelectorHasRecordScope(selector)
+    ? EffectArray.map(selectedRecords, record => record.uri)
+    : undefined;
 }
 
 export function contextHealthSelectorsEqual(
@@ -114,14 +125,18 @@ export function contextHealthSelectorKey(selector: ContextHealthSelectorV1 | und
 
 export function contextHealthSelectorDescription(selector: ContextHealthSelectorV1 | undefined): string | undefined {
   if (selector === undefined) return undefined;
-  return [
-    selector.after === undefined ? undefined : `after=${selector.after}`,
-    selector.findingCategory === undefined ? undefined : `finding category=${selector.findingCategory}`,
-    selector.kind === undefined ? undefined : `kind=${selector.kind}`,
-    selector.topic === undefined ? undefined : `topic=${selector.topic}`,
-  ]
-    .filter((value): value is string => value !== undefined)
-    .join(', ');
+  return EffectArray.join(
+    EffectArray.filter(
+      [
+        selector.after === undefined ? undefined : `after=${selector.after}`,
+        selector.findingCategory === undefined ? undefined : `finding category=${selector.findingCategory}`,
+        selector.kind === undefined ? undefined : `kind=${selector.kind}`,
+        selector.topic === undefined ? undefined : `topic=${selector.topic}`,
+      ],
+      (value): value is string => value !== undefined,
+    ),
+    ', ',
+  );
 }
 
 export function contextHealthSelectorCliFlags(
@@ -149,7 +164,7 @@ function optionalSelectorText(value: string | undefined, name: string): string |
   if (FORBIDDEN_SELECTOR_CHARACTERS.test(value)) {
     throw new Error(`${name} contains control characters.`);
   }
-  const text = value.trim();
+  const text = Effect.pipe(value, EffectString.trim);
   if (!text) throw new Error(`${name} must not be empty.`);
   if (new TextEncoder().encode(text).byteLength > CONTEXT_HEALTH_SELECTOR_MAXIMUM_BYTES) {
     throw new Error(`${name} exceeds ${CONTEXT_HEALTH_SELECTOR_MAXIMUM_BYTES} UTF-8 bytes.`);

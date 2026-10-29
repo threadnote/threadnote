@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import * as legacy from '../fixtures/schema10-writer.mjs';
 import {describe, expect, it} from 'vitest';
@@ -19,19 +20,21 @@ import {
   validateTopicMaintenanceManifest,
   topicMaintenanceReplacementError,
 } from '@threadnote/memory/topic-maintenance';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md';
 const citation = createMemoryCodeCitation({
   evidenceRetention: 'capsule-retained',
   extractorSet: 'native-code-graph-13',
-  fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
   path: 'packages/memory/src/document.ts',
-  repositoryId: '1'.repeat(64),
+  repositoryId: Effect.pipe('1', EffectString.repeat(64)),
   repositoryIdentityKind: 'remote',
-  sourceCommit: '2'.repeat(40),
+  sourceCommit: Effect.pipe('2', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceGraphContentId: `cgc_${'3'.repeat(40)}`,
-  sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
+  sourceGraphContentId: `cgc_${Effect.pipe('3', EffectString.repeat(40))}`,
+  sourceSnapshotId: `cgsn_${Effect.pipe('4', EffectString.repeat(40))}`,
   target: {kind: 'file'},
   version: 1,
 });
@@ -106,19 +109,30 @@ describe('topic maintenance manifest', () => {
         fc.array(fc.constantFrom(' ', '\t', ' \t '), {minLength: 1, maxLength: 3}),
         fc.constantFrom('\n', '\r\n', '\r'),
         (rows, newline) => {
-          const content = proposal.content
-            .replace('topic_maintenance:', `${rows.join('\n')}\ntopic_maintenance:`)
-            .replaceAll('\n', newline);
+          const content = Effect.pipe(proposal.content, __effectPipeInput => {
+            const __effectPipeStage0 = Effect.pipe(
+              __effectPipeInput,
+              EffectString.replace('topic_maintenance:', `${EffectArray.join(rows, '\n')}\ntopic_maintenance:`),
+            );
+            const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.replaceAll('\n', newline));
+            return __effectPipeStage1;
+          });
           expect(parseMemoryDocument(uri, content)?.metadata.topicMaintenance).toEqual(proposal.manifest);
           expect(declaresTopicMaintenanceHeader(content)).toBe(true);
           expect(
             declaresTopicMaintenanceHeader(
-              content.replace(/topic_maintenance: [^\r\n]+/u, ' topic_maintenance : {broken'),
+              Effect.pipe(
+                content,
+                EffectString.replace(/topic_maintenance: [^\r\n]+/u, ' topic_maintenance : {broken'),
+              ),
             ),
           ).toBe(true);
           expect(
             declaresTopicMaintenanceHeader(
-              record().content.replaceAll('\n', newline) + newline + newline + 'topic_maintenance: prose only',
+              Effect.pipe(record().content, EffectString.replaceAll('\n', newline)) +
+                newline +
+                newline +
+                'topic_maintenance: prose only',
             ),
           ).toBe(false);
         },
@@ -134,7 +148,10 @@ describe('topic maintenance manifest', () => {
     expect(hasTopicMaintenanceEnrollment(parseMemoryDocument(uri, proposal.content)!)).toBe(true);
     const malformed = parseMemoryDocument(
       uri,
-      proposal.content.replace(/topic_maintenance: .*\n/u, 'topic_maintenance: {bad-json}\n'),
+      Effect.pipe(
+        proposal.content,
+        EffectString.replace(/topic_maintenance: .*\n/u, 'topic_maintenance: {bad-json}\n'),
+      ),
     )!;
     expect(malformed.metadata.topicMaintenance).toBeUndefined();
     expect(malformed.metadata.topicMaintenanceError).toBeDefined();
@@ -149,7 +166,10 @@ describe('topic maintenance manifest', () => {
     expect(topicMaintenanceReplacementError(source, next, proposal.manifest)).toBeUndefined();
     expect(topicMaintenanceReplacementError(source, {...next, body: 'Changed.'}, proposal.manifest)).toBeDefined();
     expect(
-      topicMaintenanceReplacementError(source, next, {...proposal.manifest, bodyHash: '0'.repeat(64)}),
+      topicMaintenanceReplacementError(source, next, {
+        ...proposal.manifest,
+        bodyHash: Effect.pipe('0', EffectString.repeat(64)),
+      }),
     ).toBeDefined();
     expect(topicMaintenanceReplacementError(next, source, proposal.manifest)).toMatch(/dedicated review/);
     expect(topicMaintenanceReplacementError(next, {...next, body: 'Changed.'}, proposal.manifest)).toMatch(
@@ -163,7 +183,7 @@ describe('topic maintenance manifest', () => {
     const parsed = parseMemoryDocument(uri, proposal.content)!;
     expect(parsed.metadata.topicMaintenance).toEqual(proposal.manifest);
     expect(parsed.metadata.codeCitations).toEqual([citation]);
-    expect(proposal.manifest.paragraphs.map(paragraph => paragraph.ordinal)).toEqual([0, 1, 2]);
+    expect(EffectArray.map(proposal.manifest.paragraphs, paragraph => paragraph.ordinal)).toEqual([0, 1, 2]);
     expect(proposal.manifest.paragraphs[0].hash).toBe(proposal.manifest.paragraphs[1].hash);
     expect(proposal.manifest.bodyHash).toBeDefined();
     expect(proposal.content).toContain('schema_version: 10');
@@ -182,7 +202,7 @@ describe('topic maintenance manifest', () => {
     expect(() =>
       buildTopicMaintenanceManifest(source, {
         ...decisions(),
-        additionalDependencies: [{kind: 'dependency', citationId: `tncc_${'f'.repeat(40)}`}],
+        additionalDependencies: [{kind: 'dependency', citationId: `tncc_${Effect.pipe('f', EffectString.repeat(40))}`}],
       }),
     ).toThrow(/citation/i);
     const dirtyCitation = createMemoryCodeCitation({
@@ -202,7 +222,7 @@ describe('topic maintenance manifest', () => {
     const dirty = {...source, metadata: {...source.metadata, codeCitations: [dirtyCitation]}};
     expect(() => buildTopicMaintenanceManifest(dirty, decisions())).toThrow(/dirty/i);
     expect(() =>
-      buildTopicMaintenanceManifest(record(Array(65).fill('Section.').join('\n\n')), {
+      buildTopicMaintenanceManifest(record(EffectArray.join(Array<string>(65).fill('Section.'), '\n\n')), {
         paragraphs: Array(65).fill({role: 'descriptive', support: 'unresolved', citationIds: []}),
         additionalDependencies: [],
       }),
@@ -231,14 +251,36 @@ describe('topic maintenance manifest', () => {
 
   it('preserves unrelated raw headers and CRLF body bytes during enrollment', () => {
     const source = record();
-    const content = source.content
-      .replace(/\n/gu, '\r\n')
-      .replace('\r\n\r\n', '\r\nopaque_header: keeps-byte-shape\r\n\r\n');
+    const content = Effect.pipe(
+      source.content,
+      EffectString.replace(/\n/gu, '\r\n'),
+      EffectString.replace('\r\n\r\n', '\r\nopaque_header: keeps-byte-shape\r\n\r\n'),
+    );
     const parsed = parseMemoryDocument(uri, content)!;
     const proposal = proposeTopicMaintenanceEnrollment(parsed, decisions());
     expect(proposal.content).toContain('opaque_header: keeps-byte-shape\r\n');
-    expect(proposal.content.slice(proposal.content.indexOf('\r\n\r\n') + 4)).toBe(
-      content.slice(content.indexOf('\r\n\r\n') + 4),
+    expect(
+      Effect.pipe(
+        proposal.content,
+        EffectString.slice(
+          Effect.pipe(
+            proposal.content,
+            EffectString.indexOf('\r\n\r\n'),
+            Effect.Option.getOrElse(() => -1),
+          ) + 4,
+        ),
+      ),
+    ).toBe(
+      Effect.pipe(
+        content,
+        EffectString.slice(
+          Effect.pipe(
+            content,
+            EffectString.indexOf('\r\n\r\n'),
+            Effect.Option.getOrElse(() => -1),
+          ) + 4,
+        ),
+      ),
     );
     expect(proposal.content).toContain('schema_version: 10\r\n');
   });
@@ -246,13 +288,16 @@ describe('topic maintenance manifest', () => {
   it('rejects malformed and unsupported manifest headers before rewrite', () => {
     const content = proposeTopicMaintenanceEnrollment(record(), decisions()).content;
     const cases = [
-      content.replace(/^topic_maintenance: .*$/mu, 'topic_maintenance: {bad-json}'),
+      Effect.pipe(content, EffectString.replace(/^topic_maintenance: .*$/mu, 'topic_maintenance: {bad-json}')),
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
       content.replace(/^topic_maintenance: .*$/mu, line => `${line}\n${line}`),
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
       content.replace(/^topic_maintenance: .*$/mu, line => ` ${line}`),
-      content.replace(/^topic_maintenance: .*$/mu, line => line.replace(': ', ':  ')),
-      content.replace('schema_version: 10', 'schema_version: 8'),
-      content.replace('Same paragraph.', 'Edited paragraph.'),
-      content.replace('"version":1', '"version":2'),
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+      content.replace(/^topic_maintenance: .*$/mu, line => Effect.pipe(line, EffectString.replace(': ', ':  '))),
+      Effect.pipe(content, EffectString.replace('schema_version: 10', 'schema_version: 8')),
+      Effect.pipe(content, EffectString.replace('Same paragraph.', 'Edited paragraph.')),
+      Effect.pipe(content, EffectString.replace('"version":1', '"version":2')),
     ];
     for (const malformed of cases) {
       expect(parseMemoryDocument(uri, malformed)?.metadata.topicMaintenanceError).toBeDefined();
@@ -264,15 +309,18 @@ describe('topic maintenance manifest', () => {
 
   it('reads V1 schema 9 and validates V2 accepted comparison pins on schema 10', () => {
     const proposal = proposeTopicMaintenanceEnrollment(record(), decisions());
-    const legacy = parseMemoryDocument(uri, proposal.content.replace('schema_version: 10', 'schema_version: 9'))!;
+    const legacy = parseMemoryDocument(
+      uri,
+      Effect.pipe(proposal.content, EffectString.replace('schema_version: 10', 'schema_version: 9')),
+    )!;
     expect(legacy.metadata.topicMaintenance?.version).toBe(1);
     expect(topicMaintenanceAcceptedCitation(legacy, citation.id)).toEqual(citation);
     const {id: _id, ...currentInput} = citation;
     const current = createMemoryCodeCitation({
       ...currentInput,
-      fileContentHash: {algorithm: 'sha256', value: 'b'.repeat(64)},
-      sourceCommit: '5'.repeat(40),
-      sourceSnapshotId: `cgsn_${'6'.repeat(40)}`,
+      fileContentHash: {algorithm: 'sha256', value: Effect.pipe('b', EffectString.repeat(64))},
+      sourceCommit: Effect.pipe('5', EffectString.repeat(40)),
+      sourceSnapshotId: `cgsn_${Effect.pipe('6', EffectString.repeat(40))}`,
     });
     const manifest = {
       ...proposal.manifest,
@@ -290,11 +338,16 @@ describe('topic maintenance manifest', () => {
     expect(topicMaintenanceAcceptedCitation(accepted, citation.id)).toEqual(current);
     for (const changed of [
       {...manifest, acceptedSources: []},
-      {...manifest, acceptedSources: [{...manifest.acceptedSources[0], acceptedCitationId: `tncc_${'f'.repeat(40)}`}]},
+      {
+        ...manifest,
+        acceptedSources: [
+          {...manifest.acceptedSources[0], acceptedCitationId: `tncc_${Effect.pipe('f', EffectString.repeat(40))}`},
+        ],
+      },
       {...manifest, acceptedSources: [{...manifest.acceptedSources[0], unknown: true}]},
     ])
       expect(() => validateTopicMaintenanceManifest(changed, accepted)).toThrow();
-    const oldWriter = content.replace('schema_version: 10', 'schema_version: 9');
+    const oldWriter = Effect.pipe(content, EffectString.replace('schema_version: 10', 'schema_version: 9'));
     expect(parseMemoryDocument(uri, oldWriter)?.metadata.topicMaintenanceError).toMatch(/V2.*schema version 10/);
     expect(() => assertMemoryDocumentSchemaWritable(oldWriter)).toThrow();
   });
@@ -303,13 +356,15 @@ describe('topic maintenance manifest', () => {
     fc.assert(
       fc.property(
         fc.array(
-          fc.string({minLength: 1, maxLength: 30}).filter(s => s.trim().length > 0 && !s.includes('\n')),
+          fc
+            .string({minLength: 1, maxLength: 30})
+            .filter(s => Effect.pipe(s, EffectString.trim).length > 0 && !Effect.pipe(s, EffectString.includes('\n'))),
           {minLength: 1, maxLength: 12},
         ),
         sections => {
-          const source = record(sections.join('\n\n'));
+          const source = record(EffectArray.join(sections, '\n\n'));
           const input = {
-            paragraphs: sections.map(() => ({
+            paragraphs: EffectArray.map(sections, () => ({
               role: 'descriptive' as const,
               support: 'direct' as const,
               citationIds: [citation.id],
@@ -319,7 +374,9 @@ describe('topic maintenance manifest', () => {
           const first = buildTopicMaintenanceManifest(source, input);
           expect(buildTopicMaintenanceManifest(source, input)).toEqual(first);
           const content = proposeTopicMaintenanceEnrollment(source, input).content;
-          expect(parseMemoryDocument(uri, content)?.metadata.topicMaintenance).toEqual(first);
+          const roundTripped = parseMemoryDocument(uri, content)?.metadata.topicMaintenance;
+          expect(roundTripped).toEqual(first);
+          expect(JSON.stringify(roundTripped)).toBe(JSON.stringify(first));
           expect(() => validateTopicMaintenanceManifest(first, {...source, body: `${source.body}x`})).toThrow();
         },
       ),

@@ -1,12 +1,17 @@
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Path, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {shellQuote} from '../utils.js';
 import type {ConsolidationModel} from './consolidation_models.js';
 import type {AgentClient} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAX_DRAFT_BYTES = 32 * 1024;
 
-export class ConsolidationAgentError extends Schema.TaggedError<ConsolidationAgentError>()('ConsolidationAgentError', {
+export class ConsolidationAgentError extends Schema.TaggedError<
+  ConsolidationAgentError,
+  {readonly brand: unique symbol}
+>()('ConsolidationAgentError', {
   message: Schema.String,
 }) {}
 
@@ -61,12 +66,12 @@ export const runConsolidationAgentCommand = Effect.fn('manager.runConsolidationA
           .pipe(Effect.mapError(() => ConsolidationAgentError.make({message: 'codex returned no final answer.'})));
         if (new TextEncoder().encode(draft).byteLength > MAX_DRAFT_BYTES)
           return yield* fail('codex final answer exceeded the 32 KiB consolidation limit.');
-        if (!draft.trim()) return yield* fail('codex returned an empty final answer.');
-        return draft.trim();
+        if (!Effect2.pipe(draft, EffectString.trim)) return yield* fail('codex returned an empty final answer.');
+        return Effect2.pipe(draft, EffectString.trim);
       }
 
       if (result.exitCode !== 0) return yield* fail(processFailureMessage(agent, result));
-      const draft = result.stdout.trim();
+      const draft = Effect2.pipe(result.stdout, EffectString.trim);
       if (!draft) return yield* fail('claude returned an empty consolidation draft.');
       return draft;
     }),
@@ -77,30 +82,37 @@ function fail(message: string) {
   return Effect.fail(ConsolidationAgentError.make({message}));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
 function processFailureMessage(agent: string, result: {exitCode: number; stdout: string; stderr: string}): string {
-  const diagnostic = (result.stderr.trim() || result.stdout.trim()).slice(-500);
+  const diagnostic = Effect2.pipe(
+    Effect2.pipe(result.stderr, EffectString.trim) || Effect2.pipe(result.stdout, EffectString.trim),
+    EffectString.slice(-500),
+  );
   return `${agent} exited with ${result.exitCode}.${diagnostic ? `\n${diagnostic}` : ''}`;
 }
 
 function codexFailureMessage(output: string, exitCode: number): string | undefined {
   let lastError: string | undefined;
-  for (const line of output.split('\n')) {
+  for (const line of Effect2.pipe(output, EffectString.split('\n'))) {
     let event: unknown;
     try {
       event = JSON.parse(line);
     } catch {
       continue;
     }
-    if (!event || typeof event !== 'object') continue;
-    const record = event as Record<string, unknown>;
-    const type = typeof record.type === 'string' ? record.type.toLowerCase() : '';
+    if (!isRecord(event)) continue;
+    const record = event;
+    const type = typeof record.type === 'string' ? Effect2.pipe(record.type, EffectString.toLowerCase) : '';
     if (type !== 'error' && type !== 'turn.failed') continue;
     const nested = record.error;
-    const nestedMessage = nested && typeof nested === 'object' ? (nested as Record<string, unknown>).message : nested;
+    const nestedMessage = isRecord(nested) ? nested.message : nested;
     const message = typeof record.message === 'string' ? record.message : nestedMessage;
     const detail =
-      typeof message === 'string' && message.trim()
-        ? `codex failed: ${message.trim().slice(0, 500)}`
+      typeof message === 'string' && Effect2.pipe(message, EffectString.trim)
+        ? `codex failed: ${Effect2.pipe(message, EffectString.trim, EffectString.slice(0, 500))}`
         : 'codex reported a failed turn.';
     if (type === 'turn.failed') return detail;
     lastError = detail;

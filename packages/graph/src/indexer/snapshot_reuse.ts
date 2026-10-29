@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Option} from 'effect';
 import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
 import type {CodeGraphEmbeddingIndexShape} from '../embedding.js';
@@ -177,7 +178,9 @@ export const attemptCommittedDirtyRootAlias = Effect.fn('codeGraph.attemptCommit
   ) {
     return Option.none<ReusableCleanSnapshotAttempt>();
   }
-  const currentPackProvenance = input.languagePacks.activePackProvenance(input.inventory.files.map(file => file.path));
+  const currentPackProvenance = input.languagePacks.activePackProvenance(
+    EffectArray.map(input.inventory.files, file => file.path),
+  );
   const packDelta = assessCodeGraphLanguagePackDelta(candidate.receipt.packProvenance, currentPackProvenance);
   if (packDelta.mode === 'fallback' || packDelta.changedPackIds.length > 0) {
     return Option.none<ReusableCleanSnapshotAttempt>();

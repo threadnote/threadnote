@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {runtimeEntrypointLayer} from './effect/runtime-entrypoint.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -21,8 +22,14 @@ import {
   INTEGRATION_SYNC_WORKER_ARGUMENT,
   WINDOWS_DISK_CAPACITY_WORKER_ARGUMENT,
 } from './worker_protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const executableName = process.execPath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+const executableName = Effect2.pipe(
+  Effect2.pipe(process.execPath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+  effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+);
 const arguments_ = process.argv.slice(2);
 const isModelSetupWorker = arguments_[0] === 'model-setup-worker';
 const isModelSetupRequest = arguments_[0] === 'model-setup-request';
@@ -316,13 +323,16 @@ async function remoteMemoryServiceProgram() {
 function remoteMemoryServiceHelpProgram(): Effect.Effect<void, never, never> {
   return Effect.sync(() => {
     process.stdout.write(
-      [
-        'Threadnote remote memory service',
-        '',
-        'Usage: threadnote remote-memory-service',
-        '',
-        'Starts the remote memory HTTP service using THREADNOTE_REMOTE_* environment variables.',
-      ].join('\n') + '\n',
+      EffectArray.join(
+        [
+          'Threadnote remote memory service',
+          '',
+          'Usage: threadnote remote-memory-service',
+          '',
+          'Starts the remote memory HTTP service using THREADNOTE_REMOTE_* environment variables.',
+        ],
+        '\n',
+      ) + '\n',
     );
   });
 }

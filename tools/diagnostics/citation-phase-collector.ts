@@ -1,12 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Context, Effect, Exit, FileSystem} from 'effect';
-import type {
-  CommandExecutor,
-  CommandOptions,
-  CommandExecutionError,
-  CommandResult,
-  BinaryCommandResult,
-} from '@threadnote/platform/command';
+import type {CommandExecutor, CommandOptions, CommandExecutionError} from '@threadnote/platform/command';
 import {ChildProcessSpawner, make as makeSpawner} from 'effect/process/ChildProcessSpawner';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export type Phase = 'outside-query' | 'initial' | 'evidence' | 'closing';
 interface Frame {
@@ -55,9 +53,9 @@ export function commandOperation(executable: string, args: readonly string[], pr
 }
 
 export function intervalUnion(events: readonly Pick<Event, 'start' | 'milliseconds'>[]): number {
-  const intervals = events
-    .map(event => [event.start, event.start + event.milliseconds] as const)
-    .sort((a, b) => a[0] - b[0]);
+  const intervals = EffectArray.map(events, event => [event.start, event.start + event.milliseconds] as const).sort(
+    (a, b) => a[0] - b[0],
+  );
   let total = 0;
   let end = -Infinity;
   for (const [start, next] of intervals) {
@@ -168,16 +166,22 @@ export class Collector {
   }
   command(executor: CommandExecutor['Service']): CommandExecutor['Service'] {
     const wrap =
-      (method: 'execute' | 'executeBytes') =>
-      (executable: string, args: readonly string[], options?: CommandOptions) => {
+      <A>(
+        method: 'execute' | 'executeBytes',
+        delegate: (
+          executable: string,
+          args: readonly string[],
+          options?: CommandOptions,
+        ) => Effect.Effect<A, CommandExecutionError>,
+      ) =>
+      (
+        executable: string,
+        args: readonly string[],
+        options?: CommandOptions,
+      ): Effect.Effect<A, CommandExecutionError> => {
         const constructed = performance.now();
         return Effect.gen({self: this}, function* () {
           const frame = yield* CurrentFrame;
-          const delegate = executor[method] as (
-            executable: string,
-            args: readonly string[],
-            options?: CommandOptions,
-          ) => Effect.Effect<CommandResult | BinaryCommandResult, CommandExecutionError>;
           if (frame === undefined) return yield* delegate.call(executor, executable, args, options);
           return yield* this.measure(
             'command',
@@ -187,13 +191,10 @@ export class Collector {
           ).pipe(Effect.provideService(CurrentFrame, {...frame, commandId: ++this.sequence}));
         });
       };
-    // The method key selects the corresponding result type; both paths forward the original object.
     return {
       ...executor,
-      execute: wrap('execute') as CommandExecutor['Service']['execute'],
-      ...(executor.executeBytes === undefined
-        ? {}
-        : {executeBytes: wrap('executeBytes') as NonNullable<CommandExecutor['Service']['executeBytes']>}),
+      execute: wrap('execute', executor.execute),
+      ...(executor.executeBytes === undefined ? {} : {executeBytes: wrap('executeBytes', executor.executeBytes)}),
     };
   }
 
@@ -214,19 +215,24 @@ export class Collector {
   }
   fileOperation(file: unknown, paths: Pick<Frame, 'canonicalIndex' | 'sourceRoot'> = {}): string {
     if (typeof file !== 'string') return 'other';
-    const normalize = (value: string) => value.replaceAll('\\', '/').replace(/^\/private\/var\//, '/var/');
+    const normalize = (value: string) =>
+      Effect2.pipe(value, EffectString.replaceAll('\\', '/'), EffectString.replace(/^\/private\/var\//, '/var/'));
     const normalized = normalize(file);
     if (paths.canonicalIndex && normalized === normalize(paths.canonicalIndex)) return 'canonical-index';
-    if (normalized.includes('/git-untracked-v3/') || normalized.includes('/git-status/'))
-      return normalized.endsWith('/index')
+    if (
+      Effect2.pipe(normalized, EffectString.includes('/git-untracked-v3/')) ||
+      Effect2.pipe(normalized, EffectString.includes('/git-status/'))
+    )
+      return Effect2.pipe(normalized, EffectString.endsWith('/index'))
         ? 'private-index'
-        : normalized.includes('.status.lock')
+        : Effect2.pipe(normalized, EffectString.includes('.status.lock'))
           ? 'private-lock'
           : 'private-receipt';
-    if (normalized.includes('/local-context/')) return 'association';
+    if (Effect2.pipe(normalized, EffectString.includes('/local-context/'))) return 'association';
     if (/(?:\.threadnoteignore(?:\.local)?|\.gitignore|\/info\/exclude|\/git\/ignore)$/.test(normalized))
       return 'ignore-policy';
-    if (paths.sourceRoot && normalized.startsWith(normalize(paths.sourceRoot) + '/src/')) return 'cited-source';
+    if (paths.sourceRoot && Effect2.pipe(normalized, EffectString.startsWith(normalize(paths.sourceRoot) + '/src/')))
+      return 'cited-source';
     return 'other';
   }
   filesystem(fs: FileSystem.FileSystem): FileSystem.FileSystem {
@@ -280,21 +286,21 @@ export class Collector {
 }
 
 export function summarize(events: readonly Event[]) {
-  const command = events.filter(event => event.kind === 'command');
-  const files = events.filter(event => event.kind === 'file');
-  const store = events.filter(event => event.kind === 'store' && event.operation !== 'withSession');
+  const command = EffectArray.filter(events, event => event.kind === 'command');
+  const files = EffectArray.filter(events, event => event.kind === 'file');
+  const store = EffectArray.filter(events, event => event.kind === 'store' && event.operation !== 'withSession');
   return {
     commandWallUnion: intervalUnion(command),
     fileWallUnion: intervalUnion(files),
     storeLeafWallUnion: intervalUnion(store),
     combinedLeafWallUnion: intervalUnion([...command, ...files, ...store]),
-    byPhase: Object.fromEntries(
-      (['outside-query', 'initial', 'evidence', 'closing'] as const).map(phase => [
+    byPhase: EffectRecord.fromEntries(
+      EffectArray.map(['outside-query', 'initial', 'evidence', 'closing'] as const, phase => [
         phase,
         {
-          commandWallUnion: intervalUnion(command.filter(event => event.phase === phase)),
-          fileWallUnion: intervalUnion(files.filter(event => event.phase === phase)),
-          storeLeafWallUnion: intervalUnion(store.filter(event => event.phase === phase)),
+          commandWallUnion: intervalUnion(EffectArray.filter(command, event => event.phase === phase)),
+          fileWallUnion: intervalUnion(EffectArray.filter(files, event => event.phase === phase)),
+          storeLeafWallUnion: intervalUnion(EffectArray.filter(store, event => event.phase === phase)),
         },
       ]),
     ),

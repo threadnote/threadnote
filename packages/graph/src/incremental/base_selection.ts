@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
@@ -13,15 +16,15 @@ export const CODE_GRAPH_INCREMENTAL_ANCESTRY_COMMIT_LIMIT = 512;
 export function gitCommitDistanceGroups(output: string, headCommit: string): readonly (readonly string[])[] {
   if (!GIT_OBJECT_ID.test(headCommit)) return [];
   const parentsByCommit = new Map<string, readonly string[]>();
-  for (const line of output.split('\n')) {
-    const fields = line.trim().split(/\s+/u).filter(Boolean);
+  for (const line of Effect2.pipe(output, EffectString.split('\n'))) {
+    const fields = EffectArray.filter(Effect2.pipe(line, EffectString.trim, EffectString.split(/\s+/u)), Boolean);
     if (fields.length === 0) continue;
-    if (fields.some(field => !GIT_OBJECT_ID.test(field))) return [];
+    if (EffectArray.some(fields, field => !GIT_OBJECT_ID.test(field))) return [];
     const commit = fields[0];
     if (commit === undefined) continue;
     const parents = fields.slice(1);
     const previous = parentsByCommit.get(commit);
-    if (previous !== undefined && previous.join('\0') !== parents.join('\0')) return [];
+    if (previous !== undefined && EffectArray.join(previous, '\0') !== EffectArray.join(parents, '\0')) return [];
     parentsByCommit.set(commit, parents);
   }
   if (!parentsByCommit.has(headCommit)) return [];
@@ -46,7 +49,10 @@ export function gitCommitDistanceGroups(output: string, headCommit: string): rea
     group.push(commit);
     commitsByDistance.set(distance, group);
   }
-  return [...commitsByDistance.entries()].sort(([left], [right]) => left - right).map(([, commits]) => commits.sort());
+  return EffectArray.map(
+    [...commitsByDistance.entries()].sort(([left], [right]) => left - right),
+    ([, commits]) => commits.sort(),
+  );
 }
 
 export function preferredIncrementalBaseCommitGroups(repoRoot: string, headCommit: string) {

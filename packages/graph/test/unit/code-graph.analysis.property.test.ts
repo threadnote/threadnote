@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -5,6 +6,8 @@ import * as FC from 'fast-check';
 import {analyzeCodeGraph, type CodeGraphAnalysisResult} from '@threadnote/graph/analysis';
 import type {CodeGraphEdge} from '@threadnote/graph/types';
 import {analysisEdge, analysisSnapshot, analysisSymbol, pagedAnalysisStore} from '../helpers/code-graph-analysis.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const analysisCase = FC.record({
   nodeCount: FC.integer({max: 18, min: 1}),
@@ -41,7 +44,7 @@ describe('code graph analysis properties', () => {
     ({fixture}) => {
       const symbols = Array.from({length: fixture.nodeCount}, (_, index) =>
         analysisSymbol(
-          `node-${index.toString().padStart(2, '0')}`,
+          `node-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
           `package-${index % fixture.packageCount}`,
           `packages/p${index % fixture.packageCount}/src/${index}.ts`,
         ),
@@ -52,7 +55,15 @@ describe('code graph analysis properties', () => {
         const target = symbols[raw.target % symbols.length];
         const key = `${source.id}:${raw.relation}:${target.id}`;
         if (!uniqueEdges.has(key)) {
-          uniqueEdges.set(key, analysisEdge(`edge-${index.toString().padStart(3, '0')}`, source, target, raw.relation));
+          uniqueEdges.set(
+            key,
+            analysisEdge(
+              `edge-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
+              source,
+              target,
+              raw.relation,
+            ),
+          );
         }
       }
       const edges = [...uniqueEdges.values()];
@@ -71,28 +82,35 @@ describe('code graph analysis properties', () => {
 
         expect(stableProjection(second)).toEqual(stableProjection(first));
         expect(first.coverage.complete).toBe(true);
-        expect(new Set(first.memberships.map(item => item.node.id)).size).toBe(first.memberships.length);
+        expect(new Set(EffectArray.map(first.memberships, item => item.node.id)).size).toBe(first.memberships.length);
         expect(
           isSorted(
-            first.memberships.map(item => item.node.id),
-            (left, right) => left.localeCompare(right),
+            EffectArray.map(first.memberships, item => item.node.id),
+            (left, right) => Effect2.pipe(left, EffectString.localeCompare(right)),
           ),
         ).toBe(true);
         expect(isSorted(first.hubs, compareHubOrder)).toBe(true);
         expect(isSorted(first.surprisingLinks, compareSurpriseOrder)).toBe(true);
 
-        const membership = new Map(first.memberships.map(item => [item.node.id, item]));
+        const membership = new Map(EffectArray.map(first.memberships, item => [item.node.id, item]));
         for (const edge of edges) {
           expect(membership.get(edge.sourceId!)?.componentId).toBe(membership.get(edge.targetId!)?.componentId);
-          const source = symbols.find(symbol => symbol.id === edge.sourceId)!;
-          const target = symbols.find(symbol => symbol.id === edge.targetId)!;
+          const source = EffectOption.getOrUndefined(
+            EffectArray.findFirst(symbols, symbol => symbol.id === edge.sourceId),
+          )!;
+          const target = EffectOption.getOrUndefined(
+            EffectArray.findFirst(symbols, symbol => symbol.id === edge.targetId),
+          )!;
           if (source.path === target.path || isCohesive(edge.relation)) {
             expect(membership.get(source.id)?.communityId).toBe(membership.get(target.id)?.communityId);
           }
         }
-        for (const communityId of new Set(first.memberships.map(item => item.communityId))) {
+        for (const communityId of new Set(EffectArray.map(first.memberships, item => item.communityId))) {
           const componentIds = new Set(
-            first.memberships.filter(item => item.communityId === communityId).map(item => item.componentId),
+            EffectArray.map(
+              EffectArray.filter(first.memberships, item => item.communityId === communityId),
+              item => item.componentId,
+            ),
           );
           expect(componentIds.size).toBe(1);
         }
@@ -108,7 +126,7 @@ describe('code graph analysis properties', () => {
     ({fixture}) => {
       const symbols = Array.from({length: fixture.nodeCount}, (_, index) =>
         analysisSymbol(
-          `node-${index.toString().padStart(2, '0')}`,
+          `node-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
           `package-${index % fixture.packageCount}`,
           `packages/p${index % fixture.packageCount}/src/${index}.ts`,
         ),
@@ -119,7 +137,15 @@ describe('code graph analysis properties', () => {
         const target = symbols[raw.target % symbols.length];
         const key = `${source.id}:${raw.relation}:${target.id}`;
         if (!uniqueEdges.has(key)) {
-          uniqueEdges.set(key, analysisEdge(`edge-${index.toString().padStart(3, '0')}`, source, target, raw.relation));
+          uniqueEdges.set(
+            key,
+            analysisEdge(
+              `edge-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
+              source,
+              target,
+              raw.relation,
+            ),
+          );
         }
       }
       const edges = [...uniqueEdges.values()];
@@ -127,13 +153,15 @@ describe('code graph analysis properties', () => {
       const prefixSize = 1 + (fixture.prefixSeed % (symbols.length - 1));
       const orderedSymbols = [...symbols].sort(
         (left, right) =>
-          left.path.localeCompare(right.path) ||
-          left.qualifiedName.localeCompare(right.qualifiedName) ||
-          left.id.localeCompare(right.id),
+          Effect2.pipe(left.path, EffectString.localeCompare(right.path)) ||
+          Effect2.pipe(left.qualifiedName, EffectString.localeCompare(right.qualifiedName)) ||
+          Effect2.pipe(left.id, EffectString.localeCompare(right.id)),
       );
-      const retainedIds = new Set(orderedSymbols.slice(0, prefixSize).map(symbol => symbol.id));
-      const expectedInducedEdges = edges.filter(
-        edge => retainedIds.has(edge.sourceId!) && retainedIds.has(edge.targetId!),
+      const retainedIds = new Set(EffectArray.map(orderedSymbols.slice(0, prefixSize), symbol => symbol.id));
+      const expectedInducedEdges = EffectArray.filter(
+        edges,
+        __effectArrayValue =>
+          !!(edge => retainedIds.has(edge.sourceId!) && retainedIds.has(edge.targetId!))(__effectArrayValue),
       ).length;
       const budget = {
         aggregatePageSize: 1,
@@ -162,7 +190,7 @@ describe('code graph analysis properties', () => {
         });
         expect(first.statistics.analyzedNodeCount).toBe(prefixSize);
         expect(first.statistics.analyzedEdgeCount).toBe(expectedInducedEdges);
-        expect(new Set(first.memberships.map(item => item.node.id))).toEqual(retainedIds);
+        expect(new Set(EffectArray.map(first.memberships, item => item.node.id))).toEqual(retainedIds);
         expect(first.warnings).toContainEqual(expect.stringContaining('bounded path-prefix induced subgraph'));
       });
     },
@@ -195,7 +223,7 @@ function isCohesive(relation: CodeGraphEdge['relation']): boolean {
 }
 
 function isSorted<Value>(values: readonly Value[], compare: (left: Value, right: Value) => number): boolean {
-  return values.every((value, index) => index === 0 || compare(values[index - 1], value) <= 0);
+  return EffectArray.every(values, (value, index) => index === 0 || compare(values[index - 1], value) <= 0);
 }
 
 function compareHubOrder(
@@ -205,8 +233,8 @@ function compareHubOrder(
   return (
     right.degree - left.degree ||
     right.incoming - left.incoming ||
-    left.node.qualifiedName.localeCompare(right.node.qualifiedName) ||
-    left.node.id.localeCompare(right.node.id)
+    Effect2.pipe(left.node.qualifiedName, EffectString.localeCompare(right.node.qualifiedName)) ||
+    Effect2.pipe(left.node.id, EffectString.localeCompare(right.node.id))
   );
 }
 
@@ -217,9 +245,9 @@ function compareSurpriseOrder(
   return (
     right.score - left.score ||
     right.confidence - left.confidence ||
-    left.source.qualifiedName.localeCompare(right.source.qualifiedName) ||
-    left.relation.localeCompare(right.relation) ||
-    left.target.qualifiedName.localeCompare(right.target.qualifiedName) ||
-    left.edgeId.localeCompare(right.edgeId)
+    Effect2.pipe(left.source.qualifiedName, EffectString.localeCompare(right.source.qualifiedName)) ||
+    Effect2.pipe(left.relation, EffectString.localeCompare(right.relation)) ||
+    Effect2.pipe(left.target.qualifiedName, EffectString.localeCompare(right.target.qualifiedName)) ||
+    Effect2.pipe(left.edgeId, EffectString.localeCompare(right.edgeId))
   );
 }

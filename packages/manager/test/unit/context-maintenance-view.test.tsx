@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -26,6 +27,8 @@ import type {
   ManagerContextMaintenanceStatusV2,
 } from '@threadnote/manager/attention/contracts';
 import {ManagerLiveProvider, useManagerLiveResource} from '../../src/live/provider.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let root: Root | undefined;
 beforeEach(() => {
@@ -123,7 +126,7 @@ const status = (): ManagerContextMaintenanceStatusV2 => ({
   lastProgressAt: '2026-10-03T10:00:00Z',
 });
 async function render(element: React.ReactElement) {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
@@ -143,22 +146,38 @@ describe('context maintenance view', () => {
     vi.useFakeTimers();
     const fetch = vi.fn(
       async (input: string) =>
-        new Response(JSON.stringify(input.startsWith('/api/context-health?') ? report() : status())),
+        new Response(
+          JSON.stringify(Effect.pipe(input, EffectString.startsWith('/api/context-health?')) ? report() : status()),
+        ),
     );
     vi.stubGlobal('fetch', fetch);
     await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
-    const healthReads = () => fetch.mock.calls.filter(([path]) => path.startsWith('/api/context-health?')).length;
+    const healthReads = () =>
+      EffectArray.filter(
+        fetch.mock.calls,
+        ([path], index) =>
+          index in fetch.mock.calls && Effect.pipe(path, EffectString.startsWith('/api/context-health?')),
+      ).length;
     expect(healthReads()).toBe(1);
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
     expect(healthReads()).toBe(2);
   });
   it('automatically recovers a stale review after a successful current evidence read', async () => {
-    const finding = {
+    const finding: ManagerContextHealthResponseV1['findings'][number] = {
       id: 'citation-one',
       category: 'citation-changed',
+      confidence: 'high',
+      repairability: 'reviewable',
+      severity: 'medium',
+      summary: 'The source citation changed.',
       uris: ['threadnote://memory/one'],
-      repair: {subjectUri: 'threadnote://memory/one', targetUri: 'threadnote://memory/one'},
-    } as unknown as ManagerContextHealthResponseV1['findings'][number];
+      repair: {
+        kind: 'repair-citation',
+        subjectUri: 'threadnote://memory/one',
+        targetUri: 'threadnote://memory/one',
+        summary: 'Refresh the source citation.',
+      },
+    };
     const fetch = vi.fn(async () => new Response(JSON.stringify({...report(), findings: [finding]})));
     vi.stubGlobal('fetch', fetch);
     const detail = (stale: boolean) => (
@@ -174,9 +193,15 @@ describe('context maintenance view', () => {
     );
     await render(detail(true));
     const preview = () =>
-      [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(button =>
-        button.textContent?.includes('Preview repair'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...document.querySelectorAll<HTMLButtonElement>('dialog button')],
+          button =>
+            button.textContent !== null && Effect.pipe(button.textContent, EffectString.includes('Preview repair')),
+        ),
       );
+    expect(preview()?.disabled).toBe(false);
+    await act(async () => root?.render(detail(false)));
     expect(preview()?.disabled).toBe(false);
     await act(async () => root?.render(detail(false)));
     expect(preview()?.disabled).toBe(false);
@@ -221,7 +246,13 @@ describe('context maintenance view', () => {
     );
     const reader = vi.fn(async () => ({count: 1}));
     function Consumer() {
-      const {snapshot} = useManagerLiveResource('context-maintenance', 'threadnote', reader);
+      const {snapshot} = useManagerLiveResource(
+        'context-maintenance',
+        'threadnote',
+        reader,
+        (value): value is {count: number} =>
+          typeof value === 'object' && value !== null && 'count' in value && typeof value.count === 'number',
+      );
       return <span>{snapshot.status}</span>;
     }
     await render(
@@ -238,7 +269,9 @@ describe('context maintenance view', () => {
       socket.emit({type: 'welcome', epoch: 'one', topics: ['context-maintenance'], heartbeatMilliseconds: 15_000});
     });
     expect(reader).not.toHaveBeenCalled();
-    const subscribe = socket.sent.find(value => value.type === 'subscribe');
+    const subscribe = EffectOption.getOrUndefined(
+      EffectArray.findFirst(socket.sent, value => value.type === 'subscribe'),
+    );
     expect(subscribe).toBeDefined();
     await act(async () => {
       socket.emit({type: 'subscribed', epoch: 'one', generation: subscribe!.generation, startingSequence: 0});
@@ -267,11 +300,11 @@ describe('context maintenance view', () => {
           extractorSet: 'test',
           fileContentHash: {algorithm: 'sha256', value: sha256HexSync(`const limit = ${value};`)},
           path: 'limit.ts',
-          repositoryId: 'b'.repeat(64),
+          repositoryId: Effect.pipe('b', EffectString.repeat(64)),
           repositoryIdentityKind: 'local',
-          sourceCommit: String(value).repeat(40),
+          sourceCommit: Effect.pipe(String(value), EffectString.repeat(40)),
           sourceDirty: false,
-          sourceSnapshotId: `cgsn_${String(value).repeat(40)}`,
+          sourceSnapshotId: `cgsn_${Effect.pipe(String(value), EffectString.repeat(40))}`,
           target: {kind: 'file'},
         });
       const original = capture(8);
@@ -388,7 +421,7 @@ describe('context maintenance view', () => {
         memoryId: 'tn_limit',
         family: 'citation',
         slot: oldFinding.caseIdentity!.slot,
-        evidenceRevision: 'b'.repeat(64),
+        evidenceRevision: Effect.pipe('b', EffectString.repeat(64)),
         subjectUri: uri,
         subjectContentHashes: [{uri, hash}],
         disposition: 'needs-decision' as const,
@@ -485,8 +518,14 @@ describe('context maintenance view', () => {
       );
       expect(document.querySelectorAll('.health-decision-card')).toHaveLength(1);
       const click = async (text: string) => {
-        const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-          item => item.textContent?.trim() === text,
+        const button = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            [...document.querySelectorAll<HTMLButtonElement>('button')],
+            item =>
+              Effect.pipe(item.textContent, effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+              ) === text,
+          ),
         );
         expect(button, text).toBeDefined();
         await act(async () => button!.click());
@@ -521,7 +560,9 @@ describe('context maintenance view', () => {
                 ? {
                     ...staleStatus,
                     generation: 'new-target-hash',
-                    cases: [{...observation, subjectContentHashes: [{uri, hash: 'c'.repeat(64)}]}],
+                    cases: [
+                      {...observation, subjectContentHashes: [{uri, hash: Effect.pipe('c', EffectString.repeat(64))}]},
+                    ],
                   }
                 : staleStatus,
           ),
@@ -548,23 +589,27 @@ describe('context maintenance view', () => {
     await render(
       <TopicReviewContent
         project="threadnote"
-        caseId={`health-case-${'b'.repeat(40)}`}
+        caseId={`health-case-${Effect.pipe('b', EffectString.repeat(40))}`}
         onChanged={() => undefined}
         onOpenLibrary={() => undefined}
       />,
     );
-    expect(requests.some(request => request.includes('/api/attention/topic-review?project=threadnote&caseId='))).toBe(
-      true,
-    );
     expect(
-      requests.some(request => request.includes('/api/attention/context-maintenance?project=threadnote&caseId=')),
+      EffectArray.some(requests, request =>
+        Effect.pipe(request, EffectString.includes('/api/attention/topic-review?project=threadnote&caseId=')),
+      ),
+    ).toBe(true);
+    expect(
+      EffectArray.some(requests, request =>
+        Effect.pipe(request, EffectString.includes('/api/attention/context-maintenance?project=threadnote&caseId=')),
+      ),
     ).toBe(statusCode === 404);
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(`Selector ${statusCode}`);
   });
   it('recovers a stale written topic from a fresh case-only health mount after packet refusal', async () => {
-    const caseId = `health-case-${'b'.repeat(40)}`;
-    const reviewId = `review-${'a'.repeat(24)}`;
-    const hash = 'c'.repeat(64);
+    const caseId = `health-case-${Effect.pipe('b', EffectString.repeat(40))}`;
+    const reviewId = `review-${Effect.pipe('a', EffectString.repeat(24))}`;
+    const hash = Effect.pipe('c', EffectString.repeat(64));
     const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md';
     const item = {
       caseId,
@@ -687,16 +732,35 @@ describe('context maintenance view', () => {
       await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
     };
     await mount();
-    const open = [...document.querySelectorAll<HTMLButtonElement>('button')].find(button =>
-      button.textContent?.includes('Review memory and evidence'),
+    const open = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        __effectArrayValue =>
+          !!(button =>
+            Effect.pipe(button.textContent, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('Review memory and evidence')),
+            ))(__effectArrayValue),
+      ),
     );
     expect(open).toBeDefined();
     await act(async () => open!.click());
-    const finish = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-      button => button.textContent?.trim() === 'Finish saved update verification',
+    const finish = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        button =>
+          Effect.pipe(button.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ) === 'Finish saved update verification',
+      ),
     );
     expect(finish).toBeDefined();
-    expect(requests.some(request => request.includes(`topic-review?project=threadnote&caseId=${caseId}`))).toBe(true);
+    expect(
+      EffectArray.some(requests, request =>
+        Effect.pipe(request, EffectString.includes(`topic-review?project=threadnote&caseId=${caseId}`)),
+      ),
+    ).toBe(true);
     await act(async () => finish!.click());
     expect(document.querySelector('dialog')).toBeNull();
     expect(snapshot.cases).toHaveLength(0);
@@ -709,9 +773,9 @@ describe('context maintenance view', () => {
     'reconciles only a confirmed topic apply while stale polls are pending (failure: %s)',
     async failed => {
       vi.useFakeTimers();
-      const hash = 'a'.repeat(64);
+      const hash = Effect.pipe('a', EffectString.repeat(64));
       const uri = 'threadnote://memory/topic';
-      const citationId = `tncc_${'1'.repeat(40)}`;
+      const citationId = `tncc_${Effect.pipe('1', EffectString.repeat(40))}`;
       const healthReport: ManagerContextHealthResponseV1 = {
         ...report(),
         findings: [
@@ -920,8 +984,14 @@ describe('context maintenance view', () => {
       await render(<HealthWorkspace />);
       expect(document.querySelector('[aria-label="1 memory needs attention in threadnote"]')).not.toBeNull();
       const click = async (label: string) => {
-        const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-          value => value.textContent?.trim() === label,
+        const button = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            [...document.querySelectorAll<HTMLButtonElement>('button')],
+            value =>
+              Effect.pipe(value.textContent, effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+              ) === label,
+          ),
         );
         expect(button, label).toBeDefined();
         await act(async () => button!.click());
@@ -960,7 +1030,7 @@ describe('context maintenance view', () => {
           generation: 'new',
           page: {generation: 'new'},
           cases: [
-            {...item, evidenceRevision: 'b'.repeat(64)},
+            {...item, evidenceRevision: Effect.pipe('b', EffectString.repeat(64))},
             {...item, caseId: 'another-case'},
           ],
           counts: {decisionMemories: 1, 'needs-decision': 2},
@@ -1042,8 +1112,11 @@ describe('context maintenance view', () => {
         report={{...health, findings: [], recordPreviews: [], repositoryEvidence: {state: 'available'}}}
       />,
     );
-    const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-      button => button.textContent === 'Review memory and evidence',
+    const button = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        button => button.textContent === 'Review memory and evidence',
+      ),
     );
     expect(button).toBeDefined();
     await act(async () => button?.click());
@@ -1058,8 +1131,14 @@ describe('context maintenance view', () => {
     expect(document.querySelector('dialog h2')?.textContent).toBe('Compare conflicting memories');
     expect(document.querySelector('dialog [aria-label="Memory being reviewed"]')).toBeNull();
     expect(document.querySelector('dialog')?.textContent).not.toContain('Edit or archive in Library');
-    const openB = [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(
-      button => button.textContent?.trim() === 'Open memory B',
+    const openB = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('dialog button')],
+        button =>
+          Effect.pipe(button.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ) === 'Open memory B',
+      ),
     );
     await act(async () => openB?.click());
     expect(openMemory).toHaveBeenCalledWith(records[1].uri);
@@ -1098,7 +1177,7 @@ describe('context maintenance view', () => {
         lastSeen: '2026-06-01',
         lastChecked: '2026-06-01',
         attemptCount: 0,
-        subjectContentHashes: records.map(record => ({uri: record.uri, hash: 'hash'})),
+        subjectContentHashes: EffectArray.map(records, record => ({uri: record.uri, hash: 'hash'})),
         events: [],
       };
       let applied = false;
@@ -1108,7 +1187,7 @@ describe('context maintenance view', () => {
         vi.fn(async (input: RequestInfo | URL) => {
           const url = new URL(String(input), 'http://manager.test');
           let result: unknown;
-          if (url.pathname.endsWith('/semantic/preview'))
+          if (Effect.pipe(url.pathname, EffectString.endsWith('/semantic/preview')))
             result = {
               preview: {
                 previewId: 'semantic-preview',
@@ -1122,7 +1201,7 @@ describe('context maintenance view', () => {
                 constraints: [],
               },
             };
-          else if (url.pathname.endsWith('/semantic/apply')) {
+          else if (Effect.pipe(url.pathname, EffectString.endsWith('/semantic/apply'))) {
             applied = true;
             result = {result: {status: 'applied', choice: 'left'}};
           } else if (url.searchParams.has('caseId') && url.searchParams.get('view') !== 'status') {
@@ -1133,8 +1212,10 @@ describe('context maintenance view', () => {
               memoryUri: evidence.left.recordUri,
               reason: item.reason,
               evidenceRevision: 'revision',
+              expectedContentHash: 'memory-content-hash',
               semanticEvidence: evidence,
               choices: [],
+              allowedOperations: [],
               instructions: 'Review both memories.',
             };
           } else {
@@ -1172,8 +1253,14 @@ describe('context maintenance view', () => {
       expect(document.querySelectorAll('.health-record')).toHaveLength(2);
       const initialReads = statusReads;
       const click = async (label: string) => {
-        const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-          value => value.textContent?.trim() === label,
+        const button = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            [...document.querySelectorAll<HTMLButtonElement>('button')],
+            value =>
+              Effect.pipe(value.textContent, effectOptionalString =>
+                effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+              ) === label,
+          ),
         );
         expect(button).toBeDefined();
         await act(async () => button!.click());
@@ -1192,7 +1279,10 @@ describe('context maintenance view', () => {
       );
       expect(document.body.textContent).toContain('No decisions are waiting');
       expect(
-        [...document.querySelectorAll('[role="status"]')].some(value => value.textContent === 'Change saved.'),
+        EffectArray.some(
+          [...document.querySelectorAll('[role="status"]')],
+          value => value.textContent === 'Change saved.',
+        ),
       ).toBe(true);
     },
   );
@@ -1271,7 +1361,7 @@ describe('context maintenance view', () => {
           undone = JSON.parse(String(init.body)).receiptId === 'old-receipt';
           return new Response(JSON.stringify({status: 'undone'}));
         }
-        if (url.searchParams.has('caseId'))
+        if (url.searchParams.has('caseId') && url.searchParams.get('view') !== 'status')
           return new Response(
             JSON.stringify({
               version: 2,
@@ -1294,12 +1384,15 @@ describe('context maintenance view', () => {
                     excerptHash: 'hash',
                     supportsCitation: true,
                     startLine: 1,
-                    source: {path: 'old.ts'},
+                    endLine: 1,
+                    fileBytesHash: 'old-file-hash',
+                    source: {path: 'old.ts', sourceCommit: 'old-commit', sourceSnapshotId: 'old-snapshot'},
                   },
                 ],
               },
             }),
           );
+        if (url.searchParams.has('caseId')) return new Response(JSON.stringify({...status(), cases: [item]}));
         return new Response(
           JSON.stringify({
             ...status(),
@@ -1316,7 +1409,9 @@ describe('context maintenance view', () => {
     );
     await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
     const click = async (label: string) => {
-      const button = [...document.querySelectorAll('button')].find(value => value.textContent === label);
+      const button = EffectOption.getOrUndefined(
+        EffectArray.findFirst([...document.querySelectorAll('button')], value => value.textContent === label),
+      );
       expect(button).toBeDefined();
       await act(async () => button!.click());
     };
@@ -1326,7 +1421,9 @@ describe('context maintenance view', () => {
     expect(document.querySelector('dialog')?.open).toBe(true);
     expect(document.querySelector('dialog')?.textContent).toContain('retained historical declaration');
     await click('Close');
-    expect(calls.filter(url => url.searchParams.has('caseId'))[0].searchParams.get('project')).toBe('threadnote');
+    expect(EffectArray.filter(calls, url => url.searchParams.has('caseId'))[0].searchParams.get('project')).toBe(
+      'threadnote',
+    );
     await click('Undo this change');
     expect(undone).toBe(true);
   });
@@ -1406,8 +1503,11 @@ describe('context maintenance view', () => {
     await render(panel(0));
     const card = document.querySelector('.health-decision-card');
     expect(card).not.toBeNull();
-    const review = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-      button => button.textContent === 'Review memory and evidence',
+    const review = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        button => button.textContent === 'Review memory and evidence',
+      ),
     )!;
     await act(async () => review.click());
     const dialog = document.querySelector<HTMLDialogElement>('dialog')!;
@@ -1505,8 +1605,11 @@ describe('context maintenance view', () => {
       }),
     );
     await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
-    const review = [...document.querySelectorAll('button')].find(
-      button => button.textContent === 'Review memory and evidence',
+    const review = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll('button')],
+        button => button.textContent === 'Review memory and evidence',
+      ),
     );
     await act(async () => review!.click());
     const dialog = document.querySelector('dialog');
@@ -1519,7 +1622,11 @@ describe('context maintenance view', () => {
     expect(document.querySelector('.automatic-memory-panel')).toBe(automaticPanel);
     expect(dialog?.open).toBe(true);
     expect(dialog?.textContent).toContain('Visible memory');
-    expect(consoleError.mock.calls.filter(args => args.some(value => String(value).includes('same key')))).toEqual([]);
+    expect(
+      EffectArray.filter(consoleError.mock.calls, args =>
+        EffectArray.some(args, value => EffectString.includes('same key')(String(value))),
+      ),
+    ).toEqual([]);
   });
 
   it('refreshes evidence when background proof advances without a corpus change', async () => {
@@ -1618,6 +1725,11 @@ describe('context maintenance view', () => {
                       caseId: item.caseId,
                       memoryUri: evidence.left.recordUri,
                       evidenceRevision: item.evidenceRevision,
+                      expectedContentHash: 'reviewed-content-hash',
+                      reason: item.reason,
+                      choices: [],
+                      allowedOperations: [],
+                      instructions: 'Compare the selected memories.',
                       family: item.family,
                       semanticEvidence: evidence,
                     },
@@ -1636,6 +1748,11 @@ describe('context maintenance view', () => {
                     caseId: item.caseId,
                     memoryUri: evidence.left.recordUri,
                     evidenceRevision: item.evidenceRevision,
+                    expectedContentHash: 'reviewed-content-hash',
+                    reason: item.reason,
+                    choices: [],
+                    allowedOperations: [],
+                    instructions: 'Compare the selected memories.',
                     family: item.family,
                     semanticEvidence: evidence,
                   });
@@ -1649,8 +1766,11 @@ describe('context maintenance view', () => {
           });
           vi.stubGlobal('fetch', fetch);
           await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={revision} />);
-          const open = [...document.querySelectorAll('button')].find(
-            button => button.textContent === 'Review memory and evidence',
+          const open = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              [...document.querySelectorAll('button')],
+              button => button.textContent === 'Review memory and evidence',
+            ),
           );
           expect(open).toBeDefined();
           await act(async () => open!.click());
@@ -1676,9 +1796,10 @@ describe('context maintenance view', () => {
             expect(HTMLDialogElement.prototype.close).not.toHaveBeenCalled();
           }
           expect(
-            fetch.mock.calls
-              .filter(([, init]) => init?.method === 'POST')
-              .every(([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case'),
+            EffectArray.every(
+              EffectArray.filter(fetch.mock.calls, ([, init]) => init?.method === 'POST'),
+              ([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case',
+            ),
           ).toBe(true);
           await act(async () =>
             root?.render(<ContextHealthPanel {...props} project="other" refreshGeneration={revision} />),
@@ -1768,7 +1889,7 @@ describe('context maintenance view', () => {
   });
 
   it('loads remaining decisions directly in the decision queue without requiring History', async () => {
-    const cases: ManagerContextMaintenanceStatusV2['cases'] = ['first', 'second'].map(name => ({
+    const cases: ManagerContextMaintenanceStatusV2['cases'] = EffectArray.map(['first', 'second'], name => ({
       caseId: name,
       project: 'threadnote',
       memoryId: name,
@@ -1800,8 +1921,11 @@ describe('context maintenance view', () => {
     await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
     const queue = document.querySelector('[aria-label="Needs your decision"]');
     expect(queue?.querySelectorAll('article')).toHaveLength(1);
-    const more = [...queue!.querySelectorAll<HTMLButtonElement>('button')].find(
-      button => button.textContent === 'Load more memories to review',
+    const more = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...queue!.querySelectorAll<HTMLButtonElement>('button')],
+        button => button.textContent === 'Load more memories to review',
+      ),
     );
     expect(more).toBeDefined();
     await act(async () => more!.click());
@@ -1817,9 +1941,12 @@ describe('context maintenance view', () => {
       'fetch',
       vi.fn(async (url: string) => {
         requests.push(url);
-        return new Response(JSON.stringify(url.startsWith('/api/context-health?') ? report() : status()), {
-          headers: {'content-type': 'application/json'},
-        });
+        return new Response(
+          JSON.stringify(Effect.pipe(url, EffectString.startsWith('/api/context-health?')) ? report() : status()),
+          {
+            headers: {'content-type': 'application/json'},
+          },
+        );
       }),
     );
     await render(
@@ -1832,8 +1959,10 @@ describe('context maintenance view', () => {
       />,
     );
     expect(document.body.textContent).toContain('Needs your decision');
-    expect(requests.some(url => url.includes('/citations/jobs'))).toBe(false);
-    expect(requests.some(url => url.includes('/attention/context-maintenance'))).toBe(true);
+    expect(EffectArray.some(requests, url => Effect.pipe(url, EffectString.includes('/citations/jobs')))).toBe(false);
+    expect(
+      EffectArray.some(requests, url => Effect.pipe(url, EffectString.includes('/attention/context-maintenance'))),
+    ).toBe(true);
   });
 
   it('carries the saved excerpt from the active health view into the citation dialog', async () => {
@@ -1874,8 +2003,11 @@ describe('context maintenance view', () => {
         }}
       />,
     );
-    const compare = Array.from(document.querySelectorAll('button')).find(
-      item => item.textContent === 'Compare evidence and preview change',
+    const compare = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Array.from(document.querySelectorAll('button')),
+        item => item.textContent === 'Compare evidence and preview change',
+      ),
     );
     expect(compare).toBeDefined();
     await act(async () => compare?.click());
@@ -1886,18 +2018,25 @@ describe('context maintenance view', () => {
 
   it('combines multiple supported checks into one memory decision with a scoped agent task', async () => {
     const source = report();
-    const findings = ['citation-changed', 'semantic-contradiction'].map((category, index) => ({
-      category,
-      id: `finding-${index}`,
-      caseId: `case-${index}`,
-      classification: 'actionable',
-      confidence: 'medium',
-      severity: 'high',
-      repairability: 'manual-review',
-      summary: 'Current source contradicts the stored claim.',
-      uris: ['threadnote://memory/example'],
-      repair: {kind: 'review-memory', subjectUri: 'threadnote://memory/example', summary: 'Review claim'},
-    })) as ManagerContextHealthResponseV1['findings'];
+    const categories: ReadonlyArray<ManagerContextHealthResponseV1['findings'][number]['category']> = [
+      'citation-changed',
+      'semantic-contradiction',
+    ];
+    const findings: ManagerContextHealthResponseV1['findings'] = EffectArray.map(
+      categories,
+      (category, index): ManagerContextHealthResponseV1['findings'][number] => ({
+        category,
+        id: `finding-${index}`,
+        caseId: `case-${index}`,
+        classification: 'actionable',
+        confidence: 'medium',
+        severity: 'high',
+        repairability: 'manual-review',
+        summary: 'Current source contradicts the stored claim.',
+        uris: ['threadnote://memory/example'],
+        repair: {kind: 'review-memory', subjectUri: 'threadnote://memory/example', summary: 'Review claim'},
+      }),
+    );
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify(status()), {headers: {'content-type': 'application/json'}})),
@@ -1924,8 +2063,11 @@ describe('context maintenance view', () => {
     );
     expect(document.querySelectorAll('.health-record')).toHaveLength(1);
     expect(document.body.textContent).toContain('1 memory needs your decision');
-    const prepare = Array.from(document.querySelectorAll('button')).find(
-      item => item.textContent === 'Review with agent…',
+    const prepare = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Array.from(document.querySelectorAll('button')),
+        item => item.textContent === 'Review with agent…',
+      ),
     );
     await act(async () => prepare?.click());
     expect(document.querySelector('dialog')?.open).toBe(true);
@@ -1973,6 +2115,7 @@ describe('context maintenance view', () => {
             bodyLimitedRecords: 0,
             outputOmittedFindings: 0,
             churnCount: 0,
+            dirtyRecordPairsRemaining: 0,
           },
         ],
       };
@@ -2015,6 +2158,7 @@ describe('context maintenance view', () => {
           bodyLimitedRecords: 1,
           outputOmittedFindings: 4,
           churnCount: 2,
+          dirtyRecordPairsRemaining: 0,
         },
       ],
     };
@@ -2062,6 +2206,7 @@ describe('context maintenance view', () => {
           bodyLimitedRecords: 0,
           outputOmittedFindings: 0,
           churnCount: 0,
+          dirtyRecordPairsRemaining: 0,
         },
       ],
     };
@@ -2122,7 +2267,9 @@ describe('context maintenance view', () => {
     );
     await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
     for (const label of ['Run maintenance now', 'Pause automatic maintenance']) {
-      const button = Array.from(document.querySelectorAll('button')).find(item => item.textContent === label);
+      const button = EffectOption.getOrUndefined(
+        EffectArray.findFirst(Array.from(document.querySelectorAll('button')), item => item.textContent === label),
+      );
       await act(async () => button?.click());
     }
     expect(actions).toEqual(['run-now', 'pause']);
@@ -2134,7 +2281,7 @@ describe('context maintenance view', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) =>
-        url.includes('threadnote')
+        Effect.pipe(url, EffectString.includes('threadnote'))
           ? first
           : new Response(JSON.stringify({...status(), paused: true, projects: [], cases: [], receipts: []}), {
               headers: {'content-type': 'application/json'},
@@ -2162,7 +2309,7 @@ describe('context maintenance view', () => {
       project: 'threadnote',
       subjectUri: 'threadnote://memory/example',
       timestamp: '2026-10-03T10:00:00Z',
-      postHash: 'a'.repeat(64),
+      postHash: Effect.pipe('a', EffectString.repeat(64)),
       state: 'applied' as const,
     };
     vi.stubGlobal(
@@ -2183,16 +2330,27 @@ describe('context maintenance view', () => {
     await render(
       <ContextMaintenanceView {...props} onOpenLibrary={openMemory} project="threadnote" report={report()} />,
     );
-    const undo = Array.from(document.querySelectorAll('button')).find(item => item.textContent === 'Undo this change');
+    const undo = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Array.from(document.querySelectorAll('button')),
+        item => item.textContent === 'Undo this change',
+      ),
+    );
     await act(async () => undo?.click());
     expect(document.body.textContent).toContain('The memory changed after maintenance');
     expect(document.body.textContent).toContain('Inspect its current contents');
     expect(document.body.textContent).not.toContain('HTTP 409');
     expect(
-      Array.from(document.querySelectorAll('button')).some(item => item.textContent === 'Inspect current memory'),
+      EffectArray.some(
+        Array.from(document.querySelectorAll('button')),
+        item => item.textContent === 'Inspect current memory',
+      ),
     ).toBe(true);
-    const inspect = Array.from(document.querySelectorAll('button')).find(
-      item => item.textContent === 'Inspect current memory',
+    const inspect = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Array.from(document.querySelectorAll('button')),
+        item => item.textContent === 'Inspect current memory',
+      ),
     );
     await act(async () => inspect?.click());
     expect(openMemory).toHaveBeenCalledWith(receipt.subjectUri);
@@ -2219,7 +2377,7 @@ it('refreshes a stale selected source and displays changed current code without 
   };
   const openMemory = vi.fn();
   const fetch = vi.fn(async (path: string, init?: RequestInit) => {
-    if (path.startsWith('/api/memory')) return new Response(JSON.stringify({content: 'Saved advice.'}));
+    if (EffectString.startsWith('/api/memory')(path)) return new Response(JSON.stringify({content: 'Saved advice.'}));
     if (init?.method === 'POST') {
       expect(JSON.parse(String(init.body))).toEqual({
         action: 'refresh-case',
@@ -2253,7 +2411,9 @@ it('refreshes a stale selected source and displays changed current code without 
                   supportsCitation: true,
                   excerptHash: 'recorded',
                   startLine: 1,
-                  source: {path: 'source.ts'},
+                  endLine: 1,
+                  fileBytesHash: 'source-file-hash',
+                  source: {path: 'source.ts', sourceCommit: 'source-commit', sourceSnapshotId: 'source-snapshot'},
                 },
                 {
                   content: 'changed current source',
@@ -2261,7 +2421,9 @@ it('refreshes a stale selected source and displays changed current code without 
                   supportsCitation: false,
                   excerptHash: 'current',
                   startLine: 1,
-                  source: {path: 'source.ts'},
+                  endLine: 1,
+                  fileBytesHash: 'source-file-hash',
+                  source: {path: 'source.ts', sourceCommit: 'source-commit', sourceSnapshotId: 'source-snapshot'},
                 },
               ],
             },
@@ -2269,7 +2431,7 @@ it('refreshes a stale selected source and displays changed current code without 
         }),
       );
     }
-    if (path.includes('view=status')) return new Response(JSON.stringify({version: 2, cases: [item]}));
+    if (EffectString.includes('view=status')(path)) return new Response(JSON.stringify({...status(), cases: [item]}));
     return new Response(JSON.stringify({error: 'Saved observation is stale.'}), {status: 409});
   });
   vi.stubGlobal('fetch', fetch);
@@ -2288,12 +2450,15 @@ it('refreshes a stale selected source and displays changed current code without 
   expect(document.querySelector('dialog')?.textContent).toContain(
     'Source changed. Review the claim before updating its citation.',
   );
-  const edit = [...document.querySelectorAll('button')].find(
-    button => button.textContent === 'Edit advice for source.ts',
+  const edit = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      button => button.textContent === 'Edit advice for source.ts',
+    ),
   );
   await act(async () => edit!.click());
   expect(openMemory).toHaveBeenCalledWith(uri);
-  expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  expect(EffectArray.filter(fetch.mock.calls, ([, init]) => init?.method === 'POST')).toHaveLength(1);
 });
 
 it('adopts one refreshed case when live status already includes its old and new observations', () => {
@@ -2320,7 +2485,7 @@ it('adopts one refreshed case when live status already includes its old and new 
     [current, historical],
   ]) {
     const adopted = adoptMaintenanceEvidence([before, ...selected, after], current, historical.caseId);
-    expect(adopted.map(item => item.caseId)).toEqual(['before', 'new', 'after']);
+    expect(EffectArray.map(adopted, item => item.caseId)).toEqual(['before', 'new', 'after']);
     expect(adoptMaintenanceEvidence(adopted, current, historical.caseId)).toEqual(adopted);
   }
 });
@@ -2349,8 +2514,9 @@ it('keeps an initially stale selected observation in flight without aborting it 
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.startsWith('/api/memory')) return response({content: 'Retained selected advice.'});
-      if (!input.startsWith('/api/attention/context-maintenance')) throw new Error('Unexpected fixture route');
+      if (EffectString.startsWith('/api/memory')(input)) return response({content: 'Retained selected advice.'});
+      if (!EffectString.startsWith('/api/attention/context-maintenance')(input))
+        throw new Error('Unexpected fixture route');
       calls.push({method: init?.method ?? 'GET', signal: init?.signal});
       if (init?.method === 'POST') {
         expect(JSON.parse(String(init.body))).toMatchObject({
@@ -2364,8 +2530,8 @@ it('keeps an initially stale selected observation in flight without aborting it 
         // A client abort does not release this controlled server operation until its barrier is completed.
         return selected.promise;
       }
-      return input.includes('view=status')
-        ? response({version: 2, cases: [item]})
+      return EffectString.includes('view=status')(input)
+        ? response({...status(), cases: [item]})
         : response({error: 'Fixture saved observation is stale.'}, 409);
     }),
   );
@@ -2382,13 +2548,19 @@ it('keeps an initially stale selected observation in flight without aborting it 
       />,
     );
     await act(async () => vi.advanceTimersByTimeAsync(1500));
-    const trace = calls.map(call => ({method: call.method, aborted: call.signal?.aborted ?? false}));
+    const trace = EffectArray.map(calls, call => ({method: call.method, aborted: call.signal?.aborted ?? false}));
     expect(trace).toEqual([{method: 'POST', aborted: false}]);
     expect(document.querySelector('dialog[open]')).not.toBeNull();
     expect(document.body.textContent).not.toContain('Current evidence could not be checked.');
     expect(
-      [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-        button => button.textContent?.trim() === 'Refresh evidence',
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...document.querySelectorAll<HTMLButtonElement>('button')],
+          button =>
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+            ) === 'Refresh evidence',
+        ),
       )?.disabled,
     ).toBe(true);
   } finally {
@@ -2451,7 +2623,8 @@ it('observes initial freshness and each later stale/manual transition once', asy
         vi.stubGlobal(
           'fetch',
           vi.fn(async (input: string, init?: RequestInit) => {
-            if (input.startsWith('/api/memory')) return new Response(JSON.stringify({content: 'Selected advice.'}));
+            if (EffectString.startsWith('/api/memory')(input))
+              return new Response(JSON.stringify({content: 'Selected advice.'}));
             methods.push(init?.method ?? 'GET');
             if (init?.method === 'POST') {
               expect(JSON.parse(String(init.body))).toMatchObject({
@@ -2461,7 +2634,9 @@ it('observes initial freshness and each later stale/manual transition once', asy
               });
               return new Response(JSON.stringify({outcome: 'ready', item, packet}));
             }
-            return new Response(JSON.stringify(input.includes('view=status') ? {version: 2, cases: [item]} : packet));
+            return new Response(
+              JSON.stringify(EffectString.includes('view=status')(input) ? {...status(), cases: [item]} : packet),
+            );
           }),
         );
         const element = (stale: boolean) => (
@@ -2482,8 +2657,14 @@ it('observes initial freshness and each later stale/manual transition once', asy
           for (const action of actions) {
             if (action === 'manual') {
               observations++;
-              const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-                value => value.textContent?.trim() === 'Refresh evidence',
+              const button = EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  [...document.querySelectorAll<HTMLButtonElement>('button')],
+                  value =>
+                    EffectOption.getOrUndefined(
+                      EffectOption.map(EffectOption.fromNullishOr(value.textContent), text => EffectString.trim(text)),
+                    ) === 'Refresh evidence',
+                ),
               )!;
               expect(button.disabled).toBe(false);
               await act(async () => button.click());
@@ -2493,11 +2674,11 @@ it('observes initial freshness and each later stale/manual transition once', asy
               stale = next;
               await act(async () => root?.render(element(stale)));
             }
-            expect(methods.filter(method => method === 'POST')).toHaveLength(observations);
+            expect(EffectArray.filter(methods, method => method === 'POST')).toHaveLength(observations);
             expect(document.body.textContent).not.toContain('Current evidence could not be checked.');
           }
-          expect(methods.filter(method => method === 'GET')).toHaveLength(initialStale ? 0 : 2);
-          expect(methods.filter(method => method === 'POST')).toHaveLength(observations);
+          expect(EffectArray.filter(methods, method => method === 'GET')).toHaveLength(initialStale ? 0 : 2);
+          expect(EffectArray.filter(methods, method => method === 'POST')).toHaveLength(observations);
         } finally {
           await act(async () => root?.unmount());
           root = undefined;
@@ -2533,7 +2714,8 @@ it.each(['project-change', 'unmount'] as const)(
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string, init?: RequestInit) => {
-        if (input.startsWith('/api/memory')) return new Response(JSON.stringify({content: 'Selected advice.'}));
+        if (EffectString.startsWith('/api/memory')(input))
+          return new Response(JSON.stringify({content: 'Selected advice.'}));
         if (init?.method === 'POST') {
           pendingSignal = init.signal;
           return barrier.promise;
@@ -2668,14 +2850,26 @@ async function pollingEvidenceCase() {
     }),
   );
   await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
-  const open = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-    button => button.textContent?.trim() === 'Review memory and evidence',
+  const open = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      button =>
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+        ) === 'Review memory and evidence',
+    ),
   );
   expect(open).toBeDefined();
   await act(async () => open!.click());
   const refresh = () =>
-    [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(
-      button => button.textContent?.trim() === 'Refresh evidence',
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('dialog button')],
+        button =>
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+          ) === 'Refresh evidence',
+      ),
     )!;
   return {
     posts,
@@ -2730,7 +2924,7 @@ it('keeps one manual selected observation through unchanged real-parent pending 
     await fixture.settlePolls();
     await act(async () => vi.advanceTimersByTimeAsync(1_500));
     expect({
-      selected: fixture.posts.map(post => ({body: post.body, aborted: post.signal?.aborted})),
+      selected: EffectArray.map(fixture.posts, post => ({body: post.body, aborted: post.signal?.aborted})),
       references: document.querySelectorAll('.health-evidence-selectors button').length,
     }).toEqual({
       selected: [
@@ -2766,8 +2960,14 @@ it('keeps selected observations invariant under bounded unchanged parent poll se
           fixture.setHoldPolls(true);
           await act(async () => vi.advanceTimersByTimeAsync(30_000));
           expect(fixture.polls.length).toBeGreaterThan(0);
-          const run = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-            button => button.textContent?.trim() === 'Run maintenance now',
+          const run = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              [...document.querySelectorAll<HTMLButtonElement>('button')],
+              button =>
+                EffectOption.getOrUndefined(
+                  EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+                ) === 'Run maintenance now',
+            ),
           );
           expect(run).toBeDefined();
           expect(run!.disabled).toBe(true);
@@ -2800,9 +3000,10 @@ it('refreshes a genuinely changed selected revision while unrelated poll progres
     [...document.querySelectorAll<HTMLButtonElement>('.health-evidence-selectors button')][1].click(),
   );
   expect(
-    fixture.reads
-      .slice(before)
-      .some(path => new URL(path, 'http://manager.test').searchParams.get('citationId') === 'reference-1'),
+    EffectArray.some(
+      fixture.reads.slice(before),
+      path => new URL(path, 'http://manager.test').searchParams.get('citationId') === 'reference-1',
+    ),
   ).toBe(true);
   expect(fixture.posts).toHaveLength(1);
 });
@@ -2880,7 +3081,7 @@ async function pendingParentDenial(kind: 'cases' | 'receipts' | 'pause' | 'undo'
         project: 'threadnote',
         subjectUri: uri,
         timestamp: '2026-10-03T10:00:00Z',
-        postHash: 'a'.repeat(64),
+        postHash: EffectString.repeat(64)('a'),
         state: 'applied' as const,
       },
     ],
@@ -2934,10 +3135,21 @@ async function pendingParentDenial(kind: 'cases' | 'receipts' | 'pause' | 'undo'
   );
   await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
   const button = (label: string) =>
-    [...document.querySelectorAll<HTMLButtonElement>('button')].find(value => value.textContent?.trim() === label)!;
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        value =>
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(value.textContent), text => EffectString.trim(text)),
+          ) === label,
+      ),
+    )!;
   await act(async () => button('History').click());
-  const details = [...document.querySelectorAll('details')].find(
-    value => value.querySelector('summary')?.textContent === 'Bounded maintenance diagnostics',
+  const details = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('details')],
+      value => value.querySelector('summary')?.textContent === 'Bounded maintenance diagnostics',
+    ),
   )!;
   await act(async () => details.querySelector('summary')!.click());
   expect(details.open).toBe(true);
@@ -3047,7 +3259,10 @@ it('keeps the exact open review and undo409 conflict handling after a delayed un
   expect(dialog?.textContent).toContain('PRIVATE STORED MEMORY');
   expect(dialog?.textContent).toContain('PRIVATE SELECTED EVIDENCE');
   expect(document.body.textContent).toContain('Undo stopped: PARENT REQUEST DENIED.');
-  expect([...document.querySelectorAll('button')].some(button => button.textContent === 'Inspect current memory')).toBe(
-    true,
-  );
+  expect(
+    EffectArray.some(
+      [...document.querySelectorAll('button')],
+      button => button.textContent === 'Inspect current memory',
+    ),
+  ).toBe(true);
 });

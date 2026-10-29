@@ -10,6 +10,8 @@ import {
 import {loadCodeMemoryLinkScaleCandidateBindingAtCommit} from './verify-code-memory-link-release.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function parseScaleProvenanceArguments(args: readonly string[]) {
   const values: Record<string, string | undefined> = {};
@@ -18,7 +20,7 @@ export function parseScaleProvenanceArguments(args: readonly string[]) {
     if (!['--capture', '--candidate-commit', '--output'].includes(option))
       throw ScriptError.make({message: `Unknown scale provenance option: ${option}`});
     const value = args[++index];
-    if (!value || value.startsWith('--') || values[option] !== undefined)
+    if (!value || Effect2.pipe(value, EffectString.startsWith('--')) || values[option] !== undefined)
       throw ScriptError.make({message: `Invalid ${option}`});
     values[option] = value;
   }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
@@ -11,6 +12,8 @@ import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registr
 import type {CodeGraphCitationEvidenceSourceV1} from '@threadnote/graph/citation/capsule';
 import {decodeUtf8} from '@threadnote/graph/inventory/content';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ContextHealthCitationSourceExcerptV1 {
   readonly content: string;
@@ -43,11 +46,11 @@ export function citationSourceExcerpt(
   const maximumLines = Math.min(options.maximumLines ?? 24, 64);
   if (
     content === undefined ||
-    ![startLine, maximumBytes, maximumLines].every(value => Number.isSafeInteger(value) && value > 0) ||
+    !EffectArray.every([startLine, maximumBytes, maximumLines], value => Number.isSafeInteger(value) && value > 0) ||
     (endLine !== undefined && (!Number.isSafeInteger(endLine) || endLine < startLine))
   )
     return undefined;
-  const lines = content.split(/\r\n|\r|\n|\u2028|\u2029/u).slice(startLine - 1, endLine);
+  const lines = Effect2.pipe(content, EffectString.split(/\r\n|\r|\n|\u2028|\u2029/u)).slice(startLine - 1, endLine);
   if (lines.length === 0) return undefined;
   const selected: string[] = [];
   let length = 0;
@@ -58,7 +61,7 @@ export function citationSourceExcerpt(
     length += size;
   }
   if (selected.length === 0) return undefined;
-  const excerpt = selected.join('\n');
+  const excerpt = EffectArray.join(selected, '\n');
   return {
     content: excerpt,
     endLine: startLine + selected.length - 1,
@@ -77,7 +80,7 @@ export function historicalSnapshotCitationMatches(
   citation: MemoryCodeCitationV1,
   evidence: CodeGraphEffectiveSnapshotCitationEvidence,
 ): boolean {
-  const files = evidence.filesByPaths.filter(observation => observation.path === citation.path);
+  const files = EffectArray.filter(evidence.filesByPaths, observation => observation.path === citation.path);
   const file = files.length === 1 ? files[0].file : undefined;
   if (
     file === undefined ||
@@ -87,7 +90,7 @@ export function historicalSnapshotCitationMatches(
     return false;
   const target = citation.target;
   if (target.kind === 'file') return true;
-  const symbols = evidence.symbolsByIds.filter(symbol => symbol.id === target.nodeId);
+  const symbols = EffectArray.filter(evidence.symbolsByIds, symbol => symbol.id === target.nodeId);
   if (symbols.length !== 1) return false;
   const symbol = symbols[0];
   return (
@@ -139,7 +142,8 @@ export const historicalCitationBytesMatch = Effect.fn('contextHealth.historicalC
       Effect.orElseSucceed(() => undefined),
     );
   if (facts === undefined) return false;
-  const matches = facts.symbols.filter(
+  const matches = EffectArray.filter(
+    facts.symbols,
     symbol =>
       symbol.kind === target.symbolKind &&
       symbol.language === target.language &&

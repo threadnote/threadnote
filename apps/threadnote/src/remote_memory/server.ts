@@ -2,6 +2,8 @@ import type {RemoteMemoryServiceConfig} from '@threadnote/remote-memory/config';
 import {createRemoteMemoryHttpHandler} from './http_transport.js';
 import type {LocalIdp} from './local_idp.js';
 import type {RemoteMemoryServiceDependencies} from '@threadnote/remote-memory/service_types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface RemoteMemoryServer {
   readonly hostname: string;
@@ -47,5 +49,7 @@ export function startRemoteMemoryServer(options: StartRemoteMemoryServerOptions)
 function displayHost(hostname: string): string {
   if (hostname === '0.0.0.0') return '127.0.0.1';
   if (hostname === '::') return '[::1]';
-  return hostname.includes(':') && !hostname.startsWith('[') ? `[${hostname}]` : hostname;
+  return Effect.pipe(hostname, EffectString.includes(':')) && !Effect.pipe(hostname, EffectString.startsWith('['))
+    ? `[${hostname}]`
+    : hostname;
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
@@ -9,6 +10,9 @@ import {Console, Effect, FileSystem, Layer, Option, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ROOT_URL = new URL('..', import.meta.url);
 const COMMAND_TIMEOUT_MILLISECONDS = 300_000;
@@ -22,10 +26,14 @@ const smokeSelfContained = Effect.scoped(
     const path = yield* Path.Path;
     const root = yield* path.fromFileUrl(ROOT_URL);
     const executable = path.join(root, 'dist', process.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
-    const packageManifest = JSON.parse(yield* fs.readFileString(path.join(root, 'package.json'))) as {
-      readonly version?: unknown;
-    };
-    if (typeof packageManifest.version !== 'string' || packageManifest.version.length === 0) {
+    const packageManifest: unknown = JSON.parse(yield* fs.readFileString(path.join(root, 'package.json')));
+    if (
+      typeof packageManifest !== 'object' ||
+      packageManifest === null ||
+      !('version' in packageManifest) ||
+      typeof packageManifest.version !== 'string' ||
+      packageManifest.version.length === 0
+    ) {
       return yield* ScriptError.make({message: 'package.json does not declare a release version.'});
     }
     if (!(yield* fs.exists(executable))) {
@@ -65,7 +73,7 @@ const smokeSelfContained = Effect.scoped(
       }).pipe(Effect.map(result => `${result.stdout}\n${result.stderr}`));
 
     const version = yield* run(['--version']);
-    if (!version.includes(`threadnote v${packageManifest.version}`)) {
+    if (!Effect2.pipe(version, EffectString.includes(`threadnote v${packageManifest.version}`))) {
       return yield* ScriptError.make({message: `Standalone release reported an unexpected version:\n${version}`});
     }
 
@@ -88,7 +96,7 @@ const smokeSelfContained = Effect.scoped(
       `${SMOKE_MARKER} stores and recalls without Node or an external Bun installation.`,
     ]);
     const recall = yield* run(['recall', '--query', `${SMOKE_MARKER} standalone recall`]);
-    if (!recall.includes('standalone-bun-smoke.md')) {
+    if (!Effect2.pipe(recall, EffectString.includes('standalone-bun-smoke.md'))) {
       return yield* ScriptError.make({message: `Standalone lexical recall missed the stored memory:\n${recall}`});
     }
 
@@ -107,7 +115,7 @@ const smokeSelfContained = Effect.scoped(
     const storedMemory = yield* fs.readFileString(storedMemoryPath);
     yield* fs.writeFileString(
       storedMemoryPath,
-      `${storedMemory.trimEnd()}\n\n${LARGE_OUTPUT_START}\n${'x'.repeat(96 * 1024)}\n${LARGE_OUTPUT_END}\n`,
+      `${Effect2.pipe(storedMemory, EffectString.trimEnd)}\n\n${LARGE_OUTPUT_START}\n${Effect2.pipe('x', EffectString.repeat(96 * 1024))}\n${LARGE_OUTPUT_END}\n`,
     );
     const largeRead = yield* readLargeOutputThroughPlatformPipe({
       consumer: path.join(root, 'apps', 'threadnote', 'test', 'fixtures', 'cli-output-consumer.ts'),
@@ -152,7 +160,7 @@ const smokeSelfContained = Effect.scoped(
       {concurrency: 1},
     );
     for (const [index, expected] of ['java', 'KotlinApp', 'typescriptHelper', 'swiftBoot'].entries()) {
-      if (!graphOperations[index].includes(expected)) {
+      if (!Effect2.pipe(graphOperations[index], EffectString.includes(expected))) {
         return yield* ScriptError.make({
           message: `Standalone graph operation ${index + 1} missed ${expected}:\n${graphOperations[index]}`,
         });
@@ -182,11 +190,14 @@ const readLargeOutputThroughPlatformPipe = Effect.fn('smokeSelfContained.readLar
     const windows = process.platform === 'win32';
     const inheritedEnvironment = (yield* SystemInfo).environment();
     const quote = (value: string): string =>
-      windows ? `"${value.replaceAll('%', '%%').replaceAll('"', '""')}"` : `'${value.replaceAll("'", `'\\''`)}'`;
-    const producer = [options.executable, 'read', options.uri].map(quote).join(' ');
-    const consumer = [process.execPath, options.consumer, 'text', LARGE_OUTPUT_START, LARGE_OUTPUT_END]
-      .map(quote)
-      .join(' ');
+      windows
+        ? `"${Effect2.pipe(value, EffectString.replaceAll('%', '%%'), EffectString.replaceAll('"', '""'))}"`
+        : `'${Effect2.pipe(value, EffectString.replaceAll("'", `'\\''`))}'`;
+    const producer = EffectArray.join(EffectArray.map([options.executable, 'read', options.uri], quote), ' ');
+    const consumer = EffectArray.join(
+      EffectArray.map([process.execPath, options.consumer, 'text', LARGE_OUTPUT_START, LARGE_OUTPUT_END], quote),
+      ' ',
+    );
     const scriptPath = options.path.join(options.temporaryRoot, windows ? 'large-output.cmd' : 'large-output.sh');
     yield* options.fs.writeFileString(
       scriptPath,
@@ -200,15 +211,23 @@ const readLargeOutputThroughPlatformPipe = Effect.fn('smokeSelfContained.readLar
       maxOutputBytes: 128 * 1024,
       timeoutMs: COMMAND_TIMEOUT_MILLISECONDS,
     });
-    return yield* Effect.try({
-      try: () =>
-        JSON.parse(result.stdout) as {
-          readonly bytes: number;
-          readonly hasEnd: boolean;
-          readonly hasStart: boolean;
-        },
+    const parsed: unknown = yield* Effect.try({
+      try: () => JSON.parse(result.stdout),
       catch: cause => ScriptError.make({message: 'Standalone large-output pipe returned invalid JSON.', cause}),
     });
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      !('bytes' in parsed) ||
+      typeof parsed.bytes !== 'number' ||
+      !('hasEnd' in parsed) ||
+      typeof parsed.hasEnd !== 'boolean' ||
+      !('hasStart' in parsed) ||
+      typeof parsed.hasStart !== 'boolean'
+    ) {
+      return yield* ScriptError.make({message: 'Standalone large-output pipe returned invalid JSON.'});
+    }
+    return {bytes: parsed.bytes, hasEnd: parsed.hasEnd, hasStart: parsed.hasStart};
   },
 );
 
@@ -219,14 +238,17 @@ const writePolyglotRepository = Effect.fn('smokeSelfContained.writePolyglotRepos
   gitExecutable: string,
 ) {
   const files: Readonly<Record<string, string>> = {
-    'Package.swift': [
-      'import PackageDescription',
-      'let package = Package(name: "SwiftWorkspace", targets: [',
-      '  .target(name: "SwiftCore"),',
-      '  .target(name: "SwiftApp", dependencies: ["SwiftCore"])',
-      '])',
-      '',
-    ].join('\n'),
+    'Package.swift': EffectArray.join(
+      [
+        'import PackageDescription',
+        'let package = Package(name: "SwiftWorkspace", targets: [',
+        '  .target(name: "SwiftCore"),',
+        '  .target(name: "SwiftApp", dependencies: ["SwiftCore"])',
+        '])',
+        '',
+      ],
+      '\n',
+    ),
     'Sources/SwiftApp/Main.swift': 'import SwiftCore\npublic func swiftBoot() -> String { makeService() }\n',
     'Sources/SwiftCore/Service.swift': 'public func makeService() -> String { "ready" }\n',
     'app/build.gradle.kts': 'dependencies { implementation(project(":shared")) }\n',
@@ -239,8 +261,8 @@ const writePolyglotRepository = Effect.fn('smokeSelfContained.writePolyglotRepos
     'src/main.ts':
       'import {typescriptHelper} from "./helper.js";\nexport function typescriptBoot() { return typescriptHelper(); }\n',
   };
-  for (const [relative, content] of Object.entries(files)) {
-    const target = path.join(root, ...relative.split('/'));
+  for (const [relative, content] of EffectRecord.toEntries(files)) {
+    const target = path.join(root, ...Effect2.pipe(relative, EffectString.split('/')));
     yield* fs.makeDirectory(path.dirname(target), {recursive: true});
     yield* fs.writeFileString(target, content);
   }
@@ -280,10 +302,10 @@ const verifyMcp = Effect.fn('smokeSelfContained.verifyMcp')(function* (
       Effect.tryPromise({
         try: async () => {
           const tools = await client.listTools();
-          if (!tools.tools.some(tool => tool.name === 'recall_context')) {
+          if (!EffectArray.some(tools.tools, tool => tool.name === 'recall_context')) {
             throw ScriptError.make({message: 'Standalone MCP server did not expose recall_context.'});
           }
-          if (!tools.tools.some(tool => tool.name === 'inspect_code_graph')) {
+          if (!EffectArray.some(tools.tools, tool => tool.name === 'inspect_code_graph')) {
             throw ScriptError.make({message: 'Standalone MCP server did not expose inspect_code_graph.'});
           }
           const recalled = await client.callTool(

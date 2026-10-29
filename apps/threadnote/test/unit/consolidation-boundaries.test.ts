@@ -13,8 +13,11 @@ import {parseMemoryDocument} from '@threadnote/memory/document';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {consolidatedMemory, consolidatedUri, stableRelation} from '../helpers/consolidated-memory.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
-const sharedUri = consolidatedUri.replace('/memories/', '/memories/shared/default/');
+const sharedUri = Effect2.pipe(consolidatedUri, EffectString.replace('/memories/', '/memories/shared/default/'));
 const relativePath = 'durable/projects/threadnote/result.md';
 const fixture = Effect.fn('test.consolidationBoundaries')(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -67,7 +70,13 @@ function assertSharedProjection(content: string, active: boolean) {
   expect(record?.body).toContain('Approved conclusion');
   expect(record?.metadata.consolidationError).toBeUndefined();
   expect(record?.metadata.citationErrors).toBeUndefined();
-  expect(record?.metadata.codeCitations?.map(c => c.path) ?? []).toEqual(active ? ['portable.ts'] : []);
+  expect(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(record?.metadata.codeCitations), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, c => c.path),
+      ),
+    ) ?? [],
+  ).toEqual(active ? ['portable.ts'] : []);
   expect(record?.metadata.relations ?? []).toEqual(active ? [{type: 'references', uri: stableRelation}] : []);
 }
 
@@ -128,8 +137,8 @@ describe('consolidation at publication and repair boundaries', () => {
       const memory = consolidatedMemory();
       yield* f.store.write(f.location, consolidatedUri, memory.content, {mode: 'create'});
       for (const invalid of [
-        memory.content.replace(/Approved conclusion\.$/, 'Unreviewed replacement.'),
-        memory.content.replace(/^consolidation:.*\n/mu, ''),
+        Effect2.pipe(memory.content, EffectString.replace(/Approved conclusion\.$/, 'Unreviewed replacement.')),
+        Effect2.pipe(memory.content, EffectString.replace(/^consolidation:.*\n/mu, '')),
       ]) {
         const result = yield* writeMemoryContentWithExpectedHash(
           f.config,

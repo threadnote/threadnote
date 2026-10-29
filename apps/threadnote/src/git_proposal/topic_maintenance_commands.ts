@@ -67,6 +67,9 @@ import {
   type AutomaticMaintenanceGitProposalV3,
   type TopicMaintenanceGitProposalV2,
 } from './topic_maintenance_proposal.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export interface SharedTopicProposalOptions {
   readonly uri: string;
@@ -97,12 +100,14 @@ export const readSharedTopicGitBaseline = Effect.fn('gitProposal.readSharedTopic
     resource.anchor !== undefined
   )
     return yield* fail('Select an exact existing shared durable project/topic URI.');
+  const projectName = parts.project;
+  const topicName = parts.topic;
   const project = yield* Effect.try({
-    try: () => validatePortableSegment(decodeURIComponent(parts.project!)),
+    try: () => validatePortableSegment(decodeURIComponent(projectName)),
     catch: () => fail('Invalid shared project.'),
   });
   const topic = yield* Effect.try({
-    try: () => validatePortableSegment(decodeURIComponent(parts.topic!)),
+    try: () => validatePortableSegment(decodeURIComponent(topicName)),
     catch: () => fail('Invalid shared topic.'),
   });
   const team = yield* resolveTeam(config, requestedTeam ?? decodeURIComponent(parts.team));
@@ -123,10 +128,16 @@ export const readSharedTopicGitBaseline = Effect.fn('gitProposal.readSharedTopic
       timeoutMs: 30_000,
       maxOutputBytes: 512 * 1024,
     });
-  if ((yield* read(['status', '--porcelain=v1', '-z', '--untracked-files=normal'])).stdout.trim())
+  if (
+    Effect2.pipe(
+      (yield* read(['status', '--porcelain=v1', '-z', '--untracked-files=normal'])).stdout,
+      EffectString.trim,
+    )
+  )
     return yield* fail('Shared Git worktree must be clean before topic proposal review.');
   const treeEntry = (yield* read(['ls-tree', repository.headCommit, '--', path])).stdout;
-  if (!treeEntry.startsWith('100644 blob ')) return yield* fail('Shared topic must be an existing regular Git file.');
+  if (!Effect2.pipe(treeEntry, EffectString.startsWith('100644 blob ')))
+    return yield* fail('Shared topic must be an existing regular Git file.');
   const rawContent = (yield* read(['show', `${repository.headCommit}:${path}`])).stdout;
   const record = parseMemoryDocument(uri, rawContent);
   if (
@@ -179,11 +190,17 @@ export const readSharedAutomaticMemoryGitBaseline = Effect.fn('gitProposal.readS
       catch: cause => fail(String(cause)),
     });
   const path = yield* Effect.try({
-    try: () => assertSafeShareRelativePath(resource.segments.slice(4).map(decodeURIComponent).join('/')),
+    try: () =>
+      assertSafeShareRelativePath(
+        EffectArray.join(EffectArray.map(resource.segments.slice(4), decodeURIComponent), '/'),
+      ),
     catch: () => fail('Invalid existing shared memory path.'),
   });
   const kind = resource.segments[4];
-  if (!['durable', 'handoff', 'incident', 'preference', 'smoke'].includes(kind) || !path.endsWith('.md'))
+  if (
+    !['durable', 'handoff', 'incident', 'preference', 'smoke'].includes(kind) ||
+    !Effect2.pipe(path, EffectString.endsWith('.md'))
+  )
     return yield* fail('Select a managed ordinary-kind shared memory file.');
   const repository = yield* resolveRepositoryIdentity(team.config.worktree);
   if (!repository.remoteIdentity || /^0+$/u.test(repository.headCommit))
@@ -195,10 +212,16 @@ export const readSharedAutomaticMemoryGitBaseline = Effect.fn('gitProposal.readS
       timeoutMs: 30_000,
       maxOutputBytes: 1_048_576,
     });
-  if ((yield* read(['status', '--porcelain=v1', '-z', '--untracked-files=normal'])).stdout.trim())
+  if (
+    Effect2.pipe(
+      (yield* read(['status', '--porcelain=v1', '-z', '--untracked-files=normal'])).stdout,
+      EffectString.trim,
+    )
+  )
     return yield* fail('Shared Git worktree must be clean before automatic review.');
   const treeEntry = (yield* read(['ls-tree', repository.headCommit, '--', path])).stdout;
-  if (!treeEntry.startsWith('100644 blob ')) return yield* fail('Shared memory must be an existing regular Git file.');
+  if (!Effect2.pipe(treeEntry, EffectString.startsWith('100644 blob ')))
+    return yield* fail('Shared memory must be an existing regular Git file.');
   const rawContent = (yield* read(['show', `${repository.headCommit}:${path}`])).stdout;
   const record = parseMemoryDocument(uri, rawContent);
   if (
@@ -233,7 +256,7 @@ export const resolveAutomaticSharedMemorySource = Effect.fn('gitProposal.resolve
       catch: () => fail('Shared source portable locator is malformed.'),
     });
   const uri = locator
-    ? `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(locator.teamId)}/${locator.path.split('/').map(uriSegment).join('/')}`
+    ? `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(locator.teamId)}/${EffectArray.join(EffectArray.map(Effect2.pipe(locator.path, EffectString.split('/')), uriSegment), '/')}`
     : source.uri;
   const baseline = yield* readSharedAutomaticMemoryGitBaseline(config, uri, locator?.teamId, {requireWritable: false});
   if (locator && baseline.repository.repositoryId !== locator.repositoryId)
@@ -340,8 +363,9 @@ const readAutomaticSharingClosure = Effect.fn('gitProposal.readAutomaticSharingC
     )
       return yield* fail('Retained provenance is outside an authorized shared memory namespace.');
     const team = selector.locator?.teamId ?? decodeURIComponent(resource.segments[3]);
-    const path = selector.locator?.path ?? resource.segments.slice(4).map(decodeURIComponent).join('/');
-    const currentUri = `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(team)}/${path.split('/').map(uriSegment).join('/')}`;
+    const path =
+      selector.locator?.path ?? EffectArray.join(EffectArray.map(resource.segments.slice(4), decodeURIComponent), '/');
+    const currentUri = `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(team)}/${EffectArray.join(EffectArray.map(Effect2.pipe(path, EffectString.split('/')), uriSegment), '/')}`;
     const baseline = yield* readSharedAutomaticMemoryGitBaseline(config, currentUri, team, {
       requireWritable: false,
       historicalProvenance: true,
@@ -376,7 +400,11 @@ const readAutomaticSharingClosure = Effect.fn('gitProposal.readAutomaticSharingC
         return yield* fail('A retained current source contains non-public consolidated provenance.');
     }
   }
-  return sha256HexSync(canonicalJson([...proofs.entries()].sort(([left], [right]) => left.localeCompare(right))));
+  return sha256HexSync(
+    canonicalJson(
+      [...proofs.entries()].sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+    ),
+  );
 });
 
 /** Manual author proposal uses the existing private review, with an honest zero-model-call receipt. */
@@ -387,11 +415,15 @@ export const proposeSharedTopicMaintenance = Effect.fn('gitProposal.proposeShare
   if (!(yield* Path.Path).isAbsolute(input.sourceCwd)) return yield* fail('Topic sourceCwd must be absolute.');
   if (input.draftFile && input.draftJson) return yield* fail('Choose draftFile or draftJson, not both.');
   const baseline = yield* readSharedTopicGitBaseline(config, input.uri, input.team);
+  const baselineProject = baseline.record.metadata.project;
+  const baselineTopic = baseline.record.metadata.topic;
+  if (baselineProject === undefined || baselineTopic === undefined)
+    return yield* fail('The selected shared memory has no project or topic metadata.');
   const openingEpoch = yield* readContextMaintenanceSourceEpoch(config, input.sourceCwd);
   const observed = yield* observeTopicMaintenanceEvidence(config, baseline.record, input.sourceCwd);
   const built = yield* buildTopicMaintenanceEvidencePacket(config, baseline.record, input.sourceCwd, observed);
   const packet = yield* Effect.try({
-    try: () => readyEvidence({topicEvidence: built} as Parameters<typeof readyEvidence>[0]),
+    try: () => readyEvidence(built),
     catch: cause => fail(String(cause)),
   });
   const basis = yield* Effect.try({try: () => basisFromPacket(packet), catch: cause => fail(String(cause))});
@@ -418,7 +450,7 @@ export const proposeSharedTopicMaintenance = Effect.fn('gitProposal.proposeShare
       }),
     catch: cause => fail(cause instanceof Error ? cause.message : 'Invalid canonical manual draft.'),
   });
-  const reviewId = `review-${sha256HexSync(`topic-maintenance\0${input.uri}`).slice(0, 24)}`;
+  const reviewId = `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${input.uri}`), EffectString.slice(0, 24))}`;
   const review = yield* withCandidateReviewLock(
     config.agentContextHome,
     reviewId,
@@ -441,8 +473,8 @@ export const proposeSharedTopicMaintenance = Effect.fn('gitProposal.proposeShare
         prior,
         basis,
         payload,
-        baseline.record.metadata.project!,
-        baseline.record.metadata.topic!,
+        baselineProject,
+        baselineTopic,
         ['Explicit manual author proposal; zero model calls.'],
         at,
       );
@@ -458,7 +490,8 @@ export const proposeSharedTopicMaintenance = Effect.fn('gitProposal.proposeShare
   const closing = yield* readSharedTopicGitBaseline(config, input.uri, input.team);
   if (canonicalJson(baselineKey(closing)) !== canonicalJson(baselineKey(baseline)))
     return yield* fail('Shared Git base, target or policy changed during approval preview.');
-  yield* verifyTopicMaintenanceReviewSource(config, closing.record, prepared.maintenance!, input.sourceCwd);
+  if (prepared.maintenance === undefined) return yield* fail('The prepared topic maintenance review is unavailable.');
+  yield* verifyTopicMaintenanceReviewSource(config, closing.record, prepared.maintenance, input.sourceCwd);
   return {origin: 'manual' as const, modelCalls: 0, review: prepared};
 });
 

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {reviewedMemorySupportDigest} from '@threadnote/memory/reviewed-support';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -18,6 +19,9 @@ import {
   verifyAutomaticProposalFile,
   type KnowledgeDeltaGitProposalV1,
 } from './knowledge_delta.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 /** Existing shared-target replacement; V1 remains applied-personal publication. */
 export interface TopicMaintenanceGitProposalV2 extends Omit<KnowledgeDeltaGitProposalV1, 'version'> {
@@ -65,8 +69,8 @@ export function topicMaintenancePublicationPolicyHash(target: GitProposal['targe
 export function topicMaintenanceSourceVectorHash(review: TopicMaintenanceReviewPayloadV1) {
   return sha256HexSync(
     canonicalJson(
-      review.reviewEvidence.map(entry => {
-        if (!entry.handleId.startsWith('current:')) return entry;
+      EffectArray.map(review.reviewEvidence, entry => {
+        if (!Effect.pipe(entry.handleId, EffectString.startsWith('current:'))) return entry;
         const {sourceCommit: _commit, sourceSnapshotId: _snapshot, ...source} = entry.source;
         return {...entry, source};
       }),
@@ -239,7 +243,9 @@ export function buildAutomaticMaintenanceGitProposal(input: {
   )
     fail('Shared automatic final document does not preserve the reviewed target.');
   const candidateId = review.candidates[0].candidateId;
-  const topic = record.metadata.topic ?? input.path.split('/').at(-1)!.slice(0, -3);
+  const topic =
+    record.metadata.topic ??
+    Effect.pipe(Effect.pipe(input.path, EffectString.split('/')).at(-1)!, EffectString.slice(0, -3));
   const files = [
     {
       approval: {
@@ -368,7 +374,7 @@ export function verifyAutomaticMaintenanceGitProposal(proposal: AutomaticMainten
   )
     fail('Automatic shared repository/base/review identity is invalid.');
   if (
-    !Array.isArray(proposal.files) ||
+    !EffectArray.isArray(proposal.files) ||
     proposal.files.length !== 1 ||
     proposal.files[0].operation !== 'replace' ||
     proposal.files[0].targetPrecondition.state !== 'present'
@@ -391,13 +397,16 @@ export function verifyAutomaticMaintenanceGitProposal(proposal: AutomaticMainten
   )
     fail('Automatic shared file has unknown or missing fields.');
   if (
-    ![
-      receipt.approvalDigest,
-      receipt.beforeCanonicalHash,
-      receipt.sourceVectorHash,
-      receipt.reviewHash,
-      receipt.supportDigest,
-    ].every(value => typeof value === 'string' && hashPattern.test(value)) ||
+    !EffectArray.every(
+      [
+        receipt.approvalDigest,
+        receipt.beforeCanonicalHash,
+        receipt.sourceVectorHash,
+        receipt.reviewHash,
+        receipt.supportDigest,
+      ],
+      value => typeof value === 'string' && hashPattern.test(value),
+    ) ||
     proposal.knowledgeDelta.expectedHash !== receipt.reviewHash ||
     receipt.policy?.version !== 1 ||
     receipt.policy.access !== 'read-write' ||
@@ -456,7 +465,7 @@ export function verifyTopicMaintenanceGitProposal(proposal: TopicMaintenanceGitP
   )
     fail('Shared maintenance review identity is invalid.');
   if (
-    !Array.isArray(proposal.files) ||
+    !EffectArray.isArray(proposal.files) ||
     proposal.files.length !== 1 ||
     proposal.files[0].operation !== 'replace' ||
     proposal.files[0].targetPrecondition.state !== 'present'
@@ -465,7 +474,8 @@ export function verifyTopicMaintenanceGitProposal(proposal: TopicMaintenanceGitP
   const receipt = proposal.maintenance;
   if (
     !receipt ||
-    ![receipt.approvalDigest, receipt.beforeCanonicalHash, receipt.sourceVectorHash, receipt.reviewHash].every(
+    !EffectArray.every(
+      [receipt.approvalDigest, receipt.beforeCanonicalHash, receipt.sourceVectorHash, receipt.reviewHash],
       value => typeof value === 'string' && hashPattern.test(value),
     ) ||
     (receipt.baseBranch !== null &&
@@ -499,24 +509,30 @@ export function verifyTopicMaintenanceGitProposal(proposal: TopicMaintenanceGitP
 }
 
 function automaticProtectedHeaders(content: string): string {
-  return canonicalMemoryDocumentContent(content)
-    .replace(/\r\n?/gu, '\n')
-    .split('\n\n', 1)[0]
-    .split('\n')
-    .filter(
+  return EffectArray.join(
+    EffectArray.filter(
+      Effect.pipe(
+        Effect.pipe(canonicalMemoryDocumentContent(content), EffectString.replace(/\r\n?/gu, '\n'))
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+          .split('\n\n', 1)[0],
+        EffectString.split('\n'),
+      ),
       line =>
         !/^(?:schema_version|reviewed_support|topic_maintenance|consolidation|updated_at|last_reviewed):/u.test(line),
-    )
-    .join('\n');
+    ),
+    '\n',
+  );
 }
 
 function closed(value: unknown, required: readonly string[], optional: readonly string[] = []): boolean {
   return (
     typeof value === 'object' &&
     value !== null &&
-    !Array.isArray(value) &&
-    required.every(key => Object.hasOwn(value, key)) &&
-    Object.keys(value).every(
+    !EffectArray.isArray(value) &&
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    EffectArray.every(required, key => Object.hasOwn(value, key)) &&
+    EffectArray.every(
+      EffectRecord.keys(value),
       key => required.includes(key) || (optional.includes(key) && Reflect.get(value, key) !== undefined),
     )
   );

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {BenchmarkLeaseTrace} from '../../../../scripts/benchmark-lease-trace.js';
@@ -23,9 +24,12 @@ describe('bounded paired lease diagnostic trace', () => {
         expect(report.boundariesBalanced).toBe(true);
         expect(report.complete).toBe(false);
         expect(
-          report.points.slice(1).map((point, index) => point.wallMilliseconds - report.points[index].wallMilliseconds),
+          EffectArray.map(
+            report.points.slice(1),
+            (point, index) => point.wallMilliseconds - report.points[index].wallMilliseconds,
+          ),
         ).toEqual(durations);
-        expect(report.points.at(-1)?.wallMilliseconds).toBe(durations.reduce((a, b) => a + b, 0));
+        expect(report.points.at(-1)?.wallMilliseconds).toBe(EffectArray.reduce(durations, 0, (a, b) => a + b));
         expect(report.points.at(-1)?.processCpuMilliseconds).toBe(wall / 2);
         report.points.length = 0;
         expect(trace.report().points).toHaveLength(6);

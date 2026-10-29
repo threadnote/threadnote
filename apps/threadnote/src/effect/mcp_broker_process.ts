@@ -12,6 +12,8 @@ import {
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {emitAnonymousTelemetryEvent, withAnonymousTelemetry} from './telemetry.js';
 import {triggerAutoUpdateIfEnabled} from '../release/auto_update.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const AUTO_UPDATE_CHECK_INTERVAL_MILLISECONDS = 15 * 60 * 1_000;
 
@@ -123,7 +125,11 @@ function spawnMcpRuntime(
   system: SystemInfoShape,
   agentSession: PreparedAgentSession | undefined,
 ): McpBrokerChild {
-  const separator = release.releaseRoot.endsWith('/') || release.releaseRoot.endsWith('\\') ? '' : '/';
+  const separator =
+    Effect2.pipe(release.releaseRoot, EffectString.endsWith('/')) ||
+    Effect2.pipe(release.releaseRoot, EffectString.endsWith('\\'))
+      ? ''
+      : '/';
   const executable = `${release.releaseRoot}${separator}${system.platform === 'win32' ? 'threadnote.exe' : 'threadnote'}`;
   const child = Bun.spawn({
     cmd: [executable, 'mcp-server'],

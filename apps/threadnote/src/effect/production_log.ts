@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   Cause,
   Clock,
@@ -20,6 +21,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const PRODUCTION_LOG_FILE_NAME = 'threadnote.log';
 export const PRODUCTION_LOG_MAX_BYTES = 1024 * 1024;
@@ -95,8 +98,10 @@ class ProductionLogPhaseRecorder extends Context.Service<ProductionLogPhaseRecor
  * later application-service provision. Without this boundary, a long-lived
  * outer invocation can overwrite the recorder of a nested logged invocation.
  */
-export function omitProductionLogPhaseRecorder<R>(context: Context.Context<R>): Context.Context<R> {
-  return Context.omit(ProductionLogPhaseRecorder)(context) as Context.Context<R>;
+export function omitProductionLogPhaseRecorder<R>(
+  context: Context.Context<R>,
+): Context.Context<Exclude<R, ProductionLogPhaseRecorder>> {
+  return Context.omit(ProductionLogPhaseRecorder)(context);
 }
 
 export interface ProductionLogPolicy {
@@ -345,8 +350,8 @@ export const productionLogSupportExcerpt = Effect.fn('productionLog.productionLo
     if (snapshot.truncated) {
       truncatedFiles += 1;
     }
-    for (const line of snapshot.content.split('\n')) {
-      if (line.trim().length === 0) {
+    for (const line of Effect2.pipe(snapshot.content, EffectString.split('\n'))) {
+      if (Effect2.pipe(line, EffectString.trim).length === 0) {
         continue;
       }
       const parsed = parseProductionLogEntry(line);
@@ -371,7 +376,7 @@ export const productionLogSupportExcerpt = Effect.fn('productionLog.productionLo
   }
   const included = includedNewestFirst.reverse();
   return {
-    content: included.join('\n'),
+    content: EffectArray.join(included, '\n'),
     discardedEntries,
     includedEntries: included.length,
     omittedEntries: serializedEntries.length - included.length + truncatedFiles,
@@ -402,7 +407,11 @@ function appendProductionLogs(
             windowsSharingViolationRetryLimit: PRODUCTION_LOG_WINDOWS_SHARING_VIOLATION_RETRY_LIMIT,
           }
         : PRODUCTION_LOG_LOCK_OPTIONS;
-    const serialized = entries.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+    const serialized =
+      EffectArray.join(
+        EffectArray.map(entries, entry => JSON.stringify(entry)),
+        '\n',
+      ) + '\n';
     const serializedBytes = BigInt(new TextEncoder().encode(serialized).byteLength);
     yield* withProcessProductionLogPermit(
       lockPath,
@@ -581,8 +590,12 @@ function boundedProductionLogRead(fs: FileSystem.FileSystem, filePath: string, m
       const bytes = Option.getOrElse(yield* file.readAlloc(maximumBytes), () => new Uint8Array());
       let content = new TextDecoder().decode(bytes);
       if (offset > 0n) {
-        const firstNewline = content.indexOf('\n');
-        content = firstNewline < 0 ? '' : content.slice(firstNewline + 1);
+        const firstNewline = Effect2.pipe(
+          content,
+          EffectString.indexOf('\n'),
+          Effect2.Option.getOrElse(() => -1),
+        );
+        content = firstNewline < 0 ? '' : Effect2.pipe(content, EffectString.slice(firstNewline + 1));
       }
       return {content, rejected: false, truncated: offset > 0n};
     }),
@@ -692,10 +705,10 @@ function isOwnedThreadnoteHome(fs: FileSystem.FileSystem, path: Path.Path, home:
   return fs.readFileString(path.join(home, PRODUCTION_LOG_LAYOUT_RECEIPT_NAME)).pipe(
     Effect.map(content => {
       const parsed = Result.try(() => JSON.parse(content) as unknown);
-      if (Result.isFailure(parsed) || typeof parsed.success !== 'object' || parsed.success === null) {
+      if (Result.isFailure(parsed) || !Predicate.isObject(parsed.success) || EffectArray.isArray(parsed.success)) {
         return false;
       }
-      const receipt = parsed.success as {readonly createdBy?: unknown; readonly version?: unknown};
+      const receipt = parsed.success;
       return (
         receipt.createdBy === 'threadnote' &&
         (receipt.version === THREADNOTE_STORAGE_LAYOUT_VERSION ||
@@ -854,7 +867,7 @@ function parseProductionLogEntry(line: string): ProductionLogEntry | undefined {
 
 function parseProductionLogPhaseTimings(value: unknown): readonly ProductionLogPhaseTiming[] | undefined | false {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > PRODUCTION_LOG_PHASE_TIMING_MAX_COUNT) return false;
+  if (!EffectArray.isArray(value) || value.length > PRODUCTION_LOG_PHASE_TIMING_MAX_COUNT) return false;
   const timings: ProductionLogPhaseTiming[] = [];
   for (const entry of value) {
     if (!Predicate.isObject(entry)) return false;

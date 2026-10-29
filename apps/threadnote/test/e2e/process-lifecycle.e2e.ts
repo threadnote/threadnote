@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {access, mkdir, mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -8,6 +9,8 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {MCP_PROCESS_LIFECYCLE_PROBE_ENV} from '@threadnote/threadnote/constants';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execute = promisify(execFile);
 const root = process.cwd();
@@ -94,11 +97,14 @@ async function waitForModelWorker(parentProcessId: number): Promise<number> {
   const deadline = Date.now() + lifecycleDeadlineMilliseconds;
   while (Date.now() < deadline) {
     const diagnostics = await processDiagnostics();
-    const worker = diagnostics.processes.find(
-      process =>
-        process.parentProcessId === parentProcessId &&
-        process.parentRole === 'mcp' &&
-        process.role === 'local-model-worker',
+    const worker = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        diagnostics.processes,
+        process =>
+          process.parentProcessId === parentProcessId &&
+          process.parentRole === 'mcp' &&
+          process.role === 'local-model-worker',
+      ),
     );
     if (worker) return worker.processId;
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -108,14 +114,7 @@ async function waitForModelWorker(parentProcessId: number): Promise<number> {
   });
 }
 
-async function processDiagnostics(): Promise<{
-  readonly processes: ReadonlyArray<{
-    readonly parentProcessId: number;
-    readonly parentRole?: string;
-    readonly processId: number;
-    readonly role: string;
-  }>;
-}> {
+async function processDiagnostics(): Promise<ProcessDiagnostics> {
   const environment = {...process.env};
   delete environment.THREADNOTE_HOME;
   const result = await execute(cli, ['--home', home, 'processes', '--json'], {
@@ -128,24 +127,54 @@ async function processDiagnostics(): Promise<{
     },
     timeout: lifecycleDeadlineMilliseconds,
   });
-  return JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '{"processes":[]}') as {
-    readonly processes: ReadonlyArray<{
-      readonly parentProcessId: number;
-      readonly parentRole?: string;
-      readonly processId: number;
-      readonly role: string;
-    }>;
-  };
+  const raw: unknown = JSON.parse(
+    Effect.pipe(result.stdout, EffectString.trim, EffectString.split('\n')).at(-1) ?? '{"processes":[]}',
+  );
+  if (!isProcessDiagnostics(raw)) throw TestError.make({message: 'Threadnote returned invalid process diagnostics.'});
+  return raw;
+}
+
+interface ProcessDiagnostics {
+  readonly processes: ReadonlyArray<{
+    readonly parentProcessId: number;
+    readonly parentRole?: string;
+    readonly processId: number;
+    readonly role: string;
+  }>;
+}
+
+function isProcessDiagnostics(value: unknown): value is ProcessDiagnostics {
+  if (typeof value !== 'object' || value === null || !('processes' in value) || !EffectArray.isArray(value.processes))
+    return false;
+  return EffectArray.every(
+    value.processes,
+    process =>
+      typeof process === 'object' &&
+      process !== null &&
+      'parentProcessId' in process &&
+      typeof process.parentProcessId === 'number' &&
+      Number.isFinite(process.parentProcessId) &&
+      (!('parentRole' in process) || process.parentRole === undefined || typeof process.parentRole === 'string') &&
+      'processId' in process &&
+      typeof process.processId === 'number' &&
+      Number.isFinite(process.processId) &&
+      'role' in process &&
+      typeof process.role === 'string',
+  );
 }
 
 async function expectProcessesToExit(processIds: readonly number[]): Promise<void> {
   const deadline = Date.now() + lifecycleDeadlineMilliseconds;
   while (Date.now() < deadline) {
-    if ((await Promise.all(processIds.map(isProcessRunning))).every(running => !running)) return;
+    if (EffectArray.every(await Promise.all(EffectArray.map(processIds, isProcessRunning)), running => !running))
+      return;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   throw TestError.make({
-    message: `Threadnote processes did not exit within ${lifecycleDeadlineMilliseconds} ms: ${processIds.join(', ')}`,
+    message: `Threadnote processes did not exit within ${lifecycleDeadlineMilliseconds} ms: ${EffectArray.join(
+      EffectArray.map(processIds, item => (item === null || item === undefined ? '' : String(item))),
+      ', ',
+    )}`,
   });
 }
 
@@ -165,8 +194,8 @@ async function isProcessRunning(processId: number): Promise<boolean> {
     const result = await execute('ps', ['-o', 'stat=', '-p', String(processId)], {
       timeout: 5_000,
     });
-    const state = result.stdout.trim();
-    return state.length > 0 && !state.startsWith('Z');
+    const state = Effect.pipe(result.stdout, EffectString.trim);
+    return state.length > 0 && !Effect.pipe(state, EffectString.startsWith('Z'));
   } catch {
     return false;
   }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
 import {Clock, Context, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema, Stream} from 'effect';
@@ -5,9 +6,10 @@ import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {CommandExecutor} from '@threadnote/platform/command';
+import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {HttpService, HttpRequestFailed} from '@threadnote/platform/http';
-import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {SystemInfo} from '@threadnote/platform/system';
 import {CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {FileLockTimeout} from '@threadnote/platform/file/lock';
@@ -23,6 +25,9 @@ import {
   modelSetupRetryDelay,
   setModelSetupPolicy,
 } from '../../src/models/setup.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const bytes = new TextEncoder().encode('independent tiny model fixture');
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer);
@@ -62,7 +67,7 @@ const fixture = (options: FixtureOptions = {}) =>
       minimumRamBytes: 8,
       quantization: 'Q4_0',
       repository: 'fixture/model',
-      revision: 'a'.repeat(40),
+      revision: Effect2.pipe('a', EffectString.repeat(40)),
       role: 'generation',
       runtime: {nodeLlamaCpp: '3.22.1'},
       sha256: yield* sha256Hex(bytes),
@@ -76,7 +81,10 @@ const fixture = (options: FixtureOptions = {}) =>
     const alive = new Map<number, string>([[process.pid, 'parent']]);
     const workers = new Map<number, Fiber.Fiber<void, unknown>>();
     const workerPid = process.pid + 10_000;
-    const system = {
+    const baseSystemContext = yield* Layer.build(TestSystemInfoLayer);
+    const baseSystem = Context.get(baseSystemContext, SystemInfo);
+    const system = SystemInfo.of({
+      ...baseSystem,
       processId: process.pid,
       platform: process.platform,
       architecture: process.arch,
@@ -84,7 +92,10 @@ const fixture = (options: FixtureOptions = {}) =>
       homeDirectory: root,
       environment: () => options.environment ?? {},
       availableDiskBytes: () => Effect.succeed(options.disk === null ? undefined : (options.disk ?? 1_000_000)),
-      hardwareInfo: Effect.succeed({effectiveMemoryBytes: options.memory ?? 1_000_000}),
+      hardwareInfo: Effect.map(baseSystem.hardwareInfo, hardware => ({
+        ...hardware,
+        effectiveMemoryBytes: options.memory ?? 1_000_000,
+      })),
       canonicalProcessStartIdentity: (pid: number) => Effect.succeed(alive.get(pid)),
       processStartIdentity: (pid: number) => Effect.succeed(alive.get(pid)),
       isProcessRunning: (pid: number) => alive.has(pid),
@@ -92,7 +103,8 @@ const fixture = (options: FixtureOptions = {}) =>
         signals.push(pid);
         workers.get(pid)?.interruptUnsafe();
       },
-    } as unknown as SystemInfoShape;
+    });
+    const systemContext = Context.make(SystemInfo, system);
     const http = HttpService.of({
       downloadToFile: (_url, target, download) =>
         Effect.gen(function* () {
@@ -144,8 +156,7 @@ const fixture = (options: FixtureOptions = {}) =>
             ),
         }
       : fs;
-    const context = Context.make(SystemInfo, system).pipe(
-      Context.add(FileSystem.FileSystem, storeFileSystem),
+    const context = Context.add(systemContext, FileSystem.FileSystem, storeFileSystem).pipe(
       Context.add(Path.Path, path),
       Context.add(Crypto.Crypto, crypto),
       Context.add(HttpService, http),
@@ -260,7 +271,7 @@ describe('background model setup worker', () => {
       yield* Deferred.await(allEntered);
       yield* Deferred.succeed(release, undefined);
       const results = yield* Fiber.join(requests);
-      expect(results.every(result => result._tag === 'Success')).toBe(true);
+      expect(EffectArray.every(results, result => result._tag === 'Success')).toBe(true);
       expect(f.launches).toHaveLength(1);
     }).pipe(provideTestLayer(platform)),
   );
@@ -358,7 +369,9 @@ describe('background model setup worker', () => {
     FC.assert(
       FC.property(FC.dictionary(FC.string({minLength: 1, maxLength: 20}), FC.string({maxLength: 40})), extras => {
         const environment = {
-          ...Object.fromEntries(Object.entries(extras).map(([key, value]) => [`UNRELATED_${key}`, value])),
+          ...EffectRecord.fromEntries(
+            EffectArray.map(EffectRecord.toEntries(extras), ([key, value]) => [`UNRELATED_${key}`, value]),
+          ),
           PATH: '/bin',
           THREADNOTE_HOME: '/old',
         };

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -36,6 +37,8 @@ import {
 } from '@threadnote/graph/sharing/contribution';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {runCommandEffect} from '@threadnote/platform/command';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
@@ -84,7 +87,7 @@ describe('repository-scoped graph sharing settings', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mode-property-'});
-        const receipts = ['a', 'b'].map(id => ({
+        const receipts = EffectArray.map(['a', 'b'], id => ({
           accessMode: 'join' as const,
           client: {
             casRoot: `${home}/${id}`,
@@ -96,7 +99,7 @@ describe('repository-scoped graph sharing settings', () => {
           profileDigest: sha256Digest(id),
           publisherKeyFingerprint: sha256Digest('publisher'),
           registryCanonical: 'cas://local',
-          repositoryId: id.repeat(64),
+          repositoryId: Effect2.pipe(id, EffectString.repeat(64)),
         }));
         for (const receipt of receipts) yield* writeGraphShareTrustReceipt(home, receipt);
         const expected = ['passive', 'passive'];
@@ -412,7 +415,7 @@ const fixture = Effect.fn('test.sharing.repositoryFixture')(function* (
     canonicalRemote: `github.com/acme/${name}`,
     coordinatorUrl: coordinator,
     organization: 'acme',
-    publisherKeyFingerprint: `sha256:${'a'.repeat(64)}`,
+    publisherKeyFingerprint: `sha256:${Effect2.pipe('a', EffectString.repeat(64))}`,
     repositoryId: identity.repositoryId,
   });
   const configuredProfile = {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import fc from 'fast-check';
 import {Effect, FileSystem, Path} from 'effect';
@@ -33,7 +34,7 @@ describe('Context Brief citation actual-runtime evaluation', () => {
         legacyRecallContinuity: 1,
         scenarioAccuracy: 1,
       });
-      expect(new Map(result.observations.map(observation => [observation.id, observation]))).toMatchObject(
+      expect(new Map(EffectArray.map(result.observations, observation => [observation.id, observation]))).toMatchObject(
         new Map([
           ['exact-across-newer-snapshot', expect.objectContaining({observedStatus: 'exact'})],
           ['exact-incremental-snapshot', expect.objectContaining({observedStatus: 'exact'})],
@@ -69,7 +70,7 @@ describe('Context Brief citation actual-runtime evaluation', () => {
 
       const unsafe = finalizeContextBriefCitationRuntimeEvaluation(
         fixture,
-        result.observations.map(observation =>
+        EffectArray.map(result.observations, observation =>
           observation.id === 'incomplete-graph-abstention'
             ? {...observation, observedFreshness: 'fresh', observedStatus: 'deleted'}
             : observation,

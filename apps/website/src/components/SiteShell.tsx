@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {useEffect, useState, type ReactNode} from 'react';
 import {docsArticleHref, githubUrl, siteHref, xUrl} from '../lib/site';
 import type {SitePage} from '../lib/routes';
@@ -59,7 +60,7 @@ export function SiteShell({
             <span className="sr-only">Toggle navigation</span>
           </button>
           <nav id="site-nav" className={`site-nav${menuOpen ? ' site-nav--open' : ''}`} aria-label="Primary navigation">
-            {navItems.map(item => (
+            {EffectArray.map(navItems, item => (
               <a
                 key={item.href}
                 href={siteHref(item.href)}

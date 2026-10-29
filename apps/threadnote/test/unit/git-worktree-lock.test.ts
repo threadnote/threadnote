@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {publicRemoteMemoryError} from '@threadnote/remote-memory/errors';
 import {it as effectIt} from '@effect/vitest';
@@ -57,7 +58,7 @@ describe('scoped Git worktree lock', () => {
             const lock = yield* makeGitWorktreeLock();
             const entered: number[] = [];
             let active = 0;
-            const jobs = failures.map((fail, index) =>
+            const jobs = EffectArray.map(failures, (fail, index) =>
               lock(lockPath, async () => {
                 expect(active++).toBe(0);
                 entered.push(index);
@@ -71,8 +72,10 @@ describe('scoped Git worktree lock', () => {
               ),
             );
             const results = yield* attempt(() => Promise.all(jobs));
-            expect(results).toEqual(failures.map((fail, index) => (fail ? {failed: true} : {value: index})));
-            expect(entered).toEqual(failures.map((_, index) => index));
+            expect(results).toEqual(
+              EffectArray.map(failures, (fail, index) => (fail ? {failed: true} : {value: index})),
+            );
+            expect(entered).toEqual(EffectArray.map(failures, (_, index) => index));
             expect(active).toBe(0);
             expect(yield* fs.exists(lockPath)).toBe(false);
           }),

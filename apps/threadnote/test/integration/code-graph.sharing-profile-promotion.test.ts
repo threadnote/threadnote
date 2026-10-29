@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Cause, Effect, Exit, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -29,6 +30,8 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {lookupGraphShareTrustReceipt} from '@threadnote/graph/sharing/trust';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const canonicalRegistry = 'oci://registry.example.test/acme/canonical';
 const workerRegistry = 'oci://registry.example.test/acme/worker';
@@ -47,7 +50,13 @@ const repositoryFixture = Effect.fn('test.publisherProfilePromotion.repositoryFi
   const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-profile-promotion-'});
   const repository = path.join(root, 'repository');
   const cas = path.join(root, 'cas');
-  const config = {agentContextHome: path.join(root, 'publisher-home')} as Parameters<typeof runGraphShareInit>[0];
+  const config = {
+    account: 'local',
+    agentContextHome: path.join(root, 'publisher-home'),
+    agentId: 'profile-promotion-test',
+    manifestPath: path.join(root, 'manifest.yaml'),
+    user: 'profile-promotion-test',
+  } satisfies Parameters<typeof runGraphShareInit>[0];
   const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
   const commit = (message: string) =>
     git(['-c', 'user.name=Threadnote Test', '-c', 'user.email=test@threadnote.local', 'commit', '-qm', message]);
@@ -80,7 +89,7 @@ const fixture = Effect.fn('test.publisherProfilePromotion.fixture')(function* ()
   const enrollment = parseGraphShareEnrollment(initialized.enrollment);
   yield* git(['add', '.threadnote/graph-share.json']);
   yield* commit('stage CAS profile');
-  const head = (yield* git(['rev-parse', 'HEAD'])).stdout.trim();
+  const head = Effect2.pipe((yield* git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
   const enrollmentBytes = yield* fs.readFileString(enrollmentPath);
   const keyPath = graphSharingLayout(path, config.agentContextHome, cas).publisherKeyPath;
   const promote = (registryReference = canonicalRegistry) =>
@@ -101,22 +110,27 @@ effectIt.effect('publishes the staged v1 profile and returns a stable v2 candida
         schemaVersion: 2,
       });
       expect(first.manifestDigest).not.toBe(first.profileDigest);
-      expect(first.profileDigest).toBe(f.enrollment.profile.slice('cas://'.length));
+      expect(first.profileDigest).toBe(Effect2.pipe(f.enrollment.profile, EffectString.slice('cas://'.length)));
       expect(yield* f.fs.readFileString(f.enrollmentPath)).toBe(f.enrollmentBytes);
-      expect((yield* f.git(['rev-parse', 'HEAD'])).stdout.trim()).toBe(f.head);
+      expect(Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim)).toBe(f.head);
       expect((yield* f.git(['status', '--porcelain'])).stdout).toBe('');
       expect(f.registry.manifests.has(first.manifestDigest)).toBe(true);
-      expect(f.registry.manifests.has(`tn-profile-${first.manifestDigest.slice('sha256:'.length)}`)).toBe(true);
-      expect(f.registry.requests.some(request => request.method === 'PUT')).toBe(true);
+      expect(
+        f.registry.manifests.has(
+          `tn-profile-${Effect2.pipe(first.manifestDigest, EffectString.slice('sha256:'.length))}`,
+        ),
+      ).toBe(true);
+      expect(EffectArray.some(f.registry.requests, request => request.method === 'PUT')).toBe(true);
 
       const retry = yield* f.promote();
       expect(retry).toEqual(first);
       expect(
-        f.registry.requests.filter(
+        EffectArray.filter(
+          f.registry.requests,
           request =>
             request.method === 'PUT' &&
             request.pathname ===
-              `/v2/acme/canonical/manifests/tn-profile-${first.manifestDigest.slice('sha256:'.length)}`,
+              `/v2/acme/canonical/manifests/tn-profile-${Effect2.pipe(first.manifestDigest, EffectString.slice('sha256:'.length))}`,
         ),
       ).toHaveLength(1);
       expect(yield* f.fs.readFileString(f.enrollmentPath)).toBe(f.enrollmentBytes);
@@ -129,7 +143,7 @@ effectIt.effect('stages a fresh org outside Git history and replaces its tempora
     Effect.gen(function* () {
       const f = yield* repositoryFixture();
       const registry = yield* graphRegistryFixture();
-      const initialHead = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      const initialHead = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       const staged = yield* runGraphShareInit(f.config, {
         cas: f.cas,
         cwd: f.repository,
@@ -144,12 +158,12 @@ effectIt.effect('stages a fresh org outside Git history and replaces its tempora
         runGraphPublisherProfilePromote(f.config, {cas: f.cas, cwd: f.repository, registry: canonicalRegistry}),
       );
       expect(yield* f.fs.readFileString(staged.enrollmentPath)).toBe(stagedBytes);
-      expect((yield* f.git(['rev-parse', 'HEAD'])).stdout.trim()).toBe(initialHead);
+      expect(Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim)).toBe(initialHead);
       yield* f.fs.writeFileString(staged.enrollmentPath, `${JSON.stringify(promoted.enrollment, undefined, 2)}\n`);
       expect(parseGraphShareEnrollment(JSON.parse(yield* f.fs.readFileString(staged.enrollmentPath)))).toEqual(
         promoted.enrollment,
       );
-      expect((yield* f.git(['rev-parse', 'HEAD'])).stdout.trim()).toBe(initialHead);
+      expect(Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim)).toBe(initialHead);
       expect((yield* f.git(['status', '--porcelain'])).stdout).toContain('.threadnote/');
     }).pipe(provideTestLayer(ApplicationLayer)),
   ),
@@ -164,14 +178,26 @@ effectIt.effect('migrates a previously trusted v1 client to a cold v2 OCI profil
       expect(joined.accessMode).toBe('read-only');
       const promoted = yield* f.promote();
       yield* f.fs.writeFileString(f.enrollmentPath, `${JSON.stringify(promoted.enrollment, undefined, 2)}\n`);
-      yield* f.fs.remove(graphSharingCasBlobPath(f.path, f.cas, promoted.profileDigest.slice('sha256:'.length)));
-      yield* f.fs.remove(graphSharingCasBlobPath(f.path, f.cas, promoted.manifestDigest.slice('sha256:'.length)));
+      yield* f.fs.remove(
+        graphSharingCasBlobPath(
+          f.path,
+          f.cas,
+          Effect2.pipe(promoted.profileDigest, EffectString.slice('sha256:'.length)),
+        ),
+      );
+      yield* f.fs.remove(
+        graphSharingCasBlobPath(
+          f.path,
+          f.cas,
+          Effect2.pipe(promoted.manifestDigest, EffectString.slice('sha256:'.length)),
+        ),
+      );
       const requestsBefore = f.registry.requests.length;
       const migrated = yield* f.registry.provide(
         runGraphShareJoin(clientConfig, {cas: f.cas, cwd: f.repository, readOnly: true}),
       );
       expect(migrated.profileDigest).toBe(promoted.profileDigest);
-      expect(f.registry.requests.slice(requestsBefore).map(request => request.pathname)).toEqual([
+      expect(EffectArray.map(f.registry.requests.slice(requestsBefore), request => request.pathname)).toEqual([
         `/v2/acme/canonical/manifests/${promoted.manifestDigest}`,
         `/v2/acme/canonical/blobs/${promoted.profileDigest}`,
       ]);
@@ -221,7 +247,11 @@ effectIt.effect('fresh managed approval pins the OCI root and verified profile b
         agentContextHome: f.path.join(f.repository, '..', 'fresh-approved-home'),
       };
       const clientCas = f.path.join(f.repository, '..', 'fresh-approved-cas');
-      const manifestPath = graphSharingCasBlobPath(f.path, clientCas, promoted.manifestDigest.slice('sha256:'.length));
+      const manifestPath = graphSharingCasBlobPath(
+        f.path,
+        clientCas,
+        Effect2.pipe(promoted.manifestDigest, EffectString.slice('sha256:'.length)),
+      );
       yield* writePrivateJsonFile(approvalFile, {...approval, profileDigest: sha256Digest('wrong')});
       const beforeWrongRoot = f.registry.requests.length;
       expect(
@@ -359,7 +389,11 @@ effectIt.effect('bootstraps from the promoted v2 pointer only while its persiste
         force: true,
         threadnoteHome: f.config.agentContextHome,
       });
-      const manifestPath = graphSharingCasBlobPath(f.path, f.cas, promoted.manifestDigest.slice('sha256:'.length));
+      const manifestPath = graphSharingCasBlobPath(
+        f.path,
+        f.cas,
+        Effect2.pipe(promoted.manifestDigest, EffectString.slice('sha256:'.length)),
+      );
       const manifestBytes = yield* f.fs.readFile(manifestPath);
       yield* f.fs.remove(manifestPath);
       const requestsBefore = f.registry.requests.length;
@@ -392,7 +426,7 @@ effectIt.effect('rejects mismatched repository, key, and registry before any reg
       expect(identity.repositoryId).toBe(f.enrollment.repositoryId);
       const cases = [
         {
-          enrollment: {...f.enrollment, repositoryId: 'f'.repeat(64)},
+          enrollment: {...f.enrollment, repositoryId: Effect2.pipe('f', EffectString.repeat(64))},
           message: /repository|enrollment/iu,
           registry: canonicalRegistry,
         },

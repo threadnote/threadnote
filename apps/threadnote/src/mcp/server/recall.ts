@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
-import {DateTime, Effect, FileSystem, Option, Predicate, Result, Schema} from 'effect';
+import {DateTime, Effect, FileSystem, Option, Result, Schema} from 'effect';
 import {
   activePersonalMemoryUrisFromText,
   existingReferencedUris,
@@ -48,10 +51,10 @@ import {
   memoryReadMcpStructuredContent,
   memoryReadMcpText,
   projectMemoryRead,
-  type MemoryReadResource,
 } from '@threadnote/memory/read/projection';
 import {
   buildCandidateReview,
+  isMemoryCandidate,
   assessReplacementSafety,
   candidateReviewWithAuditEvent,
   candidateReviewWithApplyStage,
@@ -64,14 +67,14 @@ import {
   replacementSafetyBaseline,
   saveCandidateReview,
   type CandidateReview,
+  type LegacyMemoryCandidate,
   type CandidateApplyOperation,
   type MemoryCandidate,
   type SessionCloseoutInput,
-  structuredCloseoutFromInput,
   validateSessionCloseoutInput,
   withCandidateReviewLock,
 } from '@threadnote/memory/candidate';
-import {projectKnowledgeDeltaV1, replacementSafetyWarning} from '@threadnote/memory/knowledge_delta';
+import {replacementSafetyWarning} from '@threadnote/memory/knowledge_delta';
 import {recordRecallFeedback} from '@threadnote/recall/feedback';
 import {AgentResponseBudgetTooSmallError} from '@threadnote/protocol/agent-response';
 import {
@@ -84,6 +87,19 @@ import {
   type CursorCloudMemoryScope,
 } from '../../cursor/cloud.js';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {
+  canonicalReadMetadata,
+  canonicalReadMissing,
+  memoryReadResourcesFromNativeResult,
+} from './recall/read_projection.js';
+export {memoryReadResourcesFromNativeResult} from './recall/read_projection.js';
+import {
+  parseCandidatePolicy,
+  scrubSessionCloseout,
+  sessionCloseoutHasCandidateMaterial,
+  sessionCloseoutHasEvidence,
+} from './recall/session_closeout.js';
+import {candidateReviewResult, candidateReviewStructuredContent} from './recall/candidate_review_response.js';
 import {memoryReadRecoveryForRequestedUri, memoryReadRecoveryText} from '@threadnote/memory/read/recovery';
 import {RECALL_RANKER_VERSION} from '@threadnote/recall/rank';
 import {parseRecallMemoryConnectionInput} from '@threadnote/recall/memory/connections';
@@ -142,6 +158,8 @@ import {
 import {resolveMemoryScope, syncCursorCloudMemoryShares, type MemoryScopeSource} from './cursor_cloud_memory.js';
 import {resolveRecallWorkspaceContext} from './recall_workspace_context.js';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function registerCandidateMemoryTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
@@ -258,7 +276,10 @@ export function registerCandidateMemoryTools(server: EffectMcpServerAdapter, con
           outcome: checkedOutcome.value,
           preferences: candidatePolicy === 'handoff-only' ? [] : normalizeStringOrStrings(preferences),
           project: inferredProject,
-          sourceAgentClient: sourceAgentClient?.trim() || 'mcp',
+          sourceAgentClient:
+            Effect2.pipe(sourceAgentClient, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            ) || 'mcp',
           sourceCommit: normalizeOptionalMetadata(sourceCommit) ?? commonCitationSourceCommit(codeCitations),
           sourceSessionId: normalizeOptionalMetadata(sourceSessionId),
           task: checkedTask.value,
@@ -386,7 +407,9 @@ export function applyMemoryCandidate(
       const review = yield* loadCandidateReview(config.agentContextHome, checkedReviewId.value);
       if (review.maintenance !== undefined || review.maintenanceCapture !== undefined)
         return argumentError('Topic maintenance requires the reviewed apply flow.');
-      const candidate = review.candidates.find(item => item.candidateId === checkedCandidateId.value);
+      const candidate = Option.getOrUndefined(
+        EffectArray.findFirst(review.candidates, item => item.candidateId === checkedCandidateId.value),
+      );
       if (!candidate) {
         return argumentError(`Candidate ${checkedCandidateId.value} is not part of ${checkedReviewId.value}.`);
       }
@@ -602,6 +625,11 @@ export function applyMemoryCandidate(
           }),
         };
       }
+      if (!isMemoryCandidate(candidate)) {
+        return argumentError(
+          `Candidate ${checkedCandidateId.value} is a legacy generic review item without a memory kind and cannot be applied.`,
+        );
+      }
       const text = normalizeOptionalMetadata(editedText) ?? candidate.proposedText;
       const scrub = applyScrubber(text, {redact: true});
       if (scrub.blocker) {
@@ -708,7 +736,12 @@ export function applyMemoryCandidate(
       }
       const approvedOperation: CandidateApplyOperation = effectiveOperation ?? 'create';
       const approvedAt = candidate.applyApprovedAt ?? at;
-      const metadata = approvedCandidateMetadata(review, candidate, approvedAt);
+      if (review.sourceAgentClient === undefined) {
+        return argumentError(
+          'This legacy candidate review lacks source attribution. Create a new review before applying it.',
+        );
+      }
+      const metadata = approvedCandidateMetadata(review, candidate, approvedAt, review.sourceAgentClient);
       const writeParams: WriteDurableMemoryParams = {
         bodyText: scrub.cleaned,
         expectedReplaceContentHash: targetUri ? candidate.targetContentHash : undefined,
@@ -749,11 +782,17 @@ export function applyMemoryCandidate(
       });
       if (result.isError === true) {
         const resultText = textFromCallToolResult(result);
-        if (resultText.includes('Candidate replacement is stale')) {
+        if (Effect2.pipe(resultText, EffectString.includes('Candidate replacement is stale'))) {
           return yield* persistCandidateConflict(
             config,
             applying,
-            applying.candidates.find(item => item.candidateId === candidate?.candidateId) ?? candidate,
+            Option.getOrUndefined(
+              EffectArray.findFirst(
+                applying.candidates,
+                (item): item is MemoryCandidate =>
+                  item.candidateId === candidate?.candidateId && isMemoryCandidate(item),
+              ),
+            ) ?? candidate,
             `${resultText} The approval is recorded as a conflict; start a new review against the current target.`,
           );
         }
@@ -763,12 +802,18 @@ export function applyMemoryCandidate(
           (destinationCanConflict &&
             possiblyWritten &&
             possiblyWritten.metadata.candidateId !== candidate.candidateId) ||
-          resultText.includes('Create conflict')
+          Effect2.pipe(resultText, EffectString.includes('Create conflict'))
         ) {
           return yield* persistCandidateConflict(
             config,
             applying,
-            applying.candidates.find(item => item.candidateId === candidate?.candidateId) ?? candidate,
+            Option.getOrUndefined(
+              EffectArray.findFirst(
+                applying.candidates,
+                (item): item is MemoryCandidate =>
+                  item.candidateId === candidate?.candidateId && isMemoryCandidate(item),
+              ),
+            ) ?? candidate,
             `Candidate ${candidate.candidateId} could not be created because ${intendedMemoryUri} contains another memory. The apply is recorded as a conflict.`,
           );
         }
@@ -889,7 +934,12 @@ export function registerSearchTool(
       if (!checkedUri.ok) {
         return checkedUri.error;
       }
-      if (workset?.trim() && memoryScope) {
+      if (
+        Effect2.pipe(workset, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) &&
+        memoryScope
+      ) {
         return argumentError(`${name} does not allow worksets in the ${memoryScope?.label ?? 'Cursor Cloud'} profile.`);
       }
       const connections = yield* Effect.try({
@@ -910,26 +960,45 @@ export function registerSearchTool(
       }).pipe(Effect.result);
       if (connections._tag === 'Failure') return argumentError(connections.failure);
       const memoryConnections = connections.success;
-      const normalizedQuery = query?.trim() ?? '';
+      const normalizedQuery =
+        Effect2.pipe(query, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) ?? '';
       if (!normalizedQuery && memoryConnections === undefined) {
         return argumentError(
-          [
-            `Threadnote MCP tool "${name}" needs either a non-empty "query" or at least one "memoryRefs" seed.`,
-            'Pass JSON arguments to the tool call.',
-            `Examples: ${name}({"query":"unity-ui-ccc latest handoff"}) or ${name}({"memoryRefs":["threadnote://memory/tn_example"]})`,
-          ].join('\n'),
+          EffectArray.join(
+            [
+              `Threadnote MCP tool "${name}" needs either a non-empty "query" or at least one "memoryRefs" seed.`,
+              'Pass JSON arguments to the tool call.',
+              `Examples: ${name}({"query":"unity-ui-ccc latest handoff"}) or ${name}({"memoryRefs":["threadnote://memory/tn_example"]})`,
+            ],
+            '\n',
+          ),
         );
       }
       const requestedTeam = typeof team === 'string' ? team : undefined;
       const selected = yield* Effect.try({
         try: () =>
-          memoryScope && requestedTeam?.trim() ? cursorCloudShareForTeam(memoryScope, requestedTeam) : undefined,
+          memoryScope &&
+          Effect2.pipe(requestedTeam, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          )
+            ? cursorCloudShareForTeam(memoryScope, requestedTeam)
+            : undefined,
         catch: errorMessage,
       }).pipe(Effect.result);
       if (selected._tag === 'Failure') return argumentError(selected.failure);
       const selectedShare = selected.success;
-      if (memoryScope && requestedTeam?.trim() && !selectedShare) {
-        return argumentError(`${name} team must be one of: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`);
+      if (
+        memoryScope &&
+        Effect2.pipe(requestedTeam, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) &&
+        !selectedShare
+      ) {
+        return argumentError(
+          `${name} team must be one of: ${EffectArray.join(cursorCloudScopeTeams(memoryScope), ', ')}.`,
+        );
       }
       const uriShare =
         memoryScope && checkedUri.value ? cursorCloudShareForUri(memoryScope, checkedUri.value) : undefined;
@@ -953,7 +1022,10 @@ export function registerSearchTool(
           callerCwd,
           inferScope,
           explain: explain === true,
-          project: project?.trim() || undefined,
+          project:
+            Effect2.pipe(project, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            ) || undefined,
           query: normalizedQuery,
           pinnedUri: scopedUri,
           nodeLimit,
@@ -964,7 +1036,10 @@ export function registerSearchTool(
           threshold: threshold === undefined ? undefined : String(threshold),
           allowedUriScopes: memoryScope ? (scopedUri ? [scopedUri] : cursorCloudScopeRoots(memoryScope)) : undefined,
           syncTeam: selectedShare?.team ?? uriShare?.team,
-          workset: workset?.trim() || undefined,
+          workset:
+            Effect2.pipe(workset, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            ) || undefined,
         },
         progress,
         progressTiming,
@@ -1165,7 +1240,7 @@ function runRecallTool(
                 readRecords: uris => readMemoryRecordsByUri(config, uris),
                 relationTypes: params.relationTypes,
                 rerankerCache,
-                seedUris: [params.pinnedUri, seededUri].filter((uri): uri is string => uri !== undefined),
+                seedUris: EffectArray.filter([params.pinnedUri, seededUri], (uri): uri is string => uri !== undefined),
                 semanticGenerationMismatchPolicy: 'fallback',
                 semanticResult: Option.some(semanticResult),
                 workspaceBranch,
@@ -1268,10 +1343,10 @@ function runRecallTool(
       sections.push(hygieneHints);
     }
     if (syncedTeams.length > 0) {
-      sections.push(`Auto-synced shared memories: ${syncedTeams.join(', ')}`);
+      sections.push(`Auto-synced shared memories: ${EffectArray.join(syncedTeams, ', ')}`);
     }
     if (syncedSources.length > 0) {
-      sections.push(`Auto-synced sources: ${syncedSources.join(', ')}`);
+      sections.push(`Auto-synced sources: ${EffectArray.join(syncedSources, ', ')}`);
     }
     for (const warning of syncWarnings) {
       sections.push(`Auto-sync warning: ${warning}`);
@@ -1279,8 +1354,13 @@ function runRecallTool(
     for (const warning of sourceSyncWarnings) {
       sections.push(`Auto-sync warning: ${warning}`);
     }
-    const rankedResultSections = new Set([semanticSection, exactTail].filter((value): value is string => !!value));
-    const responseNotices = sections.filter(section => !rankedResultSections.has(section));
+    const rankedResultSections = new Set(
+      EffectArray.filter([semanticSection, exactTail], (value): value is string => !!value),
+    );
+    const responseNotices = EffectArray.filter(
+      sections,
+      (section, __effectArrayIndex) => __effectArrayIndex in sections && !rankedResultSections.has(section),
+    );
     const projected = yield* Effect.try({
       try: () =>
         projectRecallMcpResponse(
@@ -1322,7 +1402,9 @@ const recallHygieneHintsSection = Effect.fn('mcpServer.recallHygieneHints')(func
   }
   const records = yield* readMemoryRecordsByUri(config, uris);
   const nudges = recallHygieneNudges(recallText, {records, user: config.user});
-  return nudges.length > 0 ? ['Memory hygiene hints:', ...nudges.map(nudge => `- ${nudge}`)].join('\n') : undefined;
+  return nudges.length > 0
+    ? EffectArray.join(['Memory hygiene hints:', ...EffectArray.map(nudges, nudge => `- ${nudge}`)], '\n')
+    : undefined;
 });
 
 const MAX_REFERENCED_CONTEXT = 5;
@@ -1337,13 +1419,26 @@ const referencedContextSection = Effect.fn('mcpServer.referencedContext')(functi
   allowedUriScopes?: readonly string[],
 ) {
   const withinAllowedScope = (uri: string) =>
-    allowedUriScopes === undefined || allowedUriScopes.some(scope => resourceIdIsWithin(uri, scope));
-  const surfacedUris = activePersonalMemoryUrisFromText(recallText, config.user).filter(withinAllowedScope);
+    allowedUriScopes === undefined ||
+    EffectArray.some(allowedUriScopes, (scope): boolean => resourceIdIsWithin(uri, scope));
+  const surfacedUris = EffectArrayPipe(activePersonalMemoryUrisFromText(recallText, config.user), __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (__effectArrayValue, __effectArrayIndex2) =>
+        __effectArrayIndex2 in __effectArrayValues && withinAllowedScope(__effectArrayValue),
+    ),
+  );
   if (surfacedUris.length === 0) {
     return undefined;
   }
   const surfaced = yield* readMemoryRecordsByUri(config, surfacedUris);
-  const referenced = referencedUrisFromRecords(surfaced, recallText).filter(withinAllowedScope);
+  const referenced = EffectArrayPipe(referencedUrisFromRecords(surfaced, recallText), __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (__effectArrayValue, __effectArrayIndex2) =>
+        __effectArrayIndex2 in __effectArrayValues && withinAllowedScope(__effectArrayValue),
+    ),
+  );
   if (referenced.length === 0) {
     return undefined;
   }
@@ -1389,25 +1484,28 @@ export function registerReadTool(
       return Effect.gen(function* () {
         const memoryScope = yield* resolveMemoryScope(scopeSource);
         const outsideScope = memoryScope
-          ? requestedUris.find(
-              requestedUri =>
-                memoryIdFromIdentityAlias(requestedUri) === undefined &&
-                !cursorCloudUriWithinScope(memoryScope, requestedUri),
+          ? Option.getOrUndefined(
+              EffectArray.findFirst(
+                requestedUris,
+                requestedUri =>
+                  memoryIdFromIdentityAlias(requestedUri) === undefined &&
+                  !cursorCloudUriWithinScope(memoryScope, requestedUri),
+              ),
             )
           : undefined;
         if (outsideScope) {
           return argumentError(`${name} uri must stay within a configured ${profileLabel} share.`);
         }
         const requestedShares = memoryScope
-          ? requestedUris.map(requestedUri =>
+          ? EffectArray.map(requestedUris, requestedUri =>
               memoryIdFromIdentityAlias(requestedUri) === undefined
                 ? cursorCloudShareForUri(memoryScope, requestedUri)
                 : undefined,
             )
           : [];
         const syncTeams =
-          memoryScope && requestedShares.every(share => share !== undefined)
-            ? [...new Set(requestedShares.map(share => share.team))]
+          memoryScope && EffectArray.every(requestedShares, share => share !== undefined)
+            ? [...new Set(EffectArray.map(requestedShares, share => share.team))]
             : undefined;
         const syncWarnings: string[] = [];
         const syncedTeams = yield* syncCursorCloudMemoryShares(config, memoryScope, syncTeams).pipe(
@@ -1438,21 +1536,34 @@ export function registerReadTool(
         if (result.isError === true) {
           return scopedResult;
         }
-        const syncMessages = [
-          syncedTeams.length > 0 ? `Auto-synced shared memories: ${syncedTeams.join(', ')}` : undefined,
-          ...syncWarnings.map(warning => `Auto-sync warning: ${warning}`),
-        ].filter((part): part is string => part !== undefined);
+        const syncMessages = EffectArray.filter(
+          [
+            syncedTeams.length > 0 ? `Auto-synced shared memories: ${EffectArray.join(syncedTeams, ', ')}` : undefined,
+            ...EffectArray.map(syncWarnings, warning => `Auto-sync warning: ${warning}`),
+          ],
+          (part): part is string => part !== undefined,
+        );
         const resources = memoryReadResourcesFromNativeResult(result, requestedUris);
         if (!resources) return argumentError(`${name} could not project the canonical read response.`);
         const missing = canonicalReadMissing(result);
-        const missingWarnings = missing.map(uri => `Missing memory: ${uri}`);
-        const missingRecoveries = missing.flatMap(uri => {
+        const missingWarnings = EffectArray.map(missing, uri => `Missing memory: ${uri}`);
+        const missingRecoveries = EffectArray.flatMap(missing, (uri, index) => {
+          if (!(index in missing)) return [];
           const recovery = memoryReadRecoveryForRequestedUri(uri);
           return recovery === undefined ? [] : [memoryReadRecoveryText(recovery)];
         });
         const canonicalRead = canonicalReadMetadata(result);
         const relocatedOutsideScope = memoryScope
-          ? canonicalRead?.resources.find(resource => !cursorCloudUriWithinScope(memoryScope, resource.canonicalUri))
+          ? Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(canonicalRead), __effectCanonicalRead =>
+                Option.getOrUndefined(
+                  EffectArray.findFirst(
+                    __effectCanonicalRead.resources,
+                    resource => !cursorCloudUriWithinScope(memoryScope, resource.canonicalUri),
+                  ),
+                ),
+              ),
+            )
           : undefined;
         if (relocatedOutsideScope) {
           return argumentError(`${name} relocated uri must stay within a configured ${profileLabel} share.`);
@@ -1496,7 +1607,7 @@ export function registerReadTool(
             {type: 'text' as const, text: memoryReadMcpText(read, responseFormat)},
             ...(read.continuation === undefined ? [] : [{type: 'text' as const, text: read.continuation}]),
             ...(read.receipt === undefined ? [] : [{type: 'text' as const, text: read.receipt}]),
-            ...missingRecoveries.map(text => ({type: 'text' as const, text})),
+            ...EffectArray.map(missingRecoveries, text => ({type: 'text' as const, text})),
           ],
           structuredContent: memoryReadMcpStructuredContent(read, responseFormat),
         };
@@ -1505,254 +1616,11 @@ export function registerReadTool(
   );
 }
 
-export function memoryReadResourcesFromNativeResult(
-  result: CallToolResult,
-  uris: readonly string[],
-): MemoryReadResource[] | undefined {
-  const canonicalRead = canonicalReadMetadata(result);
-  const mappings = canonicalRead?.resources;
-  if (mappings) {
-    return projectCanonicalReadResources(result, mappings);
-  }
-  if (result.content.length !== uris.length) return undefined;
-  return projectCanonicalReadResources(
-    result,
-    uris.map((uri, index) => ({canonicalUri: uri, contentIndex: index, requestedUri: uri})),
-  );
-}
-
-function projectCanonicalReadResources(
-  result: CallToolResult,
-  mappings: readonly {readonly canonicalUri: string; readonly contentIndex: number; readonly requestedUri: string}[],
-): MemoryReadResource[] | undefined {
-  const resources: MemoryReadResource[] = [];
-  for (const mapping of mappings) {
-    const content = result.content[mapping.contentIndex];
-    if (content?.type !== 'text') return undefined;
-    const requestedUri = mapping.requestedUri;
-    const canonicalUri = mapping.canonicalUri;
-    if (memoryIdFromIdentityAlias(requestedUri) !== undefined) {
-      resources.push({requestedUri, text: content.text, uri: requestedUri});
-      continue;
-    }
-    resources.push({
-      ...(requestedUri === canonicalUri ? {} : {canonicalUri, requestedUri}),
-      text: content.text,
-      uri: canonicalUri,
-    });
-  }
-  return resources;
-}
-
-function canonicalReadMissing(result: CallToolResult): readonly string[] {
-  const value = result._meta?.['threadnote.io/canonical-read'];
-  if (!Predicate.isObject(value) || !Array.isArray(value.missing)) return [];
-  return value.missing.filter((uri): uri is string => typeof uri === 'string');
-}
-
-function canonicalReadMetadata(result: CallToolResult):
-  | {
-      readonly resources: readonly {
-        readonly canonicalUri: string;
-        readonly contentIndex: number;
-        readonly requestedUri: string;
-      }[];
-    }
-  | undefined {
-  const value = result._meta?.['threadnote.io/canonical-read'];
-  if (!Predicate.isObject(value)) return undefined;
-  const candidate = value;
-  if (
-    candidate.type !== 'threadnote-canonical-read' ||
-    candidate.version !== 1 ||
-    !Array.isArray(candidate.resources)
-  ) {
-    return undefined;
-  }
-  const resources: {
-    canonicalUri: string;
-    contentIndex: number;
-    requestedUri: string;
-  }[] = [];
-  for (const resource of candidate.resources) {
-    if (!Predicate.isObject(resource)) return undefined;
-    const entry = resource;
-    const requestedUri =
-      typeof entry.requestedUri === 'string'
-        ? entry.requestedUri
-        : typeof entry.uri === 'string'
-          ? entry.uri
-          : undefined;
-    const canonicalUri = typeof entry.canonicalUri === 'string' ? entry.canonicalUri : requestedUri;
-    if (
-      typeof entry.contentIndex !== 'number' ||
-      !Number.isSafeInteger(entry.contentIndex) ||
-      !requestedUri ||
-      !canonicalUri
-    ) {
-      return undefined;
-    }
-    resources.push({canonicalUri, contentIndex: entry.contentIndex, requestedUri});
-  }
-  return {resources};
-}
-
-function sessionCloseoutHasCandidateMaterial(input: SessionCloseoutInput): boolean {
-  return (
-    [input.decisions, input.handoff, input.invariants, input.preferences].some(items => (items?.length ?? 0) > 0) ||
-    structuredCloseoutFromInput(input) !== undefined
-  );
-}
-
-function sessionCloseoutHasEvidence(input: SessionCloseoutInput): boolean {
-  return (
-    (input.codeCitations?.length ?? 0) > 0 ||
-    (input.evidence?.length ?? 0) > 0 ||
-    input.sourceSessionId !== undefined ||
-    input.sourceCommit !== undefined
-  );
-}
-
-function parseCandidatePolicy(value: string | undefined): 'handoff-only' | 'off' | 'suggest' {
-  const normalized = value?.trim() || 'suggest';
-  if (normalized === 'suggest' || normalized === 'handoff-only' || normalized === 'off') {
-    return normalized;
-  }
-  throw McpServerOperationError.make({
-    message: `Invalid THREADNOTE_CANDIDATE_POLICY=${normalized}. Expected suggest, handoff-only, or off.`,
-  });
-}
-
-function scrubSessionCloseout(
-  input: SessionCloseoutInput,
-): {readonly input: SessionCloseoutInput; readonly ok: true} | {readonly error: string; readonly ok: false} {
-  const scrubText = (value: string): {readonly blocker?: string; readonly cleaned: string} =>
-    applyScrubber(value, {redact: true});
-  const scalarValues = [
-    ['task', input.task],
-    ['outcome', input.outcome],
-    ['project', input.project],
-    ['topic', input.topic],
-    ['sourceAgentClient', input.sourceAgentClient],
-    ['sourceCommit', input.sourceCommit],
-    ['sourceSessionId', input.sourceSessionId],
-    ['rationale', input.rationale],
-  ] as const;
-  const scrubbedScalars = new Map<string, string | undefined>();
-  for (const [key, value] of scalarValues) {
-    if (value === undefined) {
-      scrubbedScalars.set(key, undefined);
-      continue;
-    }
-    const scrubbed = scrubText(value);
-    if (scrubbed.blocker) {
-      return {error: `Refusing session review: ${key} may contain ${scrubbed.blocker}.`, ok: false};
-    }
-    scrubbedScalars.set(key, scrubbed.cleaned);
-  }
-  const scrubList = (key: string, values: readonly string[] | undefined): readonly string[] | undefined => {
-    if (!values) {
-      return undefined;
-    }
-    const result: string[] = [];
-    for (const value of values) {
-      const scrubbed = scrubText(value);
-      if (scrubbed.blocker) {
-        throw McpServerOperationError.make({message: `${key} may contain ${scrubbed.blocker}`});
-      }
-      result.push(scrubbed.cleaned);
-    }
-    return result;
-  };
-  try {
-    const outcome = scrubbedScalars.get('outcome');
-    const project = scrubbedScalars.get('project');
-    const sourceAgentClient = scrubbedScalars.get('sourceAgentClient');
-    const rationale = scrubbedScalars.get('rationale');
-    const task = scrubbedScalars.get('task');
-    const topic = scrubbedScalars.get('topic');
-    if (!outcome || !project || !sourceAgentClient || !task || !topic) {
-      return {error: 'Refusing session review: a required scalar was unexpectedly absent after scrubbing.', ok: false};
-    }
-    return {
-      input: {
-        codeCitations: input.codeCitations,
-        ...(rationale === undefined ? {} : {rationale}),
-        constraints: scrubList('constraints', input.constraints),
-        decisions: scrubList('decisions', input.decisions),
-        evidence: scrubList('evidence', input.evidence),
-        handoff: scrubList('handoff', input.handoff),
-        invariants: scrubList('invariants', input.invariants),
-        knowledgeInvalidated: scrubList('knowledgeInvalidated', input.knowledgeInvalidated),
-        outcome,
-        preferences: scrubList('preferences', input.preferences),
-        project,
-        sourceAgentClient,
-        sourceCommit: scrubbedScalars.get('sourceCommit'),
-        sourceSessionId: scrubbedScalars.get('sourceSessionId'),
-        task,
-        topic,
-        unresolvedRisks: scrubList('unresolvedRisks', input.unresolvedRisks),
-        verificationPerformed: scrubList('verificationPerformed', input.verificationPerformed),
-      },
-      ok: true,
-    };
-  } catch (cause: unknown) {
-    return {error: `Refusing session review: ${errorMessage(cause)}.`, ok: false};
-  }
-}
-
-function candidateReviewResult(review: CandidateReview): CallToolResult {
-  const actionable = review.candidates.filter(candidate => candidate.recommendation !== 'no_action');
-  const replacementWarnings = new Map(
-    projectKnowledgeDeltaV1(review)
-      .items.filter(item => item.mutationPreview.replacementSafety?.warning)
-      .map(item => [item.candidateId, item.mutationPreview.replacementSafety?.warning]),
-  );
-  const lines =
-    review.candidates.length === 0
-      ? ['No additional memory candidates found in this task closeout. No candidate memory was written.']
-      : actionable.length === 0
-        ? ['No memory update is recommended; every candidate duplicates active memory.']
-        : [
-            `Review ${review.reviewId} · revision ${review.revision}`,
-            'Present these additional recommendations in the current conversation. Do not write these additional candidates until the user decides:',
-            ...review.candidates.map(
-              (candidate, index) =>
-                `${index + 1}. [${candidate.recommendation}] ${candidate.kind}/${candidate.topic} · ${candidate.reason}\n` +
-                `   candidate: ${candidate.candidateId}` +
-                (candidate.targetUri ? `\n   target: ${candidate.targetUri}` : '') +
-                (replacementWarnings.get(candidate.candidateId)
-                  ? `\n   WARNING: ${replacementWarnings.get(candidate.candidateId)}`
-                  : '') +
-                `\n${candidate.proposedText
-                  .split('\n')
-                  .map(line => `   ${line}`)
-                  .join('\n')}`,
-            ),
-          ];
-  return {
-    content: [{type: 'text', text: lines.join('\n')}],
-    structuredContent: candidateReviewStructuredContent(review, {
-      candidates: review.candidates,
-      noAction: actionable.length === 0,
-      reviewId: review.reviewId,
-      revision: review.revision,
-    }),
-  };
-}
-
-function candidateReviewStructuredContent(
-  review: CandidateReview,
-  fields: Readonly<Record<string, unknown>>,
-): Record<string, unknown> {
-  return {...fields, knowledgeDelta: projectKnowledgeDeltaV1(review)};
-}
-
 function approvedCandidateMetadata(
   review: CandidateReview,
   candidate: MemoryCandidate,
   approvedAt: string,
+  sourceAgentClient: string,
 ): MemoryMetadata {
   return {
     authority: 'user_approved',
@@ -1764,7 +1632,7 @@ function approvedCandidateMetadata(
     lastReviewed: approvedAt,
     project: candidate.project,
     schemaVersion: MEMORY_SCHEMA_VERSION,
-    sourceAgentClient: review.sourceAgentClient,
+    sourceAgentClient,
     sourceCommit: review.sourceCommit,
     sourceObservedAt: review.createdAt,
     sourceSessionId: review.sourceSessionId,
@@ -1790,7 +1658,10 @@ function replacementCleanupIsPending(result: CallToolResult): boolean {
   return result.structuredContent?.replacementCleanupPending === true;
 }
 
-function reviewedCandidateTargetIsCurrent(config: RuntimeConfig, candidate: MemoryCandidate) {
+function reviewedCandidateTargetIsCurrent(
+  config: RuntimeConfig,
+  candidate: Pick<MemoryCandidate, 'targetUri' | 'targetContentHash'>,
+) {
   const targetUri = candidate.targetUri;
   if (!targetUri || !candidate.targetContentHash) {
     return Effect.succeed(false);
@@ -1815,7 +1686,7 @@ function reviewedCandidateTargetIsCurrent(config: RuntimeConfig, candidate: Memo
 function persistCandidateConflict(
   config: RuntimeConfig,
   review: CandidateReview,
-  candidate: MemoryCandidate,
+  candidate: MemoryCandidate | LegacyMemoryCandidate,
   message: string,
 ) {
   return Effect.gen(function* () {
@@ -1834,7 +1705,10 @@ function persistCandidateConflict(
   });
 }
 
-function reconcileCandidateReplacementCleanup(config: RuntimeConfig, candidate: MemoryCandidate) {
+function reconcileCandidateReplacementCleanup(
+  config: RuntimeConfig,
+  candidate: MemoryCandidate | LegacyMemoryCandidate,
+) {
   const replacementUri = candidate.applyReplaceUri;
   const targetUri = candidate.applyTargetUri;
   if (candidate.applyOperation !== 'replace' || !replacementUri || !targetUri || replacementUri === targetUri) {

@@ -1,4 +1,15 @@
-import {String as EffectString, Effect, Exit, FileSystem, Result} from 'effect';
+import {
+  Array as EffectArray,
+  String as EffectString,
+  Effect,
+  Exit,
+  FileSystem,
+  Record as EffectRecord,
+  Result,
+  Schema,
+  Option,
+} from 'effect';
+import * as Effect2 from 'effect';
 import {mkdtemp, mkdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {existsSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -33,9 +44,60 @@ import {runCloseout} from './native-closeout-diagnostics.js';
 
 const run = <A, E, R>(program: Effect.Effect<A, E, R>) =>
   program.pipe(TestClock.withLive, provideNative, Effect.provideService(CurrentNativeJobAutoLaunch, false));
-const object = (value: unknown): Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) throw new Error('Expected a structured result.');
-  return value as Record<string, unknown>;
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const NativeStateSchema = withRest(Schema.Struct({operations: Schema.Array(Schema.Unknown)}));
+const NativeStateStatusSchema = withRest(
+  Schema.Struct({
+    operations: Schema.Array(Schema.Struct({status: Schema.optionalKey(Schema.String)}).pipe(withRest)).pipe(
+      Schema.optionalKey,
+    ),
+  }),
+);
+const RetainedInputSchema = withRest(
+  Schema.Struct({
+    witness: withRest(
+      Schema.Struct({
+        citations: Schema.optionalKey(JsonRecordSchema.pipe(Schema.Array)),
+        files: Schema.Array(Schema.Struct({object: withRest(Schema.Struct({bytes: Schema.String}))}).pipe(withRest)),
+      }),
+    ),
+  }),
+);
+const JournalImageSchema = withRest(
+  Schema.Struct({
+    artifacts: JsonRecordSchema,
+    operations: Schema.Record(
+      Schema.String,
+      withRest(Schema.Struct({artifact: withRest(Schema.Struct({canonicalUri: Schema.String}))})),
+    ),
+  }),
+);
+const ReservedCloseoutSchema = withRest(
+  Schema.Struct({
+    closeoutSave: Schema.optionalKey(
+      Schema.Struct({transactionId: Schema.String, operationIds: Schema.Array(Schema.String)}).pipe(withRest),
+    ),
+  }),
+);
+const PreparedJournalSchema = withRest(
+  Schema.Struct({
+    transactionId: Schema.String,
+    status: Schema.String,
+    archives: JsonRecordSchema,
+    outputs: JsonRecordSchema,
+  }),
+);
+const FinalJournalSchema = withRest(Schema.Struct({transactionId: Schema.String, status: Schema.String}));
+const object = (value: unknown): Readonly<Record<string, unknown>> => Schema.decodeUnknownSync(JsonRecordSchema)(value);
+const arrayValue = (value: unknown): readonly unknown[] =>
+  Schema.decodeUnknownSync(Schema.Array(Schema.Unknown))(value);
+const recordArray = (value: unknown): readonly Readonly<Record<string, unknown>>[] =>
+  Schema.decodeUnknownSync(Schema.Array(JsonRecordSchema))(value);
+const requiredString = (value: unknown): string => {
+  if (typeof value !== 'string') throw new Error('Expected a string field.');
+  return value;
 };
 const document = (
   source: {head: string; files: {path: string; sha256: string}[]} | null = null,
@@ -87,7 +149,7 @@ const commit = (repo: string, message: string) =>
       '-m',
       message,
     ]);
-    return (yield* runCommandEffect('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+    return Effect2.pipe((yield* runCommandEffect('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout, EffectString.trim);
   });
 const submit = (f: Effect.Success<ReturnType<typeof nativeFixture>>, work: Record<string, unknown>, jobId?: string) =>
   f.call({...f.base('job'), command: 'submit', work, ...(jobId ? {jobId} : {})});
@@ -108,8 +170,10 @@ describe('native private job lifecycle', () => {
       fc.property(fc.string({minLength: 1, maxLength: 1200}), fc.string({minLength: 1, maxLength: 1200}), (a, b) => {
         const left = {action: 'authoring', command: 'save', runId: 'run', generation: 'g', document: {a, b}};
         const right = {generation: 'g', runId: 'run', document: {b, a}, command: 'save', action: 'authoring'};
-        expect(nativeJobId('0'.repeat(64), left)).toBe(nativeJobId('0'.repeat(64), right));
-        expect(nativeJobId('0'.repeat(64), left)).toMatch(/^job-[a-f0-9]{48}$/u);
+        expect(nativeJobId(Effect2.pipe('0', EffectString.repeat(64)), left)).toBe(
+          nativeJobId(Effect2.pipe('0', EffectString.repeat(64)), right),
+        );
+        expect(nativeJobId(Effect2.pipe('0', EffectString.repeat(64)), left)).toMatch(/^job-[a-f0-9]{48}$/u);
         const firstEpoch = sha256HexSync(a);
         const nextEpoch = sha256HexSync(b + '\0' + a);
         if (firstEpoch !== nextEpoch) {
@@ -150,21 +214,21 @@ describe('native private job lifecycle', () => {
       };
       const accepted = object(yield* submit(f, work));
       expect(accepted.status).toBe('accepted');
-      const jobId = accepted.jobId as string;
+      const jobId = requiredString(accepted.jobId);
       const receipt = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', 'native-run', jobId + '.json');
-      const persisted = JSON.parse(yield* f.fs.readFileString(receipt)) as Record<string, unknown>;
-      const retained = JSON.parse(yield* f.fs.readFileString(receipt + '.input.json')) as Record<string, unknown>;
+      const persisted = object(JSON.parse(yield* f.fs.readFileString(receipt)));
+      const retained = object(JSON.parse(yield* f.fs.readFileString(receipt + '.input.json')));
       expect(persisted.intentDigest).toBe(sha256HexSync(stableJson(work)));
       const witness = object(retained.witness);
       expect(witness.head).toBe(head);
       expect(witness.citationRefs).toEqual(['source.ts']);
-      const citations = witness.citations as Record<string, unknown>[];
+      const citations = recordArray(witness.citations);
       expect(citations).toHaveLength(1);
       expect(citations[0].path).toBe('source.ts');
       expect(citations[0].sourceCommit).toBe(head);
       expect(citations[0].evidenceRetention).toBe('capsule-retained');
-      const retainedFile = object((witness.files as unknown[])[0]);
-      expect(Buffer.from(object(retainedFile.object).bytes as string, 'base64').toString('utf8')).toBe(
+      const retainedFile = object(arrayValue(witness.files)[0]);
+      expect(Buffer.from(requiredString(object(retainedFile.object).bytes), 'base64').toString('utf8')).toBe(
         'export const fixture = true;\n',
       );
       expect((yield* f.fs.stat(receipt)).size).toBeLessThan(4096n);
@@ -178,9 +242,11 @@ describe('native private job lifecycle', () => {
       const result = object(yield* f.call({...f.base('job'), command: 'result', jobId}));
       expect(result.status).toBe('completed');
       expect(object(result.result).status).toBe('ok');
-      const native = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const native = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(native.operations.length).toBeGreaterThan(2);
-      expect(new Set(native.operations.map(item => object(object(item).intent).operationId)).size).toBe(
+      expect(new Set(EffectArray.map(native.operations, item => object(object(item).intent).operationId)).size).toBe(
         native.operations.length,
       );
     }).pipe(run),
@@ -205,27 +271,34 @@ describe('native private job lifecycle', () => {
       expect(Result.isFailure(refused)).toBe(true);
       yield* f.fs.remove(f.path.join(f.repo, 'dirty.txt'));
       const accepted = object(yield* submit(f, work));
-      const jobId = accepted.jobId as string;
+      const jobId = requiredString(accepted.jobId);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'unrelated.txt'), 'unrelated');
       yield* commit(f.repo, 'unrelated');
       const blocked = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(blocked.status).toBe('blocked-with-progress');
-      const native = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const native = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(native.operations.length, JSON.stringify(blocked)).toBeGreaterThan(0);
-      const root = native.operations.find(item => object(object(item).intent).role === 'authoring-root');
+      const root = Option.getOrElse(
+        EffectArray.findFirst(native.operations, item => object(object(item).intent).role === 'authoring-root'),
+        () => undefined,
+      );
       expect(root).toBeDefined();
       expect(object(root).status).toBe('verified');
       expect(object(object(root).intent).body).toContain('"readiness":"draft"');
       const originalCitations = [];
       for (const item of native.operations) {
         const artifact = object(object(item).artifact);
-        const content = yield* f.store.read(f.location, artifact.uri as string);
-        const record = parseMemoryDocument(artifact.uri as string, content);
+        const content = yield* f.store.read(f.location, requiredString(artifact.uri));
+        const record = parseMemoryDocument(requiredString(artifact.uri), content);
         originalCitations.push(...(record?.metadata.codeCitations ?? []));
       }
       expect(originalCitations.length).toBeGreaterThan(0);
-      expect(originalCitations.every(citation => citation.sourceCommit === head)).toBe(true);
-      expect(originalCitations.every(citation => citation.evidenceRetention === 'capsule-retained')).toBe(true);
+      expect(EffectArray.every(originalCitations, citation => citation.sourceCommit === head)).toBe(true);
+      expect(EffectArray.every(originalCitations, citation => citation.evidenceRetention === 'capsule-retained')).toBe(
+        true,
+      );
       const status = object(yield* f.call({...f.base('job'), command: 'status', jobId}));
       expect(JSON.stringify(status).length).toBeLessThan(1024);
     }).pipe(run),
@@ -246,7 +319,7 @@ describe('native private job lifecycle', () => {
         ready: false,
         expectedRevision: null,
       };
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       const inputFile = f.path.join(
         f.home,
         'workflow-automations',
@@ -255,29 +328,34 @@ describe('native private job lifecycle', () => {
         'native-run',
         jobId + '.json.input.json',
       );
-      const retained = JSON.parse(yield* f.fs.readFileString(inputFile)) as {
-        witness: {files: {object: {bytes: string}}[]};
-      };
+      const retained = yield* Schema.decodeUnknownEffect(RetainedInputSchema)(
+        JSON.parse(yield* f.fs.readFileString(inputFile)),
+      );
       expect(Buffer.from(retained.witness.files[0].object.bytes, 'base64').toString('utf8')).toBe(originalBytes);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = false;\n');
       const changedHead = yield* commit(f.repo, 'changed cited source');
       expect(changedHead).not.toBe(head);
       const blocked = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(blocked.status).toBe('blocked-with-progress');
-      const state = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
-      const root = state.operations.find(item => object(object(item).intent).role === 'authoring-root');
+      const state = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
+      const root = Option.getOrElse(
+        EffectArray.findFirst(state.operations, item => object(object(item).intent).role === 'authoring-root'),
+        () => undefined,
+      );
       expect(root).toBeDefined();
       expect(object(root).status).toBe('verified');
       expect(object(object(root).intent).body).toContain('"readiness":"draft"');
       const citations = [];
       for (const item of state.operations) {
         const artifact = object(object(item).artifact);
-        const content = yield* f.store.read(f.location, artifact.uri as string);
-        citations.push(...(parseMemoryDocument(artifact.uri as string, content)?.metadata.codeCitations ?? []));
+        const content = yield* f.store.read(f.location, requiredString(artifact.uri));
+        citations.push(...(parseMemoryDocument(requiredString(artifact.uri), content)?.metadata.codeCitations ?? []));
       }
       expect(citations.length).toBeGreaterThan(0);
-      expect(citations.every(citation => citation.sourceCommit === head)).toBe(true);
-      expect(citations.every(citation => citation.evidenceRetention === 'capsule-retained')).toBe(true);
+      expect(EffectArray.every(citations, citation => citation.sourceCommit === head)).toBe(true);
+      expect(EffectArray.every(citations, citation => citation.evidenceRetention === 'capsule-retained')).toBe(true);
       const citation = citations[0];
       if (!citation) throw new Error('Expected one saved code citation.');
       const capsule = yield* readRetainedCodeGraphCitationEvidence(f.home, checkout.checkoutId, {
@@ -309,19 +387,22 @@ describe('native private job lifecycle', () => {
       const initialized = yield* f.init();
       const prior = object(yield* f.call(f.write({operationId: 'historical-root', artifactKey: 'historical-root'})));
       const priorArtifact = object(prior.artifact);
-      const originalContent = yield* f.store.read(f.location, priorArtifact.uri as string);
-      const originalState = JSON.parse(yield* f.fs.readFileString(f.statePath())) as Record<string, unknown>;
-      const originalOperation = object((originalState.operations as unknown[])[0]);
+      const originalContent = yield* f.store.read(f.location, requiredString(priorArtifact.uri));
+      const originalState = object(JSON.parse(yield* f.fs.readFileString(f.statePath())));
+      const originalOperation = object(arrayValue(originalState.operations)[0]);
       const originalJournalBytes = yield* f.fs.readFileString(f.journalPath(initialized.bindingId));
       const originalLogical = yield* Effect.promise(() => decodeWorkflowJournal(originalJournalBytes));
-      const originalJournal = decodeWorkflowJournalStorageImage(JSON.parse(originalLogical)) as {
-        artifacts: Record<string, unknown>;
-        operations: Record<string, {artifact: {canonicalUri: string}}>;
-      };
-      const priorJournalOperation = Object.entries(originalJournal.operations).find(
-        ([, operation]) => operation.artifact.canonicalUri === priorArtifact.uri,
+      const originalJournal = yield* Schema.decodeUnknownEffect(JournalImageSchema)(
+        decodeWorkflowJournalStorageImage(JSON.parse(originalLogical)),
       );
-      expect(originalJournal.artifacts[priorArtifact.uri as string]).toBeDefined();
+      const priorJournalOperation = Option.getOrElse(
+        EffectArray.findFirst(
+          EffectRecord.toEntries(originalJournal.operations),
+          ([, operation]) => operation.artifact.canonicalUri === priorArtifact.uri,
+        ),
+        () => undefined,
+      );
+      expect(originalJournal.artifacts[requiredString(priorArtifact.uri)]).toBeDefined();
       expect(priorJournalOperation).toBeDefined();
       if (!priorJournalOperation) throw new Error('Expected the original keyed journal operation.');
       const work = {
@@ -331,23 +412,26 @@ describe('native private job lifecycle', () => {
         ready: false,
         expectedRevision: null,
       };
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       expect(object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call)).status).toBe('completed');
-      const currentState = JSON.parse(yield* f.fs.readFileString(f.statePath())) as Record<string, unknown>;
+      const currentState = object(JSON.parse(yield* f.fs.readFileString(f.statePath())));
       expect(currentState.bindingId).toBe(originalState.bindingId);
       expect(currentState.generation).toBe(originalState.generation);
-      expect(object((currentState.operations as unknown[])[0])).toEqual(originalOperation);
-      expect(yield* f.store.read(f.location, priorArtifact.uri as string)).toBe(originalContent);
+      expect(object(arrayValue(currentState.operations)[0])).toEqual(originalOperation);
+      expect(yield* f.store.read(f.location, requiredString(priorArtifact.uri))).toBe(originalContent);
       const currentJournalBytes = yield* f.fs.readFileString(f.journalPath(initialized.bindingId));
       const currentLogical = yield* Effect.promise(() => decodeWorkflowJournal(currentJournalBytes));
-      const currentJournal = decodeWorkflowJournalStorageImage(JSON.parse(currentLogical)) as typeof originalJournal;
-      expect(currentJournal.artifacts[priorArtifact.uri as string]).toEqual(
-        originalJournal.artifacts[priorArtifact.uri as string],
+      const currentJournal = yield* Schema.decodeUnknownEffect(JournalImageSchema)(
+        decodeWorkflowJournalStorageImage(JSON.parse(currentLogical)),
+      );
+      expect(currentJournal.artifacts[requiredString(priorArtifact.uri)]).toEqual(
+        originalJournal.artifacts[requiredString(priorArtifact.uri)],
       );
       expect(currentJournal.operations[priorJournalOperation[0]]).toEqual(priorJournalOperation[1]);
       expect(
-        new Set((currentState.operations as unknown[]).map(item => object(object(item).intent).operationId)).size,
-      ).toBe((currentState.operations as unknown[]).length);
+        new Set(EffectArray.map(arrayValue(currentState.operations), item => object(object(item).intent).operationId))
+          .size,
+      ).toBe(arrayValue(currentState.operations).length);
     }).pipe(run),
   );
 
@@ -364,14 +448,14 @@ describe('native private job lifecycle', () => {
         {
           ...base,
           document: document({
-            head: '0'.repeat(40),
+            head: Effect2.pipe('0', EffectString.repeat(40)),
             files: [{path: 'source.ts', sha256: sha256HexSync('export const fixture = true;\n')}],
           }),
         },
         {...f.base('closeout'), command: 'prepare'},
         {...f.base('closeout'), command: 'finish'},
       ];
-      expect(head).not.toBe('0'.repeat(40));
+      expect(head).not.toBe(Effect2.pipe('0', EffectString.repeat(40)));
       for (const work of invalid) {
         const denied = yield* submit(f, work).pipe(Effect.result);
         expect(Result.isFailure(denied), JSON.stringify(work)).toBe(true);
@@ -403,20 +487,24 @@ describe('native private job lifecycle', () => {
         expectedRevision: null,
       };
       const accepted = object(yield* submit(f, work));
-      const jobId = accepted.jobId as string;
+      const jobId = requiredString(accepted.jobId);
       const stoppedRequest = object(yield* f.call({...f.base('job'), command: 'cancel', jobId}));
       expect(stoppedRequest.stopRequested).toBe(true);
       const stopped = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(stopped.status, JSON.stringify(stopped)).toBe('stopped-with-progress');
-      const empty = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const empty = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(empty.operations).toHaveLength(0);
       const resumed = object(yield* f.call({...f.base('job'), command: 'resume', jobId}));
       expect(resumed.status).toBe('accepted');
       const completed = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(completed.status).toBe('completed');
-      const operationIds = (
-        JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]}
-      ).operations.map(item => object(object(item).intent).operationId);
+      const operationIds = EffectArray.map(
+        (yield* Schema.decodeUnknownEffect(NativeStateSchema)(JSON.parse(yield* f.fs.readFileString(f.statePath()))))
+          .operations,
+        item => object(object(item).intent).operationId,
+      );
       expect(operationIds.length).toBeGreaterThan(2);
       expect(new Set(operationIds).size).toBe(operationIds.length);
     }).pipe(run),
@@ -428,9 +516,9 @@ describe('native private job lifecycle', () => {
       yield* commit(f.repo, 'source');
       yield* f.init();
       const work = {...f.base('authoring'), command: 'save', document: document(), ready: false};
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       const receipt = f.path.join(f.home, 'workflow-automations', 'native-v1', 'jobs', 'native-run', jobId + '.json');
-      const state = JSON.parse(yield* f.fs.readFileString(receipt)) as Record<string, unknown>;
+      const state = object(JSON.parse(yield* f.fs.readFileString(receipt)));
       yield* f.fs.writeFileString(receipt, stableJson({...state, status: 'running', started: true}) + '\n');
       const resumed = object(yield* f.call({...f.base('job'), command: 'resume', jobId}));
       expect(resumed.status).toBe('accepted');
@@ -455,7 +543,7 @@ describe('native private job lifecycle', () => {
       );
       expect(failed.status).toBe('failed');
       expect(failed.code).toBe('job-startup-failed');
-      const jobId = failed.jobId as string;
+      const jobId = requiredString(failed.jobId);
       expect(object(yield* f.call({...f.base('job'), command: 'status', jobId})).code).toBe('job-startup-failed');
       expect(object(yield* f.call({...f.base('job'), command: 'result', jobId})).jobId).toBe(jobId);
       expect(object(yield* f.call({...f.base('job'), command: 'resume', jobId})).status).toBe('accepted');
@@ -475,7 +563,7 @@ describe('native private job lifecycle', () => {
         ready: false,
         expectedRevision: null,
       };
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       const original = yield* FileSystem.FileSystem;
       const stateFile = f.path.join(
         yield* f.fs.realPath(f.home),
@@ -491,8 +579,8 @@ describe('native private job lifecycle', () => {
           to === stateFile && !cancelled
             ? original.readFileString(from).pipe(
                 Effect.flatMap(raw => {
-                  const state = JSON.parse(raw) as {operations?: {status?: string}[]};
-                  if (state.operations?.some(item => item.status === 'verified')) {
+                  const state = Schema.decodeUnknownSync(NativeStateStatusSchema)(JSON.parse(raw));
+                  if (state.operations && EffectArray.some(state.operations, item => item.status === 'verified')) {
                     cancelled = true;
                     return original.rename(from, to).pipe(
                       Effect.tap(() =>
@@ -517,24 +605,30 @@ describe('native private job lifecycle', () => {
       expect(liveResume?.status).toBe('running');
       expect(liveResume?.stopRequested).toBe(true);
       expect(stopped.status, JSON.stringify(stopped)).toBe('stopped-with-progress');
-      const before = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const before = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(before.operations.length).toBeGreaterThan(0);
-      expect(before.operations.some(item => object(object(item).intent).role === 'authoring-root')).toBe(false);
-      const prefix = before.operations.map(item => ({
+      expect(EffectArray.some(before.operations, item => object(object(item).intent).role === 'authoring-root')).toBe(
+        false,
+      );
+      const prefix = EffectArray.map(before.operations, item => ({
         id: object(object(item).intent).operationId,
         revision: object(object(item).artifact).revision,
       }));
       yield* f.call({...f.base('job'), command: 'resume', jobId});
       const completed = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(completed.status).toBe('completed');
-      const after = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const after = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(
-        after.operations.slice(0, prefix.length).map(item => ({
+        EffectArray.map(after.operations.slice(0, prefix.length), item => ({
           id: object(object(item).intent).operationId,
           revision: object(object(item).artifact).revision,
         })),
       ).toEqual(prefix);
-      expect(new Set(after.operations.map(item => object(object(item).intent).operationId)).size).toBe(
+      expect(new Set(EffectArray.map(after.operations, item => object(object(item).intent).operationId)).size).toBe(
         after.operations.length,
       );
     }).pipe(run),
@@ -555,14 +649,14 @@ describe('native private job lifecycle', () => {
         expectedRevision: null,
         ...(yield* readyMetadata(f, doc)),
       };
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       const original = yield* ResourceStore;
       const commands = yield* CommandExecutor;
       let drifted = false;
       const racing = ResourceStore.of({
         ...original,
         writeChecked: (location, uri, content, options, check) =>
-          content.includes('threadnote-native-authoring-root') && !drifted
+          Effect2.pipe(content, EffectString.includes('threadnote-native-authoring-root')) && !drifted
             ? Effect.gen(function* () {
                 drifted = true;
                 yield* f.fs.writeFileString(f.path.join(f.repo, 'after-admission.txt'), 'new HEAD').pipe(Effect.orDie);
@@ -578,11 +672,16 @@ describe('native private job lifecycle', () => {
       );
       expect(drifted).toBe(true);
       expect(blocked.status).toBe('blocked-with-progress');
-      const native = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const native = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(native.operations.length).toBeGreaterThan(0);
-      expect(native.operations.some(item => object(object(item).intent).role === 'authoring-root')).toBe(true);
+      expect(EffectArray.some(native.operations, item => object(object(item).intent).role === 'authoring-root')).toBe(
+        true,
+      );
       expect(
-        native.operations.some(
+        EffectArray.some(
+          native.operations,
           item => object(item).status === 'verified' && object(object(item).intent).role === 'authoring-root',
         ),
       ).toBe(false);
@@ -603,7 +702,7 @@ describe('native private job lifecycle', () => {
           expectedRevision,
         });
       const initial = object(object(yield* save('Initial target', null)).authoring);
-      const initialRevision = object(initial.root).revision as string;
+      const initialRevision = requiredString(object(initial.root).revision);
       const work = {
         ...f.base('authoring'),
         command: 'save',
@@ -611,14 +710,18 @@ describe('native private job lifecycle', () => {
         ready: false,
         expectedRevision: initialRevision,
       };
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       const competing = object(object(yield* save('Competing replacement', initialRevision)).authoring);
       const competingRevision = object(competing.root).revision;
-      const before = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const before = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       const blocked = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(blocked.status).toBe('blocked-with-progress');
       expect(blocked.code).toBe('job-target-drift');
-      const after = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const after = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(after.operations).toEqual(before.operations);
       expect(competingRevision).not.toBe(initialRevision);
     }).pipe(run),
@@ -690,7 +793,7 @@ describe('native private job lifecycle', () => {
         ready: false,
         expectedRevision: null,
       };
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       const inputFile = f.path.join(
         yield* f.fs.realPath(f.home),
         'workflow-automations',
@@ -700,10 +803,15 @@ describe('native private job lifecycle', () => {
         jobId + '.json.input.json',
       );
       const original = yield* f.fs.readFileString(inputFile);
-      yield* f.fs.writeFileString(inputFile, original.replace('Native job fixture', 'Changed job fixture'));
+      yield* f.fs.writeFileString(
+        inputFile,
+        Effect2.pipe(original, EffectString.replace('Native job fixture', 'Changed job fixture')),
+      );
       const failed = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(failed).toMatchObject({status: 'failed', code: 'invalid-job-state'});
-      const native = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
+      const native = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
       expect(native.operations).toHaveLength(0);
     }).pipe(run),
   );
@@ -720,7 +828,7 @@ describe('native private job lifecycle', () => {
         ready: false,
         expectedRevision: null,
       };
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       let interrupted = false;
       const lostAck = (request: unknown) =>
         f.call(request).pipe(
@@ -740,18 +848,22 @@ describe('native private job lifecycle', () => {
       const failed = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, lostAck));
       expect(failed.status).toBe('failed');
       expect(interrupted).toBe(true);
-      const before = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
-      const ids = before.operations.map(item => object(object(item).intent).operationId);
-      const revisions = before.operations.map(item => object(object(item).artifact).revision);
+      const before = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
+      const ids = EffectArray.map(before.operations, item => object(object(item).intent).operationId);
+      const revisions = EffectArray.map(before.operations, item => object(object(item).artifact).revision);
       expect(ids.length).toBeGreaterThan(2);
       yield* f.call({...f.base('job'), command: 'resume', jobId});
       const completed = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(completed.status).toBe('completed');
       const replay = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, f.call));
       expect(replay.status).toBe('completed');
-      const after = JSON.parse(yield* f.fs.readFileString(f.statePath())) as {operations: unknown[]};
-      expect(after.operations.map(item => object(object(item).intent).operationId)).toEqual(ids);
-      expect(after.operations.map(item => object(object(item).artifact).revision)).toEqual(revisions);
+      const after = yield* Schema.decodeUnknownEffect(NativeStateSchema)(
+        JSON.parse(yield* f.fs.readFileString(f.statePath())),
+      );
+      expect(EffectArray.map(after.operations, item => object(object(item).intent).operationId)).toEqual(ids);
+      expect(EffectArray.map(after.operations, item => object(object(item).artifact).revision)).toEqual(revisions);
     }).pipe(run),
   );
 
@@ -761,12 +873,12 @@ describe('native private job lifecycle', () => {
       yield* commit(f.repo, 'source');
       yield* f.init();
       const work = {...f.base('authoring'), command: 'save', document: document(), ready: false};
-      const jobId = object(yield* submit(f, work)).jobId as string;
+      const jobId = requiredString(object(yield* submit(f, work)).jobId);
       let dispatched = 0;
       const oversized = (request: unknown) =>
         f.call(request).pipe(
           Effect.tap(() => Effect.sync(() => dispatched++)),
-          Effect.map(result => ({...object(result), largeField: 'x'.repeat(33_000)})),
+          Effect.map(result => ({...object(result), largeField: Effect2.pipe('x', EffectString.repeat(33_000))})),
         );
       const completed = object(yield* runNativeJobWorker(f.config, 'native-run', jobId, oversized));
       expect(completed.status).toBe('completed');
@@ -785,7 +897,7 @@ describe('native private job lifecycle', () => {
       yield* commit(f.repo, 'source');
       yield* f.init();
       const path = f.statePath();
-      const state = JSON.parse(yield* f.fs.readFileString(path)) as Record<string, unknown>;
+      const state = object(JSON.parse(yield* f.fs.readFileString(path)));
       const unsupported = JSON.stringify({...state, stateVersion: 999}) + '\n';
       yield* f.fs.writeFileString(path, unsupported);
       const work = {
@@ -808,8 +920,14 @@ describe('native private job lifecycle', () => {
       Effect.gen(function* () {
         const f = yield* nativeCloseoutFixture(false);
         const validation = object(yield* f.closeout('validation-input'));
-        const phases = validation.phases as {id: string; acceptanceCriteria: string[]}[];
-        const decisions = validation.decisions as {id: string; selected: string}[];
+        const phases = yield* Schema.decodeUnknownEffect(
+          Schema.Array(
+            Schema.Struct({id: Schema.String, acceptanceCriteria: Schema.Array(Schema.String)}).pipe(withRest),
+          ),
+        )(validation.phases);
+        const decisions = yield* Schema.decodeUnknownEffect(
+          Schema.Array(Schema.Struct({id: Schema.String, selected: Schema.String}).pipe(withRest)),
+        )(validation.decisions);
         const proposal = {
           architecture: {
             summary: 'The completed reader returns all saved data.',
@@ -823,20 +941,24 @@ describe('native private job lifecycle', () => {
           },
           architectureVerification: 'Inspected committed source and complete result.',
           combinedChecks: [{command: 'private combined check', result: 'passed', evidence: 'Observed complete read.'}],
-          phaseEvidence: phases.map(phase => ({
+          phaseEvidence: EffectArray.map(phases, phase => ({
             id: phase.id,
-            acceptance: phase.acceptanceCriteria.map(criterion => ({criterion, evidence: 'Observed ' + criterion})),
+            acceptance: EffectArray.map(phase.acceptanceCriteria, criterion => ({
+              criterion,
+              evidence: 'Observed ' + criterion,
+            })),
           })),
           scenarios: [],
-          decisions: decisions.map(item => ({
+          decisions: EffectArray.map(decisions, item => ({
             id: item.id,
             implemented: item.selected,
             rationale: 'Applied the approved choice with complete evidence: ' + item.id,
           })),
         };
         const work = {...f.base('closeout', f.controllerRunId), command: 'prepare', proposal};
-        const jobId = object(yield* f.call({...f.base('job', f.controllerRunId), command: 'submit', work}))
-          .jobId as string;
+        const jobId = requiredString(
+          object(yield* f.call({...f.base('job', f.controllerRunId), command: 'submit', work})).jobId,
+        );
         const original = yield* FileSystem.FileSystem;
         const journalFile = f.path.join(
           yield* f.fs.realPath(f.home),
@@ -862,33 +984,32 @@ describe('native private job lifecycle', () => {
         );
         expect(interrupted, JSON.stringify(first)).toBe(true);
         expect(first.status).toBe('failed');
-        const reserved = JSON.parse(yield* f.fs.readFileString(f.statePath(f.controllerRunId))) as {
-          closeoutSave?: {transactionId: string; operationIds: string[]};
-        };
+        const reserved = yield* Schema.decodeUnknownEffect(ReservedCloseoutSchema)(
+          JSON.parse(yield* f.fs.readFileString(f.statePath(f.controllerRunId))),
+        );
         expect(reserved.closeoutSave).toBeDefined();
         expect(yield* f.fs.exists(journalFile)).toBe(false);
         yield* f.call({...f.base('job', f.controllerRunId), command: 'resume', jobId});
         const second = object(yield* runNativeJobWorker(f.config, f.controllerRunId, jobId, f.call));
         expect(second.status).toBe('completed');
-        const prepared = JSON.parse(yield* f.fs.readFileString(journalFile)) as {
-          transactionId: string;
-          status: string;
-          archives: Record<string, unknown>;
-          outputs: Record<string, unknown>;
-        };
+        const prepared = yield* Schema.decodeUnknownEffect(PreparedJournalSchema)(
+          JSON.parse(yield* f.fs.readFileString(journalFile)),
+        );
         expect(prepared.transactionId).toBe(reserved.closeoutSave?.transactionId);
         expect(prepared.status).toBe('prepared');
-        expect(Object.keys(prepared.archives)).toHaveLength(0);
-        expect(Object.keys(prepared.outputs)).toHaveLength(0);
+        expect(EffectRecord.keys(prepared.archives)).toHaveLength(0);
+        expect(EffectRecord.keys(prepared.outputs)).toHaveLength(0);
         const finishWork = {...f.base('closeout', f.controllerRunId), command: 'finish'};
-        const finishJobId = object(
-          yield* f.call({...f.base('job', f.controllerRunId), command: 'submit', work: finishWork}),
-        ).jobId as string;
+        const finishJobId = requiredString(
+          object(yield* f.call({...f.base('job', f.controllerRunId), command: 'submit', work: finishWork})).jobId,
+        );
         expect(finishJobId).not.toBe(jobId);
         expect(object(yield* runNativeJobWorker(f.config, f.controllerRunId, finishJobId, f.call)).status).toBe(
           'completed',
         );
-        const final = JSON.parse(yield* f.fs.readFileString(journalFile)) as {transactionId: string; status: string};
+        const final = yield* Schema.decodeUnknownEffect(FinalJournalSchema)(
+          JSON.parse(yield* f.fs.readFileString(journalFile)),
+        );
         expect(final.transactionId).toBe(prepared.transactionId);
         expect(final.status).toBe('complete');
         expect(new Set(reserved.closeoutSave?.operationIds).size).toBe(reserved.closeoutSave?.operationIds.length);
@@ -909,7 +1030,7 @@ describe('native private job CLI process', () => {
       const manifest = join(home, 'custom-manifest.yaml');
       const entrypoint = join(process.cwd(), 'apps', 'threadnote', 'src', 'standalone.ts');
       const environment = {...process.env};
-      for (const key of Object.keys(environment))
+      for (const key of EffectRecord.keys(environment))
         if (/^(?:THREADNOTE_|CODEX_|CURSOR_|BUN_)/u.test(key) || /^(?:https?|all)_proxy$/iu.test(key))
           delete environment[key];
       Object.assign(environment, {
@@ -954,13 +1075,13 @@ describe('native private job CLI process', () => {
                 new Response(child.stdout).text(),
                 new Response(child.stderr).text(),
               ]);
-              if (code !== 0) throw new Error(`Native CLI failed: ${error.slice(0, 1500)}`);
+              if (code !== 0) throw new Error(`Native CLI failed: ${Effect2.pipe(error, EffectString.slice(0, 1500))}`);
               expect(error).toBe('');
-              expect(output.endsWith('\n')).toBe(true);
-              const lines = output.trim().split(/\r?\n/u);
+              expect(Effect2.pipe(output, EffectString.endsWith('\n'))).toBe(true);
+              const lines = Effect2.pipe(output, EffectString.trim, EffectString.split(/\r?\n/u));
               expect(lines).toHaveLength(1);
               expect(lines[0].length).toBeLessThan(32_768);
-              return JSON.parse(lines[0]) as Record<string, unknown>;
+              return object(JSON.parse(lines[0]));
             })(),
             Bun.sleep(15_000).then(() => {
               throw new Error('Private native CLI child exceeded 15 seconds.');
@@ -1011,7 +1132,7 @@ describe('native private job CLI process', () => {
         };
         const accepted = await cli({...base, action: 'job', command: 'submit', work});
         expect(accepted.status).toBe('accepted');
-        jobId = accepted.jobId as string;
+        jobId = requiredString(accepted.jobId);
         workerLock = join(home, 'workflow-automations', 'native-v1', 'jobs', 'cli-run', jobId + '.json.worker.lock');
         let status = accepted;
         const deadline = Date.now() + 90_000;

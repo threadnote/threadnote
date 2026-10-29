@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 export const CODE_GRAPH_BUILDER_HOME_CAPACITY = 2;
 export const CODE_GRAPH_BUILDER_BACKGROUND_AGING_MILLISECONDS = 30_000;
 
@@ -36,7 +37,7 @@ function agedBackgroundCheckoutIds(
   nowMilliseconds: number,
 ): ReadonlySet<string> {
   return new Set(
-    tickets.flatMap(ticket =>
+    EffectArray.flatMap(tickets, ticket =>
       isAgedBackgroundTicket(ticket, nowMilliseconds) && ticket.checkoutId !== undefined ? [ticket.checkoutId] : [],
     ),
   );
@@ -75,7 +76,7 @@ export function selectCodeGraphBuilderAdmissionTickets<T extends CodeGraphBuilde
   nowMilliseconds: number,
 ): readonly T[] {
   const availableSlots = Math.max(0, CODE_GRAPH_BUILDER_HOME_CAPACITY - activeCheckoutIds.length);
-  const occupied = new Set(activeCheckoutIds.filter(id => id !== undefined));
+  const occupied = new Set(EffectArray.filter(activeCheckoutIds, id => id !== undefined));
   const reservedCheckouts = agedBackgroundCheckoutIds(tickets, nowMilliseconds);
   const selected: T[] = [];
   for (const ticket of orderCodeGraphBuilderAdmissionQueue(tickets, activeCheckoutIds, nowMilliseconds)) {
@@ -98,16 +99,23 @@ export function orderCodeGraphBuilderAdmissionQueue<T extends CodeGraphBuilderAd
   nowMilliseconds: number,
 ): readonly T[] {
   const remaining = [...orderCodeGraphBuilderAdmissionTickets(tickets, nowMilliseconds)];
-  const occupied = new Set(activeCheckoutIds.filter(id => id !== undefined));
+  const occupied = new Set(EffectArray.filter(activeCheckoutIds, id => id !== undefined));
   const reservedCheckouts = agedBackgroundCheckoutIds(tickets, nowMilliseconds);
   const selected: T[] = [];
   while (remaining.length > 0) {
-    const nextIndex = remaining.findIndex(
-      ticket =>
-        !isReservedForegroundTicket(ticket, reservedCheckouts) &&
-        (ticket.checkoutId === undefined || !occupied.has(ticket.checkoutId)),
+    const nextIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        remaining,
+        ticket =>
+          !isReservedForegroundTicket(ticket, reservedCheckouts) &&
+          (ticket.checkoutId === undefined || !occupied.has(ticket.checkoutId)),
+      ),
+      () => -1,
     );
-    const reservedIndex = remaining.findIndex(ticket => !isReservedForegroundTicket(ticket, reservedCheckouts));
+    const reservedIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(remaining, ticket => !isReservedForegroundTicket(ticket, reservedCheckouts)),
+      () => -1,
+    );
     const [next] = remaining.splice(nextIndex >= 0 ? nextIndex : reservedIndex >= 0 ? reservedIndex : 0, 1);
     selected.push(next);
     if (next.checkoutId !== undefined) occupied.add(next.checkoutId);

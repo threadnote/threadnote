@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {SourceCoordinator} from '@threadnote/integration-core/source-coordinator';
 import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -67,9 +68,12 @@ export interface SourceCommandOptions {
   readonly dryRun?: boolean;
 }
 
-class SourceCommandError extends Schema.TaggedError<SourceCommandError>()('SourceCommandError', {
-  message: Schema.String,
-}) {}
+class SourceCommandError extends Schema.TaggedError<SourceCommandError, {readonly brand: unique symbol}>()(
+  'SourceCommandError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export const runSourceAdd = Effect.fn('source.add')(function* (config: RuntimeConfig, options: SourceAddOptions) {
   if (options.type === 'linear') return yield* runLinearSourceAdd(config, options);
@@ -98,7 +102,7 @@ export const runSourceList = Effect.fn('source.list')(function* (config: Runtime
         : source.type === 'linear'
           ? `${source.id} (linear): ${source.projectIds.length} selected project(s), ${source.issueIds.length} issue(s); project ${source.project}; ${source.enabled ? 'enabled' : 'disabled'}`
           : source.type === 'github'
-            ? `${source.id} (github): ${source.repositories.join(', ')}; project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`
+            ? `${source.id} (github): ${EffectArray.join(source.repositories, ', ')}; project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`
             : source.type === 'pocket'
               ? `${source.id} (pocket): all accessible recordings; project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`
               : `${source.id} (superhuman): ${source.documents.length} document(s); project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`,
@@ -107,7 +111,9 @@ export const runSourceList = Effect.fn('source.list')(function* (config: Runtime
 });
 
 const sourceType = Effect.fn('source.type')(function* (config: RuntimeConfig, id: string) {
-  const source = (yield* readSourceConfiguration(config)).sources.find(candidate => candidate.id === id);
+  const source = EffectOption.getOrUndefined(
+    EffectArray.findFirst((yield* readSourceConfiguration(config)).sources, candidate => candidate.id === id),
+  );
   if (!source) {
     return yield* SourceCommandError.make({message: `No source named "${id}".`});
   }

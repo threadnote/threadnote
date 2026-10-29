@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 export const REMOVED_VIEW_CLEANUP_ADMISSION_CURSOR_KEY = 'removed_view_cleanup_admission_cursor';
 export const REMOVED_VIEW_CLEANUP_EPOCH_SEQUENCE_KEY = 'removed_view_cleanup_epoch_sequence';
 export const MAXIMUM_CANONICAL_DATE_MILLISECONDS = 253_402_300_799_999;
@@ -84,11 +86,11 @@ export const REMOVED_VIEW_CLEANUP_TABLE_SQL = `CREATE TABLE IF NOT EXISTS remove
   )
 ) WITHOUT ROWID`;
 
-const REMOVED_VIEW_CLEANUP_STORED_TABLE_SQL = REMOVED_VIEW_CLEANUP_TABLE_SQL.replace(
-  'CREATE TABLE IF NOT EXISTS',
-  'CREATE TABLE',
+const REMOVED_VIEW_CLEANUP_STORED_TABLE_SQL = Effect.pipe(
+  REMOVED_VIEW_CLEANUP_TABLE_SQL,
+  EffectString.replace('CREATE TABLE IF NOT EXISTS', 'CREATE TABLE'),
 );
-const REMOVED_VIEW_CLEANUP_STORED_TABLE_SQL_LITERAL = `'${REMOVED_VIEW_CLEANUP_STORED_TABLE_SQL.replaceAll("'", "''")}'`;
+const REMOVED_VIEW_CLEANUP_STORED_TABLE_SQL_LITERAL = `'${Effect.pipe(REMOVED_VIEW_CLEANUP_STORED_TABLE_SQL, EffectString.replaceAll("'", "''"))}'`;
 
 export const REMOVED_VIEW_CLEANUP_DUE_INDEX_SQL = `CREATE INDEX IF NOT EXISTS removed_view_cleanup_due
   ON removed_view_cleanup (next_attempt_at, worktree_id, expected_snapshot_id)
@@ -150,7 +152,8 @@ const REMOVED_VIEW_CLEANUP_REVOKE_DELETE_TRIGGER_SQL = `CREATE TRIGGER IF NOT EX
       AND removed_at = OLD.removed_at;
   END`;
 
-const SNAPSHOT_LEASE_BATON_INDEX_TRIGGER_GUARD_SQL = `SELECT CASE
+const SNAPSHOT_LEASE_BATON_INDEX_TRIGGER_GUARD_SQL = Effect.pipe(
+  `SELECT CASE
       WHEN (
         SELECT COUNT(*)
         FROM (
@@ -230,9 +233,10 @@ const SNAPSHOT_LEASE_BATON_INDEX_TRIGGER_GUARD_SQL = `SELECT CASE
           OR retire_valid <> 1
       )
       THEN RAISE(ABORT, 'code graph snapshot lease baton index is incompatible')
-    END;`
-  .replace(/\s+/gu, ' ')
-  .trim();
+    END;`,
+  EffectString.replace(/\s+/gu, ' '),
+  EffectString.trim,
+);
 
 const REMOVED_VIEW_CLEANUP_REVOKE_INSERT_TRIGGER_SQL = `CREATE TRIGGER IF NOT EXISTS removed_views_cleanup_revoke_insert
   AFTER INSERT ON removed_views

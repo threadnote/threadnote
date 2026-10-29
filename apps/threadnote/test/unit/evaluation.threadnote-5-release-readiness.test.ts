@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   APPROVED_THREADNOTE_5_BASELINE_COMPARISON,
@@ -36,17 +37,26 @@ import {
 import * as fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import fixtureJson from '../evaluation/fixtures/threadnote-5-task-loop-v1/fixture.json' with {type: 'json'};
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function isOneOf<const Values extends readonly string[]>(value: string, values: Values): value is Values[number] {
+  for (const candidate of values) {
+    if (candidate === value) return true;
+  }
+  return false;
+}
 
 const fixture = parseThreadnote5ReleaseReadinessFixtureV1(fixtureJson);
 const CANDIDATE: Threadnote5SourceV1 = {
-  commit: '1'.repeat(40),
-  executableSha256: '2'.repeat(64),
+  commit: Effect.pipe('1', EffectString.repeat(40)),
+  executableSha256: Effect.pipe('2', EffectString.repeat(64)),
   id: 'threadnote-5.0.0',
-  version: `5.0.0-local.g${'1'.repeat(40)}`,
+  version: `5.0.0-local.g${Effect.pipe('1', EffectString.repeat(40))}`,
 };
 const BASELINE: Threadnote5SourceV1 = {
   commit: THREADNOTE_5_BASELINE_COMMIT,
-  executableSha256: '4'.repeat(64),
+  executableSha256: Effect.pipe('4', EffectString.repeat(64)),
   id: 'threadnote-4.7.x',
   version: '4.7.8',
 };
@@ -73,7 +83,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
         }),
       ]),
     );
-    expect(new Set(THREADNOTE_5_LOCAL_RECEIPT_ADAPTERS.map(adapter => adapter.kind)).size).toBe(
+    expect(new Set(EffectArray.map(THREADNOTE_5_LOCAL_RECEIPT_ADAPTERS, adapter => adapter.kind)).size).toBe(
       THREADNOTE_5_LOCAL_RECEIPT_ADAPTERS.length,
     );
   });
@@ -83,7 +93,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
     expect(fixture.networkAllowed).toBe(false);
     expect(fixture.scenarios).toEqual(APPROVED_THREADNOTE_5_SCENARIOS);
     expect(fixture.metrics).toEqual(APPROVED_THREADNOTE_5_METRICS);
-    expect(fixture.scenarios.map(item => item.id)).toEqual([
+    expect(EffectArray.map(fixture.scenarios, item => item.id)).toEqual([
       'solo',
       'two-agent',
       'git-shared',
@@ -115,17 +125,19 @@ describe('Threadnote 5 release-readiness evidence', () => {
     const evidence = evidenceBundle({baseline: unavailableBaseline(), mode: 'fixture-replay'});
     const result = evaluate(evidence);
 
-    expect(result.scenarios.every(item => item.state === 'passed')).toBe(true);
-    expect(result.metrics.every(item => item.thresholdPassed === true)).toBe(true);
+    expect(EffectArray.every(result.scenarios, item => item.state === 'passed')).toBe(true);
+    expect(EffectArray.every(result.metrics, item => item.thresholdPassed === true)).toBe(true);
     expect(
-      result.metrics
-        .filter(item => THREADNOTE_5_BASELINE_COMPARABLE_METRICS.includes(item.id as never))
-        .every(item => item.baseline.state === 'unknown' && item.delta.state === 'unknown'),
+      EffectArray.every(
+        EffectArray.filter(result.metrics, item => isOneOf(item.id, THREADNOTE_5_BASELINE_COMPARABLE_METRICS)),
+        item => item.baseline.state === 'unknown' && item.delta.state === 'unknown',
+      ),
     ).toBe(true);
     expect(
-      result.metrics
-        .filter(item => THREADNOTE_5_BASELINE_NOT_APPLICABLE_METRICS.includes(item.id as never))
-        .every(item => item.baseline.state === 'not-applicable' && item.delta.state === 'not-applicable'),
+      EffectArray.every(
+        EffectArray.filter(result.metrics, item => isOneOf(item.id, THREADNOTE_5_BASELINE_NOT_APPLICABLE_METRICS)),
+        item => item.baseline.state === 'not-applicable' && item.delta.state === 'not-applicable',
+      ),
     ).toBe(true);
     expect(result.evidence.captureManifestTrusted).toBe(true);
     expect(result.gate).toEqual({
@@ -153,7 +165,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
       status: 'unknown',
     });
     expect(
-      result.metrics.map(item => [
+      EffectArray.map(result.metrics, item => [
         item.id,
         item.delta.state,
         item.delta.state === 'observed' && item.delta.classification,
@@ -167,7 +179,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
       ['knowledge-delta-completion-rate', 'not-applicable', false],
       ['health-resolution-rate', 'not-applicable', false],
     ]);
-    expect(result.metrics.every(item => item.thresholdPassed === true)).toBe(true);
+    expect(EffectArray.every(result.metrics, item => item.thresholdPassed === true)).toBe(true);
     expect(result.gate.qualityFailures).toEqual([]);
   });
 
@@ -187,7 +199,9 @@ describe('Threadnote 5 release-readiness evidence', () => {
     );
     const result = evaluate(failing, BASELINE);
 
-    expect(result.metrics.find(item => item.id === 'setup-success-rate')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.metrics, item => item.id === 'setup-success-rate')),
+    ).toMatchObject({
       baseline: {state: 'not-applicable'},
       delta: {state: 'not-applicable'},
       thresholdPassed: false,
@@ -232,8 +246,14 @@ describe('Threadnote 5 release-readiness evidence', () => {
     );
     const sufficientResult = evaluate(sufficient);
 
-    expect(sufficientResult.scenarios.find(item => item.id === 'solo')?.state).toBe('passed');
-    expect(sufficientResult.metrics.find(item => item.id === 'setup-success-rate')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(sufficientResult.scenarios, item => item.id === 'solo'))?.state,
+    ).toBe('passed');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(sufficientResult.metrics, item => item.id === 'setup-success-rate'),
+      ),
+    ).toMatchObject({
       candidate: {state: 'observed', value: 0.9},
       thresholdPassed: true,
     });
@@ -245,8 +265,15 @@ describe('Threadnote 5 release-readiness evidence', () => {
     );
     const belowThresholdResult = evaluate(belowThreshold);
 
-    expect(belowThresholdResult.scenarios.find(item => item.id === 'solo')?.state).toBe('passed');
-    expect(belowThresholdResult.metrics.find(item => item.id === 'setup-success-rate')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(belowThresholdResult.scenarios, item => item.id === 'solo'))
+        ?.state,
+    ).toBe('passed');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(belowThresholdResult.metrics, item => item.id === 'setup-success-rate'),
+      ),
+    ).toMatchObject({
       candidate: {state: 'observed', value: 0.8},
       thresholdPassed: false,
     });
@@ -272,13 +299,18 @@ describe('Threadnote 5 release-readiness evidence', () => {
           },
         );
         const result = evaluate(undersized);
-        const soloMetricIds = new Set(fixture.scenarios.find(item => item.id === 'solo')!.metricIds);
+        const soloMetricIds = new Set(
+          EffectOption.getOrUndefined(EffectArray.findFirst(fixture.scenarios, item => item.id === 'solo'))!.metricIds,
+        );
 
-        expect(result.scenarios.find(item => item.id === 'solo')?.state).toBe('unknown');
         expect(
-          result.metrics
-            .filter(metric => soloMetricIds.has(metric.id))
-            .every(metric => metric.candidate.state === 'unknown' && metric.thresholdPassed === null),
+          EffectOption.getOrUndefined(EffectArray.findFirst(result.scenarios, item => item.id === 'solo'))?.state,
+        ).toBe('unknown');
+        expect(
+          EffectArray.every(
+            EffectArray.filter(result.metrics, metric => soloMetricIds.has(metric.id)),
+            metric => metric.candidate.state === 'unknown' && metric.thresholdPassed === null,
+          ),
         ).toBe(true);
         expect(result.gate.status).toBe('failed');
         expect(result.gate.qualityFailures).toContain('candidate scenario solo is unknown');
@@ -298,21 +330,26 @@ describe('Threadnote 5 release-readiness evidence', () => {
     );
     const result = evaluate(undersized);
 
-    expect(result.scenarios.find(item => item.id === 'solo')?.state).toBe('unknown');
-    expect(result.metrics.find(item => item.id === 'setup-success-rate')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.scenarios, item => item.id === 'solo'))?.state,
+    ).toBe('unknown');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.metrics, item => item.id === 'setup-success-rate')),
+    ).toMatchObject({
       candidate: {reason: 'source-incomplete', state: 'unknown'},
       thresholdPassed: null,
     });
     expect(
-      result.metrics
-        .filter(metric =>
+      EffectArray.every(
+        EffectArray.filter(result.metrics, metric =>
           [
             'time-to-first-cited-correct-plan',
             'estimated-tokens-to-first-cited-correct-plan',
             'wrong-memory-rate',
           ].includes(metric.id),
-        )
-        .every(metric => metric.candidate.state === 'observed'),
+        ),
+        metric => metric.candidate.state === 'observed',
+      ),
     ).toBe(true);
   });
 
@@ -332,23 +369,30 @@ describe('Threadnote 5 release-readiness evidence', () => {
     );
     const result = evaluate(evidence, BASELINE);
 
-    expect(result.metrics.find(item => item.id === 'time-to-first-cited-correct-plan')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(result.metrics, item => item.id === 'time-to-first-cited-correct-plan'),
+      ),
+    ).toMatchObject({
       baseline: {reason: 'source-incomplete', state: 'unknown'},
       delta: {reason: 'source-incomplete', state: 'unknown'},
     });
     expect(
-      result.metrics
-        .filter(
+      EffectArray.every(
+        EffectArray.filter(
+          result.metrics,
           metric =>
             metric.id !== 'time-to-first-cited-correct-plan' &&
-            THREADNOTE_5_BASELINE_COMPARABLE_METRICS.includes(metric.id as never),
-        )
-        .every(metric => metric.baseline.state === 'observed' && metric.delta.state === 'observed'),
+            isOneOf(metric.id, THREADNOTE_5_BASELINE_COMPARABLE_METRICS),
+        ),
+        metric => metric.baseline.state === 'observed' && metric.delta.state === 'observed',
+      ),
     ).toBe(true);
     expect(
-      result.metrics
-        .filter(metric => THREADNOTE_5_BASELINE_NOT_APPLICABLE_METRICS.includes(metric.id as never))
-        .every(metric => metric.baseline.state === 'not-applicable' && metric.delta.state === 'not-applicable'),
+      EffectArray.every(
+        EffectArray.filter(result.metrics, metric => isOneOf(metric.id, THREADNOTE_5_BASELINE_NOT_APPLICABLE_METRICS)),
+        metric => metric.baseline.state === 'not-applicable' && metric.delta.state === 'not-applicable',
+      ),
     ).toBe(true);
     expect(result.gate.insufficiencies).toContain('4.7.8 baseline metric is unknown: time-to-first-cited-correct-plan');
   });
@@ -360,12 +404,16 @@ describe('Threadnote 5 release-readiness evidence', () => {
       state: 'available',
     };
     const evidence = evidenceBundle({baseline, mode: 'fixture-replay'});
-    for (const expectedBaselineSource of [undefined, {...BASELINE, executableSha256: '9'.repeat(64)}]) {
+    for (const expectedBaselineSource of [
+      undefined,
+      {...BASELINE, executableSha256: Effect.pipe('9', EffectString.repeat(64))},
+    ]) {
       const result = evaluate(evidence, expectedBaselineSource);
       expect(
-        result.metrics
-          .filter(metric => THREADNOTE_5_BASELINE_COMPARABLE_METRICS.includes(metric.id as never))
-          .every(metric => metric.baseline.state === 'unknown' && metric.delta.state === 'unknown'),
+        EffectArray.every(
+          EffectArray.filter(result.metrics, metric => isOneOf(metric.id, THREADNOTE_5_BASELINE_COMPARABLE_METRICS)),
+          metric => metric.baseline.state === 'unknown' && metric.delta.state === 'unknown',
+        ),
       ).toBe(true);
       expect(result.gate.insufficiencies).toContain(
         '4.7.8 baseline does not match its trusted identity, executable, and ledger',
@@ -375,7 +423,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
 
   it('rejects any baseline release other than exact Threadnote 4.7.8', () => {
     for (const source of [
-      {...BASELINE, commit: '8'.repeat(40)},
+      {...BASELINE, commit: Effect.pipe('8', EffectString.repeat(40))},
       {...BASELINE, version: '4.7.7'},
       {...BASELINE, version: '4.7.9'},
     ]) {
@@ -402,14 +450,16 @@ describe('Threadnote 5 release-readiness evidence', () => {
       fixture,
     });
     expect(
-      trusted.metrics
-        .filter(metric => THREADNOTE_5_BASELINE_COMPARABLE_METRICS.includes(metric.id as never))
-        .every(metric => metric.baseline.state === 'observed' && metric.delta.state === 'observed'),
+      EffectArray.every(
+        EffectArray.filter(trusted.metrics, metric => isOneOf(metric.id, THREADNOTE_5_BASELINE_COMPARABLE_METRICS)),
+        metric => metric.baseline.state === 'observed' && metric.delta.state === 'observed',
+      ),
     ).toBe(true);
     expect(
-      trusted.metrics
-        .filter(metric => THREADNOTE_5_BASELINE_NOT_APPLICABLE_METRICS.includes(metric.id as never))
-        .every(metric => metric.baseline.state === 'not-applicable' && metric.delta.state === 'not-applicable'),
+      EffectArray.every(
+        EffectArray.filter(trusted.metrics, metric => isOneOf(metric.id, THREADNOTE_5_BASELINE_NOT_APPLICABLE_METRICS)),
+        metric => metric.baseline.state === 'not-applicable' && metric.delta.state === 'not-applicable',
+      ),
     ).toBe(true);
 
     const missing = evaluateThreadnote5ReleaseReadiness({
@@ -421,25 +471,27 @@ describe('Threadnote 5 release-readiness evidence', () => {
       fixture,
     });
     expect(
-      missing.metrics
-        .filter(metric => THREADNOTE_5_BASELINE_COMPARABLE_METRICS.includes(metric.id as never))
-        .every(metric => metric.baseline.state === 'unknown'),
+      EffectArray.every(
+        EffectArray.filter(missing.metrics, metric => isOneOf(metric.id, THREADNOTE_5_BASELINE_COMPARABLE_METRICS)),
+        metric => metric.baseline.state === 'unknown',
+      ),
     ).toBe(true);
 
     const untrusted = evaluateThreadnote5ReleaseReadiness({
       baselineTrialLedger: ledger,
       evidence,
       expectedBaselineSource: BASELINE,
-      expectedBaselineTrialLedgerSha256: 'f'.repeat(64),
+      expectedBaselineTrialLedgerSha256: Effect.pipe('f', EffectString.repeat(64)),
       expectedCandidateCommit: CANDIDATE.commit,
       expectedCandidateExecutableSha256: CANDIDATE.executableSha256,
       expectedCaptureManifestSha256: evidence.capture.manifestHash,
       fixture,
     });
     expect(
-      untrusted.metrics
-        .filter(metric => THREADNOTE_5_BASELINE_COMPARABLE_METRICS.includes(metric.id as never))
-        .every(metric => metric.baseline.state === 'unknown'),
+      EffectArray.every(
+        EffectArray.filter(untrusted.metrics, metric => isOneOf(metric.id, THREADNOTE_5_BASELINE_COMPARABLE_METRICS)),
+        metric => metric.baseline.state === 'unknown',
+      ),
     ).toBe(true);
   });
 
@@ -448,13 +500,20 @@ describe('Threadnote 5 release-readiness evidence', () => {
     const expected = threadnote5BaselineTrialLedger(BASELINE, observations);
     const expectedHash = threadnote5BaselineTrialLedgerHash(expected);
     expect(
-      new Set(expected.observations.flatMap(observation => observation.measurements.map(item => item.id))),
+      new Set(
+        EffectArray.flatMap(expected.observations, observation =>
+          EffectArray.map(observation.measurements, item => item.id),
+        ),
+      ),
     ).toEqual(new Set(THREADNOTE_5_BASELINE_COMPARABLE_METRICS));
     expect(
-      expected.observations
-        .flatMap(observation => observation.measurements)
-        .filter(measurement => measurement.id === 'wrong-memory-rate')
-        .every(measurement => 'eligibleCount' in measurement && 'positiveCount' in measurement),
+      EffectArray.every(
+        EffectArray.filter(
+          EffectArray.flatMap(expected.observations, observation => observation.measurements),
+          measurement => measurement.id === 'wrong-memory-rate',
+        ),
+        measurement => 'eligibleCount' in measurement && 'positiveCount' in measurement,
+      ),
     ).toBe(true);
 
     fc.assert(
@@ -465,7 +524,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
         }),
         fc.boolean(),
         (order, reverseMeasurements) => {
-          const reordered = order.map(index => {
+          const reordered = EffectArray.map(order, index => {
             const observation = observations[index];
             return reverseMeasurements
               ? {
@@ -490,7 +549,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
     const ledger = threadnote5BaselineTrialLedger(BASELINE, observationsFor(BASELINE, 'baseline'));
     const incompatible = {
       ...ledger,
-      observations: ledger.observations.map((observation, index) =>
+      observations: EffectArray.map(ledger.observations, (observation, index) =>
         index === 0
           ? {
               ...observation,
@@ -508,12 +567,14 @@ describe('Threadnote 5 release-readiness evidence', () => {
   it('fails closed when a candidate scenario is missing', () => {
     const original = evidenceBundle({baseline: unavailableBaseline(), mode: 'fixture-replay'});
     const candidateObservations = rechainObservations(
-      original.candidateObservations.filter(item => item.scenario !== 'dirty-worktree'),
+      EffectArray.filter(original.candidateObservations, item => item.scenario !== 'dirty-worktree'),
     );
     const incomplete = resealEvidence({...withoutEvidenceHash(original), candidateObservations});
     const result = evaluate(incomplete);
 
-    expect(result.scenarios.find(item => item.id === 'dirty-worktree')?.state).toBe('missing');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.scenarios, item => item.id === 'dirty-worktree'))?.state,
+    ).toBe('missing');
     expect(result.gate.status).toBe('failed');
     expect(result.gate.qualityFailures).toContain('candidate scenario dirty-worktree is missing');
   });
@@ -525,7 +586,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
       ...first,
       transcript: {
         ...first.transcript,
-        measurements: first.transcript.measurements.map((measurement, index) =>
+        measurements: EffectArray.map(first.transcript.measurements, (measurement, index) =>
           index === 0 && 'total' in measurement ? {...measurement, total: measurement.total + 1} : measurement,
         ),
       },
@@ -544,7 +605,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
       ...withoutReceiptHash(first),
       attestation: {
         ...first.attestation,
-        postRuntime: {...first.attestation.postRuntime, executableSha256: '9'.repeat(64)},
+        postRuntime: {...first.attestation.postRuntime, executableSha256: Effect.pipe('9', EffectString.repeat(64))},
       },
     };
     const drifted = {...driftedBase, receiptHash: threadnote5ObservationReceiptHash(driftedBase)};
@@ -577,7 +638,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
     const first = original.candidateObservations[0];
     const transcript = {
       ...first.transcript,
-      measurements: first.transcript.measurements.map(measurement =>
+      measurements: EffectArray.map(first.transcript.measurements, measurement =>
         'total' in measurement ? {...measurement, total: measurement.total + measurement.sampleCount} : measurement,
       ),
     };
@@ -593,16 +654,18 @@ describe('Threadnote 5 release-readiness evidence', () => {
     const result = evaluateWithManifest(relabeled, originalTrustedHash);
 
     expect(result.evidence.captureManifestTrusted).toBe(false);
-    expect(result.metrics.every(metric => metric.candidate.state === 'unknown')).toBe(true);
+    expect(EffectArray.every(result.metrics, metric => metric.candidate.state === 'unknown')).toBe(true);
     expect(
-      result.metrics
-        .filter(metric => THREADNOTE_5_BASELINE_COMPARABLE_METRICS.includes(metric.id as never))
-        .every(metric => metric.delta.state === 'unknown'),
+      EffectArray.every(
+        EffectArray.filter(result.metrics, metric => isOneOf(metric.id, THREADNOTE_5_BASELINE_COMPARABLE_METRICS)),
+        metric => metric.delta.state === 'unknown',
+      ),
     ).toBe(true);
     expect(
-      result.metrics
-        .filter(metric => THREADNOTE_5_BASELINE_NOT_APPLICABLE_METRICS.includes(metric.id as never))
-        .every(metric => metric.delta.state === 'not-applicable'),
+      EffectArray.every(
+        EffectArray.filter(result.metrics, metric => isOneOf(metric.id, THREADNOTE_5_BASELINE_NOT_APPLICABLE_METRICS)),
+        metric => metric.delta.state === 'not-applicable',
+      ),
     ).toBe(true);
     expect(result.gate.qualityFailures).toContain('capture manifest does not match the trusted expected hash');
   });
@@ -632,7 +695,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
         }),
         order => {
           const evidence = evidenceBundle({baseline: unavailableBaseline(), mode: 'fixture-replay'});
-          const reordered = order.map(index => evidence.candidateObservations[index]);
+          const reordered = EffectArray.map(order, index => evidence.candidateObservations[index]);
           expect(
             threadnote5ReleaseEvidenceHash({...withoutEvidenceHash(evidence), candidateObservations: reordered}),
           ).toBe(evidence.evidenceHash);
@@ -646,7 +709,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
   });
 
   it('detects bounded numeric tampering for every measured scenario', () => {
-    const measuredOrdinals = fixture.scenarios.flatMap((scenario, index) =>
+    const measuredOrdinals = EffectArray.flatMap(fixture.scenarios, (scenario, index) =>
       scenario.metricIds.length > 0 ? [index] : [],
     );
     fc.assert(
@@ -660,7 +723,7 @@ describe('Threadnote 5 release-readiness evidence', () => {
             : {...measurement, positiveCount: measurement.positiveCount === 0 ? 1 : measurement.positiveCount - 1};
         const tampered = {
           ...evidence,
-          candidateObservations: evidence.candidateObservations.map((item, ordinal) =>
+          candidateObservations: EffectArray.map(evidence.candidateObservations, (item, ordinal) =>
             ordinal === index
               ? {
                   ...item,
@@ -738,10 +801,10 @@ function evidenceBundle(input: {
 function observationsFor(source: Threadnote5SourceV1, variant: 'baseline' | 'candidate'): Threadnote5ObservationV1[] {
   const sourceHash = threadnote5SourceHash(source);
   let previousTranscriptDigest: string | null = null;
-  return fixture.scenarios.map((contract, index) => {
+  return EffectArray.map(fixture.scenarios, (contract, index) => {
     const transcript = {
-      assertionResults: contract.requiredAssertions.map(id => ({id, observed: true})),
-      measurements: contract.metricIds.map(id => measurementFor(id, variant)),
+      assertionResults: EffectArray.map(contract.requiredAssertions, id => ({id, observed: true})),
+      measurements: EffectArray.map(contract.metricIds, id => measurementFor(id, variant)),
       outcome: 'passed' as const,
       reason: null,
     };
@@ -751,13 +814,13 @@ function observationsFor(source: Threadnote5SourceV1, variant: 'baseline' | 'can
         postRuntime: {executableSha256: source.executableSha256, sourceCommit: source.commit},
         preRuntime: {executableSha256: source.executableSha256, sourceCommit: source.commit},
         previousTranscriptDigest,
-        subsystemReceipts: contract.subsystems.map(kind => ({
+        subsystemReceipts: EffectArray.map(contract.subsystems, kind => ({
           digest: sha256HexSync(`${sourceHash}\0${contract.id}\0${kind}`),
           kind,
         })),
         transcriptDigest,
       },
-      observationId: `obs_${sha256HexSync(`${sourceHash}\0${contract.id}\0${index}`).slice(0, 32)}`,
+      observationId: `obs_${Effect.pipe(sha256HexSync(`${sourceHash}\0${contract.id}\0${index}`), EffectString.slice(0, 32))}`,
       scenario: contract.id,
       sourceHash,
       transcript,
@@ -850,11 +913,11 @@ function rewriteObservationMeasurements(
   rewrite: (measurement: Threadnote5MeasurementV1) => Threadnote5MeasurementV1,
 ): Threadnote5ObservationV1[] {
   return rechainObservations(
-    observations.map(observation => {
+    EffectArray.map(observations, observation => {
       if (observation.scenario !== scenario) return observation;
       const transcript = {
         ...observation.transcript,
-        measurements: observation.transcript.measurements.map(rewrite),
+        measurements: EffectArray.map(observation.transcript.measurements, rewrite),
       };
       const base = {
         ...withoutReceiptHash(observation),
@@ -871,7 +934,7 @@ function rewriteObservationMeasurements(
 
 function rechainObservations(observations: readonly Threadnote5ObservationV1[]): Threadnote5ObservationV1[] {
   let previousTranscriptDigest: string | null = null;
-  return observations.map(observation => {
+  return EffectArray.map(observations, observation => {
     const base = {
       ...withoutReceiptHash(observation),
       attestation: {...observation.attestation, previousTranscriptDigest},

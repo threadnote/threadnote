@@ -1,3 +1,5 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Predicate} from 'effect';
 import {
   CONTEXT_BRIEF_SOURCE_MAXIMUM_COVERED_REFS,
@@ -5,6 +7,7 @@ import {
   type ContextBriefSourceExcerptV1,
   type ContextBriefV1,
 } from './types.js';
+import * as EffectRecord from 'effect/Record';
 
 type ProjectionItemLike = {
   readonly id: string;
@@ -44,12 +47,15 @@ export function contextBriefAnswerWithSourceReadSignal(
 export function contextBriefSourceProjectionItems(
   logical: ContextBriefLogicalResultV1,
 ): readonly SourceProjectionItem[] {
-  return (logical.graph.sourceExcerpts ?? []).map(source => ({
+  return EffectArray.map(logical.graph.sourceExcerpts ?? [], source => ({
     id: source.id,
     lane: 'source-excerpt',
     laneRank: Math.min(
-      ...source.coveredGraphRefs.map(
-        ref => logical.graph.cards.find(card => card.ref === ref)?.rank ?? source.startLine,
+      ...EffectArray.map(
+        source.coveredGraphRefs,
+        ref =>
+          EffectOption.getOrUndefined(EffectArray.findFirst(logical.graph.cards, card => card.ref === ref))?.rank ??
+          source.startLine,
       ),
     ),
     priority: 0,
@@ -62,19 +68,35 @@ export function requiredContextBriefSourceProjectionItems<T extends ProjectionIt
 ): readonly T[] {
   const source = logical.graph.sourceExcerpts?.[0];
   if (source === undefined) return [];
-  const sourceItem = items.find(item => item.lane === 'source-excerpt' && item.id === source.id);
+  const sourceItem = EffectOption.getOrUndefined(
+    EffectArray.findFirst(items, item => item.lane === 'source-excerpt' && item.id === source.id),
+  );
   if (sourceItem === undefined) return [];
-  const card = logical.graph.cards.find(candidate => source.coveredGraphRefs.includes(candidate.ref));
-  const contract = logical.graph.contracts.find(
-    candidate =>
-      source.coveredGraphRefs.includes(candidate.sourceRef) || source.coveredGraphRefs.includes(candidate.targetRef),
+  const card = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      logical.graph.cards,
+      __effectArrayValue => !!(candidate => source.coveredGraphRefs.includes(candidate.ref))(__effectArrayValue),
+    ),
+  );
+  const contract = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      logical.graph.contracts,
+      __effectArrayValue =>
+        !!(candidate =>
+          source.coveredGraphRefs.includes(candidate.sourceRef) ||
+          source.coveredGraphRefs.includes(candidate.targetRef))(__effectArrayValue),
+    ),
   );
   const evidenceItem =
     card === undefined
       ? contract === undefined
         ? undefined
-        : items.find(item => item.lane === 'graph-contract' && item.id === contract.id)
-      : items.find(item => item.lane === 'graph-card' && item.id === card.id);
+        : EffectOption.getOrUndefined(
+            EffectArray.findFirst(items, item => item.lane === 'graph-contract' && item.id === contract.id),
+          )
+      : EffectOption.getOrUndefined(
+          EffectArray.findFirst(items, item => item.lane === 'graph-card' && item.id === card.id),
+        );
   return evidenceItem === undefined ? [] : [evidenceItem, sourceItem];
 }
 
@@ -83,9 +105,13 @@ export function selectContextBriefProjectedSources(
   selectedSourceIds: ReadonlySet<string> | undefined,
   retainedGraphRefs: ReadonlySet<string>,
 ): readonly ContextBriefSourceExcerptV1[] {
-  return (logical.graph.sourceExcerpts ?? []).filter(
-    source =>
-      selectedSourceIds?.has(source.id) === true && source.coveredGraphRefs.some(ref => retainedGraphRefs.has(ref)),
+  const sourceExcerpts = logical.graph.sourceExcerpts ?? [];
+  return EffectArray.filter(
+    sourceExcerpts,
+    (source, __effectArrayIndex) =>
+      __effectArrayIndex in sourceExcerpts &&
+      selectedSourceIds?.has(source.id) === true &&
+      EffectArray.some(source.coveredGraphRefs, ref => retainedGraphRefs.has(ref)),
   );
 }
 
@@ -98,7 +124,7 @@ export function withAdjustedContextBriefSourceExcerpt(
     ...logical,
     graph: {
       ...logical.graph,
-      sourceExcerpts: (logical.graph.sourceExcerpts ?? []).map(candidate =>
+      sourceExcerpts: EffectArray.map(logical.graph.sourceExcerpts ?? [], candidate =>
         candidate.id === sourceId ? source : candidate,
       ),
     },
@@ -138,7 +164,7 @@ export function validateContextBriefSourceExcerpt(value: unknown, index: number)
     !stringArray(value.coveredGraphRefs) ||
     value.coveredGraphRefs.length === 0 ||
     value.coveredGraphRefs.length > CONTEXT_BRIEF_SOURCE_MAXIMUM_COVERED_REFS ||
-    !value.coveredGraphRefs.every(ref => /^cgs_(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/u.test(ref)) ||
+    !EffectArray.every(value.coveredGraphRefs, ref => /^cgs_(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/u.test(ref)) ||
     !positiveInteger(value.startLine) ||
     !positiveInteger(value.endLine) ||
     value.endLine < value.startLine ||
@@ -156,16 +182,16 @@ export function validateContextBriefSourceExcerpt(value: unknown, index: number)
 
 function assertKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const allowedKeys = new Set(allowed);
-  const unsupported = Object.keys(value).filter(key => !allowedKeys.has(key));
+  const unsupported = EffectArray.filter(EffectRecord.keys(value), key => !allowedKeys.has(key));
   if (unsupported.length > 0) throw invalid(`${label} has unsupported field ${JSON.stringify(unsupported.sort()[0])}`);
 }
 
 function positiveInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) > 0;
+  return checkedIsSafeInteger(value) && value > 0;
 }
 
 function stringArray(value: unknown): value is readonly string[] {
-  return Array.isArray(value) && value.every(item => typeof item === 'string');
+  return EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
 }
 
 function invalid(message: string): Error {

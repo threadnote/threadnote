@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, Option} from 'effect';
 import type {CodeGraphAutomaticCompactionStatus} from '../automatic/compaction.js';
 import {
@@ -13,6 +14,7 @@ import {compareCodeUnits} from '../ordering.js';
 import {codeGraphCompactionRequiredFreeBytes, inspectCodeGraphStorage, type CodeGraphStorage} from '../storage.js';
 import {projectManagerGraphReconciliationStatus, type ManagerGraphReconciliationStatus} from './reconciliation.js';
 import type {CodeGraphLifecycleOpportunityResult} from '../lifecycle/opportunity.js';
+import * as EffectRecord from 'effect/Record';
 
 export type {ManagerGraphReconciliationStatus} from './reconciliation.js';
 
@@ -101,7 +103,8 @@ export const managerGraphBuildCatalog = Effect.fn('codeGraph.managerBuildCatalog
   const maintenance = yield* observeCodeGraphMaintenanceStatus(threadnoteHome).pipe(
     Effect.orElseSucceed(() => undefined),
   );
-  const active = [...selection.builds, ...selection.waiters].some(
+  const active = EffectArray.some(
+    [...selection.builds, ...selection.waiters],
     status => status.state === 'queued' || status.state === 'running',
   );
   let statusObservation =
@@ -137,7 +140,7 @@ export const managerGraphBuildCatalog = Effect.fn('codeGraph.managerBuildCatalog
   });
   const catalogRevision = statusObservation?.catalogRevision;
   const checkoutIds = managerGraphStorageStatusCheckoutIds([...selection.builds, ...selection.waiters]);
-  const storage = Object.fromEntries(
+  const storage = EffectRecord.fromEntries(
     yield* Effect.forEach(
       checkoutIds,
       checkoutId =>
@@ -155,7 +158,7 @@ export const managerGraphBuildCatalog = Effect.fn('codeGraph.managerBuildCatalog
     lifecyclePending: statusObservation?.lifecyclePending === true,
     ...(maintenance === undefined ? {} : {maintenance}),
     reconciliation,
-    queuedWorktreeIds: [...new Set(selection.waiters.map(status => status.identity.worktreeId))],
+    queuedWorktreeIds: [...new Set(EffectArray.map(selection.waiters, status => status.identity.worktreeId))],
     storage,
     waiterCount: selection.waiters.length,
     waiters: selection.waiters,

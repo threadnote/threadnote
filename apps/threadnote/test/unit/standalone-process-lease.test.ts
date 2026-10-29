@@ -14,6 +14,8 @@ import {
 import {createMissingProcessFile} from '@threadnote/threadnote/process/owned_file';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -85,7 +87,11 @@ describe('standalone lease reconciliation', () => {
         remove: (file, options) =>
           fs
             .remove(file, options)
-            .pipe(Effect.tap(() => (file.endsWith('.tmp') ? Queue.offer(attempts, undefined) : Effect.void))),
+            .pipe(
+              Effect.tap(() =>
+                Effect2.pipe(file, EffectString.endsWith('.tmp')) ? Queue.offer(attempts, undefined) : Effect.void,
+              ),
+            ),
       });
       const running = yield* withStandaloneProcessLease(
         Effect.gen(function* () {
@@ -144,7 +150,11 @@ describe('standalone lease reconciliation', () => {
         remove: (file, options) =>
           fs
             .remove(file, options)
-            .pipe(Effect.tap(() => (file.endsWith('.tmp') ? Queue.offer(attempts, undefined) : Effect.void))),
+            .pipe(
+              Effect.tap(() =>
+                Effect2.pipe(file, EffectString.endsWith('.tmp')) ? Queue.offer(attempts, undefined) : Effect.void,
+              ),
+            ),
       });
       const result = yield* withStandaloneProcessLease(
         Effect.gen(function* () {

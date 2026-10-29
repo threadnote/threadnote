@@ -3,19 +3,22 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {HttpService} from '@threadnote/platform/http';
 import {SystemInfo} from '@threadnote/platform/system';
 import {LEGACY_OPENVIKING_HOME_DIRECTORY} from '@threadnote/store/layout';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const LEGACY_LOCAL_AI_SERVICE_ID = 'threadnote-local-ai';
 const LEGACY_LOCAL_AI_RECEIPT_VERSION = 1;
 const LEGACY_LOCAL_AI_STOP_WAIT_MILLISECONDS = 2_000;
 const LEGACY_LOCAL_AI_STOP_POLL_MILLISECONDS = 50;
 
-class LegacyRuntimeMigrationError extends Schema.TaggedError<LegacyRuntimeMigrationError>()(
-  'LegacyRuntimeMigrationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class LegacyRuntimeMigrationError extends Schema.TaggedError<
+  LegacyRuntimeMigrationError,
+  {readonly brand: unique symbol}
+>()('LegacyRuntimeMigrationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 interface LegacyLocalAiReceipt {
   readonly launchId: string;
@@ -62,7 +65,7 @@ export const stopVerifiedLegacyLocalAi = Effect.fn('legacyRuntime.stopLocalAi')(
   const tokenPath = path.join(legacyHome, 'threadnote', 'local-ai-token');
   const config = yield* readJsonFile(fs, configPath, isLegacyLocalAiConfig);
   const token = yield* fs.readFileString(tokenPath).pipe(
-    Effect.map(value => value.trim()),
+    Effect.map(value => Effect2.pipe(value, EffectString.trim)),
     Effect.orElseSucceed(() => ''),
   );
   if (!config || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
@@ -87,7 +90,10 @@ export const stopVerifiedLegacyLocalAi = Effect.fn('legacyRuntime.stopLocalAi')(
   }
   const health = response.success.body;
   const expectedProof = yield* sha256Hex(
-    [challenge, LEGACY_LOCAL_AI_SERVICE_ID, config.model, String(receipt.pid), receipt.launchId, token].join('\0'),
+    EffectArray.join(
+      [challenge, LEGACY_LOCAL_AI_SERVICE_ID, config.model, String(receipt.pid), receipt.launchId, token],
+      '\0',
+    ),
   );
   if (
     health.status !== 'ok' ||

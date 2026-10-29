@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import React, {useState} from 'react';
 import {Sparkles} from 'lucide-react';
 import {MemoryExcerpt} from './review_presentation.js';
@@ -15,6 +17,8 @@ import {
   type ConsolidationReview,
   type ConsolidationSource,
 } from '@threadnote/memory/consolidation';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function consolidationReviewProblem(
   draft: string,
@@ -50,7 +54,7 @@ export function ConsolidationDraftReview(props: {
     /* The bound error is shown below. */
   }
   const update = (index: number, change: Partial<ConsolidationReview>) => {
-    const next: ConsolidationReview[] = sections.map((section, i) =>
+    const next: ConsolidationReview[] = EffectArray.map(sections, (section, i) =>
       props.reviews[i]?.section === section ? props.reviews[i] : {section, disposition: 'unresolved', supports: []},
     );
     const current = next[index];
@@ -61,7 +65,7 @@ export function ConsolidationDraftReview(props: {
     props.draft && props.sources.length
       ? consolidationReviewProblem(props.draft, props.sources, props.reviews)
       : undefined;
-  const reviewedCount = sections.filter((section, index) => {
+  const reviewedCount = EffectArray.filter(sections, (section, index) => {
     const review = props.reviews[index];
     return (
       review?.section === section &&
@@ -112,7 +116,7 @@ export function ConsolidationDraftReview(props: {
         </div>
       ) : null}
       {problem && reviewedCount === sections.length ? <p role="status">{problem}</p> : null}
-      {sections.map((section, index) => {
+      {EffectArray.map(sections, (section, index) => {
         const review = props.reviews[index]?.section === section ? props.reviews[index] : undefined;
         return (
           <fieldset key={`${index}:${section}`} disabled={props.disabled}>
@@ -146,22 +150,32 @@ export function ConsolidationDraftReview(props: {
                     ? 'Open a source below and choose the passage that supports this claim. Then check the code references or memory links to keep.'
                     : 'Open a source below and choose a passage that provides background. Its selected evidence will stay in review history.'}
                 </p>
-                {props.sources.map((source, sourceIndex) => (
+                {EffectArray.map(props.sources, (source, sourceIndex) => (
                   <details key={source.uri}>
                     <summary>
-                      Source {sourceIndex + 1}: {source.uri.split('/').at(-1)?.replace(/\.md$/, '')}
+                      Source {sourceIndex + 1}:{' '}
+                      {Effect.pipe(Effect.pipe(source.uri, EffectString.split('/')).at(-1), effectOptionalString =>
+                        effectOptionalString == null
+                          ? undefined
+                          : Effect.pipe(effectOptionalString, EffectString.replace(/\.md$/, '')),
+                      )}
                     </summary>
                     <p className="consolidation-source-origin">
                       {source.uri}
                       <br />
-                      Revision {source.revision.slice(0, 12)}
+                      Revision {Effect.pipe(source.revision, EffectString.slice(0, 12))}
                     </p>
-                    {source.fragments.map((fragment, fragmentIndex) => {
-                      const support = review.supports.find(
-                        s => s.sourceUri === source.uri && s.fragment === fragmentIndex,
+                    {EffectArray.map(source.fragments, (fragment, fragmentIndex) => {
+                      const support = EffectOption.getOrUndefined(
+                        EffectArray.findFirst(
+                          review.supports,
+                          s => s.sourceUri === source.uri && s.fragment === fragmentIndex,
+                        ),
                       );
                       const setSupport = (change: Partial<NonNullable<typeof support>>) =>
-                        update(index, {supports: review.supports.map(s => (s === support ? {...s, ...change} : s))});
+                        update(index, {
+                          supports: EffectArray.map(review.supports, s => (s === support ? {...s, ...change} : s)),
+                        });
                       return (
                         <div key={fragmentIndex}>
                           <label className="check-row">
@@ -181,7 +195,7 @@ export function ConsolidationDraftReview(props: {
                                           relationIndexes: [],
                                         },
                                       ]
-                                    : review.supports.filter(s => s !== support),
+                                    : EffectArray.filter(review.supports, s => s !== support),
                                 })
                               }
                             />
@@ -198,7 +212,7 @@ export function ConsolidationDraftReview(props: {
                                   ? 'kept as background only.'
                                   : 'only checked references are carried into the saved memory.'}
                               </p>
-                              {source.codeCitations.map(citation => (
+                              {EffectArray.map(source.codeCitations, citation => (
                                 <label className="check-row" key={citation.id}>
                                   <input
                                     type="checkbox"
@@ -208,16 +222,16 @@ export function ConsolidationDraftReview(props: {
                                       setSupport({
                                         citationIds: event.target.checked
                                           ? [...support.citationIds, citation.id]
-                                          : support.citationIds.filter(id => id !== citation.id),
+                                          : EffectArray.filter(support.citationIds, id => id !== citation.id),
                                       })
                                     }
                                   />
                                   Code: {citation.path} (
                                   {citation.target.kind === 'symbol' ? citation.target.qualifiedName : 'file'}) @{' '}
-                                  {citation.sourceCommit.slice(0, 12)}
+                                  {Effect.pipe(citation.sourceCommit, EffectString.slice(0, 12))}
                                 </label>
                               ))}
-                              {source.relations.map((relation, ordinal) => (
+                              {EffectArray.map(source.relations, (relation, ordinal) => (
                                 <label className="check-row" key={ordinal}>
                                   <input
                                     type="checkbox"
@@ -227,7 +241,7 @@ export function ConsolidationDraftReview(props: {
                                       setSupport({
                                         relationIndexes: event.target.checked
                                           ? [...support.relationIndexes, ordinal]
-                                          : support.relationIndexes.filter(i => i !== ordinal),
+                                          : EffectArray.filter(support.relationIndexes, i => i !== ordinal),
                                       })
                                     }
                                   />
@@ -334,16 +348,21 @@ export function ConsolidationPanel(props: {
             label="AI provider"
             onChange={props.onAgentChange}
             openSelect={props.openSelect}
-            options={props.agents
-              .filter(
-                item =>
-                  ['codex', 'claude', 'local-ai'].includes(item.id) || (item.id === 'effect-ai' && item.available),
-              )
-              .map(item => ({
+            options={EffectArray.map(
+              EffectArrayPipe(props.agents, __effectArrayValues =>
+                EffectArray.filter(
+                  __effectArrayValues,
+                  (item, __effectArrayIndex) =>
+                    __effectArrayIndex in __effectArrayValues &&
+                    (['codex', 'claude', 'local-ai'].includes(item.id) || (item.id === 'effect-ai' && item.available)),
+                ),
+              ),
+              item => ({
                 disabled: !item.available && item.id !== 'local-ai',
                 label: `${item.label}${item.available ? '' : item.id === 'local-ai' ? ' (install a model)' : ' unavailable'}`,
                 value: item.id,
-              }))}
+              }),
+            )}
             setOpenSelect={props.setOpenSelect}
             value={props.agent}
           />

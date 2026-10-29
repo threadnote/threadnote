@@ -1,6 +1,9 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {renderPocketCatalog, renderPocketRecord} from '../src/render.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 describe('Pocket readable resources', () => {
   it('renders actual v2 content once without flattening administrative metadata', () => {
@@ -41,17 +44,23 @@ describe('Pocket readable resources', () => {
     expect(resource.body).toContain('## Mind map\n\n- Release plan');
     expect(resource.body).toContain('[00:01] Alex: Discuss the launch.');
     expect(resource.body).toContain('[00:03] Sam: Ship on Friday.');
-    expect(resource.body.match(/Discuss the launch\./g)).toHaveLength(1);
+    expect(
+      Effect.pipe(
+        resource.body,
+        EffectString.match(/Discuss the launch\./g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
     expect(resource.body).toContain('Tags: Planning');
     expect(resource.body).not.toMatch(/recording\.|internal_|costUsd|processingStatus|language_probability/);
   });
 
   it('keeps long recordings whole, with stable identity after edits', () => {
-    const text = 'A long meeting sentence. '.repeat(2500);
+    const text = Effect.pipe('A long meeting sentence. ', EffectString.repeat(2500));
     const first = renderPocketRecord({id: 'recording_1', title: 'Meeting', transcript: {text}});
     expect(first).toHaveLength(1);
     expect(Buffer.byteLength(first[0].body)).toBeGreaterThan(16 * 1024);
-    expect(first[0].body).toContain(text.trim());
+    expect(first[0].body).toContain(Effect.pipe(text, EffectString.trim));
     const edited = renderPocketRecord({id: 'recording_1', title: 'Renamed', transcript: {text: `${text}Next steps.`}});
     expect(edited[0].chunkId).toBe(first[0].chunkId);
     expect(edited[0].contentHash).not.toBe(first[0].contentHash);
@@ -90,7 +99,9 @@ describe('Pocket readable resources', () => {
     expect(
       renderPocketRecord({id: 'recording_1', summarizations: {summary_1: {v3: {novelContent: 'Text'}}}})[0].body,
     ).toContain('unsupported');
-    expect(() => renderPocketRecord({id: 'recording_1', transcript: 'a'.repeat(512 * 1024)})).toThrow(/budget/);
+    expect(() =>
+      renderPocketRecord({id: 'recording_1', transcript: Effect.pipe('a', EffectString.repeat(512 * 1024))}),
+    ).toThrow(/budget/);
   });
 
   it('renders catalog names and descriptions without internal identifiers', () => {
@@ -105,7 +116,7 @@ describe('Pocket readable resources', () => {
   it('is independent of technical metadata and object key insertion order', () => {
     const text = fc
       .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz '), {minLength: 1, maxLength: 200})
-      .map(characters => characters.join(''));
+      .map(characters => EffectArray.join(characters, ''));
     fc.assert(
       fc.property(text, fc.nat(), (content, cost) => {
         const base = {

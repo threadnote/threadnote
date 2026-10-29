@@ -31,6 +31,9 @@ import type {CodeGraphQueryResult, RepositoryIdentity} from '@threadnote/graph/t
 import {CommandExecutor, type CommandOptions} from '@threadnote/platform/command';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import type {CommandResult} from '@threadnote/platform/command';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const isolatedQueryNativeTestLayer = CommandExecutor.layer.pipe(
   Layer.provideMerge(SystemInfo.layer.pipe(Layer.provideMerge(BunServices.layer))),
@@ -41,12 +44,12 @@ const result: CodeGraphQueryResult = {
   freshness: 'current',
   nodes: [],
   operation: 'impact',
-  repository: {displayName: 'acme/repository', repositoryId: 'a'.repeat(64)},
+  repository: {displayName: 'acme/repository', repositoryId: Effect2.pipe('a', EffectString.repeat(64))},
   snapshot: {
-    commit: 'b'.repeat(40),
+    commit: Effect2.pipe('b', EffectString.repeat(40)),
     dirty: false,
-    id: `cgsn_${'c'.repeat(40)}`,
-    worktreeId: 'd'.repeat(64),
+    id: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
+    worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
   },
   trust: {
     classification: 'untrusted-repository-data',
@@ -57,7 +60,7 @@ const result: CodeGraphQueryResult = {
 };
 
 const input = {
-  baseCommit: 'e'.repeat(40),
+  baseCommit: Effect2.pipe('e', EffectString.repeat(40)),
   cwd: '/workspace/repository',
   edgeLimit: 40,
   nodeLimit: 20,
@@ -89,11 +92,11 @@ const projectScope: CodeGraphQueryScope = {
     definitionDigest: 'definition-digest',
     extractorSet: 'extractor-set',
     inventoryFingerprint: 'inventory-fingerprint',
-    observedCommit: 'b'.repeat(40),
+    observedCommit: Effect2.pipe('b', EffectString.repeat(40)),
     policyFingerprint: 'policy-fingerprint',
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     scopeKey: 'code-graph-scope:web',
-    worktreeId: 'd'.repeat(64),
+    worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
   },
 };
 
@@ -102,11 +105,11 @@ const identity: RepositoryIdentity = {
   checkoutId: 'checkout-id',
   displayName: 'acme/repository',
   gitCommonDirectory: '/workspace/repository/.git',
-  headCommit: 'b'.repeat(40),
+  headCommit: Effect2.pipe('b', EffectString.repeat(40)),
   objectFormat: 'sha1',
   repoRoot: '/workspace/repository',
-  repositoryId: 'a'.repeat(64),
-  worktreeId: 'd'.repeat(64),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+  worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
 };
 
 describe('isolated code graph impact query', () => {
@@ -277,7 +280,8 @@ describe('isolated code graph impact query', () => {
           ...projectScope.scope!,
           admittedPrefixes: Array.from(
             {length: 10_000},
-            (_, index) => `packages/team-${index.toString().padStart(5, '0')}/src/very-long-project-component`,
+            (_, index) =>
+              `packages/team-${Effect2.pipe(index.toString(), EffectString.padStart(5, '0'))}/src/very-long-project-component`,
           ),
           controlPaths: Array.from({length: 10_000}, (_, index) => `packages/team-${index}/package.json`),
           includedProjectIds: Array.from({length: 10_000}, (_, index) => `workspace-project-${index}`),
@@ -287,7 +291,7 @@ describe('isolated code graph impact query', () => {
       yield* inspectCodeGraphIsolated({
         cwd: input.cwd,
         edgeLimit: input.edgeLimit,
-        nodeId: `cgs_${'a'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
         nodeLimit: input.nodeLimit,
         operation: 'node',
         projectScope: largeProjectScope,
@@ -317,9 +321,9 @@ describe('isolated code graph impact query', () => {
         executeStreaming: () => Effect.die('unused'),
       });
       const snapshotIds = [
-        `cgsn_${'a'.repeat(40)}`,
-        `cgsn_${'b'.repeat(40)}-direct`,
-        `cgsn_${'c'.repeat(40)}-full-${'d'.repeat(16)}`,
+        `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}`,
+        `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}-direct`,
+        `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}-full-${Effect2.pipe('d', EffectString.repeat(16))}`,
       ];
 
       for (const borrowedSnapshotId of snapshotIds) {
@@ -512,10 +516,11 @@ describe('isolated code graph impact query', () => {
       });
       const seedQueries = Array.from({length: 201}, (_, index) => `src/file-${index}.ts`);
 
-      yield* inspectCodeGraphImpactIsolated({...input, query: 'src/private-path.ts '.repeat(4_000), seedQueries}).pipe(
-        Effect.provideService(CommandExecutor, command),
-        Effect.provideService(SystemInfo, systemInfoStub({})),
-      );
+      yield* inspectCodeGraphImpactIsolated({
+        ...input,
+        query: Effect2.pipe('src/private-path.ts ', EffectString.repeat(4_000)),
+        seedQueries,
+      }).pipe(Effect.provideService(CommandExecutor, command), Effect.provideService(SystemInfo, systemInfoStub({})));
 
       const request = decodeImpactQueryRequest(new TextDecoder().decode(encodedRequest));
       expect(request?.query).toBe('changed paths');
@@ -529,9 +534,9 @@ describe('isolated code graph impact query', () => {
     'round-trips SHA-1/SHA-256 bases and every bounded path set without changing order or content (property)',
     {
       baseCommit: fc.oneof(gitObjectId(40), gitObjectId(64)),
-      query: fc.string({maxLength: 80}).filter(value => !value.includes('\0')),
+      query: fc.string({maxLength: 80}).filter(value => !Effect2.pipe(value, EffectString.includes('\0'))),
       seeds: fc.array(
-        fc.string({maxLength: 80, minLength: 1}).filter(value => !value.includes('\0')),
+        fc.string({maxLength: 80, minLength: 1}).filter(value => !Effect2.pipe(value, EffectString.includes('\0'))),
         {
           maxLength: 30,
         },
@@ -564,16 +569,18 @@ describe('isolated code graph impact query', () => {
       overlay: fc.record({
         dirty: fc.boolean(),
         fingerprint: fc.option(
-          fc.string({maxLength: 64, minLength: 1}).filter(value => !value.includes('\0')),
+          fc.string({maxLength: 64, minLength: 1}).filter(value => !Effect2.pipe(value, EffectString.includes('\0'))),
           {nil: undefined},
         ),
       }),
       prefixes: fc.array(
-        fc.string({maxLength: 120, minLength: 1}).filter(value => !value.includes('\0')),
+        fc.string({maxLength: 120, minLength: 1}).filter(value => !Effect2.pipe(value, EffectString.includes('\0'))),
         {maxLength: 200},
       ),
       snapshotHash: gitObjectId(40),
-      selector: fc.string({maxLength: 80, minLength: 1}).filter(value => !value.includes('\0')),
+      selector: fc
+        .string({maxLength: 80, minLength: 1})
+        .filter(value => !Effect2.pipe(value, EffectString.includes('\0'))),
       strictFreshness: fc.option(fc.boolean(), {nil: undefined}),
     },
     ({operation, overlay, prefixes, selector, snapshotHash, strictFreshness}) => {
@@ -618,7 +625,7 @@ describe('isolated code graph impact query', () => {
   );
 
   it('uses a fixed selector for seed-based impact instead of duplicating an unbounded changed-path list', () => {
-    const oversizedLegacySelector = 'src/very-long-private-path.ts '.repeat(3_000);
+    const oversizedLegacySelector = Effect2.pipe('src/very-long-private-path.ts ', EffectString.repeat(3_000));
     expect(impactQueryTransportSelector(oversizedLegacySelector, ['src/a.ts'])).toBe('changed paths');
     expect(impactQueryTransportSelector('cgs_symbol', undefined)).toBe('cgs_symbol');
   });
@@ -649,7 +656,7 @@ describe('isolated code graph impact query', () => {
         cwd: input.cwd,
         direction: 'incoming',
         edgeLimit: input.edgeLimit,
-        nodeId: `cgs_${'a'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
         nodeLimit: input.nodeLimit,
         operation: 'neighbors',
         protocol: 1,
@@ -660,7 +667,7 @@ describe('isolated code graph impact query', () => {
     expect(request).toBeDefined();
     expect(impactQueryWorkerInspectOptions(request!, input.threadnoteHome)).toMatchObject({
       direction: 'incoming',
-      nodeId: `cgs_${'a'.repeat(32)}`,
+      nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
       operation: 'neighbors',
       refresh: false,
       requestMaintenance: false,
@@ -745,16 +752,16 @@ describe('isolated code graph impact query', () => {
 });
 
 const discoverySnapshot = {
-  commit: 'b'.repeat(40),
+  commit: Effect2.pipe('b', EffectString.repeat(40)),
   dirty: false,
   edgeCount: 7,
   extractorSet: 'extractors',
   fileCount: 11,
-  id: `cgsn_${'c'.repeat(40)}`,
-  repositoryId: 'a'.repeat(64),
+  id: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   state: 'ready' as const,
   symbolCount: 13,
-  worktreeId: 'd'.repeat(64),
+  worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
 };
 
 function discoveryStatus(
@@ -809,7 +816,7 @@ describe('isolated code graph discovery reads', () => {
     edgeLimit: 40,
     nodeLimit: 20,
     operation: 'neighbors' as const,
-    nodeId: `cgs_${'a'.repeat(32)}`,
+    nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
     protocol: 1 as const,
     query: '',
     threadnoteHome: '/threadnote-home',
@@ -873,7 +880,7 @@ describe('isolated code graph discovery reads', () => {
           selection: 'active',
           snapshot: {edgeCount: 7, fileCount: 11, symbolCount: 13},
         },
-        worktreeId: 'd'.repeat(64),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
         repoRoot: '/workspace/repository',
       });
       expect(actual.result).toEqual(neighbors);
@@ -892,8 +899,8 @@ describe('isolated code graph discovery reads', () => {
       const service = discoveryService(seen, neighbors, discoveryStatus());
       let observedIdentity: unknown;
       const refresh = {
-        currentTargetToken: `cgdq_${'1'.repeat(32)}`,
-        latestDesiredToken: `cgdq_${'2'.repeat(32)}`,
+        currentTargetToken: `cgdq_${Effect2.pipe('1', EffectString.repeat(32))}`,
+        latestDesiredToken: `cgdq_${Effect2.pipe('2', EffectString.repeat(32))}`,
         state: 'active' as const,
         type: 'code-graph-refresh-continuity' as const,
         version: 1 as const,
@@ -952,7 +959,7 @@ describe('isolated code graph discovery reads', () => {
           selection: 'active',
           snapshot: {edgeCount: 7, fileCount: 11, symbolCount: 13},
         },
-        worktreeId: 'd'.repeat(64),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
         repoRoot: '/workspace/repository',
       });
       expect(actual.result).toEqual(neighbors);
@@ -1029,7 +1036,7 @@ describe('isolated code graph discovery reads', () => {
         expect(seen.inspectOptions).toBeUndefined();
         expect(actual).toEqual({
           unavailable: 'no-ready-snapshot',
-          identity: {repoRoot: '/workspace/repository', worktreeId: 'd'.repeat(64)},
+          identity: {repoRoot: '/workspace/repository', worktreeId: Effect2.pipe('d', EffectString.repeat(64))},
         });
       }
     }),
@@ -1048,7 +1055,7 @@ describe('isolated code graph discovery reads', () => {
       expect(seen.inspectOptions).toBeUndefined();
       expect(actual).toEqual({
         unavailable: 'no-ready-snapshot',
-        identity: {repoRoot: '/workspace/repository', worktreeId: 'd'.repeat(64)},
+        identity: {repoRoot: '/workspace/repository', worktreeId: Effect2.pipe('d', EffectString.repeat(64))},
       });
     }),
   );
@@ -1084,7 +1091,7 @@ describe('isolated code graph discovery reads', () => {
             selection: 'active',
             snapshot: {edgeCount: 7, fileCount: 11, symbolCount: 13},
           },
-          worktreeId: 'd'.repeat(64),
+          worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
           repoRoot: '/workspace/repository',
         },
       });
@@ -1106,7 +1113,7 @@ describe('isolated code graph discovery reads', () => {
                 result: neighbors,
                 status: {
                   refresh: {
-                    currentTargetToken: `cgdq_${'1'.repeat(32)}`,
+                    currentTargetToken: `cgdq_${Effect2.pipe('1', EffectString.repeat(32))}`,
                     state: 'active',
                     type: 'code-graph-refresh-continuity',
                     version: 1,
@@ -1118,7 +1125,7 @@ describe('isolated code graph discovery reads', () => {
                     selection: 'active',
                     snapshot: {edgeCount: 7, fileCount: 11, symbolCount: 13},
                   },
-                  worktreeId: 'd'.repeat(64),
+                  worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
                   repoRoot: '/workspace/repository',
                 },
                 telemetry: [],
@@ -1132,7 +1139,7 @@ describe('isolated code graph discovery reads', () => {
         cwd: input.cwd,
         discover: true,
         edgeLimit: input.edgeLimit,
-        nodeId: `cgs_${'a'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
         nodeLimit: input.nodeLimit,
         operation: 'neighbors',
         threadnoteHome: input.threadnoteHome,
@@ -1144,7 +1151,7 @@ describe('isolated code graph discovery reads', () => {
       expect(actual.result).toEqual(neighbors);
       expect(actual.status).toEqual({
         refresh: {
-          currentTargetToken: `cgdq_${'1'.repeat(32)}`,
+          currentTargetToken: `cgdq_${Effect2.pipe('1', EffectString.repeat(32))}`,
           state: 'active',
           type: 'code-graph-refresh-continuity',
           version: 1,
@@ -1156,7 +1163,7 @@ describe('isolated code graph discovery reads', () => {
           selection: 'active',
           snapshot: {edgeCount: 7, fileCount: 11, symbolCount: 13},
         },
-        worktreeId: 'd'.repeat(64),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
         repoRoot: '/workspace/repository',
       });
       const decoded = decodeImpactQueryRequest(new TextDecoder().decode(encodedRequest));
@@ -1178,7 +1185,7 @@ describe('isolated code graph discovery reads', () => {
         cwd: input.cwd,
         discover: true,
         edgeLimit: input.edgeLimit,
-        nodeId: `cgs_${'a'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
         nodeLimit: input.nodeLimit,
         operation: 'neighbors',
         threadnoteHome: input.threadnoteHome,
@@ -1194,7 +1201,7 @@ describe('isolated code graph discovery reads', () => {
 
   effectIt.effect('returns the worker no-snapshot verdict with its identity', () =>
     Effect.gen(function* () {
-      const identity = {repoRoot: '/workspace/repository', worktreeId: 'd'.repeat(64)};
+      const identity = {repoRoot: '/workspace/repository', worktreeId: Effect2.pipe('d', EffectString.repeat(64))};
       const command = CommandExecutor.of({
         execute: () =>
           Effect.succeed(
@@ -1209,7 +1216,7 @@ describe('isolated code graph discovery reads', () => {
         cwd: input.cwd,
         discover: true,
         edgeLimit: input.edgeLimit,
-        nodeId: `cgs_${'a'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
         nodeLimit: input.nodeLimit,
         operation: 'neighbors',
         threadnoteHome: input.threadnoteHome,
@@ -1232,7 +1239,7 @@ describe('isolated code graph discovery reads', () => {
           cwd: input.cwd,
           discover: true,
           edgeLimit: input.edgeLimit,
-          nodeId: `cgs_${'a'.repeat(32)}`,
+          nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
           nodeLimit: input.nodeLimit,
           operation: 'neighbors',
           threadnoteHome: input.threadnoteHome,
@@ -1272,7 +1279,7 @@ describe('isolated code graph discovery reads', () => {
                 selection: 'active',
                 snapshot: {edgeCount: 7, fileCount: 11, symbolCount: 13},
               },
-              worktreeId: 'd'.repeat(64),
+              worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
               repoRoot: '/workspace/repository',
             },
             telemetry: [],
@@ -1296,9 +1303,9 @@ describe('isolated code graph discovery reads', () => {
     'round-trips discovery requests without changing selectors or flags (property)',
     {
       operation: fc.constantFrom('query', 'node', 'neighbors', 'explain', 'path', 'impact'),
-      query: fc.string({maxLength: 80}).filter(value => !value.includes('\0')),
+      query: fc.string({maxLength: 80}).filter(value => !Effect2.pipe(value, EffectString.includes('\0'))),
       seeds: fc.array(
-        fc.string({maxLength: 80, minLength: 1}).filter(value => !value.includes('\0')),
+        fc.string({maxLength: 80, minLength: 1}).filter(value => !Effect2.pipe(value, EffectString.includes('\0'))),
         {
           maxLength: 10,
         },
@@ -1314,7 +1321,7 @@ describe('isolated code graph discovery reads', () => {
               ...(operation === 'impact' && seeds.length > 0 ? {seedQueries: seeds, seedQueryCount: seeds.length} : {}),
             }
           : operation === 'node' || operation === 'neighbors'
-            ? {nodeId: `cgs_${'a'.repeat(32)}`, query: ''}
+            ? {nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`, query: ''}
             : operation === 'path'
               ? {from: query === '' ? 'a' : query, query: '', to: `${query === '' ? 'a' : query}-target`}
               : {query: '', symbol: query === '' ? 's' : query};
@@ -1369,7 +1376,7 @@ function commandResult(stdout: string): CommandResult {
 function gitObjectId(length: 40 | 64): fc.Arbitrary<string> {
   return fc
     .array(fc.constantFrom(...'0123456789abcdef'), {maxLength: length, minLength: length})
-    .map(characters => characters.join(''));
+    .map(characters => EffectArray.join(characters, ''));
 }
 
 function systemInfoStub(overrides: Partial<SystemInfoShape>): SystemInfoShape {

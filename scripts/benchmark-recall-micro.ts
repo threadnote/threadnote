@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {bench, do_not_optimize, run} from 'mitata';
@@ -7,6 +8,9 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {createBenchmarkFixture, runBenchmarkQuery} from './benchmark-target.js';
 import {atomicWrite, fixtureHash, printJson, scriptArguments} from './effect/script.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_BENCHMARK_SIZES = [200, 1_000, 10_000] as const;
 const EXTENDED_BENCHMARK_SIZES = [...DEFAULT_BENCHMARK_SIZES, 100_000] as const;
@@ -16,7 +20,7 @@ const benchmarkRecall = Effect.gen(function* () {
   const arguments_ = yield* scriptArguments();
   const sizes =
     system.environment().THREADNOTE_BENCHMARK_100K === '1' ? EXTENDED_BENCHMARK_SIZES : DEFAULT_BENCHMARK_SIZES;
-  const fixtures = new Map(sizes.map(size => [size, createBenchmarkFixture(size)]));
+  const fixtures = new Map(EffectArray.map(sizes, size => [size, createBenchmarkFixture(size)]));
   yield* Effect.sync(() => {
     for (const size of sizes) {
       const fixture = fixtures.get(size)!;
@@ -46,23 +50,25 @@ const benchmarkRecall = Effect.gen(function* () {
     {concurrency: 'unbounded'},
   );
   const artifact = {
-    benchmarks: result.benchmarks.flatMap(trial =>
-      trial.runs.map(runResult => ({
-        arguments: runResult.args,
-        error: runResult.error ? String(runResult.error) : undefined,
-        name: runResult.name,
-        statistics: runResult.stats
-          ? {
-              averageNanoseconds: runResult.stats.avg,
-              heap: runResult.stats.heap,
-              maximumNanoseconds: runResult.stats.max,
-              minimumNanoseconds: runResult.stats.min,
-              p50Nanoseconds: runResult.stats.p50,
-              p99Nanoseconds: runResult.stats.p99,
-              samples: runResult.stats.ticks,
-            }
-          : undefined,
-      })),
+    benchmarks: EffectArray.flatMap(result.benchmarks, (trial, index) =>
+      index in result.benchmarks
+        ? EffectArray.map(trial.runs, runResult => ({
+            arguments: runResult.args,
+            error: runResult.error ? String(runResult.error) : undefined,
+            name: runResult.name,
+            statistics: runResult.stats
+              ? {
+                  averageNanoseconds: runResult.stats.avg,
+                  heap: runResult.stats.heap,
+                  maximumNanoseconds: runResult.stats.max,
+                  minimumNanoseconds: runResult.stats.min,
+                  p50Nanoseconds: runResult.stats.p50,
+                  p99Nanoseconds: runResult.stats.p99,
+                  samples: runResult.stats.ticks,
+                }
+              : undefined,
+          }))
+        : [],
     ),
     createdAt: DateTime.formatIso(yield* DateTime.now),
     environment: {
@@ -75,7 +81,7 @@ const benchmarkRecall = Effect.gen(function* () {
       packageManager: `bun/${system.runtimeVersion}`,
       runtime: result.context.runtime,
     },
-    fixtures: Object.fromEntries(fixtureEntries),
+    fixtures: EffectRecord.fromEntries(fixtureEntries),
     runner: {name: 'mitata', version: '1.0.34'},
     version: 1,
   };
@@ -90,7 +96,9 @@ const benchmarkRecall = Effect.gen(function* () {
 });
 
 const git = Effect.fn('benchmark.git')((arguments_: readonly string[]) =>
-  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(Effect.map(result => result.stdout.trim())),
+  runCommandEffect('git', arguments_, {timeoutMs: 30_000}).pipe(
+    Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+  ),
 );
 
 BunRuntime.runMain(provideScriptLayer(benchmarkRecall, ApplicationLayer));

@@ -1,4 +1,9 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
+
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_RELEASE_DEFERMENT_TYPE = 'code-memory-link-release-experiment-deferment';
 export const CODE_MEMORY_LINK_RELEASE_DEFERMENT_VERSION = 1;
@@ -212,10 +217,15 @@ export async function resolveCodeMemoryLinkReleaseDeferment(input: {
   readonly repositoryRoot: string;
   readonly waiverPath: string;
 }): Promise<CodeMemoryLinkReleaseDefermentResolution> {
-  const governanceCommit = (await git(input.repositoryRoot, ['rev-parse', 'HEAD^{commit}'])).trim();
-  const parents = (await git(input.repositoryRoot, ['rev-list', '--parents', '-n', '1', governanceCommit]))
-    .trim()
-    .split(/\s+/u);
+  const governanceCommit = Effect.pipe(
+    await git(input.repositoryRoot, ['rev-parse', 'HEAD^{commit}']),
+    EffectString.trim,
+  );
+  const parents = Effect.pipe(
+    await git(input.repositoryRoot, ['rev-list', '--parents', '-n', '1', governanceCommit]),
+    EffectString.trim,
+    EffectString.split(/\s+/u),
+  );
   const parentCommit = parents[1];
   if (parents.length !== 2 || parents[0] !== governanceCommit || parentCommit === undefined) {
     invalid('deferment governance must have exactly one parent');
@@ -245,7 +255,7 @@ export async function resolveCodeMemoryLinkReleaseDeferment(input: {
         `${CODE_MEMORY_LINK_RELEASE_DEFERMENT_INITIAL_GOVERNANCE_COMMIT}^{tree}`,
       ]),
     ]);
-  const initialParents = initialParentSource.trim().split(/\s+/u);
+  const initialParents = Effect.pipe(initialParentSource, EffectString.trim, EffectString.split(/\s+/u));
   const initialGovernanceParentCommit = initialParents[1];
   if (
     initialParents.length !== 2 ||
@@ -262,7 +272,7 @@ export async function resolveCodeMemoryLinkReleaseDeferment(input: {
   const packageValue = record(JSON.parse(packageSource), 'package manifest');
   if (typeof packageValue.version !== 'string') invalid('package manifest version is missing');
   const modes = parseTrackedModes(trackedSource);
-  const changes = parseChanges(changeSource).map(change => {
+  const changes = EffectArray.map(parseChanges(changeSource), change => {
     const mode = modes.get(change.path);
     if (mode !== '100644') invalid(`deferment governance path ${change.path} is not a regular 100644 blob`);
     return {mode, path: change.path, status: change.status};
@@ -271,7 +281,7 @@ export async function resolveCodeMemoryLinkReleaseDeferment(input: {
     changes,
     governanceCommit,
     initialGovernanceParentCommit,
-    initialGovernanceTree: initialGovernanceTree.trim(),
+    initialGovernanceTree: Effect.pipe(initialGovernanceTree, EffectString.trim),
     packageVersion: packageValue.version,
     parentCommit,
     waiver,
@@ -289,22 +299,21 @@ function governancePaths(waiverPath: string): readonly string[] {
 }
 
 function parseChanges(source: string): readonly {readonly path: string; readonly status: 'A' | 'M'}[] {
-  return source
-    .trim()
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map(line => {
-      const [status, repositoryPath, extra] = line.split('\t');
+  return EffectArray.map(
+    EffectArray.filter(Effect.pipe(source, EffectString.trim, EffectString.split(/\r?\n/u)), Boolean),
+    line => {
+      const [status, repositoryPath, extra] = Effect.pipe(line, EffectString.split('\t'));
       if ((status !== 'A' && status !== 'M') || !repositoryPath || extra !== undefined) {
         invalid('deferment governance contains an unsupported Git change');
       }
       return {path: repositoryPath, status};
-    });
+    },
+  );
 }
 
 function parseTrackedModes(source: string): ReadonlyMap<string, string> {
   const modes = new Map<string, string>();
-  for (const entry of source.split('\0').filter(Boolean)) {
+  for (const entry of EffectArray.filter(Effect.pipe(source, EffectString.split('\0')), Boolean)) {
     const match = /^(\d{6}) blob [0-9a-f]{40,64}\t(.+)$/u.exec(entry);
     if (match === null || match[1] === undefined || match[2] === undefined || modes.has(match[2])) {
       invalid('deferment governance contains an unsupported tracked object');
@@ -321,7 +330,7 @@ async function git(repositoryRoot: string, args: readonly string[]): Promise<str
     readBounded(child.stderr, 64 * 1024),
     child.exited,
   ]);
-  if (exitCode !== 0) throw new Error(`Git command failed: ${stderr.trim()}`);
+  if (exitCode !== 0) throw new Error(`Git command failed: ${Effect.pipe(stderr, EffectString.trim)}`);
   return stdout;
 }
 
@@ -346,12 +355,12 @@ async function readBounded(stream: ReadableStream<Uint8Array>, maximumBytes: num
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return Object.fromEntries(Object.entries(value));
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) invalid(`${label} must be an object`);
+  return EffectRecord.fromEntries(EffectRecord.toEntries(value));
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
-  const observed = Object.keys(value).sort();
+  const observed = EffectRecord.keys(value).sort();
   const expected = [...keys].sort();
   if (JSON.stringify(observed) !== JSON.stringify(expected)) invalid(`${label} has unsupported or missing fields`);
 }

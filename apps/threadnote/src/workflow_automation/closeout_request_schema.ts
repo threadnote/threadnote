@@ -1,4 +1,7 @@
-import {Array as EffectArray, Record as EffectRecord, String as EffectString, Effect, Schema} from 'effect';
+import {Array as EffectArray} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import {Effect, Schema} from 'effect';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {NativeAuthoringDocumentSchema} from '@threadnote/workflow-automations/authoring';
 import {NativeCycleStateSchema} from '@threadnote/workflow-automations/cycle';

@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {identifiers, indexTerms} from '@threadnote/recall/index/lexical';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('recall tokenization', () => {
   it('keeps Ukrainian words and splits apostrophe and hyphen compounds', () => {
@@ -17,17 +20,22 @@ describe('recall tokenization', () => {
       }),
     },
     ({parts}) => {
-      const value = parts.join(' ');
-      expect(indexTerms(value.normalize('NFD'))).toEqual(indexTerms(value.normalize('NFC')));
+      const value = EffectArray.join(parts, ' ');
+      expect(indexTerms(Effect.pipe(value, EffectString.normalize('NFD')))).toEqual(
+        indexTerms(Effect.pipe(value, EffectString.normalize('NFC'))),
+      );
     },
     {fastCheck: {numRuns: 100}},
   );
 
   it('keeps Unicode identifier values bounded', () => {
-    const values = Array.from({length: 100}, (_, index) => `Київ-${index}`).join(' ');
+    const values = EffectArray.join(
+      Array.from({length: 100}, (_, index) => `Київ-${index}`),
+      ' ',
+    );
     const indexed = identifiers(values);
     expect(indexed).toHaveLength(64);
     expect(indexed[0]).toBe('київ-0');
-    expect(indexed.every(identifier => /[\p{N}_.-]/u.test(identifier))).toBe(true);
+    expect(EffectArray.every(indexed, identifier => /[\p{N}_.-]/u.test(identifier))).toBe(true);
   });
 });

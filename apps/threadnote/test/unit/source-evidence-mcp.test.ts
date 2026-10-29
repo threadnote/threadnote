@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, Redacted} from 'effect';
+import {Effect, FileSystem, Path, Predicate, Redacted} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {storeExternalCredential} from '@threadnote/integration-core/external-credentials';
@@ -7,33 +7,26 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {readSourceEvidence} from '@threadnote/store/source-evidence';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
-import type {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
+import {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
 import {registerSourceEvidenceTools} from '../../src/mcp/server/source_evidence.js';
 import {registerObsidianEvidenceTools} from '../../src/mcp/server/obsidian_evidence.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {sourceEvidenceFixture} from '../helpers/source-evidence.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
-type ToolResult = {
-  readonly isError?: boolean;
-  readonly structuredContent?: Record<string, unknown>;
-  readonly content?: readonly {type: string; text?: string}[];
-};
+function structuredContent(result: {readonly structuredContent?: unknown}): Record<string, unknown> {
+  const content = result.structuredContent;
+  if (!Predicate.isObject(content)) throw new Error('MCP fixture result has no structured content.');
+  return content;
+}
 function tools(config: RuntimeConfig) {
-  const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
-  const server = {
-    registerTool: (name: string, _definition: unknown, handle: unknown) => {
-      expect(handlers.has(name)).toBe(false);
-      handlers.set(name, handle as (input: Record<string, unknown>) => Effect.Effect<ToolResult>);
-    },
-  } as unknown as EffectMcpServerAdapter;
+  const server = new EffectMcpServerAdapter('source-evidence-test', '1', '');
   registerSourceEvidenceTools(server, config);
   registerObsidianEvidenceTools(server, config);
-  return (name: string, input: Record<string, unknown>) =>
-    Effect.suspend(() => {
-      const result = handlers.get(name)!(input);
-      return Effect.isEffect(result) ? result : Effect.succeed(result);
-    });
+  return (name: string, input: Record<string, unknown>) => server.invokeTool(name, input);
 }
 const reviewedInput = (inspection: Record<string, unknown>) => ({
   resourceUri: inspection.resourceUri,
@@ -67,8 +60,9 @@ describe('MCP retained integration evidence', () => {
         const call = tools(config);
         const inspection = yield* call('inspect_source_evidence', {resourceUri: fixture.resourceUri});
         expect(inspection.isError).not.toBe(true);
-        expect(inspection.structuredContent?.provider).toBe(provider);
-        const input = reviewedInput(inspection.structuredContent!);
+        const inspected = structuredContent(inspection);
+        expect(inspected['provider']).toBe(provider);
+        const input = reviewedInput(inspected);
         expect(
           (yield* call('derive_from_source', {resourceUri: fixture.resourceUri, fragment: input.fragment})).isError,
         ).toBe(true);
@@ -104,12 +98,12 @@ describe('MCP retained integration evidence', () => {
         yield* fixture.snapshot('A newer source body.', false, 'quarantined');
         const quarantined = yield* read();
         expect(quarantined.structuredContent).toMatchObject({historical: 'revoked'});
-        expect(quarantined.structuredContent?.fragment).toBeUndefined();
+        expect(structuredContent(quarantined)['fragment']).toBeUndefined();
         yield* fixture.snapshot('A newer source body.', true);
         yield* storeExternalCredential(config, 'fixture', Redacted.make('pk_synthetic_rotated_fixture'), provider);
         const revoked = yield* read();
         expect(revoked.structuredContent).toMatchObject({historical: 'revoked', currentRevision: 'unknown'});
-        expect(revoked.structuredContent?.fragment).toBeUndefined();
+        expect(structuredContent(revoked)['fragment']).toBeUndefined();
         expect(
           (yield* call('read_source_evidence', {
             memoryUri: 'threadnote://user/another/memories/durable/projects/threadnote/accepted.md',
@@ -133,7 +127,7 @@ describe('MCP retained integration evidence', () => {
       const fixture = yield* sourceEvidenceFixture(config, 'pocket');
       const call = tools(config);
       const inspection = yield* call('inspect_source_evidence', {resourceUri: fixture.resourceUri});
-      const input = reviewedInput(inspection.structuredContent!);
+      const input = reviewedInput(structuredContent(inspection));
       expect(
         (yield* call('derive_from_source', {resourceUri: fixture.resourceUri, fragment: input.fragment})).isError,
       ).toBe(true);
@@ -145,14 +139,25 @@ describe('MCP retained integration evidence', () => {
       const memoryUri = 'threadnote://user/tester/memories/durable/projects/threadnote/accepted.md';
       const content = yield* store.read(fixture.location, memoryUri);
       const citation = parseMemoryDocument(memoryUri, content)?.metadata.sourceEvidence;
+      if (citation === undefined) throw new Error('Accepted memory fixture has no source-evidence citation.');
       expect(citation).toBeDefined();
-      expect((yield* readSourceEvidence(fixture.location, citation!)).historical).toBe('available');
+      expect((yield* readSourceEvidence(fixture.location, citation)).historical).toBe('available');
       const evidenceDirectory = path.join(home, 'threadnote', 'source-evidence', 'local', 'pocket', 'fixture');
-      expect((yield* fs.readDirectory(evidenceDirectory)).filter(name => name.endsWith('.json'))).toHaveLength(1);
+      expect(
+        EffectArray.filter(
+          yield* fs.readDirectory(evidenceDirectory),
+          __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+        ),
+      ).toHaveLength(1);
       yield* fs.chmod(relocationRoot, 0o700);
       expect((yield* call('derive_from_source', input)).isError).toBe(true);
-      expect((yield* readSourceEvidence(fixture.location, citation!)).historical).toBe('available');
-      expect((yield* fs.readDirectory(evidenceDirectory)).filter(name => name.endsWith('.json'))).toHaveLength(1);
+      expect((yield* readSourceEvidence(fixture.location, citation)).historical).toBe('available');
+      expect(
+        EffectArray.filter(
+          yield* fs.readDirectory(evidenceDirectory),
+          __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+        ),
+      ).toHaveLength(1);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 });

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as yaml from 'js-yaml';
 import {Option, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -20,6 +21,9 @@ import {
 import {canonicalCodeGraphMonikers, codeGraphProtobufMoniker} from '../../cross_repository/monikers.js';
 import type {CodeGraphMonikerV1} from '../../cross_repository/types.js';
 import {scanXmlAttributes, scanXmlStartTags} from '../xml_scan.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface MutableStructuredFacts {
   readonly diagnostics: string[];
@@ -183,14 +187,14 @@ function extractObjectConfig(facts: MutableStructuredFacts, policy: ReturnType<t
         structuredPath(facts.file.path, qualifiedPath),
         location.start,
         location.end,
-        `${facts.file.path}#${qualifiedPath.join('.')}`,
+        `${facts.file.path}#${EffectArray.join(qualifiedPath, '.')}`,
       );
       if (retainResourceValues && isResourceScalar(child) && facts.symbols.length < maximumSymbols) {
         addResourceValue(facts, symbol, String(child), qualifiedPath, location.start, location.end);
       }
       visit(child, symbol, qualifiedPath, depth + 1);
     };
-    if (Array.isArray(value)) {
+    if (EffectArray.isArray(value)) {
       for (let index = 0; index < value.length && facts.symbols.length < maximumSymbols; index += 1) {
         const child = value[index];
         if (typeof child === 'object' && child !== null) addChild(String(index), child, true);
@@ -201,11 +205,11 @@ function extractObjectConfig(facts: MutableStructuredFacts, policy: ReturnType<t
     const record = value;
     for (const key in record) {
       if (facts.symbols.length >= maximumSymbols) break;
-      if (!Object.hasOwn(record, key)) continue;
+      if (!EffectRecord.has(record, key)) continue;
       addChild(key, record[key], false);
     }
   };
-  documents.forEach((document, index) =>
+  EffectArray.forEach(documents, (document, index) =>
     visit(document, facts.module, documents.length > 1 ? [`document-${index + 1}`] : [], 0),
   );
   if (facts.symbols.length >= maximumSymbols) {
@@ -236,7 +240,7 @@ function addResourceValue(
     structuredPath(facts.file.path, [...path, '$value']),
     start,
     end,
-    `${facts.file.path}#${[...path, '$value'].join('.')}`,
+    `${facts.file.path}#${EffectArray.join([...path, '$value'], '.')}`,
   );
   const lookupKeys = resourceValueLookupKeys(value);
   if (lookupKeys.length === 0) return;
@@ -244,11 +248,13 @@ function addResourceValue(
 }
 
 function resourceValueLookupKeys(value: string): readonly string[] {
-  const expanded = value
-    .replace(/([a-z0-9])([A-Z])/gu, '$1 $2')
-    .split(/[^A-Za-z0-9]+/gu)
-    .map(part => part.toLowerCase())
-    .filter(part => part.length >= 2);
+  const expanded = EffectArray.filter(
+    EffectArray.map(
+      Effect.pipe(value, EffectString.replace(/([a-z0-9])([A-Z])/gu, '$1 $2'), EffectString.split(/[^A-Za-z0-9]+/gu)),
+      part => Effect.pipe(part, EffectString.toLowerCase),
+    ),
+    part => part.length >= 2,
+  );
   return [...new Set([value, ...expanded])];
 }
 
@@ -306,9 +312,20 @@ function yamlKeyLocations(content: string): readonly ConfigKeyLocation[] {
   for (const line of linesWithOffsets(content)) {
     const match = /^\s*(?:-\s+)?(?:"([^"]+)"|'([^']+)'|([^:#][^:]*?))\s*:(?:\s|$)/.exec(line.text);
     const raw = match?.[1] ?? match?.[2] ?? match?.[3];
-    const key = raw?.trim();
+    const key = Effect.pipe(raw, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    );
     if (!key) continue;
-    const start = line.start + Math.max(0, line.text.indexOf(raw!));
+    const start =
+      line.start +
+      Math.max(
+        0,
+        Effect.pipe(
+          line.text,
+          EffectString.indexOf(raw!),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      );
     locations.push({end: start + raw!.length, key, start});
   }
   return locations;
@@ -378,7 +395,7 @@ function extractShallowJson(facts: MutableStructuredFacts): void {
           structuredPath(facts.file.path, path),
           cursor,
           token.end,
-          `${facts.file.path}#${path.join('.')}`,
+          `${facts.file.path}#${EffectArray.join(path, '.')}`,
         );
         pending = {path, symbol, valuePending: true};
         cursor = after + 1;
@@ -423,16 +440,22 @@ function extractShallowYaml(facts: MutableStructuredFacts): void {
   while (start < limit && facts.symbols.length - 1 < MAX_SHALLOW_OBJECT_CONFIG_SYMBOLS) {
     let end = start;
     while (end < limit && !isLineTerminator(content[end])) end += 1;
-    const line = content.slice(start, end);
+    const line = Effect.pipe(content, EffectString.slice(start, end));
     const match = /^(\s*)(?!-\s)(?:["']([^"']+)["']|([^:#][^:]*?))\s*:(?:\s|$)/.exec(line);
     if (match) {
       const indent = yamlIndent(match[1]);
-      const key = (match[2] ?? match[3] ?? '').trim();
+      const key = Effect.pipe(match[2] ?? match[3] ?? '', EffectString.trim);
       while (scopes.length > 1 && scopes.at(-1)!.indent >= indent) scopes.pop();
       const parent = scopes.at(-1)!;
       if (key && parent.path.length < MAX_SHALLOW_OBJECT_CONFIG_DEPTH) {
         const path = [...parent.path, key];
-        const keyOffset = start + line.indexOf(match[2] ?? match[3] ?? key);
+        const keyOffset =
+          start +
+          Effect.pipe(
+            line,
+            EffectString.indexOf(match[2] ?? match[3] ?? key),
+            Effect.Option.getOrElse(() => -1),
+          );
         const symbol = addDeclaration(
           facts,
           parent.symbol,
@@ -441,7 +464,7 @@ function extractShallowYaml(facts: MutableStructuredFacts): void {
           structuredPath(facts.file.path, path),
           keyOffset,
           keyOffset + Math.max(1, key.length),
-          `${facts.file.path}#${path.join('.')}`,
+          `${facts.file.path}#${EffectArray.join(path, '.')}`,
         );
         if (/:\s*(?:#.*)?$/.test(line)) scopes.push({indent, path, symbol});
       }
@@ -470,7 +493,7 @@ function jsonStringAt(
     if (character !== '"') continue;
     const end = cursor + 1;
     try {
-      const value: unknown = JSON.parse(content.slice(start, end));
+      const value: unknown = JSON.parse(Effect.pipe(content, EffectString.slice(start, end)));
       return typeof value === 'string' ? {end, value} : undefined;
     } catch {
       return undefined;
@@ -519,7 +542,7 @@ function extractToml(facts: MutableStructuredFacts): void {
   for (const line of linesWithOffsets(content)) {
     const tableMatch = /^\s*\[\[?([^\]]+)\]\]?\s*(?:#.*)?$/.exec(line.text);
     if (tableMatch) {
-      const name = tableMatch[1].trim();
+      const name = Effect.pipe(tableMatch[1], EffectString.trim);
       table = addDeclaration(
         facts,
         facts.module,
@@ -555,7 +578,7 @@ function extractKeyValueConfig(facts: MutableStructuredFacts): void {
   for (const line of linesWithOffsets(facts.file.content!)) {
     const sectionMatch = /^\s*\[([^\]]+)\]\s*$/.exec(line.text);
     if (sectionMatch) {
-      const name = sectionMatch[1].trim();
+      const name = Effect.pipe(sectionMatch[1], EffectString.trim);
       section = addDeclaration(
         facts,
         facts.module,
@@ -590,8 +613,8 @@ function extractSql(facts: MutableStructuredFacts): void {
   const declarations: Array<{readonly offset: number; readonly symbol: CodeGraphSymbol}> = [];
   const declaration =
     /(?:^|[;\r\n])\s*create\s+(?:or\s+replace\s+)?(?:global\s+|local\s+)?(?:temporary\s+|temp\s+)?(materialized\s+view|table|view|index|function|procedure|trigger|type|schema|sequence)\s+(?:if\s+not\s+exists\s+)?([`"[]?[A-Za-z_][\w$.-]*(?:\s*\.\s*[`"[]?[A-Za-z_][\w$-]*[`"\]]?)*[`"\]]?)/gi;
-  for (const match of content.matchAll(declaration)) {
-    const kind = match[1].toLowerCase().replace(/\s+/g, '_');
+  for (const match of Effect.pipe(content, EffectString.matchAll(declaration))) {
+    const kind = Effect.pipe(match[1], EffectString.toLowerCase, EffectString.replace(/\s+/g, '_'));
     const name = normalizeSqlIdentifier(match[2]);
     const offset = match.index ?? 0;
     const symbol = addDeclaration(facts, facts.module, kind, name, name, offset, offset + match[0].length);
@@ -599,7 +622,7 @@ function extractSql(facts: MutableStructuredFacts): void {
   }
   const references =
     /\b(?:references|from|join|update|into)\s+([`"[]?[A-Za-z_][\w$.-]*(?:\s*\.\s*[`"[]?[A-Za-z_][\w$-]*[`"\]]?)*[`"\]]?)/gi;
-  for (const match of content.matchAll(references)) {
+  for (const match of Effect.pipe(content, EffectString.matchAll(references))) {
     const target = normalizeSqlIdentifier(match[1]);
     if (!target) continue;
     const offset = match.index ?? 0;
@@ -615,8 +638,8 @@ function extractSql(facts: MutableStructuredFacts): void {
 function extractGraphql(facts: MutableStructuredFacts): void {
   const expression =
     /^\s*(extend\s+)?(schema|type|interface|input|enum|scalar|union|directive)\s+@?([_A-Za-z][_0-9A-Za-z]*)/gim;
-  for (const match of facts.file.content!.matchAll(expression)) {
-    const kind = `${match[1] ? 'extended_' : ''}${match[2].toLowerCase()}`;
+  for (const match of Effect.pipe(facts.file.content!, EffectString.matchAll(expression))) {
+    const kind = `${match[1] ? 'extended_' : ''}${Effect.pipe(match[2], EffectString.toLowerCase)}`;
     const name = match[3];
     const offset = match.index ?? 0;
     addDeclaration(facts, facts.module, kind, name, name, offset, offset + match[0].length);
@@ -670,7 +693,7 @@ function extractProtobuf(facts: MutableStructuredFacts): void {
   const scopes: Array<CodeGraphSymbol | undefined> = [];
   let pendingScope: CodeGraphSymbol | undefined;
   let declarationsTruncated = false;
-  for (const match of declarationsSource.matchAll(token)) {
+  for (const match of Effect.pipe(declarationsSource, EffectString.matchAll(token))) {
     if (facts.symbols.length >= MAX_STRUCTURED_SYMBOLS) {
       declarationsTruncated = true;
       break;
@@ -687,9 +710,12 @@ function extractProtobuf(facts: MutableStructuredFacts): void {
       continue;
     }
     const name = match[2];
-    const kind = match[1].toLowerCase();
+    const kind: string = Effect.pipe(match[1], EffectString.toLowerCase);
     const offset = match.index ?? 0;
-    const parent = [...scopes].reverse().find((scope): scope is CodeGraphSymbol => scope !== undefined) ?? facts.module;
+    const parent =
+      Option.getOrUndefined(
+        EffectArray.findFirst([...scopes].reverse(), (scope): scope is CodeGraphSymbol => scope !== undefined),
+      ) ?? facts.module;
     const parentQualifiedName = parent === facts.module ? namespace : parent.qualifiedName;
     const declaration = addDeclaration(
       facts,
@@ -725,7 +751,7 @@ function extractProtobuf(facts: MutableStructuredFacts): void {
       break;
     }
     const offset = statementSpan.start;
-    const statement = content.slice(offset, statementSpan.end);
+    const statement = Effect.pipe(content, EffectString.slice(offset, statementSpan.end));
     const importPath = protobufImportPath(statement);
     if (importPath === undefined) continue;
     addMoniker(() =>
@@ -762,9 +788,10 @@ function* protobufImportStatementSpans(
   maskedSource: string,
 ): IterableIterator<{readonly end: number; readonly start: number}> {
   const keyword = 'import';
-  const normalizedSource = maskedSource.toLowerCase();
+  const normalizedSource = Effect.pipe(maskedSource, EffectString.toLowerCase);
   let cursor = 0;
   while (cursor < maskedSource.length) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const start = normalizedSource.indexOf(keyword, cursor);
     if (start < 0) return;
     const before = maskedSource[start - 1];
@@ -773,30 +800,39 @@ function* protobufImportStatementSpans(
       cursor = start + keyword.length;
       continue;
     }
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const semicolon = maskedSource.indexOf(';', start + keyword.length);
     if (semicolon < 0) return;
-    const modifier = maskedSource
-      .slice(start + keyword.length, semicolon)
-      .trim()
-      .toLowerCase();
+    const modifier = Effect.pipe(
+      maskedSource,
+      EffectString.slice(start + keyword.length, semicolon),
+      EffectString.trim,
+      EffectString.toLowerCase,
+    );
     if (!modifier || modifier === 'public' || modifier === 'weak') yield {end: semicolon + 1, start};
     cursor = semicolon + 1;
   }
 }
 
 function protobufImportPath(statement: string): string | undefined {
-  let remainder = statement.slice('import'.length).trimStart();
+  let remainder = Effect.pipe(statement, __effectPipeInput => {
+    const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.slice('import'.length));
+    const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.trimStart);
+    return __effectPipeStage1;
+  });
   for (const modifier of ['public', 'weak']) {
-    if (remainder.startsWith(modifier) && /\s/u.test(remainder[modifier.length] ?? '')) {
-      remainder = remainder.slice(modifier.length).trimStart();
+    if (Effect.pipe(remainder, EffectString.startsWith(modifier)) && /\s/u.test(remainder[modifier.length] ?? '')) {
+      remainder = Effect.pipe(remainder, EffectString.slice(modifier.length), EffectString.trimStart);
       break;
     }
   }
   const quote = remainder[0];
   if (quote !== '"' && quote !== "'") return undefined;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const closing = remainder.indexOf(quote, 1);
-  if (closing <= 1 || remainder.slice(closing + 1).trim() !== ';') return undefined;
-  return remainder.slice(1, closing);
+  if (closing <= 1 || Effect.pipe(remainder, EffectString.slice(closing + 1), EffectString.trim) !== ';')
+    return undefined;
+  return Effect.pipe(remainder, EffectString.slice(1, closing));
 }
 
 function extractXml(facts: MutableStructuredFacts): void {
@@ -804,14 +840,28 @@ function extractXml(facts: MutableStructuredFacts): void {
   for (const element of scanXmlStartTags(content)) {
     if (facts.symbols.length >= MAX_STRUCTURED_SYMBOLS) break;
     const tag = element.name;
-    const identity = [...scanXmlAttributes(element.attributes)].find(attribute =>
-      ['x:Class', 'x:Name', 'Name', 'Include', 'Update', 'Remove', 'Id'].includes(attribute.name),
+    const identity = Option.getOrUndefined(
+      EffectArray.findFirst(
+        [...scanXmlAttributes(element.attributes)],
+        __effectArrayValue =>
+          !!(attribute => ['x:Class', 'x:Name', 'Name', 'Include', 'Update', 'Remove', 'Id'].includes(attribute.name))(
+            __effectArrayValue,
+          ),
+      ),
     )?.value;
     if (!identity && !/^(?:Project|PackageReference|ProjectReference|Target|PropertyGroup|ItemGroup)$/i.test(tag))
       continue;
     const name = identity ?? tag;
     const offset = element.offset;
-    const symbol = addDeclaration(facts, facts.module, tag.toLowerCase(), name, `${tag}:${name}`, offset, element.end);
+    const symbol = addDeclaration(
+      facts,
+      facts.module,
+      Effect.pipe(tag, EffectString.toLowerCase),
+      name,
+      `${tag}:${name}`,
+      offset,
+      element.end,
+    );
     if (/^(?:PackageReference|ProjectReference)$/i.test(tag) && identity) {
       addUnresolvedEdge(facts, symbol, identity, 'depends_on', 'declared', offset, element.end);
     }
@@ -820,7 +870,7 @@ function extractXml(facts: MutableStructuredFacts): void {
 
 function extractSolution(facts: MutableStructuredFacts): void {
   const expression = /^Project\("[^"\r\n]+"\)\s*=\s*"([^"]+)",\s*"([^"]+)"/gim;
-  for (const match of facts.file.content!.matchAll(expression)) {
+  for (const match of Effect.pipe(facts.file.content!, EffectString.matchAll(expression))) {
     const offset = match.index ?? 0;
     const symbol = addDeclaration(facts, facts.module, 'project', match[1], match[1], offset, offset + match[0].length);
     addUnresolvedEdge(facts, symbol, match[2], 'depends_on', 'declared', offset, offset + match[0].length);
@@ -912,7 +962,8 @@ export function relocateStructuredSchemaFacts(
     (facts.monikers?.length ?? 0) > 0 ||
     facts.references !== undefined ||
     facts.symbols.length === 0 ||
-    facts.symbols.some(
+    EffectArray.some(
+      facts.symbols,
       symbol =>
         symbol.path !== sourcePath ||
         symbol.contentHash !== file.contentHash ||
@@ -924,7 +975,7 @@ export function relocateStructuredSchemaFacts(
         symbol.documentation !== undefined ||
         symbol.signature !== undefined,
     ) ||
-    facts.edges.some(edge => edge.evidencePath !== sourcePath)
+    EffectArray.some(facts.edges, edge => edge.evidencePath !== sourcePath)
   ) {
     return undefined;
   }
@@ -984,8 +1035,10 @@ export function relocateStructuredSchemaFacts(
 
   return {
     ...facts,
-    diagnostics: facts.diagnostics.map(diagnostic =>
-      diagnostic.startsWith(`${sourcePath}:`) ? `${file.path}${diagnostic.slice(sourcePath.length)}` : diagnostic,
+    diagnostics: EffectArray.map(facts.diagnostics, diagnostic =>
+      Effect.pipe(diagnostic, EffectString.startsWith(`${sourcePath}:`))
+        ? `${file.path}${Effect.pipe(diagnostic, EffectString.slice(sourcePath.length))}`
+        : diagnostic,
     ),
     edges: relocatedEdges,
     path: file.path,
@@ -1002,18 +1055,18 @@ function structuredSymbolId(
   occurrence: number,
 ): string {
   return occurrence === 0
-    ? `cgs_${sha256HexSync(`structured-symbol-v1\n${path}\n${language}\n${kind}\n${identityQualifiedName}`).slice(
-        0,
-        32,
-      )}`
-    : `cgs_${sha256HexSync(
-        `structured-symbol-v2\n${path}\n${language}\n${kind}\n${qualifiedName}\n${occurrence}`,
-      ).slice(0, 32)}`;
+    ? `cgs_${Effect.pipe(sha256HexSync(`structured-symbol-v1\n${path}\n${language}\n${kind}\n${identityQualifiedName}`), EffectString.slice(0, 32))}`
+    : `cgs_${Effect.pipe(
+        sha256HexSync(`structured-symbol-v2\n${path}\n${language}\n${kind}\n${qualifiedName}\n${occurrence}`),
+        EffectString.slice(0, 32),
+      )}`;
 }
 
 function relocateStructuredPathValue(value: string, sourcePath: string, targetPath: string): string {
   if (value === sourcePath) return targetPath;
-  return value.startsWith(`${sourcePath}#`) ? `${targetPath}${value.slice(sourcePath.length)}` : value;
+  return Effect.pipe(value, EffectString.startsWith(`${sourcePath}#`))
+    ? `${targetPath}${Effect.pipe(value, EffectString.slice(sourcePath.length))}`
+    : value;
 }
 
 function structuredIdentityQualifiedName(
@@ -1023,16 +1076,16 @@ function structuredIdentityQualifiedName(
 ): string | undefined {
   if (symbol.kind === 'module') return symbol.qualifiedName === sourcePath ? targetPath : undefined;
   const prefix = `${sourcePath}#/`;
-  if (!symbol.qualifiedName.startsWith(prefix)) return undefined;
-  const segments = symbol.qualifiedName
-    .slice(prefix.length)
-    .split('/')
-    .map(segment => segment.replaceAll('~1', '/').replaceAll('~0', '~'));
-  return `${targetPath}#${segments.join('.')}`;
+  if (!Effect.pipe(symbol.qualifiedName, EffectString.startsWith(prefix))) return undefined;
+  const segments = EffectArray.map(
+    Effect.pipe(symbol.qualifiedName, EffectString.slice(prefix.length), EffectString.split('/')),
+    segment => Effect.pipe(segment, EffectString.replaceAll('~1', '/'), EffectString.replaceAll('~0', '~')),
+  );
+  return `${targetPath}#${EffectArray.join(segments, '.')}`;
 }
 
 function structuredPath(filePath: string, segments: readonly string[]): string {
-  return `${filePath}#/${segments.map(escapeStructuredSegment).join('/')}`;
+  return `${filePath}#/${EffectArray.join(EffectArray.map(segments, escapeStructuredSegment), '/')}`;
 }
 
 function structuredChild(parent: string, name: string): string {
@@ -1040,7 +1093,7 @@ function structuredChild(parent: string, name: string): string {
 }
 
 function escapeStructuredSegment(value: string): string {
-  return value.replaceAll('~', '~0').replaceAll('/', '~1');
+  return Effect.pipe(value, EffectString.replaceAll('~', '~0'), EffectString.replaceAll('/', '~1'));
 }
 
 function resolvedEdge(
@@ -1093,7 +1146,7 @@ function edgeId(path: string, source: string, relation: string, target: string, 
 }
 
 function structuredEdgeId(path: string, source: string, relation: string, target: string, provenance: string): string {
-  return `cge_${sha256HexSync(`structured-edge-v1\n${path}\n${source}\n${relation}\n${target}\n${provenance}`).slice(0, 32)}`;
+  return `cge_${Effect.pipe(sha256HexSync(`structured-edge-v1\n${path}\n${source}\n${relation}\n${target}\n${provenance}`), EffectString.slice(0, 32))}`;
 }
 
 function requiredLineIndex(facts: MutableStructuredFacts): SourceLineIndex {
@@ -1113,11 +1166,11 @@ function linesWithOffsets(
       cursor += 1;
       continue;
     }
-    output.push({end: cursor, start, text: content.slice(start, cursor)});
+    output.push({end: cursor, start, text: Effect.pipe(content, EffectString.slice(start, cursor))});
     cursor += width;
     start = cursor;
   }
-  output.push({end: content.length, start, text: content.slice(start)});
+  output.push({end: content.length, start, text: Effect.pipe(content, EffectString.slice(start))});
   return output;
 }
 
@@ -1132,6 +1185,7 @@ function stripJsonComments(value: string): string {
 }
 
 function normalizeJsonc(value: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const output = stripJsonComments(value).split('');
   let escaped = false;
   let inString = false;
@@ -1153,10 +1207,11 @@ function normalizeJsonc(value: string): string {
     if (output[lookahead] === '}' || output[lookahead] === ']') output[index] = ' ';
   }
   if (output[0] === '\uFEFF') output[0] = ' ';
-  return output.join('');
+  return EffectArray.join(output, '');
 }
 
 function maskCStyleNonCode(value: string, maskStrings: boolean): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const output = value.split('');
   let mode: 'block-comment' | 'code' | 'line-comment' | 'string' = 'code';
   let quote = '';
@@ -1202,7 +1257,7 @@ function maskCStyleNonCode(value: string, maskStrings: boolean): string {
       mode = 'string';
     }
   }
-  return output.join('');
+  return EffectArray.join(output, '');
 }
 
 function isLineTerminator(character: string): boolean {
@@ -1210,8 +1265,10 @@ function isLineTerminator(character: string): boolean {
 }
 
 function normalizeSqlIdentifier(value: string): string {
-  return value
-    .replace(/[\s`"[\]]/g, '')
-    .replace(/\.+/g, '.')
-    .replace(/^\.|\.$/g, '');
+  return Effect.pipe(
+    value,
+    EffectString.replace(/[\s`"[\]]/g, ''),
+    EffectString.replace(/\.+/g, '.'),
+    EffectString.replace(/^\.|\.$/g, ''),
+  );
 }

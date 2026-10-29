@@ -5,11 +5,14 @@ import {
   runtimeLstat,
   SystemInfo,
   type RuntimeBigIntStats,
+  type RuntimeNativeFileStat,
 } from '@threadnote/platform/system';
 import {createCodeGraphCommittedFileContentHasher} from '../content_identity.js';
 import {decodeUtf8} from './content.js';
 import {CodeGraphInventoryError} from './error.js';
 import type {RepositoryIdentity} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const readOptionalText = Effect.fn('codeGraph.readOptionalText')(function* (
   fs: FileSystem.FileSystem,
@@ -163,7 +166,7 @@ function readContainedStableRegularFileInternal(
   interlock?: ContainedReadInterlock,
   maximumBytes?: number,
 ): Effect.Effect<Uint8Array, Error, SystemInfo> {
-  const target = path.join(repositoryRoot, ...relative.split('/'));
+  const target = path.join(repositoryRoot, ...Effect2.pipe(relative, EffectString.split('/')));
   return Effect.gen(function* () {
     yield* validateRepositoryAncestors(fs, path, repositoryRoot, relative);
     const canonicalBefore = yield* fs.realPath(target);
@@ -220,7 +223,7 @@ export function inspectContainedStableRegularFile(
   repositoryRoot: string,
   relative: string,
 ): Effect.Effect<StableContainedRegularFileMetadata, Error, SystemInfo> {
-  const target = path.join(repositoryRoot, ...relative.split('/'));
+  const target = path.join(repositoryRoot, ...Effect2.pipe(relative, EffectString.split('/')));
   return Effect.gen(function* () {
     yield* validateRepositoryAncestors(fs, path, repositoryRoot, relative);
     const canonicalBefore = yield* fs.realPath(target);
@@ -283,7 +286,7 @@ export function materializeContainedStableRegularFile(
   expectedSize?: number,
   objectFormat?: RepositoryIdentity['objectFormat'],
 ): Effect.Effect<StableContainedMaterialization, Error, SystemInfo> {
-  const target = path.join(repositoryRoot, ...relative.split('/'));
+  const target = path.join(repositoryRoot, ...Effect2.pipe(relative, EffectString.split('/')));
   return Effect.gen(function* () {
     yield* validateRepositoryAncestors(fs, path, repositoryRoot, relative);
     const canonicalBefore = yield* fs.realPath(target);
@@ -393,7 +396,7 @@ const validateRepositoryAncestors = Effect.fn('codeGraph.validateRepositoryAnces
   relative: string,
 ) {
   let current = repositoryRoot;
-  for (const segment of relative.split('/').slice(0, -1)) {
+  for (const segment of Effect2.pipe(relative, EffectString.split('/')).slice(0, -1)) {
     current = path.join(current, segment);
     const link = yield* fs.readLink(current).pipe(
       Effect.asSome,
@@ -412,7 +415,9 @@ const validateRepositoryAncestors = Effect.fn('codeGraph.validateRepositoryAnces
 
 function isContainedPath(path: Path.Path, root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  return (
+    relative !== '..' && !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)) && !path.isAbsolute(relative)
+  );
 }
 
 function sameRegularFile(
@@ -457,12 +462,12 @@ function nativePathInfo(target: string): Effect.Effect<RuntimeBigIntStats, CodeG
   );
 }
 
-function nativeOpenedFileInfo(file: FileSystem.File): Effect.Effect<RuntimeBigIntStats, CodeGraphInventoryError> {
+function nativeOpenedFileInfo(file: FileSystem.File): Effect.Effect<RuntimeNativeFileStat, CodeGraphInventoryError> {
   const descriptor = fileDescriptor(file);
   if (descriptor === undefined)
     return CodeGraphInventoryError.make({message: 'Opened repository file descriptor is unavailable.'});
   return Effect.try({
-    try: () => runtimeFileDescriptorStatSync(descriptor) as unknown as RuntimeBigIntStats,
+    try: () => runtimeFileDescriptorStatSync(descriptor),
     catch: cause => CodeGraphInventoryError.make({cause, message: 'Could not inspect opened repository file.'}),
   });
 }

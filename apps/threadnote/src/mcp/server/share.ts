@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem} from 'effect';
 import {type McpToolset} from '../toolset.js';
 import {buildOnboardingGuide, gatherOnboardingContext} from '../../onboarding.js';
@@ -46,6 +47,7 @@ import {
   runNativeReadTool,
   textFromCallToolResult,
 } from './memory.js';
+
 interface SharePublishToolOptions {
   readonly allowUncitedPendingCodeRefs?: boolean;
   readonly message?: string;
@@ -127,7 +129,7 @@ export function runShareConflictsTool(config: RuntimeConfig, options: ShareConfl
           `merged: share_conflict_resolve({"id":${JSON.stringify(conflict.id)},"mergedContent":"<merged MEMORY markdown>"})`,
         );
       }
-      return {content: [{type: 'text' as const, text: lines.join('\n')}]};
+      return {content: [{type: 'text' as const, text: EffectArray.join(lines, '\n')}]};
     }),
     Effect.catch(error => Effect.succeed(mcpErrorResult(error))),
   );
@@ -139,21 +141,24 @@ export function runShareConflictShowTool(config: RuntimeConfig, id: string, opti
       content: [
         {
           type: 'text' as const,
-          text: [
-            `Conflict: ${detail.id}`,
-            `URI: ${detail.uri}`,
-            `Status: ${detail.status}`,
-            `Reason: ${detail.reason}`,
-            '',
-            detail.diff,
-            '',
-            'Resolve:',
-            ...(shareConflictCanTakeShared(detail)
-              ? [`share_conflict_resolve({"id":${JSON.stringify(detail.id)},"take":"shared"})`]
-              : []),
-            `share_conflict_resolve({"id":${JSON.stringify(detail.id)},"take":"local"})`,
-            `share_conflict_resolve({"id":${JSON.stringify(detail.id)},"mergedContent":"<merged MEMORY markdown>"})`,
-          ].join('\n'),
+          text: EffectArray.join(
+            [
+              `Conflict: ${detail.id}`,
+              `URI: ${detail.uri}`,
+              `Status: ${detail.status}`,
+              `Reason: ${detail.reason}`,
+              '',
+              detail.diff,
+              '',
+              'Resolve:',
+              ...(shareConflictCanTakeShared(detail)
+                ? [`share_conflict_resolve({"id":${JSON.stringify(detail.id)},"take":"shared"})`]
+                : []),
+              `share_conflict_resolve({"id":${JSON.stringify(detail.id)},"take":"local"})`,
+              `share_conflict_resolve({"id":${JSON.stringify(detail.id)},"mergedContent":"<merged MEMORY markdown>"})`,
+            ],
+            '\n',
+          ),
         },
       ],
     })),
@@ -185,7 +190,7 @@ export function runShareConflictResolveTool(
           ? `Would resolve shared memory conflict: ${result.id}`
           : `Resolved shared memory conflict: ${result.id}`,
       );
-      return {content: [{type: 'text' as const, text: lines.join('\n')}]};
+      return {content: [{type: 'text' as const, text: EffectArray.join(lines, '\n')}]};
     }),
     Effect.catch(error => Effect.succeed(mcpErrorResult(error))),
   );
@@ -239,7 +244,7 @@ export function runSharePublishTool(config: RuntimeConfig, sourceUri: string, op
         previewLines.push(
           `PREVIEW BLOCKED: ${scrub.blocker}. Strip the sensitive value or pass redact=true for soft-leak patterns.`,
         );
-        return {content: [{type: 'text', text: previewLines.join('\n')}]};
+        return {content: [{type: 'text', text: EffectArray.join(previewLines, '\n')}]};
       }
       for (const redaction of scrub.redactions) {
         previewLines.push(`PREVIEW redact: ${redaction.count}× ${redaction.name}`);
@@ -248,7 +253,7 @@ export function runSharePublishTool(config: RuntimeConfig, sourceUri: string, op
       previewLines.push('-----BEGIN PREVIEW-----');
       previewLines.push(scrub.cleaned);
       previewLines.push('-----END PREVIEW-----');
-      return {content: [{type: 'text', text: previewLines.join('\n')}]};
+      return {content: [{type: 'text', text: EffectArray.join(previewLines, '\n')}]};
     }
 
     if (scrub.blocker) {
@@ -415,20 +420,23 @@ export function runSharePublishTool(config: RuntimeConfig, sourceUri: string, op
         content: [
           {
             type: 'text',
-            text: [
-              ...messages,
-              ...publication.gitMessages,
-              `Could not remove the personal source after publish: ${sourceUri}.`,
-              `Retry cleanup later with: threadnote forget ${sourceUri}`,
-              cleanupReason,
-            ].join('\n'),
+            text: EffectArray.join(
+              [
+                ...messages,
+                ...publication.gitMessages,
+                `Could not remove the personal source after publish: ${sourceUri}.`,
+                `Retry cleanup later with: threadnote forget ${sourceUri}`,
+                cleanupReason,
+              ],
+              '\n',
+            ),
           },
         ],
         isError: true,
       };
     }
     return {
-      content: [{type: 'text', text: [...messages, ...publication.gitMessages].join('\n')}],
+      content: [{type: 'text', text: EffectArray.join([...messages, ...publication.gitMessages], '\n')}],
       isError: false,
     };
   }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error))));
@@ -450,7 +458,7 @@ export function runShareSkillTool(config: RuntimeConfig, sourcePath: string, opt
         lines.push(result.previewContent);
         lines.push('-----END PREVIEW-----');
       }
-      return {content: [{type: 'text' as const, text: lines.join('\n')}], isError: false};
+      return {content: [{type: 'text' as const, text: EffectArray.join(lines, '\n')}], isError: false};
     }),
     Effect.catch(error => Effect.succeed(mcpErrorResult(error))),
   );
@@ -475,7 +483,7 @@ export function runShareBundleTool(config: RuntimeConfig, manifestPath: string, 
         lines.push(result.previewContent);
         lines.push('-----END PREVIEW-----');
       }
-      return {content: [{type: 'text' as const, text: lines.join('\n')}], isError: false};
+      return {content: [{type: 'text' as const, text: EffectArray.join(lines, '\n')}], isError: false};
     }),
     Effect.catch(error => Effect.succeed(mcpErrorResult(error))),
   );
@@ -515,7 +523,7 @@ export function runListSharedSkillsTool(config: RuntimeConfig, options: SharedSk
           );
         }
       }
-      return {content: [{type: 'text' as const, text: lines.join('\n')}], isError: false};
+      return {content: [{type: 'text' as const, text: EffectArray.join(lines, '\n')}], isError: false};
     }),
     Effect.catch(error => Effect.succeed(mcpErrorResult(error))),
   );
@@ -531,7 +539,8 @@ export function runInstallSharedSkillTool(config: RuntimeConfig, name: string, o
       content: [
         {
           type: 'text' as const,
-          text: [...shareArtifactToolHeader(result.team, result.syncedTeams, result.warnings), ...result.messages].join(
+          text: EffectArray.join(
+            [...shareArtifactToolHeader(result.team, result.syncedTeams, result.warnings), ...result.messages],
             '\n',
           ),
         },
@@ -545,7 +554,7 @@ export function runInstallSharedSkillTool(config: RuntimeConfig, name: string, o
 function shareArtifactToolHeader(team: string, syncedTeams: readonly string[], warnings: readonly string[]): string[] {
   const lines = [`Team: ${team}`];
   if (syncedTeams.length > 0) {
-    lines.push(`Synced shared teams: ${syncedTeams.join(', ')}`);
+    lines.push(`Synced shared teams: ${EffectArray.join(syncedTeams, ', ')}`);
   }
   for (const warning of warnings) {
     lines.push(`Warning: ${warning}`);

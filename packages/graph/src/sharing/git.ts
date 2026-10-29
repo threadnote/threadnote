@@ -2,6 +2,8 @@ import {Effect} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {graphSharingFailure} from './errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const GRAPH_SHARE_GIT_OBJECT_ID = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u;
 
@@ -43,7 +45,7 @@ export function graphShareCommitDiffStats(repoRoot: string, from: string, to: st
     if (result.exitCode !== 0) return {changedBytes: 0, changedFiles: 0};
     let changedBytes = 0;
     let changedFiles = 0;
-    for (const line of result.stdout.split('\n')) {
+    for (const line of Effect2.pipe(result.stdout, EffectString.split('\n'))) {
       const match = /^(\d+|-)\t(\d+|-)\t/u.exec(line);
       if (match === null) continue;
       changedFiles += 1;
@@ -64,7 +66,7 @@ export const graphShareCommitUnixSeconds = (repoRoot: string, commit: string) =>
       timeoutMs: 10_000,
     });
     if (result.exitCode !== 0) return undefined;
-    const value = Number(result.stdout.trim());
+    const value = Number(Effect2.pipe(result.stdout, EffectString.trim));
     return Number.isSafeInteger(value) && value > 0 ? value : undefined;
   });
 

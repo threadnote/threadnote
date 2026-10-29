@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as yaml from 'js-yaml';
 import {Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -30,6 +31,9 @@ import {
 import {errorMessage} from '@threadnote/platform/errors';
 import {expandPath} from '@threadnote/platform/paths';
 import {writeMemoryFile} from '../share/index.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 interface LegacyMemoryCandidate {
   readonly comparableHash: string;
@@ -155,13 +159,16 @@ export const runMigrateMemories = Effect.fn('runMigrateMemories')(function* (
 
   yield* migrate;
   yield* Console.log(
-    [
-      `Migration summary: ${migratedCount} ${dryRun ? 'would be migrated' : 'migrated'}`,
-      `${duplicateCount} duplicate(s) skipped`,
-      `${sensitiveCount} sensitive-looking item(s) skipped`,
-      `${candidates.length} legacy Threadnote item(s) scanned`,
-      `source account(s): ${sourceAccounts.join(', ')}`,
-    ].join('; '),
+    EffectArray.join(
+      [
+        `Migration summary: ${migratedCount} ${dryRun ? 'would be migrated' : 'migrated'}`,
+        `${duplicateCount} duplicate(s) skipped`,
+        `${sensitiveCount} sensitive-looking item(s) skipped`,
+        `${candidates.length} legacy Threadnote item(s) scanned`,
+        `source account(s): ${EffectArray.join(sourceAccounts, ', ')}`,
+      ],
+      '; ',
+    ),
   );
 });
 
@@ -188,12 +195,19 @@ export const runMigrateLifecycle = Effect.fn('runMigrateLifecycle')(function* (
       const destinationUri = lifecycleMigrationUri(
         config,
         candidate.metadata,
-        yield* sha256(candidate.original.trim()),
+        yield* sha256(Effect2.pipe(candidate.original, EffectString.trim)),
       );
       const migratedMemory = formatMemoryDocument(
         'HANDOFF',
         candidate.metadata,
-        ['Migrated legacy handoff from the historical events trail.', '', candidate.original.trim()].join('\n'),
+        EffectArray.join(
+          [
+            'Migrated legacy handoff from the historical events trail.',
+            '',
+            Effect2.pipe(candidate.original, EffectString.trim),
+          ],
+          '\n',
+        ),
       );
 
       yield* Console.log(`${dryRun ? 'Would migrate' : 'Migrating'} ${candidate.sourceUri} -> ${destinationUri}`);
@@ -222,15 +236,19 @@ export const runMigrateLifecycle = Effect.fn('runMigrateLifecycle')(function* (
   }).pipe(Effect.ensuring(dryRun ? Effect.void : fs.remove(migrationPath, {force: true}).pipe(Effect.ignore)));
 
   yield* Console.log(
-    [
-      `Lifecycle migration summary: ${migratedCount} clear legacy handoff(s) ${dryRun ? 'would be migrated' : 'migrated'}`,
-      `${existingCount} existing archived copy/copies reused`,
-      `${skippedCount} legacy source(s) still processing`,
-      `${candidates.length} clear legacy handoff candidate(s) found`,
-      dryRun ? 'Run with --apply to perform this migration.' : undefined,
-    ]
-      .filter((part): part is string => part !== undefined)
-      .join('; '),
+    EffectArray.join(
+      EffectArray.filter(
+        [
+          `Lifecycle migration summary: ${migratedCount} clear legacy handoff(s) ${dryRun ? 'would be migrated' : 'migrated'}`,
+          `${existingCount} existing archived copy/copies reused`,
+          `${skippedCount} legacy source(s) still processing`,
+          `${candidates.length} clear legacy handoff candidate(s) found`,
+          dryRun ? 'Run with --apply to perform this migration.' : undefined,
+        ],
+        (part): part is string => part !== undefined,
+      ),
+      '; ',
+    ),
   );
 });
 
@@ -259,7 +277,7 @@ export const runMigrateProjectNames = Effect.fn('runMigrateProjectNames')(functi
     }
   }
   const seedManifestMigration = yield* seedManifestProjectNameMigration(config, contexts);
-  if (!plans.some(plan => plan.candidates.length > 0) && !seedManifestMigration) {
+  if (!EffectArray.some(plans, plan => plan.candidates.length > 0) && !seedManifestMigration) {
     yield* Console.log('No project-name migration candidates found across configured projects.');
     return;
   }
@@ -268,7 +286,7 @@ export const runMigrateProjectNames = Effect.fn('runMigrateProjectNames')(functi
   let existingCount = 0;
   let migratedCount = 0;
   let skippedCount = 0;
-  const candidates = plans.flatMap(plan => [...plan.candidates]);
+  const candidates = EffectArray.flatMap(plans, plan => [...plan.candidates]);
   if (candidates.length > 0) {
     const ov = NATIVE_RESOURCE_BACKEND;
     for (const candidate of candidates) {
@@ -304,18 +322,23 @@ export const runMigrateProjectNames = Effect.fn('runMigrateProjectNames')(functi
   const newProjectsToSeed = [...new Set(seedManifestMigration?.newProjects ?? [])];
 
   yield* Console.log(
-    [
-      projectNameMigrationSummary(migratedCount, dryRun, activeContexts),
-      seedManifestUpdated ? `seed manifest ${dryRun ? 'would be updated' : 'updated'}` : 'seed manifest unchanged',
-      `${existingCount} duplicate destination(s) reused`,
-      `${skippedCount} source(s) still processing`,
-      dryRun ? 'Run with --apply to perform this migration.' : undefined,
-      ...newProjectsToSeed.map(
-        project => `Run threadnote seed --only ${project} to re-ingest seeded resources under the new project URI.`,
+    EffectArray.join(
+      EffectArray.filter(
+        [
+          projectNameMigrationSummary(migratedCount, dryRun, activeContexts),
+          seedManifestUpdated ? `seed manifest ${dryRun ? 'would be updated' : 'updated'}` : 'seed manifest unchanged',
+          `${existingCount} duplicate destination(s) reused`,
+          `${skippedCount} source(s) still processing`,
+          dryRun ? 'Run with --apply to perform this migration.' : undefined,
+          ...EffectArray.map(
+            newProjectsToSeed,
+            project => `Run threadnote seed --only ${project} to re-ingest seeded resources under the new project URI.`,
+          ),
+        ],
+        (part): part is string => part !== undefined,
       ),
-    ]
-      .filter((part): part is string => part !== undefined)
-      .join('; '),
+      '; ',
+    ),
   );
 });
 
@@ -376,7 +399,7 @@ const projectNameMigrationMemoryEvidence = Effect.fn('memory.projectNameMigratio
       continue;
     }
     for (const projectEntry of projectEntries.value) {
-      if (projectEntry.startsWith('.')) {
+      if (Effect2.pipe(projectEntry, EffectString.startsWith('.'))) {
         continue;
       }
       const projectDirectory = path.join(locationRoot, projectEntry);
@@ -391,7 +414,10 @@ const projectNameMigrationMemoryEvidence = Effect.fn('memory.projectNameMigratio
         continue;
       }
       for (const memoryEntry of memoryEntries.value) {
-        if (memoryEntry.startsWith('.') || !memoryEntry.endsWith('.md')) {
+        if (
+          Effect2.pipe(memoryEntry, EffectString.startsWith('.')) ||
+          !Effect2.pipe(memoryEntry, EffectString.endsWith('.md'))
+        ) {
           continue;
         }
         const memoryPath = path.join(projectDirectory, memoryEntry);
@@ -436,11 +462,13 @@ const repoPathEvidenceFromMemory = Effect.fn('memory.repoPathEvidenceFromMemory'
   if (!match?.[1]) {
     return undefined;
   }
-  const cleaned = match[1]
-    .trim()
-    .replace(/^['"`]+|['"`]+$/g, '')
-    .replace(/[.,;]+$/g, '');
-  if (!cleaned.startsWith('/') && !cleaned.startsWith('~/')) {
+  const cleaned = Effect2.pipe(
+    match[1],
+    EffectString.trim,
+    EffectString.replace(/^['"`]+|['"`]+$/g, ''),
+    EffectString.replace(/[.,;]+$/g, ''),
+  );
+  if (!Effect2.pipe(cleaned, EffectString.startsWith('/')) && !Effect2.pipe(cleaned, EffectString.startsWith('~/'))) {
     return undefined;
   }
   return yield* expandPath(cleaned);
@@ -539,7 +567,7 @@ const projectNameMigrationCandidates = Effect.fn('memory.projectNameMigrationCan
       continue;
     }
     for (const entry of entries.value) {
-      if (entry.startsWith('.') || !entry.endsWith('.md')) {
+      if (Effect2.pipe(entry, EffectString.startsWith('.')) || !Effect2.pipe(entry, EffectString.endsWith('.md'))) {
         continue;
       }
       const sourcePath = path.join(sourceDirectory, entry);
@@ -599,7 +627,10 @@ function projectNameMigrationActiveContexts(
     | undefined,
 ): readonly ProjectNameMigrationContext[] {
   return dedupeProjectNameMigrationContexts([
-    ...plans.filter(plan => plan.candidates.length > 0).map(plan => plan.context),
+    ...EffectArray.map(
+      EffectArray.filter(plans, plan => plan.candidates.length > 0),
+      plan => plan.context,
+    ),
     ...(seedManifestMigration?.contexts ?? []),
   ]);
 }
@@ -615,7 +646,10 @@ function projectNameMigrationSummary(
     const [context] = contexts;
     return `Project-name migration summary: ${migratedCount} ${memoryWord} ${verb} from ${context.oldProject} to ${context.newProject}`;
   }
-  const renameSummary = contexts.map(context => `${context.oldProject} -> ${context.newProject}`).join(', ');
+  const renameSummary = EffectArray.join(
+    EffectArray.map(contexts, context => `${context.oldProject} -> ${context.newProject}`),
+    ', ',
+  );
   return `Project-name migration summary: ${migratedCount} ${memoryWord} ${verb} across ${contexts.length} project rename(s)${renameSummary ? `: ${renameSummary}` : ''}`;
 }
 
@@ -635,7 +669,7 @@ const migrateSeedManifestProjectNames = Effect.fn('memory.migrateSeedManifestPro
   }
   if (dryRun) {
     yield* Console.log(`Would update seed manifest: ${config.manifestPath}`);
-    yield* Console.log(migration.output.trimEnd());
+    yield* Console.log(Effect2.pipe(migration.output, EffectString.trimEnd));
     return true;
   }
   const fs = yield* FileSystem.FileSystem;
@@ -664,22 +698,31 @@ const seedManifestProjectNameMigration = Effect.fn('memory.seedManifestProjectNa
   }
   const renamed = new Map<string, ProjectNameMigrationContext>();
   let changed = false;
-  const projects = manifest.value.projects.map(project => {
-    const context = contexts.find(candidate =>
-      isSeedManifestProjectNameCandidate(
-        project,
-        candidate,
-        `threadnote://resources/repos/${candidate.oldSegment}`,
-        `threadnote://resources/repos/${candidate.newSegment}`,
+  const projects = EffectArray.map(manifest.value.projects, project => {
+    const context = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        contexts,
+        __effectArrayValue =>
+          !!(candidate =>
+            isSeedManifestProjectNameCandidate(
+              project,
+              candidate,
+              `threadnote://resources/repos/${candidate.oldSegment}`,
+              `threadnote://resources/repos/${candidate.newSegment}`,
+            ))(__effectArrayValue),
       ),
     );
     if (!context) {
       return project;
     }
-    const newNameExists = manifest.value.projects.some(
+    const newNameExists = EffectArray.some(
+      manifest.value.projects,
       other => other !== project && uriSegment(other.name) === context.newSegment,
     );
-    if (newNameExists || [...renamed.values()].some(existing => existing.newSegment === context.newSegment)) {
+    if (
+      newNameExists ||
+      EffectArray.some([...renamed.values()], existing => existing.newSegment === context.newSegment)
+    ) {
       return project;
     }
     changed = true;
@@ -695,28 +738,32 @@ const seedManifestProjectNameMigration = Effect.fn('memory.seedManifestProjectNa
   });
   const worksets =
     renamed.size > 0
-      ? manifest.value.worksets?.map(workset => {
-          const members = workset.projects.map(projectName => {
-            const context = renamed.get(uriSegment(projectName));
-            if (!context) {
-              return projectName;
-            }
-            changed = true;
-            return context.newProject;
-          });
-          return {...workset, projects: members};
-        })
+      ? EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(manifest.value.worksets), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, workset => {
+              const members = EffectArray.map(workset.projects, projectName => {
+                const context = renamed.get(uriSegment(projectName));
+                if (!context) {
+                  return projectName;
+                }
+                changed = true;
+                return context.newProject;
+              });
+              return {...workset, projects: members};
+            }),
+          ),
+        )
       : manifest.value.worksets;
   if (!changed) {
     return undefined;
   }
   return {
     contexts: [...renamed.values()],
-    newProjects: [...new Set([...renamed.values()].map(context => context.newProject))],
+    newProjects: [...new Set(EffectArray.map([...renamed.values()], context => context.newProject))],
     output: `${yaml.dump(
       {
         version: manifest.value.version,
-        projects: projects.map(project => ({
+        projects: EffectArray.map(projects, project => ({
           ...(project.graph === undefined
             ? {}
             : {
@@ -733,7 +780,7 @@ const seedManifestProjectNameMigration = Effect.fn('memory.seedManifestProjectNa
         })),
         ...(worksets
           ? {
-              worksets: worksets.map(workset => ({
+              worksets: EffectArray.map(worksets, workset => ({
                 name: workset.name,
                 ...(workset.description ? {description: workset.description} : {}),
                 projects: [...workset.projects],
@@ -787,7 +834,7 @@ const projectNameMigrationDestination = Effect.fn('memory.projectNameMigrationDe
   if (!direct.exists || direct.sameContent) {
     return {existsWithSameContent: direct.sameContent, filename};
   }
-  const stem = filename.replace(/\.md$/i, '');
+  const stem = Effect2.pipe(filename, EffectString.replace(/\.md$/i, ''));
   const fromOldProject = `${stem}-from-${oldProjectSegment}.md`;
   const renamed = yield* projectNameMigrationDestinationState(destinationDirectory, fromOldProject, content);
   if (!renamed.exists || renamed.sameContent) {
@@ -795,7 +842,7 @@ const projectNameMigrationDestination = Effect.fn('memory.projectNameMigrationDe
   }
   return {
     existsWithSameContent: false,
-    filename: `${stem}-from-${oldProjectSegment}-${(yield* sha256(content)).slice(0, 12)}.md`,
+    filename: `${stem}-from-${oldProjectSegment}-${Effect2.pipe(yield* sha256(content), EffectString.slice(0, 12))}.md`,
   };
 });
 
@@ -806,7 +853,13 @@ const projectNameMigrationDestinationState = Effect.fn('memory.projectNameMigrat
 ) {
   const path = yield* Path.Path;
   const existing = yield* readTextIfExists(path.join(destinationDirectory, filename));
-  return {exists: existing !== undefined, sameContent: existing?.trim() === content.trim()};
+  return {
+    exists: existing !== undefined,
+    sameContent:
+      Effect2.pipe(existing, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) === Effect2.pipe(content, EffectString.trim),
+  };
 });
 
 function projectMemoryLocations(): readonly ProjectMemoryLocation[] {
@@ -867,7 +920,10 @@ export function removeResourceWithRetry(
         if (options.expectedContent !== undefined) {
           const localPath = yield* localMemoryPathForUri(config, uri);
           const currentContent = localPath ? yield* readFileIfExists(localPath) : undefined;
-          if (currentContent === undefined || currentContent.trim() !== options.expectedContent.trim()) {
+          if (
+            currentContent === undefined ||
+            Effect2.pipe(currentContent, EffectString.trim) !== Effect2.pipe(options.expectedContent, EffectString.trim)
+          ) {
             return yield* MemoryOperationError.make({
               message: `Memory changed before removal; review the current content and retry: ${uri}`,
             });
@@ -909,7 +965,7 @@ function durableMemoryDirectoryUri(config: RuntimeConfig): string {
 }
 
 function migratedDurableMemoryUri(config: RuntimeConfig, hash: string): string {
-  return `${durableMemoryDirectoryUri(config)}/threadnote-migrated-${hash.slice(0, 16)}.md`;
+  return `${durableMemoryDirectoryUri(config)}/threadnote-migrated-${Effect2.pipe(hash, EffectString.slice(0, 16))}.md`;
 }
 
 export const hasLegacyLifecycleHandoffCandidates = Effect.fn('memory.hasLegacyLifecycleHandoffCandidates')(function* (
@@ -932,7 +988,7 @@ const legacyLifecycleHandoffCandidates = Effect.fn('memory.legacyLifecycleHandof
 
   const candidates: LifecycleHandoffCandidate[] = [];
   for (const entry of entries.value) {
-    if (entry.startsWith('.') || !entry.endsWith('.md')) {
+    if (Effect2.pipe(entry, EffectString.startsWith('.')) || !Effect2.pipe(entry, EffectString.endsWith('.md'))) {
       continue;
     }
     const sourcePath = path.join(eventsRoot, entry);
@@ -965,7 +1021,7 @@ const legacyLifecycleHandoffCandidates = Effect.fn('memory.legacyLifecycleHandof
 });
 
 function lifecycleMigrationUri(config: RuntimeConfig, metadata: MemoryMetadata, hash: string): string {
-  return `${memoryDirectoryUri(config, metadata)}/legacy-${hash.slice(0, 16)}.md`;
+  return `${memoryDirectoryUri(config, metadata)}/legacy-${Effect2.pipe(hash, EffectString.slice(0, 16))}.md`;
 }
 
 export function memoryDirectoryUri(config: RuntimeConfig, metadata: MemoryMetadata): string {
@@ -1001,19 +1057,23 @@ function isClearLegacyHandoffMemory(memory: string): boolean {
   if (/^kind:\s*/m.test(memory) || /^status:\s*/m.test(memory)) {
     return false;
   }
-  const trimmed = memory.trim();
-  if (trimmed.startsWith('HANDOFF\n')) {
+  const trimmed = Effect2.pipe(memory, EffectString.trim);
+  if (Effect2.pipe(trimmed, EffectString.startsWith('HANDOFF\n'))) {
     return true;
   }
-  if (!trimmed.startsWith('MEMORY\n')) {
+  if (!Effect2.pipe(trimmed, EffectString.startsWith('MEMORY\n'))) {
     return false;
   }
   return /^(?:#+\s*)?(?:final\s+)?handoff(?:\s+update)?\b/i.test(memoryBody(trimmed));
 }
 
 function memoryBody(memory: string): string {
-  const separatorIndex = memory.indexOf('\n\n');
-  return separatorIndex === -1 ? '' : memory.slice(separatorIndex + 2).trim();
+  const separatorIndex = Effect2.pipe(
+    memory,
+    EffectString.indexOf('\n\n'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return separatorIndex === -1 ? '' : Effect2.pipe(memory, EffectString.slice(separatorIndex + 2), EffectString.trim);
 }
 
 function inferLegacyProject(memory: string): string {
@@ -1025,12 +1085,16 @@ function inferLegacyProject(memory: string): string {
   if (!explicit) {
     return 'general';
   }
-  const trimmed = explicit.trim().replace(/[`.,;]+$/g, '');
-  return trimmed.includes('/') ? (trimmed.split('/').at(-1) ?? trimmed) : trimmed;
+  const trimmed = Effect2.pipe(explicit, EffectString.trim, EffectString.replace(/[`.,;]+$/g, ''));
+  return Effect2.pipe(trimmed, EffectString.includes('/'))
+    ? (Effect2.pipe(trimmed, EffectString.split('/')).at(-1) ?? trimmed)
+    : trimmed;
 }
 
 export function normalizeOptionalMetadata(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
+  const trimmed = Effect2.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   return trimmed ? trimmed : undefined;
 }
 
@@ -1038,13 +1102,18 @@ const legacySourceAccounts = Effect.fn('memory.legacySourceAccounts')(function* 
   config: RuntimeConfig,
   options: MigrateMemoriesOptions,
 ) {
-  const explicitAccounts = options.sourceAccount?.filter(account => account.trim().length > 0) ?? [];
+  const sourceAccounts = options.sourceAccount ?? [];
+  const explicitAccounts = EffectArray.filter(
+    sourceAccounts,
+    (account, __effectArrayIndex) =>
+      __effectArrayIndex in sourceAccounts && Effect2.pipe(account, EffectString.trim).length > 0,
+  );
   if (explicitAccounts.length > 0) {
     return uniqueStrings(explicitAccounts);
   }
   if (options.allAccounts === true) {
     const accounts = yield* childDirectoryNames(yield* localDataRoot(config));
-    return accounts.filter(account => !account.startsWith('_'));
+    return EffectArray.filter(accounts, account => !Effect2.pipe(account, EffectString.startsWith('_')));
   }
   return [config.account];
 });
@@ -1061,7 +1130,7 @@ const legacyMemoryCandidates = Effect.fn('memory.legacyMemoryCandidates')(functi
     for (const sourceSession of yield* childDirectoryNames(sessionRoot)) {
       const historyRoot = path.join(sessionRoot, sourceSession, 'history');
       for (const sourceArchive of yield* childDirectoryNames(historyRoot)) {
-        if (!sourceArchive.startsWith('archive_')) {
+        if (!Effect2.pipe(sourceArchive, EffectString.startsWith('archive_'))) {
           continue;
         }
         const sourcePath = path.join(historyRoot, sourceArchive, 'messages.jsonl');
@@ -1078,7 +1147,9 @@ const legacyMemoryCandidates = Effect.fn('memory.legacyMemoryCandidates')(functi
       }
     }
   }
-  return candidates.sort((left, right) => legacySourceLabel(left).localeCompare(legacySourceLabel(right)));
+  return candidates.sort((left, right) =>
+    Effect2.pipe(legacySourceLabel(left), EffectString.localeCompare(legacySourceLabel(right))),
+  );
 });
 
 const legacyMemoryTexts = Effect.fn('memory.legacyMemoryTexts')(function* (sourcePath: string) {
@@ -1087,8 +1158,8 @@ const legacyMemoryTexts = Effect.fn('memory.legacyMemoryTexts')(function* (sourc
     return [];
   }
   const memories: string[] = [];
-  for (const line of raw.split('\n')) {
-    const trimmedLine = line.trim();
+  for (const line of Effect2.pipe(raw, EffectString.split('\n'))) {
+    const trimmedLine = Effect2.pipe(line, EffectString.trim);
     if (!trimmedLine) {
       continue;
     }
@@ -1096,7 +1167,9 @@ const legacyMemoryTexts = Effect.fn('memory.legacyMemoryTexts')(function* (sourc
     if (Result.isFailure(parsed)) {
       continue;
     }
-    const text = legacyMessageText(parsed.success)?.trim();
+    const text = Effect2.pipe(legacyMessageText(parsed.success), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
     if (text && isLegacyThreadnoteMemory(text)) {
       memories.push(text);
     }
@@ -1111,17 +1184,22 @@ function legacyMessageText(value: unknown): string | undefined {
   if (typeof value.content === 'string') {
     return value.content;
   }
-  if (!Array.isArray(value.parts)) {
+  if (!EffectArray.isArray(value.parts)) {
     return undefined;
   }
-  const parts = value.parts
-    .map(part => (isJsonObject(part) && part.type === 'text' && typeof part.text === 'string' ? part.text : undefined))
-    .filter((text): text is string => text !== undefined);
-  return parts.length > 0 ? parts.join('\n') : undefined;
+  const parts = EffectArray.filter(
+    EffectArray.map(value.parts, part =>
+      isJsonObject(part) && part.type === 'text' && typeof part.text === 'string' ? part.text : undefined,
+    ),
+    (text): text is string => text !== undefined,
+  );
+  return parts.length > 0 ? EffectArray.join(parts, '\n') : undefined;
 }
 
 function isLegacyThreadnoteMemory(text: string): boolean {
-  return text.startsWith('MEMORY\n') || text.startsWith('HANDOFF\n');
+  return (
+    Effect2.pipe(text, EffectString.startsWith('MEMORY\n')) || Effect2.pipe(text, EffectString.startsWith('HANDOFF\n'))
+  );
 }
 
 const existingDurableMemoryHashes = Effect.fn('memory.existingDurableMemoryHashes')(function* (config: RuntimeConfig) {
@@ -1154,15 +1232,15 @@ const collectDurableMemoryHashes: (
     }
     if (
       info.value.type !== 'File' ||
-      entry.startsWith('.') ||
-      !entry.endsWith('.md') ||
+      Effect2.pipe(entry, EffectString.startsWith('.')) ||
+      !Effect2.pipe(entry, EffectString.endsWith('.md')) ||
       !isDurableMemoryPath(entryPath)
     ) {
       continue;
     }
     const content = yield* readTextIfExists(entryPath);
     if (content) {
-      const trimmedContent = content.trim();
+      const trimmedContent = Effect2.pipe(content, EffectString.trim);
       hashes.add(yield* sha256(trimmedContent));
       hashes.add(yield* sha256(comparableMemoryText(trimmedContent)));
     }
@@ -1170,7 +1248,7 @@ const collectDurableMemoryHashes: (
 });
 
 function isDurableMemoryPath(path: string): boolean {
-  return path.replaceAll('\\', '/').split('/').includes('memories');
+  return Effect2.pipe(path, EffectString.replaceAll('\\', '/'), EffectString.split('/')).includes('memories');
 }
 
 const childDirectoryNames = Effect.fn('memory.childDirectoryNames')(function* (path: string) {
@@ -1207,16 +1285,24 @@ function sensitiveMemoryReason(text: string): string | undefined {
     {name: 'bearer token', regex: /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/i},
     {name: 'AWS access key', regex: /\bAKIA[0-9A-Z]{16}\b/},
   ];
-  return patterns.find(pattern => pattern.regex.test(text))?.name;
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(patterns, __effectArrayValue => !!(pattern => pattern.regex.test(text))(__effectArrayValue)),
+  )?.name;
 }
 
 function comparableMemoryText(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith('MEMORY\n')) {
+  const trimmed = Effect2.pipe(text, EffectString.trim);
+  if (!Effect2.pipe(trimmed, EffectString.startsWith('MEMORY\n'))) {
     return trimmed;
   }
-  const separatorIndex = trimmed.indexOf('\n\n');
-  return separatorIndex === -1 ? trimmed : trimmed.slice(separatorIndex + 2).trim();
+  const separatorIndex = Effect2.pipe(
+    trimmed,
+    EffectString.indexOf('\n\n'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return separatorIndex === -1
+    ? trimmed
+    : Effect2.pipe(trimmed, EffectString.slice(separatorIndex + 2), EffectString.trim);
 }
 
 function legacySourceLabel(candidate: LegacyMemoryCandidate): string {

@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {linearUuid} from './config.js';
 import {fail, record} from './transport.js';
+
 export interface LinearIssue {
   readonly id: string;
   readonly identifier: string;
@@ -175,7 +177,7 @@ export function connection<T>(
   const v = object(value);
   const page = object(v.pageInfo);
   if (
-    !Array.isArray(v.nodes) ||
+    !EffectArray.isArray(v.nodes) ||
     v.nodes.length > 50 ||
     typeof page.hasNextPage !== 'boolean' ||
     (page.endCursor !== null && typeof page.endCursor !== 'string')
@@ -183,5 +185,5 @@ export function connection<T>(
     fail('contract-invalid');
   const cursor = page.endCursor === null ? null : text(page.endCursor, 2048);
   if (page.hasNextPage && (!cursor || v.nodes.length === 0)) fail('contract-incomplete');
-  return {nodes: v.nodes.map(parse), cursor, more: page.hasNextPage};
+  return {nodes: EffectArray.map(v.nodes, parse), cursor, more: page.hasNextPage};
 }

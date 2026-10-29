@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect, FileSystem, Stream} from 'effect';
@@ -10,6 +11,8 @@ import {
 } from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-observer-authority';
 import {printJson, scriptArguments} from './effect/script.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CANDIDATE_MAX_BYTES = 64 * 1024;
 const PRIVATE_EVIDENCE_MAX_BYTES = 8 * 1024 * 1024;
@@ -64,7 +67,7 @@ function parseArguments(args: readonly string[]): {
     const option = args[index];
     if (option === '--preview' || option === '--assemble' || option === '--verify') {
       if (mode !== undefined) throw ScriptError.make({message: 'Observer authority accepts exactly one mode flag.'});
-      mode = option.slice(2) as 'assemble' | 'preview' | 'verify';
+      mode = option === '--preview' ? 'preview' : option === '--assemble' ? 'assemble' : 'verify';
     } else if (OPTIONS.has(option)) {
       if (values[option] !== undefined)
         throw ScriptError.make({message: `Observer authority option may appear only once: ${option}`});
@@ -120,7 +123,8 @@ const OPTIONS = new Set([
 ]);
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
+  if (value === undefined) throw ScriptError.make({message: `${option} requires a value`});
+  if (!Effect2.pipe(value, EffectString.trim)) throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
 
@@ -140,15 +144,18 @@ const readBoundedJsonFile = Effect.fn('releaseReadiness.readBoundedObserverAutho
 });
 
 function usage(): string {
-  return [
-    'Usage: bun run assemble:threadnote-5-observer-authority -- --preview|--assemble|--verify [options]',
-    'Common: --candidate <json> --retained-records <json> --reviews <json>',
-    'Preview: --preview',
-    'Assemble: --assemble (emits one reviewed bundle to stdout)',
-    'Verify: --verify --bundle <json> --manifest-sha256 <64-lowercase-hex>',
-    '        --review-artifact-set-sha256 <64-lowercase-hex> --binding-sha256 <64-lowercase-hex>',
-    'Verify emits the replayed raw authority manifest to stdout.',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Usage: bun run assemble:threadnote-5-observer-authority -- --preview|--assemble|--verify [options]',
+      'Common: --candidate <json> --retained-records <json> --reviews <json>',
+      'Preview: --preview',
+      'Assemble: --assemble (emits one reviewed bundle to stdout)',
+      'Verify: --verify --bundle <json> --manifest-sha256 <64-lowercase-hex>',
+      '        --review-artifact-set-sha256 <64-lowercase-hex> --binding-sha256 <64-lowercase-hex>',
+      'Verify emits the replayed raw authority manifest to stdout.',
+    ],
+    '\n',
+  );
 }
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(program, ApplicationLayer));

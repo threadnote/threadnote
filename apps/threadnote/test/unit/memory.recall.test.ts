@@ -1,9 +1,12 @@
+import * as EffectString from 'effect/String';
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {Effect, FileSystem, Path} from 'effect';
+import * as Effect2 from 'effect';
 import {TestClock} from 'effect/testing';
 import {inheritedProcessEnvironment} from '@threadnote/testing/process-environment';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -17,6 +20,7 @@ import type {RecallMemoryConnectionsResult} from '@threadnote/recall/memory/conn
 import type {RecallOptions} from '@threadnote/threadnote/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import * as utils from '@threadnote/threadnote/utils';
+
 vi.mock('@threadnote/threadnote/utils', async importOriginal => {
   const actual = await importOriginal<typeof import('@threadnote/threadnote/utils')>();
   return {
@@ -89,11 +93,11 @@ describe('runRecall native index', () => {
     const projected = projectRecallCliResponse({memoryConnections}, true);
 
     expect(projected.confidence).toBeUndefined();
-    expect(projected.sections.join('\n')).toContain('threadnote://memory/tn_neighbor');
-    expect(projected.sections.join('\n')).not.toContain('explicit-memory-connection');
-    expect(projected.sections.join('\n')).not.toContain('Next: threadnote read');
-    expect(projected.sections.join('\n')).toContain('threadnote recall-feedback');
-    expect(projected.sections.join('\n')).toContain('applied');
+    expect(EffectArray.join(projected.sections, '\n')).toContain('threadnote://memory/tn_neighbor');
+    expect(EffectArray.join(projected.sections, '\n')).not.toContain('explicit-memory-connection');
+    expect(EffectArray.join(projected.sections, '\n')).not.toContain('Next: threadnote read');
+    expect(EffectArray.join(projected.sections, '\n')).toContain('threadnote recall-feedback');
+    expect(EffectArray.join(projected.sections, '\n')).toContain('applied');
   });
 
   effectIt.effect('uses the native recall index without a repair subprocess', () =>
@@ -138,21 +142,24 @@ describe('runRecall native index', () => {
       const outerUri = 'threadnote://user/denys/memories/durable/projects/outer-project/orbital.md';
       const callerUri = 'threadnote://user/denys/memories/durable/projects/caller-project/orbital.md';
       const memory = (project: string) =>
-        [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          `project: ${project}`,
-          'topic: calibration',
-          'source_agent_client: integration-test',
-          'timestamp: 2026-09-01T00:00:00.000Z',
-          '',
-          `The ${query} procedure uses a guarded service boundary.`,
-        ].join('\n');
+        EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            `project: ${project}`,
+            'topic: calibration',
+            'source_agent_client: integration-test',
+            'timestamp: 2026-09-01T00:00:00.000Z',
+            '',
+            `The ${query} procedure uses a guarded service boundary.`,
+          ],
+          '\n',
+        );
       const store = yield* ResourceStore;
       yield* store.mutate(
         {account: config.account, home, user: config.user},
-        [outerUri, callerUri].map((uri, index) => ({
+        EffectArray.map([outerUri, callerUri], (uri, index) => ({
           content: memory(index === 0 ? 'outer-project' : 'caller-project'),
           options: {mode: 'create' as const},
           type: 'write' as const,
@@ -162,8 +169,8 @@ describe('runRecall native index', () => {
       yield* loadRecallIndex(config, {forceRefresh: true, includeInactive: false, query});
 
       const recalled = yield* captureRecall(config, {callerCwd: callerRepo, query});
-      expect(recalled.value.ranked.map(candidate => candidate.uri)).toContain(callerUri);
-      expect(recalled.value.ranked.map(candidate => candidate.uri)).not.toContain(outerUri);
+      expect(EffectArray.map(recalled.value.ranked, candidate => candidate.uri)).toContain(callerUri);
+      expect(EffectArray.map(recalled.value.ranked, candidate => candidate.uri)).not.toContain(outerUri);
       expect(recalled.output).toContain('caller-project');
       expect(recalled.output).not.toContain('outer-project');
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
@@ -262,7 +269,7 @@ describe('runRecall native index', () => {
       const repoRoot = join(dir, 'easy-to-type');
       const previousCallerCwd = inheritedProcessEnvironment().THREADNOTE_CALLER_CWD;
       const gitEnvKeys = ['GIT_COMMON_DIR', 'GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE'] as const;
-      const previousGitEnv = new Map(gitEnvKeys.map(key => [key, inheritedProcessEnvironment()[key]]));
+      const previousGitEnv = new Map(EffectArray.map(gitEnvKeys, key => [key, inheritedProcessEnvironment()[key]]));
       for (const key of gitEnvKeys) {
         delete inheritedProcessEnvironment()[key];
       }
@@ -325,7 +332,7 @@ describe('runRecall native index', () => {
       const manifestPath = join(dir, 'seed-manifest.yaml');
       const previousCallerCwd = inheritedProcessEnvironment().THREADNOTE_CALLER_CWD;
       const gitEnvKeys = ['GIT_COMMON_DIR', 'GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE'] as const;
-      const previousGitEnv = new Map(gitEnvKeys.map(key => [key, inheritedProcessEnvironment()[key]]));
+      const previousGitEnv = new Map(EffectArray.map(gitEnvKeys, key => [key, inheritedProcessEnvironment()[key]]));
       for (const key of gitEnvKeys) {
         delete inheritedProcessEnvironment()[key];
       }
@@ -345,19 +352,22 @@ describe('runRecall native index', () => {
         yield* Effect.promise(() =>
           writeFile(
             manifestPath,
-            [
-              'version: 1',
-              'projects:',
-              '  - name: threadnote',
-              `    path: ${repoRoot}`,
-              '    uri: threadnote://resources/repos/threadnote',
-              '    seed: []',
-              '  - name: orion-worker',
-              `    path: ${dir}/orion-worker`,
-              '    uri: threadnote://resources/repos/orion-worker',
-              '    seed: []',
-              '',
-            ].join('\n'),
+            EffectArray.join(
+              [
+                'version: 1',
+                'projects:',
+                '  - name: threadnote',
+                `    path: ${repoRoot}`,
+                '    uri: threadnote://resources/repos/threadnote',
+                '    seed: []',
+                '  - name: orion-worker',
+                `    path: ${dir}/orion-worker`,
+                '    uri: threadnote://resources/repos/orion-worker',
+                '    seed: []',
+                '',
+              ],
+              '\n',
+            ),
             'utf8',
           ),
         );
@@ -405,7 +415,7 @@ describe('runRecall native index', () => {
       const manifestPath = join(dir, 'seed-manifest.yaml');
       const previousCallerCwd = inheritedProcessEnvironment().THREADNOTE_CALLER_CWD;
       const gitEnvKeys = ['GIT_COMMON_DIR', 'GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE'] as const;
-      const previousGitEnv = new Map(gitEnvKeys.map(key => [key, inheritedProcessEnvironment()[key]]));
+      const previousGitEnv = new Map(EffectArray.map(gitEnvKeys, key => [key, inheritedProcessEnvironment()[key]]));
       for (const key of gitEnvKeys) {
         delete inheritedProcessEnvironment()[key];
       }
@@ -425,18 +435,21 @@ describe('runRecall native index', () => {
         yield* Effect.promise(() =>
           writeFile(
             manifestPath,
-            [
-              'version: 1',
-              'projects:',
-              '  - name: threadnote',
-              `    path: ${repoRoot}`,
-              '    uri: threadnote://resources/repos/threadnote',
-              '    seed: []',
-              'worksets:',
-              '  - name: platform',
-              '    projects: [threadnote]',
-              '',
-            ].join('\n'),
+            EffectArray.join(
+              [
+                'version: 1',
+                'projects:',
+                '  - name: threadnote',
+                `    path: ${repoRoot}`,
+                '    uri: threadnote://resources/repos/threadnote',
+                '    seed: []',
+                'worksets:',
+                '  - name: platform',
+                '    projects: [threadnote]',
+                '',
+              ],
+              '\n',
+            ),
             'utf8',
           ),
         );
@@ -474,7 +487,7 @@ describe('runRecall native index', () => {
         );
       }
       const durableScope = '--uri threadnote://user/denys/memories/durable/projects/threadnote';
-      expect(output.split(durableScope)).toHaveLength(2);
+      expect(Effect2.pipe(output, EffectString.split(durableScope))).toHaveLength(2);
     }),
   );
   effectIt.effect('honors an explicit workset when inference is disabled', () =>
@@ -484,18 +497,21 @@ describe('runRecall native index', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: alpha',
-            `    path: ${dir}/alpha`,
-            '    uri: threadnote://resources/repos/alpha',
-            '    seed: []',
-            'worksets:',
-            '  - name: platform',
-            '    projects: [alpha]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: alpha',
+              `    path: ${dir}/alpha`,
+              '    uri: threadnote://resources/repos/alpha',
+              '    seed: []',
+              'worksets:',
+              '  - name: platform',
+              '    projects: [alpha]',
+              '',
+            ],
+            '\n',
+          ),
           'utf8',
         ),
       );
@@ -532,18 +548,21 @@ describe('runRecall native index', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: alpha',
-            `    path: ${dir}/alpha`,
-            '    uri: threadnote://resources/repos/alpha',
-            '    seed: []',
-            'worksets:',
-            '  - name: platform',
-            '    projects: [alpha]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: alpha',
+              `    path: ${dir}/alpha`,
+              '    uri: threadnote://resources/repos/alpha',
+              '    seed: []',
+              'worksets:',
+              '  - name: platform',
+              '    projects: [alpha]',
+              '',
+            ],
+            '\n',
+          ),
           'utf8',
         ),
       );
@@ -574,7 +593,12 @@ describe('runRecall native index', () => {
           }),
         );
       }
-      expect(log.mock.calls.map(call => call.join(' ')).join('\n')).not.toContain('/ov search');
+      expect(
+        EffectArray.join(
+          EffectArray.map(log.mock.calls, call => EffectArray.join(call, ' ')),
+          '\n',
+        ),
+      ).not.toContain('/ov search');
     }),
   );
   effectIt.effect('validates an explicit workset before a pinned uri search', () =>
@@ -584,18 +608,21 @@ describe('runRecall native index', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: alpha',
-            `    path: ${dir}/alpha`,
-            '    uri: threadnote://resources/repos/alpha',
-            '    seed: []',
-            'worksets:',
-            '  - name: platform',
-            '    projects: [alpha]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: alpha',
+              `    path: ${dir}/alpha`,
+              '    uri: threadnote://resources/repos/alpha',
+              '    seed: []',
+              'worksets:',
+              '  - name: platform',
+              '    projects: [alpha]',
+              '',
+            ],
+            '\n',
+          ),
           'utf8',
         ),
       );
@@ -627,7 +654,12 @@ describe('runRecall native index', () => {
           }),
         );
       }
-      expect(log.mock.calls.map(call => call.join(' ')).join('\n')).not.toContain('/ov search');
+      expect(
+        EffectArray.join(
+          EffectArray.map(log.mock.calls, call => EffectArray.join(call, ' ')),
+          '\n',
+        ),
+      ).not.toContain('/ov search');
     }),
   );
 });

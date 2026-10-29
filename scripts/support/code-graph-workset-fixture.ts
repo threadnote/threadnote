@@ -1,7 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {ScriptError} from '../effect/errors.js';
 import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {Effect, FileSystem, Layer, ManagedRuntime, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const platformRuntime = ManagedRuntime.make(Layer.merge(BunFileSystem.layer, BunPath.layer));
 const fileSystem = platformRuntime.runSync(FileSystem.FileSystem);
@@ -431,15 +435,15 @@ const CORE_ARCHETYPE_IDS = [
 const SCALE_ARCHETYPE_IDS = ['same-name-distractor', 'support', 'no-answer-member', 'support'] as const;
 const MIXED_STATES = ['clean', 'dirty', 'missing', 'stale', 'failed', 'worktree', 'cold', 'clean'] as const;
 
-const ARCHETYPE_BY_ID = new Map(ARCHETYPES.map(archetype => [archetype.id, archetype]));
+const ARCHETYPE_BY_ID = new Map(EffectArray.map(ARCHETYPES, archetype => [archetype.id, archetype]));
 
 export const CODE_GRAPH_WORKSET_ARCHETYPE_DIGESTS = Object.freeze(
-  Object.fromEntries(ARCHETYPES.map(archetype => [archetype.id, digest(canonicalJson(archetype))])),
+  EffectRecord.fromEntries(EffectArray.map(ARCHETYPES, archetype => [archetype.id, digest(canonicalJson(archetype))])),
 );
 
 /** Path-independent producer metadata consumed by the versioned evaluation fixture schema. */
 export const CODE_GRAPH_WORKSET_FIXTURE_ARCHETYPES: readonly CodeGraphWorksetFixtureArchetypeMetadata[] = Object.freeze(
-  ARCHETYPES.map(archetype => ({
+  EffectArray.map(ARCHETYPES, archetype => ({
     description: archetype.description,
     id: archetype.id,
     sha256: CODE_GRAPH_WORKSET_ARCHETYPE_DIGESTS[archetype.id],
@@ -459,7 +463,7 @@ export function createCodeGraphWorksetFixturePlan(
   }
 
   const knownRepositoryKeys = new Set(Array.from({length: size}, (_, index) => repositoryKey(index)));
-  for (const [key, state] of Object.entries(options.repositoryStates ?? {})) {
+  for (const [key, state] of EffectRecord.toEntries(options.repositoryStates ?? {})) {
     if (!knownRepositoryKeys.has(key)) {
       throw ScriptError.make({message: `Unknown code graph workset fixture repository: ${key}.`});
     }
@@ -471,17 +475,20 @@ export function createCodeGraphWorksetFixturePlan(
     const archetype = archetypeForIndex(index);
     const packageName = archetype.id === 'contract-producer' ? PRODUCER_PACKAGE : `@threadnote-fixture/${key}`;
     const projectName = `workset-${key}`;
-    const files = Object.entries(archetype.files)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([path, template]) => {
+    const files = EffectArray.map(
+      EffectRecord.toEntries(archetype.files).sort(([left], [right]) =>
+        Effect2.pipe(left, EffectString.localeCompare(right)),
+      ),
+      ([path, template]) => {
         const content = applyRepositoryTemplate(template, {packageName, projectName, repositoryKey: key});
         return {content, digest: digest(content), path};
-      });
+      },
+    );
     const state = options.repositoryStates?.[key] ?? stateForIndex(index, stateProfile);
     return {
       archetype: archetype.id,
       archetypeTags: archetype.tags,
-      contentDigest: digest(canonicalJson(files.map(file => ({digest: file.digest, path: file.path})))),
+      contentDigest: digest(canonicalJson(EffectArray.map(files, file => ({digest: file.digest, path: file.path})))),
       files,
       packageName,
       projectName,
@@ -490,20 +497,23 @@ export function createCodeGraphWorksetFixturePlan(
       state,
     } satisfies CodeGraphWorksetFixtureRepositoryPlan;
   });
-  const members = repositories.map((repository, index) => evaluationMemberPlan(repository, index));
+  const members = EffectArray.map(repositories, (repository, index) => evaluationMemberPlan(repository, index));
   const queries = fixtureQueries(repositories);
-  const allowedAuthoritativeEdges = uniqueEdges(queries.flatMap(query => query.expectedEdges));
-  const worksets = CODE_GRAPH_WORKSET_FIXTURE_SUPPORTED_SIZES.filter(worksetSize => worksetSize <= size).map(
+  const allowedAuthoritativeEdges = uniqueEdges(EffectArray.flatMap(queries, query => query.expectedEdges));
+  const worksets = EffectArray.map(
+    EffectArray.filter(CODE_GRAPH_WORKSET_FIXTURE_SUPPORTED_SIZES, worksetSize => worksetSize <= size),
     worksetSize => ({
       description: `Deterministic ${worksetSize}-repository code graph evaluation workset`,
       name: worksetSize === size ? worksetName : `code-graph-workset-${worksetSize}`,
-      repositoryKeys: repositories.slice(0, worksetSize).map(repository => repository.repositoryKey),
+      repositoryKeys: EffectArray.map(repositories.slice(0, worksetSize), repository => repository.repositoryKey),
       size: worksetSize,
     }),
   );
-  const usedArchetypes = [...new Set(repositories.map(repository => repository.archetype))].sort();
-  const archetypeDigests = Object.fromEntries(usedArchetypes.map(id => [id, CODE_GRAPH_WORKSET_ARCHETYPE_DIGESTS[id]]));
-  const membershipDigest = digest(canonicalJson(repositories.map(repository => repository.repositoryKey)));
+  const usedArchetypes = [...new Set(EffectArray.map(repositories, repository => repository.archetype))].sort();
+  const archetypeDigests = EffectRecord.fromEntries(
+    EffectArray.map(usedArchetypes, id => [id, CODE_GRAPH_WORKSET_ARCHETYPE_DIGESTS[id]]),
+  );
+  const membershipDigest = digest(canonicalJson(EffectArray.map(repositories, repository => repository.repositoryKey)));
   const querySpecificationDigest = digest(canonicalJson(queries));
   const identitySeed = {
     archetypeDigests,
@@ -511,7 +521,7 @@ export function createCodeGraphWorksetFixturePlan(
     generatorVersion: CODE_GRAPH_WORKSET_FIXTURE_GENERATOR_VERSION,
     membershipDigest,
     querySpecificationDigest,
-    repositories: repositories.map(repository => ({
+    repositories: EffectArray.map(repositories, repository => ({
       archetype: repository.archetype,
       contentDigest: repository.contentDigest,
       projectName: repository.projectName,
@@ -528,7 +538,7 @@ export function createCodeGraphWorksetFixturePlan(
     archetypeDigests,
     generator: 'threadnote-code-graph-workset-fixture',
     generatorVersion: CODE_GRAPH_WORKSET_FIXTURE_GENERATOR_VERSION,
-    id: `cgwf_${digest(canonicalJson(identitySeed)).slice(0, 32)}`,
+    id: `cgwf_${Effect2.pipe(digest(canonicalJson(identitySeed)), EffectString.slice(0, 32))}`,
     membershipDigest,
     querySpecificationDigest,
     repositoryCount: size,
@@ -609,7 +619,7 @@ export async function materializeCodeGraphWorksetFixture(
         identity: plan.identity,
         members: plan.members,
         queries: plan.queries,
-        repositories: repositories.map(repository => ({
+        repositories: EffectArray.map(repositories, repository => ({
           ...repository,
           path: relative(root, repository.path),
           siblingWorktreePath: repository.siblingWorktreePath
@@ -707,9 +717,14 @@ function fixtureQueries(
   repositories: readonly CodeGraphWorksetFixtureRepositoryPlan[],
 ): readonly CodeGraphWorksetFixtureQuery[] {
   const keys = (...archetypes: readonly string[]) =>
-    repositories
-      .filter(repository => archetypes.includes(repository.archetype))
-      .map(repository => repository.repositoryKey);
+    EffectArray.map(
+      EffectArray.filter(
+        repositories,
+        (repository, __effectArrayIndex) =>
+          __effectArrayIndex in repositories && archetypes.includes(repository.archetype),
+      ),
+      repository => repository.repositoryKey,
+    );
   const producer = keys('contract-producer');
   const workspaceConsumer = keys('workspace-consumer');
   const distractors = keys('same-name-distractor');
@@ -717,9 +732,14 @@ function fixtureQueries(
   const protobufConsumer = keys('protobuf-consumer');
   const httpConsumer = keys('openapi-http-consumer');
   const messageConsumer = keys('message-consumer');
-  const allSizes = CODE_GRAPH_WORKSET_FIXTURE_SUPPORTED_SIZES.filter(size => size <= repositories.length);
+  const allSizes = EffectArray.filter(CODE_GRAPH_WORKSET_FIXTURE_SUPPORTED_SIZES, size => size <= repositories.length);
   const sizesFor = (repositoryKeys: readonly string[]) =>
-    allSizes.filter(size => repositoryKeys.every(key => Number.parseInt(key.slice('repo-'.length), 10) < size));
+    EffectArray.filter(allSizes, size =>
+      EffectArray.every(
+        repositoryKeys,
+        key => Number.parseInt(Effect2.pipe(key, EffectString.slice('repo-'.length)), 10) < size,
+      ),
+    );
   const ref = (repositoryId: string, symbol: string): CodeGraphWorksetFixtureSymbolExpectation => ({
     repositoryId,
     symbol,
@@ -808,8 +828,8 @@ function fixtureQueries(
       PRODUCER_PACKAGE,
       [...producer, ...workspaceConsumer],
       [
-        ...producer.map(key => ref(key, `package.json#${PRODUCER_PACKAGE}`)),
-        ...workspaceConsumer.map(key =>
+        ...EffectArray.map(producer, key => ref(key, `package.json#${PRODUCER_PACKAGE}`)),
+        ...EffectArray.map(workspaceConsumer, key =>
           ref(key, 'packages/session-client/package.json#@threadnote-fixture/session-client'),
         ),
       ],
@@ -821,8 +841,8 @@ function fixtureQueries(
       'TenantSessionByTenant TenantSession tenantSession',
       [...producer, ...graphqlConsumer],
       [
-        ...producer.map(key => ref(key, 'contracts/schema.graphql#TenantSession')),
-        ...graphqlConsumer.map(key => ref(key, 'src/session-query.ts#tenantSessionOperation')),
+        ...EffectArray.map(producer, key => ref(key, 'contracts/schema.graphql#TenantSession')),
+        ...EffectArray.map(graphqlConsumer, key => ref(key, 'src/session-query.ts#tenantSessionOperation')),
       ],
     ),
     makeQuery(
@@ -831,8 +851,8 @@ function fixtureQueries(
       'threadnote.session.v1.SessionDirectory ResolveTenantSession',
       [...producer, ...protobufConsumer],
       [
-        ...producer.map(key => ref(key, 'threadnote/session/v1/session.proto#SessionDirectory')),
-        ...protobufConsumer.map(key => ref(key, 'proto/session_client.proto#SessionLookup')),
+        ...EffectArray.map(producer, key => ref(key, 'threadnote/session/v1/session.proto#SessionDirectory')),
+        ...EffectArray.map(protobufConsumer, key => ref(key, 'proto/session_client.proto#SessionLookup')),
       ],
       protobufBridgeEdge ? [protobufBridgeEdge] : [],
     ),
@@ -842,8 +862,8 @@ function fixtureQueries(
       'getTenantSession /v1/tenant-sessions/{tenantId}',
       [...producer, ...httpConsumer],
       [
-        ...producer.map(key => ref(key, 'contracts/openapi.yaml#/v1/tenant-sessions/{tenantId}')),
-        ...httpConsumer.map(key => ref(key, 'openapi/session-gateway.yaml#proxyTenantSession')),
+        ...EffectArray.map(producer, key => ref(key, 'contracts/openapi.yaml#/v1/tenant-sessions/{tenantId}')),
+        ...EffectArray.map(httpConsumer, key => ref(key, 'openapi/session-gateway.yaml#proxyTenantSession')),
       ],
     ),
     makeQuery(
@@ -852,8 +872,8 @@ function fixtureQueries(
       'TenantSessionChanged tenant.session.changed',
       [...producer, ...messageConsumer],
       [
-        ...producer.map(key => ref(key, 'contracts/messages.asyncapi.yaml#tenant.session.changed')),
-        ...messageConsumer.map(key => ref(key, 'src/worker.ts#TenantSessionChanged')),
+        ...EffectArray.map(producer, key => ref(key, 'contracts/messages.asyncapi.yaml#tenant.session.changed')),
+        ...EffectArray.map(messageConsumer, key => ref(key, 'src/worker.ts#TenantSessionChanged')),
       ],
     ),
     makeQuery(
@@ -952,14 +972,14 @@ function fixtureQueries(
     ['impact-session-contract', 2],
     ['path-bootstrap-to-session', 2],
   ]);
-  return queries.filter(query => repositories.length >= (minimumMembersByQuery.get(query.id) ?? 1));
+  return EffectArray.filter(queries, query => repositories.length >= (minimumMembersByQuery.get(query.id) ?? 1));
 }
 
 function uniqueEdges(
   edges: readonly CodeGraphWorksetFixtureEdgeExpectation[],
 ): readonly CodeGraphWorksetFixtureEdgeExpectation[] {
   const seen = new Set<string>();
-  return edges.filter(edge => {
+  return EffectArray.filter(edges, edge => {
     const key = canonicalJson(edge);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -1050,7 +1070,10 @@ async function materializeRepository(
 async function writeRepositoryFiles(root: string, files: readonly CodeGraphWorksetFixtureFile[]): Promise<void> {
   await mkdir(root, {recursive: true});
   for (const file of files) {
-    if (file.path.startsWith('/') || file.path.split('/').includes('..')) {
+    if (
+      Effect2.pipe(file.path, EffectString.startsWith('/')) ||
+      Effect2.pipe(file.path, EffectString.split('/')).includes('..')
+    ) {
       throw ScriptError.make({message: `Unsafe code graph workset fixture path: ${file.path}.`});
     }
     const target = join(root, file.path);
@@ -1060,8 +1083,9 @@ async function writeRepositoryFiles(root: string, files: readonly CodeGraphWorks
 }
 
 function renderSeedManifest(plan: CodeGraphWorksetFixturePlan, repositoriesRoot: string): string {
-  const projects = plan.repositories
-    .map(
+  const projects = EffectArray.join(
+    EffectArray.map(
+      plan.repositories,
       repository =>
         `  - name: ${repository.projectName}\n` +
         `    path: ${JSON.stringify(join(repositoriesRoot, repository.repositoryKey))}\n` +
@@ -1069,28 +1093,33 @@ function renderSeedManifest(plan: CodeGraphWorksetFixturePlan, repositoriesRoot:
         '    seed:\n' +
         '      - README.md\n' +
         '      - package.json\n',
-    )
-    .join('');
-  const projectByKey = new Map(plan.repositories.map(repository => [repository.repositoryKey, repository.projectName]));
-  const worksets = plan.worksets
-    .map(workset => {
-      const members = workset.repositoryKeys
-        .map(key => {
+    ),
+    '',
+  );
+  const projectByKey = new Map(
+    EffectArray.map(plan.repositories, repository => [repository.repositoryKey, repository.projectName]),
+  );
+  const worksets = EffectArray.join(
+    EffectArray.map(plan.worksets, workset => {
+      const members = EffectArray.join(
+        EffectArray.map(workset.repositoryKeys, key => {
           const project = projectByKey.get(key);
           if (!project) {
             throw ScriptError.make({message: `Workset ${workset.name} references unknown fixture repository ${key}.`});
           }
           return `      - ${project}\n`;
-        })
-        .join('');
+        }),
+        '',
+      );
       return (
         `  - name: ${workset.name}\n` +
         `    description: ${JSON.stringify(workset.description)}\n` +
         '    projects:\n' +
         members
       );
-    })
-    .join('');
+    }),
+    '',
+  );
   return 'version: 1\n' + 'projects:\n' + projects + 'worksets:\n' + worksets;
 }
 
@@ -1114,7 +1143,7 @@ async function commit(repositoryPath: string, message: string, environment: Node
 
 async function gitHead(repositoryPath: string, environment: NodeJS.ProcessEnv): Promise<string> {
   const result = await runGit(repositoryPath, ['rev-parse', 'HEAD'], environment);
-  return result.stdout.trim();
+  return Effect2.pipe(result.stdout, EffectString.trim);
 }
 
 async function runGit(
@@ -1132,7 +1161,7 @@ async function runGit(
 }
 
 function gitEnvironmentFor(isolatedGitConfig: string, key: string, revision: number): NodeJS.ProcessEnv {
-  const repositoryIndex = Number.parseInt(key.slice('repo-'.length), 10);
+  const repositoryIndex = Number.parseInt(Effect2.pipe(key, EffectString.slice('repo-'.length)), 10);
   const timestamp = new Date((FIXED_GIT_EPOCH_SECONDS + repositoryIndex * 4 + revision) * 1_000).toISOString();
   return {
     ...process.env,
@@ -1171,23 +1200,41 @@ function applyRepositoryTemplate(
   template: string,
   values: {readonly packageName: string; readonly projectName: string; readonly repositoryKey: string},
 ): string {
-  return template
-    .replaceAll(REPOSITORY_KEY_TOKEN, values.repositoryKey)
-    .replaceAll(REPOSITORY_SYMBOL_TOKEN, repositoryMarkerSymbol(values.repositoryKey))
-    .replaceAll(PROJECT_NAME_TOKEN, values.projectName)
-    .replaceAll(PACKAGE_NAME_TOKEN, values.packageName);
+  return Effect2.pipe(template, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(
+      __effectPipeInput,
+      EffectString.replaceAll(REPOSITORY_KEY_TOKEN, values.repositoryKey),
+    );
+    const __effectPipeStage1 = Effect2.pipe(
+      __effectPipeStage0,
+      EffectString.replaceAll(REPOSITORY_SYMBOL_TOKEN, repositoryMarkerSymbol(values.repositoryKey)),
+    );
+    const __effectPipeStage2 = Effect2.pipe(
+      __effectPipeStage1,
+      EffectString.replaceAll(PROJECT_NAME_TOKEN, values.projectName),
+    );
+    const __effectPipeStage3 = Effect2.pipe(
+      __effectPipeStage2,
+      EffectString.replaceAll(PACKAGE_NAME_TOKEN, values.packageName),
+    );
+    return __effectPipeStage3;
+  });
 }
 
 function repositoryMarkerSymbol(key: string): string {
-  const suffix = key
-    .split('-')
-    .map(segment => `${segment.slice(0, 1).toUpperCase()}${segment.slice(1)}`)
-    .join('');
+  const suffix = EffectArray.join(
+    EffectArray.map(
+      Effect2.pipe(key, EffectString.split('-')),
+      segment =>
+        `${Effect2.pipe(segment, EffectString.slice(0, 1), EffectString.toUpperCase)}${Effect2.pipe(segment, EffectString.slice(1))}`,
+    ),
+    '',
+  );
   return `repositoryHealthMarker${suffix}`;
 }
 
 function repositoryKey(index: number): string {
-  return `repo-${String(index).padStart(3, '0')}`;
+  return `repo-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}`;
 }
 
 function assertFixtureSize(size: number): asserts size is CodeGraphWorksetFixtureSize {
@@ -1211,14 +1258,15 @@ function canonicalJson(value: unknown): string {
 }
 
 function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalValue);
+  if (EffectArray.isArray(value)) {
+    return EffectArray.map(value, canonicalValue);
   }
   if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, nested]) => [key, canonicalValue(nested)]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectRecord.toEntries(value).sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+        ([key, nested]) => [key, canonicalValue(nested)],
+      ),
     );
   }
   return value;
@@ -1230,7 +1278,9 @@ export async function readCodeGraphWorksetFixtureFile(
   repositoryKey: string,
   path: string,
 ): Promise<string> {
-  const repository = fixture.repositories.find(candidate => candidate.repositoryKey === repositoryKey);
+  const repository = EffectOption.getOrUndefined(
+    EffectArray.findFirst(fixture.repositories, candidate => candidate.repositoryKey === repositoryKey),
+  );
   if (!repository?.exists) {
     throw ScriptError.make({message: `Code graph workset fixture repository is unavailable: ${repositoryKey}.`});
   }
@@ -1286,7 +1336,9 @@ async function execFileAsync(
     throw ScriptError.make({message: `Command output exceeded ${maximumOutputBytes} bytes: ${executable}.`});
   }
   if (exitCode !== 0) {
-    throw ScriptError.make({message: stderr.trim() || `${executable} exited with status ${exitCode}.`});
+    throw ScriptError.make({
+      message: Effect2.pipe(stderr, EffectString.trim) || `${executable} exited with status ${exitCode}.`,
+    });
   }
   return {stderr, stdout};
 }

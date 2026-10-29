@@ -13,6 +13,8 @@ import {parseGraphShareRegistryChallenge, type GraphShareRegistryChallenge} from
 import {makeGraphShareRegistryCredentialLoader} from './credentials.js';
 import type {GraphShareRegistryTarget} from './reference.js';
 import {GRAPH_SHARE_HTTP_CAS_MAX_BYTES} from '../oci.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TokenText = Schema.String.check(
   Schema.isMinLength(1),
@@ -214,7 +216,7 @@ function isRegistryRequestPath(
   access: 'read' | 'write',
 ): boolean {
   const prefix = `/v2/${target.repository}/`;
-  if (!value.startsWith(prefix) || value.length > 8512) return false;
+  if (!Effect2.pipe(value, EffectString.startsWith(prefix)) || value.length > 8512) return false;
   let url: URL;
   try {
     url = new URL(target.origin + value);
@@ -222,7 +224,7 @@ function isRegistryRequestPath(
     return false;
   }
   if (url.href !== target.origin + value || url.hash !== '') return false;
-  const suffix = url.pathname.slice(prefix.length);
+  const suffix = Effect2.pipe(url.pathname, EffectString.slice(prefix.length));
   if (method === 'GET' || method === 'HEAD')
     return url.search === '' && /^(?:manifests|blobs)\/[A-Za-z0-9_.:-]+$/u.test(suffix);
   if (access !== 'write') return false;

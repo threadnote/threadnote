@@ -1,27 +1,33 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import FC from 'fast-check';
-import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {ManagerDialogProvider} from '@threadnote/manager/dialog';
 import {orderManagerProcessesForPresentation, ProcessesPanel} from '@threadnote/manager/processes_view';
 import type {ManageableThreadnoteProcessDiagnostic} from '@threadnote/threadnote/process/diagnostics';
 import {readFile} from '@threadnote/testing/node-fs-promises';
+import {isJsonObject} from '@threadnote/platform/json';
 import {join} from '@threadnote/testing/node-path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let reactRoot: Root | undefined;
 let fetchOriginal: typeof fetch;
 let requests: Array<{readonly body?: Record<string, unknown>; readonly path: string}>;
 
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   fetchOriginal = globalThis.fetch;
   requests = [];
-  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+  vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
     const path =
       typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
-    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+    const parsedBody: unknown = init?.body ? JSON.parse(String(init.body)) : undefined;
+    if (parsedBody !== undefined && !isJsonObject(parsedBody)) throw new Error('Expected a process request object.');
+    const body = parsedBody;
     requests.push({body, path});
     if (path === '/api/processes/terminate') {
       return Promise.resolve(jsonResponse({processId: 80297, state: 'terminated'}));
@@ -45,7 +51,7 @@ beforeEach(() => {
             parentProcessId: 80276,
             parentRole: 'manager',
             processId: 80297,
-            processRef: `tnp_${'a'.repeat(64)}`,
+            processRef: `tnp_${Effect.pipe('a', EffectString.repeat(64))}`,
             role: 'graph-compaction-worker',
             rssBytes: 100 * 1_024 * 1_024,
             startedAt: '2026-08-12T00:00:00.000Z',
@@ -57,7 +63,7 @@ beforeEach(() => {
             currentOperation: 'index-repository',
             parentProcessId: 1,
             processId: 80300,
-            processRef: `tnp_${'b'.repeat(64)}`,
+            processRef: `tnp_${Effect.pipe('b', EffectString.repeat(64))}`,
             role: 'mcp',
             startedAt: '2026-08-12T00:00:00.000Z',
             terminable: true,
@@ -68,7 +74,7 @@ beforeEach(() => {
             parentProcessId: 80_300,
             parentRole: 'mcp',
             processId: 80_301,
-            processRef: `tnp_${'c'.repeat(64)}`,
+            processRef: `tnp_${Effect.pipe('c', EffectString.repeat(64))}`,
             role: 'graph-query-worker',
             startedAt: '2026-08-12T00:00:00.000Z',
             terminable: true,
@@ -88,7 +94,7 @@ beforeEach(() => {
         truncated: false,
       }),
     );
-  }) as typeof fetch;
+  });
 });
 
 afterEach(async () => {
@@ -111,7 +117,7 @@ describe('Manager Processes panel', () => {
     expect(document.body.textContent).toContain('Graph builder activity');
     expect(document.body.textContent).toContain('Graph query worker');
     expect(document.body.textContent).toContain('Impact query');
-    expect(document.body.textContent).not.toContain(`tnp_${'a'.repeat(64)}`);
+    expect(document.body.textContent).not.toContain(`tnp_${Effect.pipe('a', EffectString.repeat(64))}`);
 
     const stop = document.querySelector<HTMLButtonElement>(
       '[aria-label="Terminate Graph compaction worker process 80297"]',
@@ -128,7 +134,10 @@ describe('Manager Processes panel', () => {
 
   it('puts active work ahead of idle registered and legacy runtimes', async () => {
     await renderProcesses();
-    const titles = [...document.querySelectorAll('.process-row .row-copy strong')].map(element => element.textContent);
+    const titles = EffectArray.map(
+      [...document.querySelectorAll('.process-row .row-copy strong')],
+      element => element.textContent,
+    );
     expect(titles).toEqual(['Compact graph storage', 'Index repository', 'Impact query', 'Manager', 'Legacy runtime']);
     expect(document.body.textContent).toContain('Active operations');
     expect(document.body.textContent).toContain('Other runtimes');
@@ -147,8 +156,8 @@ describe('Manager Processes panel', () => {
           const ordered = orderManagerProcessesForPresentation(processes);
           expect(processes).toEqual(before);
           expect(ordered).toHaveLength(processes.length);
-          expect(new Set(ordered.map(process => process.processId))).toEqual(
-            new Set(processes.map(process => process.processId)),
+          expect(new Set(EffectArray.map(ordered, process => process.processId))).toEqual(
+            new Set(EffectArray.map(processes, process => process.processId)),
           );
           expect(orderManagerProcessesForPresentation(processes)).toEqual(ordered);
           for (let index = 1; index < ordered.length; index += 1) {
@@ -182,7 +191,7 @@ describe('Manager Processes panel', () => {
       process(4, 'graph-parser-worker', 'parser-stdio'),
       process(5, 'cli', 'index-repository'),
     ]);
-    expect(ordered.map(value => value.processId)).toEqual([5, 1, 2, 3, 4]);
+    expect(EffectArray.map(ordered, value => value.processId)).toEqual([5, 1, 2, 3, 4]);
   });
 
   it('confirms termination and posts the exact opaque process reference with the PID', async () => {
@@ -195,10 +204,14 @@ describe('Manager Processes panel', () => {
     expect(document.querySelector('dialog.manager-dialog')?.textContent).toContain('PID 80297');
     await act(async () => confirm.click());
     await flush();
-    expect(requests.find(request => request.path === '/api/processes/terminate')?.body).toEqual({
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(requests, request => request.path === '/api/processes/terminate'),
+      )?.body,
+    ).toEqual({
       confirm: true,
       processId: 80297,
-      processRef: `tnp_${'a'.repeat(64)}`,
+      processRef: `tnp_${Effect.pipe('a', EffectString.repeat(64))}`,
     });
   });
 

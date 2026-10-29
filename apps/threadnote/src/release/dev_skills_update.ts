@@ -1,14 +1,20 @@
-import {Array, Console, Effect, Path, Schema} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Console, Effect, Path, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {errorMessage, fromSync} from '@threadnote/platform/errors';
 import type {DevSkillsReleaseIdentity} from '../dev_skills/contract.js';
 import {stableJson} from '../dev_skills/files.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 import {parseDevSkillsUpdateStatus, parsePreparedDevSkillsUpdate} from '../dev_skills/update_protocol.js';
 import {installationRoot} from '../process/standalone_lease.js';
 
-export class DevSkillsUpdatePending extends Schema.TaggedError<DevSkillsUpdatePending>()('DevSkillsUpdatePending', {
+export class DevSkillsUpdatePending extends Schema.TaggedError<
+  DevSkillsUpdatePending,
+  {readonly brand: unique symbol}
+>()('DevSkillsUpdatePending', {
   message: Schema.String,
 }) {}
 
@@ -117,7 +123,7 @@ export const refreshReleaseDevSkills = Effect.fn('update.refreshDevSkills')(func
     .pipe(Effect.result);
   if (attempt._tag === 'Failure')
     return yield* DevSkillsUpdatePending.make({
-      message: `Threadnote is active, but workflow refresh is pending. Run threadnote update to retry. ${errorMessage(attempt.failure).slice(0, 1500)}`,
+      message: `Threadnote is active, but workflow refresh is pending. Run threadnote update to retry. ${Effect2.pipe(errorMessage(attempt.failure), EffectString.slice(0, 1500))}`,
     });
   const reply = yield* fromSync('read workflow refresh response', () =>
     parseDevSkillsUpdateStatus(JSON.parse(attempt.success.stdout)),
@@ -164,7 +170,7 @@ export const refreshReleaseDevSkills = Effect.fn('update.refreshDevSkills')(func
         'Workflow refresh response does not match its durable intent. Run threadnote update to retry the active release.',
     });
   if (durable.repairRequired) {
-    if (durable.diagnostics.length) yield* Console.error(Array.join(durable.diagnostics, '\n'));
+    if (durable.diagnostics.length) yield* Console.error(EffectArray.join(durable.diagnostics, '\n'));
     const attention = durable.pending
       ? `${durable.pending} workflow target(s) need attention.`
       : 'Workflow refresh is pending.';

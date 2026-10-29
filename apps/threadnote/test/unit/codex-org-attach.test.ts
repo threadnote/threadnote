@@ -1,5 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, PlatformError} from 'effect';
+import {Effect, FileSystem, Path, PlatformError, Predicate} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {parse} from 'smol-toml';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
@@ -14,6 +15,8 @@ import {
 import {resolveComposerAttach, type ComposerShareBinding} from '@threadnote/threadnote/mcp/composer_attach';
 import {runMcpInstall} from '@threadnote/threadnote/mcp/install';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const attach: ComposerShareBinding = {
   clientId: 'registered-codex',
@@ -104,9 +107,15 @@ describe('Codex organization attach', () => {
           expect(after).toBe(mode === 'concurrent' ? `${original}# concurrent edit\n` : original);
         }
         if (baseSystem.platform !== 'win32') expect((yield* fs.stat(configPath)).mode & 0o777).toBe(0o640);
-        expect(calls.every(args => args.length === 1 && args[0] === '--version')).toBe(true);
+        expect(EffectArray.every(calls, args => args.length === 1 && args[0] === '--version')).toBe(true);
         if (mode === 'unreadable-initial' || mode === 'unreadable-always') expect(calls).toEqual([]);
-        expect((yield* fs.readDirectory(root)).filter(name => name.startsWith('.threadnote-org'))).toEqual([]);
+        expect(
+          EffectArray.filter(
+            yield* fs.readDirectory(root),
+            __effectArrayValue =>
+              !!(name => Effect2.pipe(name, EffectString.startsWith('.threadnote-org')))(__effectArrayValue),
+          ),
+        ).toEqual([]);
       }),
     ).pipe(provideTestLayer(StandaloneBrokerLayer)),
   );
@@ -131,7 +140,13 @@ describe('Codex organization attach', () => {
         expect(yield* fs.readLink(configPath)).toBe(target);
         if (mode === 'readable') expect(yield* fs.readFileString(target)).toBe(original);
         else expect(yield* fs.exists(target)).toBe(false);
-        expect((yield* fs.readDirectory(root)).filter(name => name.startsWith('.threadnote-org'))).toEqual([]);
+        expect(
+          EffectArray.filter(
+            yield* fs.readDirectory(root),
+            __effectArrayValue =>
+              !!(name => Effect2.pipe(name, EffectString.startsWith('.threadnote-org')))(__effectArrayValue),
+          ),
+        ).toEqual([]);
       }),
     ).pipe(provideTestLayer(StandaloneBrokerLayer)),
   );
@@ -146,10 +161,13 @@ describe('Codex organization attach', () => {
 
   it('appends native configuration and preserves every prior byte and value', () => {
     const proposed = renderCodexOrgMcpConfig(original, attach);
-    expect(proposed.startsWith(original)).toBe(true);
+    expect(Effect2.pipe(proposed, EffectString.startsWith(original))).toBe(true);
     const actual = parse(proposed);
-    const servers = actual.mcp_servers as Record<string, unknown>;
-    expect(servers.threadnote).toEqual((parse(original).mcp_servers as Record<string, unknown>).threadnote);
+    const originalConfig = parse(original);
+    if (!Predicate.isObject(actual.mcp_servers) || !Predicate.isObject(originalConfig.mcp_servers))
+      throw new Error('Expected parsed MCP server tables.');
+    const servers = actual.mcp_servers;
+    expect(servers.threadnote).toEqual(originalConfig.mcp_servers.threadnote);
     expect(actual.mcp_oauth_callback_port).toBe(12345);
     expect(servers['threadnote-org']).toMatchObject({
       url: attach.url,
@@ -162,9 +180,12 @@ describe('Codex organization attach', () => {
   });
 
   it('preserves compatible extra settings and disabled state without rewriting', () => {
-    const proposed = renderCodexOrgMcpConfig(original, attach).replace(
-      '[mcp_servers.threadnote-org]',
-      '[mcp_servers.threadnote-org]\nenabled = false\ntool_timeout_sec = 45',
+    const proposed = Effect2.pipe(
+      renderCodexOrgMcpConfig(original, attach),
+      EffectString.replace(
+        '[mcp_servers.threadnote-org]',
+        '[mcp_servers.threadnote-org]\nenabled = false\ntool_timeout_sec = 45',
+      ),
     );
     expect(renderCodexOrgMcpConfig(proposed, attach)).toBe(proposed);
   });

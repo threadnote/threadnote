@@ -1,4 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import type {RawContractObservation} from './probe.js';
+import * as EffectRecord from 'effect/Record';
 
 const safeKeys = new Set([
   'uri',
@@ -57,11 +59,11 @@ function summarize(value: unknown) {
   const paths: Array<{path: string; kind: string; count?: number; value?: boolean | number}> = [];
   const visit = (item: unknown, path: string, key: string, depth: number) => {
     if (paths.length >= 160 || depth > 7) return;
-    if (Array.isArray(item)) {
+    if (EffectArray.isArray(item)) {
       paths.push({path, kind: 'array', count: item.length});
       if (item.length > 0) visit(item[0], `${path}[]`, '', depth + 1);
     } else if (item !== null && typeof item === 'object') {
-      const entries = Object.entries(item);
+      const entries = EffectRecord.toEntries(item);
       paths.push({path, kind: 'object', count: entries.length});
       for (const [childKey, child] of entries) {
         const label = safeKeys.has(childKey) ? childKey : '<field>';
@@ -102,6 +104,6 @@ export function summarizeContractObservation(stage: 'identity' | 'primary', obse
     ...(observation.protocolVersion === undefined ? {} : {protocolVersion: observation.protocolVersion}),
     scopeMatched: observation.scopeMatched,
     ...(observation.identitySignals === undefined ? {} : {identitySignals: observation.identitySignals}),
-    calls: observation.calls.map(call => ({name: call.name, ...summarize(call.value)})),
+    calls: EffectArray.map(observation.calls, call => ({name: call.name, ...summarize(call.value)})),
   };
 }

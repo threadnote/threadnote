@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import fc from 'fast-check';
@@ -26,6 +27,8 @@ import type {
   CodeGraphWorksetCatalogPublishedGenerationV1,
   CodeGraphWorksetCatalogRoutingSymbolRecordV1,
 } from '@threadnote/graph/workset_catalog/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph Workset Search V2 core', () => {
   it('resolves qualified references without observing dirty worktree state', () => {
@@ -41,7 +44,7 @@ describe('code graph Workset Search V2 core', () => {
       const persisted: string[] = [];
       const execution = yield* runCodeGraphWorksetQueryV2Core(
         dependencies(fixture, {
-          persistRefs: refs => persisted.push(...refs.map(ref => `${ref.repositoryId}:${ref.nodeId}`)),
+          persistRefs: refs => persisted.push(...EffectArray.map(refs, ref => `${ref.repositoryId}:${ref.nodeId}`)),
         }),
         fixture.input,
       );
@@ -56,7 +59,11 @@ describe('code graph Workset Search V2 core', () => {
       });
       expect(persisted).toHaveLength(2);
       expect(execution.projected.measurement.estimatedTokens).toBeLessThanOrEqual(1_250);
-      expect(execution.projected.structuredContent.cards.every(card => card.ref.startsWith('cgr_'))).toBe(true);
+      expect(
+        EffectArray.every(execution.projected.structuredContent.cards, card =>
+          Effect2.pipe(card.ref, EffectString.startsWith('cgr_')),
+        ),
+      ).toBe(true);
       expect(JSON.stringify(execution.projected)).not.toContain('cgwr_');
       expect(JSON.stringify(execution.projected)).not.toContain('cgwsc_');
     }),
@@ -72,7 +79,16 @@ describe('code graph Workset Search V2 core', () => {
           stage: (phase, stage, effect, disposition) =>
             effect.pipe(
               Effect.tap(() =>
-                Effect.sync(() => observedStages.push([phase, stage, disposition].filter(Boolean).join(':'))),
+                Effect.sync(() =>
+                  observedStages.push(
+                    EffectArray.join(
+                      EffectArray.map(EffectArray.filter([phase, stage, disposition], Boolean), item =>
+                        item === null || item === undefined ? '' : String(item),
+                      ),
+                      ':',
+                    ),
+                  ),
+                ),
               ),
             ),
         },
@@ -101,7 +117,7 @@ describe('code graph Workset Search V2 core', () => {
   effectIt.effect('interrupts an admitted deep-read batch at the query deadline and reports it truthfully', () =>
     Effect.gen(function* () {
       const fixture = makeFixture(4);
-      const delays = new Map(fixture.input.members.map(member => [member.repositoryKey, 1_000] as const));
+      const delays = new Map(EffectArray.map(fixture.input.members, member => [member.repositoryKey, 1_000] as const));
       const execution = yield* runCodeGraphWorksetQueryV2Core(dependencies(fixture, {delays}), {
         ...fixture.input,
         deadlineMilliseconds: 350,
@@ -159,7 +175,10 @@ describe('code graph Workset Search V2 core', () => {
     Effect.gen(function* () {
       const fixture = makeFixture(4);
       const delays = new Map(
-        fixture.input.members.map((member, index) => [member.repositoryKey, index === 0 ? 0 : 1_000] as const),
+        EffectArray.map(
+          fixture.input.members,
+          (member, index) => [member.repositoryKey, index === 0 ? 0 : 1_000] as const,
+        ),
       );
       const execution = yield* runCodeGraphWorksetQueryV2Core(dependencies(fixture, {delays}), {
         ...fixture.input,
@@ -167,7 +186,7 @@ describe('code graph Workset Search V2 core', () => {
       }).pipe(TestClock.withLive);
 
       expect(execution.logicalResult.coverage.stopReason).toBe('deadline');
-      expect(execution.logicalResult.cards.map(card => card.repositoryKey)).toEqual(['repository-0']);
+      expect(EffectArray.map(execution.logicalResult.cards, card => card.repositoryKey)).toEqual(['repository-0']);
       expect(execution.logicalResult.repositories['repository-0']).toMatchObject({deepQueried: true, state: 'current'});
     }),
   );
@@ -178,7 +197,7 @@ describe('code graph Workset Search V2 core', () => {
       const fixture = {
         ...base,
         graphs: new Map(
-          [...base.graphs].map(([repositoryKey, value], index) => [
+          EffectArray.map([...base.graphs], ([repositoryKey, value], index) => [
             repositoryKey,
             index < 8 ? {...value, nodes: []} : value,
           ]),
@@ -192,7 +211,8 @@ describe('code graph Workset Search V2 core', () => {
         },
       };
       const delays = new Map(
-        uncertain.router.repositories.map(
+        EffectArray.map(
+          uncertain.router.repositories,
           (repository, index) => [repository.repositoryKey, index < 8 ? 0 : index < 12 ? 750 : 1_000] as const,
         ),
       );
@@ -205,8 +225,8 @@ describe('code graph Workset Search V2 core', () => {
 
       expect((yield* Clock.currentTimeMillis) - started).toBeLessThan(1_250);
       expect(execution.logicalResult.coverage.stopReason).toBe('deadline');
-      expect(execution.logicalResult.cards.map(card => card.repositoryKey)).toEqual(
-        uncertain.router.repositories.slice(8, 12).map(repository => repository.repositoryKey),
+      expect(EffectArray.map(execution.logicalResult.cards, card => card.repositoryKey)).toEqual(
+        EffectArray.map(uncertain.router.repositories.slice(8, 12), repository => repository.repositoryKey),
       );
       expect(execution.instrumentation.deepQueriedRepositories).toBe(16);
       for (const repository of uncertain.router.repositories.slice(16, 20)) {
@@ -345,7 +365,7 @@ describe('code graph Workset Search V2 core', () => {
       expect(larger.logicalResult.cards.slice(0, smaller.logicalResult.cards.length)).toEqual(
         smaller.logicalResult.cards,
       );
-      expect(smaller.logicalResult.cards.map(card => card.ref)).toContain(
+      expect(EffectArray.map(smaller.logicalResult.cards, card => card.ref)).toContain(
         bridge.source.reference.kind === 'qualified-ref' ? bridge.source.reference.ref : '',
       );
     }),
@@ -388,7 +408,9 @@ describe('code graph Workset Search V2 core', () => {
     ({completionOrder}) =>
       Effect.gen(function* () {
         const fixture = makeFixture(4);
-        const delays = new Map(completionOrder.map((repository, index) => [`repository-${repository}`, index]));
+        const delays = new Map(
+          EffectArray.map(completionOrder, (repository, index) => [`repository-${repository}`, index]),
+        );
         const forward = yield* runCodeGraphWorksetQueryV2Core(dependencies(fixture), fixture.input);
         const reordered = yield* runCodeGraphWorksetQueryV2Core(dependencies(fixture, {delays}), fixture.input).pipe(
           TestClock.withLive,
@@ -412,7 +434,8 @@ describe('code graph Workset Search V2 core', () => {
             ...fixture.router,
             expansion: {exhausted: true, repositories: [firstRepository], requestedBatchSize: 4},
             repositories: [firstRepository],
-            symbols: fixture.router.symbols.filter(
+            symbols: EffectArray.filter(
+              fixture.router.symbols,
               symbol => symbol.symbol.repositoryKey === firstRepository.repositoryKey,
             ),
           },
@@ -440,19 +463,20 @@ describe('code graph Workset Search V2 core', () => {
           bridgeExpansionComplete: true,
           deepQueriedRepositories: 2,
         });
-        expect([...new Set(execution.logicalResult.cards.map(card => card.repositoryKey))]).toEqual([
+        expect([...new Set(EffectArray.map(execution.logicalResult.cards, card => card.repositoryKey))]).toEqual([
           'repository-0',
           'repository-1',
         ]);
         expect(
-          execution.logicalResult.cards
-            .filter(card => card.symbol.language === 'protobuf')
-            .map(card => ({name: card.symbol.name, path: card.symbol.path})),
+          EffectArray.map(
+            EffectArray.filter(execution.logicalResult.cards, card => card.symbol.language === 'protobuf'),
+            card => ({name: card.symbol.name, path: card.symbol.path}),
+          ),
         ).toEqual([
           {name: 'session.proto', path: 'proto/repository-0.proto'},
           {name: 'session.proto', path: 'proto/repository-1.proto'},
         ]);
-        expect(execution.logicalResult.cards.flatMap(card => card.relationships)).toEqual(
+        expect(EffectArray.flatMap(execution.logicalResult.cards, card => card.relationships)).toEqual(
           expect.arrayContaining([
             expect.objectContaining({
               authority: 'authoritative',
@@ -487,12 +511,12 @@ describe('code graph Workset Search V2 core', () => {
       warnings: [],
     });
 
-    expect(expanded.repositories.slice(0, 3).map(repository => repository.repositoryKey)).toEqual([
+    expect(EffectArray.map(expanded.repositories.slice(0, 3), repository => repository.repositoryKey)).toEqual([
       'repository-0',
       'repository-19',
       'repository-1',
     ]);
-    expect(expanded.repositories.slice(0, 3).map(repository => repository.rank)).toEqual([1, 2, 3]);
+    expect(EffectArray.map(expanded.repositories.slice(0, 3), repository => repository.rank)).toEqual([1, 2, 3]);
   });
 });
 
@@ -531,12 +555,13 @@ function dependencies(
         options.persistRefs?.(refs);
         return {
           cardCount: result.cards.length,
-          continuationForOffset: (offset: number) => `cgwc_${digest(`cursor-${offset}`).slice(0, 40)}`,
+          continuationForOffset: (offset: number) =>
+            `cgwc_${Effect2.pipe(digest(`cursor-${offset}`), EffectString.slice(0, 40))}`,
           createdAt: '2026-08-11T00:00:00.000Z',
           expiresAt: '2026-08-11T00:30:00.000Z',
           generation: fixture.input.published,
-          id: `cgwrs_${'a'.repeat(40)}`,
-          initialCursor: `cgwc_${'b'.repeat(40)}`,
+          id: `cgwrs_${Effect2.pipe('a', EffectString.repeat(40))}`,
+          initialCursor: `cgwc_${Effect2.pipe('b', EffectString.repeat(40))}`,
           projectorVersion: 1,
           totalBytes: 1,
           worksetName: fixture.input.worksetName,
@@ -553,7 +578,7 @@ function makeFixture(size: number): Fixture {
   const symbols = Array.from({length: size}, (_, repository) => routingSymbol(repository));
   const ranked = rankCodeGraphWorksetRouterCandidates({
     exactHits: [],
-    lexicalHits: symbols.map((symbol, index) => ({catalogRank: index + 1, symbol})),
+    lexicalHits: EffectArray.map(symbols, (symbol, index) => ({catalogRank: index + 1, symbol})),
     limits: {repositoryLimit: 32, symbolLimit: 32, symbolsPerRepository: 4},
     query,
   });
@@ -586,7 +611,7 @@ function makeFixture(size: number): Fixture {
   );
   const input: CodeGraphWorksetQueryV2InputV1 = {
     evidenceCards: 2,
-    members: published.members.map(member => ({
+    members: EffectArray.map(published.members, member => ({
       deepQueryEligible: true,
       published: member,
       receipt: {
@@ -619,7 +644,7 @@ function withNodesPerGraph(fixture: Fixture, nodesPerGraph: number): Fixture {
   return {
     ...fixture,
     graphs: new Map(
-      [...fixture.graphs].map(([repositoryKey, graph], index) => [
+      EffectArray.map([...fixture.graphs], ([repositoryKey, graph], index) => [
         repositoryKey,
         {
           ...graph,
@@ -627,7 +652,7 @@ function withNodesPerGraph(fixture: Fixture, nodesPerGraph: number): Fixture {
             ...graph.nodes,
             ...Array.from({length: nodesPerGraph - graph.nodes.length}, (_, offset) => ({
               ...graph.nodes[0],
-              id: `cgs_${digest(`secondary-node-${index}-${offset}`).slice(0, 32)}`,
+              id: `cgs_${Effect2.pipe(digest(`secondary-node-${index}-${offset}`), EffectString.slice(0, 32))}`,
               name: `SecondaryService${index}_${offset}`,
               path: `src/secondary-service-${index}-${offset}.ts`,
               qualifiedName: `fixture.SecondaryService${index}_${offset}`,
@@ -644,17 +669,17 @@ function generation(size: number): CodeGraphWorksetCatalogPublishedGenerationV1 
   const generationDigest = digest('generation');
   return {
     digest: generationDigest,
-    id: `cgwg_${generationDigest.slice(0, 40)}`,
+    id: `cgwg_${Effect2.pipe(generationDigest, EffectString.slice(0, 40))}`,
     manifestDigest: digest('manifest'),
     members: Array.from({length: size}, (_, repository) => ({
       checkoutId: digest(`checkout-${repository}`),
-      commitId: digest(`commit-${repository}`).slice(0, 40),
+      commitId: Effect2.pipe(digest(`commit-${repository}`), EffectString.slice(0, 40)),
       ordinal: repository,
       projectionDigest: digest(`projection-${repository}`),
       repositoryId: digest(`repository-${repository}`),
       repositoryKey: `repository-${repository}`,
       snapshotDigest: digest(`snapshot-digest-${repository}`),
-      snapshotId: `cgsn_${digest(`snapshot-${repository}`).slice(0, 40)}`,
+      snapshotId: `cgsn_${Effect2.pipe(digest(`snapshot-${repository}`), EffectString.slice(0, 40))}`,
       symbolCount: 1,
       worktreeId: digest(`worktree-${repository}`),
     })),
@@ -671,9 +696,9 @@ function graph(repository: number): CodeGraphQueryResult {
     operation: 'query',
     repository: {displayName: `repository-${repository}`, repositoryId: digest(`repository-${repository}`)},
     snapshot: {
-      commit: digest(`commit-${repository}`).slice(0, 40),
+      commit: Effect2.pipe(digest(`commit-${repository}`), EffectString.slice(0, 40)),
       dirty: false,
-      id: `cgsn_${digest(`snapshot-${repository}`).slice(0, 40)}`,
+      id: `cgsn_${Effect2.pipe(digest(`snapshot-${repository}`), EffectString.slice(0, 40))}`,
       worktreeId: digest(`worktree-${repository}`),
     },
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
@@ -686,7 +711,7 @@ function node(repository: number): CodeGraphQueryNode {
   return {
     contentHash: digest(`content-${repository}`),
     exported: true,
-    id: `cgs_${digest(`node-${repository}`).slice(0, 32)}`,
+    id: `cgs_${Effect2.pipe(digest(`node-${repository}`), EffectString.slice(0, 32))}`,
     kind: 'function',
     language: 'typescript',
     name: `Service${repository}`,
@@ -733,7 +758,7 @@ function protobufBridge(
 }
 
 function protobufBridgeNodeId(repository: number): string {
-  return `cgs_${digest(`protobuf-file-${repository}`).slice(0, 32)}`;
+  return `cgs_${Effect2.pipe(digest(`protobuf-file-${repository}`), EffectString.slice(0, 32))}`;
 }
 
 function routingSymbol(repository: number): CodeGraphWorksetCatalogRoutingSymbolRecordV1 {
@@ -752,7 +777,7 @@ function routingSymbol(repository: number): CodeGraphWorksetCatalogRoutingSymbol
     qualifiedName: value.qualifiedName,
     repositoryId: digest(`repository-${repository}`),
     repositoryKey: `repository-${repository}`,
-    snapshotId: `cgsn_${digest(`snapshot-${repository}`).slice(0, 40)}`,
+    snapshotId: `cgsn_${Effect2.pipe(digest(`snapshot-${repository}`), EffectString.slice(0, 40))}`,
     span: value.span,
     terms: [{term: 'service', weight: 1}],
   };

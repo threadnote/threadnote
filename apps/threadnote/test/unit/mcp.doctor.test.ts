@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {withoutOmpPathSelectors} from '@threadnote/testing/omp-environment';
 import {expect, it} from '@effect/vitest';
@@ -96,17 +97,20 @@ describe('MCP doctor checks', () => {
         yield* fs.makeDirectory(bin, {recursive: true});
         yield* fs.writeFileString(
           codex,
-          [
-            '#!/bin/sh',
-            'if [ "$1" = "--version" ]; then echo "codex-cli 1"; exit 0; fi',
-            `printf '%s\\n' "$*" >> '${calls}'`,
-            'if [ "$1 $2 $3" = "mcp get team-memory" ]; then',
-            '  echo "command: /home/test/.local/bin/threadnote-mcp-server"',
-            '  exit 0',
-            'fi',
-            'exit 1',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              '#!/bin/sh',
+              'if [ "$1" = "--version" ]; then echo "codex-cli 1"; exit 0; fi',
+              `printf '%s\\n' "$*" >> '${calls}'`,
+              'if [ "$1 $2 $3" = "mcp get team-memory" ]; then',
+              '  echo "command: /home/test/.local/bin/threadnote-mcp-server"',
+              '  exit 0',
+              'fi',
+              'exit 1',
+              '',
+            ],
+            '\n',
+          ),
         );
         yield* fs.chmod(codex, 0o755);
         const testSystem = SystemInfo.of({
@@ -414,7 +418,9 @@ describe('MCP doctor checks', () => {
         const checks = yield* mcpConfigurationChecks(runtime(enterpriseHome)).pipe(
           Effect.provideService(SystemInfo, testSystem),
         );
-        expect(checks.filter(check => check.name === 'cursor MCP' || check.name === 'copilot MCP')).toEqual([]);
+        expect(
+          EffectArray.filter(checks, check => check.name === 'cursor MCP' || check.name === 'copilot MCP'),
+        ).toEqual([]);
         expect(JSON.stringify(yield* fs.readFileString(cursorConfig))).toContain('threadnote-org');
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),

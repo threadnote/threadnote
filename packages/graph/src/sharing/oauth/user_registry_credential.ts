@@ -3,6 +3,8 @@ import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {SystemInfo} from '@threadnote/platform/system';
 import {getRegistryOAuthUserCredential, type OAuthUserBackend} from './user.js';
 import {graphSharingFailure} from '../errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface OAuthUserRegistryHelperIO {
   readonly stdin: AsyncIterable<Uint8Array | string>;
@@ -32,9 +34,17 @@ export const runOAuthUserRegistryCredentialHelper = Effect.fn('codeGraph.sharing
           chunks.push(bytes);
         }
         const value = new TextDecoder('utf-8', {fatal: true}).decode(Buffer.concat(chunks));
-        if (!value.endsWith('\n') || value.indexOf('\n') !== value.length - 1)
+        if (
+          !Effect2.pipe(value, EffectString.endsWith('\n')) ||
+          Effect2.pipe(
+            value,
+            EffectString.indexOf('\n'),
+            Effect2.Option.getOrElse(() => -1),
+          ) !==
+            value.length - 1
+        )
           throw graphSharingFailure('Registry helper request is invalid.');
-        const server = value.slice(0, -1);
+        const server = Effect2.pipe(value, EffectString.slice(0, -1));
         if (!/^[a-z0-9.-]+(?::[1-9][0-9]{0,4})?$/u.test(server))
           throw graphSharingFailure('Registry helper request is invalid.');
         return server;

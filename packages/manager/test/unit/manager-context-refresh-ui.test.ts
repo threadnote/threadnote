@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 
 import React, {act} from 'react';
@@ -6,6 +7,8 @@ import fc from 'fast-check';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {ContextPanel} from '@threadnote/manager/context/view';
 import type {ManagerWorksetCatalog} from '@threadnote/manager/workset/contracts';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let originalFetch: typeof fetch;
 let root: Root | undefined;
@@ -36,9 +39,9 @@ it('reflects the latest catalog across repeated refreshes without resetting the 
         await render(0);
         await enterTask('Keep this investigation');
         for (const [index, revision] of revisions.entries()) {
-          projects = revision.map(id => `fixture-${id}`);
+          projects = EffectArray.map(revision, id => `fixture-${id}`);
           await render(index + 1);
-          expect(repositoryPaths()).toEqual(['', ...projects.map(name => `/fixture/${name}`)]);
+          expect(repositoryPaths()).toEqual(['', ...EffectArray.map(projects, name => `/fixture/${name}`)]);
           expect(taskInput().value).toBe('Keep this investigation');
         }
         await act(async () => root?.unmount());
@@ -85,7 +88,9 @@ it.each(['Repository', 'Workset'])('clears a removed %s selection before compili
     select.dispatchEvent(new Event('change', {bubbles: true}));
   });
   const compileButton = () =>
-    [...document.querySelectorAll('button')].find(button => button.textContent === 'Build brief');
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst([...document.querySelectorAll('button')], button => button.textContent === 'Build brief'),
+    );
   expect(compileButton()?.disabled).toBe(false);
 
   projects = ['replacement'];
@@ -140,7 +145,9 @@ it('refreshes Context choices through the Manager button while preserving a vali
   expect(taskInput().value).toBe('Explain the synthetic pricing contract');
   await click('Workset');
   expect(
-    [...document.querySelectorAll('select')].flatMap(select => [...select.options].map(option => option.text)),
+    EffectArray.flatMap([...document.querySelectorAll('select')], select =>
+      EffectArray.map([...select.options], option => option.text),
+    ),
   ).toContain('pricing-workset · 1 projects');
 });
 
@@ -149,11 +156,18 @@ async function render(refreshGeneration: number): Promise<void> {
 }
 
 async function click(label: string): Promise<void> {
-  const button = [...document.querySelectorAll('button')].find(
-    candidate =>
-      candidate.getAttribute('aria-label') === label ||
-      candidate.textContent?.trim() === label ||
-      candidate.querySelector('strong')?.textContent?.trim() === label,
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      candidate =>
+        candidate.getAttribute('aria-label') === label ||
+        Effect.pipe(candidate.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label ||
+        Effect.pipe(candidate.querySelector('strong')?.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
   );
   expect(button).toBeDefined();
   await act(async () => button?.click());
@@ -164,15 +178,28 @@ function repositorySelect(): HTMLSelectElement {
 }
 
 function selectWithLabel(name: string): HTMLSelectElement {
-  const select = [...document.querySelectorAll('label')]
-    .find(label => label.textContent?.trim().startsWith(name))
-    ?.querySelector('select');
+  const select = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('label')],
+      __effectArrayValue =>
+        !!(label =>
+          Effect.pipe(
+            label.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(name)),
+          ))(__effectArrayValue),
+    ),
+  )?.querySelector('select');
   if (!select) throw new Error('Repository selector missing');
   return select;
 }
 
 function repositoryPaths(): readonly string[] {
-  return [...repositorySelect().options].map(option => option.value);
+  return EffectArray.map([...repositorySelect().options], option => option.value);
 }
 
 function taskInput(): HTMLTextAreaElement {
@@ -191,11 +218,11 @@ async function enterTask(value: string): Promise<void> {
 
 function catalog(projects: readonly string[]): ManagerWorksetCatalog {
   return {
-    definitions: projects.map(name => ({memberCount: 1, name: `${name}-workset`})),
+    definitions: EffectArray.map(projects, name => ({memberCount: 1, name: `${name}-workset`})),
     definitionSource: 'seed-manifest',
     editability: {state: 'editable'},
     projectEditability: {state: 'editable'},
-    projects: projects.map(name => ({
+    projects: EffectArray.map(projects, name => ({
       branchState: 'not-observed',
       folder: name,
       name,
@@ -205,7 +232,7 @@ function catalog(projects: readonly string[]): ManagerWorksetCatalog {
     })),
     projectsReadOnly: false,
     readOnly: false,
-    revision: 'a'.repeat(64),
+    revision: Effect.pipe('a', EffectString.repeat(64)),
     type: 'manager-workset-catalog',
     version: 1,
   };

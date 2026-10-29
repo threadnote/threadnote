@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {afterEach, describe, expect, it} from 'vitest';
 import {CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
@@ -12,7 +13,7 @@ import {runEffect} from '../helpers/effect-runtime.js';
 const homes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('core embedding provisioning', () => {

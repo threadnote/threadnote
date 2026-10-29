@@ -1,6 +1,8 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Clock, Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
+import {join} from '@threadnote/testing/node-path';
 import * as HttpClient from 'effect/http/HttpClient';
 import * as HttpClientRequest from 'effect/http/HttpClientRequest';
 import {exportJWK, generateKeyPair, SignJWT} from 'jose';
@@ -59,6 +61,8 @@ import {
 } from '@threadnote/graph/sharing/worker/admission_state';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('signed worker publisher', () => {
   for (const publicationMode of ['controlled', 'listener'] as const)
@@ -162,8 +166,12 @@ describe('signed worker publisher', () => {
               sourceVerification: {
                 observeParserBatch: group =>
                   Effect.sync(() => {
-                    const file = group.files.find(item => item.path === 'src/next.ts');
-                    const facts = group.facts.find(item => item.facts.path === file?.path);
+                    const file = EffectOption.getOrUndefined(
+                      EffectArray.findFirst(group.files, item => item.path === 'src/next.ts'),
+                    );
+                    const facts = EffectOption.getOrUndefined(
+                      EffectArray.findFirst(group.facts, item => item.facts.path === file?.path),
+                    );
                     if (file === undefined || facts === undefined) return;
                     const action = {
                       contentHash: file.contentHash,
@@ -199,7 +207,7 @@ describe('signed worker publisher', () => {
             };
             const artifact = yield* createGraphWorkerResultArtifact({
               metadata: {
-                batchId: nextIdentity.headCommit.slice(0, 40),
+                batchId: Effect2.pipe(nextIdentity.headCommit, EffectString.slice(0, 40)),
                 graphAbi: targetAbi,
                 identityClass: 'oauth-principal',
                 issuedAt: nowSeconds,
@@ -218,7 +226,7 @@ describe('signed worker publisher', () => {
             });
             const announcement = yield* signGraphWorkerResultAnnouncement({artifact, expected: authority, signer});
             const absentAction = {
-              contentHash: 'f'.repeat(64),
+              contentHash: Effect2.pipe('f', EffectString.repeat(64)),
               extractorSet: parsed.extractorSet,
               languageAndRole: 'typescript:source',
               normalizedPath: 'src/absent.ts',
@@ -228,11 +236,11 @@ describe('signed worker publisher', () => {
               ...absentAction,
               actionKey: graphShareParseActionKey(absentAction),
               facts: {path: absentAction.normalizedPath, diagnostics: [], edges: [], symbols: []},
-              gitBlobId: 'f'.repeat(40),
+              gitBlobId: Effect2.pipe('f', EffectString.repeat(40)),
             });
             const absentArtifact = yield* createGraphWorkerResultArtifact({
               metadata: {
-                batchId: nextIdentity.headCommit.slice(0, 40),
+                batchId: Effect2.pipe(nextIdentity.headCommit, EffectString.slice(0, 40)),
                 graphAbi: targetAbi,
                 identityClass: 'oauth-principal',
                 issuedAt: nowSeconds,
@@ -264,10 +272,14 @@ describe('signed worker publisher', () => {
             const nativeFetch = globalThis.fetch;
             yield* Effect.acquireRelease(
               Effect.sync(() => {
-                globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) =>
-                  String(input) === policy.jwksUrl
-                    ? Promise.resolve(new Response(JSON.stringify({keys: [jwk]}), {status: 200}))
-                    : nativeFetch(input, init)) as typeof globalThis.fetch;
+                const testFetch = Object.assign(
+                  (input: RequestInfo | URL, init?: RequestInit) =>
+                    String(input) === policy.jwksUrl
+                      ? Promise.resolve(new Response(JSON.stringify({keys: [jwk]}), {status: 200}))
+                      : nativeFetch(input, init),
+                  {preconnect: nativeFetch.preconnect},
+                );
+                globalThis.fetch = testFetch;
               }),
               () =>
                 Effect.sync(() => {
@@ -440,7 +452,8 @@ describe('signed worker publisher', () => {
               yield* Fiber.interrupt(nextListener);
             }
             expect(
-              registry.requests.some(
+              EffectArray.some(
+                registry.requests,
                 request =>
                   request.method === 'GET' &&
                   request.pathname === `/v2/acme/worker/manifests/${artifact.manifestDigest}`,
@@ -535,11 +548,12 @@ describe('signed worker publisher', () => {
           const graphLayout = codeGraphLayout(path, home, nextIdentity.checkoutId, nextIdentity.worktreeId);
           const packs = yield* store.snapshotPackProvenance(graphLayout.databasePath, source.snapshot.id);
           expect(packs).toBeDefined();
-          const targetAbi = codeGraphCheckpointAbiDigestV1(codeGraphCheckpointAbiInputV1(packs!)).digest;
+          if (packs === undefined) throw new Error('Expected snapshot pack provenance.');
+          const targetAbi = codeGraphCheckpointAbiDigestV1(codeGraphCheckpointAbiInputV1(packs)).digest;
           const coordinatorOptions = {organization: 'acme', repositoryId: identity.repositoryId, threadnoteHome: home};
           const coordinator = yield* loadGraphShareCoordinatorState(coordinatorOptions);
           const receipts = announceGraphShareResult(coordinator.receipts, {
-            actionKey: 'a'.repeat(64),
+            actionKey: Effect2.pipe('a', EffectString.repeat(64)),
             attestationDigest: sha256Digest('legacy-attestation'),
             batchId: nextIdentity.headCommit,
             resultManifestDigest: sha256Digest('untrusted-legacy-result'),
@@ -553,15 +567,17 @@ describe('signed worker publisher', () => {
             principalId: sha256Digest('revoked-principal'),
             profileDigest,
             repositoryId: identity.repositoryId,
-            signingPublicKey: 'f'.repeat(64),
-            workerId: `gw_${'1'.repeat(32)}`,
+            signingPublicKey: Effect2.pipe('f', EffectString.repeat(64)),
+            workerId: `gw_${Effect2.pipe('1', EffectString.repeat(32))}`,
           };
           const signed = [
-            signedAnnouncement(1, '1'.repeat(64), nextIdentity.headCommit, worker),
-            signedAnnouncement(2, '1'.repeat(64), nextIdentity.headCommit, worker),
-            signedAnnouncement(3, '2'.repeat(64), nextIdentity.headCommit, worker),
+            signedAnnouncement(1, Effect2.pipe('1', EffectString.repeat(64)), nextIdentity.headCommit, worker),
+            signedAnnouncement(2, Effect2.pipe('1', EffectString.repeat(64)), nextIdentity.headCommit, worker),
+            signedAnnouncement(3, Effect2.pipe('2', EffectString.repeat(64)), nextIdentity.headCommit, worker),
           ];
-          const admissions = signed.reduce(
+          const admissions = EffectArray.reduce(
+            signed,
+            emptyGraphWorkerAdmissionStore(),
             (store, announcement) =>
               admitGraphWorkerAnnouncement(store, {
                 announcement,
@@ -569,7 +585,6 @@ describe('signed worker publisher', () => {
                 nowSeconds,
                 sourceCommit: nextIdentity.headCommit,
               }).store,
-            emptyGraphWorkerAdmissionStore(),
           );
           expect(admissions.quarantine).toHaveLength(1);
           const admissionPath = yield* graphWorkerAdmissionStatePath(home, policy);
@@ -608,7 +623,12 @@ describe('signed worker publisher', () => {
           yield* commit(repository, 'later');
           const laterIdentity = yield* resolveRepositoryIdentity(repository);
           const laterAdmission = admitGraphWorkerAnnouncement(admissions, {
-            announcement: signedAnnouncement(4, '3'.repeat(64), laterIdentity.headCommit, worker),
+            announcement: signedAnnouncement(
+              4,
+              Effect2.pipe('3', EffectString.repeat(64)),
+              laterIdentity.headCommit,
+              worker,
+            ),
             authority: worker,
             nowSeconds,
             sourceCommit: laterIdentity.headCommit,
@@ -623,7 +643,10 @@ describe('signed worker publisher', () => {
           expect(afterRestart.published).toBe(false);
           expect(afterRestart.manifestDigest).toBe(result.manifestDigest);
           expect(
-            (yield* readGraphWorkerAdmissionStore(home, policy)).receipts.map(receipt => receipt.sourceCommit),
+            EffectArray.map(
+              (yield* readGraphWorkerAdmissionStore(home, policy)).receipts,
+              receipt => receipt.sourceCommit,
+            ),
           ).toEqual([laterIdentity.headCommit]);
         }).pipe(provideTestLayer(ApplicationLayer)),
       ),
@@ -631,7 +654,13 @@ describe('signed worker publisher', () => {
   );
 });
 
-const config = (agentContextHome: string) => ({agentContextHome}) as Parameters<typeof runGraphShareInit>[0];
+const config = (agentContextHome: string): Parameters<typeof runGraphShareInit>[0] => ({
+  account: 'local',
+  agentContextHome,
+  agentId: 'threadnote',
+  manifestPath: join(agentContextHome, 'seed-manifest.yaml'),
+  user: 'tester',
+});
 const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', args, {cwd}).pipe(Effect.asVoid);
 const commit = (cwd: string, message: string) =>
   git(cwd, ['-c', 'user.name=Threadnote Test', '-c', 'user.email=test@threadnote.local', 'commit', '-qm', message]);
@@ -651,7 +680,7 @@ function signedAnnouncement(
   const fields = {
     actionKey,
     attestationDigest: sha256Digest(`attestation-${seed}`),
-    batchId: sourceCommit.slice(0, 40),
+    batchId: Effect2.pipe(sourceCommit, EffectString.slice(0, 40)),
     principalId: worker.principalId,
     profileDigest: worker.profileDigest,
     repositoryId: worker.repositoryId,
@@ -667,6 +696,6 @@ function signedAnnouncement(
     },
     publicKey: worker.signingPublicKey,
     schemaVersion: 1 as const,
-    signature: seed.toString(16).padStart(128, '0'),
+    signature: Effect2.pipe(seed.toString(16), EffectString.padStart(128, '0')),
   };
 }

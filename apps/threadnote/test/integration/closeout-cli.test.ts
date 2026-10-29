@@ -1,3 +1,5 @@
+import assert from 'node:assert/strict';
+import {Array as EffectArray} from 'effect';
 import {
   buildCandidateReview,
   readActiveProjectMemories,
@@ -8,6 +10,7 @@ import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
+import {isJsonObject} from '@threadnote/platform/json';
 import {runEffect as run} from '../helpers/effect-runtime.js';
 import {afterEach, describe, expect, it} from 'vitest';
 import {promisify} from 'node:util';
@@ -15,21 +18,24 @@ import {promisify} from 'node:util';
 const execFilePromise = promisify(execFile);
 const homes: string[] = [];
 
-const detailedHandoffBody = [
-  '## Current state',
-  '- Release branch and exact head are recorded for the next agent.',
-  '- Runtime ownership and active branch coordination are recorded here.',
-  '- Pull request status still needs a fresh remote check.',
-  '',
-  '## Verification evidence',
-  '- Focused tests, typecheck, lint, and exact-head smoke passed.',
-  '- The retained safety artifact and recovery path are documented.',
-  '',
-  '## Ordered next steps',
-  '- Refresh remote checks before merging.',
-  '- Transfer runtime ownership before the next install.',
-  '- Run final admission only after every slice is complete.',
-].join('\n');
+const detailedHandoffBody = EffectArray.join(
+  [
+    '## Current state',
+    '- Release branch and exact head are recorded for the next agent.',
+    '- Runtime ownership and active branch coordination are recorded here.',
+    '- Pull request status still needs a fresh remote check.',
+    '',
+    '## Verification evidence',
+    '- Focused tests, typecheck, lint, and exact-head smoke passed.',
+    '- The retained safety artifact and recovery path are documented.',
+    '',
+    '## Ordered next steps',
+    '- Refresh remote checks before merging.',
+    '- Transfer runtime ownership before the next install.',
+    '- Run final admission only after every slice is complete.',
+  ],
+  '\n',
+);
 
 const input: SessionCloseoutInput = {
   decisions: ['Keep closeout decisions explicit.'],
@@ -43,7 +49,7 @@ const input: SessionCloseoutInput = {
 };
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('closeout CLI', () => {
@@ -94,7 +100,7 @@ describe('closeout CLI', () => {
         '1',
       ],
       home,
-    ).catch(error => error as CliFailure);
+    ).catch(cliFailure);
     expect(missingApproval).toMatchObject({code: 1});
     expect(missingApproval.stderr).toContain('approve requires approved=true');
 
@@ -112,7 +118,7 @@ describe('closeout CLI', () => {
         '2',
       ],
       home,
-    ).catch(error => error as CliFailure);
+    ).catch(cliFailure);
     expect(staleRevision).toMatchObject({code: 1});
     expect(staleRevision.stderr).toContain('Candidate review revision changed: expected 2, current 1');
 
@@ -205,7 +211,7 @@ describe('closeout CLI', () => {
         targetUri,
       ],
       home,
-    ).catch(error => error as CliFailure);
+    ).catch(cliFailure);
     expect(blocked).toMatchObject({code: 1});
     expect(blocked.stderr).toContain('allowDestructiveReplacement=true');
     expect(await readFile(targetPath, 'utf8')).toBe(before);
@@ -245,10 +251,11 @@ describe('closeout CLI', () => {
     const {candidateId, home, reviewId, reviewPath, targetPath, targetUri} =
       await storedReplacementReview('legacy-replacement-safety');
     const before = await readFile(targetPath, 'utf8');
-    const persisted = JSON.parse(await readFile(reviewPath, 'utf8')) as {
-      candidates: Array<{replacementSafetyBaseline?: unknown}>;
-    };
-    delete persisted.candidates[0]?.replacementSafetyBaseline;
+    const persisted: unknown = JSON.parse(await readFile(reviewPath, 'utf8'));
+    assert(isJsonObject(persisted));
+    assert(EffectArray.isArray(persisted.candidates));
+    assert(isJsonObject(persisted.candidates[0]));
+    delete persisted.candidates[0].replacementSafetyBaseline;
     await writeFile(reviewPath, `${JSON.stringify(persisted, undefined, 2)}\n`, 'utf8');
 
     const preview = await runCli(['closeout', 'preview', '--review-id', reviewId, '--json'], home);
@@ -278,7 +285,7 @@ describe('closeout CLI', () => {
         targetUri,
       ],
       home,
-    ).catch(error => error as CliFailure);
+    ).catch(cliFailure);
     expect(blocked).toMatchObject({code: 1});
     expect(blocked.stderr).toContain('Run review_session_context again');
     expect(await readFile(targetPath, 'utf8')).toBe(before);
@@ -341,6 +348,20 @@ interface CliFailure extends Error {
   readonly stderr: string;
 }
 
+function isCliFailure(error: unknown): error is CliFailure {
+  return (
+    error instanceof Error &&
+    'stderr' in error &&
+    typeof error.stderr === 'string' &&
+    (!('code' in error) || typeof error.code === 'number')
+  );
+}
+
+function cliFailure(error: unknown): CliFailure {
+  assert(isCliFailure(error), 'Expected a failed CLI result.');
+  return error;
+}
+
 async function storedReview() {
   const home = await mkdtemp(join(tmpdir(), 'threadnote-closeout-cli-'));
   homes.push(home);
@@ -373,17 +394,20 @@ async function storedReplacementReview(topic: string) {
   await mkdir(join(targetPath, '..'), {recursive: true});
   await writeFile(
     targetPath,
-    [
-      'HANDOFF',
-      'kind: handoff',
-      'status: active',
-      'project: threadnote',
-      `topic: ${topic}`,
-      'source_agent_client: test',
-      'timestamp: 2026-09-17T09:00:00.000Z',
-      '',
-      detailedHandoffBody,
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'HANDOFF',
+        'kind: handoff',
+        'status: active',
+        'project: threadnote',
+        `topic: ${topic}`,
+        'source_agent_client: test',
+        'timestamp: 2026-09-17T09:00:00.000Z',
+        '',
+        detailedHandoffBody,
+      ],
+      '\n',
+    ),
     'utf8',
   );
   const proposedText = '## Handoff state\n- Continue coordinated release work after checks finish.';

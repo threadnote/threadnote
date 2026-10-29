@@ -8,6 +8,8 @@ import {
   parseGraphShareRegistryTarget,
   type GraphShareRegistryTarget,
 } from './registry/reference.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const STRICT = {errors: 'all', onExcessProperty: 'error'} as const;
 const ORGANIZATION = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
@@ -122,6 +124,10 @@ export function parseGraphShareEnrollment(value: unknown): GraphShareEnrollment 
   }
 }
 
+function isSha256Digest(value: string): value is Sha256Digest {
+  return SHA256_DIGEST.test(value);
+}
+
 export function parseGraphShareProfile(value: unknown): GraphShareProfileV1 {
   try {
     return Schema.decodeUnknownSync(GraphShareProfileSchemaV1, STRICT)(value);
@@ -136,18 +142,22 @@ export function graphShareProfileDigest(profile: GraphShareProfileV1): Sha256Dig
 
 export function parseGraphShareProfilePointer(value: string): GraphShareProfilePointer {
   if (CAS_PROFILE.test(value)) {
-    return {bodyDigest: `sha256:${value.slice('cas://sha256:'.length)}`, kind: 'cas'};
+    return {bodyDigest: `sha256:${Effect.pipe(value, EffectString.slice('cas://sha256:'.length))}`, kind: 'cas'};
   }
-  const at = value.lastIndexOf('@');
-  const registryReference = value.slice(0, at);
-  const manifestDigest = value.slice(at + 1);
-  if (at > 0 && SHA256_DIGEST.test(manifestDigest)) {
+  const at = Effect.pipe(
+    value,
+    EffectString.lastIndexOf('@'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const registryReference = Effect.pipe(value, EffectString.slice(0, at));
+  const manifestDigest = Effect.pipe(value, EffectString.slice(at + 1));
+  if (at > 0 && isSha256Digest(manifestDigest)) {
     try {
       const registryTarget = parseGraphShareRegistryTarget(registryReference);
       if (registryReference === `oci://${registryTarget.registry}/${registryTarget.repository}`)
         return {
           kind: 'oci',
-          manifestDigest: manifestDigest as Sha256Digest,
+          manifestDigest,
           registryReference,
           registryTarget,
         };
@@ -168,13 +178,13 @@ export function ociProfilePointer(registryReference: string, manifestDigest: Sha
 export function enrolledProfileBodyDigest(enrollment: GraphShareEnrollment): Sha256Digest {
   const pointer = parseGraphShareProfilePointer(enrollment.profile);
   if (enrollment.schemaVersion === 1 && pointer.kind === 'cas') return pointer.bodyDigest;
-  if (enrollment.schemaVersion === 2 && pointer.kind === 'oci' && SHA256_DIGEST.test(enrollment.profileDigest))
-    return enrollment.profileDigest as Sha256Digest;
+  if (enrollment.schemaVersion === 2 && pointer.kind === 'oci' && isSha256Digest(enrollment.profileDigest))
+    return enrollment.profileDigest;
   throw graphSharingFailure('Enrollment profile pointer is invalid.');
 }
 
 export function parseGraphShareCoordinatorUrl(value: string): string {
-  const trimmed = trimTrailingCharacters(value.trim(), '/');
+  const trimmed = trimTrailingCharacters(Effect.pipe(value, EffectString.trim), '/');
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
@@ -243,7 +253,9 @@ export function defaultGraphShareProfile(input: {
     },
     schemaVersion: GRAPH_SHARE_PROFILE_SCHEMA_VERSION,
     source: {
-      branches: [input.branch.startsWith('refs/') ? input.branch : `refs/heads/${input.branch}`],
+      branches: [
+        Effect.pipe(input.branch, EffectString.startsWith('refs/')) ? input.branch : `refs/heads/${input.branch}`,
+      ],
       canonicalRemote: input.canonicalRemote,
     },
     trust: {

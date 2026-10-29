@@ -17,6 +17,8 @@ import {
 import {graphSharePublicationAuthority, readGraphSharePublicationReceipt} from '../registry/publication_state.js';
 import {resolveGraphShareCasRoot} from '../trust.js';
 import {readGraphPublisherEvidenceRecord, type GraphPublisherEvidenceRecordV1} from './evidence_record.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const loadGraphPublisherRegistry = Effect.fn('codeGraph.sharing.loadPublisherRegistry')(function* (
   config: RuntimeConfig,
@@ -24,7 +26,11 @@ const loadGraphPublisherRegistry = Effect.fn('codeGraph.sharing.loadPublisherReg
 ) {
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const cwd = path.resolve(options.cwd?.trim() || system.currentDirectory());
+  const cwd = path.resolve(
+    Effect2.pipe(options.cwd, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || system.currentDirectory(),
+  );
   const identity = yield* resolveRepositoryIdentity(cwd);
   const casRoot = yield* resolveGraphShareCasRoot(config.agentContextHome, options.cas);
   const enrollmentPath = graphShareEnrollmentPath(path, identity.repoRoot);
@@ -79,7 +85,7 @@ export const readGraphPublisherRegistryStatus = Effect.fn('codeGraph.sharing.pub
     : undefined;
   const manifest =
     pointer === undefined ? undefined : yield* readAuthenticatedGraphShareFrontier(input.casRoot, input.scope, pointer);
-  const receipt = input.profile.registry.canonical.startsWith('oci://')
+  const receipt = Effect2.pipe(input.profile.registry.canonical, EffectString.startsWith('oci://'))
     ? yield* readGraphSharePublicationReceipt(
         input.home,
         graphSharePublicationAuthority(input.scope, input.profile.registry.canonical),

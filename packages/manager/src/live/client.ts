@@ -1,4 +1,6 @@
-import {Array as Arr, Schema} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Schema} from 'effect';
 import {
   MANAGER_LIVE_LIMITS,
   MANAGER_LIVE_VERSION,
@@ -27,12 +29,8 @@ const emptySnapshot: ManagerLiveSnapshot = {status: 'loading'};
 const unavailableStatus = new Set([404, 405, 501]);
 const handshakeTimeoutMilliseconds = 10_000;
 function isUnavailable(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'status' in error &&
-    unavailableStatus.has((error as {status: number}).status)
-  );
+  if (typeof error !== 'object' || error === null || !('status' in error)) return false;
+  return typeof error.status === 'number' && unavailableStatus.has(error.status);
 }
 
 export function createManagerLiveClient(options: ManagerLiveClientOptions) {
@@ -190,7 +188,12 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
     acknowledged = false;
     staleAll();
     armHandshake();
-    const resources = store.resources().filter(resource => topics.has(resource.topic));
+    const resources = EffectArrayPipe(store.resources(), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (resource, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && topics.has(resource.topic),
+      ),
+    );
     pendingGeneration = ++generation;
     send({type: 'subscribe', version: MANAGER_LIVE_VERSION, generation: pendingGeneration, resources});
   };
@@ -215,10 +218,10 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
       if (epoch) return disconnect();
       epoch = frame.epoch;
       topics = new Set(frame.topics);
-      snapshotTopics = new Set(Arr.filter(frame.snapshots ?? [], topic => topics.has(topic)));
+      snapshotTopics = new Set(EffectArray.filter(frame.snapshots ?? [], topic => topics.has(topic)));
       heartbeatMilliseconds = Math.max(1_000, Math.min(60_000, frame.heartbeatMilliseconds));
       for (const entry of store.values()) if (!supported(entry)) update(entry, 'unsupported');
-      if (store.values().length && store.values().every(entry => !supported(entry))) {
+      if (store.values().length && EffectArray.every(store.values(), entry => !supported(entry))) {
         if (handshakeTimer) clearTimeout(handshakeTimer);
         handshakeTimer = undefined;
         setConnection('unsupported');
@@ -235,7 +238,7 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
       sequence = frame.startingSequence;
       attempt = 0;
       setConnection('connected');
-      const unavailable = new Set((frame.unavailable ?? []).map(managerLiveResourceKey));
+      const unavailable = new Set(EffectArray.map(frame.unavailable ?? [], managerLiveResourceKey));
       for (const entry of store.values()) {
         if (!supported(entry)) continue;
         entry.available = !unavailable.has(entry.key);
@@ -383,19 +386,20 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
         if (store.remove(entry, listener) && epoch && socket?.readyState === 1) subscribeFrame();
       };
     },
-    getSnapshot<T>(resource: ManagerLiveResource): ManagerLiveSnapshot<T> {
-      return this.getQuerySnapshot<T>(resource, '');
+    getSnapshot(resource: ManagerLiveResource): ManagerLiveSnapshot {
+      return this.getQuerySnapshot(resource, '');
     },
-    getQuerySnapshot<T>(resource: ManagerLiveResource, queryKey: string): ManagerLiveSnapshot<T> {
-      return (store.get(resource, queryKey)?.snapshot ?? emptySnapshot) as ManagerLiveSnapshot<T>;
+    getQuerySnapshot(resource: ManagerLiveResource, queryKey: string): ManagerLiveSnapshot {
+      return store.get(resource, queryKey)?.snapshot ?? emptySnapshot;
     },
     invalidate(resource: ManagerLiveResource, queryKey?: string) {
-      if (Arr.some(store.queries(resource), entry => streams(entry) && entry.available)) return subscribeFrame();
+      if (EffectArray.some(store.queries(resource), entry => streams(entry) && entry.available))
+        return subscribeFrame();
       for (const entry of queryKey === undefined ? store.queries(resource) : [store.get(resource, queryKey)])
         if (entry) dirty(entry);
     },
     revalidate() {
-      if (Arr.some(store.values(), entry => streams(entry) && entry.available)) return subscribeFrame();
+      if (EffectArray.some(store.values(), entry => streams(entry) && entry.available)) return subscribeFrame();
       for (const entry of store.values()) dirty(entry);
     },
     getConnectionSnapshot: () => connection,

@@ -396,7 +396,13 @@ describe('Effect file lock', () => {
             .readFileString(lockPath)
             .pipe(
               Effect.map(content =>
-                String((JSON.parse(content) as {readonly processStartIdentity?: unknown}).processStartIdentity),
+                String(
+                  Schema.decodeUnknownSync(
+                    Schema.StructWithRest(Schema.Struct({processStartIdentity: Schema.optional(Schema.Unknown)}), [
+                      Schema.Record(Schema.String, Schema.Unknown),
+                    ]),
+                  )(JSON.parse(content)).processStartIdentity,
+                ),
               ),
             ),
         ).pipe(

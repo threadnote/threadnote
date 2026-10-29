@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '@threadnote/graph/fact/budget';
@@ -17,6 +18,9 @@ import {
 import {overlayFallbackDescription} from '@threadnote/graph/indexer/incremental';
 import {PERSISTENT_MATERIALIZATION_TRANSACTION_FACT_BYTES} from '@threadnote/graph/indexer/materialization';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 describe('incremental rewrite work', () => {
   it('matches one governed persistent materialization transaction', () => {
@@ -43,14 +47,20 @@ describe('incremental rewrite work', () => {
     );
     fc.assert(
       fc.property(batches, value => {
-        const batchBytes = value.map(batch => batch.reduce((total, fact) => total + fact.bytes, 0));
-        const factBytes = value.flatMap(batch => batch.map(fact => fact.bytes));
+        const batchBytes = EffectArray.map(value, batch =>
+          EffectArray.reduce(batch, 0, (total, fact) => total + fact.bytes),
+        );
+        const factBytes = EffectArray.flatMap(value, batch => EffectArray.map(batch, fact => fact.bytes));
         const expected =
           value.length >= 1 &&
           value.length <= CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BATCHES &&
-          value.every((batch, index) => batch.length > 0 && batchBytes[index] <= maximumBatchBytes) &&
-          factBytes.every(bytes => Number.isSafeInteger(bytes) && bytes > 0 && bytes <= maximumBatchBytes) &&
-          batchBytes.reduce((total, bytes) => total + bytes, 0) <= CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES;
+          EffectArray.every(value, (batch, index) => batch.length > 0 && batchBytes[index] <= maximumBatchBytes) &&
+          EffectArray.every(
+            factBytes,
+            bytes => Number.isSafeInteger(bytes) && bytes > 0 && bytes <= maximumBatchBytes,
+          ) &&
+          EffectArray.reduce(batchBytes, 0, (total, bytes) => total + bytes) <=
+            CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES;
         expect(codeGraphIncrementalFactBatchesFitBudget(value)).toBe(expected);
       }),
       {numRuns: 250},
@@ -105,7 +115,11 @@ describe('incremental rewrite work', () => {
 
     expect(
       assessCodeGraphIncrementalFactBytes({
-        aggregateBytes: [...addedFactBytes, ...deletedFactBytes].reduce((total, bytes) => total + bytes, 0),
+        aggregateBytes: EffectArray.reduce(
+          [...addedFactBytes, ...deletedFactBytes],
+          0,
+          (total, bytes) => total + bytes,
+        ),
         factBytes: [...addedFactBytes, ...deletedFactBytes],
       }),
     ).toEqual({
@@ -118,14 +132,20 @@ describe('incremental rewrite work', () => {
   it('plans carried and cumulative paths as a deterministic bounded set union', () => {
     const paths = fc
       .uniqueArray(fc.integer({max: 400, min: 0}), {maxLength: 80})
-      .map(values => values.map(value => `src/file-${value}.ts`));
+      .map(values => EffectArray.map(values, value => `src/file-${value}.ts`));
     fc.assert(
       fc.property(paths, paths, (prior, fresh) => {
         const plan = planCodeGraphIncrementalFoldForwardPaths(prior, fresh);
         const expectedCumulative = [...new Set([...prior, ...fresh])].sort();
         expect(plan?.cumulativePaths).toEqual(expectedCumulative);
-        expect(plan?.carriedPaths).toEqual(prior.filter(path => !fresh.includes(path)).sort());
-        expect(plan?.carriedPaths.every(path => !fresh.includes(path))).toBe(true);
+        expect(plan?.carriedPaths).toEqual(EffectArray.filter(prior, path => !fresh.includes(path)).sort());
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(plan?.carriedPaths), __effectArrayReceiver =>
+              EffectArray.every(__effectArrayReceiver, path => !fresh.includes(path)),
+            ),
+          ),
+        ).toBe(true);
         expect(planCodeGraphIncrementalFoldForwardPaths(prior, fresh)).toEqual(plan);
       }),
       {numRuns: 250},
@@ -140,8 +160,8 @@ describe('incremental rewrite work', () => {
 
   it('measures final fact bytes and every row presented to incremental staging', () => {
     const file: CodeGraphInventoryFile = {
-      blobId: 'a'.repeat(40),
-      contentHash: 'b'.repeat(64),
+      blobId: Effect.pipe('a', EffectString.repeat(40)),
+      contentHash: Effect.pipe('b', EffectString.repeat(64)),
       language: 'typescript',
       mode: '100644',
       path: 'src/value.ts',

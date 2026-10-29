@@ -11,6 +11,8 @@ import {makeGraphShareRegistryReader} from '@threadnote/graph/sharing/registry/r
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, FetchHttpClient.layer);
 
@@ -25,7 +27,7 @@ effectIt.effect('reads a profile manifest only by exact digest with bounded veri
         canonicalRemote: 'github.com/acme/repository',
         organization: 'acme',
         publisherKeyFingerprint: sha256Digest('publisher'),
-        repositoryId: 'a'.repeat(64),
+        repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
       }),
     );
     let mode: 'valid' | 'oversized' | 'wrong-header' | 'wrong-media' | 'tampered' = 'valid';
@@ -61,8 +63,8 @@ effectIt.effect('reads a profile manifest only by exact digest with bounded veri
     );
     for (const invalid of [
       'latest',
-      'tn-frontier-' + 'a'.repeat(40),
-      artifact.manifestDigest.slice('sha256:'.length),
+      'tn-frontier-' + Effect2.pipe('a', EffectString.repeat(40)),
+      Effect2.pipe(artifact.manifestDigest, EffectString.slice('sha256:'.length)),
       artifact.manifestDigest + '?repository=other',
       '../foreign',
     ]) {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -5,6 +6,8 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Code Memory Link agent trial ledger lock', () => {
   effectIt.effect('holds one canonical lock across a delayed external execution and receipt write', () =>
@@ -21,11 +24,20 @@ describe('Code Memory Link agent trial ledger lock', () => {
         {concurrency: 2},
       );
 
-      expect(results.map(result => result.exitCode)).toEqual([0, 0]);
+      expect(EffectArray.map(results, result => result.exitCode)).toEqual([0, 0]);
       expect(
-        (yield* fs.readDirectory(path.join(root, 'external-executions'))).filter(name => name.endsWith('.marker')),
+        EffectArray.filter(
+          yield* fs.readDirectory(path.join(root, 'external-executions')),
+          __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.marker')))(__effectArrayValue),
+        ),
       ).toHaveLength(1);
-      expect((yield* fs.readFileString(path.join(root, 'trials.jsonl'))).trim().split(/\r?\n/u)).toHaveLength(1);
+      expect(
+        Effect2.pipe(
+          yield* fs.readFileString(path.join(root, 'trials.jsonl')),
+          EffectString.trim,
+          EffectString.split(/\r?\n/u),
+        ),
+      ).toHaveLength(1);
       expect(yield* fs.exists(path.join(root, 'trials.jsonl.lock'))).toBe(false);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );

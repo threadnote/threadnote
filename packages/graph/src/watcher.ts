@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   Cause,
   Clock,
@@ -105,6 +106,9 @@ import {
 import {resolveCodeGraphWatchOptions, sameCodeGraphWatchRoute} from './refresh/watch_route.js';
 import {makeKeyedBackgroundScheduler} from './watcher_resume_scheduler.js';
 import {makeCodeGraphWatchReconciliation} from './watcher_reconciliation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export {makeCodeGraphWatchReconciliation};
 
 export interface CodeGraphWatchOptions {
@@ -277,12 +281,14 @@ export interface CodeGraphAutomaticRecoveryIdentity extends Partial<RepositoryId
   readonly worktreeId: string;
 }
 
-export interface CodeGraphAutomaticRecoveryDependencies {
+export interface CodeGraphAutomaticRecoveryDependencies<
+  Identity extends CodeGraphAutomaticRecoveryIdentity = CodeGraphAutomaticRecoveryIdentity,
+> {
   readonly coordinator: CodeGraphAutomaticRecoveryCoordinatorShape;
-  readonly resolveIdentity: (cwd: string) => Effect.Effect<CodeGraphAutomaticRecoveryIdentity, unknown>;
+  readonly resolveIdentity: (cwd: string) => Effect.Effect<Identity, unknown>;
   readonly routineMaintenance: (
     options: CodeGraphWatchOptions,
-    identity: CodeGraphAutomaticRecoveryIdentity,
+    identity: Identity,
   ) => Effect.Effect<CodeGraphRoutineMaintenanceResult, unknown>;
 }
 
@@ -331,10 +337,13 @@ interface RefreshExecutionMetrics {
   readonly highWater: number;
 }
 
-class CodeGraphWatcherError extends Schema.TaggedError<CodeGraphWatcherError>()('CodeGraphWatcherError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class CodeGraphWatcherError extends Schema.TaggedError<CodeGraphWatcherError, {readonly brand: unique symbol}>()(
+  'CodeGraphWatcherError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const DEFAULT_IDLE_TIMEOUT_MILLISECONDS = 30 * 60_000;
 const DEFAULT_MAXIMUM_WATCHERS = 32;
@@ -802,10 +811,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                     opportunity: 'critical-error',
                     targets: [
                       {
-                        // This production dependency is wired directly to
-                        // resolveRepositoryIdentity above; test seams may retain
-                        // the intentionally smaller recovery identity shape.
-                        anchorIdentity: identity as RepositoryIdentity,
+                        anchorIdentity: identity,
                         ...(target.scopeId === undefined ? {} : {anchorScopeId: target.scopeId}),
                         checkoutId: target.layout.checkoutId,
                         databasePath: target.layout.databasePath,
@@ -1330,7 +1336,7 @@ export const makeCodeGraphWatcher = Effect.fn('codeGraph.makeWatcher')(function*
     scheduleRefresh(options, false).pipe(Effect.flatMap(decision => Deferred.await(decision.completion)));
   const cancelWatches = (entries: readonly [string, ActiveWatch][]) =>
     Effect.gen(function* () {
-      yield* removeStatuses(entries.map(([key]) => key));
+      yield* removeStatuses(EffectArray.map(entries, ([key]) => key));
       yield* Effect.forEach(entries, ([, entry]) => entry.cancel, {concurrency: 1, discard: true});
     });
   const startSessionWatch = (options: CodeGraphWatchOptions) =>
@@ -1486,8 +1492,10 @@ function withCodeGraphWatcherScopeKey(options: CodeGraphWatchOptions): CodeGraph
 }
 
 /** @internal Keep identity resolution inside the already-detached failure hook. */
-export const requestCodeGraphAutomaticRecovery = Effect.fn('codeGraph.requestAutomaticRecovery')(function* (
-  dependencies: CodeGraphAutomaticRecoveryDependencies,
+export const requestCodeGraphAutomaticRecovery = Effect.fn('codeGraph.requestAutomaticRecovery')(function* <
+  Identity extends CodeGraphAutomaticRecoveryIdentity,
+>(
+  dependencies: CodeGraphAutomaticRecoveryDependencies<Identity>,
   options: CodeGraphWatchOptions,
   failure: CodeGraphRefreshFailure,
 ) {
@@ -1669,10 +1677,14 @@ export function prewarmCandidatesFromRefOutput(output: string, currentCommit: st
   const limit = Number.isSafeInteger(maximum) && maximum > 0 ? Math.min(maximum, 2) : 2;
   return [
     ...new Set(
-      output
-        .split(/\r?\n/u)
-        .map(value => value.trim().toLowerCase())
-        .filter(value => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(value) && value !== currentCommit.toLowerCase()),
+      EffectArray.filter(
+        EffectArray.map(Effect2.pipe(output, EffectString.split(/\r?\n/u)), value =>
+          Effect2.pipe(value, EffectString.trim, EffectString.toLowerCase),
+        ),
+        value =>
+          /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(value) &&
+          value !== Effect2.pipe(currentCommit, EffectString.toLowerCase),
+      ),
     ),
   ].slice(0, limit);
 }
@@ -1858,7 +1870,8 @@ export function codeGraphCachedOverlayAssessmentAllowsBackgroundRefresh(
   readySnapshotId: string,
   statuses: readonly Pick<ObservedCodeGraphBuildStatus, 'materialization' | 'result' | 'state' | 'timestamps'>[],
 ): boolean {
-  const matching = statuses.filter(
+  const matching = EffectArray.filter(
+    statuses,
     status => status.state === 'completed' && status.result?.snapshotId === readySnapshotId,
   );
   const latest = matching.sort((left, right) => {
@@ -1905,28 +1918,35 @@ export const makeCodeGraphWatchIgnorePolicy = Effect.fn('codeGraph.makeWatchIgno
   return {
     accepts: (watchPath: string) =>
       Effect.gen(function* () {
-        const repositoryPath = path.relative(repoRoot, path.join(watchCwd, watchPath)).split(path.sep).join('/');
+        const repositoryPath = EffectArray.join(
+          Effect2.pipe(path.relative(repoRoot, path.join(watchCwd, watchPath)), EffectString.split(path.sep)),
+          '/',
+        );
         if (isOverlayAdmissionControlPath(repositoryPath)) {
           yield* reload;
           return true;
         }
         const current = yield* Ref.get(state);
         if (isIgnoredByThreadnote(repositoryPath, current.rules)) return false;
-        const prefixes = repositoryPath.split('/').map((_, index, segments) => segments.slice(0, index + 1).join('/'));
-        if (prefixes.some(prefix => current.gitDecisions.get(prefix) === true)) return false;
-        const unknown = prefixes.filter(prefix => !current.gitDecisions.has(prefix));
+        const prefixes = Effect2.pipe(repositoryPath, EffectString.split('/'), (segments: string[]) =>
+          EffectArray.map(segments, (_, index) => EffectArray.join(segments.slice(0, index + 1), '/')),
+        );
+        if (EffectArray.some(prefixes, prefix => current.gitDecisions.get(prefix) === true)) return false;
+        const unknown = EffectArray.filter(prefixes, prefix => !current.gitDecisions.has(prefix));
         if (unknown.length === 0) return true;
         const checked = yield* runCommandEffect(
           'git',
           ['-C', repoRoot, '-c', 'core.ignorecase=false', 'check-ignore', '--no-index', '-z', '--stdin'],
           {
             allowFailure: true,
-            input: new TextEncoder().encode(`${unknown.join('\0')}\0`),
+            input: new TextEncoder().encode(`${EffectArray.join(unknown, '\0')}\0`),
             maxOutputBytes: 0,
             timeoutMs: 0,
           },
         ).pipe(
-          Effect.map(result => new Set(result.stdout.split('\0').filter(Boolean))),
+          Effect.map(
+            result => new Set(EffectArray.filter(Effect2.pipe(result.stdout, EffectString.split('\0')), Boolean)),
+          ),
           Effect.orElseSucceed(() => new Set<string>()),
         );
         yield* Ref.update(state, previous => {
@@ -1939,7 +1959,7 @@ export const makeCodeGraphWatchIgnorePolicy = Effect.fn('codeGraph.makeWatchIgno
           }
           return {...previous, gitDecisions};
         });
-        return !prefixes.some(prefix => checked.has(prefix));
+        return !EffectArray.some(prefixes, prefix => checked.has(prefix));
       }).pipe(Effect.provideService(CommandExecutor, command), Effect.provideService(SystemInfo, system)),
     reload,
   } satisfies CodeGraphWatchIgnorePolicy;
@@ -1948,13 +1968,19 @@ export const makeCodeGraphWatchIgnorePolicy = Effect.fn('codeGraph.makeWatchIgno
 function relevantWatchPath(path: Path.Path, cwd: string, eventPath: string): string | undefined {
   const absolute = path.isAbsolute(eventPath) ? eventPath : path.join(cwd, eventPath);
   const relative = path.relative(cwd, absolute);
-  if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+  if (
+    relative === '' ||
+    relative === '..' ||
+    Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)) ||
+    path.isAbsolute(relative)
+  ) {
     return undefined;
   }
-  const segments = relative.split(path.sep);
-  return segments.some(
+  const segments = Effect2.pipe(relative, EffectString.split(path.sep));
+  return EffectArray.some(
+    segments,
     segment =>
-      segment.startsWith('.') &&
+      Effect2.pipe(segment, EffectString.startsWith('.')) &&
       segment !== '.gitignore' &&
       segment !== '.threadnoteignore' &&
       segment !== '.threadnoteignore.local',

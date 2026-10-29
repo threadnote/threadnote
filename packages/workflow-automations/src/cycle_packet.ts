@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
 import {
@@ -6,11 +7,15 @@ import {
   nativeCycleHasControl,
   type NativeCycleState,
 } from './cycle.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const text = (maximum: number) =>
   Schema.String.check(
     Schema.makeFilter(value =>
-      !value.trim() || new TextEncoder().encode(value).byteLength > maximum || nativeCycleHasControl(value)
+      !Effect.pipe(value, EffectString.trim) ||
+      new TextEncoder().encode(value).byteLength > maximum ||
+      nativeCycleHasControl(value)
         ? 'Expected bounded single-line text.'
         : undefined,
     ),
@@ -82,8 +87,8 @@ export function validateNativeCycleFeaturePublication(
   if (
     receipt.currentHead !== expected.currentHead ||
     receipt.team !== expected.team ||
-    !receipt.uri.startsWith('threadnote://') ||
-    !receipt.uri.includes(`/memories/shared/${encodeURIComponent(expected.team)}/`)
+    !Effect.pipe(receipt.uri, EffectString.startsWith('threadnote://')) ||
+    !Effect.pipe(receipt.uri, EffectString.includes(`/memories/shared/${encodeURIComponent(expected.team)}/`))
   )
     fail('Publication does not match the exact source head and selected team.');
   return true;
@@ -118,7 +123,7 @@ export function nativeCyclePacket(
   input: unknown,
 ): Readonly<Record<string, unknown>> {
   const state = decodeNativeCycleState(value),
-    phase = state.plan.phases.find(item => item.id === phaseId);
+    phase = EffectOption.getOrUndefined(EffectArray.findFirst(state.plan.phases, item => item.id === phaseId));
   if (!phase) return fail('Unknown phase.');
   let options: NativeCyclePacketOptions;
   try {
@@ -128,12 +133,16 @@ export function nativeCyclePacket(
   }
   if (
     !nativeCycleAbsolutePath(options.graphProof.repositoryRoot) ||
-    options.anchors.some(
+    EffectArray.some(
+      options.anchors,
       anchor =>
-        anchor.path.startsWith('/') ||
+        Effect.pipe(anchor.path, EffectString.startsWith('/')) ||
         /[\\:]/u.test(anchor.path) ||
         nativeCycleHasControl(anchor.path) ||
-        anchor.path.split('/').some(part => !part || part === '.' || part === '..'),
+        EffectArray.some(
+          Effect.pipe(anchor.path, EffectString.split('/')),
+          part => !part || part === '.' || part === '..',
+        ),
     )
   )
     return {available: false, reason: 'graph-or-anchor-proof-unavailable'};
@@ -144,7 +153,7 @@ export function nativeCyclePacket(
     delivery: state.plan.delivery,
     source: state.plan.source,
     dependsOn: phase.dependsOn,
-    dependencies: phase.dependsOn.map(id => ({
+    dependencies: EffectArray.map(phase.dependsOn, id => ({
       phaseId: id,
       phaseHash: state.phases[id].phaseHash,
       head: state.phases[id].head,

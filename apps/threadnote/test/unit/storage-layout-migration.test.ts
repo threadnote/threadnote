@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {describe} from 'vitest';
 import {sha256FileHex, sha256Hex} from '@threadnote/platform/digest';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -14,6 +15,8 @@ import {
   StorageLayoutMigrationConflict,
 } from '@threadnote/threadnote/migration/layout';
 import {loadRecallIndex} from '@threadnote/recall/index';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Threadnote storage layout migration', () => {
   it.effect('ignores empty beta layout scaffolds, including after a completed migration', () =>
@@ -266,7 +269,7 @@ describe('Threadnote storage layout migration', () => {
         });
 
         expect(indexingTotals).toEqual([4]);
-        expect(refreshed.map(candidate => candidate.uri)).toEqual([
+        expect(EffectArray.map(refreshed, candidate => candidate.uri)).toEqual([
           'threadnote://resources/repos/threadnote/first.md',
           laterUri,
           'threadnote://resources/repos/threadnote/migrated.md',
@@ -418,9 +421,12 @@ describe('Threadnote storage layout migration', () => {
           accounts: 1,
           action: 'resumed',
         });
-        const receipt = JSON.parse(
-          yield* fs.readFileString(path.join(home, 'migration', `${STORAGE_LAYOUT_MIGRATION_ID}.json`)),
-        ) as {readonly accounts: readonly {readonly treeSha256: string}[]; readonly status: string};
+        const receipt = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            accounts: Schema.Array(Schema.Struct({treeSha256: Schema.String})),
+            status: Schema.Literals(['completed', 'pending']),
+          }),
+        )(JSON.parse(yield* fs.readFileString(path.join(home, 'migration', `${STORAGE_LAYOUT_MIGRATION_ID}.json`))));
         expect(receipt.status).toBe('completed');
         expect(receipt.accounts[0]?.treeSha256).toBe(filteredTreeSha256);
         expect(yield* fs.readFileString(metadata)).toBe(metadataContent);
@@ -439,7 +445,7 @@ describe('Threadnote storage layout migration', () => {
         yield* fs.writeFileString(
           path.join(home, 'migration', `${STORAGE_LAYOUT_MIGRATION_ID}.json`),
           `${JSON.stringify({
-            accounts: [{name: 'local', treeSha256: 'a'.repeat(64)}],
+            accounts: [{name: 'local', treeSha256: Effect2.pipe('a', EffectString.repeat(64))}],
             id: STORAGE_LAYOUT_MIGRATION_ID,
             sourceLayoutVersion: 1,
             status: 'pending',
@@ -472,7 +478,7 @@ describe('Threadnote storage layout migration', () => {
         yield* fs.writeFileString(
           path.join(home, 'migration', `${STORAGE_LAYOUT_MIGRATION_ID}.json`),
           `${JSON.stringify({
-            accounts: [{name: 'local', treeSha256: 'a'.repeat(64)}],
+            accounts: [{name: 'local', treeSha256: Effect2.pipe('a', EffectString.repeat(64))}],
             id: STORAGE_LAYOUT_MIGRATION_ID,
             sourceLayoutVersion: 1,
             status: 'pending',
@@ -483,9 +489,9 @@ describe('Threadnote storage layout migration', () => {
 
         const failure = yield* migrateThreadnoteStorageLayout({apply: true, home}).pipe(Effect.flip);
         expect(failure).toBeInstanceOf(StorageLayoutMigrationConflict);
-        const receipt = JSON.parse(
-          yield* fs.readFileString(path.join(home, 'migration', `${STORAGE_LAYOUT_MIGRATION_ID}.json`)),
-        ) as {readonly status: string};
+        const receipt = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({status: Schema.Literals(['completed', 'pending'])}),
+        )(JSON.parse(yield* fs.readFileString(path.join(home, 'migration', `${STORAGE_LAYOUT_MIGRATION_ID}.json`))));
         expect(receipt.status).toBe('pending');
         expect(yield* isThreadnoteStorageLayoutMigrationPending({home})).toBe(true);
       }),

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {createRepositoryFactAttributor} from '../extractor.js';
 import {finalCodeGraphFactBatches} from '../fact/budget.js';
@@ -49,6 +51,8 @@ import {
   workspaceTransitionFileEvidence,
 } from '../workspace/compatibility.js';
 import type {CodeGraphMembershipCandidateWork} from '../incremental/work.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   'codeGraph.assessResolutionCandidateIncrementalClosure',
@@ -105,13 +109,13 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
     loadPage: (files: readonly CodeGraphInventoryFile[]) =>
       loadCachedFacts(input.store, input.layout.databasePath, files, input.languagePacks).pipe(
         Effect.map(loaded => {
-          const rawFacts = files.flatMap(file => {
+          const rawFacts = EffectArray.flatMap(files, file => {
             const facts = loaded.facts.get(file.path);
             return facts === undefined ? [] : [input.languagePacks.postprocessFile(file, facts)];
           });
           return {
             bytesByPath: loaded.bytesByPath,
-            facts: new Map(attributeBaseFacts(rawFacts).map(facts => [facts.path, facts])),
+            facts: new Map(EffectArray.map(attributeBaseFacts(rawFacts), facts => [facts.path, facts])),
           };
         }),
       ),
@@ -120,23 +124,35 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
 
   const selectedPaths = new Set([
     ...scan.paths,
-    ...input.currentChangedFiles.map(file => file.path),
-    ...(input.requiredFiles ?? []).map(file => file.path),
+    ...EffectArray.map(input.currentChangedFiles, file => file.path),
+    ...EffectArray.map(input.requiredFiles ?? [], file => file.path),
   ]);
   const stagedAliasIdentities = new Set(
-    [...scan.reexports.filter(reexport => selectedPaths.has(reexport.sourcePath)), ...input.candidateReexports].flatMap(
-      reexport => reexport.aliases.map(alias => `${alias.resolutionDomain}\0${alias.key}`),
+    EffectArray.flatMap(
+      [
+        ...EffectArrayPipe(scan.reexports, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (reexport, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues && selectedPaths.has(reexport.sourcePath),
+          ),
+        ),
+        ...input.candidateReexports,
+      ],
+      reexport => EffectArray.map(reexport.aliases, alias => `${alias.resolutionDomain}\0${alias.key}`),
     ),
   );
-  if ([...scan.directAliasSymbolConflictIdentities].some(identity => stagedAliasIdentities.has(identity))) {
+  if (
+    EffectArray.some([...scan.directAliasSymbolConflictIdentities], identity => stagedAliasIdentities.has(identity))
+  ) {
     return {mode: 'fallback', reason: 'project-closure-incomplete'} satisfies IncrementalOverlayPreassessment;
   }
 
-  const currentByPath = new Map(input.currentFiles.map(file => [file.path, file]));
-  const selectedFiles = [...selectedPaths]
-    .sort(compareCodeUnits)
-    .map(path => currentByPath.get(path))
-    .filter((file): file is CodeGraphInventoryFile => file !== undefined);
+  const currentByPath = new Map(EffectArray.map(input.currentFiles, file => [file.path, file]));
+  const selectedFiles = EffectArray.filter(
+    EffectArray.map([...selectedPaths].sort(compareCodeUnits), path => currentByPath.get(path)),
+    (file): file is CodeGraphInventoryFile => file !== undefined,
+  );
   if (selectedFiles.length !== selectedPaths.size) {
     return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
   }
@@ -159,11 +175,14 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
 }) {
   const evidence = workspaceMembershipEvidence({...input, baseWorkspace: input.committedWorkspace});
   if (!evidence) return {mode: 'fallback', reason: 'workspace-changed'} as const;
-  const baseByPath = new Map(input.baseFiles.map(file => [file.path, file]));
-  const currentByPath = new Map(input.currentFiles.map(file => [file.path, file]));
-  const deletedPaths = input.baseFiles.filter(file => !currentByPath.has(file.path)).map(file => file.path);
+  const baseByPath = new Map(EffectArray.map(input.baseFiles, file => [file.path, file]));
+  const currentByPath = new Map(EffectArray.map(input.currentFiles, file => [file.path, file]));
+  const deletedPaths = EffectArray.map(
+    EffectArray.filter(input.baseFiles, file => !currentByPath.has(file.path)),
+    file => file.path,
+  );
   if (
-    new Set([...input.currentChangedFiles.map(file => file.path), ...deletedPaths]).size >
+    new Set([...EffectArray.map(input.currentChangedFiles, file => file.path), ...deletedPaths]).size >
     PROJECT_INCREMENTAL_CLOSURE_MAX_FILES
   )
     return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
@@ -188,16 +207,17 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
         return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
     }
   }
-  const unionFiles = [...new Set([...baseByPath.keys(), ...currentByPath.keys()])]
-    .sort(compareCodeUnits)
-    .map(path => baseByPath.get(path) ?? currentByPath.get(path)!);
+  const unionFiles = EffectArray.map(
+    [...new Set([...baseByPath.keys(), ...currentByPath.keys()])].sort(compareCodeUnits),
+    path => baseByPath.get(path) ?? currentByPath.get(path)!,
+  );
   const distinctCurrent = (path: string) => {
     const before = baseByPath.get(path);
     const after = currentByPath.get(path);
     return after !== undefined && (before === undefined || !sameWorkspaceInventoryFile(before, after));
   };
   const bytesByPath = new Map(
-    unionFiles.map(file => [
+    EffectArray.map(unionFiles, file => [
       file.path,
       (baseMetadata.bytesByPath.get(file.path) ?? 0) +
         (distinctCurrent(file.path) ? currentMetadata.bytesByPath.get(file.path)! : 0),
@@ -207,8 +227,13 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
   const completePlan = planProjectResolutionCandidateScan({files: unionFiles, bytesByPath});
   if (completePlan.mode === 'fallback')
     return resolutionCandidateScanFallback(completePlan, input.currentChangedFiles.length);
-  const scannedFiles = unionFiles.filter(file => !evidence.omittedPaths.has(file.path));
-  if (scannedFiles.some(file => bytesByPath.get(file.path)! > PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES))
+  const scannedFiles = EffectArray.filter(unionFiles, file => !evidence.omittedPaths.has(file.path));
+  if (
+    EffectArray.some(
+      scannedFiles,
+      file => bytesByPath.get(file.path)! > PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES,
+    )
+  )
     return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
   const plan = planProjectResolutionCandidateScan({files: scannedFiles, bytesByPath});
   if (plan.mode === 'fallback') return resolutionCandidateScanFallback(plan, input.currentChangedFiles.length);
@@ -226,7 +251,7 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
   }
   const attributeBase = createFactsAttributor(input.baseFiles, input.committedWorkspace);
   const attributeCurrent = createFactsAttributor(input.currentFiles, input.currentWorkspace);
-  const requiredPaths = new Set([...input.currentChangedFiles.map(file => file.path), ...deletedPaths]);
+  const requiredPaths = new Set([...EffectArray.map(input.currentChangedFiles, file => file.path), ...deletedPaths]);
   const lookupKeys = new Map<string, ProjectResolutionLookupKey>();
   let evidenceComplete = true;
   let rawBaseFiles = 0;
@@ -262,8 +287,12 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
     },
     loadPage: files =>
       Effect.gen(function* () {
-        const beforeFiles = files.flatMap(file => (baseByPath.has(file.path) ? [baseByPath.get(file.path)!] : []));
-        const afterFiles = files.flatMap(file => (distinctCurrent(file.path) ? [currentByPath.get(file.path)!] : []));
+        const beforeFiles = EffectArray.flatMap(files, file =>
+          baseByPath.has(file.path) ? [baseByPath.get(file.path)!] : [],
+        );
+        const afterFiles = EffectArray.flatMap(files, file =>
+          distinctCurrent(file.path) ? [currentByPath.get(file.path)!] : [],
+        );
         const [before, after] = yield* Effect.all(
           [
             loadCachedFacts(input.store, input.layout.databasePath, beforeFiles, input.languagePacks),
@@ -300,11 +329,13 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
           if (newFile && newProof) newEvidence.set(file.path, newProof);
           if ((oldFile && !oldProof) || (newFile && !newProof)) evidenceComplete = false;
           if (
-            [...(oldFacts.references ?? []), ...(newFacts.references ?? [])].some(
+            EffectArray.some(
+              [...(oldFacts.references ?? []), ...(newFacts.references ?? [])],
               reference =>
                 isStaticReexportReference(reference) &&
                 (reference.resolutionDomain !== 'typescript' ||
-                  [...reference.lookupTiers.flat(), ...(reference.aliasLookupKeys ?? [])].some(
+                  EffectArray.some(
+                    [...reference.lookupTiers.flat(), ...(reference.aliasLookupKeys ?? [])],
                     key => parseTypeScriptPathNameLookupKey(key).length !== 1,
                   )),
             )
@@ -356,9 +387,9 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
   }
   if (sourceBytes > PROJECT_INCREMENTAL_CLOSURE_MAX_SOURCE_BYTES)
     return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
-  const selectedFiles = [...requiredPaths]
-    .sort(compareCodeUnits)
-    .flatMap(path => (currentByPath.has(path) ? [currentByPath.get(path)!] : []));
+  const selectedFiles = EffectArray.flatMap([...requiredPaths].sort(compareCodeUnits), path =>
+    currentByPath.has(path) ? [currentByPath.get(path)!] : [],
+  );
   const candidateWork: CodeGraphMembershipCandidateWork = {
     metadataFiles: unionFiles.length,
     metadataFactBytes: completePlan.factBytes,
@@ -369,7 +400,11 @@ export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
     rawBaseBytes,
     rawCurrentBytes,
     selectedReloadFiles: selectedFiles.length,
-    selectedReloadBytes: selectedFiles.reduce((sum, file) => sum + currentMetadata.bytesByPath.get(file.path)!, 0),
+    selectedReloadBytes: EffectArray.reduce(
+      selectedFiles,
+      0,
+      (sum, file) => sum + currentMetadata.bytesByPath.get(file.path)!,
+    ),
     projectionObservations: scan.projectionObservations ?? 0,
     projectionObservedKeyBytes: scan.projectionObservedKeyBytes ?? 0,
   };
@@ -409,7 +444,7 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
         PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
       );
     }
-    const sourceBytes = input.selectedFiles.reduce((total, file) => total + file.size, 0);
+    const sourceBytes = EffectArray.reduce(input.selectedFiles, 0, (total, file) => total + file.size);
     if (sourceBytes > PROJECT_INCREMENTAL_CLOSURE_MAX_SOURCE_BYTES) {
       return projectClosureBoundFallback(
         changedFiles,
@@ -448,10 +483,10 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
       input.selectedFiles,
       input.languagePacks,
     );
-    if (input.selectedFiles.some(file => !loaded.facts.has(file.path))) {
+    if (EffectArray.some(input.selectedFiles, file => !loaded.facts.has(file.path))) {
       return {mode: 'fallback', reason: 'cache-incomplete'} satisfies IncrementalOverlayPreassessment;
     }
-    const rawFacts = input.selectedFiles.map(file =>
+    const rawFacts = EffectArray.map(input.selectedFiles, file =>
       input.languagePacks.postprocessFile(file, loaded.facts.get(file.path)!),
     );
     const attributedFacts = createFactsAttributor(input.currentFiles, input.currentWorkspace)(rawFacts);
@@ -460,7 +495,7 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
       input.scan.affectedAliasLookupIdentities,
       input.scan.reexports,
       input.scan.directAliasSymbolConflictIdentities,
-      new Set(input.selectedFiles.map(file => file.path)),
+      new Set(EffectArray.map(input.selectedFiles, file => file.path)),
     );
     if (facts === undefined) {
       return {mode: 'fallback', reason: 'project-closure-incomplete'} satisfies IncrementalOverlayPreassessment;
@@ -534,10 +569,14 @@ function projectClosureBoundFallback(
 }
 
 export function reusableReexportSeeds(facts: readonly CodeGraphFileFacts[]): readonly CodeGraphReusableReexportSeed[] {
-  const seeds = facts.flatMap(file =>
-    (file.references ?? []).flatMap(reference =>
+  const seeds = EffectArray.flatMap(facts, file =>
+    EffectArray.flatMap(file.references ?? [], reference =>
       reference.resolutionDomain === 'typescript' && isPersistedReexportEnrichableRelation(reference.relation)
-        ? reference.lookupTiers.flatMap(tier => tier.flatMap(parseTypeScriptPathNameLookupKey))
+        ? EffectArray.flatMap(reference.lookupTiers, tier =>
+            EffectArray.flatMap(tier, (__effectFlatMapValue, __effectFlatMapIndex) =>
+              __effectFlatMapIndex in tier ? parseTypeScriptPathNameLookupKey(__effectFlatMapValue) : [],
+            ),
+          )
         : [],
     ),
   );
@@ -557,17 +596,22 @@ function enrichResolutionCandidateFacts(
   directAliasSymbolConflictIdentities: ReadonlySet<string>,
   selectedPaths: ReadonlySet<string>,
 ): readonly CodeGraphFileFacts[] | undefined {
-  const currentReferences = facts.flatMap(file => file.references ?? []).filter(isStaticReexportReference);
-  if (currentReferences.some(reference => reference.resolutionDomain !== 'typescript')) return undefined;
-  const currentReexports = currentReferences.map(reexportKeysFromReference);
+  const currentReferences = EffectArray.filter(
+    EffectArray.flatMap(facts, file => file.references ?? []),
+    isStaticReexportReference,
+  );
+  if (EffectArray.some(currentReferences, reference => reference.resolutionDomain !== 'typescript')) return undefined;
+  const currentReexports = EffectArray.map(currentReferences, reexportKeysFromReference);
   const stagedAliasLookupIdentities = new Set(
-    currentReexports.flatMap(reexport => reexport.aliases.map(alias => `${alias.resolutionDomain}\0${alias.key}`)),
+    EffectArray.flatMap(currentReexports, reexport =>
+      EffectArray.map(reexport.aliases, alias => `${alias.resolutionDomain}\0${alias.key}`),
+    ),
   );
   const safetyAliasIdentities = new Set([...affectedAliasLookupIdentities, ...stagedAliasLookupIdentities]);
   if (
-    facts.some(file =>
-      file.symbols.some(symbol =>
-        (symbol.lookupKeys ?? []).some(key =>
+    EffectArray.some(facts, file =>
+      EffectArray.some(file.symbols, symbol =>
+        EffectArray.some(symbol.lookupKeys ?? [], key =>
           safetyAliasIdentities.has(`${lookupKeyDomain(key, symbol.resolutionDomain)}\0${key}`),
         ),
       ),
@@ -575,10 +619,15 @@ function enrichResolutionCandidateFacts(
   ) {
     return undefined;
   }
-  const retainedBase = baseReexports.filter(
-    reexport =>
+  const retainedBase = EffectArray.filter(
+    baseReexports,
+    (reexport, __effectArrayIndex) =>
+      __effectArrayIndex in baseReexports &&
       !selectedPaths.has(reexport.sourcePath) &&
-      [...reexport.aliases, ...reexport.candidates].every(value => value.resolutionDomain === 'typescript'),
+      EffectArray.every(
+        [...reexport.aliases, ...reexport.candidates],
+        value => value.resolutionDomain === 'typescript',
+      ),
   );
   if (
     assessResolutionCandidateReexportSafety({
@@ -600,9 +649,9 @@ function isStaticReexportReference(reference: CodeGraphReference): boolean {
 
 function reexportKeysFromReference(reference: CodeGraphReference): ProjectResolutionReexportKeys {
   return {
-    aliases: (reference.aliasLookupKeys ?? []).map(key => ({key, resolutionDomain: 'typescript'})),
-    candidates: reference.lookupTiers.flatMap(tier =>
-      tier.map(key => ({key, resolutionDomain: reference.resolutionDomain})),
+    aliases: EffectArray.map(reference.aliasLookupKeys ?? [], key => ({key, resolutionDomain: 'typescript'})),
+    candidates: EffectArray.flatMap(reference.lookupTiers, tier =>
+      EffectArray.map(tier, key => ({key, resolutionDomain: reference.resolutionDomain})),
     ),
     sourcePath: reference.evidencePath,
   };
@@ -635,17 +684,17 @@ export function assessResolutionCandidateReexportSafety(input: {
   const safetyAliases = new Set<string>();
   const stagedAliases = new Set<string>();
   for (const reexport of input.reexports) {
-    const aliases = reexport.aliases.flatMap(alias =>
-      parseTypeScriptPathNameLookupKey(alias.key).map(value => ({alias, value})),
+    const aliases = EffectArray.flatMap(reexport.aliases, alias =>
+      EffectArray.map(parseTypeScriptPathNameLookupKey(alias.key), value => ({alias, value})),
     );
-    const candidates = reexport.candidates.flatMap(candidate =>
-      parseTypeScriptPathNameLookupKey(candidate.key).map(value => ({candidate, value})),
+    const candidates = EffectArray.flatMap(reexport.candidates, candidate =>
+      EffectArray.map(parseTypeScriptPathNameLookupKey(candidate.key), value => ({candidate, value})),
     );
     if (aliases.length === 0 || candidates.length === 0) {
       return {mode: 'fallback', reason: 'unparseable-alias'};
     }
     const candidateIdentities = new Set(
-      candidates.map(({candidate, value}) =>
+      EffectArray.map(candidates, ({candidate, value}) =>
         normalizedResolutionIdentity(candidate.resolutionDomain, value.path, value.name),
       ),
     );
@@ -758,9 +807,12 @@ function parsedReusableReexportKeys(reexport: ProjectResolutionReexportKeys):
       readonly candidates: readonly CodeGraphReusableReexportSeed[];
     }
   | undefined {
-  const parsedAliases = reexport.aliases.map(value => parseTypeScriptPathNameLookupKey(value.key));
-  const parsedCandidates = reexport.candidates.map(value => parseTypeScriptPathNameLookupKey(value.key));
-  if (parsedAliases.some(values => values.length === 0) || parsedCandidates.some(values => values.length === 0)) {
+  const parsedAliases = EffectArray.map(reexport.aliases, value => parseTypeScriptPathNameLookupKey(value.key));
+  const parsedCandidates = EffectArray.map(reexport.candidates, value => parseTypeScriptPathNameLookupKey(value.key));
+  if (
+    EffectArray.some(parsedAliases, values => values.length === 0) ||
+    EffectArray.some(parsedCandidates, values => values.length === 0)
+  ) {
     return undefined;
   }
   return {
@@ -782,11 +834,11 @@ export function enrichPersistedTypeScriptReexports(
     provenance.set(key, values);
   }
   const terminalResolver = createPersistedReexportTerminalResolver(provenance);
-  const enriched = facts.map(file => {
+  const enriched = EffectArray.map(facts, file => {
     if (!file.references) return file;
     return {
       ...file,
-      references: file.references.map(reference =>
+      references: EffectArray.map(file.references, reference =>
         enrichPersistedTypeScriptReference(reference, provenance, terminalResolver),
       ),
     };
@@ -802,26 +854,32 @@ function enrichPersistedTypeScriptReference(
   if (reference.resolutionDomain !== 'typescript' || !isPersistedReexportEnrichableRelation(reference.relation)) {
     return reference;
   }
-  const parsedTargets = reference.lookupTiers.flatMap(tier => tier.flatMap(parseTypeScriptPathNameLookupTarget));
-  if (!parsedTargets.some(target => provenance.has(`${target.path}\0${target.name}`))) return reference;
+  const parsedTargets = EffectArray.flatMap(reference.lookupTiers, tier =>
+    EffectArray.flatMap(tier, (__effectFlatMapValue, __effectFlatMapIndex) =>
+      __effectFlatMapIndex in tier ? parseTypeScriptPathNameLookupTarget(__effectFlatMapValue) : [],
+    ),
+  );
+  if (!EffectArray.some(parsedTargets, target => provenance.has(`${target.path}\0${target.name}`))) return reference;
   return {
     ...reference,
-    lookupTiers: reference.lookupTiers
-      .map(tier =>
+    lookupTiers: EffectArray.filter(
+      EffectArray.map(reference.lookupTiers, tier =>
         uniqueStrings(
-          tier.flatMap(key => {
+          EffectArray.flatMap(tier, key => {
             const parsed = parseTypeScriptPathNameLookupTarget(key);
             if (parsed.length === 0) return [key];
-            return parsed.flatMap(target =>
-              (terminalResolver.resolve(target) ?? []).map(
+            return EffectArray.flatMap(parsed, target =>
+              EffectArray.map(
+                terminalResolver.resolve(target) ?? [],
                 terminal =>
                   `${target.lookupPrefix}path:${encodeURIComponent(terminal.path)}:name:${encodeURIComponent(terminal.name)}${target.lookupSuffix}`,
               ),
             );
           }),
         ),
-      )
-      .filter(tier => tier.length > 0),
+      ),
+      tier => tier.length > 0,
+    ),
   };
 }
 
@@ -933,12 +991,16 @@ function reusableReexportKey(value: CodeGraphReusableReexport): string {
 }
 
 function lookupKeyDomain(key: string, fallback: string | undefined): string {
-  const separator = key.indexOf(':');
-  return separator > 0 ? key.slice(0, separator) : (fallback ?? 'generic');
+  const separator = Effect2.pipe(
+    key,
+    EffectString.indexOf(':'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return separator > 0 ? Effect2.pipe(key, EffectString.slice(0, separator)) : (fallback ?? 'generic');
 }
 
 function parseTypeScriptPathNameLookupKey(value: string): readonly CodeGraphReusableReexportSeed[] {
-  return parseTypeScriptPathNameLookupTarget(value).map(({name, path}) => ({name, path}));
+  return EffectArray.map(parseTypeScriptPathNameLookupTarget(value), ({name, path}) => ({name, path}));
 }
 
 interface TypeScriptPathNameLookupTarget extends CodeGraphReusableReexportSeed {

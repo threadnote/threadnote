@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   graphFocusLayoutTargets,
@@ -10,6 +11,8 @@ import {
   MANAGER_GRAPH_MAX_NODE_LIMIT,
   managerGraphVisualizationLimits,
 } from '@threadnote/graph/visualization/limits';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 // Istanbul instruments every branch in the layout loop, while hosted CI shares
 // cores with parallel Bazel actions. Keep the focused local budget unchanged.
@@ -58,8 +61,8 @@ describe('Manager graph production-shaped budgets', () => {
       x: (index % 25) * 12,
       y: Math.floor(index / 25) * 12,
     }));
-    const edges = nodes.slice(1).map(node => ({sourceId: nodes[0].id, targetId: node.id}));
-    const labelSizes = new Map(nodes.map(node => [node.id, {height: 15, width: 120}]));
+    const edges = EffectArray.map(nodes.slice(1), node => ({sourceId: nodes[0].id, targetId: node.id}));
+    const labelSizes = new Map(EffectArray.map(nodes, node => [node.id, {height: 15, width: 120}]));
     graphFocusLayoutTargets(nodes, nodes[0].id, edges, labelSizes, 2.8);
 
     const startedAt = performance.now();
@@ -76,24 +79,24 @@ describe('Manager graph production-shaped budgets', () => {
 
 function maximumGraphFixture(): GraphQueryVisualization {
   const nodes = Array.from({length: MANAGER_GRAPH_MAX_NODE_LIMIT}, (_, index) => {
-    const suffix = index.toString().padStart(4, '0');
+    const suffix = Effect.pipe(index.toString(), EffectString.padStart(4, '0'));
     return {
       degree: 6,
       exported: true,
       id: `cgs_${suffix}`,
       kind: index % 7 === 0 ? 'class' : 'function',
-      label: `productionSymbol${suffix}${'x'.repeat(64)}`,
+      label: `productionSymbol${suffix}${Effect.pipe('x', EffectString.repeat(64))}`,
       language: 'typescript',
-      path: `apps/production/src/deep/module/${suffix}/${'segment/'.repeat(12)}index.ts`,
+      path: `apps/production/src/deep/module/${suffix}/${Effect.pipe('segment/', EffectString.repeat(12))}index.ts`,
       projectId: 'cgp_production',
-      qualifiedName: `Production.Module.${suffix}.${'Namespace.'.repeat(12)}symbol`,
+      qualifiedName: `Production.Module.${suffix}.${Effect.pipe('Namespace.', EffectString.repeat(12))}symbol`,
       type: 'symbol' as const,
     };
   });
   const edges: readonly GraphEdge[] = Array.from({length: MANAGER_GRAPH_MAX_EDGE_LIMIT}, (_, index) => ({
     confidence: 1,
     count: 1,
-    id: `cge_${index.toString().padStart(5, '0')}`,
+    id: `cge_${Effect.pipe(index.toString(), EffectString.padStart(5, '0'))}`,
     provenance: 'resolved',
     relation: index % 2 === 0 ? 'calls' : 'imports',
     sourceId: nodes[index % nodes.length].id,
@@ -122,7 +125,7 @@ function maximumGraphFixture(): GraphQueryVisualization {
       id: 'checkout.worktree',
       metrics: 'deferred',
       snapshot: {
-        commit: 'a'.repeat(40),
+        commit: Effect.pipe('a', EffectString.repeat(40)),
         dirty: false,
         edgeCount: 8_000_000,
         fileCount: 70_000,

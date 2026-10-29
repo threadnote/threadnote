@@ -32,11 +32,16 @@ import {
 import type {ProjectManifest} from '@threadnote/workspace/config';
 import {CODE_GRAPH_BUILDER_ADMISSION_CLASS_ENV, type CodeGraphBuilderAdmissionClass} from '../builder/admission.js';
 import {CODE_GRAPH_REFRESH_DEMAND_SUPERSEDED_EXIT_CODE, CodeGraphRefreshDemandSuperseded} from '../refresh/demand.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class IsolatedBuilderError extends Schema.TaggedError<IsolatedBuilderError>()('IsolatedBuilderError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class IsolatedBuilderError extends Schema.TaggedError<IsolatedBuilderError, {readonly brand: unique symbol}>()(
+  'IsolatedBuilderError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const isolatedBuilderPromise = <A>(operation: string, evaluate: () => PromiseLike<A>) =>
   fromPromiseInterruptible(evaluate, cause =>
@@ -133,7 +138,11 @@ export interface CodeGraphIsolatedBuilderResult {
 }
 
 function executableBaseName(executablePath: string): string | undefined {
-  return executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  return Effect2.pipe(
+    Effect2.pipe(executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
 }
 
 /** True when this OS process hosts MCP stdio and must not run heavy graph builds in-process. */
@@ -141,7 +150,14 @@ export function isCodeGraphIsolatedBuilderHost(
   system: Pick<SystemInfoShape, 'executablePath' | 'processArguments'>,
 ): boolean {
   const executableName = executableBaseName(system.executablePath);
-  if (executableName?.startsWith('threadnote-mcp-server') === true) return true;
+  if (
+    Effect2.pipe(executableName, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.startsWith('threadnote-mcp-server')),
+    ) === true
+  )
+    return true;
   // Mirror apps/threadnote/src/standalone.ts: user args start at argv[2] for both scripts and compiled binaries.
   return system.processArguments.slice(2)[0] === 'mcp-server';
 }
@@ -356,7 +372,12 @@ export const runIsolatedCodeGraphIndex: (
   const system = yield* SystemInfo;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  if ((options.scopeId !== undefined || options.project?.graph !== undefined) && !options.project?.name?.trim()) {
+  if (
+    (options.scopeId !== undefined || options.project?.graph !== undefined) &&
+    !Effect2.pipe(options.project?.name, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  ) {
     return yield* CodeGraphScopeRoutingError.make({
       message: 'Scoped graph refresh requires a configured project name before child launch.',
     });
@@ -530,8 +551,11 @@ export function isolatedBuilderFailureMessage(
   stderrTail: string | undefined,
 ): string {
   if (errorSummary) return errorSummary;
-  const stderr = stderrTail?.trim();
-  if (stderr) return `isolated graph index exited with code ${exitCode}: ${stderr.slice(0, 500)}`;
+  const stderr = Effect2.pipe(stderrTail, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  if (stderr)
+    return `isolated graph index exited with code ${exitCode}: ${Effect2.pipe(stderr, EffectString.slice(0, 500))}`;
   return `isolated graph index exited with code ${exitCode}`;
 }
 
@@ -647,7 +671,13 @@ export function statusBelongsToChild(
 /** @internal Exported for unit tests. */
 export function assertIsolatedBuilderPlan(plan: CodeGraphIsolatedBuilderSpawnPlan): void {
   const executableName = executableBaseName(plan.executable);
-  if (executableName?.startsWith('threadnote-mcp-server') === true) {
+  if (
+    Effect2.pipe(executableName, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.startsWith('threadnote-mcp-server')),
+    ) === true
+  ) {
     throw IsolatedBuilderError.make({message: 'Isolated graph builder must not spawn the MCP launcher executable.'});
   }
   const graphAt = plan.arguments.indexOf('graph');

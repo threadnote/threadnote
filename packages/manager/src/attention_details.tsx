@@ -1,3 +1,12 @@
+import {
+  isManagerContextHealthResponseV1,
+  isManagerMaintenanceRefreshResultV1,
+  isManagerSemanticRefreshResultV1,
+  isProposalResponse,
+  isReviewPreview,
+  isStatusResponse2,
+} from './api/response_guards.js';
+import {Array as EffectArray, Option as EffectOption, Order} from 'effect';
 import type {
   ManagerMaintenanceRefreshResultV1,
   ManagerContextMaintenanceCaseV2,
@@ -15,6 +24,8 @@ import type {KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import type {ManagerContextHealthResponseV1} from './attention/contracts.js';
 import {DetailModal, MemoryBody} from './detail_modal.js';
 import {api, errorMessage, ManagerApiError} from './ui/support.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 import {evidenceReadError, retryEvidenceRead} from './attention/evidence_refresh.js';
 
 type ReviewPreview = {review: CandidateReview; delta: KnowledgeDeltaV1};
@@ -36,10 +47,15 @@ export function ReviewDetail(props: {
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    void api<ReviewPreview>('/api/reviews/preview', {
-      project: props.project,
-      reviewId: props.reviewId,
-    })
+    void api<ReviewPreview>(
+      '/api/reviews/preview',
+      {
+        project: props.project,
+        reviewId: props.reviewId,
+      },
+      undefined,
+      isReviewPreview,
+    )
       .then(result => {
         if (!cancelled) setPreview(result);
       })
@@ -50,9 +66,21 @@ export function ReviewDetail(props: {
       cancelled = true;
     };
   }, [props.project, props.reviewId]);
-  const candidate = preview?.review.candidates.find(item => item.candidateId === props.candidateId);
+  const candidate = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(preview?.review.candidates), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(__effectArrayReceiver, item => item.candidateId === props.candidateId),
+      ),
+    ),
+  );
   const canDecide = candidate?.state === 'pending' || candidate?.state === 'deferred';
-  const mutation = preview?.delta.items.find(item => item.candidateId === props.candidateId)?.mutationPreview;
+  const mutation = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(preview?.delta.items), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(__effectArrayReceiver, item => item.candidateId === props.candidateId),
+      ),
+    ),
+  )?.mutationPreview;
   const reviewedOperation =
     mutation?.operation === 'create' || mutation?.operation === 'replace' ? mutation.operation : '';
   const personalCopyRequired =
@@ -79,12 +107,17 @@ export function ReviewDetail(props: {
     setBusy(true);
     setError('');
     try {
-      const result = await api<ReviewPreview>('/api/reviews/refresh-safety', {
-        project: props.project,
-        reviewId: props.reviewId,
-        candidateId: props.candidateId,
-        revision: preview.review.revision,
-      });
+      const result = await api<ReviewPreview>(
+        '/api/reviews/refresh-safety',
+        {
+          project: props.project,
+          reviewId: props.reviewId,
+          candidateId: props.candidateId,
+          revision: preview.review.revision,
+        },
+        undefined,
+        isReviewPreview,
+      );
       setPreview(result);
       setOperation('');
       setReplacementApproved(false);
@@ -142,7 +175,11 @@ export function ReviewDetail(props: {
             Operation:{' '}
             {personalCopyRequired
               ? 'Create a personal copy after your approval'
-              : (mutation?.operation.replaceAll('_', ' ') ?? 'Unavailable')}
+              : (Effect.pipe(mutation?.operation, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.replaceAll('_', ' ')),
+                ) ?? 'Unavailable')}
           </p>
           {candidate.targetUri ? (
             <button onClick={() => props.onOpenLibrary(candidate.targetUri)} type="button">
@@ -246,11 +283,11 @@ export function ReviewDetail(props: {
           ) : (
             <p className="workspace-note">This proposal is {candidate.state}. Its decision controls are read-only.</p>
           )}
-          {candidate.evidence.length > 0 ? (
+          {(candidate.evidence?.length ?? 0) > 0 ? (
             <details>
               <summary>Source evidence</summary>
               <ul>
-                {candidate.evidence.map(item => (
+                {EffectArray.map(candidate.evidence ?? [], item => (
                   <li key={item}>{item}</li>
                 ))}
               </ul>
@@ -331,9 +368,15 @@ export function HealthDetail(props: {
   const reviewFrozen = frozen || semanticChecking;
   const finding = currentFinding;
   const supportsSelectedRefresh =
-    finding.category === 'semantic-contradiction' || finding.category.startsWith('citation-');
+    finding.category === 'semantic-contradiction' || EffectString.startsWith('citation-')(finding.category);
   const sourceUri =
-    finding.repair.subjectUri ?? finding.uris.find(uri => uri !== finding.repair.targetUri && !uri.includes('#'));
+    finding.repair.subjectUri ??
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        finding.uris,
+        uri => uri !== finding.repair.targetUri && !Effect.pipe(uri, EffectString.includes('#')),
+      ),
+    );
   const targetUri = finding.repair.targetUri;
   const memoryPreview = props.memoryPreview?.uri === sourceUri ? props.memoryPreview : undefined;
   const citationEvidenceReady =
@@ -345,13 +388,18 @@ export function HealthDetail(props: {
     setError('');
     setProposal(undefined);
     try {
-      const result = await api<{proposal: RepairProposal}>('/api/context-health/preview', {
-        project: props.project,
-        findingId: finding.id,
-        subjectUri: sourceUri,
-        findingCategory: finding.category,
-        after: props.after,
-      });
+      const result = await api<{proposal: RepairProposal}>(
+        '/api/context-health/preview',
+        {
+          project: props.project,
+          findingId: finding.id,
+          subjectUri: sourceUri,
+          findingCategory: finding.category,
+          after: props.after,
+        },
+        undefined,
+        isProposalResponse,
+      );
       setProposal(result.proposal);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -364,13 +412,18 @@ export function HealthDetail(props: {
     setBusy(true);
     setError('');
     try {
-      const result = await api<{status: string}>('/api/context-health/apply', {
-        project: props.project,
-        proposalId: proposal.proposalId,
-        revision: proposal.revision,
-        approved: true,
-        ...proposal.selector,
-      });
+      const result = await api<{status: string}>(
+        '/api/context-health/apply',
+        {
+          project: props.project,
+          proposalId: proposal.proposalId,
+          revision: proposal.revision,
+          approved: true,
+          ...proposal.selector,
+        },
+        undefined,
+        isStatusResponse2,
+      );
       if (result.status === 'review-required') {
         setNotice('This repair requires manual review. Open the affected memory and follow the instructions below.');
         return;
@@ -400,11 +453,18 @@ export function HealthDetail(props: {
         `/api/context-health?project=${encodeURIComponent(props.project)}`,
         undefined,
         {signal: controller.signal, timeoutMilliseconds: 30_000},
+        isManagerContextHealthResponseV1,
       );
       if (controller.signal.aborted) return;
-      const sameFinding = current.findings.find(item => item.id === finding.id);
+      const sameFinding = EffectOption.getOrUndefined(
+        EffectArray.findFirst(current.findings, item => item.id === finding.id),
+      );
       if (!sameFinding) {
         setNotice('This check is no longer present in current evidence. No repair was applied.');
+        return;
+      }
+      if (JSON.stringify(sameFinding) !== JSON.stringify(finding)) {
+        setError('This decision changed. Close and reopen it to review current evidence.');
         return;
       }
       setCurrentFinding(sameFinding);
@@ -444,16 +504,26 @@ export function HealthDetail(props: {
             right: source(selected.right),
           },
           {signal: controller.signal, timeoutMilliseconds: 30_000},
+          isManagerSemanticRefreshResultV1,
         );
         if (checked.outcome === 'changing') throw new Error(checked.reason);
         return checked;
       }, controller.signal);
       if (controller.signal.aborted) return;
       if (result.outcome === 'ready') {
-        const expected = [selected.left.recordUri, selected.right.recordUri].sort().join('\n');
+        const expected = EffectArray.join(
+          EffectArray.sort([selected.left.recordUri, selected.right.recordUri], Order.String),
+          '\n',
+        );
         if (
-          [result.evidence.left.recordUri, result.evidence.right.recordUri].sort().join('\n') !== expected ||
-          [result.evidence.left, result.evidence.right].some(claim => claim.context.project !== props.project)
+          EffectArray.join(
+            EffectArray.sort([result.evidence.left.recordUri, result.evidence.right.recordUri], Order.String),
+            '\n',
+          ) !== expected ||
+          EffectArray.some(
+            [result.evidence.left, result.evidence.right],
+            claim => claim.context.project !== props.project,
+          )
         )
           throw new Error('The refreshed comparison does not match the selected memories.');
         setSemanticEvidence(result.evidence);
@@ -488,6 +558,7 @@ export function HealthDetail(props: {
             '/api/attention/context-maintenance',
             {action: 'refresh-case', project: props.project, caseId: finding.caseId},
             {signal: controller.signal, timeoutMilliseconds: 30_000},
+            isManagerMaintenanceRefreshResultV1,
           ),
         controller.signal,
       );
@@ -581,7 +652,7 @@ export function HealthDetail(props: {
           <>
             <p>These memories may disagree. Open both to compare their advice and the situations it applies to.</p>
             <p className="muted">Comparison evidence is unavailable. Review any change in Library.</p>
-            {finding.uris.map((uri, index) => (
+            {EffectArray.map(finding.uris, (uri, index) => (
               <button key={uri} type="button" onClick={() => props.onOpenLibrary(uri)}>
                 Open memory {index === 0 ? 'A' : 'B'}
               </button>
@@ -594,12 +665,18 @@ export function HealthDetail(props: {
   return (
     <DetailModal
       className="health-repair-dialog"
-      title={finding.category.replaceAll('-', ' ').replace(/^./u, letter => letter.toUpperCase())}
+      title={
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks transform the matched text; Effect String accepts replacement strings only.
+        Effect.pipe(finding.category, EffectString.replaceAll('-', ' ')).replace(/^./u, letter =>
+          Effect.pipe(letter, EffectString.toUpperCase),
+        )
+      }
       onClose={props.onClose}
       footer={
         <>
           {frozenNotice}
-          {!props.repairsAvailable && finding.category.startsWith('citation-') ? undefined : proposal ? (
+          {!props.repairsAvailable &&
+          Effect.pipe(finding.category, EffectString.startsWith('citation-')) ? undefined : proposal ? (
             proposal.mutation.kind === 'review-only' ? undefined : (
               <>
                 <span className="muted">Apply only when the memory still matches the evidence.</span>
@@ -631,7 +708,7 @@ export function HealthDetail(props: {
           <ReviewBadge tone="warning">Needs review</ReviewBadge>
           <ReviewBadge tone="info">
             <FileCode2 size={13} aria-hidden="true" />
-            {finding.category.startsWith('citation-') ? 'Code evidence' : 'Memory health'}
+            {Effect.pipe(finding.category, EffectString.startsWith('citation-')) ? 'Code evidence' : 'Memory health'}
           </ReviewBadge>
         </div>
         <p>{healthFindingSummary(finding.category)}</p>
@@ -664,9 +741,13 @@ export function HealthDetail(props: {
       ) : null}
       {targetUri && targetUri !== sourceUri ? (
         <section className="health-repair-reference">
-          <h3>{finding.category.startsWith('citation-') ? 'Stored code reference' : 'Related memory target'}</h3>
+          <h3>
+            {Effect.pipe(finding.category, EffectString.startsWith('citation-'))
+              ? 'Stored code reference'
+              : 'Related memory target'}
+          </h3>
           <p className="muted">
-            {finding.category.startsWith('citation-')
+            {Effect.pipe(finding.category, EffectString.startsWith('citation-'))
               ? 'Compare the current source excerpt with the proposed replacement below.'
               : 'The related memory is unavailable; preview the repair before removing the broken link.'}
           </p>
@@ -682,7 +763,7 @@ export function HealthDetail(props: {
           {notice}
         </ReviewNotice>
       ) : null}
-      {!props.repairsAvailable && finding.category.startsWith('citation-') ? (
+      {!props.repairsAvailable && Effect.pipe(finding.category, EffectString.startsWith('citation-')) ? (
         <ReviewNotice title="Local checkout required" tone="warning">
           Repository-backed repairs require a configured local checkout for this project.
         </ReviewNotice>
@@ -701,7 +782,7 @@ export function HealthDetail(props: {
           <p className="muted">
             {proposal.mutation.kind === 'review-only'
               ? proposal.mutation.reason
-              : `This will ${proposal.mutation.kind.replaceAll('-', ' ')}.`}
+              : `This will ${Effect.pipe(proposal.mutation.kind, EffectString.replaceAll('-', ' '))}.`}
           </p>
           {proposal.mutation.kind === 'replace-citation' && proposal.mutation.replacement ? (
             <CitationReplacementEvidence replacement={proposal.mutation.replacement} />
@@ -711,7 +792,7 @@ export function HealthDetail(props: {
           <details className="health-repair-diagnostics">
             <summary>Exact revision and checked memories</summary>
             <code>{proposal.revision}</code>
-            {proposal.preconditions.map(item => (
+            {EffectArray.map(proposal.preconditions, item => (
               <p key={item.uri}>
                 {item.uri}
                 <br />
@@ -770,7 +851,7 @@ function CitationReplacementEvidence(props: {readonly replacement: MemoryCodeCit
 }
 
 function managerReplacementWarning(warning: string): string {
-  return warning.includes('review_session_context')
+  return Effect.pipe(warning, EffectString.includes('review_session_context'))
     ? 'Refresh the safety check against the current memory before approving this replacement.'
     : warning;
 }
@@ -834,7 +915,8 @@ function healthFindingNextStep(category: Finding['category']): string {
 }
 
 function healthFindingSummary(category: Finding['category']): string {
-  if (category.startsWith('citation-')) return 'A stored code reference no longer matches the current project graph.';
+  if (Effect.pipe(category, EffectString.startsWith('citation-')))
+    return 'A stored code reference no longer matches the current project graph.';
   if (category === 'relation-target-missing') return 'A memory links to a related memory that is no longer available.';
   return 'This memory has a quality issue that needs review.';
 }

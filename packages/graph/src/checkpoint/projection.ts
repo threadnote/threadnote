@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -47,6 +48,9 @@ import {
   type CodeGraphCheckpointReuseV1,
   type CodeGraphCheckpointSpanV1,
 } from './schema.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CodeGraphCheckpointSpanSchema = Schema.Struct({
   column: Schema.Int,
@@ -66,13 +70,13 @@ const LANGUAGE_PACK_PROVENANCE_MAXIMUM = 1_024;
 export const CODE_GRAPH_CHECKPOINT_GIT_PATHSPEC_BYTES_MAXIMUM = 64 * 1_024;
 const GIT_TREE_OUTPUT_BYTES_MAXIMUM = 256 * 1_024;
 
-export class CodeGraphCheckpointProjectionError extends Schema.TaggedError<CodeGraphCheckpointProjectionError>()(
-  'CodeGraphCheckpointProjectionError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphCheckpointProjectionError extends Schema.TaggedError<
+  CodeGraphCheckpointProjectionError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCheckpointProjectionError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export interface CodeGraphCheckpointProjectionRequest<E = never, R = never> {
   readonly abi: CodeGraphCheckpointAbiInputV1;
@@ -317,7 +321,7 @@ function projectInReadTransaction<E, R>(
           Effect.gen(function* () {
             if (records.length === 0) return;
             const parsed = yield* Effect.try({
-              try: () => records.map(parseCodeGraphCheckpointRecordV1),
+              try: () => EffectArray.map(records, parseCodeGraphCheckpointRecordV1),
               catch: cause => projectionError('Checkpoint projection produced an invalid logical record.', cause),
             });
             for (const record of parsed) {
@@ -348,7 +352,7 @@ function projectInReadTransaction<E, R>(
         yield* streamMonikers(sql, snapshot.id, pageSize, emit);
         yield* streamLexical(sql, snapshot.id, pageSize, emit);
         yield* emit(
-          packs.map(pack => ({
+          EffectArray.map(packs, pack => ({
             cacheIdentity: pack.cache_identity,
             derivationIdentity: pack.derivation_identity,
             id: pack.pack_id,
@@ -524,7 +528,7 @@ function validateFence(
       message: 'Checkpoint source ABI or reusable snapshot receipt is incompatible.',
     });
   }
-  const persistedPacks = packs.map(pack => ({
+  const persistedPacks = EffectArray.map(packs, pack => ({
     cacheIdentity: pack.cache_identity,
     derivationIdentity: pack.derivation_identity,
     id: pack.pack_id,
@@ -579,9 +583,10 @@ export function codeGraphCheckpointCoverage(
   ) {
     throw CodeGraphCheckpointProjectionError.make({message: 'Checkpoint inventory coverage is inconsistent.'});
   }
-  const reasons: Array<CodeGraphCheckpointCoverageV1['reasons'][number]> = inventory.policyExclusions.reasons
-    .filter(reason => reason.files > 0)
-    .map(reason => ({bytes: reason.bytes, code: reason.reason, files: reason.files}));
+  const reasons: Array<CodeGraphCheckpointCoverageV1['reasons'][number]> = EffectArray.map(
+    EffectArray.filter(inventory.policyExclusions.reasons, reason => reason.files > 0),
+    reason => ({bytes: reason.bytes, code: reason.reason, files: reason.files}),
+  );
   const residual = inventory.skipped - inventory.policyExclusions.files;
   if (residual > 0) reasons.push({bytes: 0, code: 'inventory-other', files: residual});
   reasons.sort((left, right) => compareCodeUnits(left.code, right.code));
@@ -600,10 +605,10 @@ function portableReuse(
   objectFormat: RepositoryIdentity['objectFormat'],
 ): CodeGraphCheckpointReuseV1 {
   const portable = portableInventory(inventory, attributionGitEntries, objectFormat);
-  const portableBytes = portable.attributionFiles.reduce(
-    (totals, file) => ({content: totals.content + file.size, source: totals.source + file.blobSize}),
-    {content: 0, source: 0},
-  );
+  const portableBytes = EffectArray.reduce(portable.attributionFiles, {content: 0, source: 0}, (totals, file) => ({
+    content: totals.content + file.size,
+    source: totals.source + file.blobSize,
+  }));
   const inventoryIsPortable =
     portable.attributionFiles.length <= CODE_GRAPH_CHECKPOINT_ATTRIBUTION_FILES_MAXIMUM &&
     portableBytes.content <= CODE_GRAPH_CHECKPOINT_ATTRIBUTION_CONTENT_BYTES_MAXIMUM &&
@@ -623,7 +628,7 @@ function portableInventory(
   objectFormat: RepositoryIdentity['objectFormat'],
 ): CodeGraphCheckpointPortableInventoryV1 {
   return {
-    attributionFiles: inventory.attributionFiles.map(file => {
+    attributionFiles: EffectArray.map(inventory.attributionFiles, file => {
       const git = attributionGitEntries.get(file.path);
       if (
         git === undefined ||
@@ -689,7 +694,7 @@ function streamFiles<E, R>(
       Effect.gen(function* () {
         const gitEntries = yield* loadGitTreeEntries(identity, snapshot.commit, rows);
         const records = yield* attemptProjection('Checkpoint file metadata is malformed.', () =>
-          rows.map(row => {
+          EffectArray.map(rows, row => {
             const git = gitEntries.get(row.path);
             if (
               git === undefined ||
@@ -729,7 +734,7 @@ function loadGitTreeEntries<T extends {readonly path: string}>(
 ) {
   return Effect.gen(function* () {
     const system = yield* SystemInfo;
-    if (files.some(file => !isSafeCodeGraphCheckpointPath(file.path))) {
+    if (EffectArray.some(files, file => !isSafeCodeGraphCheckpointPath(file.path))) {
       return yield* projectionFailure('Checkpoint source contains an unsafe repository path.');
     }
     const entries = new Map<string, GitTreeEntry>();
@@ -739,7 +744,17 @@ function loadGitTreeEntries<T extends {readonly path: string}>(
     for (const batch of batches) {
       const result = yield* runBinaryCommandEffect(
         'git',
-        ['-C', identity.repoRoot, 'ls-tree', '-l', '-z', '--full-tree', commit, '--', ...batch.map(file => file.path)],
+        [
+          '-C',
+          identity.repoRoot,
+          'ls-tree',
+          '-l',
+          '-z',
+          '--full-tree',
+          commit,
+          '--',
+          ...EffectArray.map(batch, file => file.path),
+        ],
         {
           env: {...system.environment(), GIT_LITERAL_PATHSPECS: '1'},
           maxOutputBytes: GIT_TREE_OUTPUT_BYTES_MAXIMUM,
@@ -755,7 +770,7 @@ function loadGitTreeEntries<T extends {readonly path: string}>(
         entries.set(path, entry);
       }
     }
-    if (entries.size !== files.length || files.some(file => !entries.has(file.path))) {
+    if (entries.size !== files.length || EffectArray.some(files, file => !entries.has(file.path))) {
       return yield* projectionFailure('Exact-commit Git file metadata is incomplete.');
     }
     return entries;
@@ -795,18 +810,28 @@ export function parseGitTreeEntries(
 ): ReadonlyMap<string, GitTreeEntry> {
   const text = new TextDecoder('utf-8', {fatal: true}).decode(output);
   if (text.length === 0) return new Map();
-  if (!text.endsWith('\0'))
+  if (!Effect2.pipe(text, EffectString.endsWith('\0')))
     throw CodeGraphCheckpointProjectionError.make({message: 'Git tree output is not NUL terminated.'});
   const entries = new Map<string, GitTreeEntry>();
   const objectIdPattern = objectFormat === 'sha1' ? /^[0-9a-f]{40}$/u : /^[0-9a-f]{64}$/u;
-  for (const encoded of text.slice(0, -1).split('\0')) {
-    const separator = encoded.indexOf('\t');
-    const metadata = /^(\d{6}) ([a-z]+) ([0-9a-f]+) +(\d+)$/u.exec(encoded.slice(0, separator));
+  for (const encoded of Effect2.pipe(text, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split('\0'));
+    return __effectPipeStage1;
+  })) {
+    const separator = Effect2.pipe(
+      encoded,
+      EffectString.indexOf('\t'),
+      Effect2.Option.getOrElse(() => -1),
+    );
+    const metadata = /^(\d{6}) ([a-z]+) ([0-9a-f]+) +(\d+)$/u.exec(
+      Effect2.pipe(encoded, EffectString.slice(0, separator)),
+    );
     if (separator < 0 || metadata === null) {
       throw CodeGraphCheckpointProjectionError.make({message: 'Git tree entry is malformed.'});
     }
     const [, mode, type, blobId, encodedSize] = metadata;
-    const path = encoded.slice(separator + 1);
+    const path = Effect2.pipe(encoded, EffectString.slice(separator + 1));
     const size = Number(encodedSize);
     if (
       !/^\d{6}$/u.test(mode) ||
@@ -851,7 +876,7 @@ function streamFileFacts<E, R>(
       Effect.gen(function* () {
         const records = yield* Effect.try({
           try: () =>
-            rows.map(row => {
+            EffectArray.map(rows, row => {
               if (
                 row.path_hint !== row.path ||
                 row.extractor_set !== snapshot.extractorSet ||
@@ -978,7 +1003,7 @@ function streamWorkspaceDependencies<E, R>(
     row => [row.source_component_id, row.target_component_id, row.provenance],
     rows =>
       emit(
-        rows.map(row => {
+        EffectArray.map(rows, row => {
           const evidence = optionalText(row.evidence);
           return {
             ...(evidence === undefined ? {} : {evidence}),
@@ -1117,9 +1142,9 @@ function streamSymbolLookups<E, R>(
       row => [row.lookup_key, row.symbol_id],
       rows =>
         Effect.gen(function* () {
-          aliases += rows.filter(row => row.provenance === 'alias').length;
+          aliases += EffectArray.filter(rows, row => row.provenance === 'alias').length;
           yield* emit(
-            rows.map(row => {
+            EffectArray.map(rows, row => {
               const evidenceEdgeId = optionalText(row.evidence_edge_id);
               const evidencePath = optionalText(row.evidence_path);
               return {
@@ -1162,7 +1187,7 @@ function streamReexports<E, R>(
     row => [row.source_path, row.local_name, row.target_path, row.imported_name],
     rows =>
       emit(
-        rows.map(row => ({
+        EffectArray.map(rows, row => ({
           importedName: row.imported_name,
           kind: 'reexport' as const,
           localName: row.local_name,
@@ -1299,7 +1324,7 @@ function streamLexical<E, R>(
     row => [row.term, row.symbol_id],
     rows =>
       emit(
-        rows.map(row => ({
+        EffectArray.map(rows, row => ({
           kind: 'lexical' as const,
           symbolId: row.symbol_id,
           term: row.term,
@@ -1362,7 +1387,7 @@ function decodeAndEmit<Row, E, R>(
   label: string,
 ) {
   return Effect.try({
-    try: () => rows.map(map),
+    try: () => EffectArray.map(rows, map),
     catch: cause => projectionError(`Checkpoint ${label} are malformed.`, cause),
   }).pipe(Effect.flatMap(emit));
 }
@@ -1459,9 +1484,13 @@ function updatePathDigest(hasher: Bun.CryptoHasher, path: string): void {
   hasher.update('\0');
 }
 
+function isStringArray(value: unknown): value is readonly string[] {
+  return EffectArray.isArray(value) && EffectArray.every(value, (item): item is string => typeof item === 'string');
+}
+
 function parseStringArray(value: string, label: string): readonly string[] {
   const parsed: unknown = JSON.parse(value);
-  if (!Array.isArray(parsed) || parsed.some(item => typeof item !== 'string')) {
+  if (!isStringArray(parsed)) {
     throw CodeGraphCheckpointProjectionError.make({message: `Checkpoint ${label} are invalid.`});
   }
   return parsed;
@@ -1500,8 +1529,10 @@ function optionalText(value: unknown): string | undefined {
 }
 
 function optionalFields(values: Readonly<Record<string, unknown>>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(values).flatMap(([key, value]) => (typeof value === 'string' ? [[key, value]] : [])),
+  return EffectRecord.fromEntries(
+    EffectArray.flatMap(EffectRecord.toEntries(values), ([key, value]) =>
+      typeof value === 'string' ? [[key, value]] : [],
+    ),
   );
 }
 

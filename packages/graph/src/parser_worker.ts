@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   Context,
   Crypto,
@@ -26,6 +27,8 @@ import {BUILTIN_LANGUAGE_PACK_REGISTRY} from './languages/registry.js';
 import {TreeSitterRuntime, type TreeSitterRuntimeShape} from './tree_sitter/runtime.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSymbol} from './types.js';
 import {CODE_GRAPH_PARSER_WORKER_ARGUMENT} from '@threadnote/graph/worker_protocol';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {CODE_GRAPH_PARSER_WORKER_ARGUMENT};
 export const CODE_GRAPH_PARSER_WORKERS_ENV = 'THREADNOTE_CODE_GRAPH_PARSER_WORKERS';
@@ -90,24 +93,27 @@ export interface ParserWorkerSourceByteBudget {
   readonly observedBytes: number;
 }
 
-class ParserWorkerError extends Schema.TaggedError<ParserWorkerError>()('ParserWorkerError', {
-  budget: Schema.optionalKey(Schema.Any),
-  message: Schema.String,
-  reason: Schema.Literals([
-    'abort',
-    'allocation',
-    'exit',
-    'fact-bytes',
-    'operation',
-    'protocol',
-    'rss',
-    'source-bytes',
-    'spawn',
-    'symbols',
-    'timeout',
-    'write',
-  ]),
-}) {
+class ParserWorkerError extends Schema.TaggedError<ParserWorkerError, {readonly brand: unique symbol}>()(
+  'ParserWorkerError',
+  {
+    budget: Schema.optionalKey(Schema.Any),
+    message: Schema.String,
+    reason: Schema.Literals([
+      'abort',
+      'allocation',
+      'exit',
+      'fact-bytes',
+      'operation',
+      'protocol',
+      'rss',
+      'source-bytes',
+      'spawn',
+      'symbols',
+      'timeout',
+      'write',
+    ]),
+  },
+) {
   static of(reason: ParserWorkerFailureReason, budget?: ParserWorkerBudgetDiagnostic): ParserWorkerError {
     return ParserWorkerError.make({
       message: parserWorkerFailureSummary(reason),
@@ -196,10 +202,10 @@ export interface ParserWorkerResourceBudgetOptions {
   readonly maximumRssBytes?: number;
 }
 
-export class ParserWorkerConfigurationError extends Schema.TaggedError<ParserWorkerConfigurationError>()(
-  'ParserWorkerConfigurationError',
-  {message: Schema.String},
-) {}
+export class ParserWorkerConfigurationError extends Schema.TaggedError<
+  ParserWorkerConfigurationError,
+  {readonly brand: unique symbol}
+>()('ParserWorkerConfigurationError', {message: Schema.String}) {}
 
 export interface CodeGraphParserPoolShape {
   readonly capacity: number;
@@ -802,10 +808,14 @@ class ParserWorkerConnection {
 
   private async readLine(): Promise<string> {
     for (;;) {
-      const newline = this.buffer.indexOf('\n');
+      const newline = Effect2.pipe(
+        this.buffer,
+        EffectString.indexOf('\n'),
+        Effect2.Option.getOrElse(() => -1),
+      );
       if (newline >= 0) {
-        const line = this.buffer.slice(0, newline).replace(/\r$/, '');
-        this.buffer = this.buffer.slice(newline + 1);
+        const line = Effect2.pipe(this.buffer, EffectString.slice(0, newline), EffectString.replace(/\r$/, ''));
+        this.buffer = Effect2.pipe(this.buffer, EffectString.slice(newline + 1));
         this.bufferBytes = this.encoder.encode(this.buffer).byteLength;
         return line;
       }
@@ -878,7 +888,11 @@ function parserWorkerSpawnOptions(system: SystemInfoShape, threadnoteHome: strin
 }
 
 function developmentStandaloneScript(system: SystemInfoShape): Option.Option<string> {
-  const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1);
+  const executableName = Effect2.pipe(
+    system.executablePath,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.split('/'),
+  ).at(-1);
   if (executableName !== 'bun' && executableName !== 'bun.exe') return Option.none();
   const candidate = system.processArguments[1];
   if (candidate && /(?:^|[/\\])(?:standalone\.(?:js|ts)|threadnote\.cjs)$/i.test(candidate)) {
@@ -962,12 +976,20 @@ export const codeGraphParserWorkerServer: Effect.Effect<void, never, Stdio.Stdio
           bufferedBytes += chunk.byteLength;
           buffered += decoder.decode(chunk, {stream: true});
           for (;;) {
-            const newline = buffered.indexOf('\n');
+            const newline = Effect2.pipe(
+              buffered,
+              EffectString.indexOf('\n'),
+              Effect2.Option.getOrElse(() => -1),
+            );
             if (newline < 0) break;
-            const lineWithNewline = buffered.slice(0, newline + 1);
-            const line = lineWithNewline.slice(0, -1).replace(/\r$/, '');
+            const lineWithNewline = Effect2.pipe(buffered, EffectString.slice(0, newline + 1));
+            const line = Effect2.pipe(lineWithNewline, __effectPipeInput => {
+              const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+              const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\r$/, ''));
+              return __effectPipeStage1;
+            });
             bufferedBytes -= encoder.encode(lineWithNewline).byteLength;
-            buffered = buffered.slice(newline + 1);
+            buffered = Effect2.pipe(buffered, EffectString.slice(newline + 1));
             if (encoder.encode(line).byteLength > MAX_PROTOCOL_LINE_BYTES) {
               return yield* ParserWorkerError.of('protocol');
             }
@@ -984,7 +1006,7 @@ export const codeGraphParserWorkerServer: Effect.Effect<void, never, Stdio.Stdio
     if (encoder.encode(buffered).byteLength > MAX_PROTOCOL_LINE_BYTES) {
       return yield* ParserWorkerError.of('protocol');
     }
-    if (buffered.trim()) yield* processLine(buffered.trim());
+    if (Effect2.pipe(buffered, EffectString.trim)) yield* processLine(Effect2.pipe(buffered, EffectString.trim));
   }).pipe(Effect.ignore);
 
 function handleParserWorkerLine(
@@ -1138,14 +1160,14 @@ function isFileFacts(value: unknown): value is CodeGraphFileFacts {
   return (
     Predicate.isObject(value) &&
     typeof value.path === 'string' &&
-    Array.isArray(value.diagnostics) &&
-    value.diagnostics.every(diagnostic => typeof diagnostic === 'string') &&
-    Array.isArray(value.edges) &&
-    value.edges.every(isCodeGraphEdge) &&
+    EffectArray.isArray(value.diagnostics) &&
+    EffectArray.every(value.diagnostics, diagnostic => typeof diagnostic === 'string') &&
+    EffectArray.isArray(value.edges) &&
+    EffectArray.every(value.edges, isCodeGraphEdge) &&
     (value.references === undefined ||
-      (Array.isArray(value.references) && value.references.every(isCodeGraphReference))) &&
-    Array.isArray(value.symbols) &&
-    value.symbols.every(isCodeGraphSymbol)
+      (EffectArray.isArray(value.references) && EffectArray.every(value.references, isCodeGraphReference))) &&
+    EffectArray.isArray(value.symbols) &&
+    EffectArray.every(value.symbols, isCodeGraphSymbol)
   );
 }
 
@@ -1175,8 +1197,8 @@ function isCodeGraphReference(value: unknown): boolean {
     typeof value.evidencePath === 'string' &&
     isCodeGraphSpan(value.evidenceSpan) &&
     (value.exportedOnly === undefined || typeof value.exportedOnly === 'boolean') &&
-    Array.isArray(value.lookupTiers) &&
-    value.lookupTiers.every(isStringArray) &&
+    EffectArray.isArray(value.lookupTiers) &&
+    EffectArray.every(value.lookupTiers, isStringArray) &&
     typeof value.provenance === 'string' &&
     typeof value.relation === 'string' &&
     typeof value.resolutionDomain === 'string' &&
@@ -1219,7 +1241,7 @@ function isCodeGraphSpan(value: unknown): boolean {
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
-  return Array.isArray(value) && value.every(entry => typeof entry === 'string');
+  return EffectArray.isArray(value) && EffectArray.every(value, entry => typeof entry === 'string');
 }
 
 function degradedFacts(file: CodeGraphInventoryFile, cause: unknown): CodeGraphFileFacts {
@@ -1233,11 +1255,11 @@ function degradedFacts(file: CodeGraphInventoryFile, cause: unknown): CodeGraphF
     contentHash: file.contentHash,
     documentation: diagnostic,
     exported: true,
-    id: `cgs_${sha256HexSync(`parser-degraded-v1\n${file.path}\n${file.contentHash}`).slice(0, 40)}`,
+    id: `cgs_${Effect2.pipe(sha256HexSync(`parser-degraded-v1\n${file.path}\n${file.contentHash}`), EffectString.slice(0, 40))}`,
     kind: 'module',
     language: file.language,
     lookupKeys: uniqueStrings([file.path, ...tokens(file.path)]),
-    name: file.path.split('/').at(-1) ?? file.path,
+    name: Effect2.pipe(file.path, EffectString.split('/')).at(-1) ?? file.path,
     path: file.path,
     qualifiedName: file.path,
     resolutionDomain: 'degraded',
@@ -1488,13 +1510,15 @@ function nonNegativeSafeInteger(value: number, fallback: number): number {
 }
 
 function tokens(value: string): readonly string[] {
-  return value
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .split(/[^A-Za-z0-9]+/)
-    .map(token => token.toLowerCase())
-    .filter(token => token.length >= 2);
+  return EffectArray.filter(
+    EffectArray.map(
+      Effect2.pipe(value, EffectString.replace(/([a-z0-9])([A-Z])/g, '$1 $2'), EffectString.split(/[^A-Za-z0-9]+/)),
+      token => Effect2.pipe(token, EffectString.toLowerCase),
+    ),
+    token => token.length >= 2,
+  );
 }
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
-  return [...new Set(values.filter(Boolean))];
+  return [...new Set(EffectArray.filter(values, Boolean))];
 }

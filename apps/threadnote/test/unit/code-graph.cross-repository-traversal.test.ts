@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
@@ -21,9 +22,11 @@ import {
 } from '@threadnote/graph/cross_repository/traversal';
 import type {CodeGraphMonikerV1} from '@threadnote/graph/cross_repository/types';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const span = {column: 1, endColumn: 8, endLine: 1, line: 1} as const;
-const generationId = `cgwg_${'a'.repeat(40)}`;
+const generationId = `cgwg_${Effect2.pipe('a', EffectString.repeat(40))}`;
 const bridgeSet = {digest: digest('bridge-set'), totalBridges: 2} as const;
 
 describe('cross-repository graph traversal', () => {
@@ -42,10 +45,17 @@ describe('cross-repository graph traversal', () => {
 
     expect(result.reachedTarget).toBe(true);
     expect(result.stop).toEqual({complete: true, reason: 'target-found'});
-    expect(result.edges.map(edge => edge.provenance.kind)).toEqual(['local', 'bridge', 'local', 'bridge', 'local']);
-    expect(result.edges.filter(edge => edge.provenance.kind === 'bridge')).toHaveLength(2);
+    expect(EffectArray.map(result.edges, edge => edge.provenance.kind)).toEqual([
+      'local',
+      'bridge',
+      'local',
+      'bridge',
+      'local',
+    ]);
+    expect(EffectArray.filter(result.edges, edge => edge.provenance.kind === 'bridge')).toHaveLength(2);
     expect(
-      result.edges.every(
+      EffectArray.every(
+        result.edges,
         edge =>
           edge.provenance.kind !== 'bridge' ||
           (edge.provenance.generationId === generationId && edge.provenance.sourceEvidence.path.length > 0),
@@ -67,7 +77,13 @@ describe('cross-repository graph traversal', () => {
     );
     expect(complete.direction).toBe('reverse');
     expect(complete.stop).toEqual({complete: true, reason: 'exhaustion'});
-    expect(complete.edges.map(edge => edge.provenance.kind)).toEqual(['local', 'bridge', 'local', 'bridge', 'local']);
+    expect(EffectArray.map(complete.edges, edge => edge.provenance.kind)).toEqual([
+      'local',
+      'bridge',
+      'local',
+      'bridge',
+      'local',
+    ]);
     expect(complete.visited).toEqual(expect.arrayContaining([fixture.start, fixture.end]));
 
     const blockedKey = endpointKey(fixture.bridges[0].source);
@@ -82,7 +98,7 @@ describe('cross-repository graph traversal', () => {
     );
     expect(blocked.visited).not.toContainEqual(fixture.start);
     expect(blocked.coverage.unreadyEndpointsSkipped).toBeGreaterThan(0);
-    expect(blocked.edges.every(edge => endpointKey(edge.source) !== blockedKey)).toBe(true);
+    expect(EffectArray.every(blocked.edges, edge => endpointKey(edge.source) !== blockedKey)).toBe(true);
     expect(blocked.stop).toEqual({complete: false, reason: 'exhaustion'});
   });
 
@@ -216,7 +232,10 @@ describe('cross-repository graph traversal', () => {
               });
             },
             readLocalPage: request => {
-              const index = request.after === undefined ? 0 : Number(request.after.slice('page:'.length));
+              const index =
+                request.after === undefined
+                  ? 0
+                  : Number(Effect2.pipe(request.after, EffectString.slice('page:'.length)));
               return Effect.succeed({
                 edges: [pagedEdges[index]],
                 ...(index + 1 < pagedEdges.length ? {next: `page:${index + 1}`} : {}),
@@ -264,8 +283,12 @@ function traversalFixture(): TraversalFixture {
   const resolution = resolveCodeGraphCrossRepositoryBridges([terminal, consumer, middle]);
   if (resolution.rejections.length > 0 || resolution.bridges.length !== 2)
     throw TestError.make({message: 'Invalid fixture.'});
-  const first = resolution.bridges.find(bridge => bridge.source.repositoryId === consumer.repositoryId)!;
-  const second = resolution.bridges.find(bridge => bridge.source.repositoryId === middle.repositoryId)!;
+  const first = EffectOption.getOrUndefined(
+    EffectArray.findFirst(resolution.bridges, bridge => bridge.source.repositoryId === consumer.repositoryId),
+  )!;
+  const second = EffectOption.getOrUndefined(
+    EffectArray.findFirst(resolution.bridges, bridge => bridge.source.repositoryId === middle.repositoryId),
+  )!;
   const start = endpoint(consumer, {kind: 'qualified-ref', ref: qualifiedRef('start')});
   const end = endpoint(terminal, {kind: 'qualified-ref', ref: qualifiedRef('end')});
   const localEdges = [
@@ -284,7 +307,7 @@ function dependencies(
     monotonicMilliseconds: () => 0,
     readBridgePage: request => {
       const endpoint = endpointLookupKey(request.endpoint);
-      const matches = fixture.bridges.filter(bridge =>
+      const matches = EffectArray.filter(fixture.bridges, bridge =>
         request.direction === 'outgoing'
           ? endpointLookupKey(bridge.source) === endpoint
           : endpointLookupKey(bridge.target) === endpoint,
@@ -310,7 +333,7 @@ function dependencies(
     },
     readLocalPage: request => {
       const endpoint = endpointKey(request.endpoint);
-      const matches = fixture.localEdges.filter(edge =>
+      const matches = EffectArray.filter(fixture.localEdges, edge =>
         request.direction === 'outgoing'
           ? endpointKey(edge.source) === endpoint
           : endpointKey(edge.target) === endpoint,
@@ -329,13 +352,13 @@ function repository(seed: string, repositoryKey: string, monikers: readonly Code
     monikers,
     repositoryId: digest(`repository:${seed}`),
     repositoryKey,
-    snapshotId: `cgsn_${digest(`snapshot:${seed}`).slice(0, 40)}`,
+    snapshotId: `cgsn_${Effect2.pipe(digest(`snapshot:${seed}`), EffectString.slice(0, 40))}`,
   } satisfies CodeGraphBridgeRepositoryV1;
 }
 
 function packageMoniker(role: 'export' | 'import', packageName: string, packageVersion: string, seed: string) {
   return codeGraphPackageMoniker({
-    componentId: `cgp_${digest(`component:${seed}`).slice(0, 32)}`,
+    componentId: `cgp_${Effect2.pipe(digest(`component:${seed}`), EffectString.slice(0, 32))}`,
     ...(role === 'import' ? {dependencyKind: 'runtime' as const} : {}),
     evidence: {path: `${seed}/package.json`, span},
     packageName,
@@ -384,13 +407,16 @@ function endpointKey(
         readonly snapshotId: string;
       },
 ): string {
-  return [
-    value.repositoryId,
-    'repositoryKey' in value ? value.repositoryKey : '',
-    value.snapshotId,
-    value.reference.kind,
-    value.reference.kind === 'component' ? value.reference.componentId : value.reference.ref,
-  ].join('\0');
+  return EffectArray.join(
+    [
+      value.repositoryId,
+      'repositoryKey' in value ? value.repositoryKey : '',
+      value.snapshotId,
+      value.reference.kind,
+      value.reference.kind === 'component' ? value.reference.componentId : value.reference.ref,
+    ],
+    '\0',
+  );
 }
 
 function endpointLookupKey(value: {
@@ -398,16 +424,19 @@ function endpointLookupKey(value: {
   readonly repositoryId: string;
   readonly snapshotId: string;
 }): string {
-  return [
-    value.repositoryId,
-    value.snapshotId,
-    value.reference.kind,
-    value.reference.kind === 'component' ? value.reference.componentId : value.reference.ref,
-  ].join('\0');
+  return EffectArray.join(
+    [
+      value.repositoryId,
+      value.snapshotId,
+      value.reference.kind,
+      value.reference.kind === 'component' ? value.reference.componentId : value.reference.ref,
+    ],
+    '\0',
+  );
 }
 
 function qualifiedRef(seed: string): string {
-  return `cgr_${digest(`qualified:${seed}`).slice(0, 40)}`;
+  return `cgr_${Effect2.pipe(digest(`qualified:${seed}`), EffectString.slice(0, 40))}`;
 }
 
 function digest(value: string): string {

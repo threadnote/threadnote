@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Path} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {
@@ -10,9 +11,10 @@ import type {
   DevSkillsReleaseIdentity,
   DevSkillsRuntimeCapabilities,
 } from './contract.js';
-import {decode, hash, isRecord, readOptional, requireValue, stableJson} from './files.js';
+import {decode, fail, hash, isRecord, readOptional, requireValue, stableJson} from './files.js';
 import {consumerId, enrollmentContext, parseRuntimeIndex, parseTarget, type Enrollment} from './registry.js';
 import {parseHistoricalDevSkillsManifest, parseNativeRequirements} from './manifest.js';
+import * as EffectRecord from 'effect/Record';
 
 export interface RefreshMember {
   readonly consumerId: string;
@@ -45,7 +47,7 @@ export const version = (value: unknown): value is string =>
   typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(value);
 export function keys(value: unknown, allowed: readonly string[]) {
   requireValue(
-    isRecord(value) && Object.keys(value).every(key => allowed.includes(key)),
+    isRecord(value) && EffectArray.every(EffectRecord.keys(value), key => allowed.includes(key)),
     'Unknown refresh protocol fields.',
   );
 }
@@ -63,14 +65,20 @@ export function parseCapabilities(value: unknown): DevSkillsRuntimeCapabilities 
     ...(value.schemaVersion === 2 ? ['manifestSchemas', 'nativeFeatures'] : []),
   ]);
   const numbers = (input: unknown): number[] => {
+    const validNumbers = EffectArray.isArray(input)
+      ? EffectArray.filter(
+          input,
+          (item): item is number => typeof item === 'number' && Number.isSafeInteger(item) && item > 0,
+        )
+      : [];
     requireValue(
-      Array.isArray(input) &&
+      EffectArray.isArray(input) &&
         input.length <= 32 &&
-        new Set(input).size === input.length &&
-        input.every((item): item is number => typeof item === 'number' && Number.isSafeInteger(item) && item > 0),
+        validNumbers.length === input.length &&
+        new Set(validNumbers).size === validNumbers.length,
       'Invalid candidate capability set.',
     );
-    return input;
+    return [...validNumbers];
   };
   const common = {
     runtimeVersion: value.runtimeVersion,
@@ -89,8 +97,8 @@ export function parseCapabilities(value: unknown): DevSkillsRuntimeCapabilities 
 }
 
 function issues(value: unknown): readonly DevSkillsIssue[] {
-  requireValue(Array.isArray(value) && value.length <= 2048, 'Invalid refresh diagnostics.');
-  for (const issue of value) {
+  requireValue(EffectArray.isArray(value) && value.length <= 2048, 'Invalid refresh diagnostics.');
+  return EffectArray.map(value, issue => {
     keys(issue, ['code', 'message', 'path']);
     requireValue(
       isRecord(issue) &&
@@ -101,8 +109,15 @@ function issues(value: unknown): readonly DevSkillsIssue[] {
         (issue.path === undefined || typeof issue.path === 'string'),
       'Invalid refresh issue.',
     );
-  }
-  return value as DevSkillsIssue[];
+    if (!isRecord(issue) || typeof issue.code !== 'string' || typeof issue.message !== 'string') {
+      throw fail('invalid-state', 'Invalid refresh issue.');
+    }
+    return {
+      code: issue.code,
+      message: issue.message,
+      ...(typeof issue.path === 'string' ? {path: issue.path} : {}),
+    };
+  });
 }
 export function parseInstalled(value: unknown): DevSkillsInstalled {
   keys(value, [
@@ -156,7 +171,7 @@ function parsePinned(value: unknown, path: Path.Path): DevSkillsConsumer {
   const target = parseTarget(value.target);
   requireValue(
     path.resolve(target.skillRoot) === target.skillRoot &&
-      target.discoveryRoots.every(root => path.resolve(root) === root),
+      EffectArray.every(target.discoveryRoots, root => path.resolve(root) === root),
     'Noncanonical refresh target.',
   );
   return {home: value.home, installationRoot: value.installationRoot, target};
@@ -167,9 +182,9 @@ function parseRequest(value: unknown, root: string, path: Path.Path): RefreshReq
     isRecord(value) &&
       value.schemaVersion === 1 &&
       isRecord(value.release) &&
-      Array.isArray(value.members) &&
+      EffectArray.isArray(value.members) &&
       value.members.length <= 1024 &&
-      Array.isArray(value.affected) &&
+      EffectArray.isArray(value.affected) &&
       value.affected.length <= 1024,
     'Invalid refresh request.',
   );
@@ -181,7 +196,12 @@ function parseRequest(value: unknown, root: string, path: Path.Path): RefreshReq
       digest(value.release.bundleDigest),
     'Invalid final release identity.',
   );
-  const release = value.release as unknown as DevSkillsReleaseIdentity;
+  const release: DevSkillsReleaseIdentity = {
+    installationRoot: value.release.installationRoot,
+    releaseRoot: value.release.releaseRoot,
+    releaseVersion: value.release.releaseVersion,
+    bundleDigest: value.release.bundleDigest,
+  };
   const capabilities = parseCapabilities(value.capabilities);
   const desired = parseHistoricalDevSkillsManifest(value.desired);
   requireValue(
@@ -191,7 +211,7 @@ function parseRequest(value: unknown, root: string, path: Path.Path): RefreshReq
       (value.runtimeHash === null || digest(value.runtimeHash)),
     'Refresh desired release differs.',
   );
-  const members: RefreshMember[] = value.members.map(item => {
+  const members: RefreshMember[] = EffectArray.map(value.members, item => {
     keys(item, [
       'consumerId',
       'enrollment',
@@ -205,9 +225,9 @@ function parseRequest(value: unknown, root: string, path: Path.Path): RefreshReq
     requireValue(
       isRecord(item) &&
         digest(item.consumerId) &&
-        Array.isArray(item.retained) &&
+        EffectArray.isArray(item.retained) &&
         item.retained.length <= 1024 &&
-        [item.receiptHash, item.homeHash, item.observedHash].every(hash => hash === null || digest(hash)),
+        EffectArray.every([item.receiptHash, item.homeHash, item.observedHash], hash => hash === null || digest(hash)),
       'Invalid refresh member.',
     );
     const consumer = parsePinned(item.enrollment, path);
@@ -223,16 +243,16 @@ function parseRequest(value: unknown, root: string, path: Path.Path): RefreshReq
     return {
       consumerId: item.consumerId,
       enrollment,
-      retained: item.retained.map(parseInstalled),
+      retained: EffectArray.map(item.retained, parseInstalled),
       ...(item.installed ? {installed: parseInstalled(item.installed)} : {}),
-      receiptHash: item.receiptHash as string | null,
-      homeHash: item.homeHash as string | null,
-      observedHash: item.observedHash as string | null,
+      receiptHash: nullableDigest(item.receiptHash),
+      homeHash: nullableDigest(item.homeHash),
+      observedHash: nullableDigest(item.observedHash),
       issues: issues(item.issues),
     };
   });
-  const affected = value.affected.map(item => parsePinned(item, path));
-  const ids = [...members.map(member => member.consumerId), ...affected.map(consumerId)];
+  const affected = EffectArray.map(value.affected, item => parsePinned(item, path));
+  const ids = [...EffectArray.map(members, member => member.consumerId), ...EffectArray.map(affected, consumerId)];
   requireValue(new Set(ids).size === ids.length, 'Duplicate refresh consumer.');
   return {
     schemaVersion: 1,
@@ -252,9 +272,12 @@ export function parseRefreshState(value: unknown, root: string, path: Path.Path)
   );
   const request = parseRequest(value.request, root, path);
   requireValue(value.intentId === hash(stableJson(request)), 'Refresh immutable request fingerprint differs.');
-  const allowed = new Set([...request.members.map(member => member.consumerId), ...request.affected.map(consumerId)]);
+  const allowed = new Set([
+    ...EffectArray.map(request.members, member => member.consumerId),
+    ...EffectArray.map(request.affected, consumerId),
+  ]);
   const outcomes: Record<string, DevSkillsRefreshOutcome> = {};
-  for (const [id, outcome] of Object.entries(value.outcomes)) {
+  for (const [id, outcome] of EffectRecord.toEntries(value.outcomes)) {
     keys(outcome, [
       'intentId',
       'requestedReleaseVersion',
@@ -278,18 +301,48 @@ export function parseRefreshState(value: unknown, root: string, path: Path.Path)
           : typeof outcome.completedAt === 'string' && Number.isFinite(Date.parse(outcome.completedAt))),
       'Invalid refresh outcome.',
     );
-    outcomes[id] = {...outcome, issues: issues(outcome.issues)} as unknown as DevSkillsRefreshOutcome;
+    const outcomeState = refreshOutcomeState(outcome.state);
+    const attemptedAt = validTimestamp(outcome.attemptedAt);
+    const completedAt = outcome.completedAt === undefined ? undefined : validTimestamp(outcome.completedAt);
+    outcomes[id] = {
+      intentId: requiredString(outcome.intentId),
+      requestedReleaseVersion: requiredString(outcome.requestedReleaseVersion),
+      requestedBundleDigest: requiredString(outcome.requestedBundleDigest),
+      state: outcomeState,
+      attemptedAt,
+      ...(completedAt === undefined ? {} : {completedAt}),
+      issues: issues(outcome.issues),
+    };
   }
   const batchIssues = value.issues === undefined ? undefined : issues(value.issues);
   requireValue(
     !batchIssues ||
       (batchIssues.length <= 1 &&
-        batchIssues.every(
+        EffectArray.every(
+          batchIssues,
           issue => issue.code === 'enrollment-drift' && issue.message.length <= 512 && issue.path === undefined,
         )),
     'Invalid refresh batch diagnostics.',
   );
   return {schemaVersion: 1, intentId: value.intentId, request, outcomes, ...(batchIssues ? {issues: batchIssues} : {})};
+}
+function nullableDigest(value: unknown): string | null {
+  if (value === null) return null;
+  if (!digest(value)) throw fail('invalid-state', 'Invalid refresh hash.');
+  return value;
+}
+function requiredString(value: unknown): string {
+  if (typeof value !== 'string') throw fail('invalid-state', 'Invalid refresh string.');
+  return value;
+}
+function validTimestamp(value: unknown): string {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value)))
+    throw fail('invalid-state', 'Invalid refresh timestamp.');
+  return value;
+}
+function refreshOutcomeState(value: unknown): DevSkillsRefreshOutcome['state'] {
+  if (value === 'current' || value === 'pending' || value === 'skipped') return value;
+  throw fail('invalid-state', 'Invalid refresh outcome state.');
 }
 export const refreshStatePath = (path: Path.Path, root: string) => path.join(root, 'dev-skills-refresh.json');
 export const readRefreshStateAt = Effect.fn('devSkills.readRefreshState')(function* (root: string) {
@@ -300,10 +353,10 @@ export const readRefreshStateAt = Effect.fn('devSkills.readRefreshState')(functi
 });
 export const refreshResult = (state: RefreshState, override?: readonly DevSkillsIssue[]): DevSkillsRefreshResult => {
   const all = [
-    ...state.request.members.map(member => ({id: member.consumerId, target: member.enrollment.target})),
-    ...state.request.affected.map(consumer => ({id: consumerId(consumer), target: consumer.target})),
+    ...EffectArray.map(state.request.members, member => ({id: member.consumerId, target: member.enrollment.target})),
+    ...EffectArray.map(state.request.affected, consumer => ({id: consumerId(consumer), target: consumer.target})),
   ];
-  const targets = all.map(({id, target}) => ({
+  const targets = EffectArray.map(all, ({id, target}) => ({
     consumerId: id,
     target,
     outcome: override
@@ -331,7 +384,9 @@ export const refreshResult = (state: RefreshState, override?: readonly DevSkills
     targets,
     ...(state.issues?.length ? {issues: state.issues} : {}),
     repairRequired:
-      Boolean(override) || Boolean(state.issues?.length) || targets.some(target => target.outcome.state === 'pending'),
+      Boolean(override) ||
+      Boolean(state.issues?.length) ||
+      EffectArray.some(targets, target => target.outcome.state === 'pending'),
   };
 };
 export const readDevSkillsRefresh = Effect.fn('devSkills.readRefresh')(function* (config: RuntimeConfig) {

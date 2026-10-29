@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphQueryResult} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type CodeGraphRenderTarget = 'mcp' | 'standalone';
 
@@ -15,7 +18,7 @@ export function renderCodeGraphResult(
   if (result.projectCoverage) {
     const coverage = result.projectCoverage;
     lines.push(
-      `Project: ${coverage.project} (${coverage.kind}; ${coverage.completeness}); roots: ${coverage.configuredRoots.join(', ') || 'repository'}; components: ${coverage.rootComponents} roots + ${coverage.dependencyComponents} dependencies.`,
+      `Project: ${coverage.project} (${coverage.kind}; ${coverage.completeness}); roots: ${EffectArray.join(coverage.configuredRoots, ', ') || 'repository'}; components: ${coverage.rootComponents} roots + ${coverage.dependencyComponents} dependencies.`,
       `Observed commit: ${shortCommit(coverage.observedWorktreeCommit)}${coverage.reusedEquivalentSnapshot ? '; reused equivalent snapshot' : ''}.`,
     );
   }
@@ -56,11 +59,11 @@ export function renderCodeGraphResult(
     );
   }
   if (result.warnings.length > 0) {
-    lines.push('', ...result.warnings.map(warning => `Warning: ${warning}`));
+    lines.push('', ...EffectArray.map(result.warnings, warning => `Warning: ${warning}`));
   }
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 function shortCommit(value: string): string {
-  return value.slice(0, 12);
+  return Effect.pipe(value, EffectString.slice(0, 12));
 }

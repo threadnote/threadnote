@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -11,6 +12,8 @@ import {
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {codeGraphGitIndexSemanticSha256} from './index_semantic.js';
 import type {RepositoryIdentity} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_GIT_STATUS_CACHE_RECEIPT_VERSION = 3 as const;
 // Avoid a persistent Git monitor and private-index setup for repositories
@@ -187,13 +190,13 @@ export const worktreeUntrackedStatusWithPrivateCache = Effect.fn('codeGraph.work
   },
 );
 
-class CodeGraphGitStatusCacheUnavailable extends Schema.TaggedError<CodeGraphGitStatusCacheUnavailable>()(
-  'CodeGraphGitStatusCacheUnavailable',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphGitStatusCacheUnavailable extends Schema.TaggedError<
+  CodeGraphGitStatusCacheUnavailable,
+  {readonly brand: unique symbol}
+>()('CodeGraphGitStatusCacheUnavailable', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const worktreeStatusWithPrivateCache = Effect.fn('codeGraph.worktreeStatusWithPrivateCache')(function* (
   identity: RepositoryIdentity,
@@ -224,11 +227,14 @@ const acceleratedWorktreeStatus = Effect.fn('codeGraph.acceleratedWorktreeStatus
   if (!Number.isSafeInteger(minimumIndexBytes) || minimumIndexBytes < 0) {
     return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Invalid private Git index threshold.'});
   }
-  const resolvedIndex = (yield* runCommandEffect(
-    'git',
-    ['--no-optional-locks', '-C', identity.repoRoot, 'rev-parse', '--path-format=absolute', '--git-path', 'index'],
-    {maxOutputBytes: 16_384, timeoutMs: 30_000},
-  )).stdout.trim();
+  const resolvedIndex = Effect2.pipe(
+    (yield* runCommandEffect(
+      'git',
+      ['--no-optional-locks', '-C', identity.repoRoot, 'rev-parse', '--path-format=absolute', '--git-path', 'index'],
+      {maxOutputBytes: 16_384, timeoutMs: 30_000},
+    )).stdout,
+    EffectString.trim,
+  );
   if (!path.isAbsolute(resolvedIndex) || /[\0\r\n]/.test(resolvedIndex)) {
     return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Git index path is unavailable.'});
   }
@@ -502,10 +508,15 @@ function ensurePrivateCacheDirectory(
 ) {
   return Effect.gen(function* () {
     const relative = path.relative(privateHome, directory);
-    if (!relative || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+    if (
+      !relative ||
+      path.isAbsolute(relative) ||
+      relative === '..' ||
+      Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`))
+    ) {
       return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Private Git cache directory escaped home.'});
     }
-    const components = relative.split(path.sep).filter(Boolean);
+    const components = EffectArray.filter(Effect2.pipe(relative, EffectString.split(path.sep)), Boolean);
     let candidate = privateHome;
     for (const component of ['', ...components]) {
       if (component) candidate = path.join(candidate, component);
@@ -582,7 +593,7 @@ export function parseCodeGraphGitStatusCacheReceipt(value: string): CodeGraphGit
   if (new TextEncoder().encode(value).byteLength > RECEIPT_BYTES_MAXIMUM) return undefined;
   try {
     const parsed: unknown = JSON.parse(value);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+    if (typeof parsed !== 'object' || parsed === null || EffectArray.isArray(parsed)) return undefined;
     const candidate = parsed as Partial<CodeGraphGitStatusCacheReceipt>;
     const device = parseIndexIdentity(candidate.sourceIndexDevice);
     const inode = parseIndexIdentity(candidate.sourceIndexInode);

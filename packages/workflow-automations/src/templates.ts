@@ -1,5 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {decodeNativeDocument, type NativeDocumentEnvelope, type NativeDocumentKind} from './documents.js';
 import {WorkflowAutomationError} from './contracts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const nativeDocumentTemplateVersion = 1 as const;
 
@@ -146,29 +150,32 @@ export function createNativeDocument(input: CreateNativeDocumentInput): NativeDo
     input === null ||
     typeof input.sections !== 'object' ||
     input.sections === null ||
-    Array.isArray(input.sections)
+    EffectArray.isArray(input.sections)
   )
     throw invalidTemplate('A native document requires a kind, title, and section map.');
   const kind =
     typeof input.kind === 'string'
-      ? Object.keys(nativeDocumentTemplateDefinitions).find(
-          (candidate): candidate is NativeDocumentKind => candidate === input.kind,
+      ? EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            EffectRecord.keys(nativeDocumentTemplateDefinitions),
+            (candidate): candidate is NativeDocumentKind => candidate === input.kind,
+          ),
         )
       : undefined;
   if (!kind) throw invalidTemplate('The requested native document kind has no template.');
   const definition: NativeDocumentTemplateDefinition = nativeDocumentTemplateDefinitions[kind];
 
   const knownSections = new Map<string, NativeDocumentSectionTemplate>(
-    definition.sections.map(section => [section.id, section]),
+    EffectArray.map(definition.sections, section => [section.id, section]),
   );
-  const suppliedIds = Object.keys(input.sections);
+  const suppliedIds = EffectRecord.keys(input.sections);
   for (const id of suppliedIds) {
     if (!knownSections.has(id)) throw invalidTemplate(`Unknown ${kind} template section: ${id}.`);
     if (typeof input.sections[id] !== 'string') throw invalidTemplate(`Section ${id} must be supplied as text.`);
   }
-  const sections = definition.sections.flatMap(section => {
+  const sections = EffectArray.flatMap(definition.sections, section => {
     const body = input.sections[section.id];
-    if (body === undefined || body.trim().length === 0) {
+    if (body === undefined || Effect.pipe(body, EffectString.trim).length === 0) {
       if (section.required === true) throw invalidTemplate(`Required ${kind} section ${section.id} is blank.`);
       return [];
     }

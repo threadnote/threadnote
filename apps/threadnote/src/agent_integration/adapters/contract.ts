@@ -10,7 +10,10 @@ import type {AgentIntegrationRegistry, AgentSetupCompletion} from '../registry.j
 import type {AgentJsonContainer} from '../json_config.js';
 import type {JsonObject} from '@threadnote/platform/json';
 
-export class AgentAdapterActionError extends Schema.TaggedError<AgentAdapterActionError>()('AgentAdapterActionError', {
+export class AgentAdapterActionError extends Schema.TaggedError<
+  AgentAdapterActionError,
+  {readonly brand: unique symbol}
+>()('AgentAdapterActionError', {
   message: Schema.String,
 }) {}
 

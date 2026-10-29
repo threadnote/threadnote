@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import type {Node} from 'web-tree-sitter';
 import type {TreeSitterLanguageDefinition} from '../../tree_sitter/extractor.js';
@@ -16,6 +17,8 @@ import {
 import type {CodeGraphLanguagePack} from '../types.js';
 import {createGenericTreeSitterLanguagePack} from './factory.js';
 import {genericReferenceLookupTiers, genericSymbolLookupKeys, simpleImport} from './lookup.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const SOURCE_CAPABILITIES = new Set(['calls', 'declarations', 'imports', 'inheritance'] as const);
 
@@ -59,7 +62,7 @@ export const goLanguagePack = createGenericTreeSitterLanguagePack({
   definition: languageDefinition({
     asset: GO_GRAMMAR,
     declarationKind: (capture, node) => {
-      if (capture !== 'definition.type') return capture.replace(/^definition\./, '');
+      if (capture !== 'definition.type') return Effect.pipe(capture, EffectString.replace(/^definition\./, ''));
       const type = node.childForFieldName('type')?.type;
       return type === 'struct_type' ? 'struct' : type === 'interface_type' ? 'interface' : 'type';
     },
@@ -77,7 +80,9 @@ export const goLanguagePack = createGenericTreeSitterLanguagePack({
       (import_spec) @metadata.import
     `,
     namespaceFromNode: node => {
-      const name = node.namedChildren.find(child => child.type === 'package_identifier')?.text;
+      const name = Option.getOrUndefined(
+        EffectArray.findFirst(node.namedChildren, child => child.type === 'package_identifier'),
+      )?.text;
       return name ? Option.some(name) : Option.none();
     },
     referenceQuery: `
@@ -171,7 +176,7 @@ export const cppLanguagePack = createGenericTreeSitterLanguagePack({
   definition: languageDefinition({
     asset: CPP_GRAMMAR,
     declarationKind: (capture, node) => {
-      if (capture !== 'definition.class') return capture.replace(/^definition\./, '');
+      if (capture !== 'definition.class') return Effect.pipe(capture, EffectString.replace(/^definition\./, ''));
       return /^\s*struct\b/.test(node.text) ? 'struct' : /^\s*union\b/.test(node.text) ? 'union' : 'class';
     },
     declarationQuery: `
@@ -378,7 +383,8 @@ export const hclLanguagePack = createGenericTreeSitterLanguagePack({
     asset: HCL_GRAMMAR,
     declarationKind: (capture, node) =>
       capture === 'definition.block'
-        ? (node.namedChildren.find(child => child.type === 'identifier')?.text ?? 'block')
+        ? (Option.getOrUndefined(EffectArray.findFirst(node.namedChildren, child => child.type === 'identifier'))
+            ?.text ?? 'block')
         : 'property',
     declarationName: (capture, declaration, name) =>
       capture === 'definition.block' ? hclBlockName(declaration) : name.text,
@@ -422,25 +428,31 @@ function languageDefinition(
 
 function pythonImport(value: string) {
   const from = /^\s*from\s+([\w.]+)\s+import\s+([\w.*]+)/.exec(value);
-  if (from) return simpleImport(`${from[1]}.${from[2]}`, from[2].split('.').at(-1));
+  if (from) return simpleImport(`${from[1]}.${from[2]}`, Effect.pipe(from[2], EffectString.split('.')).at(-1));
   const direct = /^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?/.exec(value);
-  return direct ? simpleImport(direct[1], direct[1].split('.').at(-1), direct[2]) : Option.none();
+  return direct
+    ? simpleImport(direct[1], Effect.pipe(direct[1], EffectString.split('.')).at(-1), direct[2])
+    : Option.none();
 }
 
 function goImport(value: string) {
-  const match = /^\s*(?:(\w+|\.|_)\s+)?["`]([^"`]+)["`]/.exec(value.trim());
+  const match = /^\s*(?:(\w+|\.|_)\s+)?["`]([^"`]+)["`]/.exec(Effect.pipe(value, EffectString.trim));
   const module = match?.[2];
   return module
-    ? simpleImport(module, module.split('/').at(-1), match?.[1] === '.' || match?.[1] === '_' ? undefined : match?.[1])
+    ? simpleImport(
+        module,
+        Effect.pipe(module, EffectString.split('/')).at(-1),
+        match?.[1] === '.' || match?.[1] === '_' ? undefined : match?.[1],
+      )
     : Option.none();
 }
 
 function rustImport(value: string) {
   const match = /^\s*use\s+(.+?);?\s*$/.exec(value);
   if (!match) return Option.none();
-  const module = match[1].replace(/\s+as\s+\w+$/, '').replace(/[{}\s]/g, '');
+  const module = Effect.pipe(match[1], EffectString.replace(/\s+as\s+\w+$/, ''), EffectString.replace(/[{}\s]/g, ''));
   const alias = /\s+as\s+(\w+)\s*;?$/.exec(value)?.[1];
-  return simpleImport(module, module.split('::').at(-1), alias);
+  return simpleImport(module, Effect.pipe(module, EffectString.split('::')).at(-1), alias);
 }
 
 function includeImport(value: string) {
@@ -451,8 +463,8 @@ function includeImport(value: string) {
 function csharpImport(value: string) {
   const match = /^\s*(?:global\s+)?using\s+(?:(\w+)\s*=\s*)?([^;]+);/.exec(value);
   if (!match || /^static\s+/.test(match[2])) return Option.none();
-  const module = match[2].trim();
-  return simpleImport(module, module.split('.').at(-1), match[1]);
+  const module = Effect.pipe(match[2], EffectString.trim);
+  return simpleImport(module, Effect.pipe(module, EffectString.split('.')).at(-1), match[1]);
 }
 
 function rubyImport(value: string) {
@@ -463,8 +475,8 @@ function rubyImport(value: string) {
 function phpImport(value: string) {
   const match = /^\s*use\s+([^;{,]+?)(?:\s+as\s+(\w+))?\s*;/i.exec(value);
   if (!match) return Option.none();
-  const module = match[1].trim();
-  return simpleImport(module, module.split('\\').at(-1), match[2]);
+  const module = Effect.pipe(match[1], EffectString.trim);
+  return simpleImport(module, Effect.pipe(module, EffectString.split('\\')).at(-1), match[2]);
 }
 
 function bashImport(value: string) {
@@ -483,24 +495,26 @@ function relationForCapture(capture: string) {
 
 function rustExported(node: Node): boolean {
   for (let current: Node | null = node; current; current = current.parent) {
-    if (current.namedChildren.some(child => child.type === 'visibility_modifier')) return true;
+    if (EffectArray.some(current.namedChildren, child => child.type === 'visibility_modifier')) return true;
     if (current.type === 'source_file') break;
   }
   return false;
 }
 
 function hclBlockName(node: Node): string {
-  const components = node.namedChildren
-    .filter(child => child.type === 'identifier' || child.type === 'string_lit')
-    .map(child => stripQuotes(child.text));
-  return components.length > 1 ? components.slice(1).join('.') : (components[0] ?? 'block');
+  const components = EffectArray.map(
+    EffectArray.filter(node.namedChildren, child => child.type === 'identifier' || child.type === 'string_lit'),
+    child => stripQuotes(child.text),
+  );
+  return components.length > 1 ? EffectArray.join(components.slice(1), '.') : (components[0] ?? 'block');
 }
 
 function stripQuotes(value: string): string {
-  return value.trim().replace(/^["']|["']$/g, '');
+  return Effect.pipe(value, EffectString.trim, EffectString.replace(/^["']|["']$/g, ''));
 }
 
 function header(node: Node): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   return node.text.split(/[={\n]/, 1)[0] ?? '';
 }
 

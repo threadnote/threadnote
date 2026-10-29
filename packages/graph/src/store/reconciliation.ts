@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, DateTime, Effect, Predicate} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
@@ -89,6 +90,9 @@ import {
   codeGraphScopeCursor,
   codeGraphScopeCursorParameters,
 } from './scope/cursor.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const WORKTREE_RECONCILIATION_CURSOR_KEY = 'worktree_reconciliation_cursor';
 const WORKTREE_RECONCILIATION_CURSOR_PATTERN = CODE_GRAPH_SCOPE_CURSOR_PATTERN;
@@ -108,6 +112,7 @@ interface ReconciliationTrigger {
 }
 
 function isCodeGraphReconciliationTable(value: string): value is CodeGraphReconciliationTable {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   return Object.hasOwn(CODE_GRAPH_RECONCILIATION_TABLE_COLUMNS, value);
 }
 
@@ -115,9 +120,9 @@ function isReconciliationTrigger(value: unknown): value is ReconciliationTrigger
   if (!Predicate.isObject(value)) return false;
   return (
     typeof value.name === 'string' &&
-    value.name === value.name.toLowerCase() &&
+    value.name === Effect2.pipe(value.name, EffectString.toLowerCase) &&
     typeof value.tbl_name === 'string' &&
-    value.tbl_name === value.tbl_name.toLowerCase() &&
+    value.tbl_name === Effect2.pipe(value.tbl_name, EffectString.toLowerCase) &&
     typeof value.sql_bytes === 'number' &&
     Number.isSafeInteger(value.sql_bytes) &&
     value.sql_bytes <= 8192 &&
@@ -282,7 +287,8 @@ const claimWorktreeReconciliationCandidates = Effect.fn('codeGraph.claimWorktree
       const nextCursor =
         lastRow === undefined ? undefined : codeGraphScopeCursor(lastRow.worktree_id, lastRow.scope_id);
       if (
-        rows.some(
+        EffectArray.some(
+          rows,
           row =>
             typeof row.repository_id !== 'string' ||
             !/^[0-9a-f]{64}$/.test(row.repository_id) ||
@@ -297,14 +303,15 @@ const claimWorktreeReconciliationCandidates = Effect.fn('codeGraph.claimWorktree
       if (nextCursor !== undefined) {
         yield* recordWorktreeReconciliationCursor(sql, cursorState, nextCursor);
       }
-      return rows
-        .filter(row => row.snapshot_state === 'ready' && Number(row.tombstoned) === 0)
-        .map(row => ({
+      return EffectArray.map(
+        EffectArray.filter(rows, row => row.snapshot_state === 'ready' && Number(row.tombstoned) === 0),
+        row => ({
           repositoryId: row.repository_id!,
           snapshotId: row.snapshot_id,
           worktreeId: row.worktree_id,
           ...(row.scope_id === CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY ? {} : {scopeId: row.scope_id}),
-        })) satisfies readonly CodeGraphWorktreeReconciliationCandidate[];
+        }),
+      ) satisfies readonly CodeGraphWorktreeReconciliationCandidate[];
     }),
   );
 });
@@ -340,7 +347,7 @@ const claimOrphanProvenanceCandidates = Effect.fn('codeGraph.claimOrphanProvenan
 ) {
   if (
     requestedWorktreeIds.length > ORPHAN_PROVENANCE_WORKTREE_ID_LIMIT ||
-    requestedWorktreeIds.some(worktreeId => !/^[0-9a-f]{64}$/.test(worktreeId))
+    EffectArray.some(requestedWorktreeIds, worktreeId => !/^[0-9a-f]{64}$/.test(worktreeId))
   ) {
     return yield* CodeGraphStoreError.of('Code graph provenance candidate inventory is invalid.');
   }
@@ -516,7 +523,7 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
         ? [
             'removed_view_cleanup',
             'removed_view_cleanup_due',
-            ...SCOPED_REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS.map(trigger => trigger.name),
+            ...EffectArray.map(SCOPED_REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS, trigger => trigger.name),
           ]
         : []),
     ];
@@ -529,7 +536,7 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
     const cleanupTriggerDefinitions = scoped
       ? SCOPED_REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS
       : REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS;
-    for (const tableName of Object.keys(CODE_GRAPH_RECONCILIATION_TABLE_COLUMNS)) {
+    for (const tableName of EffectRecord.keys(CODE_GRAPH_RECONCILIATION_TABLE_COLUMNS)) {
       if (!isCodeGraphReconciliationTable(tableName)) return false;
       const table = tableName;
       if (table === 'removed_view_cleanup' && !requireCleanup) continue;
@@ -559,20 +566,20 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
         `SELECT * FROM pragma_table_xinfo('${table}')
          LIMIT ${expectedColumns.length + 1}`,
       );
-      const observed = columns
-        .map(column => ({
-          hidden: Number(column.hidden),
-          defaultValue: column.dflt_value,
-          name: column.name,
-          notNull: Number(column.notnull) === 1,
-          primaryKeyPosition: Number(column.pk),
-          type: column.type.toUpperCase(),
-        }))
-        .sort((left, right) => left.name.localeCompare(right.name));
-      const expected = [...expectedColumns].sort((left, right) => left.name.localeCompare(right.name));
+      const observed = EffectArray.map(columns, column => ({
+        hidden: Number(column.hidden),
+        defaultValue: column.dflt_value,
+        name: column.name,
+        notNull: Number(column.notnull) === 1,
+        primaryKeyPosition: Number(column.pk),
+        type: Effect2.pipe(column.type, EffectString.toUpperCase),
+      })).sort((left, right) => Effect2.pipe(left.name, EffectString.localeCompare(right.name)));
+      const expected = [...expectedColumns].sort((left, right) =>
+        Effect2.pipe(left.name, EffectString.localeCompare(right.name)),
+      );
       if (
         observed.length !== expected.length ||
-        observed.some((column, index) => {
+        EffectArray.some(observed, (column, index) => {
           const contract = expected[index];
           return (
             contract === undefined ||
@@ -614,9 +621,15 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
       activeForeignKeys[0]?.from !== 'snapshot_id' ||
       activeForeignKeys[0]?.to !== 'id' ||
       activeForeignKeys[0]?.table !== 'snapshots' ||
-      activeForeignKeys[0]?.on_delete.toUpperCase() !== 'CASCADE' ||
-      activeForeignKeys[0]?.on_update.toUpperCase() !== 'NO ACTION' ||
-      activeForeignKeys[0]?.match.toUpperCase() !== 'NONE'
+      Effect2.pipe(activeForeignKeys[0]?.on_delete, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'CASCADE' ||
+      Effect2.pipe(activeForeignKeys[0]?.on_update, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'NO ACTION' ||
+      Effect2.pipe(activeForeignKeys[0]?.match, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'NONE'
     ) {
       return false;
     }
@@ -638,9 +651,15 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
       snapshotForeignKeys[0]?.from !== 'repository_id' ||
       snapshotForeignKeys[0]?.to !== 'id' ||
       snapshotForeignKeys[0]?.table !== 'repositories' ||
-      snapshotForeignKeys[0]?.on_delete.toUpperCase() !== 'CASCADE' ||
-      snapshotForeignKeys[0]?.on_update.toUpperCase() !== 'NO ACTION' ||
-      snapshotForeignKeys[0]?.match.toUpperCase() !== 'NONE'
+      Effect2.pipe(snapshotForeignKeys[0]?.on_delete, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'CASCADE' ||
+      Effect2.pipe(snapshotForeignKeys[0]?.on_update, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'NO ACTION' ||
+      Effect2.pipe(snapshotForeignKeys[0]?.match, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'NONE'
     ) {
       return false;
     }
@@ -657,9 +676,15 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
       leaseForeignKeys[0]?.from !== 'snapshot_id' ||
       leaseForeignKeys[0]?.to !== 'id' ||
       leaseForeignKeys[0]?.table !== 'snapshots' ||
-      leaseForeignKeys[0]?.on_delete.toUpperCase() !== 'CASCADE' ||
-      leaseForeignKeys[0]?.on_update.toUpperCase() !== 'NO ACTION' ||
-      leaseForeignKeys[0]?.match.toUpperCase() !== 'NONE'
+      Effect2.pipe(leaseForeignKeys[0]?.on_delete, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'CASCADE' ||
+      Effect2.pipe(leaseForeignKeys[0]?.on_update, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'NO ACTION' ||
+      Effect2.pipe(leaseForeignKeys[0]?.match, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toUpperCase),
+      ) !== 'NONE'
     ) {
       return false;
     }
@@ -701,7 +726,10 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
                length(CAST(sql AS BLOB)) AS sql_bytes
         FROM sqlite_master
         WHERE type = 'trigger'
-          AND tbl_name IN (${triggerTables.map(table => `'${table}' COLLATE NOCASE`).join(', ')})
+          AND tbl_name IN (${EffectArray.join(
+            EffectArray.map(triggerTables, table => `'${table}' COLLATE NOCASE`),
+            ', ',
+          )})
         ORDER BY name
         LIMIT 5`);
     const verifiedTriggers: ReconciliationTrigger[] = [];
@@ -709,11 +737,14 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
       if (!isReconciliationTrigger(trigger)) return false;
       verifiedTriggers.push(trigger);
     }
-    const activeTrigger = verifiedTriggers.filter(
+    const activeTrigger = EffectArray.filter(
+      verifiedTriggers,
       trigger => trigger.name === 'active_snapshots_require_current_extractor',
     );
     const cleanupTriggers = requireCleanup
-      ? verifiedTriggers.filter(trigger => cleanupTriggerDefinitions.some(expected => expected.name === trigger.name))
+      ? EffectArray.filter(verifiedTriggers, trigger =>
+          EffectArray.some(cleanupTriggerDefinitions, expected => expected.name === trigger.name),
+        )
       : [];
     const expectedTriggerCount = 1 + cleanupTriggers.length;
     if (
@@ -727,8 +758,10 @@ const codeGraphWorktreeReconciliationSchemaCompatible: (
             : CODE_GRAPH_ACTIVE_SNAPSHOT_EXTRACTOR_TRIGGER_SQL,
         ) ||
       (requireCleanup && cleanupTriggers.length !== cleanupTriggerDefinitions.length) ||
-      cleanupTriggers.some(trigger => {
-        const expected = cleanupTriggerDefinitions.find(candidate => candidate.name === trigger.name);
+      EffectArray.some(cleanupTriggers, trigger => {
+        const expected = EffectOption.getOrUndefined(
+          EffectArray.findFirst(cleanupTriggerDefinitions, candidate => candidate.name === trigger.name),
+        );
         return (
           expected === undefined ||
           trigger.tbl_name !== 'removed_views' ||

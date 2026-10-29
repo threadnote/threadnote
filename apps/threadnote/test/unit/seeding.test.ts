@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {inheritedProcessEnvironment} from '@threadnote/testing/process-environment';
 import {
@@ -14,7 +15,7 @@ import {
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, PlatformError} from 'effect';
+import {Effect, FileSystem, PlatformError, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, describe, expect} from 'vitest';
 import {runInitManifest, runSeed, runSeedSkills, seedDependencyGraphs} from '@threadnote/threadnote/seeding';
@@ -23,6 +24,18 @@ import {captureConsole as captureEffectConsole} from '@threadnote/threadnote/eff
 import {ApplicationLayer, type ApplicationServices} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig, SeedManifest} from '@threadnote/workspace/config';
 import {runCommand} from '@threadnote/threadnote/utils';
+
+const seedStateFileSchema = Schema.StructWithRest(
+  Schema.Struct({files: Schema.Record(Schema.String, Schema.Unknown)}),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const seedStateProjectFileSchema = Schema.StructWithRest(Schema.Struct({project: Schema.optional(Schema.String)}), [
+  Schema.Record(Schema.String, Schema.Unknown),
+]);
+const seedStateProjectSchema = Schema.StructWithRest(
+  Schema.Struct({files: Schema.Record(Schema.String, seedStateProjectFileSchema)}),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 
 const GIT_ENV_KEYS = ['GIT_COMMON_DIR', 'GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE'] as const;
 
@@ -39,7 +52,7 @@ describe('runSeed', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   effectIt.effect('previews native resource imports without external runtime arguments', () =>
@@ -52,16 +65,19 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed:',
-            '      - README.md',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed:',
+              '      - README.md',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -94,15 +110,18 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed: [../secret.md]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed: [../secret.md]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -136,15 +155,18 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed: [README.md, linked/secret.md, inside-link.md]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed: [README.md, linked/secret.md, inside-link.md]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -179,15 +201,18 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed: ["docs/**/*.md", "linked/**/*.md", "inside-linked/**/*.md"]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed: ["docs/**/*.md", "linked/**/*.md", "inside-linked/**/*.md"]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -223,15 +248,18 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed: [docs/README.md]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed: [docs/README.md]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -297,15 +325,18 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed: [README.md]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed: [README.md]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -375,16 +406,19 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed:',
-            '      - README.md',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed:',
+              '      - README.md',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       yield* Effect.promise(() =>
@@ -430,16 +464,19 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed:',
-            '      - README.md',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed:',
+              '      - README.md',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -468,13 +505,16 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           join(repo, 'CLAUDE.md'),
-          [
-            'Local checkout: /Users/jane/work/project',
-            'Git-Bash commands use /c/Users/jane/work/project',
-            'WSL commands use /mnt/c/Users/jane/work/project',
-            'Windows tools use C:/Users/jane/work/project',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'Local checkout: /Users/jane/work/project',
+              'Git-Bash commands use /c/Users/jane/work/project',
+              'WSL commands use /mnt/c/Users/jane/work/project',
+              'Windows tools use C:/Users/jane/work/project',
+              '',
+            ],
+            '\n',
+          ),
           'utf8',
         ),
       );
@@ -482,15 +522,18 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed: [CLAUDE.md]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed: [CLAUDE.md]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -508,13 +551,16 @@ describe('runSeed', () => {
 
       expect(output).not.toContain('SKIP');
       expect(seeded).toBe(
-        [
-          'Local checkout: <local-path>',
-          'Git-Bash commands use <local-path>',
-          'WSL commands use <local-path>',
-          'Windows tools use <local-path>',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'Local checkout: <local-path>',
+            'Git-Bash commands use <local-path>',
+            'WSL commands use <local-path>',
+            'Windows tools use <local-path>',
+            '',
+          ],
+          '\n',
+        ),
       );
     }),
   );
@@ -543,17 +589,20 @@ describe('runSeed', () => {
         yield* Effect.promise(() =>
           writeFile(
             manifestPath,
-            [
-              'version: 1',
-              'projects:',
-              '  - name: sample-repo',
-              `    path: ${repo}`,
-              '    uri: threadnote://resources/repos/sample-repo',
-              '    seed:',
-              '      - "**/*.md"',
-              '      - ".claude/**/*.md"',
-              '',
-            ].join('\n'),
+            EffectArray.join(
+              [
+                'version: 1',
+                'projects:',
+                '  - name: sample-repo',
+                `    path: ${repo}`,
+                '    uri: threadnote://resources/repos/sample-repo',
+                '    seed:',
+                '      - "**/*.md"',
+                '      - ".claude/**/*.md"',
+                '',
+              ],
+              '\n',
+            ),
           ),
         );
         const config: RuntimeConfig = {
@@ -586,19 +635,22 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: failing',
-            `    path: ${failingRepo}`,
-            '    uri: threadnote://resources/repos/failing',
-            '    seed: ["*.md"]',
-            '  - name: healthy',
-            `    path: ${healthyRepo}`,
-            '    uri: threadnote://resources/repos/healthy',
-            '    seed: [README.md]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: failing',
+              `    path: ${failingRepo}`,
+              '    uri: threadnote://resources/repos/failing',
+              '    seed: ["*.md"]',
+              '  - name: healthy',
+              `    path: ${healthyRepo}`,
+              '    uri: threadnote://resources/repos/healthy',
+              '    seed: [README.md]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -630,16 +682,19 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed:',
-            '      - "*.md"',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed:',
+              '      - "*.md"',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -676,15 +731,18 @@ describe('runSeed', () => {
       const writeManifest = (name: string) =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            `  - name: ${name}`,
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/stable-uri',
-            '    seed: [README.md]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              `  - name: ${name}`,
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/stable-uri',
+              '    seed: [README.md]',
+              '',
+            ],
+            '\n',
+          ),
         );
       yield* Effect.promise(() => writeFile(source, '# Project\n\nrename ownership anchor'));
       yield* Effect.promise(() => writeManifest('old-project-name'));
@@ -705,9 +763,9 @@ describe('runSeed', () => {
         readFile(join(contextHome, 'data', 'local', 'resources', 'repos', 'stable-uri', 'README.md')),
       ).pipe(Effect.flip);
       expect(removed).toBeDefined();
-      const state = JSON.parse(yield* Effect.promise(() => readFile(join(contextHome, 'seed-state.json'), 'utf8'))) as {
-        readonly files: Record<string, unknown>;
-      };
+      const state = yield* Schema.decodeUnknownEffect(seedStateFileSchema)(
+        JSON.parse(yield* Effect.promise(() => readFile(join(contextHome, 'seed-state.json'), 'utf8'))),
+      );
       expect(state.files['threadnote://resources/repos/stable-uri/README.md']).toBeUndefined();
       expect(output).toContain('1 stale removed');
     }),
@@ -725,19 +783,22 @@ describe('runSeed', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: child',
-            `    path: ${childRepo}`,
-            '    uri: threadnote://resources/repos/platform/service',
-            '    seed: ["*.md"]',
-            '  - name: parent',
-            `    path: ${parentRepo}`,
-            '    uri: threadnote://resources/repos/platform',
-            '    seed: ["*.md"]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: child',
+              `    path: ${childRepo}`,
+              '    uri: threadnote://resources/repos/platform/service',
+              '    seed: ["*.md"]',
+              '  - name: parent',
+              `    path: ${parentRepo}`,
+              '    uri: threadnote://resources/repos/platform',
+              '    seed: ["*.md"]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -754,9 +815,9 @@ describe('runSeed', () => {
         readFile(join(contextHome, 'data', 'local', 'resources', 'repos', 'platform', 'service', 'child.md'), 'utf8'),
       );
       expect(child).toContain('Child');
-      const state = JSON.parse(yield* Effect.promise(() => readFile(join(contextHome, 'seed-state.json'), 'utf8'))) as {
-        readonly files: Record<string, {readonly project?: string}>;
-      };
+      const state = yield* Schema.decodeUnknownEffect(seedStateProjectSchema)(
+        JSON.parse(yield* Effect.promise(() => readFile(join(contextHome, 'seed-state.json'), 'utf8'))),
+      );
       expect(state.files['threadnote://resources/repos/platform/service/child.md']?.project).toBe('child');
     }),
   );
@@ -772,7 +833,7 @@ describe('seed-skills', () => {
     } else {
       process.env.HOME = originalHome;
     }
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   effectIt.effect('discovers global Cursor skills and repo-local Claude command markdown files', () =>
@@ -799,15 +860,18 @@ describe('seed-skills', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: sample-repo',
-            `    path: ${repo}`,
-            '    uri: threadnote://resources/repos/sample-repo',
-            '    seed: []',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: sample-repo',
+              `    path: ${repo}`,
+              '    uri: threadnote://resources/repos/sample-repo',
+              '    seed: []',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
 
@@ -841,7 +905,7 @@ describe('init-manifest', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   effectIt.effect('preserves worksets while adding a repo', () =>
@@ -854,23 +918,26 @@ describe('init-manifest', () => {
       yield* Effect.promise(() =>
         writeFile(
           manifestPath,
-          [
-            'version: 1',
-            'projects:',
-            '  - name: existing-repo',
-            `    path: ${existingRepo}`,
-            '    uri: threadnote://resources/repos/existing-repo',
-            '    seed: [README.md]',
-            '    graph:',
-            '      roots: [apps/existing]',
-            '      closure: dependencies',
-            '      include: [tools/generated]',
-            'worksets:',
-            '  - name: platform',
-            '    description: existing grouped repos',
-            '    projects: [existing-repo, missing-repo]',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'version: 1',
+              'projects:',
+              '  - name: existing-repo',
+              `    path: ${existingRepo}`,
+              '    uri: threadnote://resources/repos/existing-repo',
+              '    seed: [README.md]',
+              '    graph:',
+              '      roots: [apps/existing]',
+              '      closure: dependencies',
+              '      include: [tools/generated]',
+              'worksets:',
+              '  - name: platform',
+              '    description: existing grouped repos',
+              '    projects: [existing-repo, missing-repo]',
+              '',
+            ],
+            '\n',
+          ),
         ),
       );
 
@@ -907,7 +974,7 @@ describe('init-manifest', () => {
     Effect.gen(function* () {
       const contextHome = yield* Effect.promise(() => mkdtemp(join(tmpdir(), 'threadnote-init-manifest-context-')));
       const repo = join(contextHome, 'easy-to-type');
-      const previousGitEnv = new Map(GIT_ENV_KEYS.map(key => [key, inheritedProcessEnvironment()[key]]));
+      const previousGitEnv = new Map(EffectArray.map(GIT_ENV_KEYS, key => [key, inheritedProcessEnvironment()[key]]));
       homes.push(contextHome);
       for (const key of GIT_ENV_KEYS) {
         delete inheritedProcessEnvironment()[key];
@@ -950,7 +1017,7 @@ describe('seedDependencyGraphs', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   effectIt.effect('writes dependency facts directly to the native resource store', () =>

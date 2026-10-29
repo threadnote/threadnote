@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {buildHomeAttentionModel} from '../../src/home_scene.js';
@@ -26,8 +27,8 @@ describe('Home attention flow', () => {
 
   it('distinguishes clear, unavailable, and invalid count states without inventing data', () => {
     const nodes = buildHomeAttentionModel({findings: 0, memories: 1_000_000, pending: -4});
-    expect(nodes.map(node => node.value)).toEqual(['1,000,000', '0', '0', 'Unavailable']);
-    expect(nodes.map(node => node.status)).toEqual(['available', 'clear', 'clear', 'unavailable']);
+    expect(EffectArray.map(nodes, node => node.value)).toEqual(['1,000,000', '0', '0', 'Unavailable']);
+    expect(EffectArray.map(nodes, node => node.status)).toEqual(['available', 'clear', 'clear', 'unavailable']);
   });
 
   it('normalizes every live count to a non-negative integer', () => {
@@ -35,7 +36,7 @@ describe('Home attention flow', () => {
       fc.property(fc.double({max: 100_000, min: -100_000, noNaN: true, noDefaultInfinity: true}), (count: number) => {
         const nodes = buildHomeAttentionModel({findings: count, memories: count, outcomes: count, pending: count});
         const expected = Math.max(0, Math.floor(count)).toLocaleString();
-        expect(nodes.map(node => node.value)).toEqual([expected, expected, expected, expected]);
+        expect(EffectArray.map(nodes, node => node.value)).toEqual([expected, expected, expected, expected]);
       }),
       {numRuns: 100},
     );

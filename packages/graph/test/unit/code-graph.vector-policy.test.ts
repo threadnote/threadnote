@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {serializeCodeGraphStatusV5} from '@threadnote/graph/status/projection';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Database} from 'bun:sqlite';
@@ -13,27 +14,49 @@ import {codeGraphIndexVectorPolicy, resumeExistingCodeGraphEmbeddingDemand} from
 import {codeGraphBuildRequestKey} from '@threadnote/graph/indexer/build';
 import {codeGraphWatcherRefreshIndexRequest} from '@threadnote/graph/watcher';
 import {codeGraphIsolatedBuilderSpawnPlan, isolatedBuilderRequestMatches} from '@threadnote/graph/isolated/builder';
-import type {CodeGraphLanguagePackRegistryShape} from '@threadnote/graph/languages/registry';
-import type {ObservedCodeGraphBuildStatus} from '@threadnote/graph/build_status';
-import type {SystemInfoShape} from '@threadnote/platform/system';
+import {createCodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
+import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const packs = {cacheIdentities: [], packs: []} as unknown as CodeGraphLanguagePackRegistryShape;
+const packs = createCodeGraphLanguagePackRegistry([]);
 const identity = {
-  checkoutId: 'a'.repeat(64),
-  headCommit: 'b'.repeat(40),
-  repositoryId: 'c'.repeat(64),
-  worktreeId: 'd'.repeat(64),
+  checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+  headCommit: Effect2.pipe('b', EffectString.repeat(40)),
+  repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+  worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
 };
-const system = {
+const system = SystemInfo.of({
+  architecture: 'x64',
+  availableDiskBytes: () => Effect.die('unexpected disk capacity query'),
+  currentDirectory: () => process.cwd(),
+  environment: () => process.env,
+  developmentEntrypoint: '/test/threadnote.ts',
+  intendedChildEnvironment: environment => environment,
   executablePath: '/usr/local/bin/threadnote',
+  homeDirectory: '/tmp',
+  hardwareInfo: Effect.succeed({cpuModel: 'test', memoryBytes: 1, effectiveMemoryBytes: 1, operatingSystem: 'test'}),
+  isProcessRunning: processId => processId === process.pid,
+  memoryUsage: () => ({external: 0, heapUsed: 0, rss: 0}),
+  processStartIdentity: () => Effect.as(Effect.void, undefined),
+  runtimeVersion: Bun.version,
+  pathDelimiter: process.platform === 'win32' ? ';' : ':',
+  platform: process.platform,
+  processId: process.pid,
   processArguments: ['/usr/local/bin/threadnote', 'mcp-server'],
-  environment: () => ({}),
-  intendedChildEnvironment: () => ({}),
-} as unknown as SystemInfoShape;
+  readLine: () => () => undefined,
+  signalProcess: () => undefined,
+  setExitCode: () => undefined,
+  setEnvironmentVariable: () => undefined,
+  stdinIsTTY: false,
+  stdoutIsTTY: false,
+  tempDirectory: '/tmp',
+  userName: 'fixture',
+});
 
 describe('graph vector completion policy', () => {
   it('retains bounded semantic state in the backwards-compatible CLI status JSON', () => {
-    const semantic = {state: 'queued', snapshotId: `cgsn_${'e'.repeat(40)}`} as const;
+    const semantic = {state: 'queued', snapshotId: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`} as const;
     const serialized = serializeCodeGraphStatusV5({builds: [], waiters: []}, identity.worktreeId, 4, 4, {
       databasePath: '/graph.sqlite',
       identity: {
@@ -74,7 +97,7 @@ describe('graph vector completion policy', () => {
     },
     ({dirty, fingerprint}) => {
       const overlay = Object.freeze({dirty, fingerprint});
-      const keys = (['wait', 'background', 'off'] as const).map(policy =>
+      const keys = EffectArray.map(['wait', 'background', 'off'] as const, policy =>
         codeGraphBuildRequestKey(identity, overlay, packs, undefined, policy, 'environment'),
       );
       expect(new Set(keys).size).toBe(3);
@@ -83,7 +106,7 @@ describe('graph vector completion policy', () => {
           const status = Object.freeze({
             observation: {liveness},
             request: {key: keys[receipt]},
-          }) as ObservedCodeGraphBuildStatus;
+          });
           for (let requested = 0; requested < keys.length; requested++) {
             expect(isolatedBuilderRequestMatches(status, keys[requested])).toBe(requested === receipt);
           }
@@ -133,7 +156,7 @@ const startupFixture = (checkoutId: string, revision: number, queued: boolean, e
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const home = existingHome ?? (yield* fs.makeTempDirectoryScoped({prefix: 'graph-startup-policy-'}));
-    const layout = codeGraphLayout(path, home, checkoutId, 'b'.repeat(64));
+    const layout = codeGraphLayout(path, home, checkoutId, Effect2.pipe('b', EffectString.repeat(64)));
     yield* fs.makeDirectory(layout.repositoryRoot, {recursive: true});
     yield* Effect.sync(() => {
       const db = new Database(layout.databasePath);
@@ -144,9 +167,9 @@ const startupFixture = (checkoutId: string, revision: number, queued: boolean, e
           db.run(CODE_GRAPH_EMBEDDING_DEMAND_TABLE_SQL);
           if (queued)
             db.run('INSERT INTO embedding_demand VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
-              'b'.repeat(64),
+              Effect2.pipe('b', EffectString.repeat(64)),
               'full-repository',
-              `cgsn_${'c'.repeat(40)}`,
+              `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
               '2026-01-01T00:00:00.000Z',
               'queued',
               0,
@@ -166,7 +189,7 @@ const startupFixture = (checkoutId: string, revision: number, queued: boolean, e
 it.layer(BunServices.layer)(test => {
   test.effect('startup leaves old-schema no-demand catalogs unchanged and never wakes a worker', () =>
     Effect.gen(function* () {
-      const fixture = yield* startupFixture('a'.repeat(64), 18, false);
+      const fixture = yield* startupFixture(Effect2.pipe('a', EffectString.repeat(64)), 18, false);
       const before = yield* fixture.fs.readFile(fixture.layout.databasePath);
       let wakes = 0;
       const result = yield* resumeExistingCodeGraphEmbeddingDemand(fixture.home).pipe(
@@ -189,8 +212,8 @@ it.layer(BunServices.layer)(test => {
 
   test.effect('startup skips a blocked first catalog and wakes recorded demand in a later catalog', () =>
     Effect.gen(function* () {
-      const first = yield* startupFixture('a'.repeat(64), 19, false);
-      const next = yield* startupFixture('c'.repeat(64), 19, true, first.home);
+      const first = yield* startupFixture(Effect2.pipe('a', EffectString.repeat(64)), 19, false);
+      const next = yield* startupFixture(Effect2.pipe('c', EffectString.repeat(64)), 19, true, first.home);
       const entered = yield* Deferred.make<void>();
       let closes = 0;
       let wakes = 0;
@@ -200,7 +223,10 @@ it.layer(BunServices.layer)(test => {
             ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
             : Effect.void,
         openDirectory: async () => ({
-          readPage: async () => ({names: ['a'.repeat(64), 'c'.repeat(64)], done: true}),
+          readPage: async () => ({
+            names: [Effect2.pipe('a', EffectString.repeat(64)), Effect2.pipe('c', EffectString.repeat(64))],
+            done: true,
+          }),
           close: async () => {
             closes++;
           },
@@ -226,8 +252,8 @@ it.layer(BunServices.layer)(test => {
 
   test.effect('startup native SQLite lock wait is short and cannot hide later recorded demand', () =>
     Effect.gen(function* () {
-      const first = yield* startupFixture('a'.repeat(64), 19, false);
-      const next = yield* startupFixture('c'.repeat(64), 19, true, first.home);
+      const first = yield* startupFixture(Effect2.pipe('a', EffectString.repeat(64)), 19, false);
+      const next = yield* startupFixture(Effect2.pipe('c', EffectString.repeat(64)), 19, true, first.home);
       const before = yield* next.fs.readFile(next.layout.databasePath);
       const child = yield* Effect.acquireRelease(
         Effect.sync(() =>
@@ -235,13 +261,16 @@ it.layer(BunServices.layer)(test => {
             cmd: [
               process.execPath,
               '--eval',
-              [
-                "import {Database} from 'bun:sqlite';",
-                'const db = new Database(process.argv[1]);',
-                "db.exec('PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;');",
-                "process.stdout.write('locked\\n');",
-                'setInterval(() => {}, 1000);',
-              ].join('\n'),
+              EffectArray.join(
+                [
+                  "import {Database} from 'bun:sqlite';",
+                  'const db = new Database(process.argv[1]);',
+                  "db.exec('PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;');",
+                  "process.stdout.write('locked\\n');",
+                  'setInterval(() => {}, 1000);',
+                ],
+                '\n',
+              ),
               first.layout.databasePath,
             ],
             stdin: 'ignore',
@@ -264,7 +293,10 @@ it.layer(BunServices.layer)(test => {
       const started = performance.now();
       const result = yield* resumeExistingCodeGraphEmbeddingDemand(first.home, {
         openDirectory: async () => ({
-          readPage: async () => ({names: ['a'.repeat(64), 'c'.repeat(64)], done: true}),
+          readPage: async () => ({
+            names: [Effect2.pipe('a', EffectString.repeat(64)), Effect2.pipe('c', EffectString.repeat(64))],
+            done: true,
+          }),
           close: async () => {
             closes++;
           },
@@ -291,8 +323,8 @@ it.layer(BunServices.layer)(test => {
   for (const inaccessible of ['directory', 'invalid-sqlite'] as const) {
     test.effect(`startup skips an ${inaccessible} database path and closes its reader after later demand`, () =>
       Effect.gen(function* () {
-        const first = yield* startupFixture('a'.repeat(64), 19, false);
-        const next = yield* startupFixture('c'.repeat(64), 19, true, first.home);
+        const first = yield* startupFixture(Effect2.pipe('a', EffectString.repeat(64)), 19, false);
+        const next = yield* startupFixture(Effect2.pipe('c', EffectString.repeat(64)), 19, true, first.home);
         yield* first.fs.remove(first.layout.databasePath);
         if (inaccessible === 'directory') yield* first.fs.makeDirectory(first.layout.databasePath);
         else yield* first.fs.writeFileString(first.layout.databasePath, 'Invalid SQLite fixture.\n');
@@ -301,7 +333,10 @@ it.layer(BunServices.layer)(test => {
         let wakes = 0;
         const result = yield* resumeExistingCodeGraphEmbeddingDemand(first.home, {
           openDirectory: async () => ({
-            readPage: async () => ({names: ['a'.repeat(64), 'c'.repeat(64)], done: true}),
+            readPage: async () => ({
+              names: [Effect2.pipe('a', EffectString.repeat(64)), Effect2.pipe('c', EffectString.repeat(64))],
+              done: true,
+            }),
             close: async () => {
               closes++;
             },
@@ -328,7 +363,7 @@ it.layer(BunServices.layer)(test => {
 
   test.effect('runtime scope release interrupts startup discovery and closes its directory reader', () =>
     Effect.gen(function* () {
-      const fixture = yield* startupFixture('a'.repeat(64), 19, false);
+      const fixture = yield* startupFixture(Effect2.pipe('a', EffectString.repeat(64)), 19, false);
       const entered = yield* Deferred.make<void>();
       let closes = 0;
       let wakes = 0;
@@ -337,7 +372,7 @@ it.layer(BunServices.layer)(test => {
           yield* resumeExistingCodeGraphEmbeddingDemand(fixture.home, {
             beforeReadCatalog: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
             openDirectory: async () => ({
-              readPage: async () => ({names: ['a'.repeat(64)], done: true}),
+              readPage: async () => ({names: [Effect2.pipe('a', EffectString.repeat(64))], done: true}),
               close: async () => {
                 closes++;
               },

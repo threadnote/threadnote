@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   codeGraphEvidenceCardId,
   codeGraphQualifiedRefHandle,
@@ -10,6 +11,7 @@ import type {
   CodeGraphWorksetRouterResultV1,
 } from './router.js';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphQueryResult} from '../types.js';
+import {Option as EffectOption} from 'effect';
 
 export const CODE_GRAPH_WORKSET_GLOBAL_RANK_VERSION = 1 as const;
 const CODE_GRAPH_WORKSET_DIVERSITY_PREFIX_REPOSITORIES = 4;
@@ -35,10 +37,13 @@ export function rankCodeGraphWorksetEvidenceCards(
 ): readonly CodeGraphEvidenceCardV1[] {
   const maximumCards = boundedCards(input.maximumCards);
   const routerRepositories = new Map(
-    input.router.repositories.map(repository => [repository.repositoryKey, repository]),
+    EffectArray.map(input.router.repositories, repository => [repository.repositoryKey, repository]),
   );
   const routerSymbols = new Map(
-    input.router.symbols.map(symbol => [symbolKey(symbol.symbol.repositoryKey, symbol.symbol.nodeId), symbol]),
+    EffectArray.map(input.router.symbols, symbol => [
+      symbolKey(symbol.symbol.repositoryKey, symbol.symbol.nodeId),
+      symbol,
+    ]),
   );
   const seenRepositories = new Set<string>();
   const candidates: RankedCardCandidate[] = [];
@@ -94,9 +99,7 @@ export function rankCodeGraphWorksetEvidenceCards(
     }
   }
 
-  return diversityFirstRanking(candidates)
-    .slice(0, maximumCards)
-    .map(candidate => candidate.card);
+  return EffectArray.map(diversityFirstRanking(candidates).slice(0, maximumCards), candidate => candidate.card);
 }
 
 interface RankedCardCandidate {
@@ -128,7 +131,7 @@ function diversityFirstRanking(candidates: readonly RankedCardCandidate[]): read
     (left, right) => left.repositoryRank - right.repositoryRank || compareCardCandidate(left, right),
   );
   const selected = new Set(prefix);
-  return [...prefix, ...globallyRanked.filter(candidate => !selected.has(candidate))];
+  return [...prefix, ...EffectArray.filter(globallyRanked, candidate => !selected.has(candidate))];
 }
 
 function validateDeepQueryProvenance(
@@ -181,7 +184,11 @@ function scoreSignals(
     `repository-rank:${repository.rank}`,
     ...(symbol === undefined ? [] : [`catalog-rank:${symbol.globalRank}`]),
     `local-rank:${localRank}`,
-    ...(symbol?.exactMatches.map(match => `exact:${match}`) ?? []),
+    ...(EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(symbol?.exactMatches), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, match => `exact:${match}`),
+      ),
+    ) ?? []),
     ...(exported ? ['exported'] : []),
   ];
 }
@@ -190,7 +197,7 @@ function relationshipsForNode(
   deep: CodeGraphWorksetDeepQueryResultV1,
   nodeId: string,
 ): readonly CompactEvidenceRelationshipV1[] {
-  const relationships = deep.graph.edges.flatMap(edge => {
+  const relationships = EffectArray.flatMap(deep.graph.edges, edge => {
     if (edge.sourceId === undefined || edge.targetId === undefined) return [];
     if (edge.sourceId !== nodeId && edge.targetId !== nodeId) return [];
     try {
@@ -262,15 +269,21 @@ function compareRelationship(left: CompactEvidenceRelationshipV1, right: Compact
 }
 
 function relationshipKey(relationship: CompactEvidenceRelationshipV1): string {
-  return [
-    relationship.source.ref,
-    relationship.relation,
-    relationship.target.ref,
-    relationship.provenance,
-    relationship.evidence.path,
-    relationship.evidence.span.line,
-    relationship.evidence.span.column,
-  ].join('\0');
+  return EffectArray.join(
+    EffectArray.map(
+      [
+        relationship.source.ref,
+        relationship.relation,
+        relationship.target.ref,
+        relationship.provenance,
+        relationship.evidence.path,
+        relationship.evidence.span.line,
+        relationship.evidence.span.column,
+      ],
+      item => (item === null || item === undefined ? '' : String(item)),
+    ),
+    '\0',
+  );
 }
 
 function reciprocalRank(rank: number, weight: number): number {

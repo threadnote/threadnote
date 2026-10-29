@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Effect, Layer} from 'effect';
@@ -12,7 +13,9 @@ import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'gemma-4-e4b-it-q4')!;
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'gemma-4-e4b-it-q4'),
+)!;
 
 describe('native memory enrichment', () => {
   it('uses the selected in-process generation model and validates its structured output', async () => {

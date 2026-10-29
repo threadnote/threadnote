@@ -1,9 +1,11 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Deferred, Effect, Exit, Fiber, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterAll, beforeAll, expect} from 'vitest';
 import fc from 'fast-check';
-import {ChildProcess, spawn, type ChildProcessWithoutNullStreams} from '@threadnote/testing/node-child-process';
+import {ChildProcess, spawn} from '@threadnote/testing/node-child-process';
+import {PassThrough} from '@threadnote/testing/node-stream';
 import {resolve} from '@threadnote/testing/node-path';
 import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -17,6 +19,9 @@ import {applyDevSkills} from '../../src/dev_skills/index.js';
 import {handleManagerDevSkillsRequest} from '../../src/manager/dev_skills.js';
 import {devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 let harnessDirectory: string | undefined;
 let harness: string;
@@ -64,15 +69,20 @@ const nativeFenceEnvironment = (environment: NodeJS.ProcessEnv, root: string): N
   // This child is a known standalone executable. BUN_BE_BUN switches it to the
   // Bun interpreter and treats the fixture root as a module before our entrypoint.
   // Windows environment names are case insensitive; remove only this variable.
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   for (const key of Object.keys(childEnvironment)) {
-    if (key.toUpperCase() === 'BUN_BE_BUN') delete childEnvironment[key];
+    if (Effect2.pipe(key, EffectString.toUpperCase) === 'BUN_BE_BUN') delete childEnvironment[key];
   }
   return childEnvironment;
 };
 const environmentHas = (environment: NodeJS.ProcessEnv, key: string) =>
-  Object.keys(environment).some(name => name.toUpperCase() === key && environment[name] !== undefined);
+  EffectArray.some(
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    Object.keys(environment),
+    name => Effect2.pipe(name, EffectString.toUpperCase) === key && environment[name] !== undefined,
+  );
 const launchFacts = new WeakMap<
-  ChildProcessWithoutNullStreams,
+  ReadinessChild,
   {
     inputBunBeBunPresent: boolean;
     childBunBeBunPresent: boolean;
@@ -89,7 +99,26 @@ const closedSignal = (signal: string | null) =>
     : ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV', 'SIGPIPE'].includes(signal)
       ? signal
       : 'other';
-const waitReady = (child: ChildProcessWithoutNullStreams) =>
+interface ReadinessStream {
+  on(event: 'data', listener: (chunk: Uint8Array) => void): this;
+  off(event: 'data', listener: (chunk: Uint8Array) => void): this;
+  emit(event: 'data', chunk: Uint8Array): boolean;
+  listenerCount(event: 'data'): number;
+}
+type ReadinessProcessEvents = {
+  close: [code: number | null, signal: string | null];
+  error: [cause: Error];
+};
+interface ReadinessChild {
+  readonly stdout: ReadinessStream;
+  readonly stderr: ReadinessStream;
+  readonly exitCode: number | null;
+  once<K extends keyof ReadinessProcessEvents>(event: K, listener: (...args: ReadinessProcessEvents[K]) => void): this;
+  off<K extends keyof ReadinessProcessEvents>(event: K, listener: (...args: ReadinessProcessEvents[K]) => void): this;
+  emit<K extends keyof ReadinessProcessEvents>(event: K, ...args: ReadinessProcessEvents[K]): boolean;
+  listenerCount(event: 'close' | 'error'): number;
+}
+const waitReady = (child: ReadinessChild) =>
   Effect.callback<void, Error>(resume => {
     const frame = readinessFrame();
     let stdoutBytes = 0;
@@ -107,7 +136,7 @@ const waitReady = (child: ChildProcessWithoutNullStreams) =>
       cleanup();
       resume(result);
     };
-    const ready = (chunk: Buffer) => {
+    const ready = (chunk: Uint8Array) => {
       stdoutBytes = Math.min(65536, stdoutBytes + chunk.byteLength);
       const status = frame.push(chunk);
       if (status === 'ready') complete(Effect.void);
@@ -134,7 +163,7 @@ const waitReady = (child: ChildProcessWithoutNullStreams) =>
       );
     const error = (cause: Error) => complete(Effect.fail(cause));
     // Count a bounded number only. Never retain, classify or echo arbitrary child bytes.
-    const stderr = (chunk: Buffer) => {
+    const stderr = (chunk: Uint8Array) => {
       stderrBytes = Math.min(65536, stderrBytes + chunk.byteLength);
     };
     child.stdout.on('data', ready);
@@ -146,7 +175,7 @@ const waitReady = (child: ChildProcessWithoutNullStreams) =>
       cleanup();
     });
   }).pipe(Effect.timeout('5 seconds'));
-const waitExit = (child: ChildProcessWithoutNullStreams) =>
+const waitExit = (child: ReadinessChild) =>
   Effect.callback<void, TestError>(resume => {
     const closed = (code: number | null) =>
       resume(code === 0 ? Effect.void : Effect.fail(TestError.make({message: `Fence child exit ${code}`})));
@@ -214,10 +243,14 @@ const makeFixture = Effect.gen(function* () {
   return {...f, home, user, lock, config, run, inventory};
 });
 const changed = (before: Record<string, Record<string, string>>, after: Record<string, Record<string, string>>) =>
-  Object.keys(before).flatMap(name =>
-    [...new Set([...Object.keys(before[name]), ...Object.keys(after[name])])]
-      .filter(key => before[name][key] !== after[name][key])
-      .map(key => `${name}/${key}`),
+  EffectArray.flatMap(EffectRecord.keys(before), name =>
+    EffectArray.map(
+      EffectArray.filter(
+        [...new Set([...EffectRecord.keys(before[name]), ...EffectRecord.keys(after[name])])],
+        key => before[name][key] !== after[name][key],
+      ),
+      key => `${name}/${key}`,
+    ),
   );
 const observedFileSystem = (
   fs: FileSystem.FileSystem,
@@ -343,10 +376,12 @@ compiledFenceIt(
       const childEnvironment = nativeFenceEnvironment(contaminated, f.root);
       expect(environmentHas(childEnvironment, 'BUN_BE_BUN')).toBe(false);
       expect(
-        Object.entries(contaminated).every(
+        EffectArray.every(
+          // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+          Object.entries(contaminated),
           ([key, value]) =>
             ['BUN_BE_BUN', 'HOME', 'USERPROFILE', 'THREADNOTE_HOME', 'TMPDIR', 'TMP', 'TEMP'].includes(
-              key.toUpperCase(),
+              Effect2.pipe(key, EffectString.toUpperCase),
             ) || childEnvironment[key] === value,
         ),
       ).toBe(true);
@@ -358,7 +393,15 @@ compiledFenceIt(
         f.root,
         Effect.gen(function* () {
           const token = yield* f.fs.readFileString(f.lock);
-          const owner = JSON.parse(token) as {version: number; processId: number; token: string};
+          const parsedOwner: unknown = JSON.parse(token);
+          if (
+            !Predicate.isObject(parsedOwner) ||
+            typeof parsedOwner.version !== 'number' ||
+            typeof parsedOwner.processId !== 'number' ||
+            typeof parsedOwner.token !== 'string'
+          )
+            throw new Error('Fence token has an invalid owner record.');
+          const owner = parsedOwner;
           expect(owner.version).toBe(1);
           expect(owner.processId).toBeGreaterThan(0);
           expect(owner.processId).not.toBe(process.pid);
@@ -433,12 +476,32 @@ compiledFenceProperty(
 );
 
 // Event-only child double: the constructor does not spawn an operating-system process.
-const protocolChild = () => {
-  const child = new ChildProcess() as ChildProcessWithoutNullStreams;
-  Object.defineProperties(child, {stdout: {value: new ChildProcess()}, stderr: {value: new ChildProcess()}});
-  return child;
+const protocolChild = (): ReadinessChild => {
+  const child = new ChildProcess();
+  const fixture: ReadinessChild = {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    get exitCode() {
+      return child.exitCode;
+    },
+    once: <K extends keyof ReadinessProcessEvents>(
+      event: K,
+      listener: (...args: ReadinessProcessEvents[K]) => void,
+    ) => {
+      child.once(event, listener);
+      return fixture;
+    },
+    off: <K extends keyof ReadinessProcessEvents>(event: K, listener: (...args: ReadinessProcessEvents[K]) => void) => {
+      child.off(event, listener);
+      return fixture;
+    },
+    emit: <K extends keyof ReadinessProcessEvents>(event: K, ...args: ReadinessProcessEvents[K]) =>
+      child.emit(event, ...args),
+    listenerCount: event => child.listenerCount(event),
+  };
+  return fixture;
 };
-const expectNoProtocolListeners = (child: ChildProcessWithoutNullStreams) => {
+const expectNoProtocolListeners = (child: ReadinessChild) => {
   expect(child.stdout.listenerCount('data')).toBe(0);
   expect(child.stderr.listenerCount('data')).toBe(0);
   expect(child.listenerCount('close')).toBe(0);
@@ -452,8 +515,8 @@ effectIt.effect('readiness protocol accepts exact LF and CRLF across every split
         const child = protocolChild();
         const waiting = yield* waitReady(child).pipe(Effect.forkChild);
         yield* Effect.yieldNow;
-        child.stdout.emit('data', Buffer.from(frame.slice(0, split)));
-        child.stdout.emit('data', Buffer.from(frame.slice(split)));
+        child.stdout.emit('data', Buffer.from(Effect2.pipe(frame, EffectString.slice(0, split))));
+        child.stdout.emit('data', Buffer.from(Effect2.pipe(frame, EffectString.slice(split))));
         yield* TestClock.adjust('5 seconds');
         expect(yield* Fiber.await(waiting)).toEqual(Exit.void);
         expectNoProtocolListeners(child);
@@ -490,7 +553,13 @@ effectIt.effect('observer failure reaches pending admission with its original ca
 
 effectIt.effect('readiness protocol refuses false, malformed and oversized records without exposing bytes', () =>
   Effect.gen(function* () {
-    for (const frame of ['notready\n', 'readyX\n', 'ready\rX\n', 'ready\r\r\n', '/private/body/token'.repeat(1024)]) {
+    for (const frame of [
+      'notready\n',
+      'readyX\n',
+      'ready\rX\n',
+      'ready\r\r\n',
+      Effect2.pipe('/private/body/token', EffectString.repeat(1024)),
+    ]) {
       const child = protocolChild();
       const waiting = yield* waitReady(child).pipe(Effect.forkChild);
       yield* Effect.yieldNow;
@@ -528,7 +597,7 @@ effectIt.effect('reports bounded closed early-exit facts without retaining or ex
     const waiting = yield* waitReady(child).pipe(Effect.forkChild);
     yield* Effect.yieldNow;
     child.stdout.emit('data', Buffer.from('rea'));
-    child.stderr.emit('data', Buffer.from('/private/error/credential'.repeat(4096)));
+    child.stderr.emit('data', Buffer.from(Effect2.pipe('/private/error/credential', EffectString.repeat(4096))));
     child.emit('close', 1, 'SIGTERM');
     const result = yield* Fiber.await(waiting);
     expect(Exit.isFailure(result)).toBe(true);
@@ -607,14 +676,18 @@ fcEffectProp(
       const before = Buffer.from(input.bytes);
       const cutsBefore = [...input.cuts];
       const text = Buffer.from(input.bytes).toString('latin1');
-      const newline = text.indexOf('\n');
-      const line = newline < 0 ? text : text.slice(0, newline);
+      const newline = Effect2.pipe(
+        text,
+        EffectString.indexOf('\n'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      const line = newline < 0 ? text : Effect2.pipe(text, EffectString.slice(0, newline));
       const expected =
         newline >= 0
           ? line === 'ready' || line === 'ready\r'
             ? 'ready'
             : 'invalid'
-          : 'ready\r'.startsWith(line)
+          : Effect2.pipe('ready\r', EffectString.startsWith(line))
             ? 'pending'
             : 'invalid';
       const frame = readinessFrame();
@@ -622,9 +695,10 @@ fcEffectProp(
       const child = protocolChild();
       const waiting = yield* waitReady(child).pipe(Effect.forkChild);
       yield* Effect.yieldNow;
-      const cuts = [...input.cuts.map(value => Math.min(value, input.bytes.length)), input.bytes.length].sort(
-        (a, b) => a - b,
-      );
+      const cuts = [
+        ...EffectArray.map(input.cuts, value => Math.min(value, input.bytes.length)),
+        input.bytes.length,
+      ].sort((a, b) => a - b);
       let start = 0;
       for (const end of cuts) {
         const chunk = input.bytes.subarray(start, end);
@@ -635,7 +709,7 @@ fcEffectProp(
       const snapshot = frame.snapshot();
       expect(snapshot.status).toBe(expected);
       expect(snapshot.matchedBytes).toBeLessThanOrEqual(6);
-      expect(Object.keys(snapshot).sort()).toEqual(['matchedBytes', 'status']);
+      expect(EffectRecord.keys(snapshot).sort()).toEqual(['matchedBytes', 'status']);
       expect(initial).toEqual({matchedBytes: 0, status: 'pending'});
       const original = new Error('controlled protocol error');
       if (expected === 'pending') {

@@ -1,3 +1,8 @@
+import {
+  isManagerTopicExpansionInspection,
+  isManagerTopicExpansionInspectionOrManagerTopicExpansionPreviewOrManagerTopicExpansionApplied,
+} from '../api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import {Schema} from 'effect';
 import {
@@ -16,6 +21,9 @@ import type {
   ManagerTopicExpansionPreview,
   ManagerTopicExpansionSelection,
 } from './topic_expansion_contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export function TopicExpansionPanel({
   uri,
@@ -117,8 +125,8 @@ export function TopicExpansionPanel({
       setSelected([]);
     }
   }
-  function choose(values: readonly string[], id: string, checked: boolean) {
-    return checked ? [...new Set([...values, id])] : values.filter(value => value !== id);
+  function choose<Value extends string>(values: readonly Value[], id: Value, checked: boolean): Value[] {
+    return checked ? [...new Set([...values, id])] : EffectArray.filter(values, value => value !== id);
   }
   async function request(action: 'inspect' | 'discover' | 'preview' | 'apply' | 'restart') {
     if (
@@ -143,6 +151,9 @@ export function TopicExpansionPanel({
         action === 'inspect'
           ? await api<ManagerTopicExpansionInspection>(
               `/api/attention/topic-expansion?uri=${encodeURIComponent(uri)}&project=${encodeURIComponent(project)}`,
+              undefined,
+              undefined,
+              isManagerTopicExpansionInspection,
             )
           : await api<ManagerTopicExpansionInspection | ManagerTopicExpansionPreview | ManagerTopicExpansionApplied>(
               '/api/attention/topic-expansion',
@@ -157,6 +168,8 @@ export function TopicExpansionPanel({
                     ? {revision: recovery!.revision, approvalDigest: recovery!.approvalDigest, approved: true}
                     : {}),
               },
+              undefined,
+              isManagerTopicExpansionInspectionOrManagerTopicExpansionPreviewOrManagerTopicExpansionApplied,
             );
       if (epoch.current !== token) return;
       if (result.targetUri !== uri || ('project' in result && result.project !== project))
@@ -287,7 +300,7 @@ export function TopicExpansionPanel({
           <p>{current.currentScope.length} additional sources are already declared.</p>
           <fieldset disabled={busy}>
             <legend>Start from declared sources</legend>
-            {current.seeds.map(seed => (
+            {EffectArray.map(current.seeds, seed => (
               <label key={seed.id} className="review-confirmation">
                 <input
                   type="checkbox"
@@ -318,8 +331,15 @@ export function TopicExpansionPanel({
                 value={direction}
                 onChange={event => {
                   if (inFlight.current !== undefined) return;
+                  const selectedDirection = event.target.value;
+                  if (
+                    selectedDirection !== 'outgoing' &&
+                    selectedDirection !== 'incoming' &&
+                    selectedDirection !== 'both'
+                  )
+                    return;
                   invalidate(true);
-                  setDirection(event.target.value as typeof direction);
+                  setDirection(selectedDirection);
                 }}
               >
                 <option value="outgoing">Dependencies used by the source</option>
@@ -329,7 +349,7 @@ export function TopicExpansionPanel({
             </label>
             <fieldset disabled={busy}>
               <legend>Relationships to inspect</legend>
-              {TOPIC_EXPANSION_KINDS.map(kind => (
+              {EffectArray.map(TOPIC_EXPANSION_KINDS, kind => (
                 <label key={kind} className="review-confirmation">
                   <input
                     type="checkbox"
@@ -337,16 +357,16 @@ export function TopicExpansionPanel({
                     onChange={event => {
                       if (inFlight.current !== undefined) return;
                       invalidate(true);
-                      setKinds(choose(kinds, kind, event.target.checked) as typeof kinds);
+                      setKinds(choose(kinds, kind, event.target.checked));
                     }}
                   />
-                  {kind.replaceAll('_', ' ')}
+                  {Effect.pipe(kind, EffectString.replaceAll('_', ' '))}
                 </label>
               ))}
             </fieldset>
             <fieldset disabled={busy}>
               <legend>Evidence types</legend>
-              {TOPIC_EXPANSION_PROVENANCES.map(provenance => (
+              {EffectArray.map(TOPIC_EXPANSION_PROVENANCES, provenance => (
                 <label key={provenance} className="review-confirmation">
                   <input
                     type="checkbox"
@@ -354,7 +374,7 @@ export function TopicExpansionPanel({
                     onChange={event => {
                       if (inFlight.current !== undefined) return;
                       invalidate(true);
-                      setProvenances(choose(provenances, provenance, event.target.checked) as typeof provenances);
+                      setProvenances(choose(provenances, provenance, event.target.checked));
                     }}
                   />
                   {provenance}
@@ -427,11 +447,20 @@ export function TopicExpansionPanel({
               <h4>Choose additions to this topic</h4>
               <ReviewBadge tone="info">Requested one-hop neighborhood evaluated</ReviewBadge>
               <p>
-                {discovery.coverage?.reduce((sum, read) => sum + read.visitedNodes, 0) ?? 0} sources and{' '}
-                {discovery.coverage?.reduce((sum, read) => sum + read.inspectedEdges, 0) ?? 0} relationships evaluated
-                completely within the requested limits.
+                {EffectOption.getOrUndefined(
+                  EffectOption.map(EffectOption.fromNullishOr(discovery.coverage), __effectArrayReceiver =>
+                    EffectArray.reduce(__effectArrayReceiver, 0, (sum, read) => sum + read.visitedNodes),
+                  ),
+                ) ?? 0}{' '}
+                sources and{' '}
+                {EffectOption.getOrUndefined(
+                  EffectOption.map(EffectOption.fromNullishOr(discovery.coverage), __effectArrayReceiver =>
+                    EffectArray.reduce(__effectArrayReceiver, 0, (sum, read) => sum + read.inspectedEdges),
+                  ),
+                ) ?? 0}{' '}
+                relationships evaluated completely within the requested limits.
               </p>
-              {discovery.choices.eligible.map(choice => (
+              {EffectArray.map(discovery.choices.eligible, choice => (
                 <label key={choice.id} className="review-confirmation">
                   <input
                     type="checkbox"
@@ -483,7 +512,7 @@ export function TopicExpansionPanel({
             >
               Add file choice
             </button>
-            {configurationChoices.map(path => (
+            {EffectArray.map(configurationChoices, path => (
               <label key={path} className="review-confirmation">
                 <input
                   type="checkbox"
@@ -515,7 +544,7 @@ export function TopicExpansionPanel({
                 </ReviewNotice>
               ) : null}
               <ReviewBadge tone="proposal">{exactPreview.additions.length} explicit additions</ReviewBadge>
-              {exactPreview.additions.map(addition => (
+              {EffectArray.map(exactPreview.additions, addition => (
                 <p key={`${addition.kind}:${addition.ref}`}>
                   <ReviewBadge tone={addition.kind === 'configuration' ? 'protected' : 'proposal'}>
                     {addition.kind}
@@ -528,9 +557,9 @@ export function TopicExpansionPanel({
                 <summary>Full proposed memory and metadata</summary>
                 <MemoryBody content={exactPreview.content} />
                 <ul>
-                  {exactPreview.metadataDiff.map(diff => (
+                  {EffectArray.map(exactPreview.metadataDiff, diff => (
                     <li key={diff.field}>
-                      {diff.field.startsWith('code_citation:')
+                      {Effect.pipe(diff.field, EffectString.startsWith('code_citation:'))
                         ? 'Retained source citation added'
                         : diff.field === 'topic_maintenance'
                           ? 'Declared source scope updated'
@@ -557,12 +586,12 @@ export function TopicExpansionPanel({
                 <summary>Selection identifiers and verification</summary>
                 <p>Revision: {exactPreview.revision}</p>
                 <p>Approval checksum: {exactPreview.approvalDigest}</p>
-                {exactPreview.additions.map(addition => (
+                {EffectArray.map(exactPreview.additions, addition => (
                   <p key={addition.ref}>
                     {addition.ref} · {addition.citationId}
                   </p>
                 ))}
-                {exactPreview.omissions.map((omission, index) => (
+                {EffectArray.map(exactPreview.omissions, (omission, index) => (
                   <p key={index}>
                     {omission.kind}: {omission.id}
                   </p>

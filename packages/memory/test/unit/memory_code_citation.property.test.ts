@@ -15,12 +15,23 @@ import {
   type MemoryCodeCitationTargetV1,
 } from '@threadnote/memory/code/citation';
 
-const safeCharacter = fc.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-'.split(''));
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
+
+const safeCharacter = fc.constantFrom(
+  ...Effect.pipe('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-', EffectString.split('')),
+);
 const safeText = (minimumLength: number, maximumLength: number) =>
-  fc.array(safeCharacter, {maxLength: maximumLength, minLength: minimumLength}).map(characters => characters.join(''));
+  fc
+    .array(safeCharacter, {maxLength: maximumLength, minLength: minimumLength})
+    .map(characters => EffectArray.join(characters, ''));
 const repositoryPath = fc
   .array(safeText(1, 16), {maxLength: 5, minLength: 1})
-  .map(segments => `${segments.join('/')}.ts`);
+  .map(segments => `${EffectArray.join(segments, '/')}.ts`);
+const decodeCitationWire = Schema.decodeUnknownSync(
+  Schema.StructWithRest(Schema.Struct({id: Schema.String}), [Schema.Record(Schema.String, Schema.Unknown)]),
+);
 const hash = (seed: string) => ({algorithm: 'sha256' as const, value: sha256HexSync(seed)});
 
 const symbolTarget: fc.Arbitrary<MemoryCodeCitationTargetV1> = fc
@@ -42,7 +53,7 @@ const symbolTarget: fc.Arbitrary<MemoryCodeCitationTargetV1> = fc
     kind: 'symbol',
     language: value.language,
     name: value.name,
-    nodeId: `cgs_${sha256HexSync(`node:${value.seed}`).slice(0, 40)}`,
+    nodeId: `cgs_${Effect.pipe(sha256HexSync(`node:${value.seed}`), EffectString.slice(0, 40))}`,
     qualifiedName: value.qualifiedName,
     ...(value.signature === undefined ? {} : {signatureHash: hash(`signature:${value.signature}`)}),
     span: {
@@ -70,17 +81,51 @@ const citationInput: fc.Arbitrary<MemoryCodeCitationInputV1> = fc
     path: value.path,
     repositoryId: sha256HexSync(`repository:${value.seed}`),
     repositoryIdentityKind: value.identityKind,
-    sourceCommit: sha256HexSync(`commit:${value.seed}`).slice(0, 40),
+    sourceCommit: Effect.pipe(sha256HexSync(`commit:${value.seed}`), EffectString.slice(0, 40)),
     sourceDirty: value.dirty,
     ...(value.sourceGraphContent
-      ? {sourceGraphContentId: `cgc_${sha256HexSync(`graph:${value.seed}`).slice(0, 40)}`}
+      ? {sourceGraphContentId: `cgc_${Effect.pipe(sha256HexSync(`graph:${value.seed}`), EffectString.slice(0, 40))}`}
       : {}),
-    sourceSnapshotId: `cgsn_${sha256HexSync(`snapshot:${value.seed}`).slice(0, 40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe(sha256HexSync(`snapshot:${value.seed}`), EffectString.slice(0, 40))}`,
     target: value.target,
     version: 1,
   }));
 
 describe('memory code citation properties', () => {
+  it('preserves the control-character contract across arbitrary UTF-16 text', () => {
+    const codeUnits = fc.oneof(
+      fc.array(fc.integer({min: 0, max: 0xffff}), {maxLength: 48}),
+      fc.constantFrom(
+        [0],
+        [31],
+        [32],
+        [126],
+        [127],
+        [128],
+        [133],
+        [134],
+        [0x2028],
+        [0x2029],
+        [0xd800],
+        [0xdc00],
+        [0xd800, 0xdc00],
+      ),
+    );
+    fc.assert(
+      fc.property(citationInput, codeUnits, (input, units) => {
+        const extractorSet = 'x' + String.fromCharCode(...units);
+        const rejected = EffectArray.some(
+          units,
+          unit => unit <= 0x1f || unit === 0x7f || unit === 0x85 || unit === 0x2028 || unit === 0x2029,
+        );
+        const create = () => createMemoryCodeCitation({...input, extractorSet});
+        if (rejected) expect(create).toThrow();
+        else expect(create().extractorSet).toBe(extractorSet);
+      }),
+      {numRuns: 300},
+    );
+  });
+
   it('round-trips retention coverage without changing evidence or logical anchor identity', () => {
     fc.assert(
       fc.property(
@@ -139,7 +184,12 @@ describe('memory code citation properties', () => {
       parseMemoryCodeCitationHeaders([formatMemoryCodeCitation(original), formatMemoryCodeCitation(replacement)], 5)
         .errors,
     ).toEqual([{index: 1, reason: 'duplicate-id'}]);
-    for (const anchorId of ['', 'tncc_short', `tncc_${'A'.repeat(40)}`, `${original.id}\n`]) {
+    for (const anchorId of [
+      '',
+      'tncc_short',
+      `tncc_${Effect.pipe('A', EffectString.repeat(40))}`,
+      `${original.id}\n`,
+    ]) {
       expect(parseMemoryCodeCitation(JSON.stringify({...replacement, anchorId}))).toMatchObject({
         ok: false,
         error: {reason: 'invalid-shape'},
@@ -154,7 +204,11 @@ describe('memory code citation properties', () => {
   it('round-trips canonical citations and derives the same identity regardless of object key insertion order', () => {
     fc.assert(
       fc.property(citationInput, input => {
-        const reordered = Object.fromEntries(Object.entries(input).reverse()) as unknown as MemoryCodeCitationInputV1;
+        const reordered = {...input};
+        for (const key of Reflect.ownKeys(input).reverse()) {
+          Reflect.deleteProperty(reordered, key);
+          Reflect.set(reordered, key, Reflect.get(input, key));
+        }
         const citation = createMemoryCodeCitation(input);
         const citationFromReorderedInput = createMemoryCodeCitation(reordered);
         const encoded = formatMemoryCodeCitation(citation);
@@ -179,8 +233,8 @@ describe('memory code citation properties', () => {
     fc.assert(
       fc.property(citationInput, input => {
         const encoded = formatMemoryCodeCitation(createMemoryCodeCitation(input));
-        const wire = JSON.parse(encoded) as {id: string};
-        wire.id = `${wire.id.slice(0, -1)}${wire.id.endsWith('0') ? '1' : '0'}`;
+        const wire = {...decodeCitationWire(JSON.parse(encoded))};
+        wire.id = `${Effect.pipe(wire.id, EffectString.slice(0, -1))}${Effect.pipe(wire.id, EffectString.endsWith('0')) ? '1' : '0'}`;
 
         expect(parseMemoryCodeCitation(JSON.stringify(wire))).toEqual({
           error: {reason: 'id-mismatch'},
@@ -219,7 +273,7 @@ describe('memory code citation properties', () => {
           selector: input => `${input.repositoryId}:${input.path}:${input.target.kind}`,
         }),
         inputs => {
-          const citations = inputs.map(createMemoryCodeCitation);
+          const citations = EffectArray.map(inputs, createMemoryCodeCitation);
           const before = JSON.stringify(citations);
           expect(formatMemoryCodeCitationLines(citations)).toHaveLength(citations.length);
           expect(JSON.stringify(citations)).toBe(before);
@@ -244,10 +298,10 @@ const sampleCitationInput: MemoryCodeCitationInputV1 = {
   path: 'src/example.ts',
   repositoryId: sha256HexSync('repository'),
   repositoryIdentityKind: 'remote',
-  sourceCommit: sha256HexSync('commit').slice(0, 40),
+  sourceCommit: Effect.pipe(sha256HexSync('commit'), EffectString.slice(0, 40)),
   sourceDirty: false,
-  sourceGraphContentId: `cgc_${sha256HexSync('graph').slice(0, 40)}`,
-  sourceSnapshotId: `cgsn_${sha256HexSync('snapshot').slice(0, 40)}`,
+  sourceGraphContentId: `cgc_${Effect.pipe(sha256HexSync('graph'), EffectString.slice(0, 40))}`,
+  sourceSnapshotId: `cgsn_${Effect.pipe(sha256HexSync('snapshot'), EffectString.slice(0, 40))}`,
   target: {kind: 'file'},
   version: 1,
 };

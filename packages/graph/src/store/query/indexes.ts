@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {normalizeSchemaDefinition} from '../schema/normalization.js';
@@ -171,11 +172,14 @@ export const inspectCodeGraphQueryIndexes = Effect.fn('codeGraph.inspectQueryInd
        CASE WHEN typeof(sql) = 'text' AND length(CAST(sql AS BLOB)) <= 4096 THEN sql ELSE NULL END AS sql,
        type
      FROM sqlite_master
-     WHERE name COLLATE NOCASE IN (${definitions.map(() => '?').join(', ')})
+     WHERE name COLLATE NOCASE IN (${EffectArray.join(
+       EffectArray.map(definitions, () => '?'),
+       ', ',
+     )})
      LIMIT ${definitions.length + 1}`,
-    definitions.map(definition => definition.name),
+    EffectArray.map(definitions, definition => definition.name),
   );
-  const expectedByName = new Map(definitions.map(definition => [definition.name, definition]));
+  const expectedByName = new Map(EffectArray.map(definitions, definition => [definition.name, definition]));
   const current = new Set<string>();
   for (const row of rows) {
     if (typeof row.name !== 'string' || typeof row.sql !== 'string' || row.type !== 'index') {
@@ -192,7 +196,7 @@ export const inspectCodeGraphQueryIndexes = Effect.fn('codeGraph.inspectQueryInd
     current.add(row.name);
   }
   return {
-    missing: definitions.filter(definition => !current.has(definition.name)),
+    missing: EffectArray.filter(definitions, definition => !current.has(definition.name)),
   } satisfies CodeGraphQueryIndexInspection;
 });
 

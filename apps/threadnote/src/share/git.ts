@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Option, Path} from 'effect';
 
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -27,6 +28,8 @@ import {
   readdir,
   rm,
 } from './core.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const stageShareableChanges = Effect.fn('share.stageShareableChanges')(function* (
   dryRun: boolean,
@@ -75,9 +78,13 @@ const removeOrphanPackIndexes = Effect.fn('share.removeOrphanPackIndexes')(funct
       if (!(yield* isFile(indexPath)) || (yield* isFile(manifestPath))) {
         continue;
       }
-      const indexRelative = (yield* pathRelative(worktree, indexPath)).split(yield* pathSeparator).join('/');
+      const indexRelative = EffectArray.join(
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+        (yield* pathRelative(worktree, indexPath)).split(yield* pathSeparator),
+        '/',
+      );
       const tracked = yield* runCommand(git, ['-C', worktree, 'ls-files', '--', indexRelative], {allowFailure: true});
-      if (tracked.exitCode === 0 && tracked.stdout.trim().length > 0) {
+      if (tracked.exitCode === 0 && Effect2.pipe(tracked.stdout, EffectString.trim).length > 0) {
         continue;
       }
       yield* Console.warn(
@@ -106,7 +113,7 @@ const existingShareablePathspecs = Effect.fn('share.existingShareablePathspecs')
       return (yield* hasWorktreeOrTrackedPath(git, worktree, dir)) ? `:(top)${dir}` : undefined;
     }),
   );
-  return [...rootFiles, ...topLevelDirs].filter((pathspec): pathspec is string => pathspec !== undefined);
+  return EffectArray.filter([...rootFiles, ...topLevelDirs], (pathspec): pathspec is string => pathspec !== undefined);
 });
 
 const hasWorktreeOrTrackedPath = Effect.fn('share.hasWorktreeOrTrackedPath')(function* (
@@ -118,7 +125,7 @@ const hasWorktreeOrTrackedPath = Effect.fn('share.hasWorktreeOrTrackedPath')(fun
     return true;
   }
   const result = yield* runCommand(git, ['-C', worktree, 'ls-files', '--', relativePath], {allowFailure: true});
-  return result.exitCode === 0 && result.stdout.trim().length > 0;
+  return result.exitCode === 0 && Effect2.pipe(result.stdout, EffectString.trim).length > 0;
 });
 
 export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(function* (
@@ -151,7 +158,7 @@ export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(fu
       : ['-C', worktree, 'add', '--', ...paths];
   const stageResult = yield* runGitCommand(dryRun, git, stageArgs, `git ${verb} failed`);
   if (stageResult) {
-    messages.push(`git ${verb}: ${stageResult.stdout.trim() || 'ok'}`);
+    messages.push(`git ${verb}: ${Effect2.pipe(stageResult.stdout, EffectString.trim) || 'ok'}`);
   }
 
   if (dryRun) {
@@ -167,10 +174,10 @@ export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(fu
     );
     if (staged.exitCode !== 0) {
       return yield* ShareOperationError.make({
-        message: `Could not inspect staged shared changes: ${staged.stderr.trim() || staged.stdout.trim() || 'git diff failed'}`,
+        message: `Could not inspect staged shared changes: ${Effect2.pipe(staged.stderr, EffectString.trim) || Effect2.pipe(staged.stdout, EffectString.trim) || 'git diff failed'}`,
       });
     }
-    const commitPaths = staged.stdout.split('\0').filter(Boolean);
+    const commitPaths = EffectArray.filter(Effect2.pipe(staged.stdout, EffectString.split('\0')), Boolean);
     if (commitPaths.length === 0) {
       messages.push('git commit: nothing to commit (requested paths already absent)');
     } else {
@@ -180,14 +187,17 @@ export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(fu
         {allowFailure: true},
       );
       if (commitResult.exitCode !== 0) {
-        const detail = commitResult.stdout.trim() || commitResult.stderr.trim();
+        const detail =
+          Effect2.pipe(commitResult.stdout, EffectString.trim) || Effect2.pipe(commitResult.stderr, EffectString.trim);
         if (/nothing to commit|no changes added/i.test(detail)) {
           messages.push('git commit: nothing to commit (file already in tree)');
         } else {
           return yield* ShareOperationError.make({message: `git commit failed: ${detail || 'unknown error'}`});
         }
       } else {
-        messages.push(`git commit: ${commitResult.stdout.trim().split('\n').slice(0, 2).join(' ')}`);
+        messages.push(
+          `git commit: ${EffectArray.join(Effect2.pipe(commitResult.stdout, EffectString.trim, EffectString.split('\n')).slice(0, 2), ' ')}`,
+        );
       }
     }
   }
@@ -203,7 +213,9 @@ export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(fu
     'git push failed',
   );
   if (pushResult) {
-    messages.push(`git push: ${pushResult.stdout.trim() || pushResult.stderr.trim() || 'ok'}`);
+    messages.push(
+      `git push: ${Effect2.pipe(pushResult.stdout, EffectString.trim) || Effect2.pipe(pushResult.stderr, EffectString.trim) || 'ok'}`,
+    );
   }
   return messages;
 });
@@ -240,7 +252,7 @@ export const assertShareGitPublicationTarget = Effect.fn('share.assertGitPublica
   const git = yield* requiredExecutable('git');
   const checked = (args: readonly string[]) =>
     runGitCommand(false, git, ['-C', worktree, ...args], 'Shared publication verification failed').pipe(
-      Effect.map(result => result!.stdout.trim()),
+      Effect.map(result => Effect2.pipe(result!.stdout, EffectString.trim)),
     );
   yield* checked(['check-ref-format', `refs/heads/${expectedBranch}`]);
   if ((yield* checked(['symbolic-ref', '--quiet', '--short', 'HEAD'])) !== expectedBranch)
@@ -265,12 +277,15 @@ export const assertShareGitPublicationImages = Effect.fn('share.assertGitPublica
   const safePath = assertSafeShareRelativePath(relativePath);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const filename = path.join(worktree, ...safePath.split('/'));
+  const filename = path.join(worktree, ...Effect2.pipe(safePath, EffectString.split('/')));
   if (!(yield* fs.exists(filename))) {
     if (expectedContent !== undefined)
       return yield* ShareOperationError.make({message: 'Shared publication worktree preimage is missing.'});
   } else {
-    if ((yield* fs.realPath(filename)) !== path.join(yield* fs.realPath(worktree), ...safePath.split('/')))
+    if (
+      (yield* fs.realPath(filename)) !==
+      path.join(yield* fs.realPath(worktree), ...Effect2.pipe(safePath, EffectString.split('/')))
+    )
       return yield* ShareOperationError.make({message: 'Shared publication path is an alias or symbolic link.'});
   }
   yield* assertSharedWorktreeFileReady(
@@ -321,12 +336,12 @@ export const publishShareGitChangeVerified = Effect.fn('share.publishShareGitCha
   const git = yield* requiredExecutable('git');
   const checked = (args: readonly string[]) =>
     runGitCommand(false, git, ['-C', worktree, ...args], 'Shared publication verification failed').pipe(
-      Effect.map(result => result!.stdout.trim()),
+      Effect.map(result => Effect2.pipe(result!.stdout, EffectString.trim)),
     );
   const validateBinding = assertShareGitPublicationTarget(worktree, options.expectedRemote, options.expectedBranch);
   yield* validateBinding;
   const fs = yield* FileSystem.FileSystem;
-  const filename = yield* pathJoin(worktree, ...path.split('/'));
+  const filename = yield* pathJoin(worktree, ...Effect2.pipe(path, EffectString.split('/')));
   yield* assertShareGitPublicationImages(
     worktree,
     path,
@@ -394,7 +409,10 @@ export const publishShareGitChangeVerified = Effect.fn('share.publishShareGitCha
   // A push sends the receipt's entire ancestry. Each approved workflow stage
   // is pushed before the next starts, so only this one exact document commit
   // may be unpublished. Preserve other pending commits for their own owner.
-  const parents = (yield* checked(['rev-list', '--parents', '--max-count=1', receipt.commit])).split(' ');
+  const parents = Effect2.pipe(
+    yield* checked(['rev-list', '--parents', '--max-count=1', receipt.commit]),
+    EffectString.split(' '),
+  );
   if (parents.length !== 2 || parents[0] !== receipt.commit || parents[1] !== previous.remoteCommit)
     return yield* ShareOperationError.make({
       message:
@@ -417,7 +435,7 @@ export const publishShareGitChangeVerified = Effect.fn('share.publishShareGitCha
     ],
     'Shared publication commit scope verification failed',
   );
-  const changedPaths = changes!.stdout.split('\0').filter(Boolean);
+  const changedPaths = EffectArray.filter(Effect2.pipe(changes!.stdout, EffectString.split('\0')), Boolean);
   if (changedPaths.length !== 1 || changedPaths[0] !== path)
     return yield* ShareOperationError.make({
       message: 'Shared publication commit includes changes outside the exact approved document.',
@@ -446,7 +464,7 @@ export const writeSharedWorktreeFile = Effect.fn('share.writeSharedWorktreeFile'
   dryRun = false,
 ) {
   const safeRelativePath = assertSafeShareRelativePath(relativePath);
-  const targetPath = yield* pathJoin(worktree, ...safeRelativePath.split('/'));
+  const targetPath = yield* pathJoin(worktree, ...Effect2.pipe(safeRelativePath, EffectString.split('/')));
   if (dryRun) {
     yield* Console.log(`Would write shared worktree file: ${targetPath}`);
     return targetPath;
@@ -456,7 +474,7 @@ export const writeSharedWorktreeFile = Effect.fn('share.writeSharedWorktreeFile'
   const system = yield* SystemInfo;
   const realWorktree = yield* fs.realPath(worktree);
   let current = path.resolve(worktree);
-  for (const segment of safeRelativePath.split('/').slice(0, -1)) {
+  for (const segment of Effect2.pipe(safeRelativePath, EffectString.split('/')).slice(0, -1)) {
     current = path.join(current, segment);
     if (Option.isSome(yield* fs.readLink(current).pipe(Effect.option))) {
       return yield* ShareOperationError.make({
@@ -512,10 +530,10 @@ export function assertSharedWorktreeFileReady(
     });
     if (unmerged.exitCode !== 0) {
       return yield* ShareOperationError.make({
-        message: `Could not verify shared worktree state for ${safeRelativePath}: ${unmerged.stderr.trim() || unmerged.stdout.trim() || 'git ls-files failed'}.`,
+        message: `Could not verify shared worktree state for ${safeRelativePath}: ${Effect2.pipe(unmerged.stderr, EffectString.trim) || Effect2.pipe(unmerged.stdout, EffectString.trim) || 'git ls-files failed'}.`,
       });
     }
-    if (unmerged.stdout.trim().length > 0) {
+    if (Effect2.pipe(unmerged.stdout, EffectString.trim).length > 0) {
       return yield* ShareOperationError.make({
         message: `Refusing to overwrite unmerged shared worktree file: ${safeRelativePath}. Resolve the conflict first.`,
       });
@@ -534,7 +552,7 @@ export function assertSharedWorktreeFileReady(
         ['-C', worktree, 'ls-files', '--error-unmatch', '--', safeRelativePath],
         {allowFailure: true},
       );
-      tracked = trackedResult.exitCode === 0 && trackedResult.stdout.trim().length > 0;
+      tracked = trackedResult.exitCode === 0 && Effect2.pipe(trackedResult.stdout, EffectString.trim).length > 0;
       const status = yield* runCommand(
         git,
         ['-C', worktree, 'status', '--porcelain=v1', '--untracked-files=all', '--', safeRelativePath],
@@ -542,12 +560,12 @@ export function assertSharedWorktreeFileReady(
       );
       if (status.exitCode !== 0) {
         return yield* ShareOperationError.make({
-          message: `Could not verify shared worktree state for ${safeRelativePath}: ${status.stderr.trim() || status.stdout.trim() || 'git status failed'}.`,
+          message: `Could not verify shared worktree state for ${safeRelativePath}: ${Effect2.pipe(status.stderr, EffectString.trim) || Effect2.pipe(status.stdout, EffectString.trim) || 'git status failed'}.`,
         });
       }
-      dirty = status.stdout.trim().length > 0;
+      dirty = Effect2.pipe(status.stdout, EffectString.trim).length > 0;
     }
-    const targetPath = yield* pathJoin(worktree, ...safeRelativePath.split('/'));
+    const targetPath = yield* pathJoin(worktree, ...Effect2.pipe(safeRelativePath, EffectString.split('/')));
     if (!(yield* fs.exists(targetPath))) {
       if (options.allowCleanTrackedReplacement !== true || (!tracked && !dirty)) return;
       return yield* ShareOperationError.make({
@@ -608,7 +626,7 @@ const runGitCommand = Effect.fn('share.runGitCommand')(function* (
   const result = yield* runCommand(git, args, {allowFailure: true});
   if (result.exitCode !== 0) {
     return yield* ShareOperationError.make({
-      message: `${failureLabel}: ${result.stderr.trim() || result.stdout.trim() || 'unknown error'}`,
+      message: `${failureLabel}: ${Effect2.pipe(result.stderr, EffectString.trim) || Effect2.pipe(result.stdout, EffectString.trim) || 'unknown error'}`,
     });
   }
   return result;
@@ -618,7 +636,7 @@ const hasUncommittedChanges = Effect.fn('share.hasUncommittedChanges')(function*
   // Read-only check; always run, even in dry-run, so the preamble reflects
   // what a non-dry-run sync would actually have to commit.
   const result = yield* runCommand('git', ['-C', worktree, 'status', '--porcelain'], {allowFailure: true});
-  return result.stdout.trim().length > 0;
+  return Effect2.pipe(result.stdout, EffectString.trim).length > 0;
 });
 
 const restoreTrackedSharedChanges = Effect.fn('share.restoreTrackedSharedChanges')(function* (
@@ -636,10 +654,12 @@ const restoreTrackedSharedChanges = Effect.fn('share.restoreTrackedSharedChanges
   );
   if (changed.exitCode !== 0) {
     throw ShareOperationError.make({
-      message: `Could not inspect tracked shared changes in ${worktree}: ${changed.stderr.trim() || changed.stdout.trim() || 'unknown git diff error'}`,
+      message: `Could not inspect tracked shared changes in ${worktree}: ${Effect2.pipe(changed.stderr, EffectString.trim) || Effect2.pipe(changed.stdout, EffectString.trim) || 'unknown git diff error'}`,
     });
   }
-  const relativePaths = [...new Set(changed.stdout.split('\0').filter(Boolean))];
+  const relativePaths = [
+    ...new Set(EffectArray.filter(Effect2.pipe(changed.stdout, EffectString.split('\0')), Boolean)),
+  ];
   if (relativePaths.length === 0) {
     return [];
   }
@@ -650,7 +670,7 @@ const restoreTrackedSharedChanges = Effect.fn('share.restoreTrackedSharedChanges
   );
   if (restored.exitCode !== 0) {
     throw ShareOperationError.make({
-      message: `Could not restore tracked shared changes in ${worktree}: ${restored.stderr.trim() || restored.stdout.trim() || 'unknown git restore error'}`,
+      message: `Could not restore tracked shared changes in ${worktree}: ${Effect2.pipe(restored.stderr, EffectString.trim) || Effect2.pipe(restored.stdout, EffectString.trim) || 'unknown git restore error'}`,
     });
   }
   return relativePaths;
@@ -669,14 +689,19 @@ const isShareGitOperationInProgress = Effect.fn('share.isShareGitOperationInProg
   git: string,
   worktree: string,
 ) {
-  const args = ['-C', worktree, 'rev-parse', ...SHARE_GIT_OPERATION_MARKERS.flatMap(marker => ['--git-path', marker])];
+  const args = [
+    '-C',
+    worktree,
+    'rev-parse',
+    ...EffectArray.flatMap(SHARE_GIT_OPERATION_MARKERS, marker => ['--git-path', marker]),
+  ];
   const result = yield* runCommand(git, args, {allowFailure: true});
   if (result.exitCode !== 0) {
     return yield* ShareOperationError.make({
-      message: `Could not inspect Git operation state in ${worktree}: ${result.stderr.trim() || result.stdout.trim() || 'unknown git rev-parse error'}`,
+      message: `Could not inspect Git operation state in ${worktree}: ${Effect2.pipe(result.stderr, EffectString.trim) || Effect2.pipe(result.stdout, EffectString.trim) || 'unknown git rev-parse error'}`,
     });
   }
-  const markerPaths = result.stdout.split(/\r?\n/).filter(Boolean);
+  const markerPaths = EffectArray.filter(Effect2.pipe(result.stdout, EffectString.split(/\r?\n/)), Boolean);
   if (markerPaths.length !== SHARE_GIT_OPERATION_MARKERS.length) {
     return yield* ShareOperationError.make({
       message: `Could not inspect Git operation state in ${worktree}: git returned incomplete marker paths.`,
@@ -708,7 +733,7 @@ const gitOutput = Effect.fn('share.gitOutput')(function* (
   if (result.exitCode !== 0) {
     return undefined;
   }
-  return result.stdout.trim();
+  return Effect2.pipe(result.stdout, EffectString.trim);
 });
 
 const GIT_MODE_ABSENT = '000000';
@@ -727,11 +752,15 @@ export const listChangedFiles = Effect.fn('share.listChangedFiles')(function* (
   if (result.exitCode !== 0) {
     return [];
   }
-  const entries = result.stdout.split('\0').filter(part => part.length > 0);
+  const entries = EffectArray.filter(Effect2.pipe(result.stdout, EffectString.split('\0')), part => part.length > 0);
   const changes: ChangedFile[] = [];
   for (let index = 0; index < entries.length;) {
     const raw = entries[index++];
-    const match = raw.match(/^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])\d*/);
+    const match = Effect2.pipe(
+      raw,
+      EffectString.match(/^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z])\d*/),
+      Effect2.Option.getOrElse(() => null),
+    );
     if (!match) {
       continue;
     }

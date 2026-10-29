@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
@@ -7,6 +8,9 @@ import {Clock, Console, DateTime, Effect, FileSystem, Layer, Path} from 'effect'
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runtimeHostHardwareInfo, runtimeOperatingSystemRelease, SystemInfo} from '@threadnote/platform/system';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_CANDIDATE_REF = 'v4.0.1';
 const DEFAULT_SAMPLES = 5;
@@ -185,7 +189,7 @@ const prepareRuntime = Effect.fn('worktreeReadiness.prepareRuntime')(function* (
   const path = yield* Path.Path;
   const root = path.join(context.temporaryRoot, `runtime-${name}`);
   yield* cloneAtCommit(context, context.repositoryRoot, root, commit);
-  yield* progress(`Installing frozen dependencies for ${name} ${commit.slice(0, 12)}`);
+  yield* progress(`Installing frozen dependencies for ${name} ${Effect2.pipe(commit, EffectString.slice(0, 12))}`);
   yield* command('bun', ['install', '--frozen-lockfile', '--ignore-scripts'], root, 5 * 60 * 1_000);
   if ((yield* git(root, ['status', '--porcelain', '--untracked-files=no'])) !== '') {
     return yield* ScriptError.make({message: `${name} runtime checkout changed during dependency installation.`});
@@ -226,7 +230,7 @@ const runScenario = Effect.fn('worktreeReadiness.runScenario')(function* (
     const measured = run >= context.options.warmups;
     const sample = run - context.options.warmups;
     const logicalRun = `${scenario}-${run + 1}`;
-    for (const fixture of Object.values(fixtures)) yield* prepareScenarioCommit(fixture, scenario, run);
+    for (const fixture of EffectRecord.values(fixtures)) yield* prepareScenarioCommit(fixture, scenario, run);
     const worktrees = {
       baseline: yield* addLinkedWorktree(fixtures.baseline, logicalRun),
       candidate: yield* addLinkedWorktree(fixtures.candidate, logicalRun),
@@ -261,26 +265,26 @@ const runScenario = Effect.fn('worktreeReadiness.runScenario')(function* (
     }
   }
   const baseline = summarize(
-    observations.baseline.map(value => value.durationMilliseconds),
+    EffectArray.map(observations.baseline, value => value.durationMilliseconds),
     context.options.samples,
   );
   const candidate = summarize(
-    observations.candidate.map(value => value.durationMilliseconds),
+    EffectArray.map(observations.candidate, value => value.durationMilliseconds),
     context.options.samples,
   );
   const medianSpeedup = baseline.medianMilliseconds / candidate.medianMilliseconds;
   return {
     baseline: {
       ...baseline,
-      materializationModes: unique(observations.baseline.map(value => value.materializationMode)),
+      materializationModes: unique(EffectArray.map(observations.baseline, value => value.materializationMode)),
       observations: observations.baseline,
-      stagedFiles: observations.baseline.map(value => value.stagedFiles),
+      stagedFiles: EffectArray.map(observations.baseline, value => value.stagedFiles),
     },
     candidate: {
       ...candidate,
-      materializationModes: unique(observations.candidate.map(value => value.materializationMode)),
+      materializationModes: unique(EffectArray.map(observations.candidate, value => value.materializationMode)),
       observations: observations.candidate,
-      stagedFiles: observations.candidate.map(value => value.stagedFiles),
+      stagedFiles: EffectArray.map(observations.candidate, value => value.stagedFiles),
     },
     graphParityPassed: true,
     medianSpeedup,
@@ -337,7 +341,7 @@ const removeLinkedWorktree = Effect.fn('worktreeReadiness.removeLinkedWorktree')
   worktree: string,
 ) {
   const path = yield* Path.Path;
-  if (!worktree.startsWith(`${fixture.worktreeRoot}${path.sep}`)) {
+  if (!Effect2.pipe(worktree, EffectString.startsWith(`${fixture.worktreeRoot}${path.sep}`))) {
     return yield* ScriptError.make({message: `Refusing to remove an unexpected worktree path: ${worktree}`});
   }
   yield* git(fixture.primary, ['worktree', 'remove', '--force', worktree]);
@@ -367,8 +371,8 @@ const runIndex = Effect.fn('worktreeReadiness.runIndex')(function* (runtime: Run
       '--json',
     ]),
   );
-  const nodes = array(query.nodes, 'query.nodes').map(value => record(value, 'query node'));
-  if (!nodes.some(node => node.name === FIXTURE_QUERY && node.path === FIXTURE_QUERY_PATH)) {
+  const nodes = EffectArray.map(array(query.nodes, 'query.nodes'), value => record(value, 'query node'));
+  if (!EffectArray.some(nodes, node => node.name === FIXTURE_QUERY && node.path === FIXTURE_QUERY_PATH)) {
     throw ScriptError.make({
       message: `${runtime.name} query control did not return ${FIXTURE_QUERY_PATH}#${FIXTURE_QUERY}.`,
     });
@@ -443,9 +447,9 @@ function assertParity(baseline: Observation, candidate: Observation, label: stri
 }
 
 function queryEvidenceDigest(query: Record<string, unknown>): string {
-  const nodes = array(query.nodes, 'query.nodes')
-    .map(value => record(value, 'query node'))
-    .map(node => ({
+  const nodes = EffectArray.map(
+    EffectArray.map(array(query.nodes, 'query.nodes'), value => record(value, 'query node')),
+    node => ({
       exported: node.exported,
       kind: node.kind,
       language: node.language,
@@ -453,27 +457,27 @@ function queryEvidenceDigest(query: Record<string, unknown>): string {
       path: node.path,
       qualifiedName: node.qualifiedName,
       signature: node.signature,
-    }))
-    .sort(compareJson);
-  const edges = array(query.edges, 'query.edges')
-    .map(value => record(value, 'query edge'))
-    .map(edge => ({
+    }),
+  ).sort(compareJson);
+  const edges = EffectArray.map(
+    EffectArray.map(array(query.edges, 'query.edges'), value => record(value, 'query edge')),
+    edge => ({
       evidencePath: edge.evidencePath,
       provenance: edge.provenance,
       relation: edge.relation,
       sourceName: edge.sourceName,
       targetName: edge.targetName,
-    }))
-    .sort(compareJson);
+    }),
+  ).sort(compareJson);
   return sha256HexSync(JSON.stringify({edges, nodes}));
 }
 
 function compareJson(left: unknown, right: unknown): number {
-  return JSON.stringify(left).localeCompare(JSON.stringify(right), 'en');
+  return Effect2.pipe(JSON.stringify(left), EffectString.localeCompare(JSON.stringify(right), ['en']));
 }
 
 function summarize(values: readonly number[], expectedSamples: number): Summary {
-  if (values.length !== expectedSamples || values.some(value => !Number.isFinite(value) || value <= 0)) {
+  if (values.length !== expectedSamples || EffectArray.some(values, value => !Number.isFinite(value) || value <= 0)) {
     throw ScriptError.make({message: `Expected ${expectedSamples} positive benchmark observations.`});
   }
   const sorted = [...values].sort((left, right) => left - right);
@@ -500,7 +504,7 @@ function validateArtifact(
   ) {
     throw ScriptError.make({message: 'Benchmark artifact source provenance drifted during the run.'});
   }
-  for (const [name, scenario] of Object.entries(artifact.scenarios)) {
+  for (const [name, scenario] of EffectRecord.toEntries(artifact.scenarios)) {
     if (!scenario.graphParityPassed || !scenario.queryParityPassed)
       throw ScriptError.make({message: `${name} parity did not pass.`});
     if (!Number.isFinite(scenario.medianSpeedup) || scenario.medianSpeedup <= 1) {
@@ -513,11 +517,13 @@ function validateArtifact(
 }
 
 function finalJsonRecord(output: string, expectedType?: string): Record<string, unknown> {
-  const records = output
-    .split(/\r?\n/)
-    .filter(line => line.trim().startsWith('{'))
-    .map(line => JSON.parse(line) as unknown)
-    .filter(value => value !== null && typeof value === 'object' && !Array.isArray(value)) as Record<string, unknown>[];
+  const parsed = EffectArray.map(
+    EffectArray.filter(Effect2.pipe(output, EffectString.split(/\r?\n/)), line =>
+      Effect2.pipe(line, EffectString.trim, EffectString.startsWith('{')),
+    ),
+    line => JSON.parse(line) as unknown,
+  );
+  const records = EffectArray.filter(parsed, isRecord);
   const selected = expectedType ? records.findLast(record => record.type === expectedType) : records.at(-1);
   if (!selected)
     throw ScriptError.make({message: `Threadnote command did not emit ${expectedType ?? 'a final JSON record'}.`});
@@ -543,7 +549,7 @@ const cloneAtCommit = Effect.fn('worktreeReadiness.cloneAtCommit')(function* (
 });
 
 const git = Effect.fn('worktreeReadiness.git')(function* (cwd: string, arguments_: readonly string[]) {
-  return (yield* command('git', arguments_, cwd, 2 * 60 * 1_000)).trim();
+  return Effect2.pipe(yield* command('git', arguments_, cwd, 2 * 60 * 1_000), EffectString.trim);
 });
 
 const gitTopLevel = Effect.fn('worktreeReadiness.gitTopLevel')(function* (cwd: string) {
@@ -594,7 +600,12 @@ function parseArguments(arguments_: readonly string[]): BenchmarkOptions {
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
 
@@ -611,14 +622,17 @@ function nonNegativeInteger(value: string | undefined, option: string): number {
   return parsed;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw ScriptError.make({message: `${label} must be an object.`});
-  return value as Record<string, unknown>;
+  if (!isRecord(value)) throw ScriptError.make({message: `${label} must be an object.`});
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) throw ScriptError.make({message: `${label} must be an array.`});
+  if (!EffectArray.isArray(value)) throw ScriptError.make({message: `${label} must be an array.`});
   return value;
 }
 

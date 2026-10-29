@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {inspectObsidianFile, scanObsidianDirectoryPage} from './scan.js';
 import {SourceCoordinator, type SourceWorkOptions} from '@threadnote/integration-core/source-coordinator';
 import {Option} from 'effect';
@@ -11,6 +13,7 @@ import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resou
 import {scanFilesWithinBoundary} from '@threadnote/platform/safe_scan';
 import {
   DEFAULT_OBSIDIAN_EXCLUDES,
+  type ObsidianProjectionConfig,
   type ObsidianSourceConfig,
   type SourceConfig,
   isObsidianSource,
@@ -30,6 +33,9 @@ import {expandPath} from '@threadnote/platform/paths';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {isDirectory, toPosixPath} from '@threadnote/integration-core/utils';
 import {validMemoryObsidianEvidence, type MemoryObsidianEvidenceV1} from '@threadnote/memory/document';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ObsidianSourceAddOptions {
   readonly apply?: boolean;
@@ -59,6 +65,57 @@ export interface ObsidianInventory {
   readonly entries: readonly ObsidianInventoryEntry[];
   readonly source: ObsidianSourceConfig;
   readonly more?: boolean;
+}
+function isObsidianInventory(value: unknown): value is ObsidianInventory {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'entries' in value &&
+    EffectArray.isArray(value.entries) &&
+    EffectArray.every(
+      value.entries,
+      (entry): entry is ObsidianInventoryEntry =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        'action' in entry &&
+        (entry.action === 'add' ||
+          entry.action === 'remove' ||
+          entry.action === 'skip' ||
+          entry.action === 'unchanged' ||
+          entry.action === 'update') &&
+        'relativePath' in entry &&
+        typeof entry.relativePath === 'string' &&
+        (!('detail' in entry) || entry.detail === undefined || typeof entry.detail === 'string') &&
+        (!('uri' in entry) || entry.uri === undefined || typeof entry.uri === 'string'),
+    ) &&
+    'source' in value &&
+    isObsidianSourceConfig(value.source) &&
+    (!('more' in value) || value.more === undefined || typeof value.more === 'boolean')
+  );
+}
+
+function isObsidianSourceConfig(value: unknown): value is ObsidianSourceConfig {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'type' in value &&
+    value.type === 'obsidian' &&
+    'enabled' in value &&
+    typeof value.enabled === 'boolean' &&
+    'exclude' in value &&
+    EffectArray.isArray(value.exclude) &&
+    EffectArray.every(value.exclude, (item): item is string => typeof item === 'string') &&
+    'id' in value &&
+    typeof value.id === 'string' &&
+    'include' in value &&
+    EffectArray.isArray(value.include) &&
+    EffectArray.every(value.include, (item): item is string => typeof item === 'string') &&
+    (!('inbox' in value) || value.inbox === undefined || typeof value.inbox === 'string') &&
+    'vault' in value &&
+    typeof value.vault === 'string' &&
+    'watch' in value &&
+    typeof value.watch === 'boolean'
+  );
 }
 
 export interface ObsidianSourceAutoSyncResult {
@@ -119,10 +176,13 @@ interface ObsidianSourceSyncBehavior {
   readonly writeUnchangedState: boolean;
 }
 
-class ObsidianSourceError extends Schema.TaggedError<ObsidianSourceError>()('ObsidianSourceError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ObsidianSourceError extends Schema.TaggedError<ObsidianSourceError, {readonly brand: unique symbol}>()(
+  'ObsidianSourceError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const SOURCE_STATE_VERSION = 2;
 const SOURCE_STATE_FILENAME = 'state-v1.json';
@@ -187,10 +247,20 @@ export const inspectObsidianNote = Effect.fn('obsidian.inspectNote')(function* (
         const matches =
           typeof selection === 'string'
             ? []
-            : Object.entries(state.files).filter(([, entry]) => entry.noteId === selection.noteId);
-        const identities = new Set(matches.map(([, entry]) => entry.fileIdentity).filter(Boolean));
-        const liveMatches = inventory.safeNotes.filter(note =>
-          typeof selection === 'string' ? note.relativePath === selection : identities.has(note.fileIdentity),
+            : EffectArray.filter(EffectRecord.toEntries(state.files), ([, entry]) => entry.noteId === selection.noteId);
+        const identities = new Set(
+          EffectArray.filter(
+            EffectArray.map(matches, ([, entry]) => entry.fileIdentity),
+            Boolean,
+          ),
+        );
+        const liveMatches = EffectArrayPipe(inventory.safeNotes, __effectArrayValues2 =>
+          EffectArray.filter(
+            __effectArrayValues2,
+            (note, __effectArrayIndex2) =>
+              __effectArrayIndex2 in __effectArrayValues2 &&
+              (typeof selection === 'string' ? note.relativePath === selection : identities.has(note.fileIdentity)),
+          ),
         );
         if (
           liveMatches.length !== 1 ||
@@ -202,7 +272,10 @@ export const inspectObsidianNote = Effect.fn('obsidian.inspectNote')(function* (
         const live = liveMatches[0];
         const relativePath = live.relativePath;
         const entry =
-          state.files[relativePath] ?? matches.find(([, file]) => file.fileIdentity === live.fileIdentity)?.[1];
+          state.files[relativePath] ??
+          Option.getOrUndefined(
+            EffectArray.findFirst(matches, ([, file]) => file.fileIdentity === live.fileIdentity),
+          )?.[1];
         if (typeof selection !== 'string' && (identities.size !== 1 || entry?.noteId !== selection.noteId))
           return yield* ObsidianSourceError.make({message: 'Obsidian stable note identity is ambiguous or replaced.'});
         if (!sourcePathMatches(relativePath, source.include, source.exclude))
@@ -330,22 +403,38 @@ const captureOrRecoverObsidianEvidence = Effect.fn('obsidian.captureOrRecoverEvi
           });
         }
         const state = yield* readSourceState(statePath, source.id);
-        const matches = Object.entries(state.files).filter(([, file]) => file.noteId === input.expectedNoteId);
+        const matches = EffectArray.filter(
+          EffectRecord.toEntries(state.files),
+          ([, file]) => file.noteId === input.expectedNoteId,
+        );
         // A checkpoint can temporarily contain both old and renamed paths. Require one live identity below.
         const inventory = yield* buildObsidianInventory(config, currentSource);
-        const identities = new Set(matches.map(([, file]) => file.fileIdentity).filter(Boolean));
+        const identities = new Set(
+          EffectArray.filter(
+            EffectArray.map(matches, ([, file]) => file.fileIdentity),
+            Boolean,
+          ),
+        );
         const liveMatches = reservation
-          ? inventory.safeNotes.filter(note => identities.has(note.fileIdentity))
-          : inventory.safeNotes.filter(note => note.relativePath === input.relativePath);
+          ? EffectArrayPipe(inventory.safeNotes, __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (note, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues && identities.has(note.fileIdentity),
+              ),
+            )
+          : EffectArray.filter(inventory.safeNotes, note => note.relativePath === input.relativePath);
         if (liveMatches.length !== 1 || (reservation && identities.size !== 1))
           return yield* ObsidianSourceError.make({
             message: 'Obsidian note identity is missing or ambiguous; sync and inspect it again.',
           });
         const live = liveMatches[0];
         const resolvedPath = reservation ? live.relativePath : input.relativePath;
-        const matchingEntries = matches.filter(([, file]) => file.fileIdentity === live.fileIdentity);
+        const matchingEntries = EffectArray.filter(matches, ([, file]) => file.fileIdentity === live.fileIdentity);
         const entry = reservation
-          ? (matchingEntries.find(([relativePath]) => relativePath === resolvedPath)?.[1] ?? matchingEntries[0]?.[1])
+          ? (Option.getOrUndefined(
+              EffectArray.findFirst(matchingEntries, ([relativePath]) => relativePath === resolvedPath),
+            )?.[1] ?? matchingEntries[0]?.[1])
           : state.files[resolvedPath];
         if (!sourcePathMatches(resolvedPath, currentSource.include, currentSource.exclude))
           return yield* ObsidianSourceError.make({
@@ -389,7 +478,8 @@ const captureOrRecoverObsidianEvidence = Effect.fn('obsidian.captureOrRecoverEvi
         if (
           live.fileIdentity !== entry.fileIdentity ||
           live.sanitizedHash !== entry.sanitizedHash ||
-          matchingEntries.some(
+          EffectArray.some(
+            matchingEntries,
             ([, file]) =>
               file.noteId !== entry.noteId ||
               file.sanitizedHash !== entry.sanitizedHash ||
@@ -402,11 +492,18 @@ const captureOrRecoverObsidianEvidence = Effect.fn('obsidian.captureOrRecoverEvi
         }
         if (new TextDecoder().decode(new TextEncoder().encode(input.fragment)) !== input.fragment)
           return yield* ObsidianSourceError.make({message: 'Select a complete UTF-8 fragment.'});
-        const fragmentStart = reservation?.fragmentStart ?? sanitizedContent.indexOf(input.fragment);
+        const fragmentStart =
+          reservation?.fragmentStart ??
+          Effect2.pipe(
+            sanitizedContent,
+            EffectString.indexOf(input.fragment),
+            Effect2.Option.getOrElse(() => -1),
+          );
         if (
           fragmentStart < 0 ||
           (reservation && reservation.fragmentEnd !== fragmentStart + input.fragment.length) ||
-          sanitizedContent.slice(fragmentStart, fragmentStart + input.fragment.length) !== input.fragment
+          Effect2.pipe(sanitizedContent, EffectString.slice(fragmentStart, fragmentStart + input.fragment.length)) !==
+            input.fragment
         ) {
           return yield* ObsidianSourceError.make({
             message: 'Evidence fragment is absent from the exact sanitized imported revision.',
@@ -462,7 +559,10 @@ const captureOrRecoverObsidianEvidence = Effect.fn('obsidian.captureOrRecoverEvi
         }
         if (recoverOnly) return undefined;
         yield* fs.makeDirectory(dir, {recursive: true});
-        const names = (yield* fs.readDirectory(dir)).filter(name => /^[a-f0-9-]{36}\.json$/u.test(name));
+        const names = EffectArray.filter(
+          yield* fs.readDirectory(dir),
+          __effectArrayValue => !!(name => /^[a-f0-9-]{36}\.json$/u.test(name))(__effectArrayValue),
+        );
         let retainedBytes = 0;
         let retainedCount = 0;
         for (const name of names) {
@@ -526,8 +626,9 @@ function validCaptureReservation(
     'fragmentEnd',
   ];
   if (
-    Object.keys(value).length !== fields.length ||
-    !fields.every(key => Object.hasOwn(value, key)) ||
+    EffectRecord.keys(value).length !== fields.length ||
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    !EffectArray.every(fields, key => Object.hasOwn(value, key)) ||
     !('version' in value) ||
     value.version !== 1 ||
     !('operationId' in value) ||
@@ -576,7 +677,7 @@ function validPinnedObsidianEvidence(value: unknown): value is PinnedObsidianEvi
   if (
     !value ||
     typeof value !== 'object' ||
-    Object.keys(value).some(key => !['citation', 'sanitizedContent', 'reservation'].includes(key)) ||
+    EffectArray.some(EffectRecord.keys(value), key => !['citation', 'sanitizedContent', 'reservation'].includes(key)) ||
     !('citation' in value) ||
     !('sanitizedContent' in value) ||
     !validMemoryObsidianEvidence(value.citation) ||
@@ -597,7 +698,7 @@ function validPinnedObsidianEvidence(value: unknown): value is PinnedObsidianEvi
     )
       return false;
   }
-  const fragment = sanitizedContent.slice(citation.fragmentStart, citation.fragmentEnd);
+  const fragment = Effect2.pipe(sanitizedContent, EffectString.slice(citation.fragmentStart, citation.fragmentEnd));
   return (
     citation.fragmentEnd <= sanitizedContent.length &&
     new TextEncoder().encode(fragment).byteLength <= EVIDENCE_MAX_FRAGMENT_BYTES &&
@@ -633,7 +734,9 @@ export const readObsidianEvidence = Effect.fn('obsidian.readEvidence')(function*
           return {citation, historical: 'expired' as const, currentRevision: 'unknown' as const};
         }
         const configuration = yield* readObsidianConfiguration(config);
-        const source = configuration.sources.find(item => item.id === citation.sourceId);
+        const source = Option.getOrUndefined(
+          EffectArray.findFirst(configuration.sources, item => item.id === citation.sourceId),
+        );
         if (!source || !isObsidianSource(source)) {
           return {citation, historical: 'revoked' as const, currentRevision: 'unknown' as const};
         }
@@ -650,9 +753,10 @@ export const readObsidianEvidence = Effect.fn('obsidian.readEvidence')(function*
         if (state.sourceInstanceId !== citation.sourceInstanceId) {
           return {citation, historical: 'revoked' as const, currentRevision: 'unknown' as const};
         }
-        const recordedPaths = Object.entries(state.files)
-          .filter(([, file]) => file.noteId === citation.noteId)
-          .map(([relativePath]) => relativePath);
+        const recordedPaths = EffectArray.map(
+          EffectArray.filter(EffectRecord.toEntries(state.files), ([, file]) => file.noteId === citation.noteId),
+          ([relativePath]) => relativePath,
+        );
         for (const relativePath of recordedPaths.length > 0 ? recordedPaths : [citation.relativePath]) {
           if (!(yield* sourceEvidenceReadable(vault.success, relativePath))) {
             return {citation, historical: 'revoked' as const, currentRevision: 'unknown' as const};
@@ -670,21 +774,32 @@ export const readObsidianEvidence = Effect.fn('obsidian.readEvidence')(function*
         ) {
           return {citation, historical: 'corrupt' as const, currentRevision: 'unknown' as const};
         }
-        const fragment = pin.sanitizedContent.slice(citation.fragmentStart, citation.fragmentEnd);
+        const fragment = Effect2.pipe(
+          pin.sanitizedContent,
+          EffectString.slice(citation.fragmentStart, citation.fragmentEnd),
+        );
         if ((yield* sha256Hex(fragment)) !== citation.fragmentHash) {
           return {citation, historical: 'corrupt' as const, currentRevision: 'unknown' as const};
         }
-        const recorded = Object.values(state.files).find(file => file.noteId === citation.noteId);
+        const recorded = Option.getOrUndefined(
+          EffectArray.findFirst(EffectRecord.values(state.files), file => file.noteId === citation.noteId),
+        );
         const liveInventory = yield* Effect.result(buildObsidianInventory(config, source));
         const live =
           Result.isSuccess(liveInventory) && recorded?.fileIdentity
-            ? liveInventory.success.safeNotes.find(note => note.fileIdentity === recorded.fileIdentity)
+            ? Option.getOrUndefined(
+                EffectArray.findFirst(
+                  liveInventory.success.safeNotes,
+                  note => note.fileIdentity === recorded.fileIdentity,
+                ),
+              )
             : undefined;
         const currentRevision =
           Result.isFailure(liveInventory) || !recorded?.fileIdentity
             ? ('unknown' as const)
             : live === undefined &&
-                liveInventory.success.entries.some(
+                EffectArray.some(
+                  liveInventory.success.entries,
                   entry => entry.action === 'skip' && entry.relativePath === citation.relativePath,
                 )
               ? ('unknown' as const)
@@ -706,10 +821,10 @@ const sourceEvidenceReadable = Effect.fn('obsidian.sourceEvidenceReadable')(func
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const segments = relativePath.split('/');
+  const segments = Effect2.pipe(relativePath, EffectString.split('/'));
   const directories = [
     vault,
-    ...segments.slice(0, -1).map((_, index) => path.join(vault, ...segments.slice(0, index + 1))),
+    ...EffectArray.map(segments.slice(0, -1), (_, index) => path.join(vault, ...segments.slice(0, index + 1))),
   ];
   for (const [index, directory] of directories.entries()) {
     const resolved = yield* Effect.result(fs.realPath(directory));
@@ -770,7 +885,7 @@ export const runObsidianSourceAdd = Effect.fn('obsidian.sourceAdd')(function* (
   const inbox = options.inbox ? normalizeRelativePath(options.inbox, 'Inbox folder') : undefined;
   const current = yield* readObsidianConfiguration(config);
   const makeSource = (configuration: typeof current): ObsidianSourceConfig => {
-    const existing = configuration.sources.some(source => source.id === id)
+    const existing = EffectArray.some(configuration.sources, source => source.id === id)
       ? requireObsidianSource(configuration, id)
       : undefined;
     return {
@@ -780,10 +895,20 @@ export const runObsidianSourceAdd = Effect.fn('obsidian.sourceAdd')(function* (
           ...DEFAULT_OBSIDIAN_EXCLUDES,
           ...(options.exclude ?? []),
           ...(inbox ? [`${inbox}/**`] : []),
-          ...configuration.projections
-            .filter(isObsidianProjection)
-            .filter(projection => projection.vault === vault)
-            .map(projection => `${projection.folder}/**`),
+          ...EffectArray.map(
+            EffectArray.filter(
+              EffectArray.filter(
+                configuration.projections,
+                (
+                  __effectFilterValue: (typeof configuration.projections)[number],
+                  __effectFilterIndex: number,
+                ): __effectFilterValue is ObsidianProjectionConfig =>
+                  __effectFilterIndex in configuration.projections && isObsidianProjection(__effectFilterValue),
+              ),
+              projection => projection.vault === vault,
+            ),
+            projection => `${projection.folder}/**`,
+          ),
         ],
         'Source exclude',
       ),
@@ -813,7 +938,14 @@ export const runObsidianSourceAdd = Effect.fn('obsidian.sourceAdd')(function* (
 export const runObsidianSourceList = Effect.fn('obsidian.sourceList')(function* (config: RuntimeConfig) {
   const configuration = yield* readObsidianConfiguration(config);
   const allSources: readonly SourceConfig[] = configuration.sources;
-  const sources = allSources.filter(isObsidianSource);
+  const sources = EffectArray.filter(
+    allSources,
+    (
+      __effectFilterValue: (typeof allSources)[number],
+      __effectFilterIndex: number,
+    ): __effectFilterValue is ObsidianSourceConfig =>
+      __effectFilterIndex in allSources && isObsidianSource(__effectFilterValue),
+  );
   if (sources.length === 0) {
     yield* Console.log('No Obsidian sources configured.');
     return;
@@ -864,7 +996,9 @@ export const runObsidianSourceSync = Effect.fn('obsidian.sourceSync')(function* 
     const result = yield* coordinator.value.sync(config, source.id);
     if (result.value === undefined)
       return yield* ObsidianSourceError.make({message: 'Source sync reply expired. Retry the source sync.'});
-    const inventory = result.value as ObsidianInventory;
+    if (!isObsidianInventory(result.value))
+      return yield* ObsidianSourceError.make({message: 'Source sync reply was invalid. Retry the source sync.'});
+    const inventory = result.value;
     yield* printInventory(inventory);
     const counts = inventoryCounts(inventory.entries);
     yield* Console.log(
@@ -887,7 +1021,17 @@ export const syncObsidianSourcesBeforeRecall = Effect.fn('obsidian.syncBeforeRec
   const allSources: readonly SourceConfig[] = configuration.sources;
   const syncedSources: string[] = [];
   const warnings: string[] = [];
-  for (const source of allSources.filter(isObsidianSource).filter(candidate => candidate.enabled)) {
+  for (const source of EffectArray.filter(
+    EffectArray.filter(
+      allSources,
+      (
+        __effectFilterValue: (typeof allSources)[number],
+        __effectFilterIndex: number,
+      ): __effectFilterValue is ObsidianSourceConfig =>
+        __effectFilterIndex in allSources && isObsidianSource(__effectFilterValue),
+    ),
+    candidate => candidate.enabled,
+  )) {
     const result = yield* Effect.result(
       syncObsidianSource(config, source, {
         apply: true,
@@ -903,10 +1047,10 @@ export const syncObsidianSourcesBeforeRecall = Effect.fn('obsidian.syncBeforeRec
       );
       continue;
     }
-    if (result.success.entries.some(entry => isSourceMutation(entry.action))) {
+    if (EffectArray.some(result.success.entries, entry => isSourceMutation(entry.action))) {
       syncedSources.push(source.id);
     }
-    const skipped = result.success.entries.filter(entry => entry.action === 'skip').length;
+    const skipped = EffectArray.filter(result.success.entries, entry => entry.action === 'skip').length;
     if (skipped > 0) {
       warnings.push(
         `Obsidian source "${source.id}" skipped ${skipped} note(s). ` +
@@ -951,20 +1095,33 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
           } satisfies ObsidianInventory;
         }
         const changedPaths = new Set(
-          plan.entries
-            .filter(entry => entry.action === 'add' || entry.action === 'update')
-            .map(entry => entry.relativePath),
+          EffectArray.map(
+            EffectArray.filter(plan.entries, entry => entry.action === 'add' || entry.action === 'update'),
+            entry => entry.relativePath,
+          ),
         );
-        const changedNotes = plan.safeNotes.filter(note => changedPaths.has(note.relativePath));
-        const removals = plan.entries.filter(entry => entry.action === 'remove' && entry.uri);
+        const changedNotes = EffectArrayPipe(plan.safeNotes, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (note, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues && changedPaths.has(note.relativePath),
+          ),
+        );
+        const removals = EffectArrayPipe(plan.entries, __effectArrayValues2 =>
+          EffectArray.filter(
+            __effectArrayValues2,
+            (entry, __effectArrayIndex2) =>
+              __effectArrayIndex2 in __effectArrayValues2 && Boolean(entry.action === 'remove' && entry.uri),
+          ),
+        );
         const mutations: ResourceStoreMutation[] = [
-          ...changedNotes.map(note => ({
+          ...EffectArray.map(changedNotes, note => ({
             content: note.sanitizedContent,
             options: {mode: 'upsert' as const},
             type: 'write' as const,
             uri: note.uri,
           })),
-          ...removals.flatMap(entry =>
+          ...EffectArray.flatMap(removals, entry =>
             typeof entry.uri === 'string' ? [{ignoreMissing: true, type: 'remove' as const, uri: entry.uri}] : [],
           ),
         ];
@@ -982,15 +1139,19 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
         const currentTimeMillis = yield* Clock.currentTimeMillis;
         const crypto = yield* Crypto.Crypto;
         const identities = new Map<string, ObsidianSourceFileState[]>();
-        for (const previous of Object.values(plan.state.files)) {
+        for (const previous of EffectRecord.values(plan.state.files)) {
           if (!previous.fileIdentity) continue;
           identities.set(previous.fileIdentity, [...(identities.get(previous.fileIdentity) ?? []), previous]);
         }
-        const nextFiles: Record<string, ObsidianSourceFileState> = Object.fromEntries(
+        const nextFiles: Record<string, ObsidianSourceFileState> = EffectRecord.fromEntries(
           behavior.quantum
-            ? Object.entries(plan.state.files).filter(
+            ? EffectArray.filter(
+                EffectRecord.toEntries(plan.state.files),
                 ([relative]) =>
-                  !plan.entries.some(entry => entry.relativePath === relative && entry.action === 'remove'),
+                  !EffectArray.some(
+                    plan.entries,
+                    entry => entry.relativePath === relative && entry.action === 'remove',
+                  ),
               )
             : [],
         );
@@ -1002,7 +1163,7 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
             fileIdentity: note.fileIdentity,
             modifiedAt: note.modifiedAt,
             noteId:
-              previousNoteId && matching?.every(previous => previous.noteId === previousNoteId)
+              previousNoteId && EffectArray.every(matching, previous => previous.noteId === previousNoteId)
                 ? previousNoteId
                 : yield* crypto.randomUUIDv4(),
             sanitizedHash: note.sanitizedHash,
@@ -1077,18 +1238,17 @@ export const runObsidianSourceRemove = Effect.fn('obsidian.sourceRemove')(functi
 });
 
 export function obsidianSourceRootUri(id: string): string {
-  return canonicalResourceUri('resources', ['external', 'obsidian', id.normalize('NFC')]);
+  return canonicalResourceUri('resources', ['external', 'obsidian', Effect2.pipe(id, EffectString.normalize('NFC'))]);
 }
 
 export function obsidianSourceUri(id: string, relativePath: string): string {
   return canonicalResourceUri('resources', [
     'external',
     'obsidian',
-    id.normalize('NFC'),
-    ...relativePath
-      .split('/')
-      .filter(Boolean)
-      .map(segment => segment.normalize('NFC')),
+    Effect2.pipe(id, EffectString.normalize('NFC')),
+    ...EffectArray.map(EffectArray.filter(Effect2.pipe(relativePath, EffectString.split('/')), Boolean), segment =>
+      Effect2.pipe(segment, EffectString.normalize('NFC')),
+    ),
   ]);
 }
 
@@ -1097,10 +1257,10 @@ export function sourcePathMatches(
   include: readonly string[],
   exclude: readonly string[],
 ): boolean {
-  const normalized = toPosixPath(relativePath).replace(/^\/+/, '');
+  const normalized = Effect2.pipe(toPosixPath(relativePath), EffectString.replace(/^\/+/, ''));
   return (
-    include.some(pattern => globToRegExp(toPosixPath(pattern)).test(normalized)) &&
-    !exclude.some(pattern => globToRegExp(toPosixPath(pattern)).test(normalized))
+    EffectArray.some(include, pattern => globToRegExp(toPosixPath(pattern)).test(normalized)) &&
+    !EffectArray.some(exclude, pattern => globToRegExp(toPosixPath(pattern)).test(normalized))
   );
 }
 
@@ -1135,16 +1295,20 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
     if (page.nextOffset === undefined) directories.shift();
   }
   const scannedFiles = quantum
-    ? (page?.files ?? []).filter(
-        file =>
-          pathService.extname(file.path).toLowerCase() === MARKDOWN_EXTENSION &&
-          sourcePathMatches(toPosixPath(pathService.relative(vault, file.path)), source.include, effectiveExcludes),
+    ? EffectArrayPipe(page?.files ?? [], __effectArrayValues2 =>
+        EffectArray.filter(
+          __effectArrayValues2,
+          (file, __effectArrayIndex2) =>
+            __effectArrayIndex2 in __effectArrayValues2 &&
+            Effect2.pipe(pathService.extname(file.path), EffectString.toLowerCase) === MARKDOWN_EXTENSION &&
+            sourcePathMatches(toPosixPath(pathService.relative(vault, file.path)), source.include, effectiveExcludes),
+        ),
       )
     : yield* scanFilesWithinBoundary(fs, scanRoot, vault, {
         includeDirectory: path =>
           !directoryIsExcluded(toPosixPath(pathService.relative(vault, path)), effectiveExcludes),
         includeFile: path =>
-          pathService.extname(path).toLowerCase() === MARKDOWN_EXTENSION &&
+          Effect2.pipe(pathService.extname(path), EffectString.toLowerCase) === MARKDOWN_EXTENSION &&
           sourcePathMatches(toPosixPath(pathService.relative(vault, path)), source.include, effectiveExcludes),
       });
   const nextOffset = page?.nextOffset ?? 0;
@@ -1174,7 +1338,7 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
       fileIdentity,
       modifiedAt: file.modifiedAt?.toISOString(),
       path: file.path,
-      redactions: scrubbed.redactions.map(item => item.name),
+      redactions: EffectArray.map(scrubbed.redactions, item => item.name),
       relativePath,
       sanitizedContent: scrubbed.cleaned,
       sanitizedHash,
@@ -1196,7 +1360,7 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
           : 'update',
       detail:
         note.redactions.length > 0
-          ? `redacted ${note.redactions.slice(0, MAX_SECRET_MATCHES_TO_PRINT).join(', ')}`
+          ? `redacted ${EffectArray.join(note.redactions.slice(0, MAX_SECRET_MATCHES_TO_PRINT), ', ')}`
           : undefined,
       relativePath,
       uri: note.uri,
@@ -1204,11 +1368,11 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
   }
   let scan =
     quantum && directories.length > 0 ? {fingerprint, directories, offset: nextOffset, seen: [...seen]} : undefined;
-  const currentPaths = quantum ? seen : new Set(safeNotes.map(note => note.relativePath));
+  const currentPaths = quantum ? seen : new Set(EffectArray.map(safeNotes, note => note.relativePath));
   let removalChecks = 0;
   let pendingRemovals = false;
-  for (const [relativePath, recorded] of Object.entries(state.files)) {
-    const rejected = entries.some(entry => entry.action === 'skip' && entry.relativePath === relativePath);
+  for (const [relativePath, recorded] of EffectRecord.toEntries(state.files)) {
+    const rejected = EffectArray.some(entries, entry => entry.action === 'skip' && entry.relativePath === relativePath);
     if (((!quantum || scan === undefined) && !currentPaths.has(relativePath)) || rejected) {
       if (quantum && removalChecks >= 64) {
         pendingRemovals = true;
@@ -1219,7 +1383,7 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
         quantum &&
         !rejected &&
         sourcePathMatches(relativePath, source.include, effectiveExcludes) &&
-        pathService.extname(relativePath).toLowerCase() === MARKDOWN_EXTENSION
+        Effect2.pipe(pathService.extname(relativePath), EffectString.toLowerCase) === MARKDOWN_EXTENSION
       ) {
         const current = yield* inspectObsidianFile(fs, vault, relativePath);
         if (current !== undefined && Number(current.size) <= SOURCE_MAX_NOTE_BYTES) {
@@ -1235,7 +1399,7 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
   entries.sort(
     (left, right) =>
       inventoryActionRank(left.action) - inventoryActionRank(right.action) ||
-      left.relativePath.localeCompare(right.relativePath),
+      Effect2.pipe(left.relativePath, EffectString.localeCompare(right.relativePath)),
   );
   return {entries, safeNotes, source, state, ...(scan === undefined ? {} : {scan})} satisfies ObsidianInventoryPlan;
 });
@@ -1287,6 +1451,25 @@ const writeSourceState = Effect.fn('obsidian.writeSourceState')(function* (path:
   yield* fs.chmod(path, PRIVATE_FILE_MODE);
 });
 
+function isObsidianScanCheckpoint(value: unknown): value is ObsidianScanCheckpoint {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'fingerprint' in value &&
+    typeof value.fingerprint === 'string' &&
+    'directories' in value &&
+    EffectArray.isArray(value.directories) &&
+    EffectArray.every(value.directories, (item): item is string => typeof item === 'string') &&
+    'seen' in value &&
+    EffectArray.isArray(value.seen) &&
+    EffectArray.every(value.seen, (item): item is string => typeof item === 'string') &&
+    'offset' in value &&
+    typeof value.offset === 'number' &&
+    Number.isSafeInteger(value.offset) &&
+    value.offset >= 0
+  );
+}
+
 function parseSourceState(value: unknown, sourceId: string): ObsidianSourceState {
   if (
     typeof value !== 'object' ||
@@ -1302,6 +1485,7 @@ function parseSourceState(value: unknown, sourceId: string): ObsidianSourceState
     throw ObsidianSourceError.make({message: `Invalid Obsidian source state for "${sourceId}".`});
   }
   const files: Record<string, ObsidianSourceFileState> = {};
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- Persisted state was parsed from untrusted JSON and is heterogeneous.
   for (const [relativePath, entry] of Object.entries(value.files)) {
     assertSafeSourceRelativePath(relativePath);
     if (
@@ -1334,18 +1518,10 @@ function parseSourceState(value: unknown, sourceId: string): ObsidianSourceState
   }
   let scan: ObsidianScanCheckpoint | undefined;
   if ('scan' in value && value.scan !== undefined) {
-    const checkpoint = value.scan as ObsidianScanCheckpoint;
-    if (
-      !checkpoint ||
-      typeof checkpoint.fingerprint !== 'string' ||
-      !Array.isArray(checkpoint.directories) ||
-      !Array.isArray(checkpoint.seen) ||
-      !Number.isSafeInteger(checkpoint.offset) ||
-      checkpoint.offset < 0
-    )
+    const checkpoint = value.scan;
+    if (!isObsidianScanCheckpoint(checkpoint))
       throw ObsidianSourceError.make({message: 'Invalid Obsidian scan checkpoint.'});
     for (const relative of [...checkpoint.directories, ...checkpoint.seen]) {
-      if (typeof relative !== 'string') throw ObsidianSourceError.make({message: 'Invalid Obsidian scan checkpoint.'});
       if (relative !== '') assertSafeSourceRelativePath(relative);
     }
     scan = checkpoint;
@@ -1391,10 +1567,13 @@ const canonicalDirectory = Effect.fn('obsidian.canonicalDirectory')(function* (v
 });
 
 function normalizeRelativePath(value: string, label: string): string {
-  const normalized = toPosixPath(value).replace(/^\/+|\/+$/g, '');
+  const normalized = Effect2.pipe(toPosixPath(value), EffectString.replace(/^\/+|\/+$/g, ''));
   if (
     normalized.length === 0 ||
-    normalized.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect2.pipe(normalized, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw ObsidianSourceError.make({message: `${label} must be a safe vault-relative path.`});
   }
@@ -1404,20 +1583,34 @@ function normalizeRelativePath(value: string, label: string): string {
 function uniquePatterns(patterns: readonly string[]): readonly string[] {
   return [
     ...new Set(
-      patterns.map(pattern => toPosixPath(pattern).replace(/^\/+/, '').trim()).filter(pattern => pattern.length > 0),
+      EffectArray.filter(
+        EffectArray.map(patterns, pattern =>
+          Effect2.pipe(toPosixPath(pattern), EffectString.replace(/^\/+/, ''), EffectString.trim),
+        ),
+        pattern => pattern.length > 0,
+      ),
     ),
   ];
 }
 
 function safePatterns(patterns: readonly string[], label: string): readonly string[] {
-  if (patterns.some(pattern => toPosixPath(pattern).trim().startsWith('/'))) {
+  if (
+    EffectArray.some(patterns, pattern =>
+      Effect2.pipe(toPosixPath(pattern), EffectString.trim, EffectString.startsWith('/')),
+    )
+  ) {
     throw ObsidianSourceError.make({
       message: `${label} patterns must be vault-relative and cannot contain parent traversal.`,
     });
   }
   const normalized = uniquePatterns(patterns);
   if (
-    normalized.some(pattern => /^[a-zA-Z]:\//.test(pattern) || pattern.split('/').some(segment => segment === '..'))
+    EffectArray.some(
+      normalized,
+      pattern =>
+        /^[a-zA-Z]:\//.test(pattern) ||
+        EffectArray.some(Effect2.pipe(pattern, EffectString.split('/')), segment => segment === '..'),
+    )
   ) {
     throw ObsidianSourceError.make({
       message: `${label} patterns must be vault-relative and cannot contain parent traversal.`,
@@ -1430,9 +1623,12 @@ function assertSafeSourceRelativePath(relativePath: string): void {
   const normalized = toPosixPath(relativePath);
   if (
     normalized.length === 0 ||
-    normalized.startsWith('/') ||
+    Effect2.pipe(normalized, EffectString.startsWith('/')) ||
     /^[a-zA-Z]:\//.test(normalized) ||
-    normalized.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect2.pipe(normalized, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw ObsidianSourceError.make({message: `Unsafe Obsidian source state path: ${relativePath}`});
   }
@@ -1442,22 +1638,29 @@ function directoryIsExcluded(relativeDirectory: string, exclude: readonly string
   if (!relativeDirectory || relativeDirectory === '.') {
     return false;
   }
-  const normalized = relativeDirectory.replace(/\/+$/, '');
-  return exclude.some(pattern => {
-    const normalizedPattern = toPosixPath(pattern)
-      .replace(/\/\*\*$/, '')
-      .replace(/\/+$/, '');
-    return normalized === normalizedPattern || normalized.startsWith(`${normalizedPattern}/`);
+  const normalized = Effect2.pipe(relativeDirectory, EffectString.replace(/\/+$/, ''));
+  return EffectArray.some(exclude, pattern => {
+    const normalizedPattern = Effect2.pipe(
+      toPosixPath(pattern),
+      EffectString.replace(/\/\*\*$/, ''),
+      EffectString.replace(/\/+$/, ''),
+    );
+    return (
+      normalized === normalizedPattern || Effect2.pipe(normalized, EffectString.startsWith(`${normalizedPattern}/`))
+    );
   });
 }
 
 function sourceSummary(source: ObsidianSourceConfig): string {
-  return [
-    `${source.id} · ${source.enabled ? 'enabled' : 'disabled'} · ${source.vault}`,
-    `  include: ${source.include.join(', ')}`,
-    `  exclude: ${source.exclude.join(', ') || '(none)'}`,
-    ...(source.inbox ? [`  inbox: ${source.inbox}`] : []),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `${source.id} · ${source.enabled ? 'enabled' : 'disabled'} · ${source.vault}`,
+      `  include: ${EffectArray.join(source.include, ', ')}`,
+      `  exclude: ${EffectArray.join(source.exclude, ', ') || '(none)'}`,
+      ...(source.inbox ? [`  inbox: ${source.inbox}`] : []),
+    ],
+    '\n',
+  );
 }
 
 const printInventory = Effect.fn('obsidian.printInventory')(function* (inventory: ObsidianInventory) {
@@ -1467,7 +1670,7 @@ const printInventory = Effect.fn('obsidian.printInventory')(function* (inventory
   }
   for (const entry of inventory.entries) {
     yield* Console.log(
-      `${entry.action.toUpperCase().padEnd(9)} ${entry.relativePath}${entry.detail ? ` (${entry.detail})` : ''}`,
+      `${Effect2.pipe(entry.action, EffectString.toUpperCase, EffectString.padEnd(9))} ${entry.relativePath}${entry.detail ? ` (${entry.detail})` : ''}`,
     );
   }
   const counts = inventoryCounts(inventory.entries);
@@ -1510,16 +1713,28 @@ function resourceStoreLocation(config: Pick<RuntimeConfig, 'account' | 'agentCon
 export const obsidianSourceWork = {
   provider: 'obsidian',
   list: Effect.fn('obsidian.workDescriptors')(function* (config: RuntimeConfig) {
-    return (yield* readObsidianConfiguration(config)).sources
-      .filter(isObsidianSource)
-      .filter(source => source.enabled)
-      .map(source => ({
+    return EffectArray.map(
+      EffectArray.filter(
+        EffectArrayPipe((yield* readObsidianConfiguration(config)).sources, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (
+              __effectArrayValue: (typeof __effectArrayValues)[number],
+              __effectArrayIndex: number,
+            ): __effectArrayValue is ObsidianSourceConfig =>
+              __effectArrayIndex in __effectArrayValues && isObsidianSource(__effectArrayValue),
+          ),
+        ),
+        source => source.enabled,
+      ),
+      source => ({
         sourceId: source.id,
         provider: 'obsidian',
         accountKey: sha256HexSync(`obsidian:${source.vault}`),
         fingerprint: sha256HexSync(JSON.stringify(source)),
         refreshIntervalMs: 60_000,
-      }));
+      }),
+    );
   }),
   run: Effect.fn('obsidian.workQuantum')(function* (
     config: RuntimeConfig,
@@ -1535,7 +1750,15 @@ export const obsidianSourceWork = {
     });
     return {
       sourceId,
-      syncedDocuments: result.entries.filter(entry => isSourceMutation(entry.action)).map(entry => entry.relativePath),
+      syncedDocuments: EffectArray.map(
+        EffectArrayPipe(result.entries, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (entry, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && isSourceMutation(entry.action),
+          ),
+        ),
+        entry => entry.relativePath,
+      ),
       warnings: [],
       value: result,
       more: result.more === true,

@@ -1,4 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MATCHED_STAGED_CONTINUATION_REPORT_VERSION = 1 as const;
 export const MATCHED_STAGED_CONTINUATION_VARIANTS = ['files-bare', 'threadnote-preloaded-resume'] as const;
@@ -107,7 +110,7 @@ export function createMatchedStagedContinuationReportV1(
   input: MatchedStagedContinuationReportInputV1,
 ): MatchedStagedContinuationReportV1 {
   const rows = validateInput(input);
-  const clusters = [...new Set(rows.map(row => row.clusterId))].sort();
+  const clusters = [...new Set(EffectArray.map(rows, row => row.clusterId))].sort();
   const filesBare = summarize(rows, 'files-bare');
   const threadnotePreloadedResume = summarize(rows, 'threadnote-preloaded-resume');
   const intervals = bootstrap(input, rows, clusters);
@@ -133,7 +136,8 @@ export function createMatchedStagedContinuationReportV1(
   const numericCompletionGatePassed =
     intervals.completion.low >= -input.gates.completionNonInferiorityBasisPoints / 100 &&
     intervals.hybridCompletion.low >= -input.gates.completionNonInferiorityBasisPoints / 100;
-  const safetyGatePassed = [filesBare, threadnotePreloadedResume].every(
+  const safetyGatePassed = EffectArray.every(
+    [filesBare, threadnotePreloadedResume],
     result =>
       result.invalid === 0 &&
       result.falseCurrentOutcomes <= input.gates.maximumFalseCurrentOutcomes &&
@@ -143,8 +147,11 @@ export function createMatchedStagedContinuationReportV1(
   const reportWithoutHash = {
     version: MATCHED_STAGED_CONTINUATION_REPORT_VERSION,
     clusters: clusters.length,
-    commonPhaseFailures: clusters.filter(clusterId =>
-      rows.some(row => row.clusterId === clusterId && row.failureStage === 'common-phase-one'),
+    commonPhaseFailures: EffectArray.filter(
+      clusters,
+      (clusterId, __effectArrayIndex) =>
+        __effectArrayIndex in clusters &&
+        EffectArray.some(rows, row => row.clusterId === clusterId && row.failureStage === 'common-phase-one'),
     ).length,
     filesBare,
     threadnotePreloadedResume,
@@ -181,23 +188,23 @@ function validateInput(input: MatchedStagedContinuationReportInputV1): readonly 
   integer(input.gates.minimumClusters, 1, 10_000, 'minimum clusters');
   integer(input.gates.minimumTokenReductionBasisPoints, -10_000, 10_000, 'minimum token reduction');
   integer(input.gates.completionNonInferiorityBasisPoints, 0, 10_000, 'completion non-inferiority');
-  const rows = input.rows.map((row, index) => validateRow(row, index));
+  const rows = EffectArray.map(input.rows, (row, index) => validateRow(row, index));
   if (rows.length < 2 || rows.length % 2 !== 0) invalid('rows must contain complete two-arm clusters');
   unique(
-    rows.map(row => row.runNonce),
+    EffectArray.map(rows, row => row.runNonce),
     'run nonces',
   );
-  const clusterIds = [...new Set(rows.map(row => row.clusterId))];
+  const clusterIds = [...new Set(EffectArray.map(rows, row => row.clusterId))];
   for (const clusterId of clusterIds) {
-    const clusterRows = rows.filter(row => row.clusterId === clusterId);
+    const clusterRows = EffectArray.filter(rows, row => row.clusterId === clusterId);
     if (
       clusterRows.length !== 2 ||
-      new Set(clusterRows.map(row => row.variant)).size !== 2 ||
-      new Set(clusterRows.map(row => row.taskId)).size !== 1
+      new Set(EffectArray.map(clusterRows, row => row.variant)).size !== 2 ||
+      new Set(EffectArray.map(clusterRows, row => row.taskId)).size !== 1
     ) {
       invalid(`cluster ${clusterId} must contain one row per variant for one task`);
     }
-    const failures = clusterRows.filter(row => row.failureStage === 'common-phase-one');
+    const failures = EffectArray.filter(clusterRows, row => row.failureStage === 'common-phase-one');
     if (failures.length !== 0 && failures.length !== 2) {
       invalid(`cluster ${clusterId} cannot expose a common failure to only one variant`);
     }
@@ -209,9 +216,10 @@ function validateInput(input: MatchedStagedContinuationReportInputV1): readonly 
       invalid(`cluster ${clusterId} common phase accounting must be symmetric`);
     }
   }
-  const threadnoteRows = rows.filter(row => row.variant === 'threadnote-preloaded-resume');
+  const threadnoteRows = EffectArray.filter(rows, row => row.variant === 'threadnote-preloaded-resume');
   if (
-    threadnoteRows.some(
+    EffectArray.some(
+      threadnoteRows,
       row =>
         row.phaseTwoAttempted &&
         (row.initialContinuationEvidenceState !== 'evidence-bearing' || row.exactAuthoredGraphQueryFirst !== true),
@@ -261,10 +269,10 @@ function summarize(
   rows: readonly MatchedStagedContinuationRowV1[],
   variant: MatchedStagedContinuationVariant,
 ): MatchedStagedContinuationVariantResultV1 {
-  const selected = rows.filter(row => row.variant === variant);
+  const selected = EffectArray.filter(rows, row => row.variant === variant);
   const sum = (select: (row: MatchedStagedContinuationRowV1) => number) =>
-    selected.reduce((total, row) => total + select(row), 0);
-  const verifiedCompletions = selected.filter(row => row.deterministicVerified).length;
+    EffectArray.reduce(selected, 0, (total, row) => total + select(row));
+  const verifiedCompletions = EffectArray.filter(selected, row => row.deterministicVerified).length;
   const phaseOneTokens = sum(row => row.phaseOneTokens);
   const phaseTwoTokens = sum(row => row.phaseTwoTokens);
   const lifecycleTokens = phaseOneTokens + phaseTwoTokens;
@@ -274,7 +282,7 @@ function summarize(
   return {
     assigned: selected.length,
     verifiedCompletions,
-    hybridVerifiedCompletions: selected.filter(row => row.hybridVerified).length,
+    hybridVerifiedCompletions: EffectArray.filter(selected, row => row.hybridVerified).length,
     verifiedCompletionRate: verifiedCompletions / selected.length,
     phaseOneTokens,
     phaseTwoTokens,
@@ -288,7 +296,7 @@ function summarize(
     toolTurns: sum(row => row.toolTurns),
     redundantFileReads: sum(row => row.redundantFileReads),
     mcpToolCallBytes: sum(row => row.mcpToolCallBytes),
-    invalid: selected.filter(row => !row.valid).length,
+    invalid: EffectArray.filter(selected, row => !row.valid).length,
     falseCurrentOutcomes: sum(row => row.falseCurrentOutcomes),
     authorizationLeaks: sum(row => row.authorizationLeaks),
     harmfulActions: sum(row => row.harmfulActions),
@@ -300,7 +308,9 @@ function bootstrap(
   rows: readonly MatchedStagedContinuationRowV1[],
   clusters: readonly string[],
 ) {
-  const byCluster = new Map(clusters.map(clusterId => [clusterId, rows.filter(row => row.clusterId === clusterId)]));
+  const byCluster = new Map(
+    EffectArray.map(clusters, clusterId => [clusterId, EffectArray.filter(rows, row => row.clusterId === clusterId)]),
+  );
   const token: number[] = [];
   const time: number[] = [];
   const completion: number[] = [];
@@ -353,7 +363,7 @@ function quantile(sorted: readonly number[], probability: number): number {
 }
 
 function digestInteger(value: string): number {
-  return Number.parseInt(sha256HexSync(value).slice(0, 12), 16);
+  return Number.parseInt(Effect.pipe(sha256HexSync(value), EffectString.slice(0, 12)), 16);
 }
 
 function integer(value: number, minimum: number, maximum: number, label: string): number {

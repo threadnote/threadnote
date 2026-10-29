@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {richRemoteMemoryMetadata} from '@threadnote/memory/test/helpers/remote-memory-document';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
@@ -19,6 +20,8 @@ import {PostgresRemoteControlPlane} from '@threadnote/remote-memory/postgres/con
 import {PostgresRemoteMemoryRepository} from '@threadnote/remote-memory/postgres/repository';
 import {PostgresRemoteRateLimiter} from '@threadnote/remote-memory/rate_limit';
 import {acquireRemoteRelationAdmissionTransactionLock} from '@threadnote/remote-memory/relation_admission';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const TEST_DATABASE_URL = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const postgresDescribe = TEST_DATABASE_URL ? describe : describe.skip;
@@ -870,7 +873,7 @@ postgresDescribe('review-gated durable organization memory', () => {
   });
 
   it('accepts the largest public text payload with PostgreSQL JSONB rendering headroom', async () => {
-    const text = 'a'.repeat(1_000_000);
+    const text = Effect.pipe('a', EffectString.repeat(1_000_000));
     const proposed = await repository.proposeDurable(
       proposer,
       {
@@ -965,7 +968,7 @@ postgresDescribe('review-gated durable organization memory', () => {
     );
     const beforeCount = Number(await git(['rev-list', '--count', 'HEAD'], gitFixture.worktree));
     const attempts = await Promise.allSettled(
-      ['a', 'b'].map(suffix =>
+      EffectArray.map(['a', 'b'], suffix =>
         repository.reviewProposal(
           reviewer,
           {
@@ -979,8 +982,8 @@ postgresDescribe('review-gated durable organization memory', () => {
         ),
       ),
     );
-    expect(attempts.filter(result => result.status === 'fulfilled')).toHaveLength(1);
-    expect(attempts.filter(result => result.status === 'rejected')).toHaveLength(1);
+    expect(EffectArray.filter(attempts, result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(EffectArray.filter(attempts, result => result.status === 'rejected')).toHaveLength(1);
     expect((await repository.readProposal(reviewer, proposed.proposalId)).status).toBe('approved');
     expect(Number(await git(['rev-list', '--count', 'HEAD'], gitFixture.worktree))).toBe(beforeCount + 1);
     expect(

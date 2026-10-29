@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -16,13 +17,16 @@ export interface CodexCloudProfile {
   readonly version: 1;
 }
 
-export class CodexCloudError extends Schema.TaggedError<CodexCloudError>()('CodexCloudError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+export class CodexCloudError extends Schema.TaggedError<CodexCloudError, {readonly brand: unique symbol}>()(
+  'CodexCloudError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export function normalizeCodexCloudShares(values: readonly string[]): readonly string[] {
-  const teams = [...new Set(values.map(normalizeTeamName))].sort();
+  const teams = [...new Set(EffectArray.map(values, normalizeTeamName))].sort();
   if (teams.length === 0 || teams.length > MAX_CODEX_CLOUD_SHARES) {
     throw CodexCloudError.make({message: `Codex Cloud requires 1–${MAX_CODEX_CLOUD_SHARES} configured shares.`});
   }
@@ -112,13 +116,14 @@ function isProfile(value: unknown): value is CodexCloudProfile {
   if (
     candidate.version !== 1 ||
     candidate.provider !== 'codex-cloud' ||
-    !Array.isArray(candidate.teams) ||
-    candidate.teams.some(team => typeof team !== 'string')
+    !EffectArray.isArray(candidate.teams) ||
+    EffectArray.some(candidate.teams, team => typeof team !== 'string')
   )
     return false;
   try {
     if (
-      ![candidate.account, candidate.agentId, candidate.user].every(
+      !EffectArray.every(
+        [candidate.account, candidate.agentId, candidate.user],
         value => typeof value === 'string' && validatePortableSegment(value) === value,
       )
     )

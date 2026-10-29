@@ -13,6 +13,8 @@ import {
   nativeWatchWorkList,
   nativeWatchWorkDetail,
 } from '../../src/workflow_automation/watch_output.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function work(reason: string, evidence: string) {
   const state = reconcileNativeWatch(
@@ -22,8 +24,8 @@ function work(reason: string, evidence: string) {
       0,
     ),
     {
-      head: 'a'.repeat(40),
-      startedHead: 'a'.repeat(40),
+      head: Effect.pipe('a', EffectString.repeat(40)),
+      startedHead: Effect.pipe('a', EffectString.repeat(40)),
       state: 'open',
       at: 1,
       sources: [
@@ -36,13 +38,20 @@ function work(reason: string, evidence: string) {
               id: 'thread',
               kind: 'review_thread',
               url: 'https://github.com/fixture/repo/pull/1#discussion_r1',
-              version: 'b'.repeat(64),
+              version: Effect.pipe('b', EffectString.repeat(64)),
               bootstrap: true,
             },
           ],
         },
       ],
-      ci: {head: 'a'.repeat(40), complete: false, count: 0, pending: 0, failed: 0, version: 'c'.repeat(64)},
+      ci: {
+        head: Effect.pipe('a', EffectString.repeat(40)),
+        complete: false,
+        count: 0,
+        pending: 0,
+        failed: 0,
+        version: Effect.pipe('c', EffectString.repeat(64)),
+      },
     },
   );
   const relayed = relayNativeWatch(state, 'consumer', 2);
@@ -56,12 +65,19 @@ function work(reason: string, evidence: string) {
   );
   return acknowledgeNativeWatch(recorded, 'consumer', relayed.delivery.id, 4).work;
 }
-const identity = {protocolVersion: 1, executorVersion: 1, status: 'ok', watchId: 'fixture', revision: 'd'.repeat(64)};
+const identity = {
+  protocolVersion: 1,
+  executorVersion: 1,
+  status: 'ok',
+  watchId: 'fixture',
+  revision: Effect.pipe('d', EffectString.repeat(64)),
+};
 
 describe('native watch bounded work readers', () => {
   it('round trips legal Unicode and escaping maxima through complete digest-bound pages', () => {
     fc.assert(
       fc.property(fc.constantFrom('界', '語', 'é', '"', '\\', '😀'), character => {
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const records = work(character.repeat(1024 / character.length), character.repeat(2048 / character.length));
         const before = JSON.stringify(records);
         const list = nativeWatchWorkList(records);
@@ -82,20 +98,22 @@ describe('native watch bounded work readers', () => {
         expect(JSON.parse(result)).toEqual(records[0]);
         expect(JSON.stringify(records)).toBe(before);
         expect(() => nativeWatchWorkDetail(records, records[0].eventId, 1)).toThrow();
-        expect(() => nativeWatchWorkDetail(records, records[0].eventId, 0, 'f'.repeat(64))).toThrow();
+        expect(() =>
+          nativeWatchWorkDetail(records, records[0].eventId, 0, Effect.pipe('f', EffectString.repeat(64))),
+        ).toThrow();
       }),
       {numRuns: 12},
     );
   });
 
   it('returns a detail locator for work that exceeds the list budget', () => {
-    const records = work('界'.repeat(1024), '語'.repeat(2048));
+    const records = work(Effect.pipe('界', EffectString.repeat(1024)), Effect.pipe('語', EffectString.repeat(2048)));
     expect(nativeWatchWorkList(records).items[0]).toMatchObject({
       available: false,
       eventId: records[0].eventId,
       event: {source: 'threads', key: 'thread', url: 'https://github.com/fixture/repo/pull/1#discussion_r1'},
       detail: {command: 'work-detail', eventId: records[0].eventId},
     });
-    expect(() => assertNativeWatchOutput({oversized: '界'.repeat(8192)})).toThrow();
+    expect(() => assertNativeWatchOutput({oversized: Effect.pipe('界', EffectString.repeat(8192))})).toThrow();
   });
 });

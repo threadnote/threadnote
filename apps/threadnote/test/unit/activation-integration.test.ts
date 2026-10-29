@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {describe, expect} from 'vitest';
@@ -15,8 +16,10 @@ import {
 } from '@threadnote/threadnote/activation/index';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const digest = (character: string) => character.repeat(64);
+const digest = (character: string) => Effect2.pipe(character, EffectString.repeat(64));
 const input = {
   catalogSnapshotHash: digest('a'),
   primarySurfaceId: 'codex-cli',
@@ -65,7 +68,9 @@ describe('guided activation integration', () => {
         const executor = {
           execute: ({operationId, plan: currentPlan}: {readonly operationId: string; readonly plan: typeof plan}) => {
             seen.push(operationId);
-            const operation = currentPlan.operations.find(candidate => candidate.id === operationId)!;
+            const operation = EffectOption.getOrUndefined(
+              EffectArray.findFirst(currentPlan.operations, candidate => candidate.id === operationId),
+            )!;
             return Effect.succeed({
               ownership: 'preexisting' as const,
               status: operation.expectedOutcome,
@@ -123,7 +128,9 @@ describe('guided activation integration', () => {
         let outcomes = 0;
         const executor = {
           execute: ({operationId, plan: currentPlan}: {readonly operationId: string; readonly plan: typeof plan}) => {
-            const operation = currentPlan.operations.find(candidate => candidate.id === operationId)!;
+            const operation = EffectOption.getOrUndefined(
+              EffectArray.findFirst(currentPlan.operations, candidate => candidate.id === operationId),
+            )!;
             outcomes += 1;
             return Effect.succeed({
               ownership: operation.reversible ? ('activation-created' as const) : ('preexisting' as const),
@@ -154,8 +161,12 @@ describe('guided activation integration', () => {
         );
         expect(completed.status).toBe('completed');
         expect(completed.state.receipt.firstBrief?.durationMilliseconds).toBeLessThan(10 * 60 * 1_000);
-        expect(completed.state.receipt.operations.map(operation => operation.kind)).toContain('decision.propose');
-        expect(completed.state.receipt.operations.map(operation => operation.kind)).not.toContain('decision.publish');
+        expect(EffectArray.map(completed.state.receipt.operations, operation => operation.kind)).toContain(
+          'decision.propose',
+        );
+        expect(EffectArray.map(completed.state.receipt.operations, operation => operation.kind)).not.toContain(
+          'decision.publish',
+        );
         const root = path.join(home, 'activation', 'states', plan.activationId);
         expect((yield* fs.readDirectory(root)).sort()).toEqual(['plan.json', 'receipt.json']);
         const persisted = `${yield* fs.readFileString(path.join(root, 'plan.json'))}${yield* fs.readFileString(
@@ -164,7 +175,7 @@ describe('guided activation integration', () => {
         expect(persisted).not.toContain('Activate Threadnote');
         expect(persisted).not.toContain('/tmp/');
         const undo = planActivationUndoV1(plan, completed.state.receipt);
-        expect(undo.operations.map(operation => operation.operationId)).toEqual([
+        expect(EffectArray.map(undo.operations, operation => operation.operationId)).toEqual([
           'decision-apply',
           'imports-review',
           'team-share',

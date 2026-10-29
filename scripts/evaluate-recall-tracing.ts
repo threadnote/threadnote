@@ -1,4 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Exit, Option, Tracer} from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 export const RECALL_EVALUATION_SPAN_NAMES = [
   'recall.prepareSections',
@@ -92,7 +94,9 @@ export function createRecallEvaluationTracing(): RecallEvaluationTracing {
         const candidate = options.name;
         const started = options.startTime;
         if (typeof started === 'bigint' && started >= 0n) {
-          name = RECALL_EVALUATION_SPAN_NAMES.find(value => value === candidate);
+          name = Option.getOrUndefined(
+            EffectArray.findFirst(RECALL_EVALUATION_SPAN_NAMES, value => value === candidate),
+          );
           startTime = started;
         }
       } catch {
@@ -104,7 +108,8 @@ export function createRecallEvaluationTracing(): RecallEvaluationTracing {
   });
   return {
     tracer,
-    snapshot: () => Object.fromEntries([...summaries].map(([name, summary]) => [name, {...summary}])),
+    snapshot: () =>
+      EffectRecord.fromEntries(EffectArray.map([...summaries], ([name, summary]) => [name, {...summary}])),
   };
 }
 

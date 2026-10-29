@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {externalResourceUri, isExternalResourceMetadata} from '@threadnote/store/external-resource';
 import type {RecallCandidate} from './rank.js';
 
@@ -15,9 +16,9 @@ export function recallCandidateIsValid(value: unknown): value is RecallCandidate
     'validFrom',
     'validTo',
   ] as const;
-  if (stringValues.some(key => value[key] !== undefined && typeof value[key] !== 'string')) return false;
+  if (EffectArray.some(stringValues, key => value[key] !== undefined && typeof value[key] !== 'string')) return false;
   const numberValues = ['feedback', 'reranker', 'semantic'] as const;
-  if (numberValues.some(key => value[key] !== undefined && !isFiniteNumber(value[key]))) return false;
+  if (EffectArray.some(numberValues, key => value[key] !== undefined && !isFiniteNumber(value[key]))) return false;
   if (value.identityConflict !== undefined && typeof value.identityConflict !== 'boolean') return false;
   if (value.exactTerms !== undefined && !isStringArray(value.exactTerms)) return false;
   if (value.equivalentUris !== undefined && !isStringArray(value.equivalentUris)) return false;
@@ -27,6 +28,7 @@ export function recallCandidateIsValid(value: unknown): value is RecallCandidate
       !isExternalResourceMetadata(value.externalSource) ||
       !isFiniteNumber(value.externalSource.fetchedAt) ||
       value.externalSource.fetchedAt < 0 ||
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
       externalResourceUri(value.externalSource) !== value.uri.split('#', 1)[0])
   )
     return false;
@@ -34,25 +36,27 @@ export function recallCandidateIsValid(value: unknown): value is RecallCandidate
     if (!isPlainRecord(value.fields)) return false;
     const fields = value.fields;
     if (
-      !['project', 'title', 'topic', 'workspaceScope'].every(
+      !EffectArray.every(
+        ['project', 'title', 'topic', 'workspaceScope'],
         key => fields[key] === undefined || typeof fields[key] === 'string',
       ) ||
-      !['identifiers', 'keywords'].every(key => fields[key] === undefined || isStringArray(fields[key]))
+      !EffectArray.every(['identifiers', 'keywords'], key => fields[key] === undefined || isStringArray(fields[key]))
     ) {
       return false;
     }
   }
   return (
     value.relations === undefined ||
-    (Array.isArray(value.relations) &&
-      value.relations.every(
+    (EffectArray.isArray(value.relations) &&
+      EffectArray.every(
+        value.relations,
         relation => isPlainRecord(relation) && typeof relation.type === 'string' && typeof relation.uri === 'string',
       ))
   );
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -60,5 +64,5 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
-  return Array.isArray(value) && value.every(entry => typeof entry === 'string');
+  return EffectArray.isArray(value) && EffectArray.every(value, entry => typeof entry === 'string');
 }

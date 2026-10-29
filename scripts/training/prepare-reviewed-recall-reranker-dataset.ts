@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptSystemInfoLayer} from '../effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from '../effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -7,6 +8,8 @@ import {Console, Effect, FileSystem, Layer, Path} from 'effect';
 import {atomicWrite, scriptArguments} from '../effect/script.js';
 import {serializeRecallRerankerGroupsV1} from './recall-reranker-contract.js';
 import {prepareReviewedRecallRerankerDatasetV1} from './recall-reranker-preparation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -64,21 +67,29 @@ function parseJson(content: string, source: string): unknown {
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
 
 function usage(): string {
-  return [
-    'Prepare a Threadnote recall-reranker dataset from already reviewed source rows.',
-    '',
-    'Usage:',
-    '  bun scripts/training/prepare-reviewed-recall-reranker-dataset.ts \\',
-    '    --draft <draft.json> --groups <reviewed-groups.jsonl> --output <dataset-directory>',
-    '',
-    'This command never sets reviewed=true. Every input candidate must already be human-reviewed.',
-    'Run scripts/validate-recall-reranker-dataset.ts afterward to emit the training receipt.',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Prepare a Threadnote recall-reranker dataset from already reviewed source rows.',
+      '',
+      'Usage:',
+      '  bun scripts/training/prepare-reviewed-recall-reranker-dataset.ts \\',
+      '    --draft <draft.json> --groups <reviewed-groups.jsonl> --output <dataset-directory>',
+      '',
+      'This command never sets reviewed=true. Every input candidate must already be human-reviewed.',
+      'Run scripts/validate-recall-reranker-dataset.ts afterward to emit the training receipt.',
+    ],
+    '\n',
+  );
 }
 
 const scriptLayer = Layer.mergeAll(BunServices.layer, ScriptSystemInfoLayer);

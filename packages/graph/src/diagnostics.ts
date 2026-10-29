@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {DateTime, Effect, Path} from 'effect';
 import {analyzeCodeGraph, type CodeGraphAnalysisCoverage, type CodeGraphAnalysisStatistics} from './analysis.js';
 import {codeGraphAnalysisLimitsForView} from './analysis/render.js';
@@ -27,6 +28,8 @@ import {runCodeGraphLifecycleOpportunity, type CodeGraphLifecycleOpportunityResu
 import {CodeGraphMaintenanceCoordinator} from './maintenance/coordinator.js';
 import {CODE_GRAPH_ORPHAN_PROVENANCE_CURSOR_RECOVERY_DIAGNOSTIC} from './orphan_provenance_cleanup.js';
 import {diagnoseCodeGraphDatabase} from './deep_diagnostics.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DIAGNOSTIC_CATALOG_PAGE_SIZE = 64;
 
@@ -165,12 +168,14 @@ export const inspectAllCodeGraphs = Effect.fn('codeGraph.inspectAllDiagnostics')
       Effect.gen(function* () {
         yield* options.onProgress?.({current: index + 1, phase: 'checking', total: databases.length}) ?? Effect.void;
         const checkoutId = path.basename(path.dirname(database));
-        const builds = buildSelection.builds
-          .filter(status => status.identity.checkoutId === checkoutId)
-          .map(privacySafeBuildStatus);
-        const waiters = buildSelection.waiters
-          .filter(status => status.identity.checkoutId === checkoutId)
-          .map(privacySafeBuildStatus);
+        const builds = EffectArray.map(
+          EffectArray.filter(buildSelection.builds, status => status.identity.checkoutId === checkoutId),
+          privacySafeBuildStatus,
+        );
+        const waiters = EffectArray.map(
+          EffectArray.filter(buildSelection.waiters, status => status.identity.checkoutId === checkoutId),
+          privacySafeBuildStatus,
+        );
         const active =
           (yield* codeGraphRepositoryLockActive(threadnoteHome, checkoutId)) ||
           (yield* codeGraphWorktreeBuildActive(threadnoteHome, checkoutId));
@@ -223,7 +228,7 @@ export const inspectAllCodeGraphs = Effect.fn('codeGraph.inspectAllDiagnostics')
           issues.push({code: 'catalog-unavailable', message: privacySafeDiagnostic(catalogResult.cause)});
         }
         for (const _baseSnapshotId of new Set(
-          catalogs.flatMap(catalog =>
+          EffectArray.flatMap(catalogs, catalog =>
             catalog.snapshot.baseSnapshotId === undefined ? [] : [catalog.snapshot.baseSnapshotId],
           ),
         )) {
@@ -281,7 +286,8 @@ export const inspectAllCodeGraphs = Effect.fn('codeGraph.inspectAllDiagnostics')
           views.push({
             ...(catalog.activatedAt ? {activatedAt: catalog.activatedAt} : {}),
             ...(analysis ? {analysis} : {}),
-            managementAvailable: [...buildSelection.builds, ...buildSelection.waiters].some(
+            managementAvailable: EffectArray.some(
+              [...buildSelection.builds, ...buildSelection.waiters],
               status =>
                 status.identity.checkoutId === checkoutId &&
                 status.identity.scopeId === catalog.viewScopeId &&
@@ -304,14 +310,16 @@ export const inspectAllCodeGraphs = Effect.fn('codeGraph.inspectAllDiagnostics')
       }),
     {concurrency: options.analyze || options.deep ? 1 : 2},
   );
-  const analyses = entries.flatMap(entry => entry.views.flatMap(view => (view.analysis ? [view.analysis] : [])));
+  const analyses = EffectArray.flatMap(entries, entry =>
+    EffectArray.flatMap(entry.views, view => (view.analysis ? [view.analysis] : [])),
+  );
   return {
     databases: entries,
     generatedAt: DateTime.formatIso(yield* DateTime.now),
     mode: {analyze: options.analyze === true, deep: options.deep === true},
     obsoleteStores: {
       bytes: obsolete.bytes,
-      checkouts: obsolete.checkouts.map(checkout => ({
+      checkouts: EffectArray.map(obsolete.checkouts, checkout => ({
         bytes: checkout.bytes,
         checkoutId: checkout.checkoutId,
         fileCount: checkout.files.length,
@@ -321,26 +329,32 @@ export const inspectAllCodeGraphs = Effect.fn('codeGraph.inspectAllDiagnostics')
       unsafeEntryCount: obsolete.unsafeEntryCount,
     },
     summary: {
-      activeBuildCount: buildSelection.builds.filter(status => status.observation.liveness === 'active').length,
-      analysisCompleteCount: analyses.filter(analysis => analysis.coverage.complete).length,
-      analysisPartialCount: analyses.filter(analysis => !analysis.coverage.complete).length,
+      activeBuildCount: EffectArray.filter(buildSelection.builds, status => status.observation.liveness === 'active')
+        .length,
+      analysisCompleteCount: EffectArray.filter(analyses, analysis => analysis.coverage.complete).length,
+      analysisPartialCount: EffectArray.filter(analyses, analysis => !analysis.coverage.complete).length,
       databaseCount: entries.length,
-      deferredDatabaseCount: entries.filter(entry => entry.healthState === 'deferred').length,
-      healthyDatabaseCount: entries.filter(entry => entry.health?.integrity === 'ok').length,
-      migrationPendingDatabaseCount: entries.filter(entry => entry.health?.integrity === 'migration-pending').length,
-      readySnapshotCount: entries.reduce((total, entry) => total + knownReadySnapshotCount(entry), 0),
-      totalStorageBytes: entries.reduce(
-        (total, entry) => total + (entry.storage.state === 'available' ? entry.storage.totalBytes : 0),
+      deferredDatabaseCount: EffectArray.filter(entries, entry => entry.healthState === 'deferred').length,
+      healthyDatabaseCount: EffectArray.filter(entries, entry => entry.health?.integrity === 'ok').length,
+      migrationPendingDatabaseCount: EffectArray.filter(
+        entries,
+        entry => entry.health?.integrity === 'migration-pending',
+      ).length,
+      readySnapshotCount: EffectArray.reduce(entries, 0, (total, entry) => total + knownReadySnapshotCount(entry)),
+      totalStorageBytes: EffectArray.reduce(
+        entries,
         0,
+        (total, entry) => total + (entry.storage.state === 'available' ? entry.storage.totalBytes : 0),
       ),
-      unhealthyDatabaseCount: entries.filter(
+      unhealthyDatabaseCount: EffectArray.filter(
+        entries,
         entry =>
           entry.health !== undefined &&
           entry.health.integrity !== 'ok' &&
           entry.health.integrity !== 'migration-pending',
       ).length,
-      unreadableDatabaseCount: entries.filter(entry => entry.healthState === 'unreadable').length,
-      viewCount: entries.reduce((total, entry) => total + entry.views.length, 0),
+      unreadableDatabaseCount: EffectArray.filter(entries, entry => entry.healthState === 'unreadable').length,
+      viewCount: EffectArray.reduce(entries, 0, (total, entry) => total + entry.views.length),
       waiterCount: buildSelection.waiters.length,
     },
     type: 'code-graph-diagnostics',
@@ -365,13 +379,16 @@ export const inspectAllCodeGraphsLocal = Effect.fn('codeGraph.inspectAllDiagnost
         const views = yield* Effect.forEach(
           database.views,
           view => {
-            const liveStatus = buildStatuses.find(
-              status =>
-                status.identity.checkoutId === database.checkoutId &&
-                status.identity.scopeId === view.viewScopeId &&
-                status.identity.worktreeId === view.viewWorktreeId &&
-                status.identity.repositoryId === view.repository.repositoryId &&
-                status.managerContext !== undefined,
+            const liveStatus = EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                buildStatuses,
+                status =>
+                  status.identity.checkoutId === database.checkoutId &&
+                  status.identity.scopeId === view.viewScopeId &&
+                  status.identity.worktreeId === view.viewWorktreeId &&
+                  status.identity.repositoryId === view.repository.repositoryId &&
+                  status.managerContext !== undefined,
+              ),
             );
             return readCodeGraphLocalAssociation(
               threadnoteHome,
@@ -393,9 +410,10 @@ export const inspectAllCodeGraphsLocal = Effect.fn('codeGraph.inspectAllDiagnost
         );
         const lifecycle = [
           ...database.lifecycle,
-          ...views
-            .filter(view => view.localAssociation.state === 'missing')
-            .map(() => classifyCodeGraphLifecycle({authority: 'unproven', state: 'missing-view'})),
+          ...EffectArray.map(
+            EffectArray.filter(views, view => view.localAssociation.state === 'missing'),
+            () => classifyCodeGraphLifecycle({authority: 'unproven', state: 'missing-view'}),
+          ),
         ];
         return {...database, lifecycle, views};
       }),
@@ -406,12 +424,17 @@ export const inspectAllCodeGraphsLocal = Effect.fn('codeGraph.inspectAllDiagnost
   if (lifecycleMaintenance._tag === 'Some') {
     const lifecycle = yield* runCodeGraphLifecycleOpportunity({
       opportunity: 'diagnostics',
-      targets: databases.flatMap(database => {
-        const databasePath = databasePaths.find(
-          candidate => path.basename(path.dirname(candidate)) === database.checkoutId,
+      targets: EffectArray.flatMap(databases, database => {
+        const databasePath = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            databasePaths,
+            candidate => path.basename(path.dirname(candidate)) === database.checkoutId,
+          ),
         );
         if (databasePath === undefined) return [];
-        const association = database.views.find(view => view.localAssociation.state === 'verified')?.localAssociation;
+        const association = EffectOption.getOrUndefined(
+          EffectArray.findFirst(database.views, view => view.localAssociation.state === 'verified'),
+        )?.localAssociation;
         const anchor = association !== undefined && 'path' in association ? association.path : undefined;
         return [
           {
@@ -421,7 +444,7 @@ export const inspectAllCodeGraphsLocal = Effect.fn('codeGraph.inspectAllDiagnost
             ...(database.accounting?.pressure === 'critical' || database.accounting?.pressure === 'elevated'
               ? {pressure: database.accounting.pressure}
               : {}),
-            reconciliationPending: database.views.some(view => view.localAssociation.state === 'missing'),
+            reconciliationPending: EffectArray.some(database.views, view => view.localAssociation.state === 'missing'),
           },
         ];
       }),
@@ -430,7 +453,7 @@ export const inspectAllCodeGraphsLocal = Effect.fn('codeGraph.inspectAllDiagnost
     }).pipe(Effect.catch(() => Effect.void));
     const lifecycleIssue = codeGraphLifecycleDiagnosticIssue(lifecycle);
     if (lifecycleIssue !== undefined && lifecycle?.state === 'completed') {
-      databases = databases.map(database =>
+      databases = EffectArray.map(databases, database =>
         database.checkoutId === lifecycle.checkoutId
           ? {
               ...database,
@@ -479,7 +502,7 @@ export function renderCodeGraphDiagnostics(
         : 'Snapshots: unavailable';
     lines.push(
       '',
-      `${repository} · checkout ${database.checkoutId.slice(-8)}`,
+      `${repository} · checkout ${Effect2.pipe(database.checkoutId, EffectString.slice(-8))}`,
       `Health: ${health}`,
       snapshotSummary,
       `Storage: ${database.storage.state === 'available' ? formatBytes(database.storage.totalBytes) : 'missing'}`,
@@ -498,10 +521,13 @@ export function renderCodeGraphDiagnostics(
         : undefined;
     if (attribution?.state === 'available') {
       lines.push(
-        `B-tree groups${attribution.semantic.groupsComplete ? '' : ' (partial)'}: ${attribution.semantic.groups
-          .slice(0, 8)
-          .map(group => `${group.name} ${formatBytes(group.bytes)}`)
-          .join(' · ')}`,
+        `B-tree groups${attribution.semantic.groupsComplete ? '' : ' (partial)'}: ${EffectArray.join(
+          EffectArray.map(
+            attribution.semantic.groups.slice(0, 8),
+            group => `${group.name} ${formatBytes(group.bytes)}`,
+          ),
+          ' · ',
+        )}`,
       );
       if (attribution.semantic.snapshots.state === 'available') {
         const baseline = attribution.semantic.snapshots.baseline;
@@ -520,7 +546,7 @@ export function renderCodeGraphDiagnostics(
         );
         for (const snapshot of attribution.semantic.snapshots.snapshots.slice(0, 8)) {
           lines.push(
-            `Snapshot ${snapshot.id.slice(-8)}${snapshot.active ? ' active' : ''} ${snapshot.state}: ` +
+            `Snapshot ${Effect2.pipe(snapshot.id, EffectString.slice(-8))}${snapshot.active ? ' active' : ''} ${snapshot.state}: ` +
               `${formatBytes(snapshot.logicalPayloadBytes)} logical · facts ${formatBytes(snapshot.associatedFactStoredBytes)} stored/${formatBytes(snapshot.associatedFactRawBytes)} raw · ${snapshot.logicalRows.toLocaleString()} rows`,
           );
         }
@@ -528,7 +554,7 @@ export function renderCodeGraphDiagnostics(
     }
     for (const view of database.views) {
       lines.push(
-        `View ${view.viewWorktreeId.slice(-8)}: ${view.snapshot.fileCount} files · ${view.snapshot.symbolCount} symbols · ${view.snapshot.edgeCount} edges`,
+        `View ${Effect2.pipe(view.viewWorktreeId, EffectString.slice(-8))}: ${view.snapshot.fileCount} files · ${view.snapshot.symbolCount} symbols · ${view.snapshot.edgeCount} edges`,
       );
       if ('localAssociation' in view) {
         lines.push(`Folder: ${codeGraphLocalAssociationLabel(view.localAssociation)} · ${view.localAssociation.state}`);
@@ -558,13 +584,13 @@ export function renderCodeGraphDiagnostics(
       `Obsolete stores: ${report.obsoleteStores.fileCount} file(s), ${formatBytes(report.obsoleteStores.bytes)}; unsafe entries ${report.obsoleteStores.unsafeEntryCount}`,
     );
   }
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 function knownReadySnapshotCount(
   database: CodeGraphDiagnosticsReport['databases'][number] | CodeGraphLocalDiagnosticsReport['databases'][number],
 ): number {
-  return database.health?.readySnapshots ?? new Set(database.views.map(view => view.snapshot.id)).size;
+  return database.health?.readySnapshots ?? new Set(EffectArray.map(database.views, view => view.snapshot.id)).size;
 }
 
 function currentTemporaryDatabaseBytes(

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {Database} from 'bun:sqlite';
 import type {Path} from 'effect';
 import type {CodeGraphLayout} from '../layout.js';
@@ -9,6 +10,8 @@ import {
   sortCodeGraphMaterializationSpoolSurface,
 } from './spool/surfaces.js';
 import {codeGraphSqliteAll, codeGraphSqliteGet, codeGraphSqliteRun} from '../sqlite_statement.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_MATERIALIZATION_SPOOL_FORMAT_VERSION = 2 as const;
 export const CODE_GRAPH_MATERIALIZATION_APPLY_PAGE_ROWS = 50_000;
@@ -100,7 +103,7 @@ interface CodeGraphMaterializationSpoolCountRow {
  * main database so capacity accounting observes one durable filesystem.
  */
 export function codeGraphMaterializationSpoolPath(
-  path: Path.Path,
+  path: Pick<Path.Path, 'join'>,
   layout: Pick<CodeGraphLayout, 'repositoryRoot'>,
   snapshotId: string,
 ): string {
@@ -467,7 +470,7 @@ export function readCodeGraphMaterializationSpoolReadyPlan(database: Database): 
      FROM materialization_spool_batches
      ORDER BY batch_index`,
   );
-  const surfaces = CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES.map(surface => {
+  const surfaces = EffectArray.map(CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES, surface => {
     const row = codeGraphSqliteGet<CodeGraphMaterializationSpoolCountRow>(
       database,
       `SELECT COUNT(*) AS count FROM materialization_ordered_${surface.name}`,
@@ -501,7 +504,7 @@ export function readCodeGraphMaterializationSpoolReadyPlan(database: Database): 
     }),
   );
   return {
-    batches: receipts.map(materializationSpoolBatchReceiptFromRow),
+    batches: EffectArray.map(receipts, materializationSpoolBatchReceiptFromRow),
     lexicalTermCount,
     spoolIdentity: digest.digest('hex'),
     surfaces,
@@ -565,7 +568,10 @@ function assertCodeGraphMaterializationSpoolLedger(database: Database): void {
   );
   if (
     receipts.length !== state.appendedBatchCount ||
-    receipts.some((receipt, index) => receipt.batch_index !== index || !/^[0-9a-f]{64}$/u.test(receipt.batch_id))
+    EffectArray.some(
+      receipts,
+      (receipt, index) => receipt.batch_index !== index || !/^[0-9a-f]{64}$/u.test(receipt.batch_id),
+    )
   ) {
     throw new Error('Code graph materialization spool batch ledger is corrupt.');
   }
@@ -665,7 +671,7 @@ function validateCodeGraphMaterializationSpoolHeader(header: CodeGraphMaterializ
     !/^(?:cgc_[0-9a-f]{40}|cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?)$/u.test(header.graphContentId) ||
     header.extractorSet.length === 0 ||
     header.extractorSet.length > 4_096 ||
-    header.extractorSet.includes('\0')
+    Effect.pipe(header.extractorSet, EffectString.includes('\0'))
   ) {
     throw new Error('Code graph materialization spool header is invalid.');
   }

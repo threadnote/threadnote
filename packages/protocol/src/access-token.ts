@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey} from 'jose';
 import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const ACCESS_TOKEN_ERRORS = {
   invalidBearer: 'The bearer access token is invalid.',
@@ -10,17 +13,20 @@ export const ACCESS_TOKEN_ERRORS = {
   unverifiable: 'The access token could not be verified.',
 } as const;
 
-export class AccessTokenError extends Schema.TaggedError<AccessTokenError>()('AccessTokenError', {
-  message: Schema.String,
-  reason: Schema.Literals([
-    'invalidBearer',
-    'invalidLifetime',
-    'invalidTime',
-    'missingBearer',
-    'missingIdentity',
-    'unverifiable',
-  ]),
-}) {
+export class AccessTokenError extends Schema.TaggedError<AccessTokenError, {readonly brand: unique symbol}>()(
+  'AccessTokenError',
+  {
+    message: Schema.String,
+    reason: Schema.Literals([
+      'invalidBearer',
+      'invalidLifetime',
+      'invalidTime',
+      'missingBearer',
+      'missingIdentity',
+      'unverifiable',
+    ]),
+  },
+) {
   static of(reason: keyof typeof ACCESS_TOKEN_ERRORS) {
     return AccessTokenError.make({message: ACCESS_TOKEN_ERRORS[reason], reason});
   }
@@ -93,7 +99,7 @@ export function createAccessTokenVerifier(key: CryptoKey | JWTVerifyGetKey, conf
 }
 
 function exactAudience(audience: JWTPayload['aud'], expected: string): boolean {
-  return audience === expected || (Array.isArray(audience) && audience.length === 1 && audience[0] === expected);
+  return audience === expected || (EffectArray.isArray(audience) && audience.length === 1 && audience[0] === expected);
 }
 
 function configuredClientId(payload: JWTPayload, config: AccessTokenConfig): string | undefined {
@@ -117,10 +123,11 @@ function configuredClientId(payload: JWTPayload, config: AccessTokenConfig): str
 }
 
 function legacyTokenScopes(payload: JWTPayload): ReadonlySet<string> {
-  const rawScopes = typeof payload.scope === 'string' ? payload.scope.split(/\s+/) : payload.scp;
+  const rawScopes =
+    typeof payload.scope === 'string' ? Effect.pipe(payload.scope, EffectString.split(/\s+/)) : payload.scp;
   return new Set(
-    Array.isArray(rawScopes)
-      ? rawScopes.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    EffectArray.isArray(rawScopes)
+      ? EffectArray.filter(rawScopes, (item): item is string => typeof item === 'string' && item.length > 0)
       : [],
   );
 }
@@ -134,19 +141,23 @@ function tokenScopes(payload: JWTPayload): ReadonlySet<string> {
   return new Set(scope ?? scp ?? []);
 }
 
+const isScopeList = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) &&
+  EffectArray.every(value, (item): item is string => typeof item === 'string' && item.length > 0 && !/\s/u.test(item));
+
 function scopeList(value: unknown): string[] | undefined {
   const result =
     typeof value === 'string'
-      ? value.split(/\s+/).filter(Boolean)
-      : Array.isArray(value) && value.every(item => typeof item === 'string' && item.length > 0 && !/\s/u.test(item))
-        ? value
+      ? EffectArray.filter(Effect.pipe(value, EffectString.split(/\s+/)), Boolean)
+      : isScopeList(value)
+        ? [...value]
         : undefined;
   if (result === undefined || new Set(result).size !== result.length) return undefined;
   return result;
 }
 
 function sameSet(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every(item => right.includes(item));
+  return left.length === right.length && EffectArray.every(left, item => right.includes(item));
 }
 
 function numericDate(value: unknown): number {

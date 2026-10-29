@@ -1,12 +1,22 @@
-import {Effect, FileSystem, Result} from 'effect';
+import {Effect, FileSystem, Predicate, Result} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectRecord from 'effect/Record';
 
 const failure = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.result);
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (!Predicate.isObject(value)) throw new Error(`Expected ${label} to be an object.`);
+  return value;
+}
+function textField(value: Record<string, unknown>, key: string, label: string): string {
+  const field = value[key];
+  if (typeof field !== 'string') throw new Error(`Expected ${label}.${key} to be text.`);
+  return field;
+}
 
 describe('native workflow automation', () => {
   effectIt.effect('creates and resumes a stable native run without rewriting verified bytes', () =>
@@ -26,11 +36,12 @@ describe('native workflow automation', () => {
       const written = writeResult.success;
       if (!('artifact' in written)) throw new Error('Expected verified native artifact');
       expect(written).toMatchObject({status: 'ok', operationId: 'write-1', artifact: {body: write.body}});
-      const artifactUri = (written.artifact as {uri: string}).uri;
+      const artifactUri = textField(record(written.artifact, 'written artifact'), 'uri', 'written artifact');
       const artifactBytes = yield* f.store.read(f.location, artifactUri);
       const journalAfterWrite = yield* f.fs.readFileString(journalPath);
-      const journalValue = JSON.parse(journalAfterWrite) as {manifestUri: string};
-      const manifestBytes = yield* f.store.read(f.location, journalValue.manifestUri);
+      const journalValue = record(JSON.parse(journalAfterWrite), 'journal');
+      const manifestUri = textField(journalValue, 'manifestUri', 'journal');
+      const manifestBytes = yield* f.store.read(f.location, manifestUri);
       const stateAfterWrite = yield* f.fs.readFileString(f.statePath());
       const read = yield* f.call({...f.base('read'), uri: artifactUri});
       expect(read).toMatchObject({status: 'ok', artifact: {body: write.body, uri: artifactUri}});
@@ -52,7 +63,7 @@ describe('native workflow automation', () => {
       expect(yield* f.fs.readFileString(f.statePath())).toBe(stateAfterWrite);
       expect(yield* f.fs.readFileString(journalPath)).toBe(journalAfterWrite);
       expect(yield* f.store.read(f.location, artifactUri)).toBe(artifactBytes);
-      expect(yield* f.store.read(f.location, journalValue.manifestUri)).toBe(manifestBytes);
+      expect(yield* f.store.read(f.location, manifestUri)).toBe(manifestBytes);
       expect(initialState).not.toBe(stateAfterWrite);
       expect(firstJournal).not.toBe(journalAfterWrite);
       expect(yield* failure(f.call(f.write({body: 'Changed intent.\n'})))).toMatchObject({
@@ -70,13 +81,16 @@ describe('native workflow automation', () => {
       const initialized = yield* f.init();
       const statePath = f.statePath();
       const journalPath = f.journalPath(initialized.bindingId);
-      const existing = (yield* f.call(f.write())) as {artifact: {uri: string; revision: string}};
+      const existing = yield* f.call(f.write());
+      const existingArtifact = record(record(existing, 'write result').artifact, 'written artifact');
+      const existingArtifactUri = textField(existingArtifact, 'uri', 'written artifact');
+      const existingArtifactRevision = textField(existingArtifact, 'revision', 'written artifact');
       const replace = f.write({
         action: 'write',
         operationId: 'replace-interrupted',
         artifactKey: 'plan-root',
-        uri: existing.artifact.uri,
-        expectedRevision: existing.artifact.revision,
+        uri: existingArtifactUri,
+        expectedRevision: existingArtifactRevision,
         body: 'Replacement after interruption.\n',
       });
       const beforeJournal = yield* f.fs.readFileString(journalPath);
@@ -102,7 +116,7 @@ describe('native workflow automation', () => {
       const interrupted = yield* failure(f.call(replace).pipe(Effect.provideService(ResourceStore, guardedStore)));
       expect(Result.isFailure(interrupted)).toBe(true);
       expect(failed).toBe(true);
-      expect(JSON.parse(yield* f.fs.readFileString(statePath))).toMatchObject({
+      expect(record(JSON.parse(yield* f.fs.readFileString(statePath)), 'native state')).toMatchObject({
         operations: expect.arrayContaining([
           expect.objectContaining({
             status: 'prepared',
@@ -117,9 +131,9 @@ describe('native workflow automation', () => {
         operationId: 'replace-interrupted',
         artifact: {body: replace.body},
       });
-      const journalAfter = JSON.parse(yield* f.fs.readFileString(journalPath)) as {artifacts: Record<string, unknown>};
-      expect(Object.keys(journalAfter.artifacts)).toHaveLength(1);
-      expect(JSON.parse(yield* f.fs.readFileString(statePath))).toMatchObject({
+      const journalAfter = record(JSON.parse(yield* f.fs.readFileString(journalPath)), 'journal');
+      expect(EffectRecord.keys(record(journalAfter.artifacts, 'journal artifacts'))).toHaveLength(1);
+      expect(record(JSON.parse(yield* f.fs.readFileString(statePath)), 'native state')).toMatchObject({
         operations: expect.arrayContaining([
           expect.objectContaining({
             status: 'verified',
@@ -156,17 +170,21 @@ describe('native workflow automation', () => {
         f.call(f.write()).pipe(Effect.provideService(FileSystem.FileSystem, interruptedFs)),
       );
       expect(Result.isFailure(result)).toBe(true);
-      const nativeState = JSON.parse(yield* f.fs.readFileString(stateFile)) as {operations: {status: string}[]};
+      const nativeState = record(JSON.parse(yield* f.fs.readFileString(stateFile)), 'native state');
       expect(nativeState.operations).toMatchObject([{status: 'prepared'}]);
       const pendingStateBytes = yield* f.fs.readFileString(stateFile);
       const verifiedJournal = yield* f.fs.readFileString(journalFile);
-      expect(JSON.parse(verifiedJournal)).toMatchObject({operations: {'write-1': {status: 'verified'}}});
+      expect(record(JSON.parse(verifiedJournal), 'journal')).toMatchObject({
+        operations: {'write-1': {status: 'verified'}},
+      });
       const inspection = yield* f.call(f.base('inspect'));
       expect(inspection).toMatchObject({operations: [{status: 'prepared'}]});
       expect(yield* f.fs.readFileString(stateFile)).toBe(pendingStateBytes);
       const recovered = yield* f.call({...f.base('recover'), operationId: 'write-1'});
       expect(recovered).toMatchObject({status: 'ok', operationId: 'write-1'});
-      expect(JSON.parse(yield* f.fs.readFileString(stateFile))).toMatchObject({operations: [{status: 'verified'}]});
+      expect(record(JSON.parse(yield* f.fs.readFileString(stateFile)), 'native state')).toMatchObject({
+        operations: [{status: 'verified'}],
+      });
       expect(yield* f.fs.readFileString(journalFile)).toBe(verifiedJournal);
     }).pipe(run),
   );

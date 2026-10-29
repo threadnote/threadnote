@@ -1,4 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export const CODE_GRAPH_VECTOR_RETIREMENT_PAGE_ROWS = 1_000;
 export const CODE_GRAPH_VECTOR_RETIREMENT_PAGE_BYTES = 32 * 1_024 * 1_024;
 export const CODE_GRAPH_VECTOR_RETIREMENT_PAGE_FIXED_ROWS = 5;
@@ -18,20 +22,20 @@ export const VECTOR_CORE_TABLE_NAMES = ['vector_generations', 'vector_pointers',
 export const VECTOR_RETIREMENT_TABLE_NAMES = ['vector_retirement_state', 'vector_generation_retirements'] as const;
 
 export function storedSchemaSql(value: string): string {
-  return value.replace(/^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS/u, 'CREATE $1');
+  return Effect.pipe(value, EffectString.replace(/^CREATE (TABLE|INDEX|TRIGGER) IF NOT EXISTS/u, 'CREATE $1'));
 }
 
 export function sqliteStringLiteral(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
+  return `'${Effect.pipe(value, EffectString.replaceAll("'", "''"))}'`;
 }
 
-export class CodeGraphVectorRetirementError extends Schema.TaggedError<CodeGraphVectorRetirementError>()(
-  'CodeGraphVectorRetirementError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphVectorRetirementError extends Schema.TaggedError<
+  CodeGraphVectorRetirementError,
+  {readonly brand: unique symbol}
+>()('CodeGraphVectorRetirementError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export function vectorGenerationManifestPredicate(alias: string): string {
   return `typeof(${alias}.generation) = 'text'
@@ -431,7 +435,10 @@ export const POINTER_MANIFEST_TRIGGER_GUARD_SQL = `SELECT CASE
   THEN RAISE(ABORT, 'code graph vector pointer manifest is invalid')
 END;`;
 
-export const OLD_POINTER_MANIFEST_TRIGGER_GUARD_SQL = POINTER_MANIFEST_TRIGGER_GUARD_SQL.replaceAll('NEW.', 'OLD.');
+export const OLD_POINTER_MANIFEST_TRIGGER_GUARD_SQL = Effect.pipe(
+  POINTER_MANIFEST_TRIGGER_GUARD_SQL,
+  EffectString.replaceAll('NEW.', 'OLD.'),
+);
 
 export const VECTOR_RETIREMENT_POINTER_INSERT_TRIGGER_SQL = `CREATE TRIGGER IF NOT EXISTS vector_retirement_pointer_insert_guard
   BEFORE INSERT ON vector_pointers
@@ -639,9 +646,13 @@ export const CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS = [
 // singleton state row, and sqlite_sequence authority published by r1. The
 // fixed conservative count is versioned by the exact SQL byte constant below.
 export const CODE_GRAPH_VECTOR_RETIREMENT_SCHEMA_FIXED_ROWS = 24;
-export const CODE_GRAPH_VECTOR_RETIREMENT_SCHEMA_FIXED_BYTES = [
-  CODE_GRAPH_VECTOR_RETIREMENT_STATE_TABLE_SQL,
-  CODE_GRAPH_VECTOR_RETIREMENTS_TABLE_SQL,
-  CODE_GRAPH_VECTOR_RETIREMENT_ASSOCIATION_INDEX_SQL,
-  ...CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.map(trigger => trigger.sql),
-].reduce((total, sql) => total + new TextEncoder().encode(storedSchemaSql(sql)).byteLength, 256);
+export const CODE_GRAPH_VECTOR_RETIREMENT_SCHEMA_FIXED_BYTES = EffectArray.reduce(
+  [
+    CODE_GRAPH_VECTOR_RETIREMENT_STATE_TABLE_SQL,
+    CODE_GRAPH_VECTOR_RETIREMENTS_TABLE_SQL,
+    CODE_GRAPH_VECTOR_RETIREMENT_ASSOCIATION_INDEX_SQL,
+    ...EffectArray.map(CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS, trigger => trigger.sql),
+  ],
+  256,
+  (total, sql) => total + new TextEncoder().encode(storedSchemaSql(sql)).byteLength,
+);

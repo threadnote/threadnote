@@ -8,9 +8,12 @@ import {
   type MemoryObsidianEvidenceV1,
 } from '@threadnote/memory/document';
 import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/decision.md';
-const hash = 'a'.repeat(64);
+const hash = Effect.pipe('a', EffectString.repeat(64));
 const uuid = '12345678-1234-1234-1234-123456789abc';
 
 function citation(relativePath: string): MemoryObsidianEvidenceV1 {
@@ -39,6 +42,7 @@ describe('Obsidian memory evidence metadata', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 16}), fc.integer({min: -2, max: 2}), (multibyteCount, offset) => {
         const pathBytes = maxBytes - fixedBytes + offset;
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const relativePath = `${'é'.repeat(multibyteCount)}${'a'.repeat(pathBytes - multibyteCount * 2)}`;
         const evidence = citation(relativePath);
         const serializedBytes = new TextEncoder().encode(JSON.stringify(evidence)).byteLength;
@@ -63,7 +67,7 @@ describe('Obsidian memory evidence metadata', () => {
   });
 
   it('rejects an oversized citation before formatting the memory', () => {
-    const evidence = citation(`${'é'.repeat(2000)}.md`);
+    const evidence = citation(`${Effect.pipe('é', EffectString.repeat(2000))}.md`);
     expect(new TextEncoder().encode(JSON.stringify(evidence)).byteLength).toBeGreaterThan(4096);
     expect(() =>
       formatMemoryDocument(
@@ -83,11 +87,11 @@ describe('Obsidian memory evidence metadata', () => {
 
   it('round trips safe paths without changing exact citation identity (property)', () => {
     const segment = fc
-      .array(fc.constantFrom(...'abcXYZ012_-'.split('')), {minLength: 1, maxLength: 12})
-      .map(chars => chars.join(''));
+      .array(fc.constantFrom(...Effect.pipe('abcXYZ012_-', EffectString.split(''))), {minLength: 1, maxLength: 12})
+      .map(chars => EffectArray.join(chars, ''));
     fc.assert(
       fc.property(fc.array(segment, {minLength: 1, maxLength: 4}), segments => {
-        const evidence = citation(`${segments.join('/')}.md`);
+        const evidence = citation(`${EffectArray.join(segments, '/')}.md`);
         const formatted = formatMemoryDocument(
           'MEMORY',
           {

@@ -23,12 +23,14 @@ import {
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale-contract';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {ScriptError} from '../../../../scripts/effect/errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Context Brief citation RSS parent controller', () => {
   it.effect('rejects a same-bundle digest mismatch before controller startup', () =>
     Effect.gen(function* () {
-      const observed = 'a'.repeat(64);
-      const expected = 'b'.repeat(64);
+      const observed = Effect2.pipe('a', EffectString.repeat(64));
+      const expected = Effect2.pipe('b', EffectString.repeat(64));
       const error = yield* validateContextBriefCitationRssBundleDigest(observed, expected).pipe(Effect.flip);
 
       expect(error.message).toContain(`target digest ${observed}; expected ${expected}`);
@@ -159,9 +161,9 @@ describe('Context Brief citation RSS parent controller', () => {
           'Context Brief RSS observer exited with 9 before acknowledgement sequence 2. observer diagnostic',
         );
 
-        const oversized = yield* errorFor(`${'x'.repeat(4_097)}must-not-survive`);
+        const oversized = yield* errorFor(`${Effect2.pipe('x', EffectString.repeat(4_097))}must-not-survive`);
         expect(oversized.message).toBe(
-          `Context Brief RSS observer exited with 9 before acknowledgement sequence 2. ${'x'.repeat(4_096)}`,
+          `Context Brief RSS observer exited with 9 before acknowledgement sequence 2. ${Effect2.pipe('x', EffectString.repeat(4_096))}`,
         );
       }),
     ).pipe(provideTestLayer(BunServices.layer)),

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -26,18 +27,21 @@ it('runs the actual Cursor CLI protocol from a user-hook cwd, recalls the payloa
     await mkdir(memoryRoot, {recursive: true});
     await writeFile(
       join(memoryRoot, 'current.md'),
-      [
-        'MEMORY',
-        'kind: handoff',
-        'status: active',
-        'project: cursor-hook-workspace',
-        'topic: current',
-        'source_agent_client: test',
-        'timestamp: 2026-09-08T00:00:00.000Z',
-        'memory_id: tn_cursor_hook_cli_seed',
-        '',
-        'Current branch latest handoff for cursor-hook-workspace.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: handoff',
+          'status: active',
+          'project: cursor-hook-workspace',
+          'topic: current',
+          'source_agent_client: test',
+          'timestamp: 2026-09-08T00:00:00.000Z',
+          'memory_id: tn_cursor_hook_cli_seed',
+          '',
+          'Current branch latest handoff for cursor-hook-workspace.',
+        ],
+        '\n',
+      ),
     );
     const payload = {
       conversation_id: 'cursor-conversation',
@@ -77,7 +81,7 @@ it('runs the actual Cursor CLI protocol from a user-hook cwd, recalls the payloa
     expect(JSON.parse((await run(['cursor-hook', 'preCompact', '--dry-run'])).stdout)).toEqual({});
     expect(await readdir(memoryRoot)).toEqual(['current.md']);
     expect(JSON.parse((await run(['cursor-hook', 'preCompact'])).stdout)).toEqual({});
-    const snapshotNames = (await readdir(memoryRoot)).filter(name => name !== 'current.md');
+    const snapshotNames = EffectArray.filter(await readdir(memoryRoot), name => name !== 'current.md');
     expect(snapshotNames).toHaveLength(1);
     const snapshot = await readFile(join(memoryRoot, snapshotNames[0]), 'utf8');
     expect(snapshot).toContain('source_agent_client: cursor');

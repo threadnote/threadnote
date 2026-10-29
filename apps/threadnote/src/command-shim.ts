@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Option, Path, PlatformError, Result, Schema} from 'effect';
 import {SHIM_MARKER} from './constants.js';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -6,6 +7,9 @@ import type {DoctorCheck} from './types.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {readFileIfExists, removePath, shellQuote} from './utils.js';
 import {toolRoot} from '@threadnote/workspace/installation';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const THREADNOTE_COMMAND = 'threadnote';
 const THREADNOTE_MCP_COMMAND = 'threadnote-mcp-server';
@@ -14,10 +18,10 @@ const THREADNOTE_AUTH0_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadno
 const THREADNOTE_AUTH0_PUBLISHER_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadnote-auth0-publisher-m2m';
 const THREADNOTE_AUTH0_USER_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadnote-auth0-user';
 const THREADNOTE_OAUTH_USER_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadnote-oauth-user';
-class CommandShimConfigurationError extends Schema.TaggedError<CommandShimConfigurationError>()(
-  'CommandShimConfigurationError',
-  {message: Schema.String},
-) {}
+class CommandShimConfigurationError extends Schema.TaggedError<
+  CommandShimConfigurationError,
+  {readonly brand: unique symbol}
+>()('CommandShimConfigurationError', {message: Schema.String}) {}
 export type LauncherMode =
   | 'cli'
   | 'mcp'
@@ -57,7 +61,7 @@ const DOCKER_HELPER_MODES = new Map<string, LauncherMode>([
 
 export function configuredLauncherModes(controlConfig: unknown, dockerConfig: unknown): readonly LauncherMode[] {
   const selected = new Set<LauncherMode>(CORE_LAUNCHER_MODES);
-  if (isRecord(controlConfig) && controlConfig.schemaVersion === 1 && Array.isArray(controlConfig.bindings)) {
+  if (isRecord(controlConfig) && controlConfig.schemaVersion === 1 && EffectArray.isArray(controlConfig.bindings)) {
     for (const binding of controlConfig.bindings) {
       if (!isRecord(binding) || typeof binding.helper !== 'string') continue;
       const mode = CONTROL_HELPER_MODES.get(binding.helper);
@@ -65,14 +69,14 @@ export function configuredLauncherModes(controlConfig: unknown, dockerConfig: un
     }
   }
   if (isRecord(dockerConfig)) {
-    const helpers = isRecord(dockerConfig.credHelpers) ? Object.values(dockerConfig.credHelpers) : [];
+    const helpers = isRecord(dockerConfig.credHelpers) ? EffectRecord.values(dockerConfig.credHelpers) : [];
     for (const helper of [...helpers, dockerConfig.credsStore]) {
       if (typeof helper !== 'string') continue;
       const mode = DOCKER_HELPER_MODES.get(helper);
       if (mode !== undefined) selected.add(mode);
     }
   }
-  return LAUNCHER_MODES.filter(mode => selected.has(mode));
+  return EffectArray.filter(LAUNCHER_MODES, mode => selected.has(mode));
 }
 
 export const requiredCommandLauncherModes = Effect.fn('commandShim.requiredModes')(function* (home?: string) {
@@ -159,8 +163,8 @@ function isControlConfiguration(value: unknown): boolean {
   return (
     isRecord(value) &&
     value.schemaVersion === 1 &&
-    Array.isArray(value.bindings) &&
-    value.bindings.every(binding => isRecord(binding) && typeof binding.helper === 'string')
+    EffectArray.isArray(value.bindings) &&
+    EffectArray.every(value.bindings, binding => isRecord(binding) && typeof binding.helper === 'string')
   );
 }
 
@@ -168,13 +172,14 @@ function isDockerConfiguration(value: unknown): boolean {
   return (
     isRecord(value) &&
     (value.credHelpers === undefined ||
-      (isRecord(value.credHelpers) && Object.values(value.credHelpers).every(helper => typeof helper === 'string'))) &&
+      (isRecord(value.credHelpers) &&
+        EffectArray.every(EffectRecord.values(value.credHelpers), helper => typeof helper === 'string'))) &&
     (value.credsStore === undefined || typeof value.credsStore === 'string')
   );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 export type CommandLauncherKind = 'cmd' | 'posix';
@@ -232,7 +237,7 @@ export const commandShimCheck = Effect.fn('commandShim.check')(function* (home?:
       paths.push(shimPath);
     }
   }
-  return {detail: paths.join('; '), name: 'threadnote launcher', status: 'ok'} satisfies DoctorCheck;
+  return {detail: EffectArray.join(paths, '; '), name: 'threadnote launcher', status: 'ok'} satisfies DoctorCheck;
 });
 
 export const installCommandShim = Effect.fn('commandShim.install')(function* (
@@ -271,20 +276,29 @@ const ensureDefaultWindowsBinDirectoryOnUserPath = Effect.fn('commandShim.ensure
 ) {
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  if (system.platform !== 'win32' || system.environment().THREADNOTE_BIN_DIR?.trim()) return;
+  if (
+    system.platform !== 'win32' ||
+    Effect2.pipe(system.environment().THREADNOTE_BIN_DIR, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    return;
   const binDirectory = path.dirname(yield* managedCommandShimPath('cli'));
   if (dryRun) {
     yield* Console.log(`Would ensure command directory is on the Windows user PATH: ${binDirectory}`);
     return;
   }
-  const script = [
-    '$entry=$env:THREADNOTE_PATH_ENTRY',
-    "$current=[Environment]::GetEnvironmentVariable('Path','User')",
-    "$entries=@($current -split ';' | Where-Object { $_ })",
-    "if (-not ($entries | Where-Object { $_.TrimEnd('\\') -ieq $entry.TrimEnd('\\') })) {",
-    "  [Environment]::SetEnvironmentVariable('Path', ((@($entry) + $entries) -join ';'), 'User')",
-    '}',
-  ].join('; ');
+  const script = EffectArray.join(
+    [
+      '$entry=$env:THREADNOTE_PATH_ENTRY',
+      "$current=[Environment]::GetEnvironmentVariable('Path','User')",
+      "$entries=@($current -split ';' | Where-Object { $_ })",
+      "if (-not ($entries | Where-Object { $_.TrimEnd('\\') -ieq $entry.TrimEnd('\\') })) {",
+      "  [Environment]::SetEnvironmentVariable('Path', ((@($entry) + $entries) -join ';'), 'User')",
+      '}',
+    ],
+    '; ',
+  );
   yield* runCommandEffect('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     env: {...system.environment(), THREADNOTE_PATH_ENTRY: binDirectory},
   });
@@ -400,40 +414,47 @@ export const renderCommandShim = Effect.fn('commandShim.render')(function* (
                       ? ['__credential-registry-auth0-user']
                       : [];
   if (resolvedKind === 'cmd') {
-    const command = [cmdQuote(executable), ...modeArguments, '%*'].join(' ');
-    return [
-      '@echo off',
-      `rem ${SHIM_MARKER}`,
-      'setlocal',
-      'set "THREADNOTE_CALLER_CWD=%CD%"',
-      command,
-      'exit /b %ERRORLEVEL%',
-      '',
-    ].join('\r\n');
+    const command = EffectArray.join([cmdQuote(executable), ...modeArguments, '%*'], ' ');
+    return EffectArray.join(
+      [
+        '@echo off',
+        `rem ${SHIM_MARKER}`,
+        'setlocal',
+        'set "THREADNOTE_CALLER_CWD=%CD%"',
+        command,
+        'exit /b %ERRORLEVEL%',
+        '',
+      ],
+      '\r\n',
+    );
   }
-  const posixExecutable = system.platform === 'win32' ? executable.replaceAll('\\', '/') : executable;
-  return [
-    '#!/usr/bin/env sh',
-    `# ${SHIM_MARKER}`,
-    'set -eu',
-    `THREADNOTE_ENTRY=${shellQuote(posixExecutable)}`,
-    'if [ ! -x "$THREADNOTE_ENTRY" ]; then',
-    '  echo "Threadnote standalone executable is missing: $THREADNOTE_ENTRY" >&2',
-    '  echo "Reinstall Threadnote from a stable or beta GitHub release." >&2',
-    '  exit 127',
-    'fi',
-    'THREADNOTE_CALLER_CWD="$PWD"',
-    'export THREADNOTE_CALLER_CWD',
-    `exec "$THREADNOTE_ENTRY"${modeArguments
-      .map(shellQuote)
-      .map(value => ` ${value}`)
-      .join('')} "$@"`,
-    '',
-  ].join('\n');
+  const posixExecutable =
+    system.platform === 'win32' ? Effect2.pipe(executable, EffectString.replaceAll('\\', '/')) : executable;
+  return EffectArray.join(
+    [
+      '#!/usr/bin/env sh',
+      `# ${SHIM_MARKER}`,
+      'set -eu',
+      `THREADNOTE_ENTRY=${shellQuote(posixExecutable)}`,
+      'if [ ! -x "$THREADNOTE_ENTRY" ]; then',
+      '  echo "Threadnote standalone executable is missing: $THREADNOTE_ENTRY" >&2',
+      '  echo "Reinstall Threadnote from a stable or beta GitHub release." >&2',
+      '  exit 127',
+      'fi',
+      'THREADNOTE_CALLER_CWD="$PWD"',
+      'export THREADNOTE_CALLER_CWD',
+      `exec "$THREADNOTE_ENTRY"${EffectArray.join(
+        EffectArray.map(EffectArray.map(modeArguments, shellQuote), value => ` ${value}`),
+        '',
+      )} "$@"`,
+      '',
+    ],
+    '\n',
+  );
 });
 
 function isManagedCommandShim(content: string): boolean {
-  const marker = SHIM_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const marker = Effect2.pipe(SHIM_MARKER, EffectString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   return (
     new RegExp(`^#![^\\r\\n]*\\r?\\n# ${marker}(?:\\r?\\n|$)`).test(content) ||
     new RegExp(`^@echo off\\r?\\nrem ${marker}(?:\\r?\\n|$)`, 'i').test(content)
@@ -447,7 +468,9 @@ const managedCommandShimPath = Effect.fn('commandShim.path')(function* (
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const environment = system.environment();
-  const configured = environment.THREADNOTE_BIN_DIR?.trim();
+  const configured = Effect2.pipe(environment.THREADNOTE_BIN_DIR, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   const localAppData = environment.LOCALAPPDATA;
   const binDirectory = configured
     ? yield* expandPath(configured)
@@ -479,7 +502,7 @@ const managedCommandShimPath = Effect.fn('commandShim.path')(function* (
 });
 
 function cmdQuote(value: string): string {
-  return `"${value.replaceAll('%', '%%').replaceAll('"', '""')}"`;
+  return `"${Effect2.pipe(value, EffectString.replaceAll('%', '%%'), EffectString.replaceAll('"', '""'))}"`;
 }
 
 function pathEntryExists(fs: FileSystem.FileSystem, target: string): Effect.Effect<boolean, never> {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {chmod, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -5,6 +6,8 @@ import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {TestError} from '@threadnote/testing/test-error';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const exec = promisify(execFile);
 const gitIdentity = {
@@ -61,15 +64,83 @@ async function fixture(options: {runtimeCodexHome?: boolean} = {}) {
   return {root, home, userHome, codexHome, remote, otherRemote, run, bootstrap, cli};
 }
 
-function parsed(stdout: string) {
-  return JSON.parse(stdout) as {
-    isError?: boolean;
-    structuredContent?: {memoryUri?: string};
-    status?: string;
-    shares?: string[];
-    identity?: {user: string; agentId: string};
-    graph?: {freshness: string; snapshot?: {id: string; commit: string}};
+interface CodexCloudJsonResponse {
+  readonly graph?: {
+    readonly freshness?: string;
+    readonly snapshot?: {readonly commit: string; readonly id: string};
+    readonly status?: string;
   };
+  readonly identity?: {readonly agentId: string; readonly user: string};
+  readonly isError?: boolean;
+  readonly shares?: readonly string[];
+  readonly status?: string;
+  readonly structuredContent?: {readonly memoryUri?: string};
+}
+
+function parsed(stdout: string): CodexCloudJsonResponse {
+  const value: unknown = JSON.parse(stdout);
+  if (!isCodexCloudJsonResponse(value)) throw new Error('Codex Cloud CLI returned an invalid JSON response.');
+  return value;
+}
+
+function isCodexCloudJsonResponse(value: unknown): value is CodexCloudJsonResponse {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  return (
+    optionalProperty(value, 'isError', item => typeof item === 'boolean') &&
+    optionalProperty(value, 'status', item => typeof item === 'string') &&
+    optionalProperty(
+      value,
+      'shares',
+      item => EffectArray.isArray(item) && EffectArray.every(item, entry => typeof entry === 'string'),
+    ) &&
+    optionalProperty(
+      value,
+      'structuredContent',
+      item =>
+        typeof item === 'object' &&
+        item !== null &&
+        !EffectArray.isArray(item) &&
+        optionalProperty(item, 'memoryUri', entry => typeof entry === 'string'),
+    ) &&
+    optionalProperty(
+      value,
+      'identity',
+      item =>
+        typeof item === 'object' &&
+        item !== null &&
+        !EffectArray.isArray(item) &&
+        'user' in item &&
+        typeof item.user === 'string' &&
+        'agentId' in item &&
+        typeof item.agentId === 'string',
+    ) &&
+    optionalProperty(
+      value,
+      'graph',
+      item =>
+        typeof item === 'object' &&
+        item !== null &&
+        !EffectArray.isArray(item) &&
+        (('freshness' in item && typeof item.freshness === 'string') ||
+          ('status' in item && typeof item.status === 'string')) &&
+        optionalProperty(
+          item,
+          'snapshot',
+          snapshot =>
+            typeof snapshot === 'object' &&
+            snapshot !== null &&
+            !EffectArray.isArray(snapshot) &&
+            'id' in snapshot &&
+            typeof snapshot.id === 'string' &&
+            'commit' in snapshot &&
+            typeof snapshot.commit === 'string',
+        ),
+    )
+  );
+}
+
+function optionalProperty(value: object, key: string, validate: (property: unknown) => boolean): boolean {
+  return !(key in value) || Reflect.get(value, key) === undefined || validate(Reflect.get(value, key));
 }
 
 describe('Codex Cloud CLI integration', () => {
@@ -170,7 +241,7 @@ describe('Codex Cloud CLI integration', () => {
         await mkdir(outside, {recursive: true});
         await writeFile(
           join(outside, 'outside.md'),
-          shared.replace('return a friendly message.', 'OUTSIDE_SCOPE_MARKER.'),
+          Effect.pipe(shared, EffectString.replace('return a friendly message.', 'OUTSIDE_SCOPE_MARKER.')),
         );
       }
       for (const args of [[], ['--code-ref', 'greeting.ts']]) {
@@ -224,20 +295,23 @@ describe('Codex Cloud CLI integration', () => {
       await mkdir(f.home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          ...['a', 'b'].flatMap(name => [
-            `  - name: ${name}`,
-            `    path: ${repo}`,
-            '    seed: []',
-            `    uri: threadnote://resources/repos/${name}`,
-            '    graph:',
-            '      closure: dependencies',
-            `      roots: [apps/${name}]`,
-          ]),
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            ...EffectArray.flatMap(['a', 'b'], name => [
+              `  - name: ${name}`,
+              `    path: ${repo}`,
+              '    seed: []',
+              `    uri: threadnote://resources/repos/${name}`,
+              '    graph:',
+              '      closure: dependencies',
+              `      roots: [apps/${name}]`,
+            ]),
+            '',
+          ],
+          '\n',
+        ),
       );
       for (const name of ['a', 'b']) {
         const flags = ['--cwd', join(repo, 'apps', name), '--manifest', manifest];
@@ -393,9 +467,12 @@ describe('Codex Cloud CLI integration', () => {
       const profile = await readFile(join(f.home, 'codex-cloud', 'profile.json'), 'utf8');
       const teams = await readFile(join(f.home, 'share', 'teams.json'), 'utf8');
       const registry = await readFile(join(f.home, 'integrations', 'agents.json'), 'utf8');
-      const sharedHead = (await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout.trim();
+      const sharedHead = Effect.pipe(
+        (await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout,
+        EffectString.trim,
+      );
       const persistentSkills = await Promise.all(
-        ['threadnote-context', 'threadnote-code-graph'].map(name =>
+        EffectArray.map(['threadnote-context', 'threadnote-code-graph'], name =>
           readFile(join(f.userHome, '.agents', 'skills', name, 'SKILL.md'), 'utf8'),
         ),
       );
@@ -406,9 +483,12 @@ describe('Codex Cloud CLI integration', () => {
         stdout: expect.stringContaining('"status":"fail"'),
         stderr: expect.stringContaining('verification failed'),
       });
-      expect((await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout.trim()).toBe(
-        sharedHead,
-      );
+      expect(
+        Effect.pipe(
+          (await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout,
+          EffectString.trim,
+        ),
+      ).toBe(sharedHead);
       await expect(readFile(instruction)).rejects.toMatchObject({code: 'ENOENT'});
       await expect(readFile(startSkill)).rejects.toMatchObject({code: 'ENOENT'});
       expect(await readFile(configToml, 'utf8')).toBe('model = "user-selected-model"\n');
@@ -418,7 +498,7 @@ describe('Codex Cloud CLI integration', () => {
       expect(await readFile(join(f.home, 'integrations', 'agents.json'), 'utf8')).toBe(registry);
       expect(
         await Promise.all(
-          ['threadnote-context', 'threadnote-code-graph'].map(name =>
+          EffectArray.map(['threadnote-context', 'threadnote-code-graph'], name =>
             readFile(join(f.userHome, '.agents', 'skills', name, 'SKILL.md'), 'utf8'),
           ),
         ),
@@ -445,9 +525,12 @@ describe('Codex Cloud CLI integration', () => {
       expect(parsed((await f.run(['start', '--json'])).stdout).status).toBe('ok');
       expect(await Promise.all([readFile(instruction, 'utf8'), readFile(startSkill, 'utf8')])).toEqual(restoredFiles);
       expect(await readFile(join(f.home, 'integrations', 'agents.json'), 'utf8')).toBe(restoredRegistry);
-      expect((await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout.trim()).toBe(
-        sharedHead,
-      );
+      expect(
+        Effect.pipe(
+          (await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout,
+          EffectString.trim,
+        ),
+      ).toBe(sharedHead);
 
       await rm(startSkill);
       await writeFile(startSkill, 'Unowned Codex Cloud file.\n');
@@ -455,9 +538,12 @@ describe('Codex Cloud CLI integration', () => {
         stderr: expect.stringContaining('not managed by Threadnote'),
       });
       expect(await readFile(startSkill, 'utf8')).toBe('Unowned Codex Cloud file.\n');
-      expect((await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout.trim()).toBe(
-        sharedHead,
-      );
+      expect(
+        Effect.pipe(
+          (await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout,
+          EffectString.trim,
+        ),
+      ).toBe(sharedHead);
     } finally {
       await rm(f.root, {recursive: true, force: true});
     }
@@ -493,7 +579,7 @@ describe('Codex Cloud CLI integration', () => {
             second,
           )
         ).stdout,
-      ).toContain(uri.replace('threadnote://user/codex-cloud/', ''));
+      ).toContain(Effect.pipe(uri, EffectString.replace('threadnote://user/codex-cloud/', '')));
       expect((await f.run(['read', '--uri', uri], second)).stdout).toContain('Cloud persistence contract marker');
       const handoff = parsed(
         (
@@ -524,7 +610,7 @@ describe('Codex Cloud CLI integration', () => {
       await mkdir(inbound, {recursive: true});
       await writeFile(
         join(inbound, 'malformed.md'),
-        ['not a memory', '  code_citation: {not-json}', '', 'malformed fixture'].join('\r'),
+        EffectArray.join(['not a memory', '  code_citation: {not-json}', '', 'malformed fixture'], '\r'),
       );
       await exec('git', ['-C', seed, 'add', '.']);
       await exec('git', ['-C', seed, 'commit', '-m', 'Malformed inbound fixture'], {
@@ -574,7 +660,9 @@ describe('Codex Cloud CLI integration', () => {
       await expect(
         f.run(['remember', '--team', 'docs', '--reference', uri, '--text', 'Wrong share reference.']),
       ).rejects.toMatchObject({stderr: expect.stringContaining('selected share')});
-      await expect(f.run(['read', '--uri', uri.replace('/personal/', '/unconfigured/')])).rejects.toMatchObject({
+      await expect(
+        f.run(['read', '--uri', Effect.pipe(uri, EffectString.replace('/personal/', '/unconfigured/'))]),
+      ).rejects.toMatchObject({
         stderr: expect.stringContaining('configured Codex Cloud share'),
       });
       await f.run([

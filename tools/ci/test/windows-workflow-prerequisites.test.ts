@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -15,6 +16,8 @@ import {
   usable,
   VERSION,
 } from '../windows-workflow-prerequisites.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -104,7 +107,7 @@ it.each(['AMD64', 'x64', 'ARM64'])(
         expect.any(AbortSignal),
       );
       expect(options.fetch.mock.calls[0][1].aborted).toBe(false);
-      expect(options.probe.mock.calls.every(call => call[1] === 10_000)).toBe(true);
+      expect(EffectArray.every(options.probe.mock.calls, call => call[1] === 10_000)).toBe(true);
     }
   },
 );
@@ -112,7 +115,7 @@ it.each(['AMD64', 'x64', 'ARM64'])(
 it.each(['', 'previous-directory', 'previous-directory\n'])('appends one path line after %j', async initial => {
   const test = fixture(initial);
   const executable = await ensureRipgrep(test.environment, 'x64', dependencies());
-  const prefix = initial.endsWith('\n') || initial === '' ? initial : `${initial}\n`;
+  const prefix = Effect.pipe(initial, EffectString.endsWith('\n')) || initial === '' ? initial : `${initial}\n`;
   // Empty files receive a blank separator consistently with the original helper.
   expect(readFileSync(test.githubPath, 'utf8')).toBe(`${initial === '' ? '\n' : prefix}${dirname(executable)}\n`);
 });
@@ -180,7 +183,9 @@ it('ignores unrelated archive entries, including traversal entries', async () =>
   const payload = zipSync({[memberName()]: executableBytes, '../escaped.exe': Buffer.from('unrelated')});
   const executable = await ensureRipgrep(test.environment, 'x64', dependencies(payload));
   expect(readdirSync(dirname(executable))).toEqual(['rg.exe']);
-  expect(readdirSync(test.root).sort()).toEqual(['github-path', dirname(executable).split(/[/\\]/u).at(-1)].sort());
+  expect(readdirSync(test.root).sort()).toEqual(
+    ['github-path', Effect.pipe(dirname(executable), EffectString.split(/[/\\]/u)).at(-1)].sort(),
+  );
 });
 
 it.each(['archive', 'executable', 'empty executable'])('enforces the %s byte bound before publication', async kind => {

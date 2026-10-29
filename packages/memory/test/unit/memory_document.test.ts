@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -25,6 +26,15 @@ import {
   type MemoryCodeCitationInputV1,
 } from '@threadnote/memory/code/citation';
 import {migrateMemoryDocumentV4ToV5} from '@threadnote/memory/migrations';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
 
 describe('memory document contract', () => {
   it('recognizes reserved artifact roots without treating a basename or nested directory as an artifact', () => {
@@ -94,7 +104,7 @@ describe('memory document contract', () => {
               'repo_path: legacy-path',
             ],
             [...(input.topic === undefined ? [] : [`topic: ${input.topic}`, 'topic: ignored']), 'task: legacy-task'],
-            input.keywords.map(value => `keywords: ${value}`),
+            EffectArray.map(input.keywords, value => `keywords: ${value}`),
             [
               `schema_version: ${input.schema === 'spaced' ? ' ' : ''}${MEMORY_SCHEMA_VERSION}`,
               ...(input.schema === 'duplicate' ? [`schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`] : []),
@@ -102,19 +112,22 @@ describe('memory document contract', () => {
             [citationLine],
             [`kind: ${kind === 'handoff' ? '' : 'durable'}`, 'kind: preference', 'status: active'],
           ];
-          const header = [input.title, ...input.order.flatMap(index => groups[index])];
+          const header = [input.title, ...EffectArray.flatMap(input.order, index => groups[index])];
           const body = 'Payload remains readable.\nproject: body-only\nkeywords: hidden';
-          const raw = [
-            ...header,
-            '',
-            ...body.split('\n'),
-            ...(input.footer ? ['', '<!-- MEMORY_FIELDS', 'version: 1', '-->'] : []),
-          ].join(input.ending);
+          const raw = EffectArray.join(
+            [
+              ...header,
+              '',
+              ...Effect.pipe(body, EffectString.split('\n')),
+              ...(input.footer ? ['', '<!-- MEMORY_FIELDS', 'version: 1', '-->'] : []),
+            ],
+            input.ending,
+          );
           const uri = 'threadnote://user/me/memories/durable/projects/headers/property.md';
           const parsed = parseMemoryDocument(uri, raw)!;
           const inferred = inferMemoryMetadata(raw);
           const project = input.project ?? input.repo;
-          const keywords = input.keywords.filter(value => value !== '');
+          const keywords = EffectArray.filter(input.keywords, value => value !== '');
           const errors = [
             ...(input.schema === 'canonical' ? [] : [{reason: 'schema-version-mismatch'}]),
             ...(input.citation === 'canonical' ? [] : [{index: 0, reason: 'non-canonical'}]),
@@ -142,7 +155,7 @@ describe('memory document contract', () => {
             sourceAgentClient: input.agent,
             timestamp: input.timestamp,
           });
-          expect(memoryHeaderValue(header.join('\n'), 'candidate_id')).toBe(input.candidate);
+          expect(memoryHeaderValue(EffectArray.join(header, '\n'), 'candidate_id')).toBe(input.candidate);
           expect(parsed.headerTitle).toBe(input.title);
           expect(parsed.body).toBe(body);
           expect(parsed.content).toBe(raw);
@@ -167,35 +180,45 @@ describe('memory document contract', () => {
     const document = formatMemoryDocument('MEMORY', metadata, 'Use the shared ranker.');
 
     expect(document).toBe(
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        'topic: recall',
-        'source_agent_client: codex',
-        'timestamp: 2026-07-23T10:00:00.000Z',
-        'references: threadnote://resources/repos/threadnote/README.md',
-        '',
-        'Use the shared ranker.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: recall',
+          'source_agent_client: codex',
+          'timestamp: 2026-07-23T10:00:00.000Z',
+          'references: threadnote://resources/repos/threadnote/README.md',
+          '',
+          'Use the shared ranker.',
+        ],
+        '\n',
+      ),
     );
     expect(parseMemoryDocument('threadnote://user/me/memory.md', document)?.metadata).toEqual(metadata);
   });
 
   it('parses LF, CRLF, and CR legacy bodies equivalently without normalizing canonical content bytes', () => {
-    const lf = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      'project: threadnote',
-      'topic: newline-compatibility',
-      'schema_version: 1',
-      '',
-      'Legacy body remains nonempty.',
-      'Second line remains available to recall.',
-    ].join('\n');
-    const variants = [lf, lf.replaceAll('\n', '\r\n'), lf.replaceAll('\n', '\r')];
+    const lf = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        'project: threadnote',
+        'topic: newline-compatibility',
+        'schema_version: 1',
+        '',
+        'Legacy body remains nonempty.',
+        'Second line remains available to recall.',
+      ],
+      '\n',
+    );
+    const variants = [
+      lf,
+      Effect.pipe(lf, EffectString.replaceAll('\n', '\r\n')),
+      Effect.pipe(lf, EffectString.replaceAll('\n', '\r')),
+    ];
 
     for (const content of variants) {
       const parsed = parseMemoryDocument('threadnote://user/me/newline-compatibility.md', content);
@@ -269,7 +292,7 @@ describe('memory document contract', () => {
         kind: 'symbol',
         language: 'typescript',
         name: 'validateContextBriefPreciseCodeEvidence',
-        nodeId: `cgs_${'c'.repeat(40)}`,
+        nodeId: `cgs_${Effect.pipe('c', EffectString.repeat(40))}`,
         qualifiedName: 'validateContextBriefPreciseCodeEvidence',
         signatureHash: hash('d'),
         span: {column: 1, endColumn: 2, endLine: 63, line: 43},
@@ -289,10 +312,10 @@ describe('memory document contract', () => {
 
     const document = formatMemoryDocument('MEMORY', metadata, 'Precise evidence supersedes commit-only freshness.');
     const parsed = parseMemoryDocument('threadnote://user/me/memory.md', document);
-    const fileWire = JSON.parse(formatMemoryCodeCitation(file)) as Record<string, unknown>;
+    const fileWire = requireJsonObject(JSON.parse(formatMemoryCodeCitation(file)));
 
     expect(file.id).toBe('tncc_14b8d7c2ff2c496c2a70dd2576a6874e03865334');
-    expect(Object.keys(fileWire)).toEqual([
+    expect(EffectRecord.keys(fileWire)).toEqual([
       'version',
       'id',
       'repositoryId',
@@ -373,7 +396,7 @@ describe('memory document contract', () => {
     const migrated = migrateMemoryDocumentV4ToV5(v4);
     const parsed = parseMemoryDocument('threadnote://user/me/migrated.md', migrated);
 
-    expect(migrated).toBe(v4.replace('schema_version: 4', 'schema_version: 5'));
+    expect(migrated).toBe(Effect.pipe(v4, EffectString.replace('schema_version: 4', 'schema_version: 5')));
     expect(migrateMemoryDocumentV4ToV5(migrated)).toBe(migrated);
     expect(parsed?.metadata).toMatchObject({codeCitations: [citation], schemaVersion: 5});
     expect(parsed?.metadata.owner).toBeUndefined();
@@ -383,17 +406,20 @@ describe('memory document contract', () => {
   it('has a deterministic, idempotent v4-to-v5 migration that never adds maintenance metadata (property)', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 256}), body => {
-        const v4 = [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          'project: threadnote',
-          'source_agent_client: codex',
-          'timestamp: 2026-09-17T10:00:00.000Z',
-          'schema_version: 4',
-          '',
-          body,
-        ].join('\n');
+        const v4 = EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            'project: threadnote',
+            'source_agent_client: codex',
+            'timestamp: 2026-09-17T10:00:00.000Z',
+            'schema_version: 4',
+            '',
+            body,
+          ],
+          '\n',
+        );
 
         const migrated = migrateMemoryDocumentV4ToV5(v4);
         const parsed = parseMemoryDocument('threadnote://user/me/property.md', migrated);
@@ -403,7 +429,7 @@ describe('memory document contract', () => {
         expect(parsed?.metadata.schemaVersion).toBe(5);
         expect(parsed?.metadata.owner).toBeUndefined();
         expect(parsed?.metadata.reviewAfter).toBeUndefined();
-        expect(parsed?.body).toBe(body.replace(/\r\n?/gu, '\n').trim());
+        expect(parsed?.body).toBe(Effect.pipe(body, EffectString.replace(/\r\n?/gu, '\n'), EffectString.trim));
       }),
       {numRuns: 64},
     );
@@ -422,7 +448,7 @@ describe('memory document contract', () => {
     expect(
       parseMemoryDocument(
         'threadnote://user/me/invalid-review-date.md',
-        ['MEMORY', 'kind: durable', 'status: active', 'review_after: 2026-02-30', '', 'Body'].join('\n'),
+        EffectArray.join(['MEMORY', 'kind: durable', 'status: active', 'review_after: 2026-02-30', '', 'Body'], '\n'),
       )?.metadata.reviewAfter,
     ).toBeUndefined();
   });
@@ -437,23 +463,26 @@ describe('memory document contract', () => {
 
   it('preserves closed errors for malformed, unsupported, and non-canonical schema-v4 citation lines', () => {
     const valid = formatMemoryCodeCitation(createMemoryCodeCitation(citationInput('src/valid.ts')));
-    const {version: citationVersion, ...citationRest} = JSON.parse(valid) as Record<string, unknown>;
+    const {version: citationVersion, ...citationRest} = requireJsonObject(JSON.parse(valid));
     const reordered = JSON.stringify({...citationRest, version: citationVersion});
-    const document = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-      'source_agent_client: codex',
-      'timestamp: 2026-08-26T20:00:00.000Z',
-      'code_citation: {not-json}',
-      'code_citation: {"version":2}',
-      `code_citation: ${reordered}`,
-      `code_citation:  ${valid}`,
-      `  code_citation: ${valid}`,
-      '',
-      'Body remains readable.',
-    ].join('\n');
+    const document = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+        'source_agent_client: codex',
+        'timestamp: 2026-08-26T20:00:00.000Z',
+        'code_citation: {not-json}',
+        'code_citation: {"version":2}',
+        `code_citation: ${reordered}`,
+        `code_citation:  ${valid}`,
+        `  code_citation: ${valid}`,
+        '',
+        'Body remains readable.',
+      ],
+      '\n',
+    );
 
     const parsed = parseMemoryDocument('threadnote://user/me/malformed.md', document);
 
@@ -475,21 +504,24 @@ describe('memory document contract', () => {
   it('keeps imported records readable while bounding citation count, entry bytes, and aggregate bytes', () => {
     const largeCitations = Array.from({length: MAX_MEMORY_CODE_CITATIONS + 1}, (_, index) =>
       createMemoryCodeCitation({
-        ...citationInput(`src/${'p'.repeat(3_400)}-${index}.ts`),
-        extractorSet: 'e'.repeat(3_400),
+        ...citationInput(`src/${Effect.pipe('p', EffectString.repeat(3_400))}-${index}.ts`),
+        extractorSet: Effect.pipe('e', EffectString.repeat(3_400)),
       }),
     );
-    const document = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-      'source_agent_client: codex',
-      'timestamp: 2026-08-26T20:00:00.000Z',
-      ...largeCitations.map(citation => `code_citation: ${formatMemoryCodeCitation(citation)}`),
-      '',
-      'Imported body remains readable.',
-    ].join('\n');
+    const document = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+        'source_agent_client: codex',
+        'timestamp: 2026-08-26T20:00:00.000Z',
+        ...EffectArray.map(largeCitations, citation => `code_citation: ${formatMemoryCodeCitation(citation)}`),
+        '',
+        'Imported body remains readable.',
+      ],
+      '\n',
+    );
 
     const parsed = parseMemoryDocument('threadnote://user/me/oversized.md', document);
 
@@ -500,7 +532,13 @@ describe('memory document contract', () => {
       {reason: 'aggregate-too-large'},
     ]);
 
-    const oversizedEntry = document.replace(/^code_citation: .*$/m, `code_citation: ${'x'.repeat(8 * 1_024)}`);
+    const oversizedEntry = Effect.pipe(
+      document,
+      EffectString.replace(
+        /^code_citation: .*$/m,
+        `code_citation: ${Effect.pipe('x', EffectString.repeat(8 * 1_024))}`,
+      ),
+    );
     expect(
       parseMemoryDocument('threadnote://user/me/entry.md', oversizedEntry)?.metadata.citationErrors,
     ).toContainEqual({
@@ -511,17 +549,20 @@ describe('memory document contract', () => {
 
   it('requires an exact schema-v4 header before treating a valid citation as authoritative', () => {
     const citation = createMemoryCodeCitation(citationInput('src/schema.ts'));
-    const document = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      'schema_version: 4suffix',
-      'source_agent_client: codex',
-      'timestamp: 2026-08-26T20:00:00.000Z',
-      `code_citation: ${formatMemoryCodeCitation(citation)}`,
-      '',
-      'Body',
-    ].join('\n');
+    const document = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        'schema_version: 4suffix',
+        'source_agent_client: codex',
+        'timestamp: 2026-08-26T20:00:00.000Z',
+        `code_citation: ${formatMemoryCodeCitation(citation)}`,
+        '',
+        'Body',
+      ],
+      '\n',
+    );
 
     const parsed = parseMemoryDocument('threadnote://user/me/schema.md', document);
 
@@ -531,7 +572,10 @@ describe('memory document contract', () => {
 
     const spaced = parseMemoryDocument(
       'threadnote://user/me/schema-spaced.md',
-      document.replace('schema_version: 4suffix', `schema_version:  ${MEMORY_SCHEMA_VERSION}`),
+      Effect.pipe(
+        document,
+        EffectString.replace('schema_version: 4suffix', `schema_version:  ${MEMORY_SCHEMA_VERSION}`),
+      ),
     );
     expect(spaced?.metadata.schemaVersion).toBe(MEMORY_SCHEMA_VERSION);
     expect(spaced?.metadata.citationErrors).toEqual([{reason: 'schema-version-mismatch'}]);
@@ -576,8 +620,8 @@ describe('memory document contract', () => {
     expect(() =>
       createMemoryCodeCitation({
         ...citationInput('src/large.ts'),
-        extractorSet: 'x'.repeat(4_096),
-        path: `src/${'p'.repeat(4_000)}`,
+        extractorSet: Effect.pipe('x', EffectString.repeat(4_096)),
+        path: `src/${Effect.pipe('p', EffectString.repeat(4_000))}`,
       }),
     ).toThrow('per-entry byte limit');
     expect(() => assertMemorySchemaWritable(MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1)).toThrow(
@@ -598,83 +642,102 @@ describe('memory document contract', () => {
     ).toThrow('newer than supported');
     expect(() =>
       formatMemoryDocumentWithKeywords(
-        [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
-          '',
-          'Future body',
-        ].join('\n'),
-        ['must-not-rewrite'],
-      ),
-    ).toThrow('newer than supported');
-    const legacyCrLf = ['MEMORY', 'kind: durable', 'status: active', 'schema_version: 1', '', 'Legacy CRLF body'].join(
-      '\r\n',
-    );
-    expect(formatMemoryDocumentWithKeywords(legacyCrLf, ['safe-rewrite'])).toBe(
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'schema_version: 1',
-        'keywords: safe-rewrite',
-        '',
-        'Legacy CRLF body',
-      ].join('\n'),
-    );
-    for (const newline of ['\r\n', '\r']) {
-      expect(() =>
-        formatMemoryDocumentWithKeywords(
+        EffectArray.join(
           [
             'MEMORY',
             'kind: durable',
             'status: active',
             `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
             '',
-            'Future line-ending body',
-          ].join(newline),
+            'Future body',
+          ],
+          '\n',
+        ),
+        ['must-not-rewrite'],
+      ),
+    ).toThrow('newer than supported');
+    const legacyCrLf = EffectArray.join(
+      ['MEMORY', 'kind: durable', 'status: active', 'schema_version: 1', '', 'Legacy CRLF body'],
+      '\r\n',
+    );
+    expect(formatMemoryDocumentWithKeywords(legacyCrLf, ['safe-rewrite'])).toBe(
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'schema_version: 1',
+          'keywords: safe-rewrite',
+          '',
+          'Legacy CRLF body',
+        ],
+        '\n',
+      ),
+    );
+    for (const newline of ['\r\n', '\r']) {
+      expect(() =>
+        formatMemoryDocumentWithKeywords(
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+              '',
+              'Future line-ending body',
+            ],
+            newline,
+          ),
           ['must-not-rewrite'],
         ),
       ).toThrow('newer than supported');
     }
     expect(() =>
       formatMemoryDocumentWithKeywords(
-        [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          `  schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
-          '',
-          'Indented future body',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            `  schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+            '',
+            'Indented future body',
+          ],
+          '\n',
+        ),
         ['must-not-rewrite'],
       ),
     ).toThrow('newer than supported');
     expect(() =>
       formatMemoryDocumentWithKeywords(
-        [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          `schema_version: ${'9'.repeat(80)}`,
-          '',
-          'Unsafe-version body',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            `schema_version: ${Effect.pipe('9', EffectString.repeat(80))}`,
+            '',
+            'Unsafe-version body',
+          ],
+          '\n',
+        ),
         ['must-not-rewrite'],
       ),
     ).toThrow('canonical positive safe integer');
     expect(() =>
       formatMemoryDocumentWithKeywords(
-        [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-          `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
-          '',
-          'Duplicate-version body',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+            `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+            '',
+            'Duplicate-version body',
+          ],
+          '\n',
+        ),
         ['must-not-rewrite'],
       ),
     ).toThrow('must appear exactly once');
@@ -694,16 +757,38 @@ describe('memory document contract', () => {
       },
       'The coordinator renews worker leases after a stalled heartbeat.',
     );
-    const legacyKnownHeaders = Object.fromEntries(
-      document
-        .slice(0, document.indexOf('\n\n'))
-        .split('\n')
-        .slice(1)
-        .filter(line => !line.startsWith('keywords:'))
-        .map(line => {
-          const separator = line.indexOf(':');
-          return [line.slice(0, separator), line.slice(separator + 1).trim()];
-        }),
+    const legacyKnownHeaders = EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectArray.filter(
+          Effect.pipe(document, __effectPipeInput => {
+            const __effectPipeStage0 = Effect.pipe(
+              __effectPipeInput,
+              EffectString.slice(
+                0,
+                Effect.pipe(
+                  document,
+                  EffectString.indexOf('\n\n'),
+                  Effect.Option.getOrElse(() => -1),
+                ),
+              ),
+            );
+            const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.split('\n'));
+            return __effectPipeStage1;
+          }).slice(1),
+          line => !Effect.pipe(line, EffectString.startsWith('keywords:')),
+        ),
+        line => {
+          const separator = Effect.pipe(
+            line,
+            EffectString.indexOf(':'),
+            Effect.Option.getOrElse(() => -1),
+          );
+          return [
+            Effect.pipe(line, EffectString.slice(0, separator)),
+            Effect.pipe(line, EffectString.slice(separator + 1), EffectString.trim),
+          ];
+        },
+      ),
     );
 
     expect(legacyKnownHeaders).toMatchObject({
@@ -713,62 +798,80 @@ describe('memory document contract', () => {
       status: 'active',
       topic: 'lease-renewal',
     });
-    expect(document.split('\n\n')[1]).toBe('The coordinator renews worker leases after a stalled heartbeat.');
+    expect(Effect.pipe(document, EffectString.split('\n\n'))[1]).toBe(
+      'The coordinator renews worker leases after a stalled heartbeat.',
+    );
   });
 
   it('adds enrichment without dropping unknown headers or rewriting the body', () => {
-    const original = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      'future_writer_field: preserve-me',
-      'keywords: old alias',
-      'source_agent_client: codex',
-      'timestamp: 2026-07-23T10:00:00.000Z',
-      '',
-      'Body spacing stays intact.',
-      '',
-      'Second paragraph.',
-      '',
-      '<!-- MEMORY_FIELDS',
-      '{"version":1}',
-      '-->',
-    ].join('\n');
+    const original = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        'future_writer_field: preserve-me',
+        'keywords: old alias',
+        'source_agent_client: codex',
+        'timestamp: 2026-07-23T10:00:00.000Z',
+        '',
+        'Body spacing stays intact.',
+        '',
+        'Second paragraph.',
+        '',
+        '<!-- MEMORY_FIELDS',
+        '{"version":1}',
+        '-->',
+      ],
+      '\n',
+    );
 
     const enriched = formatMemoryDocumentWithKeywords(original, ['new paraphrase', 'another alias']);
 
     expect(enriched).toContain('future_writer_field: preserve-me');
     expect(enriched).not.toContain('keywords: old alias');
     expect(enriched).toContain('keywords: new paraphrase\nkeywords: another alias');
-    expect(enriched.split('\n\n').slice(1).join('\n\n')).toBe(
-      ['Body spacing stays intact.', '', 'Second paragraph.'].join('\n'),
+    expect(EffectArray.join(Effect.pipe(enriched, EffectString.split('\n\n')).slice(1), '\n\n')).toBe(
+      EffectArray.join(['Body spacing stays intact.', '', 'Second paragraph.'], '\n'),
     );
     expect(enriched).not.toContain('MEMORY_FIELDS');
   });
 
   it('excludes the legacy managed memory-fields trailer from the parsed body', () => {
-    const document = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      'source_agent_client: codex',
-      'timestamp: 2026-07-23T10:00:00.000Z',
-      '',
-      'Only this text belongs to the memory body.',
-      '',
-      '<!-- MEMORY_FIELDS',
-      '{',
-      '  "version": 1',
-      '}',
-      '-->',
-    ].join('\n');
+    const document = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        'source_agent_client: codex',
+        'timestamp: 2026-07-23T10:00:00.000Z',
+        '',
+        'Only this text belongs to the memory body.',
+        '',
+        '<!-- MEMORY_FIELDS',
+        '{',
+        '  "version": 1',
+        '}',
+        '-->',
+      ],
+      '\n',
+    );
 
     const parsed = parseMemoryDocument('threadnote://user/me/memory.md', document);
 
     expect(parsed?.body).toBe('Only this text belongs to the memory body.');
     expect(parsed?.content).toBe(document);
     expect(canonicalMemoryDocumentContent(document)).toBe(
-      document.slice(0, document.indexOf('\n\n<!-- MEMORY_FIELDS')),
+      Effect.pipe(
+        document,
+        EffectString.slice(
+          0,
+          Effect.pipe(
+            document,
+            EffectString.indexOf('\n\n<!-- MEMORY_FIELDS'),
+            Effect.Option.getOrElse(() => -1),
+          ),
+        ),
+      ),
     );
   });
 
@@ -824,17 +927,20 @@ describe('memory document contract', () => {
   it('ignores malformed and untyped relations', () => {
     const parsed = parseMemoryDocument(
       'threadnote://user/me/memory.md',
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'source_agent_client: codex',
-        'timestamp: 2026-07-23T10:00:00.000Z',
-        'relation: unknown threadnote://user/me/other.md',
-        'relation: related_to https://example.com',
-        '',
-        'Body',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'source_agent_client: codex',
+          'timestamp: 2026-07-23T10:00:00.000Z',
+          'relation: unknown threadnote://user/me/other.md',
+          'relation: related_to https://example.com',
+          '',
+          'Body',
+        ],
+        '\n',
+      ),
     );
 
     expect(parsed?.metadata.relations).toBeUndefined();
@@ -843,7 +949,10 @@ describe('memory document contract', () => {
   it('infers legacy repo and task aliases', () => {
     expect(
       inferMemoryMetadata(
-        ['HANDOFF', 'repo: threadnote', 'task: recall-quality', 'source_agent_client: claude', '', 'Body'].join('\n'),
+        EffectArray.join(
+          ['HANDOFF', 'repo: threadnote', 'task: recall-quality', 'source_agent_client: claude', '', 'Body'],
+          '\n',
+        ),
       ),
     ).toMatchObject({
       kind: 'handoff',
@@ -859,17 +968,17 @@ function citationInput(path: string): MemoryCodeCitationInputV1 {
     extractorSet: 'native-code-graph-13',
     fileContentHash: hash('a'),
     path,
-    repositoryId: '1'.repeat(64),
+    repositoryId: Effect.pipe('1', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: '2'.repeat(40),
+    sourceCommit: Effect.pipe('2', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceGraphContentId: `cgc_${'3'.repeat(40)}`,
-    sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
+    sourceGraphContentId: `cgc_${Effect.pipe('3', EffectString.repeat(40))}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('4', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   };
 }
 
 function hash(character: string): {readonly algorithm: 'sha256'; readonly value: string} {
-  return {algorithm: 'sha256', value: character.repeat(64)};
+  return {algorithm: 'sha256', value: Effect.pipe(character, EffectString.repeat(64))};
 }

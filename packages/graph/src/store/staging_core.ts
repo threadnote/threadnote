@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {codeGraphUtf8ByteLength, saturatingCapacityAdd} from '../disk/capacity.js';
@@ -127,7 +128,10 @@ const reclaimRetiredSnapshotPage = Effect.fn('codeGraph.reclaimRetiredSnapshotPa
   batchRowsByTable: ReadonlyMap<string, number> = new Map(),
 ) {
   const now = yield* Clock.currentTimeMillis;
-  const snapshotPlaceholders = snapshotIds.map(() => '?').join(', ');
+  const snapshotPlaceholders = EffectArray.join(
+    EffectArray.map(snapshotIds, () => '?'),
+    ', ',
+  );
   const eligibleTargets = sql.unsafe<{readonly id: string}>(
     `SELECT snapshot.id
      FROM snapshots AS snapshot
@@ -187,14 +191,20 @@ const reclaimRetiredSnapshotPage = Effect.fn('codeGraph.reclaimRetiredSnapshotPa
   for (const spec of RETIRED_SNAPSHOT_CLEANUP_SPECS) {
     if (spec.table === LEGACY_BUILDING_REFERENCES_V3_TABLE && !(yield* tableExists(sql, spec.table))) continue;
     const batchRows = batchRowsByTable.get(spec.table) ?? spec.batchRows;
-    const key = `(${spec.keyColumns.join(', ')})`;
+    const key = `(${EffectArray.join(spec.keyColumns, ', ')})`;
     yield* sql.unsafe(
       `DELETE FROM ${spec.table}
        WHERE ${key} IN (
-         SELECT ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+         SELECT ${EffectArray.join(
+           EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+           ', ',
+         )}
          FROM ${spec.table} AS candidate
          WHERE candidate.snapshot_id = ?
-         ORDER BY ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
+         ORDER BY ${EffectArray.join(
+           EffectArray.map(spec.keyColumns, column => `candidate.${column}`),
+           ', ',
+         )}
          LIMIT ?
        )`,
       [target.id, batchRows],
@@ -502,7 +512,11 @@ function stageActivationReferences(
   observer?: ActivationStagingObserver,
 ) {
   return Effect.gen(function* () {
-    const boundedReferences = references.filter(isCodeGraphReferenceWithinCandidateBudget);
+    const boundedReferences = EffectArray.filter(
+      references,
+      (__effectFilterValue: (typeof references)[number], __effectFilterIndex: number) =>
+        __effectFilterIndex in references && isCodeGraphReferenceWithinCandidateBudget(__effectFilterValue),
+    );
     yield* observer?.('references', 0, true) ?? Effect.void;
     for (const batch of chunk(
       sortedBy(boundedReferences, reference => reference.edgeId),
@@ -511,8 +525,11 @@ function stageActivationReferences(
       yield* sql.unsafe(
         `${activationInsertClause(mode)} INTO activation_references (
           edge_id, resolution_domain, exported_only, alias_lookup_keys_json
-        ) VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')}`,
-        batch.flatMap(reference => [
+        ) VALUES ${EffectArray.join(
+          EffectArray.map(batch, () => '(?, ?, ?, ?)'),
+          ', ',
+        )}`,
+        EffectArray.flatMap(batch, reference => [
           reference.edgeId,
           reference.resolutionDomain,
           reference.exportedOnly === true ? 1 : 0,
@@ -522,9 +539,9 @@ function stageActivationReferences(
       yield* observer?.('references', batch.length) ?? Effect.void;
       const candidates = [
         ...uniqueBy(
-          batch.flatMap(reference =>
-            reference.lookupTiers.flatMap((tier, tierIndex) =>
-              tier.map(key => [reference.edgeId, tierIndex, key] as const),
+          EffectArray.flatMap(batch, reference =>
+            EffectArray.flatMap(reference.lookupTiers, (tier, tierIndex) =>
+              EffectArray.map(tier, key => [reference.edgeId, tierIndex, key] as const),
             ),
           ),
           row => `${row[0]}\0${row[1]}\0${row[2]}`,
@@ -538,14 +555,24 @@ function stageActivationReferences(
         yield* sql.unsafe(
           `${activationInsertClause(mode)} INTO activation_reference_candidates (
             edge_id, tier, lookup_key
-          ) VALUES ${candidateBatch.map(() => '(?, ?, ?)').join(', ')}`,
+          ) VALUES ${EffectArray.join(
+            EffectArray.map(candidateBatch, () => '(?, ?, ?)'),
+            ', ',
+          )}`,
           candidateBatch.flat(),
         );
         yield* observer?.('reference-candidates', candidateBatch.length) ?? Effect.void;
       }
       const reexports = [
-        ...uniqueBy(batch.flatMap(normalizedReexportProvenance), reexport =>
-          [reexport.sourcePath, reexport.localName, reexport.targetPath, reexport.importedName].join('\0'),
+        ...uniqueBy(
+          EffectArray.flatMap(batch, (__effectFlatMapValue, __effectFlatMapIndex) =>
+            __effectFlatMapIndex in batch ? normalizedReexportProvenance(__effectFlatMapValue) : [],
+          ),
+          reexport =>
+            EffectArray.join(
+              [reexport.sourcePath, reexport.localName, reexport.targetPath, reexport.importedName],
+              '\0',
+            ),
         ),
       ].sort(
         (left, right) =>
@@ -559,8 +586,11 @@ function stageActivationReferences(
         yield* sql.unsafe(
           `INSERT OR IGNORE INTO activation_reexport_provenance (
             source_path, local_name, target_path, imported_name
-          ) VALUES ${reexportBatch.map(() => '(?, ?, ?, ?)').join(', ')}`,
-          reexportBatch.flatMap(reexport => [
+          ) VALUES ${EffectArray.join(
+            EffectArray.map(reexportBatch, () => '(?, ?, ?, ?)'),
+            ', ',
+          )}`,
+          EffectArray.flatMap(reexportBatch, reexport => [
             reexport.sourcePath,
             reexport.localName,
             reexport.targetPath,
@@ -588,8 +618,11 @@ function stageActivationMonikers(
           id, version, scheme, role, kind, resolution_domain, identity,
           package_name, package_version, import_path, qualified_name, component_id,
           symbol_id, dependency_kind, evidence_path, evidence_span_json
-        ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-        batch.flatMap(moniker => [
+        ) VALUES ${EffectArray.join(
+          EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+          ', ',
+        )}`,
+        EffectArray.flatMap(batch, moniker => [
           moniker.id,
           moniker.version,
           moniker.scheme,
@@ -625,8 +658,11 @@ function stageSnapshotMonikers(
           snapshot_id, id, version, scheme, role, kind, resolution_domain, identity,
           package_name, package_version, import_path, qualified_name, component_id,
           symbol_id, dependency_kind, evidence_path, evidence_span_json
-        ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-        batch.flatMap(moniker => [
+        ) VALUES ${EffectArray.join(
+          EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+          ', ',
+        )}`,
+        EffectArray.flatMap(batch, moniker => [
           snapshotId,
           moniker.id,
           moniker.version,
@@ -773,10 +809,13 @@ const stagePersistedAnalysisBatch = Effect.fn('codeGraph.stagePersistedAnalysisB
   for (const batch of chunk([...symbolCounts.values()], 400)) {
     yield* sql.unsafe(
       `INSERT INTO snapshot_analysis_symbol_counts (snapshot_id, language, kind, count)
-       VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')}
+       VALUES ${EffectArray.join(
+         EffectArray.map(batch, () => '(?, ?, ?, ?)'),
+         ', ',
+       )}
        ON CONFLICT(snapshot_id, language, kind) DO UPDATE SET
          count = snapshot_analysis_symbol_counts.count + excluded.count`,
-      batch.flatMap(row => [snapshotId, row.language, row.kind, row.count]),
+      EffectArray.flatMap(batch, row => [snapshotId, row.language, row.kind, row.count]),
     );
   }
 
@@ -785,10 +824,20 @@ const stagePersistedAnalysisBatch = Effect.fn('codeGraph.stagePersistedAnalysisB
     yield* sql.unsafe(
       `INSERT INTO snapshot_analysis_edge_histogram (
          snapshot_id, provenance, relation, confidence, endpoint_state, count
-       ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?)').join(', ')}
+       ) VALUES ${EffectArray.join(
+         EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?)'),
+         ', ',
+       )}
        ON CONFLICT(snapshot_id, provenance, relation, confidence, endpoint_state) DO UPDATE SET
          count = snapshot_analysis_edge_histogram.count + excluded.count`,
-      batch.flatMap(row => [snapshotId, row.provenance, row.relation, row.confidence, row.endpointState, row.count]),
+      EffectArray.flatMap(batch, row => [
+        snapshotId,
+        row.provenance,
+        row.relation,
+        row.confidence,
+        row.endpointState,
+        row.count,
+      ]),
     );
   }
   yield* sql`

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -31,6 +32,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface ParsedProductionLogEntry {
   readonly component: string;
@@ -47,7 +50,7 @@ interface ParsedProductionLogEntry {
   readonly schemaVersion: number;
 }
 
-class PrivateFailure extends Schema.TaggedError<PrivateFailure>()('PrivateFailure', {
+class PrivateFailure extends Schema.TaggedError<PrivateFailure, {readonly brand: unique symbol}>()('PrivateFailure', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
@@ -147,7 +150,7 @@ describe('production log writer', () => {
         expect(Exit.isFailure(taggedExit) ? Cause.squash(taggedExit.cause) : undefined).toBe(taggedFailure);
         const content = yield* fs.readFileString(productionLogPath(path, home));
         expect(content).not.toContain(secretType);
-        expect(parseEntries(content).filter(entry => entry.event === 'invocation.finished')).toEqual(
+        expect(EffectArray.filter(parseEntries(content), entry => entry.event === 'invocation.finished')).toEqual(
           expect.arrayContaining([
             expect.objectContaining({errorType: 'UnknownError', outcome: 'failure'}),
             expect.objectContaining({errorType: 'UnknownError', outcome: 'failure'}),
@@ -275,7 +278,7 @@ describe('production log writer', () => {
 
         const entries = parseEntries(yield* fs.readFileString(productionLogPath(path, home)));
         expect(entries).toHaveLength(invocationCount * 2);
-        expect(new Set(entries.map(entry => entry.invocationId)).size).toBe(invocationCount);
+        expect(new Set(EffectArray.map(entries, entry => entry.invocationId)).size).toBe(invocationCount);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -286,7 +289,10 @@ describe('production log writer', () => {
         Effect.flatMap(entries =>
           Effect.sync(() => {
             expect(entries).toHaveLength(2);
-            expect(entries.map(entry => entry.event)).toEqual(['invocation.started', 'invocation.finished']);
+            expect(EffectArray.map(entries, entry => entry.event)).toEqual([
+              'invocation.started',
+              'invocation.finished',
+            ]);
             expect(entries[0]?.invocationId).toBe(entries[1]?.invocationId);
           }),
         ),
@@ -335,7 +341,7 @@ describe('production log writer', () => {
       Effect.flatMap(entries =>
         Effect.sync(() => {
           expect(entries).toHaveLength(2);
-          expect(entries.map(entry => entry.event)).toEqual(['invocation.started', 'invocation.finished']);
+          expect(EffectArray.map(entries, entry => entry.event)).toEqual(['invocation.started', 'invocation.finished']);
           expect(entries[0]?.invocationId).toBe(entries[1]?.invocationId);
         }),
       ),
@@ -393,7 +399,7 @@ describe('production log writer', () => {
 
         const entries = parseEntries(yield* fs.readFileString(active));
         expect(entries).toHaveLength(4);
-        expect(entries.map(entry => entry.operation)).toEqual(['version', 'version', 'doctor', 'doctor']);
+        expect(EffectArray.map(entries, entry => entry.operation)).toEqual(['version', 'version', 'doctor', 'doctor']);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -467,7 +473,9 @@ describe('production log writer', () => {
         expect(excerpt.includedEntries).toBeGreaterThan(0);
         expect(excerpt.omittedEntries).toBeGreaterThan(0);
         expect(excerpt.content).toContain('"operation":"logs"');
-        expect(excerpt.content.trim().split('\n')).toHaveLength(excerpt.includedEntries);
+        expect(Effect2.pipe(excerpt.content, EffectString.trim, EffectString.split('\n'))).toHaveLength(
+          excerpt.includedEntries,
+        );
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -478,8 +486,12 @@ describe('production log writer', () => {
         const {fs, home, path} = yield* ownedTestHome('bounded-read');
         yield* withProductionLogging(home, {component: 'cli', operation: 'doctor'}, Effect.void);
         const active = productionLogPath(path, home);
-        const validLine = (yield* fs.readFileString(active)).trim().split('\n')[0];
-        yield* fs.writeFileString(active, `${validLine}\n`.repeat(4_000));
+        const validLine = Effect2.pipe(
+          yield* fs.readFileString(active),
+          EffectString.trim,
+          EffectString.split('\n'),
+        )[0];
+        yield* fs.writeFileString(active, Effect2.pipe(`${validLine}\n`, EffectString.repeat(4_000)));
         yield* fs.makeDirectory(`${active}.5`);
 
         const excerpt = yield* productionLogSupportExcerpt(home, 1_000);
@@ -685,10 +697,34 @@ function productionLogPath(path: Path.Path, home: string): string {
   return path.join(home, 'logs', PRODUCTION_LOG_FILE_NAME);
 }
 
+const isProductionLogEntry = Schema.is(
+  Schema.Struct({
+    component: Schema.String,
+    errorType: Schema.optionalKey(Schema.String),
+    event: Schema.String,
+    invocationId: Schema.String,
+    operation: Schema.String,
+    outcome: Schema.optionalKey(Schema.String),
+    phaseTimings: Schema.optionalKey(
+      Schema.Array(
+        Schema.Struct({
+          durationMilliseconds: Schema.Finite,
+          outcome: Schema.String,
+          phase: Schema.String,
+        }),
+      ),
+    ),
+    schemaVersion: Schema.Int,
+  }),
+);
+
 function parseEntries(content: string): readonly ParsedProductionLogEntry[] {
-  return content
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .map(line => JSON.parse(line) as ParsedProductionLogEntry);
+  return EffectArray.map(
+    EffectArray.filter(Effect2.pipe(content, EffectString.trim, EffectString.split('\n')), Boolean),
+    line => {
+      const entry: unknown = JSON.parse(line);
+      if (!isProductionLogEntry(entry)) throw TestError.make({message: 'Expected a complete production log entry.'});
+      return entry;
+    },
+  );
 }

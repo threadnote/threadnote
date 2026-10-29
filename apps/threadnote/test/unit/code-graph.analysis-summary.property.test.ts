@@ -1,6 +1,8 @@
+import {TestError} from '@threadnote/testing/test-error';
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import * as FC from 'fast-check';
@@ -16,6 +18,13 @@ import type {
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const edgeSpec = FC.record({
   confidence: FC.integer({max: 100, min: 35}),
@@ -49,15 +58,15 @@ describe('persisted code graph analysis summaries', () => {
           // Persisted delta activation is deliberately selected only when the
           // resolution surface is stable. Content, documentation and spans may
           // change while symbol identities remain reusable.
-          const effectiveSymbols = baseSymbols.map((symbol, index) => ({
+          const effectiveSymbols = EffectArray.map(baseSymbols, (symbol, index) => ({
             ...symbol,
             contentHash: `effective-${index}`,
             documentation: `effective documentation ${index}`,
           }));
           const baseEdgeMap = lastEdges(baseEdges, baseSymbols);
-          const deleted = new Set(deletedEdges.map(edgeId));
+          const deleted = new Set(EffectArray.map(deletedEdges, edgeId));
           const effectiveEdgeMap = new Map(
-            [...lastEdges(overlayEdges, effectiveSymbols)].filter(([id]) => !deleted.has(id)),
+            EffectArray.filter([...lastEdges(overlayEdges, effectiveSymbols)], ([id]) => !deleted.has(id)),
           );
           const baseSnapshot = snapshot(identity, 'base', baseSymbols.length, baseEdgeMap.size);
           const overlaySnapshot = {
@@ -147,7 +156,10 @@ describe('persisted code graph analysis summaries', () => {
             target: 2,
           }),
         ];
-        const effectiveSymbols = symbols.map((symbol, index) => ({...symbol, contentHash: `changed-${index}`}));
+        const effectiveSymbols = EffectArray.map(symbols, (symbol, index) => ({
+          ...symbol,
+          contentHash: `changed-${index}`,
+        }));
         const effectiveEdges = [
           // edge-000 collides with the base ID but changes every aggregate
           // dimension and becomes a self-loop.
@@ -429,20 +441,25 @@ describe('persisted code graph analysis summaries', () => {
         const partialCounts = yield* Effect.sync(() => {
           const database = new Database(databasePath, {readonly: true});
           try {
-            return database
-              .query(
-                `SELECT
+            return requiredRow(
+              database
+                .query<
+                  {
+                    readonly edges: number;
+                    readonly histogram: number;
+                    readonly receipts: number;
+                    readonly symbols: number;
+                  },
+                  SQLQueryBindings[]
+                >(
+                  `SELECT
                    (SELECT COUNT(*) FROM snapshot_analysis_symbol_counts) AS symbols,
                    (SELECT COUNT(*) FROM snapshot_analysis_edge_histogram) AS histogram,
                    (SELECT COUNT(*) FROM snapshot_analysis_edge_counts) AS edges,
                    (SELECT COUNT(*) FROM snapshot_analysis_summary_receipts) AS receipts`,
-              )
-              .get() as {
-              readonly edges: number;
-              readonly histogram: number;
-              readonly receipts: number;
-              readonly symbols: number;
-            };
+                )
+                .get(),
+            );
           } finally {
             database.close();
           }
@@ -462,22 +479,27 @@ describe('persisted code graph analysis summaries', () => {
           const database = new Database(databasePath);
           try {
             database.exec("PRAGMA foreign_keys = ON; DELETE FROM snapshots WHERE id = 'legacy-backfill';");
-            return database
-              .query(
-                `SELECT
+            return requiredRow(
+              database
+                .query<
+                  {
+                    readonly batches: number;
+                    readonly edges: number;
+                    readonly histogram: number;
+                    readonly receipts: number;
+                    readonly symbols: number;
+                  },
+                  SQLQueryBindings[]
+                >(
+                  `SELECT
                    (SELECT COUNT(*) FROM snapshot_analysis_symbol_counts) AS symbols,
                    (SELECT COUNT(*) FROM snapshot_analysis_edge_histogram) AS histogram,
                    (SELECT COUNT(*) FROM snapshot_analysis_edge_counts) AS edges,
                    (SELECT COUNT(*) FROM snapshot_analysis_summary_receipts) AS receipts,
                    (SELECT COUNT(*) FROM building_analysis_batches) AS batches`,
-              )
-              .get() as {
-              readonly batches: number;
-              readonly edges: number;
-              readonly histogram: number;
-              readonly receipts: number;
-              readonly symbols: number;
-            };
+                )
+                .get(),
+            );
           } finally {
             database.close();
           }
@@ -651,21 +673,21 @@ interface EdgeSpec {
 function repositoryIdentity(root: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'analysis-summary-property',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
 }
 
 function inventoryFile(hash: string): CodeGraphInventoryFile {
   return {
-    blobId: 'b'.repeat(40),
-    contentHash: hash.padEnd(64, '0'),
+    blobId: Effect2.pipe('b', EffectString.repeat(40)),
+    contentHash: Effect2.pipe(hash, EffectString.padEnd(64, '0')),
     language: 'typescript',
     mode: '100644',
     path: 'apps/threadnote/src/graph.ts',
@@ -730,9 +752,9 @@ function snapshot(identity: RepositoryIdentity, id: string, symbolCount: number,
 }
 
 function edgeId(value: number): string {
-  return `edge-${value.toString().padStart(3, '0')}`;
+  return `edge-${Effect2.pipe(value.toString(), EffectString.padStart(3, '0'))}`;
 }
 
 function nodeId(value: number): string {
-  return `node-${value.toString().padStart(3, '0')}`;
+  return `node-${Effect2.pipe(value.toString(), EffectString.padStart(3, '0'))}`;
 }

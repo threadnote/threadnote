@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Redacted} from 'effect';
 import type {LinearSourceConfig} from './config.js';
 import {LINEAR_MAX_COLLECTION_ITEMS, linearUuid} from './config.js';
@@ -21,6 +22,9 @@ import {
   type LinearComment,
   type LinearIssue,
 } from './schema.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export {
   LinearClientError,
   makeLinearClientBudget,
@@ -87,8 +91,11 @@ export function createLinearClient(token: Redacted.Redacted<string>, options: Li
       },
       hinted,
     );
-    const byId = new Map(rows.map(row => [row.id, row]));
-    const pending = rows.filter(row => row.hasChildren);
+    const byId = new Map(EffectArray.map(rows, row => [row.id, row]));
+    const pending = EffectArray.filter(
+      rows,
+      (row, __effectArrayIndex) => __effectArrayIndex in rows && row.hasChildren,
+    );
     const expanded = new Set<string>();
     while (pending.length) {
       const parent = pending.shift()!;
@@ -126,17 +133,17 @@ export function createLinearClient(token: Redacted.Redacted<string>, options: Li
       }
       if (row.resolvingCommentId && !byId.has(row.resolvingCommentId)) fail('contract-incomplete');
     }
-    return all
-      .filter(row => {
+    return EffectArray.map(
+      EffectArray.filter(all, row => {
         let current: typeof row | undefined = row;
         while (current) {
           if (current.documentContentId !== null) return false;
           current = current.parentId ? byId.get(current.parentId) : undefined;
         }
         return true;
-      })
-      .map(({hasChildren: _, ...row}) => row)
-      .sort((a, b) => a.id.localeCompare(b.id));
+      }),
+      ({hasChildren: _, ...row}) => row,
+    ).sort((a, b) => Effect.pipe(a.id, EffectString.localeCompare(b.id)));
   }
   const projectDetail = async (id: string) => {
     linearUuid(id);

@@ -1,8 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {normalizeTeamName, readTeamsFile} from '../share/core.js';
 import {validateWorkflowInput, workflowError, type WorkflowBinding} from './protocol.js';
+import * as EffectRecord from 'effect/Record';
 
 /** Read/reference authority only; never adds mutation ownership or changes a binding. */
 export const readWorkflowSharedRoots = Effect.fn('workflowMemory.sharedRoots')(function* (
@@ -14,7 +16,7 @@ export const readWorkflowSharedRoots = Effect.fn('workflowMemory.sharedRoots')(f
   if (binding.profile !== 'desktop') return binding.sharedRoots;
   const teams = yield* readTeamsFile(config);
   return yield* validateWorkflowInput(() =>
-    Object.keys(teams.teams).map(team => {
+    EffectArray.map(EffectRecord.keys(teams.teams), team => {
       if (normalizeTeamName(team) !== team)
         throw workflowError('invalid-share', 'Configured share names must be canonical.');
       return `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(team)}`;

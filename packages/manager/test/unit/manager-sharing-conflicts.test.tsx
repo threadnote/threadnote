@@ -1,9 +1,12 @@
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
-import {afterEach, describe, expect, it, vi} from 'vitest';
+import {assert, afterEach, describe, expect, it, vi} from 'vitest';
 import {ManagerDialogProvider} from '../../src/dialog.js';
 import {ConflictResolver} from '../../src/sharing_conflicts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 vi.mock('../../src/memory_editor.js', () => ({
   MemoryEditor: ({content, onChange}: {content: string; onChange: (value: string) => void}) => (
@@ -22,15 +25,28 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 async function render(node: React.ReactNode) {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
   await act(async () => root?.render(<ManagerDialogProvider>{node}</ManagerDialogProvider>));
 }
 function button(label: string) {
-  const match = Array.from(document.querySelectorAll('button')).find(item =>
-    item.textContent?.trim().startsWith(label),
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      Array.from(document.querySelectorAll('button')),
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(
+            item.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
   );
   if (!match) throw new Error('Button not found: ' + label);
   return match;
@@ -90,9 +106,7 @@ describe('Sharing conflict resolution', () => {
     await act(async () => button('Edit draft').click());
     await act(async () => button('Save and share resolution').click());
     expect(document.body.textContent).toContain('changed after you opened it');
-    expect((document.querySelector('[aria-label="Resolution draft"]') as HTMLTextAreaElement).value).toBe(
-      conflict.localContent + '\nMerged edit',
-    );
+    expect(requiredTextarea('[aria-label="Resolution draft"]').value).toBe(conflict.localContent + '\nMerged edit');
     expect(resolved).not.toHaveBeenCalled();
     expect(button('Reload versions')).toBeDefined();
   });
@@ -120,3 +134,9 @@ describe('Sharing conflict resolution', () => {
     expect(document.body.textContent).toContain('different memory identities');
   });
 });
+
+function requiredTextarea(selector: string): HTMLTextAreaElement {
+  const element = document.querySelector(selector);
+  assert(element instanceof HTMLTextAreaElement, `Missing textarea: ${selector}`);
+  return element;
+}

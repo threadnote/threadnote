@@ -3,6 +3,7 @@ import {Effect, Schema} from 'effect';
 import {captureMemoryCodeCitations, MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {mcpErrorResult} from './server/common.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {Array as EffectArray} from 'effect';
 
 export function captureMemoryCodeCitationsForMcp(
   config: RuntimeConfig,
@@ -32,11 +33,14 @@ function memoryCodeCitationCaptureErrorResult(error: unknown, operation: string)
     result.content = [
       {
         type: 'text',
-        text: [
-          error.message,
-          'No memory was written.',
-          `Retry the same ${operation} request unchanged after the graph writer is available.`,
-        ].join(' '),
+        text: EffectArray.join(
+          [
+            error.message,
+            'No memory was written.',
+            `Retry the same ${operation} request unchanged after the graph writer is available.`,
+          ],
+          ' ',
+        ),
       },
     ];
     result.structuredContent = {
@@ -58,11 +62,14 @@ function memoryCodeCitationCaptureErrorResult(error: unknown, operation: string)
   result.content = [
     {
       type: 'text',
-      text: [
-        error.message,
-        'No memory was written.',
-        `After preparation reports current ready evidence, retry the same ${operation} request unchanged.`,
-      ].join(' '),
+      text: EffectArray.join(
+        [
+          error.message,
+          'No memory was written.',
+          `After preparation reports current ready evidence, retry the same ${operation} request unchanged.`,
+        ],
+        ' ',
+      ),
     },
   ];
   result.structuredContent = {

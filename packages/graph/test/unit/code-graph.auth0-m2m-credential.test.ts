@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {generateKeyPair, SignJWT} from 'jose';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -7,6 +8,9 @@ import {
   parseAuth0M2MGraphCredentialRequest,
 } from '@threadnote/graph/sharing/auth0/m2m_graph_credential';
 import {createAccessTokenVerifier} from '@threadnote/protocol/access-token';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const now = Math.floor(Date.now() / 1000);
 const request = {
@@ -15,8 +19,8 @@ const request = {
   interactive: false,
   issuer: 'https://threadnote-org.eu.auth0.com/',
   organization: 'threadnote',
-  profileDigest: `sha256:${'a'.repeat(64)}`,
-  repositoryId: 'b'.repeat(64),
+  profileDigest: `sha256:${Effect.pipe('a', EffectString.repeat(64))}`,
+  repositoryId: Effect.pipe('b', EffectString.repeat(64)),
   schemaVersion: 1,
   scopes: ['graph:contribute'],
 } as const;
@@ -46,7 +50,7 @@ describe('Auth0 graph worker credential helper', () => {
         expect(init?.method).toBe('POST');
         expect(init?.redirect).toBe('error');
         const body = new URLSearchParams(String(init?.body));
-        expect(Object.fromEntries(body)).toEqual({
+        expect(EffectRecord.fromEntries(body)).toEqual({
           audience: request.audience,
           client_id: environment.THREADNOTE_AUTH0_GRAPH_M2M_CLIENT_ID,
           client_secret: environment.THREADNOTE_AUTH0_GRAPH_M2M_CLIENT_SECRET,
@@ -137,8 +141,8 @@ describe('Auth0 graph worker credential helper', () => {
       {...request, coordinatorUrl: 'https://other.threadnote.test/org'},
       {...request, issuer: 'https://other.eu.auth0.com/'},
       {...request, organization: 'other'},
-      {...request, profileDigest: `sha256:${'c'.repeat(64)}`},
-      {...request, repositoryId: 'c'.repeat(64)},
+      {...request, profileDigest: `sha256:${Effect.pipe('c', EffectString.repeat(64))}`},
+      {...request, repositoryId: Effect.pipe('c', EffectString.repeat(64))},
       {...request, scopes: ['graph:write']},
       {...request, interactive: true},
       {...request, extra: 'injected'},
@@ -199,7 +203,7 @@ describe('Auth0 graph worker credential helper', () => {
           {maxLength: 4},
         ),
         async scopes => {
-          const token = await signedToken(privateKey, {scope: scopes.join(' ')});
+          const token = await signedToken(privateKey, {scope: EffectArray.join(scopes, ' ')});
           const result = getAuth0M2MGraphCredential(request, environment, {
             key: async () => publicKey,
             now: () => now * 1000,
@@ -207,7 +211,7 @@ describe('Auth0 graph worker credential helper', () => {
               Response.json({
                 access_token: token,
                 expires_in: 600,
-                scope: [...scopes].reverse().join(' '),
+                scope: EffectArray.join([...scopes].reverse(), ' '),
                 token_type: 'Bearer',
               }),
           });
@@ -215,7 +219,7 @@ describe('Auth0 graph worker credential helper', () => {
             scopes.length > 0 &&
             scopes.includes('graph:contribute') &&
             new Set(scopes).size === scopes.length &&
-            scopes.every(scope => scope === 'graph:read' || scope === 'graph:contribute');
+            EffectArray.every(scopes, scope => scope === 'graph:read' || scope === 'graph:contribute');
           if (expected) expect((await result).accessToken).toBe(token);
           else await expect(result).rejects.toThrow('OAuth graph credential unavailable.');
         },
@@ -231,7 +235,7 @@ describe('Auth0 graph worker credential helper', () => {
       Response.json({access_token: 'opaque', token_type: 'Bearer', expires_in: 600, debug: 'extra'}),
       Response.json({access_token: 'opaque', token_type: 'mac', expires_in: 600}),
       Response.json({access_token: 'opaque', token_type: 'Bearer', expires_in: 601}),
-      new Response('x'.repeat(32769)),
+      new Response(Effect.pipe('x', EffectString.repeat(32769))),
     ];
     for (const response of bodies) {
       await expect(

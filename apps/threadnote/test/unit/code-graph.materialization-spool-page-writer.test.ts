@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Database} from 'bun:sqlite';
@@ -14,6 +15,8 @@ import {
   attachPersistentMaterializationSpool,
   materializationSpoolReadOnlyUri,
 } from '@threadnote/graph/store/materialization/spool_lifecycle';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = Layer.mergeAll(
   BunFileSystem.layer,
@@ -26,11 +29,11 @@ effectIt.effect('falls back to the verified path when SQLite URI attach is unava
     const calls: string[] = [];
     const spoolPath = '/tmp/threadnote spool.sqlite';
     const sql = {
-      unsafe: (_statement: string, parameters: readonly unknown[]) => {
-        calls.push(String(parameters[0]));
+      unsafe: (_statement: string, parameters?: readonly unknown[]) => {
+        calls.push(String(parameters?.[0]));
         return calls.length === 1 ? Effect.fail({code: 'SQLITE_CANTOPEN'}) : Effect.succeed([]);
       },
-    } as unknown as SqlClient.SqlClient;
+    } satisfies Parameters<typeof attachPersistentMaterializationSpool>[0];
 
     expect(yield* attachPersistentMaterializationSpool(sql, spoolPath)).toBe('verified-path-fallback');
     expect(calls).toEqual([materializationSpoolReadOnlyUri(spoolPath), spoolPath]);
@@ -41,11 +44,11 @@ effectIt.effect('does not weaken the attach mode for non-transient URI failures'
   Effect.gen(function* () {
     const calls: string[] = [];
     const sql = {
-      unsafe: (_statement: string, parameters: readonly unknown[]) => {
-        calls.push(String(parameters[0]));
+      unsafe: (_statement: string, parameters?: readonly unknown[]) => {
+        calls.push(String(parameters?.[0]));
         return Effect.fail({code: 'SQLITE_READONLY'});
       },
-    } as unknown as SqlClient.SqlClient;
+    } satisfies Parameters<typeof attachPersistentMaterializationSpool>[0];
 
     const result = yield* attachPersistentMaterializationSpool(sql, '/tmp/threadnote-spool.sqlite').pipe(Effect.result);
     expect(Result.isFailure(result)).toBe(true);
@@ -108,7 +111,10 @@ effectIt.effect('applies compact lexical dictionaries before exact joined postin
       expect(Result.isFailure(sidecarWrite)).toBe(true);
     }
     const surfaceIndex = (name: string) =>
-      CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES.findIndex(surface => surface.name === name);
+      EffectOption.getOrElse(
+        EffectArray.findFirstIndex(CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES, surface => surface.name === name),
+        () => -1,
+      );
     yield* writeCodeGraphMaterializationSpoolSurfacePage(sql, 'snapshot', surfaceIndex('lexical_snapshot'), {
       afterRowid: 0,
       rowCount: 1,
@@ -167,7 +173,7 @@ effectIt.effect('publishes exact deferred receipts and aggregate analysis atomic
             reference_count INTEGER NOT NULL, candidate_count INTEGER NOT NULL, reexport_count INTEGER NOT NULL
           );
           INSERT INTO materialization_spool_batches VALUES
-            (0, '${'b'.repeat(64)}', 100, 200, 7, 1, 2, 2, 2, 1, 3, 1);
+            (0, '${Effect2.pipe('b', EffectString.repeat(64))}', 100, 200, 7, 1, 2, 2, 2, 1, 3, 1);
           CREATE TABLE materialization_ordered_symbols (id TEXT NOT NULL);
           CREATE TABLE materialization_ordered_terms (term TEXT NOT NULL);
           CREATE TABLE materialization_ordered_symbol_terms (term TEXT NOT NULL, symbol_id TEXT NOT NULL, weight INTEGER NOT NULL);
@@ -232,13 +238,20 @@ effectIt.effect('publishes exact deferred receipts and aggregate analysis atomic
     yield* sql.unsafe("INSERT INTO symbols VALUES ('snapshot', 'typescript', 'function')");
     yield* sql.unsafe("INSERT INTO edges VALUES ('snapshot', 'source', 'target', 'syntactic', 'calls', 0.75)");
     yield* sql.unsafe("INSERT INTO building_references VALUES ('snapshot', 'declared', 'references', 0.5)");
-    const identity = 'a'.repeat(64);
+    const identity = Effect2.pipe('a', EffectString.repeat(64));
     yield* sql.unsafe(
       `INSERT INTO building_materialization_spool_surfaces (
          snapshot_id, surface_index, spool_identity, surface_name, row_count,
          next_page_index, applied_row_count, complete
-       ) VALUES ${CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES.map(() => "('snapshot', ?, ?, ?, 0, 0, 0, 1)").join(', ')}`,
-      CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES.flatMap((surface, index) => [index, identity, surface.name]),
+       ) VALUES ${EffectArray.join(
+         EffectArray.map(CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES, () => "('snapshot', ?, ?, ?, 0, 0, 0, 1)"),
+         ', ',
+       )}`,
+      EffectArray.flatMap(CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES, (surface, index) => [
+        index,
+        identity,
+        surface.name,
+      ]),
     );
     yield* attachPersistentMaterializationSpool(sql, sidecarPath);
     expect(yield* finalizeCodeGraphMaterializationSpoolReceipts(sql, 'snapshot', 'owner', identity)).toBe('finalized');
@@ -258,7 +271,7 @@ effectIt.effect('publishes exact deferred receipts and aggregate analysis atomic
     ]);
     expect(
       yield* sql.unsafe('SELECT batch_fingerprint, symbol_count, edge_count FROM building_materialization_batches'),
-    ).toEqual([{batch_fingerprint: 'b'.repeat(64), edge_count: 2, symbol_count: 1}]);
+    ).toEqual([{batch_fingerprint: Effect2.pipe('b', EffectString.repeat(64)), edge_count: 2, symbol_count: 1}]);
     yield* sql.unsafe('DETACH DATABASE materialization_spool');
   }).pipe(provideTestLayer(layer)),
 );

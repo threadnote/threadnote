@@ -16,10 +16,12 @@ import {purgeCodeGraphSnapshot} from '@threadnote/graph/snapshot/purge';
 import {CodeGraphStore} from '@threadnote/graph/store';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const checkoutId = 'a'.repeat(64);
-const worktreeId = 'b'.repeat(64);
-const scopeId = `code-graph-scope:${'c'.repeat(64)}`;
+const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+const worktreeId = Effect2.pipe('b', EffectString.repeat(64));
+const scopeId = `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`;
 const layer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
   Layer.provideMerge(TestSystemInfoLayer),
   Layer.provideMerge(BunServices.layer),
@@ -34,7 +36,11 @@ effectIt.effect('recognizes exact scoped builders for probes, drains, compaction
     yield* (yield* CodeGraphStore).initialize(layout.databasePath);
     const lock = codeGraphWorktreeLockPath(path, home, checkoutId, worktreeId, scopeId);
     yield* fs.makeDirectory(path.dirname(lock), {recursive: true});
-    for (const name of [`${'d'.repeat(64)}.lock.recovery`, `${'d'.repeat(64)}.scope-bad.lock`, 'unrelated.lock']) {
+    for (const name of [
+      `${Effect2.pipe('d', EffectString.repeat(64))}.lock.recovery`,
+      `${Effect2.pipe('d', EffectString.repeat(64))}.scope-bad.lock`,
+      'unrelated.lock',
+    ]) {
       yield* fs.writeFileString(path.join(path.dirname(lock), name), 'malformed');
     }
     expect(yield* codeGraphWorktreeBuildActive(home, checkoutId)).toBe(false);
@@ -58,8 +64,8 @@ effectIt.effect('recognizes exact scoped builders for probes, drains, compaction
         });
         const purge = yield* purgeCodeGraphSnapshot(
           home,
-          {checkoutId, snapshotId: `cgsn_${'e'.repeat(40)}`},
-          {apply: true, approvalDigest: `sha256:${'f'.repeat(64)}`},
+          {checkoutId, snapshotId: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`},
+          {apply: true, approvalDigest: `sha256:${Effect2.pipe('f', EffectString.repeat(64))}`},
         ).pipe(Effect.exit);
         expect(purge._tag).toBe('Failure');
       }),

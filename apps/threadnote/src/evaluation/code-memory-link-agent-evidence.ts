@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseCodeMemoryLinkAgentAbClientTrialSummaryV1} from './code-memory-link-agent-ab.js';
 import type {
@@ -14,6 +15,9 @@ import {
   parseCodeMemoryLinkCodexRawEvidenceV1,
   type CodeMemoryLinkCodexRawEvidenceV1,
 } from './code-memory-link-codex-evidence.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_AGENT_EVIDENCE_VERSION = 1 as const;
 
@@ -82,8 +86,8 @@ export function parseCodeMemoryLinkAgentEvidenceJsonl(input: string): readonly C
   if (new TextEncoder().encode(input).byteLength > MAXIMUM_EVIDENCE_JSONL_BYTES) {
     invalid('evidence JSONL input exceeds 128 MiB');
   }
-  return input.split(/\r?\n/u).flatMap((line, index) => {
-    if (!line.trim()) return [];
+  return EffectArray.flatMap(Effect.pipe(input, EffectString.split(/\r?\n/u)), (line, index) => {
+    if (!Effect.pipe(line, EffectString.trim)) return [];
     try {
       return [parseCodeMemoryLinkAgentEvidenceReceiptV1(JSON.parse(line) as unknown)];
     } catch (cause) {
@@ -96,7 +100,12 @@ export function parseCodeMemoryLinkAgentEvidenceJsonl(input: string): readonly C
 export function serializeCodeMemoryLinkAgentEvidenceJsonl(
   receipts: readonly CodeMemoryLinkAgentEvidenceReceiptV1[],
 ): string {
-  return receipts.length === 0 ? '' : `${receipts.map(receipt => JSON.stringify(receipt)).join('\n')}\n`;
+  return receipts.length === 0
+    ? ''
+    : `${EffectArray.join(
+        EffectArray.map(receipts, receipt => JSON.stringify(receipt)),
+        '\n',
+      )}\n`;
 }
 
 /**
@@ -109,7 +118,7 @@ export function assertCodeMemoryLinkAgentEvidenceLedgerV1(input: {
   readonly manifest: CodeMemoryLinkAgentAbManifestV1;
   readonly trials: readonly CodeMemoryLinkAgentAbTrialV1[];
 }): readonly CodeMemoryLinkAgentEvidenceReceiptV1[] {
-  const receipts = input.evidence.map(parseCodeMemoryLinkAgentEvidenceReceiptV1);
+  const receipts = EffectArray.map(input.evidence, parseCodeMemoryLinkAgentEvidenceReceiptV1);
   if (receipts.length !== input.trials.length) invalid('evidence ledger must contain exactly one receipt per trial');
   const evidenceHashes = new Set<string>();
   const appServerEvidenceHashes = new Set<string>();
@@ -120,8 +129,12 @@ export function assertCodeMemoryLinkAgentEvidenceLedgerV1(input: {
     const receipt = receipts[index];
     const raw = receipt.rawEvidence;
     const binding = raw.bindings;
-    const task = input.manifest.tasks.find(candidate => candidate.taskId === trial.taskId);
-    const client = input.manifest.clients.find(candidate => candidate.clientId === trial.clientId);
+    const task = EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.manifest.tasks, candidate => candidate.taskId === trial.taskId),
+    );
+    const client = EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.manifest.clients, candidate => candidate.clientId === trial.clientId),
+    );
     if (!task || !client) invalid(`evidence receipt ${index} is outside the manifest roster`);
     const expectedClientProjectionHash = codeMemoryLinkClientProjectionHash('expected-client', {
       appServerVersion: client.expectedClient.appServerVersion,
@@ -179,10 +192,16 @@ export function assertCodeMemoryLinkAgentEvidenceLedgerV1(input: {
     ) {
       invalid(`evidence receipt ${index} differs from the manifest task contract`);
     }
-    if (raw.rubric.goldCitationDigests.some(digest => !raw.graphPreflight.observedCitationDigests.includes(digest))) {
+    if (
+      EffectArray.some(
+        raw.rubric.goldCitationDigests,
+        digest => !raw.graphPreflight.observedCitationDigests.includes(digest),
+      )
+    ) {
       invalid(`evidence receipt ${index} graph preflight omitted a gold citation`);
     }
-    const contextCalls = raw.appServer.checkpoints.filter(
+    const contextCalls = EffectArray.filter(
+      raw.appServer.checkpoints,
       checkpoint => checkpoint.method === 'item/completed' && checkpoint.itemType === 'mcpToolCall',
     );
     const expectedResponseHash =
@@ -237,9 +256,9 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }

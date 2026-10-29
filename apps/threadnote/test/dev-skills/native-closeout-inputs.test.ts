@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Option} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -26,6 +27,8 @@ import {
 import type {NativeAuthoringCall} from '../../src/workflow_automation/authoring_artifacts.js';
 import {AuthoringReferenceSchema} from '../../src/workflow_automation/authoring_artifacts.js';
 import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const generation = 'skill-generation-v1';
 const common = {
@@ -150,9 +153,9 @@ const setup = Effect.fn('test.closeoutInputs.setup')(function* (withSpec = false
     if (!specState || spec.kind !== 'spec') throw new Error('Expected spec state.');
     plan = decodeNativeAuthoringDocument({
       ...plan,
-      phases: plan.phases.map(phase => ({
+      phases: EffectArray.map(plan.phases, phase => ({
         ...phase,
-        acceptance: phase.acceptance.map(item => ({...item, scenarioIds: ['read']})),
+        acceptance: EffectArray.map(phase.acceptance, item => ({...item, scenarioIds: ['read']})),
       })),
       spec: {
         root,
@@ -198,7 +201,7 @@ const setup = Effect.fn('test.closeoutInputs.setup')(function* (withSpec = false
     phases: [
       {
         id: 'one',
-        definitionHash: '1'.repeat(64),
+        definitionHash: Effect2.pipe('1', EffectString.repeat(64)),
         title: 'One',
         dependsOn: [],
         allowedPaths: ['source.ts'],
@@ -216,9 +219,13 @@ const setup = Effect.fn('test.closeoutInputs.setup')(function* (withSpec = false
   const cycle = validateNativeCyclePhase(
     initializeNativeCycle(cyclePlan),
     'one',
-    {head: 'a'.repeat(40), tree: 'b'.repeat(40), files: ['source.ts']},
     {
-      snapshotTree: 'b'.repeat(40),
+      head: Effect2.pipe('a', EffectString.repeat(40)),
+      tree: Effect2.pipe('b', EffectString.repeat(40)),
+      files: ['source.ts'],
+    },
+    {
+      snapshotTree: Effect2.pipe('b', EffectString.repeat(40)),
       status: 'passed',
       productState: 'working',
       checks: [{command: 'fixture check', result: 'passed', evidence: 'Observed.'}],
@@ -264,13 +271,10 @@ effectIt.effect('admits clean current source and only active original authoring-
     const result = yield* f.load();
     expect(result.planRoot).toEqual(f.planRoot);
     expect(result.plan).toEqual(f.plan);
-    const gitRoot = (yield* runCommandEffect('git', [
-      '--no-optional-locks',
-      '-C',
-      f.repo,
-      'rev-parse',
-      '--show-toplevel',
-    ])).stdout.trim();
+    const gitRoot = Effect2.pipe(
+      (yield* runCommandEffect('git', ['--no-optional-locks', '-C', f.repo, 'rev-parse', '--show-toplevel'])).stdout,
+      EffectString.trim,
+    );
     const canonicalGitRoot = yield* f.fs.realPath(gitRoot);
     const fixtureRoot = yield* f.fs.realPath(f.repo);
     const gitAuthority = yield* readPathFileSystemAuthority(canonicalGitRoot, 'Directory');
@@ -283,12 +287,18 @@ effectIt.effect('admits clean current source and only active original authoring-
     expect(result.source.tree).toMatch(/^[a-f0-9]{40}$/u);
     expect(result.owned.length).toBeGreaterThan(0);
     expect(
-      result.owned.every(
-        item => item.runId === 'plan-run' && item.sourceRunId === 'plan-run' && item.role.startsWith('authoring-'),
+      EffectArray.every(
+        result.owned,
+        item =>
+          item.runId === 'plan-run' &&
+          item.sourceRunId === 'plan-run' &&
+          Effect2.pipe(item.role, EffectString.startsWith('authoring-')),
       ),
     ).toBe(true);
-    expect(result.owned.some(item => item.artifactKey === 'unrelated')).toBe(false);
-    expect(new Set(result.owned.map(item => item.bindingId + '\n' + item.uri)).size).toBe(result.owned.length);
+    expect(EffectArray.some(result.owned, item => item.artifactKey === 'unrelated')).toBe(false);
+    expect(new Set(EffectArray.map(result.owned, item => item.bindingId + '\n' + item.uri)).size).toBe(
+      result.owned.length,
+    );
     expect(yield* f.fs.readFileString(f.statePath('controller'))).toBe(before);
   }).pipe(run),
 );
@@ -298,8 +308,8 @@ effectIt.effect('loads approved linked spec from its separate original authoring
     const f = yield* setup(true);
     const result = yield* f.load();
     expect(result.spec).toEqual(specDocument());
-    expect(new Set(result.owned.map(item => item.runId))).toEqual(new Set(['plan-run', 'spec-run']));
-    expect(new Set(result.owned.map(item => item.bindingId)).size).toBe(2);
+    expect(new Set(EffectArray.map(result.owned, item => item.runId))).toEqual(new Set(['plan-run', 'spec-run']));
+    expect(new Set(EffectArray.map(result.owned, item => item.bindingId)).size).toBe(2);
   }).pipe(run),
 );
 
@@ -331,7 +341,10 @@ effectIt.effect('rejects missing cycle, generation drift, loaded root drift and 
             const parsed = Schema.decodeUnknownSync(loadedRootSchema)(value);
             return {
               ...value,
-              authoring: {...value.authoring, root: {...parsed.authoring.root, revision: 'f'.repeat(64)}},
+              authoring: {
+                ...value.authoring,
+                root: {...parsed.authoring.root, revision: Effect2.pipe('f', EffectString.repeat(64))},
+              },
             };
           }
           return value;
@@ -347,7 +360,15 @@ effectIt.effect('rejects a missing owned artifact rather than silently dropping 
   Effect.gen(function* () {
     const f = yield* setup();
     const initial = yield* f.load();
-    const owned = initial.owned.find(item => item.role === 'authoring-child' && item.uri.includes('arch-current'));
+    const owned = Option.getOrUndefined(
+      EffectArray.findFirst(
+        initial.owned,
+        __effectArrayValue =>
+          !!(item => item.role === 'authoring-child' && Effect2.pipe(item.uri, EffectString.includes('arch-current')))(
+            __effectArrayValue,
+          ),
+      ),
+    );
     if (!owned) throw new Error('Expected authoring data fixture.');
     yield* f.store.remove(f.location, owned.uri);
     expect((yield* f.load().pipe(Effect.result))._tag).toBe('Failure');

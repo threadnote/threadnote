@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -14,6 +16,8 @@ import type {CodeGraphReusableReexport} from '@threadnote/graph/store';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSymbol} from '@threadnote/graph/types';
 import {mergeCodeGraphWorkspaces} from '@threadnote/graph/workspace';
 import {classifyWorkspaceTransition} from '@threadnote/graph/workspace/transition';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('project incremental closure', () => {
   it('includes unchanged nested ownership paths and reverse dependents from each project version', () => {
@@ -22,11 +26,11 @@ describe('project incremental closure', () => {
     const newLib = transitionProject('new-lib', 'packages/lib');
     const newConsumer = transitionProject('consumer', 'packages/consumer', ['new-lib']);
     const paths = ['packages/consumer/index.ts', 'packages/lib/index.ts', 'packages/lib/nested/kept.ts'];
-    const files = paths.map(path => ({
+    const files = EffectArray.map(paths, path => ({
       path,
       size: 10,
       resolutionDomains: ['typescript'],
-      hasWorkspacePackageSymbol: path.startsWith('packages/lib/'),
+      hasWorkspacePackageSymbol: Effect.pipe(path, EffectString.startsWith('packages/lib/')),
     }));
     const transition = classifyWorkspaceTransition({
       base: transitionSide([oldConsumer, oldLib], files),
@@ -51,13 +55,13 @@ describe('project incremental closure', () => {
           transitionProject(`p${index}`, `packages/p${index}`, index + 1 < count ? [`p${index + 1}`] : []),
         );
         const target = `p${Math.floor(count / 2)}`;
-        const currentProjects = projects.map((value, index) =>
+        const currentProjects = EffectArray.map(projects, (value, index) =>
           index === Math.floor(count / 2)
             ? transitionProject(value.id, value.root, [...value.dependencies, 'added'])
             : value,
         );
         const files = [
-          ...projects.map(value => ({
+          ...EffectArray.map(projects, value => ({
             path: `${value.root}/index.ts`,
             size: 1,
             resolutionDomains: ['typescript'],
@@ -79,10 +83,14 @@ describe('project incremental closure', () => {
         if (transition.mode === 'eligible') {
           const expected = independentReverseClosure(projects, [target]);
           expect([...expected].sort()).toEqual(
-            projects
-              .filter(value => transition.baseAffectedPaths.includes(`${value.root}/index.ts`))
-              .map(value => value.id)
-              .sort(),
+            EffectArray.map(
+              EffectArray.filter(
+                projects,
+                __effectArrayValue =>
+                  !!(value => transition.baseAffectedPaths.includes(`${value.root}/index.ts`))(__effectArrayValue),
+              ),
+              value => value.id,
+            ).sort(),
           );
         }
       }),
@@ -95,13 +103,18 @@ describe('project incremental closure', () => {
       FC.property(
         FC.record({depth: FC.integer({min: 1, max: 5}), dependentCount: FC.integer({min: 0, max: 8})}),
         ({depth, dependentCount}) => {
-          const childRoot = `packages/${Array.from({length: depth}, () => 'nested').join('/')}`;
+          const childRoot = `packages/${EffectArray.join(
+            Array.from({length: depth}, () => 'nested'),
+            '/',
+          )}`;
           const parent = transitionProject('parent', 'packages');
           const child = transitionProject('child', childRoot);
           const oldConsumers = Array.from({length: dependentCount}, (_, index) =>
             transitionProject(`consumer${index}`, `apps/consumer${index}`, ['parent']),
           );
-          const currentConsumers = oldConsumers.map(value => transitionProject(value.id, value.root, ['child']));
+          const currentConsumers = EffectArray.map(oldConsumers, value =>
+            transitionProject(value.id, value.root, ['child']),
+          );
           const allFiles = [
             {
               path: `${childRoot}/src/kept.ts`,
@@ -109,7 +122,7 @@ describe('project incremental closure', () => {
               resolutionDomains: ['typescript'],
               hasWorkspacePackageSymbol: true,
             },
-            ...oldConsumers.map(value => ({
+            ...EffectArray.map(oldConsumers, value => ({
               path: `${value.root}/index.ts`,
               size: 3,
               resolutionDomains: ['typescript'],
@@ -118,8 +131,8 @@ describe('project incremental closure', () => {
           ];
           const baseProjects = [parent, ...oldConsumers];
           const currentProjects = [parent, child, ...currentConsumers];
-          const beforeSeeds = ['parent', ...oldConsumers.map(value => value.id)];
-          const afterSeeds = ['child', ...currentConsumers.map(value => value.id)];
+          const beforeSeeds = ['parent', ...EffectArray.map(oldConsumers, value => value.id)];
+          const afterSeeds = ['child', ...EffectArray.map(currentConsumers, value => value.id)];
           for (const direction of [
             {base: baseProjects, current: currentProjects, baseSeeds: beforeSeeds, currentSeeds: afterSeeds},
             {base: currentProjects, current: baseProjects, baseSeeds: afterSeeds, currentSeeds: beforeSeeds},
@@ -190,9 +203,9 @@ describe('project incremental closure', () => {
 
   it('finds the exact reverse-transitive declared project closure and deterministically selects its files', () => {
     const projects = [project('app', ['barrel']), project('barrel', ['core']), project('core'), project('unrelated')];
-    const files = projects.flatMap(value => [inventory(`${value.root}/index.ts`, 32)]);
+    const files = EffectArray.flatMap(projects, value => [inventory(`${value.root}/index.ts`, 32)]);
     const plan = planProjectIncrementalClosure({
-      cachedFactBytesByPath: new Map(files.map(file => [file.path, 64])),
+      cachedFactBytesByPath: new Map(EffectArray.map(files, file => [file.path, 64])),
       files: [...files].reverse(),
       modifiedPaths: ['packages/barrel/index.ts'],
       projects: [...projects].reverse(),
@@ -224,16 +237,19 @@ describe('project incremental closure', () => {
       ],
     };
     const merged = mergeCodeGraphWorkspaces([workspace(canonicalProjects), workspace([appWithBuildEvidence])]);
-    const files = canonicalProjects.map(value => inventory(`${value.root}/index.ts`, 1));
+    const files = EffectArray.map(canonicalProjects, value => inventory(`${value.root}/index.ts`, 1));
     const common = {
-      cachedFactBytesByPath: new Map(files.map(file => [file.path, 1])),
+      cachedFactBytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
       files,
       modifiedPaths: ['packages/core/index.ts'],
       seedProjectIds: ['core'],
       workspaceDiagnostics: [] as readonly string[],
     };
 
-    expect(merged.projects.find(value => value.id === 'app')?.dependencyDetails).toEqual([
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(merged.projects, value => value.id === 'app'))
+        ?.dependencyDetails,
+    ).toEqual([
       {evidence: 'packages/app/package.json', provenance: 'declared', targetId: 'core'},
       {evidence: 'packages/app/tsconfig.json', provenance: 'declared', targetId: 'core'},
     ]);
@@ -244,9 +260,9 @@ describe('project incremental closure', () => {
 
   it('retains otherwise-compatible modified files outside the seeded closure without leaking their unchanged peers', () => {
     const projects = [project('app', ['barrel']), project('barrel'), project('other'), project('idle')];
-    const files = projects.map(value => inventory(`${value.root}/index.ts`, 1));
+    const files = EffectArray.map(projects, value => inventory(`${value.root}/index.ts`, 1));
     const plan = planProjectIncrementalClosure({
-      cachedFactBytesByPath: new Map(files.map(file => [file.path, 1])),
+      cachedFactBytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
       files,
       modifiedPaths: ['packages/barrel/index.ts', 'packages/other/index.ts'],
       projects,
@@ -333,18 +349,18 @@ describe('project incremental closure', () => {
         seedProjectIds: [scopeId],
       });
       expect(assessment.mode === 'eligible' ? assessment.candidateLookupKeys : undefined).toEqual(
-        [...ownedKeys].sort().map(key => ({key, resolutionDomain: 'typescript'})),
+        EffectArray.map([...ownedKeys].sort(), key => ({key, resolutionDomain: 'typescript'})),
       );
       expect(assessment.mode === 'eligible' ? assessment.candidateReexports : undefined).toEqual([]);
       expect(assessProjectClosureSeeds({committedFacts: [effective], effectiveFacts: [committed], projects})).toEqual({
-        candidateLookupKeys: [...ownedKeys].sort().map(key => ({key, resolutionDomain: 'typescript'})),
+        candidateLookupKeys: EffectArray.map([...ownedKeys].sort(), key => ({key, resolutionDomain: 'typescript'})),
         candidateReexports: [],
         mode: 'eligible',
         planningOperations: {ownershipChecks: 1, pathIndexProjects: 1},
         seedProjectIds: [scopeId],
       });
       const renamedName = `renamed${suffix}`;
-      const renamedKeys = keys.map(key => key.replaceAll(name, renamedName));
+      const renamedKeys = EffectArray.map(keys, key => Effect.pipe(key, EffectString.replaceAll(name, renamedName)));
       const renamed = {
         ...added,
         id: `renamed-symbol-${suffix}`,
@@ -363,7 +379,7 @@ describe('project incremental closure', () => {
         seedProjectIds: [scopeId],
       });
       expect(renameAssessment.mode === 'eligible' ? renameAssessment.candidateLookupKeys : undefined).toEqual(
-        [...ownedKeys, ...renamedKeys].sort().map(key => ({key, resolutionDomain: 'typescript'})),
+        EffectArray.map([...ownedKeys, ...renamedKeys].sort(), key => ({key, resolutionDomain: 'typescript'})),
       );
       expect(
         assessProjectClosureSeeds({
@@ -449,9 +465,10 @@ describe('project incremental closure', () => {
       const newHeading = markdownHeading(path, newName, !reverseKeys, '@fixture/current');
       const oldFacts = facts(path, [oldHeading], false);
       const newFacts = facts(path, [newHeading], false);
-      const expectedKeys = [...(oldHeading.lookupKeys ?? []), ...(newHeading.lookupKeys ?? [])]
-        .sort()
-        .map(key => ({key, resolutionDomain: 'global'}));
+      const expectedKeys = EffectArray.map(
+        [...(oldHeading.lookupKeys ?? []), ...(newHeading.lookupKeys ?? [])].sort(),
+        key => ({key, resolutionDomain: 'global'}),
+      );
 
       expect(assessProjectClosureSeeds({committedFacts: [oldFacts], effectiveFacts: [newFacts], projects: []})).toEqual(
         {
@@ -512,11 +529,17 @@ describe('project incremental closure', () => {
       const effectiveCurrentMask = (maskedCurrent | effectiveDeletedMask) === 0 ? 1 : maskedCurrent;
       const projects = Array.from({length: projectCount}, (_, index) => project(`p${index}`));
       const paths = (mask: number) =>
-        projects.filter((_, index) => (mask & (1 << index)) !== 0).map(value => `${value.root}/index.ts`);
-      const expected = projects
-        .filter((_, index) => ((effectiveCurrentMask | effectiveDeletedMask) & (1 << index)) !== 0)
-        .map(value => value.id)
-        .sort();
+        EffectArray.map(
+          EffectArray.filter(projects, (_, index) => (mask & (1 << index)) !== 0),
+          value => `${value.root}/index.ts`,
+        );
+      const expected = EffectArray.map(
+        EffectArray.filter(
+          projects,
+          (_, index) => ((effectiveCurrentMask | effectiveDeletedMask) & (1 << index)) !== 0,
+        ),
+        value => value.id,
+      ).sort();
       const input = {
         baseProjects: reverse ? [...projects].reverse() : projects,
         currentChangedPaths: reverse ? paths(effectiveCurrentMask).reverse() : paths(effectiveCurrentMask),
@@ -563,25 +586,37 @@ describe('project incremental closure', () => {
       });
       const ordered = reverse ? [...entries].reverse() : entries;
       const partition = partitionProjectResolutionSurfaceChanges(
-        ordered.map(entry => entry.committed),
-        ordered.map(entry => entry.effective),
+        EffectArray.map(ordered, entry => entry.committed),
+        EffectArray.map(ordered, entry => entry.effective),
       );
-      const changedPaths = entries
-        .filter(entry => entry.changed)
-        .map(entry => entry.path)
-        .sort();
-      const stablePaths = entries
-        .filter(entry => !entry.changed)
-        .map(entry => entry.path)
-        .sort();
+      const changedPaths = EffectArray.map(
+        EffectArray.filter(entries, (entry, __effectArrayIndex) => __effectArrayIndex in entries && entry.changed),
+        entry => entry.path,
+      ).sort();
+      const stablePaths = EffectArray.map(
+        EffectArray.filter(entries, entry => !entry.changed),
+        entry => entry.path,
+      ).sort();
 
-      expect(partition?.changedCommittedFacts.map(value => value.path)).toEqual(changedPaths);
-      expect(partition?.changedEffectiveFacts.map(value => value.path)).toEqual(changedPaths);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(partition?.changedCommittedFacts), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, value => value.path),
+          ),
+        ),
+      ).toEqual(changedPaths);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(partition?.changedEffectiveFacts), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, value => value.path),
+          ),
+        ),
+      ).toEqual(changedPaths);
       expect(partition?.stablePaths).toEqual(stablePaths);
       expect(
         partitionProjectResolutionSurfaceChanges(
-          ordered.map(entry => entry.committed),
-          ordered.slice(1).map(entry => entry.effective),
+          EffectArray.map(ordered, entry => entry.committed),
+          EffectArray.map(ordered.slice(1), entry => entry.effective),
         ),
       ).toBeUndefined();
     },
@@ -659,7 +694,7 @@ describe('project incremental closure', () => {
         baseProjects: [runtime],
         currentChangedPaths: orderedPaths,
         currentProjects: [runtime],
-        currentResolutionDomainByPath: new Map(paths.map(path => [path, 'documentation'])),
+        currentResolutionDomainByPath: new Map(EffectArray.map(paths, path => [path, 'documentation'])),
         deletedPaths: [],
       });
 
@@ -675,7 +710,7 @@ describe('project incremental closure', () => {
           currentChangedPaths: [],
           currentProjects: [runtime],
           deletedPaths: orderedPaths,
-          deletedResolutionDomainByPath: new Map(paths.map(path => [path, 'documentation'])),
+          deletedResolutionDomainByPath: new Map(EffectArray.map(paths, path => [path, 'documentation'])),
         }),
       ).toEqual(result);
       expect(JSON.stringify(result)).not.toContain('private-');
@@ -776,7 +811,9 @@ describe('project incremental closure', () => {
     expect(
       planProjectIncrementalClosure({
         ...common,
-        cachedFactBytesByPath: new Map(aggregateBudgetFiles.slice(0, 4).map(value => [value.path, 8 * 1_048_576])),
+        cachedFactBytesByPath: new Map(
+          EffectArray.map(aggregateBudgetFiles.slice(0, 4), value => [value.path, 8 * 1_048_576]),
+        ),
         files: aggregateBudgetFiles.slice(0, 4),
         modifiedPaths: [aggregateBudgetFiles[0].path],
         projects: [base],
@@ -786,7 +823,7 @@ describe('project incremental closure', () => {
       planProjectIncrementalClosure({
         ...common,
         cachedFactBytesByPath: new Map(
-          aggregateBudgetFiles.map((value, index) => [value.path, index === 4 ? 1 : 8 * 1_048_576]),
+          EffectArray.map(aggregateBudgetFiles, (value, index) => [value.path, index === 4 ? 1 : 8 * 1_048_576]),
         ),
         files: aggregateBudgetFiles,
         modifiedPaths: [aggregateBudgetFiles[0].path],
@@ -875,7 +912,11 @@ describe('project incremental closure', () => {
     ).toEqual({mode: 'fallback', reason: 'resolution-surface-changed'});
     const dynamic = {
       ...left,
-      references: left.references?.map(reference => ({...reference, relation: 'calls' as const})),
+      references: EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(left.references), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, reference => ({...reference, relation: 'calls' as const})),
+        ),
+      ),
     };
     expect(assessProjectClosureSeeds({committedFacts: [dynamic], effectiveFacts: [dynamic], projects: [base]})).toEqual(
       {
@@ -897,7 +938,7 @@ describe('project incremental closure', () => {
     ];
     const files = [inventory('packages/a/index.ts', 1), inventory('packages/b/index.ts', 1)];
     const common = {
-      cachedFactBytesByPath: new Map(files.map(file => [file.path, 1])),
+      cachedFactBytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
       files,
       modifiedPaths: ['packages/a/index.ts'],
       seedProjectIds: ['a'],
@@ -925,9 +966,9 @@ describe('project incremental closure', () => {
       const projects = Array.from({length: projectCount}, (_, index) =>
         project(`p${index}`, index === 0 ? [] : [`p${index - 1}`]),
       );
-      const enrichedProjects = projects.map(value => ({
+      const enrichedProjects = EffectArray.map(projects, value => ({
         ...value,
-        dependencyDetails: value.dependencyDetails.flatMap(dependency => {
+        dependencyDetails: EffectArray.flatMap(value.dependencyDetails, dependency => {
           const evidence = [
             dependency,
             ...Array.from({length: evidenceCopies}, (_, index) => ({
@@ -940,7 +981,7 @@ describe('project incremental closure', () => {
       }));
       const seedProject = projects[seed % projectCount];
       const changedPath = `${seedProject.root}/index.ts`;
-      const files = projects.map(value => inventory(`${value.root}/index.ts`, 1));
+      const files = EffectArray.map(projects, value => inventory(`${value.root}/index.ts`, 1));
       const canonicalSeeds = assessProjectFileSetClosureSeeds({
         baseProjects: projects,
         currentChangedPaths: [changedPath],
@@ -954,7 +995,7 @@ describe('project incremental closure', () => {
         deletedPaths: [],
       });
       const common = {
-        cachedFactBytesByPath: new Map(files.map(file => [file.path, 1])),
+        cachedFactBytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
         files,
         modifiedPaths: [changedPath],
         seedProjectIds: [seedProject.id],
@@ -984,19 +1025,19 @@ describe('project incremental closure', () => {
     ({adjacency, dependencyPriorities, filePriorities, priorities, seedMask, seedPriorities}) => {
       const count = adjacency.length;
       const ids = Array.from({length: count}, (_, index) => `p${index}`);
-      const projects = ids.map((id, source) =>
+      const projects = EffectArray.map(ids, (id, source) =>
         project(
           id,
-          ids.filter((_, target) => target !== source && (adjacency[source] & (1 << target)) !== 0),
+          EffectArray.filter(ids, (_, target) => target !== source && (adjacency[source] & (1 << target)) !== 0),
         ),
       );
-      const seeds = ids.filter((_, index) => (seedMask & (1 << index)) !== 0);
+      const seeds = EffectArray.filter(ids, (_, index) => (seedMask & (1 << index)) !== 0);
       const firstSeed = seeds[0] ?? ids[0];
       const expected = independentReverseClosure(projects, seeds.length > 0 ? seeds : [firstSeed]);
-      const files = ids.map(id => inventory(`packages/${id}/index.ts`, 1));
-      const bytes = new Map(files.map(file => [file.path, 1]));
-      const shuffled = projects
-        .map((value, index) => ({
+      const files = EffectArray.map(ids, id => inventory(`packages/${id}/index.ts`, 1));
+      const bytes = new Map(EffectArray.map(files, file => [file.path, 1]));
+      const shuffled = EffectArray.map(
+        EffectArray.map(projects, (value, index) => ({
           index,
           priority: priorities[index] ?? 0,
           value: {
@@ -1008,17 +1049,25 @@ describe('project incremental closure', () => {
                 ? [...value.dependencyDetails].reverse()
                 : value.dependencyDetails,
           },
-        }))
-        .sort((left, right) => left.priority - right.priority || left.index - right.index)
-        .map(entry => entry.value);
-      const shuffledFiles = files
-        .map((value, index) => ({index, priority: filePriorities[index] ?? 0, value}))
-        .sort((left, right) => left.priority - right.priority || left.index - right.index)
-        .map(entry => entry.value);
-      const shuffledSeeds = (seeds.length > 0 ? seeds : [firstSeed])
-        .map(value => ({priority: seedPriorities[ids.indexOf(value)] ?? 0, value}))
-        .sort((left, right) => left.priority - right.priority || left.value.localeCompare(right.value))
-        .map(entry => entry.value);
+        })).sort((left, right) => left.priority - right.priority || left.index - right.index),
+        entry => entry.value,
+      );
+      const shuffledFiles = EffectArray.map(
+        EffectArray.map(files, (value, index) => ({index, priority: filePriorities[index] ?? 0, value})).sort(
+          (left, right) => left.priority - right.priority || left.index - right.index,
+        ),
+        entry => entry.value,
+      );
+      const shuffledSeeds = EffectArray.map(
+        EffectArray.map(seeds.length > 0 ? seeds : [firstSeed], value => ({
+          priority: seedPriorities[ids.indexOf(value)] ?? 0,
+          value,
+        })).sort(
+          (left, right) =>
+            left.priority - right.priority || Effect.pipe(left.value, EffectString.localeCompare(right.value)),
+        ),
+        entry => entry.value,
+      );
       const canonical = planProjectIncrementalClosure({
         cachedFactBytesByPath: bytes,
         files,
@@ -1044,20 +1093,23 @@ describe('project incremental closure', () => {
       if (once.mode !== 'eligible') return;
       expect(planProjectIncrementalClosure({...input, seedProjectIds: once.projectIds})).toEqual(once);
       expect(once.projectIds).toEqual([...expected].sort());
-      expect(seeds.every(seed => once.projectIds.includes(seed))).toBe(true);
+      expect(EffectArray.every(seeds, seed => once.projectIds.includes(seed))).toBe(true);
 
       const expanded = planProjectIncrementalClosure({...input, seedProjectIds: ids});
       expect(expanded.mode).toBe('eligible');
       if (expanded.mode === 'eligible') {
-        expect(once.projectIds.every(id => expanded.projectIds.includes(id))).toBe(true);
+        expect(EffectArray.every(once.projectIds, id => expanded.projectIds.includes(id))).toBe(true);
       }
-      const missingEdge = projects
-        .flatMap(source => ids.map(targetId => ({source, targetId})))
-        .find(({source, targetId}) => source.id !== targetId && !source.dependencies.includes(targetId));
+      const missingEdge = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          EffectArray.flatMap(projects, source => EffectArray.map(ids, targetId => ({source, targetId}))),
+          ({source, targetId}) => source.id !== targetId && !source.dependencies.includes(targetId),
+        ),
+      );
       if (missingEdge) {
         const edgeExpanded = planProjectIncrementalClosure({
           ...input,
-          projects: projects.map(value =>
+          projects: EffectArray.map(projects, value =>
             value.id === missingEdge.source.id
               ? {
                   ...value,
@@ -1076,7 +1128,7 @@ describe('project incremental closure', () => {
         });
         expect(edgeExpanded.mode).toBe('eligible');
         if (edgeExpanded.mode === 'eligible') {
-          expect(once.projectIds.every(id => edgeExpanded.projectIds.includes(id))).toBe(true);
+          expect(EffectArray.every(once.projectIds, id => edgeExpanded.projectIds.includes(id))).toBe(true);
         }
       }
     },
@@ -1092,7 +1144,7 @@ describe('project incremental closure', () => {
       inventory(`packages/p${index % projectCount}/file-${index}.ts`, 1),
     );
     const plan = planProjectIncrementalClosure({
-      cachedFactBytesByPath: new Map(files.map(file => [file.path, 1])),
+      cachedFactBytesByPath: new Map(EffectArray.map(files, file => [file.path, 1])),
       files,
       maxCachedFactBytes: 100_000,
       maxFiles: 100_000,
@@ -1225,7 +1277,7 @@ function transitionSide(
 ) {
   const workspaces = [
     ...new Map(
-      projects.map(value => [
+      EffectArray.map(projects, value => [
         value.workspaceId,
         {
           buildSystem: value.buildSystem,
@@ -1246,16 +1298,20 @@ function oracleAffectedPaths(
   files: readonly {path: string; resolutionDomains: readonly string[]; hasWorkspacePackageSymbol: boolean}[],
   closure: ReadonlySet<string>,
 ): string[] {
-  return files
-    .filter(file => {
-      const domains = [...file.resolutionDomains, ...(file.hasWorkspacePackageSymbol ? ['workspace'] : [])];
-      return domains.some(domain => {
-        const owner = oracleOwner(projects, file.path, domain);
-        return owner !== undefined && closure.has(owner.id);
-      });
-    })
-    .map(file => file.path)
-    .sort();
+  return EffectArray.map(
+    EffectArray.filter(
+      files,
+      __effectArrayValue =>
+        !!(file => {
+          const domains = [...file.resolutionDomains, ...(file.hasWorkspacePackageSymbol ? ['workspace'] : [])];
+          return EffectArray.some(domains, domain => {
+            const owner = oracleOwner(projects, file.path, domain);
+            return owner !== undefined && closure.has(owner.id);
+          });
+        })(__effectArrayValue),
+    ),
+    file => file.path,
+  ).sort();
 }
 
 function oracleOwner(
@@ -1263,20 +1319,36 @@ function oracleOwner(
   path: string,
   domain: string,
 ): CodeGraphWorkspaceProject | undefined {
-  const eligible = projects.filter(value =>
-    domain === 'workspace'
-      ? value.buildSystem === 'node' || value.buildSystem === 'pnpm'
-      : value.resolutionDomain === domain ||
-        (domain === 'bazel' && value.languages.some(language => language === 'bazel' || language === 'starlark')),
+  const eligible = EffectArray.filter(
+    projects,
+    __effectArrayValue =>
+      !!(value =>
+        domain === 'workspace'
+          ? value.buildSystem === 'node' || value.buildSystem === 'pnpm'
+          : value.resolutionDomain === domain ||
+            (domain === 'bazel' &&
+              EffectArray.some(value.languages, language => language === 'bazel' || language === 'starlark')))(
+        __effectArrayValue,
+      ),
   );
   const find = (rootsFor: (project: CodeGraphWorkspaceProject) => readonly string[]) => {
-    const matches = eligible.flatMap(project =>
-      rootsFor(project)
-        .filter(root => root === '' || path === root || path.startsWith(`${root}/`))
-        .map(root => ({project, root})),
+    const matches = EffectArray.flatMap(eligible, project =>
+      EffectArray.map(
+        EffectArrayPipe(rootsFor(project), __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (root, __effectArrayIndex2) =>
+              __effectArrayIndex2 in __effectArrayValues &&
+              (root === '' || path === root || Effect.pipe(path, EffectString.startsWith(`${root}/`))),
+          ),
+        ),
+        root => ({project, root}),
+      ),
     );
     matches.sort(
-      (left, right) => right.root.length - left.root.length || left.project.id.localeCompare(right.project.id),
+      (left, right) =>
+        right.root.length - left.root.length ||
+        Effect.pipe(left.project.id, EffectString.localeCompare(right.project.id)),
     );
     return matches[0]?.project;
   };
@@ -1287,7 +1359,7 @@ function project(id: string, dependencies: readonly string[] = []): CodeGraphWor
   return {
     buildSystem: 'node',
     dependencies,
-    dependencyDetails: dependencies.map(targetId => ({
+    dependencyDetails: EffectArray.map(dependencies, targetId => ({
       evidence: `packages/${id}/package.json`,
       provenance: 'declared',
       targetId,
@@ -1347,7 +1419,7 @@ function markdownHeading(
   reverseKeys: boolean,
   packageName: string | undefined,
 ): CodeGraphSymbol {
-  const qualifiedName = `${path}#${name.toLowerCase()}`;
+  const qualifiedName = `${path}#${Effect.pipe(name, EffectString.toLowerCase)}`;
   const lookupKeys = [
     `global:qualified:${encodeURIComponent(qualifiedName)}`,
     `global:name:${encodeURIComponent(name)}`,
@@ -1403,7 +1475,7 @@ function independentReverseClosure(
     changed = false;
     for (const project of projects) {
       if (closure.has(project.id)) continue;
-      if (project.dependencies.some(dependency => closure.has(dependency))) {
+      if (EffectArray.some(project.dependencies, dependency => closure.has(dependency))) {
         closure.add(project.id);
         changed = true;
       }

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -35,6 +36,9 @@ import {
   persistentFullShardPublicationPlan,
 } from '@threadnote/graph/store';
 import type {CodeGraphEdge, CodeGraphMaterializationRows, CodeGraphReference} from '@threadnote/graph/types';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const byteCount = FC.integer({max: Number.MAX_SAFE_INTEGER, min: 0});
 const materializationRowCount = FC.integer({max: 1_000_000, min: 0});
@@ -60,7 +64,7 @@ describe('code graph indexer properties', () => {
       omittedSize: FC.integer({max: 64 * 1_048_576, min: 0}),
     },
     ({extraRetainedSize, omittedSize, retainedSizes}) => {
-      const retained = retainedSizes.map(size => ({content: '', size}));
+      const retained = EffectArray.map(retainedSizes, size => ({content: '', size}));
       const before = codeGraphInventoryNeedsSynchronousReclamation(retained);
       const after = codeGraphInventoryNeedsSynchronousReclamation([
         ...retained,
@@ -101,24 +105,36 @@ describe('code graph indexer properties', () => {
       ),
     },
     ({observations}) => {
-      const aggregate = observations.reduce(addMaterializationReplayMetrics, emptyMaterializationReplayMetrics());
-      const reversed = [...observations]
-        .reverse()
-        .reduce(addMaterializationReplayMetrics, emptyMaterializationReplayMetrics());
+      const aggregate = EffectArray.reduce(
+        observations,
+        emptyMaterializationReplayMetrics(),
+        addMaterializationReplayMetrics,
+      );
+      const reversed = EffectArray.reduce(
+        [...observations].reverse(),
+        emptyMaterializationReplayMetrics(),
+        addMaterializationReplayMetrics,
+      );
       const bounded = (values: readonly number[]): number => {
-        const exact = values.reduce((total, value) => total + BigInt(value), 0n);
+        const exact = EffectArray.reduce(values, 0n, (total, value) => total + BigInt(value));
         return Number(exact > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : exact);
       };
-      const expectedRaw = bounded(observations.map(observation => observation.rawFactReplayBytes));
-      const expectedMaterialized = bounded(observations.map(observation => observation.materializedShardReplayBytes));
-      const expectedAttributed = bounded(observations.map(observation => observation.attributedFiles));
-      const expectedCrossGeneration = bounded(observations.map(observation => observation.crossGenerationShardFiles));
-      const expectedExactGeneration = bounded(observations.map(observation => observation.exactGenerationShardFiles));
+      const expectedRaw = bounded(EffectArray.map(observations, observation => observation.rawFactReplayBytes));
+      const expectedMaterialized = bounded(
+        EffectArray.map(observations, observation => observation.materializedShardReplayBytes),
+      );
+      const expectedAttributed = bounded(EffectArray.map(observations, observation => observation.attributedFiles));
+      const expectedCrossGeneration = bounded(
+        EffectArray.map(observations, observation => observation.crossGenerationShardFiles),
+      );
+      const expectedExactGeneration = bounded(
+        EffectArray.map(observations, observation => observation.exactGenerationShardFiles),
+      );
       const expectedDeferredFiles = bounded(
-        observations.map(observation => observation.materializedShardCacheDeferredFiles),
+        EffectArray.map(observations, observation => observation.materializedShardCacheDeferredFiles),
       );
       const expectedDeferredRawFactBytes = bounded(
-        observations.map(observation => observation.materializedShardCacheDeferredRawFactBytes),
+        EffectArray.map(observations, observation => observation.materializedShardCacheDeferredRawFactBytes),
       );
 
       expect(aggregate).toEqual(reversed);
@@ -130,7 +146,9 @@ describe('code graph indexer properties', () => {
       expect(aggregate.rawFactReplayBytesCompleted).toBe(expectedRaw);
       expect(aggregate.materializedShardReplayBytesCompleted).toBe(expectedMaterialized);
       expect(aggregate.cachedFactReplayBytesCompleted).toBe(bounded([expectedRaw, expectedMaterialized]));
-      expect(Object.values(aggregate).every(value => Number.isSafeInteger(value) && value >= 0)).toBe(true);
+      expect(
+        EffectArray.every(EffectRecord.values(aggregate), value => Number.isSafeInteger(value) && value >= 0),
+      ).toBe(true);
     },
     {fastCheck: {numRuns: 100}},
   );
@@ -143,7 +161,7 @@ describe('code graph indexer properties', () => {
     },
     ({activeIdentities}) => {
       const generations = codeGraphParserCacheLookupGenerations(activeIdentities);
-      const expected = [...new Set(activeIdentities)].sort().flatMap(activeIdentity => [
+      const expected = EffectArray.flatMap([...new Set(activeIdentities)].sort(), activeIdentity => [
         {activeIdentity, storedIdentity: activeIdentity},
         {
           activeIdentity,
@@ -181,7 +199,7 @@ describe('code graph indexer properties', () => {
           {contentHash: leftHash, path: 'src/index.ts'},
           {contentHash: leftHash, path: 'tsconfig.json'},
         ];
-        const changedContent = paths.map(file => ({...file, contentHash: rightHash}));
+        const changedContent = EffectArray.map(paths, file => ({...file, contentHash: rightHash}));
         const identity = extractorSetIdentity(paths);
 
         expect(extractorSetIdentity(changedContent)).toBe(identity);
@@ -193,13 +211,20 @@ describe('code graph indexer properties', () => {
   });
 
   it('includes the compact lexical format in deterministic snapshot identity', () => {
-    const identity = {headCommit: 'a'.repeat(40), repositoryId: 'b'.repeat(64), worktreeId: 'c'.repeat(64)};
-    const files = [{contentHash: 'd'.repeat(64), path: 'src/index.ts', source: 'commit'}];
+    const identity = {
+      headCommit: Effect.pipe('a', EffectString.repeat(40)),
+      repositoryId: Effect.pipe('b', EffectString.repeat(64)),
+      worktreeId: Effect.pipe('c', EffectString.repeat(64)),
+    };
+    const files = [{contentHash: Effect.pipe('d', EffectString.repeat(64)), path: 'src/index.ts', source: 'commit'}];
     const extractorSet = 'extractor-set';
     const inventory = `${files[0].path}\0${files[0].contentHash}\0${files[0].source}`;
-    const expected = sha256HexSync(
-      `snapshot-v2\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${identity.repositoryId}\nshared-commit\n${identity.headCommit}\nclean\n${extractorSet}\n${inventory}`,
-    ).slice(0, 40);
+    const expected = Effect.pipe(
+      sha256HexSync(
+        `snapshot-v2\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${identity.repositoryId}\nshared-commit\n${identity.headCommit}\nclean\n${extractorSet}\n${inventory}`,
+      ),
+      EffectString.slice(0, 40),
+    );
 
     expect(snapshotIdentity(identity, false, extractorSet, files)).toBe(`cgsn_${expected}`);
   });
@@ -209,9 +234,12 @@ describe('code graph indexer properties', () => {
       fc.property(fc.string(), fc.string(), fc.string(), fc.string(), (base, extractor, overlay, worktree) => {
         const identity = {headCommit: 'head', repositoryId: 'repository', worktreeId: worktree};
         const snapshot = sparseOverlaySnapshotIdentity(identity, base, extractor, overlay);
-        const legacySnapshot = `cgsn_${sha256HexSync(
-          `snapshot-sparse-overlay-v1\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${identity.repositoryId}\n${identity.worktreeId}\n${identity.headCommit}\n${base}\n${extractor}\n${overlay}`,
-        ).slice(0, 40)}`;
+        const legacySnapshot = `cgsn_${Effect.pipe(
+          sha256HexSync(
+            `snapshot-sparse-overlay-v1\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${identity.repositoryId}\n${identity.worktreeId}\n${identity.headCommit}\n${base}\n${extractor}\n${overlay}`,
+          ),
+          EffectString.slice(0, 40),
+        )}`;
 
         expect(sparseOverlaySnapshotIdentity(identity, base, extractor, overlay)).toBe(snapshot);
         expect(snapshot).not.toBe(legacySnapshot);
@@ -230,9 +258,12 @@ describe('code graph indexer properties', () => {
     fc.assert(
       fc.property(fc.string(), fc.string(), fc.string(), (base, extractor, overlay) => {
         const content = sparseOverlayGraphContentIdentity(base, extractor, overlay);
-        const legacyContent = `cgc_${sha256HexSync(
-          `graph-content-sparse-overlay-v1\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${base}\n${extractor}\n${overlay}`,
-        ).slice(0, 40)}`;
+        const legacyContent = `cgc_${Effect.pipe(
+          sha256HexSync(
+            `graph-content-sparse-overlay-v1\nlexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}\n${base}\n${extractor}\n${overlay}`,
+          ),
+          EffectString.slice(0, 40),
+        )}`;
         expect(sparseOverlayGraphContentIdentity(base, extractor, overlay)).toBe(content);
         expect(content).not.toBe(legacyContent);
         expect(content).toMatch(/^cgc_[0-9a-f]{40}$/u);
@@ -260,7 +291,7 @@ describe('code graph indexer properties', () => {
           const original = graphContentIdentity('extractor-set', files);
           expect(graphContentIdentity('extractor-set', [...files].reverse())).toBe(original);
 
-          const changed = files.map((file, index) =>
+          const changed = EffectArray.map(files, (file, index) =>
             index === 0 ? {...file, contentHash: `${file.contentHash}0`} : file,
           );
           expect(graphContentIdentity('extractor-set', changed)).not.toBe(original);
@@ -291,9 +322,10 @@ describe('code graph indexer properties', () => {
     const extractor = 'extractor-set';
     const workspace = 'workspace-fingerprint';
     const graphContent = 'graph-content';
-    const legacy = `cgfd_${sha256HexSync(
-      `materialized-file-derivation-v2\n${extractor}\n${workspace}\n${graphContent}`,
-    ).slice(0, 40)}`;
+    const legacy = `cgfd_${Effect.pipe(
+      sha256HexSync(`materialized-file-derivation-v2\n${extractor}\n${workspace}\n${graphContent}`),
+      EffectString.slice(0, 40),
+    )}`;
 
     expect(materializedShardDerivationIdentity(extractor, workspace, graphContent)).not.toBe(legacy);
   });
@@ -312,21 +344,26 @@ describe('code graph indexer properties', () => {
           {maxLength: 20, minLength: 3, selector: file => file.path},
         ),
         files => {
-          const canonicalEntries = [...files]
-            .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
-            .map(file => [file.path, file.language, file.mode, null]);
-          const expectedEnvelope = `cgfe_${sha256HexSync(
-            `materialized-repository-semantic-envelope-v1\n${JSON.stringify(canonicalEntries)}`,
-          ).slice(0, 40)}`;
+          const canonicalEntries = EffectArray.map(
+            [...files].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)),
+            file => [file.path, file.language, file.mode, null],
+          );
+          const expectedEnvelope = `cgfe_${Effect.pipe(
+            sha256HexSync(`materialized-repository-semantic-envelope-v1\n${JSON.stringify(canonicalEntries)}`),
+            EffectString.slice(0, 40),
+          )}`;
           const envelope = materializedShardRepositorySemanticEnvelope(files);
           const batch = files.slice(0, 2);
-          const expectedDerivation = `cgfd_${sha256HexSync(
-            `materialized-file-derivation-v4\nextractor\nworkspace\n${expectedEnvelope}\n${JSON.stringify(
-              batch.map(file => [file.path, file.contentHash, file.language, file.mode, file.source]),
-            )}`,
-          ).slice(0, 40)}`;
+          const expectedDerivation = `cgfd_${Effect.pipe(
+            sha256HexSync(
+              `materialized-file-derivation-v4\nextractor\nworkspace\n${expectedEnvelope}\n${JSON.stringify(
+                EffectArray.map(batch, file => [file.path, file.contentHash, file.language, file.mode, file.source]),
+              )}`,
+            ),
+            EffectString.slice(0, 40),
+          )}`;
           const derivation = materializedBatchShardDerivationIdentity('extractor', 'workspace', envelope, batch);
-          const outsideBodyChanged = files.map((file, index) =>
+          const outsideBodyChanged = EffectArray.map(files, (file, index) =>
             index === 2 ? {...file, contentHash: `${file.contentHash}0`, source: 'worktree' as const} : file,
           );
 
@@ -416,21 +453,24 @@ describe('code graph indexer properties', () => {
 
   it('splits high-density low-source-byte facts before one SQLite writer transaction becomes pathological', () => {
     const files = Array.from({length: 7}, (_, index) => ({path: `src/dense-${index}.ts`, size: 32}));
-    const factBytes = new Map(files.map(file => [file.path, 4 * 1_048_576]));
+    const factBytes = new Map(EffectArray.map(files, file => [file.path, 4 * 1_048_576]));
     const batches = factMaterializationBatches(files, factBytes);
 
-    expect(batches.map(batch => batch.length)).toEqual([2, 2, 2, 1]);
+    expect(EffectArray.map(batches, batch => batch.length)).toEqual([2, 2, 2, 1]);
     expect(
-      batches.every(batch => batch.reduce((total, file) => total + factBytes.get(file.path)!, 0) <= 8 * 1_048_576),
+      EffectArray.every(
+        batches,
+        batch => EffectArray.reduce(batch, 0, (total, file) => total + factBytes.get(file.path)!) <= 8 * 1_048_576,
+      ),
     ).toBe(true);
     expect(factMaterializationBatches(files, factBytes)).toEqual(batches);
   });
 
   it('keeps 128-file logical receipt boundaries stable across interrupted-build upgrades', () => {
     const files = Array.from({length: 129}, (_, index) => ({path: `src/file-${index}.ts`, size: 1}));
-    const factBytes = new Map(files.map(file => [file.path, 1]));
+    const factBytes = new Map(EffectArray.map(files, file => [file.path, 1]));
 
-    expect(factMaterializationBatches(files, factBytes).map(batch => batch.length)).toEqual([128, 1]);
+    expect(EffectArray.map(factMaterializationBatches(files, factBytes), batch => batch.length)).toEqual([128, 1]);
   });
 
   it('coalesces logical receipts deterministically, contiguously, and exactly once within physical bounds', () => {
@@ -450,23 +490,23 @@ describe('code graph indexer properties', () => {
 
           expect(persistentMaterializationTransactionBatches(candidates)).toEqual(groups);
           expect(groups.flat()).toEqual(candidates);
-          expect(groups.every(group => group.length > 0 && group.length <= 4)).toBe(true);
+          expect(EffectArray.every(groups, group => group.length > 0 && group.length <= 4)).toBe(true);
           let cursor = 0;
           for (const group of groups) {
             expect(group).toEqual(candidates.slice(cursor, cursor + group.length));
             cursor += group.length;
-            const factBytes = group.reduce((total, value) => total + value.factBytes, 0);
-            const fileCount = group.reduce((total, value) => total + value.fileCount, 0);
-            const sourceBytes = group.reduce((total, value) => total + value.sourceBytes, 0);
+            const factBytes = EffectArray.reduce(group, 0, (total, value) => total + value.factBytes);
+            const fileCount = EffectArray.reduce(group, 0, (total, value) => total + value.fileCount);
+            const sourceBytes = EffectArray.reduce(group, 0, (total, value) => total + value.sourceBytes);
             expect(
               (factBytes <= 32 * 1_048_576 && fileCount <= 512 && sourceBytes <= 64 * 1_048_576) || group.length === 1,
             ).toBe(true);
           }
           for (let index = 0; index < groups.length - 1; index += 1) {
             const combined = [...groups[index], ...groups[index + 1]];
-            const factBytes = combined.reduce((total, value) => total + value.factBytes, 0);
-            const fileCount = combined.reduce((total, value) => total + value.fileCount, 0);
-            const sourceBytes = combined.reduce((total, value) => total + value.sourceBytes, 0);
+            const factBytes = EffectArray.reduce(combined, 0, (total, value) => total + value.factBytes);
+            const fileCount = EffectArray.reduce(combined, 0, (total, value) => total + value.fileCount);
+            const sourceBytes = EffectArray.reduce(combined, 0, (total, value) => total + value.sourceBytes);
             expect(
               combined.length <= 4 && factBytes <= 32 * 1_048_576 && fileCount <= 512 && sourceBytes <= 64 * 1_048_576,
             ).toBe(false);
@@ -506,7 +546,7 @@ describe('code graph indexer properties', () => {
     ({first, second, third}) => {
       const leftAssociated = addMaterializationRows(addMaterializationRows(first, second), third);
       const rightAssociated = addMaterializationRows(first, addMaterializationRows(second, third));
-      const keys = Object.keys(first) as ReadonlyArray<keyof CodeGraphMaterializationRows>;
+      const keys = EffectRecord.keys(first) as ReadonlyArray<keyof CodeGraphMaterializationRows>;
 
       expect(leftAssociated).toEqual(rightAssociated);
       for (const key of keys) {
@@ -530,7 +570,7 @@ describe('code graph indexer properties', () => {
         estimate.estimatedTemporaryDatabaseBytes,
       ];
 
-      expect(values.every(value => Number.isSafeInteger(value) && value >= 0)).toBe(true);
+      expect(EffectArray.every(values, value => Number.isSafeInteger(value) && value >= 0)).toBe(true);
       expect(estimate.estimatedRequiredBytes).toBeGreaterThanOrEqual(estimate.estimatedConcurrentBuildBytes);
       expect(estimate.estimateBasis).toBe(
         cachedFactBytes === undefined ? 'source-bytes-fallback' : 'cached-fact-bytes',
@@ -683,8 +723,8 @@ describe('code graph indexer properties', () => {
     'compacts parser-cache relationships idempotently without changing attribution winner semantics',
     {ids: FC.array(FC.integer({max: 30, min: 0}), {maxLength: 300})},
     ({ids}) => {
-      const edges = ids.map((id, index) => relationshipEdge(String(id), index));
-      const references = ids.map((id, index) => relationshipReference(String(id), index));
+      const edges = EffectArray.map(ids, (id, index) => relationshipEdge(String(id), index));
+      const references = EffectArray.map(ids, (id, index) => relationshipReference(String(id), index));
       const facts = {
         diagnostics: [],
         edges,
@@ -694,16 +734,30 @@ describe('code graph indexer properties', () => {
       } as const;
       const compacted = compactCachedFileRelationships(facts);
       const repeated = compactCachedFileRelationships(compacted);
-      const uniqueIds = new Set(ids.map(String));
+      const uniqueIds = new Set(EffectArray.map(ids, String));
 
-      expect(compacted.edges.map(edge => edge.id)).toEqual([...uniqueIds]);
-      expect(compacted.references?.map(reference => reference.edgeId)).toEqual([...uniqueIds]);
+      expect(EffectArray.map(compacted.edges, edge => edge.id)).toEqual([...uniqueIds]);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(compacted.references), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, reference => reference.edgeId),
+          ),
+        ),
+      ).toEqual([...uniqueIds]);
       expect(repeated).toEqual(compacted);
       for (const id of uniqueIds) {
-        expect(compacted.edges.find(edge => edge.id === id)).toBe(edges.find(edge => edge.id === id));
-        expect(compacted.references?.find(reference => reference.edgeId === id)).toBe(
-          references.filter(reference => reference.edgeId === id).at(-1),
+        expect(EffectOption.getOrUndefined(EffectArray.findFirst(compacted.edges, edge => edge.id === id))).toBe(
+          EffectOption.getOrUndefined(EffectArray.findFirst(edges, edge => edge.id === id)),
         );
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(compacted.references), __effectArrayReceiver =>
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(__effectArrayReceiver, reference => reference.edgeId === id),
+              ),
+            ),
+          ),
+        ).toBe(EffectArray.filter(references, reference => reference.edgeId === id).at(-1));
       }
     },
     {fastCheck: {numRuns: 250}},
@@ -714,14 +768,14 @@ describe('code graph indexer properties', () => {
     'deduplicates repeated relationship primary keys stably and idempotently before strict staging',
     {ids: FC.array(FC.integer({max: 30, min: 0}), {maxLength: 300})},
     ({ids}) => {
-      const edges = ids.map((id, index) => relationshipEdge(String(id), index));
-      const references = ids.map((id, index) => relationshipReference(String(id), index));
+      const edges = EffectArray.map(ids, (id, index) => relationshipEdge(String(id), index));
+      const references = EffectArray.map(ids, (id, index) => relationshipReference(String(id), index));
       const deduplicated = deduplicateMaterializationRelationships(edges, references);
       const repeated = deduplicateMaterializationRelationships(deduplicated.edges, deduplicated.references);
-      const uniqueIds = new Set(ids.map(String));
+      const uniqueIds = new Set(EffectArray.map(ids, String));
 
-      expect(deduplicated.edges.map(edge => edge.id)).toEqual([...uniqueIds]);
-      expect(deduplicated.references.map(reference => reference.edgeId)).toEqual([...uniqueIds]);
+      expect(EffectArray.map(deduplicated.edges, edge => edge.id)).toEqual([...uniqueIds]);
+      expect(EffectArray.map(deduplicated.references, reference => reference.edgeId)).toEqual([...uniqueIds]);
       expect(deduplicated.duplicateEdges).toBe(ids.length - uniqueIds.size);
       expect(deduplicated.duplicateReferences).toBe(ids.length - uniqueIds.size);
       expect(repeated).toEqual({
@@ -731,10 +785,14 @@ describe('code graph indexer properties', () => {
         references: deduplicated.references,
       });
       for (const id of uniqueIds) {
-        expect(deduplicated.edges.find(edge => edge.id === id)).toBe(edges.find(edge => edge.id === id));
-        expect(deduplicated.references.find(reference => reference.edgeId === id)).toBe(
-          references.filter(reference => reference.edgeId === id).at(-1),
+        expect(EffectOption.getOrUndefined(EffectArray.findFirst(deduplicated.edges, edge => edge.id === id))).toBe(
+          EffectOption.getOrUndefined(EffectArray.findFirst(edges, edge => edge.id === id)),
         );
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(deduplicated.references, reference => reference.edgeId === id),
+          ),
+        ).toBe(EffectArray.filter(references, reference => reference.edgeId === id).at(-1));
       }
     },
     {fastCheck: {numRuns: 250}},

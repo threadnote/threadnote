@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -9,7 +10,7 @@ const execFilePromise = promisify(execFile);
 const temporaryHomes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryHomes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryHomes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('recall CLI explicit memory navigation', () => {
@@ -18,15 +19,13 @@ describe('recall CLI explicit memory navigation', () => {
     const help = await runCli(['recall', '--help'], home);
     expect(help.stdout).toContain('optional when --memory-ref supplies an explicit navigation seed');
 
-    const missingInput = await runCli(['recall'], home).catch(error => error as CliFailure);
+    const missingInput = await runCli(['recall'], home).catch(cliFailure);
     expect(missingInput).toMatchObject({code: 1});
     expect(missingInput.stderr).toContain(
       'Threadnote recall needs either a non-empty --query or at least one --memory-ref seed.',
     );
 
-    const missingPremise = await runCli(['recall', '--relation-type', 'depends_on'], home).catch(
-      error => error as CliFailure,
-    );
+    const missingPremise = await runCli(['recall', '--relation-type', 'depends_on'], home).catch(cliFailure);
     expect(missingPremise).toMatchObject({code: 1});
     expect(missingPremise.stderr).toContain('--relation-type requires at least one --memory-ref.');
   });
@@ -77,25 +76,32 @@ describe('recall CLI explicit memory navigation', () => {
   });
 });
 
-interface CliFailure extends Error {
-  readonly code?: number;
-  readonly stderr: string;
+function isCliFailure(error: unknown): error is Error & {readonly stderr: string} {
+  return error instanceof Error && 'stderr' in error && typeof error.stderr === 'string';
+}
+
+function cliFailure(error: unknown) {
+  if (!isCliFailure(error)) throw error;
+  return error;
 }
 
 function memoryDocument(topic: string, memoryId: string, body: string, relation?: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    'source_agent_client: integration-test',
-    'timestamp: 2026-09-01T00:00:00.000Z',
-    `memory_id: ${memoryId}`,
-    ...(relation ? [`relation: ${relation}`] : []),
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      'source_agent_client: integration-test',
+      'timestamp: 2026-09-01T00:00:00.000Z',
+      `memory_id: ${memoryId}`,
+      ...(relation ? [`relation: ${relation}`] : []),
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
 async function temporaryHome(): Promise<string> {

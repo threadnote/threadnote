@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -20,6 +21,7 @@ import {
   validateCodeGraphCheckpointImportReceiptInput,
 } from '@threadnote/graph/store/checkpoint_import';
 import {codeGraphCheckpointFileFactCacheIdentity} from '@threadnote/graph/checkpoint/file_fact_identity';
+import {parseCodeGraphFileFacts} from '@threadnote/graph/fact/validation';
 import type {CodeGraphFileFacts, CodeGraphSnapshot, RepositoryIdentity} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
@@ -44,6 +46,9 @@ import {
 import {CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION} from '@threadnote/graph/inventory/policy';
 import {CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION} from '@threadnote/graph/store/schema/revision';
 import {legacyCodeGraphAuthorityStatements} from '@threadnote/graph/test/helpers/code-graph-legacy-authority';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph checkpoint import store', () => {
   effectIt.effect('keeps staged records unreachable and atomically publishes an immutable receipt', () =>
@@ -59,11 +64,11 @@ describe('code graph checkpoint import store', () => {
 
           const page = {
             batchIndex: 0,
-            digest: {algorithm: 'sha256' as const, digest: 'd'.repeat(64)},
+            digest: {algorithm: 'sha256' as const, digest: Effect2.pipe('d', EffectString.repeat(64))},
             records: [
               {
-                blobId: 'b'.repeat(40),
-                contentHash: 'c'.repeat(64),
+                blobId: Effect2.pipe('b', EffectString.repeat(40)),
+                contentHash: Effect2.pipe('c', EffectString.repeat(64)),
                 kind: 'file' as const,
                 language: 'typescript',
                 mode: '100644',
@@ -95,7 +100,7 @@ describe('code graph checkpoint import store', () => {
           const conflict = yield* Effect.exit(
             store.stageCheckpointImportRecordPage(databasePath, snapshot.id, ownerToken, {
               ...page,
-              digest: {...page.digest, digest: 'e'.repeat(64)},
+              digest: {...page.digest, digest: Effect2.pipe('e', EffectString.repeat(64))},
             }),
           );
           expect(conflict._tag).toBe('Failure');
@@ -104,7 +109,7 @@ describe('code graph checkpoint import store', () => {
           const emptyPage = yield* Effect.exit(
             store.stageCheckpointImportRecordPage(databasePath, snapshot.id, ownerToken, {
               batchIndex: 1,
-              digest: {...page.digest, digest: '0'.repeat(64)},
+              digest: {...page.digest, digest: Effect2.pipe('0', EffectString.repeat(64))},
               records: [],
             }),
           );
@@ -137,7 +142,7 @@ describe('code graph checkpoint import store', () => {
           const conflictingReceipt = yield* Effect.exit(
             store.recordCheckpointImportReceipt(databasePath, snapshot.id, {
               ...input,
-              artifact: {...input.artifact, digest: 'f'.repeat(64)},
+              artifact: {...input.artifact, digest: Effect2.pipe('f', EffectString.repeat(64))},
             }),
           );
           expect(conflictingReceipt._tag).toBe('Failure');
@@ -165,7 +170,7 @@ describe('code graph checkpoint import store', () => {
             databasePath,
             Effect.gen(function* () {
               const sql = yield* SqlClient.SqlClient;
-              yield* sql`UPDATE snapshots SET scope_id = ${`code-graph-scope:${'f'.repeat(64)}`} WHERE id = ${snapshot.id}`;
+              yield* sql`UPDATE snapshots SET scope_id = ${`code-graph-scope:${Effect2.pipe('f', EffectString.repeat(64))}`} WHERE id = ${snapshot.id}`;
             }),
           );
           expect(yield* store.checkpointImportReceipt(databasePath, snapshot.id)).toBeUndefined();
@@ -191,7 +196,7 @@ describe('code graph checkpoint import store', () => {
     {
       scopeHex: fc
         .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 64, maxLength: 64})
-        .map(chars => chars.join('')),
+        .map(chars => EffectArray.join(chars, '')),
     },
     ({scopeHex}) =>
       TestClock.withLive(
@@ -229,7 +234,7 @@ describe('code graph checkpoint import store', () => {
       artifactSize: fc.integer({min: 0, max: 10_000_000}),
       digest: fc
         .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 64, maxLength: 64})
-        .map(value => value.join('')),
+        .map(value => EffectArray.join(value, '')),
     },
     ({artifactSize, digest}) =>
       Effect.sync(() => {
@@ -238,7 +243,7 @@ describe('code graph checkpoint import store', () => {
         expect(() =>
           validateCodeGraphCheckpointImportReceiptInput({
             ...receipt,
-            artifact: {...receipt.artifact, digest: `A${digest.slice(1)}`},
+            artifact: {...receipt.artifact, digest: `A${Effect2.pipe(digest, EffectString.slice(1))}`},
           }),
         ).toThrow('checkpoint import receipt is invalid');
       }),
@@ -274,8 +279,8 @@ describe('code graph checkpoint import store', () => {
         Effect.gen(function* () {
           const ownerToken = yield* claimPersistentBuildForTest(store, databasePath, identity, snapshot);
           const pack = {
-            cacheIdentity: '4'.repeat(64),
-            derivationIdentity: '5'.repeat(64),
+            cacheIdentity: Effect2.pipe('4', EffectString.repeat(64)),
+            derivationIdentity: Effect2.pipe('5', EffectString.repeat(64)),
             id: 'typescript',
             resolutionDomain: 'typescript',
             resolutionVersion: 'v1',
@@ -287,7 +292,7 @@ describe('code graph checkpoint import store', () => {
           const staged = yield* Effect.exit(
             store.stageCheckpointImportRecordPage(databasePath, snapshot.id, ownerToken, {
               batchIndex: 0,
-              digest: {algorithm: 'sha256', digest: 'd'.repeat(64)},
+              digest: {algorithm: 'sha256', digest: Effect2.pipe('d', EffectString.repeat(64))},
               records: [{...pack, kind: 'pack-provenance', resolutionVersion: 'forged'}],
             }),
           );
@@ -310,7 +315,7 @@ describe('code graph checkpoint import store', () => {
           counts.moniker = 1;
           const input = {...checkpointReceiptInput(), batchCount: 1, packProvenance: [], recordCounts: counts};
           yield* store.bindCheckpointImportBuild(databasePath, snapshot.id, input);
-          const componentId = `cgp_${'1'.repeat(32)}`;
+          const componentId = `cgp_${Effect2.pipe('1', EffectString.repeat(32))}`;
           const moniker = codeGraphPackageMoniker({
             componentId,
             evidence: {
@@ -323,11 +328,11 @@ describe('code graph checkpoint import store', () => {
           expect(
             yield* store.stageCheckpointImportRecordPage(databasePath, snapshot.id, ownerToken, {
               batchIndex: 0,
-              digest: {algorithm: 'sha256', digest: 'd'.repeat(64)},
+              digest: {algorithm: 'sha256', digest: Effect2.pipe('d', EffectString.repeat(64))},
               records: [
                 {
-                  blobId: 'b'.repeat(40),
-                  contentHash: 'c'.repeat(64),
+                  blobId: Effect2.pipe('b', EffectString.repeat(40)),
+                  contentHash: Effect2.pipe('c', EffectString.repeat(64)),
                   kind: 'file',
                   language: 'typescript',
                   mode: '100644',
@@ -391,10 +396,10 @@ describe('code graph checkpoint import store', () => {
       withFixture(({databasePath, identity, snapshot, store}) =>
         Effect.gen(function* () {
           const path = 'src/value.ts';
-          const contentHash = 'c'.repeat(64);
+          const contentHash = Effect2.pipe('c', EffectString.repeat(64));
           const existingJson = JSON.stringify({path, symbols: [], edges: [], diagnostics: []});
           const file = {
-            blobId: 'b'.repeat(40),
+            blobId: Effect2.pipe('b', EffectString.repeat(40)),
             contentHash,
             kind: 'file' as const,
             language: 'typescript',
@@ -434,7 +439,7 @@ describe('code graph checkpoint import store', () => {
           expect(
             yield* store.stageCheckpointImportRecordPage(databasePath, snapshot.id, ownerToken, {
               batchIndex: 0,
-              digest: {algorithm: 'sha256', digest: 'd'.repeat(64)},
+              digest: {algorithm: 'sha256', digest: Effect2.pipe('d', EffectString.repeat(64))},
               records: [file, fact],
             }),
           ).toEqual({records: 2, state: 'staged'});
@@ -466,7 +471,7 @@ describe('code graph checkpoint import store', () => {
 
           const conflictingSnapshot = {
             ...snapshot,
-            id: `cgsn_${'0'.repeat(40)}-full-${'5'.repeat(16)}`,
+            id: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}-full-${Effect2.pipe('5', EffectString.repeat(16))}`,
           };
           const conflictingOwner = yield* claimPersistentBuildForTest(
             store,
@@ -478,7 +483,7 @@ describe('code graph checkpoint import store', () => {
           const conflict = yield* Effect.flip(
             store.stageCheckpointImportRecordPage(databasePath, conflictingSnapshot.id, conflictingOwner, {
               batchIndex: 0,
-              digest: {algorithm: 'sha256', digest: 'e'.repeat(64)},
+              digest: {algorithm: 'sha256', digest: Effect2.pipe('e', EffectString.repeat(64))},
               records: [file, fact],
             }),
           );
@@ -496,7 +501,7 @@ describe('code graph checkpoint import store', () => {
       Effect.sync(() => {
         const incoming = JSON.stringify(facts);
         const existing = JSON.stringify(reverseObjectKeys(facts));
-        const reordered = reverseObjectKeys(facts) as CodeGraphFileFacts;
+        const reordered = parseCodeGraphFileFacts(reverseObjectKeys(facts));
         expect(existing).not.toBe(incoming);
         expect(codeGraphCheckpointFileFactCacheIdentity(reordered)).toBe(
           codeGraphCheckpointFileFactCacheIdentity(facts),
@@ -574,7 +579,7 @@ describe('code graph checkpoint import store', () => {
             const hashed = yield* runCommandEffect('git', ['-C', root, 'hash-object', '-w', 'package.json'], {
               timeoutMs: 0,
             });
-            const blobId = hashed.stdout.trim();
+            const blobId = Effect2.pipe(hashed.stdout, EffectString.trim);
             const identity = repositoryIdentity(root);
             const header = reusableHeader(
               identity,
@@ -583,7 +588,7 @@ describe('code graph checkpoint import store', () => {
               Buffer.byteLength(content),
             );
 
-            const admission = {environmentFingerprint: 'a'.repeat(64)};
+            const admission = {environmentFingerprint: Effect2.pipe('a', EffectString.repeat(64))};
             const hydrated = yield* hydrateCodeGraphCheckpointReusableBaseReceipt(identity, header, admission);
 
             expect(hydrated?.inventory?.attributionFiles).toEqual([
@@ -601,7 +606,10 @@ describe('code graph checkpoint import store', () => {
                     inventory: {
                       ...header.reuse!.inventory!,
                       attributionFiles: [
-                        {...header.reuse!.inventory!.attributionFiles[0], contentHash: 'f'.repeat(64)},
+                        {
+                          ...header.reuse!.inventory!.attributionFiles[0],
+                          contentHash: Effect2.pipe('f', EffectString.repeat(64)),
+                        },
                       ],
                     },
                   },
@@ -668,14 +676,14 @@ function withFixture<A, E>(
 function repositoryIdentity(root: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'checkpoint-import',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'a'.repeat(64),
-    worktreeId: '2'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('2', EffectString.repeat(64)),
   };
 }
 
@@ -686,8 +694,8 @@ function checkpointSnapshot(identity: RepositoryIdentity): CodeGraphSnapshot {
     edgeCount: 0,
     extractorSet: 'native-code-graph-13',
     fileCount: 1,
-    graphContentId: `cgc_${'3'.repeat(40)}`,
-    id: `cgsn_${'0'.repeat(40)}-full-${'4'.repeat(16)}`,
+    graphContentId: `cgc_${Effect2.pipe('3', EffectString.repeat(40))}`,
+    id: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}-full-${Effect2.pipe('4', EffectString.repeat(16))}`,
     repositoryId: identity.repositoryId,
     state: 'building',
     symbolCount: 0,
@@ -695,9 +703,12 @@ function checkpointSnapshot(identity: RepositoryIdentity): CodeGraphSnapshot {
   };
 }
 
-function checkpointReceiptInput(digest = '5'.repeat(64), artifactSize = 1_024): CodeGraphCheckpointImportReceiptInput {
+function checkpointReceiptInput(
+  digest = Effect2.pipe('5', EffectString.repeat(64)),
+  artifactSize = 1_024,
+): CodeGraphCheckpointImportReceiptInput {
   return {
-    abi: {algorithm: 'sha256', digest: '6'.repeat(64)},
+    abi: {algorithm: 'sha256', digest: Effect2.pipe('6', EffectString.repeat(64))},
     artifact: {
       algorithm: 'sha256',
       digest,
@@ -707,11 +718,11 @@ function checkpointReceiptInput(digest = '5'.repeat(64), artifactSize = 1_024): 
     baseLogicalDigest: null,
     coverage: {eligibleFiles: 1, excludedFiles: 0, reasons: [], state: 'complete'},
     formatVersion: 1,
-    logical: {algorithm: 'sha256', digest: '7'.repeat(64)},
+    logical: {algorithm: 'sha256', digest: Effect2.pipe('7', EffectString.repeat(64))},
     source: {
-      commit: '1'.repeat(40),
-      graphContentId: `cgc_${'3'.repeat(40)}`,
-      repositoryId: 'a'.repeat(64),
+      commit: Effect2.pipe('1', EffectString.repeat(40)),
+      graphContentId: `cgc_${Effect2.pipe('3', EffectString.repeat(40))}`,
+      repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     },
     trust: 'local-unverified',
   };
@@ -755,12 +766,10 @@ const semanticFactArbitrary = fc
   }));
 
 function reverseObjectKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(reverseObjectKeys);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, reverseObjectKeys);
   if (typeof value !== 'object' || value === null) return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .reverse()
-      .map(([key, entry]) => [key, reverseObjectKeys(entry)]),
+  return EffectRecord.fromEntries(
+    EffectArray.map(EffectRecord.toEntries(value).reverse(), ([key, entry]) => [key, reverseObjectKeys(entry)]),
   );
 }
 
@@ -774,7 +783,7 @@ function reusableHeader(
   return {
     abi: {
       algorithm: 'sha256',
-      digest: '8'.repeat(64),
+      digest: Effect2.pipe('8', EffectString.repeat(64)),
       input: {
         checkpointSemanticVersion: CODE_GRAPH_CHECKPOINT_SEMANTIC_VERSION,
         graphSchemaVersion: 3,
@@ -791,7 +800,7 @@ function reusableHeader(
     counts,
     coverage: {eligibleFiles: 0, excludedFiles: 0, reasons: [], state: 'complete'},
     formatVersion: CODE_GRAPH_CHECKPOINT_FORMAT_VERSION,
-    logical: {algorithm: 'sha256', digest: '9'.repeat(64)},
+    logical: {algorithm: 'sha256', digest: Effect2.pipe('9', EffectString.repeat(64))},
     mediaType: CODE_GRAPH_CHECKPOINT_MEDIA_TYPE,
     recordSchemaVersion: CODE_GRAPH_CHECKPOINT_RECORD_SCHEMA_VERSION,
     repository: {
@@ -816,7 +825,7 @@ function reusableHeader(
             source: 'commit',
           },
         ],
-        contract: 'a'.repeat(64),
+        contract: Effect2.pipe('a', EffectString.repeat(64)),
         includeOpaqueCorpusAssets: false,
         policyExclusions: {
           bytes: 0,
@@ -835,7 +844,7 @@ function reusableHeader(
     source: {
       commit: identity.headCommit,
       extractorSet: 'native-code-graph-13',
-      graphContentId: `cgc_${'3'.repeat(40)}`,
+      graphContentId: `cgc_${Effect2.pipe('3', EffectString.repeat(40))}`,
     },
   };
 }

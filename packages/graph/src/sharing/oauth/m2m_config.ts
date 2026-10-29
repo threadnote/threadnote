@@ -1,3 +1,8 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export interface OAuthM2MProviderConfig {
   readonly tokenUrl: string;
   readonly jwksUrl: string;
@@ -8,9 +13,9 @@ export interface OAuthM2MProviderConfig {
 
 export function oauthCredentialEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const result = {...environment};
-  for (const [name, value] of Object.entries(environment)) {
+  for (const [name, value] of EffectRecord.toEntries(environment)) {
     if (!/^THREADNOTE_AUTH0_(GRAPH|REGISTRY|PUBLISHER)_M2M_/u.test(name) || value === undefined) continue;
-    const generic = name.replace('THREADNOTE_AUTH0_', 'THREADNOTE_OAUTH_');
+    const generic = Effect.pipe(name, EffectString.replace('THREADNOTE_AUTH0_', 'THREADNOTE_OAUTH_'));
     if (result[generic] !== undefined && result[generic] !== value)
       throw new Error('OAuth credential configuration is invalid.');
     result[generic] = value;
@@ -68,7 +73,20 @@ export function parseOAuthM2MProviderConfig(
     (audienceParameter !== undefined &&
       (!audienceParameter ||
         audienceParameter.length > 512 ||
-        [...audienceParameter].some(character => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127)))
+        EffectArray.some(
+          [...audienceParameter],
+          character =>
+            Effect.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect.Option.getOrElse(() => NaN),
+            ) <= 32 ||
+            Effect.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect.Option.getOrElse(() => NaN),
+            ) === 127,
+        )))
   )
     throw new Error('OAuth credential configuration is invalid.');
   return {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -13,9 +14,11 @@ import {
 import {CommandExecutor} from '@threadnote/platform/command';
 import {CODE_GRAPH_GIT_WORKTREE_REGISTRATION_WORKER_ARGUMENT} from '@threadnote/threadnote/worker_protocol';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const roots: string[] = [];
-const CHECKOUT_ID = 'a'.repeat(64);
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 
 afterEach(() => {
   for (const root of roots.splice(0).reverse()) rmSync(root, {force: true, recursive: true});
@@ -92,8 +95,8 @@ describe('code graph Git worktree registration worker', () => {
     );
 
     expect(observations).toHaveLength(8);
-    expect(observations.every(observation => observation.state === 'present')).toBe(true);
-    expect(new Set(observations.map(observation => JSON.stringify(observation)))).toHaveLength(1);
+    expect(EffectArray.every(observations, observation => observation.state === 'present')).toBe(true);
+    expect(new Set(EffectArray.map(observations, observation => JSON.stringify(observation)))).toHaveLength(1);
   });
 
   it('rejects oversized worker input with one bounded path-free response', () => {
@@ -103,6 +106,7 @@ describe('code graph Git worktree registration worker', () => {
       [join(import.meta.dirname, '../../src/standalone.ts'), CODE_GRAPH_GIT_WORKTREE_REGISTRATION_WORKER_ARGUMENT],
       {
         encoding: 'utf8',
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         input: `${privateMarker}${'x'.repeat(CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.workerInputBytes)}\n`,
         timeout: 2_000,
       },
@@ -211,8 +215,8 @@ describe('code graph Git worktree registration worker', () => {
       }),
     );
 
-    expect(observedArguments.join(' ')).not.toContain(common);
-    expect(observedArguments.join(' ')).not.toContain(adminName);
+    expect(EffectArray.join(observedArguments, ' ')).not.toContain(common);
+    expect(EffectArray.join(observedArguments, ' ')).not.toContain(adminName);
     expect(observedInput).toContain(common);
     expect(observedInput).not.toContain(adminName);
     expect(JSON.stringify(result)).not.toContain(common);

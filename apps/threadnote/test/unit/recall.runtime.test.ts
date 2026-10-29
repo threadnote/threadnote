@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -41,6 +42,9 @@ import {
 } from '@threadnote/recall/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {buildRecallSections} from '@threadnote/recall/results';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 describe('recall runtime orchestration', () => {
   const homes: string[] = [];
   beforeEach(() => {
@@ -49,7 +53,7 @@ describe('recall runtime orchestration', () => {
   });
   afterEach(async () => {
     await Promise.all(
-      homes.splice(0).map(home =>
+      EffectArray.map(homes.splice(0), home =>
         rm(home, {
           force: true,
           recursive: true,
@@ -83,7 +87,7 @@ describe('recall runtime orchestration', () => {
         workspaceScope: 'apps/search',
       },
       text: 'Unrelated package-local operational note.',
-      uri: `threadnote://user/test/memories/durable/projects/monorepo/scope-${String(index).padStart(3, '0')}.md`,
+      uri: `threadnote://user/test/memories/durable/projects/monorepo/scope-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
     }));
     const candidates = mergePrioritizedRecallIndexCandidates([[relevant]], [scopeOnly]);
 
@@ -95,7 +99,7 @@ describe('recall runtime orchestration', () => {
       query: 'search checkout retry contract',
       workspaceScope: 'apps/search',
     });
-    expect(sections.ranked.map(hit => hit.uri)).toEqual([relevant.uri]);
+    expect(EffectArray.map(sections.ranked, hit => hit.uri)).toEqual([relevant.uri]);
   });
   it('reserves bounded admission for a current-package match beyond a full topical window', () => {
     const siblingCandidates = Array.from({length: 125}, (_unused, index) => ({
@@ -106,7 +110,7 @@ describe('recall runtime orchestration', () => {
         workspaceScope: `apps/sibling-${index}`,
       },
       text: 'Checkout retry contract uses bounded attempts.',
-      uri: `threadnote://user/test/memories/durable/projects/monorepo/sibling-${String(index).padStart(3, '0')}.md`,
+      uri: `threadnote://user/test/memories/durable/projects/monorepo/sibling-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
     }));
     const currentPackage = {
       fields: {
@@ -126,7 +130,7 @@ describe('recall runtime orchestration', () => {
         workspaceScope: 'apps/search',
       },
       text: 'Unrelated package-local operational note.',
-      uri: `threadnote://user/test/memories/durable/projects/monorepo/local-${String(index).padStart(3, '0')}.md`,
+      uri: `threadnote://user/test/memories/durable/projects/monorepo/local-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
     }));
     const supplementalPool = [...localIrrelevant, currentPackage];
     const prioritizedWorkspace = prioritizeWorkspaceRecallCandidates('checkout retry contract', supplementalPool, {
@@ -141,7 +145,7 @@ describe('recall runtime orchestration', () => {
 
     expect(supplementalPool.indexOf(currentPackage)).toBeGreaterThan(16);
     expect(prioritizedWorkspace[0]?.uri).toBe(currentPackage.uri);
-    expect(candidates.slice(0, 100).map(candidate => candidate.uri)).toContain(currentPackage.uri);
+    expect(EffectArray.map(candidates.slice(0, 100), candidate => candidate.uri)).toContain(currentPackage.uri);
     const sections = buildRecallSections([], [], 5, {
       indexedCandidates: candidates,
       project: 'monorepo',
@@ -172,7 +176,9 @@ describe('recall runtime orchestration', () => {
       {project: 'monorepo', workspaceScope: 'apps/search'},
     );
 
-    expect(candidates.map(result => result.uri)).toEqual(expect.arrayContaining([descendants.uri, sibling.uri]));
+    expect(EffectArray.map(candidates, result => result.uri)).toEqual(
+      expect.arrayContaining([descendants.uri, sibling.uri]),
+    );
     expect(candidates).toHaveLength(2);
   });
   it('skips the sibling fallback only after the broad topical query proves exhaustive', () => {
@@ -206,7 +212,7 @@ describe('recall runtime orchestration', () => {
       budgets.admissionLimit,
     );
 
-    expect(admitted.map(candidate => candidate.uri)).toEqual(
+    expect(EffectArray.map(admitted, candidate => candidate.uri)).toEqual(
       expect.arrayContaining([protectedCandidate.uri, crossCandidate.uri]),
     );
   });
@@ -217,7 +223,7 @@ describe('recall runtime orchestration', () => {
       status: 'active' as const,
       text: 'Latest release status is complete.',
       timestamp: '2026-08-04T00:00:00.000Z',
-      uri: `threadnote://user/test/memories/handoffs/active/threadnote/release-${String(index).padStart(3, '0')}.md`,
+      uri: `threadnote://user/test/memories/handoffs/active/threadnote/release-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
     }));
     const latest = {
       fields: {project: 'threadnote', title: 'Latest release status', topic: '4.2.7-release'},
@@ -243,7 +249,7 @@ describe('recall runtime orchestration', () => {
     });
     const admitted = merged.slice(0, 100);
 
-    expect(admitted.map(candidate => candidate.uri)).toEqual(
+    expect(EffectArray.map(admitted, candidate => candidate.uri)).toEqual(
       expect.arrayContaining([latest.uri, protectedCandidate.uri, crossCandidate.uri]),
     );
     const sections = buildRecallSections([], [], 10, {
@@ -253,7 +259,12 @@ describe('recall runtime orchestration', () => {
       query: 'latest release status',
     });
     expect(sections.ranked[0]?.uri).toBe(latest.uri);
-    expect(sections.ranked.findIndex(hit => hit.uri === staleTopical[0].uri)).toBeGreaterThan(0);
+    expect(
+      Option.getOrElse(
+        EffectArray.findFirstIndex(sections.ranked, hit => hit.uri === staleTopical[0].uri),
+        () => -1,
+      ),
+    ).toBeGreaterThan(0);
   });
   fcEffectProp(
     effectIt,
@@ -269,7 +280,7 @@ describe('recall runtime orchestration', () => {
         const makeCandidate = (lane: string, index: number) => ({
           fields: {project: 'monorepo', topic: `${lane}-${index}`},
           text: 'Bounded candidate lane contract.',
-          uri: `threadnote://user/test/memories/durable/projects/monorepo/${lane}-${String(index).padStart(3, '0')}.md`,
+          uri: `threadnote://user/test/memories/durable/projects/monorepo/${lane}-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
         });
         const topical = Array.from({length: topicalCount}, (_unused, index) => makeCandidate('topical', index));
         const protectedCandidates = Array.from({length: protectedCount}, (_unused, index) =>
@@ -279,12 +290,14 @@ describe('recall runtime orchestration', () => {
         const budgets = recallCrossScopeLaneBudgets(resultLimit);
         const first = mergeRecallCandidateLanes([topical], [protectedCandidates], [crossCandidates], budgets);
         const second = mergeRecallCandidateLanes([topical], [protectedCandidates], [crossCandidates], budgets);
-        const admittedUris = new Set(first.slice(0, budgets.admissionLimit).map(candidate => candidate.uri));
+        const admittedUris = new Set(
+          EffectArray.map(first.slice(0, budgets.admissionLimit), candidate => candidate.uri),
+        );
         const expectedProtected = protectedCandidates.slice(0, budgets.protectedReserve);
         const expectedCross = crossCandidates.slice(0, budgets.crossScopeReserve);
 
-        expect(expectedProtected.every(candidate => admittedUris.has(candidate.uri))).toBe(true);
-        expect(expectedCross.every(candidate => admittedUris.has(candidate.uri))).toBe(true);
+        expect(EffectArray.every(expectedProtected, candidate => admittedUris.has(candidate.uri))).toBe(true);
+        expect(EffectArray.every(expectedCross, candidate => admittedUris.has(candidate.uri))).toBe(true);
         expect(first).toEqual(second);
         expect(first.slice(0, budgets.admissionLimit)).toHaveLength(
           Math.min(budgets.admissionLimit, topicalCount + protectedCount + crossCount),
@@ -420,8 +433,10 @@ describe('recall runtime orchestration', () => {
       yield* Effect.yieldNow;
       yield* TestClock.adjust(MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS);
       const results = yield* Fiber.join(fiber);
-      expect(results.filter(result => result.status === 'completed')).toHaveLength(completedCount);
-      expect(results.filter(result => result.status === 'timed-out')).toHaveLength(retrievalCount - completedCount);
+      expect(EffectArray.filter(results, result => result.status === 'completed')).toHaveLength(completedCount);
+      expect(EffectArray.filter(results, result => result.status === 'timed-out')).toHaveLength(
+        retrievalCount - completedCount,
+      );
       expect(invocations).toBe(retrievalCount);
       expect(interrupted).toBe(retrievalCount - completedCount);
       expect(yield* inferencePermit.withPermit(Effect.succeed('permit-released'))).toBe('permit-released');
@@ -532,7 +547,9 @@ describe('recall runtime orchestration', () => {
         manifestPath: join(home, 'seed-manifest.yaml'),
         user: 'tester',
       };
-      const embedding = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+      const embedding = Option.getOrUndefined(
+        EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+      )!;
       const installation = {
         bytes: embedding.size,
         installed: true,
@@ -639,7 +656,7 @@ describe('recall runtime orchestration', () => {
         },
       ).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(prepared.ranked.map(hit => hit.uri)).toContain(fallbackUri);
+      expect(EffectArray.map(prepared.ranked, hit => hit.uri)).toContain(fallbackUri);
       expect(prepared.operationalWarnings).toEqual([expect.objectContaining({code: 'lexical_index_unavailable'})]);
     }),
   );
@@ -699,8 +716,8 @@ describe('recall runtime orchestration', () => {
         semanticResult: Option.none(),
       }).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(emptyHydration.ranked.map(ranked => ranked.uri)).toContain(presentUri);
-      expect(loadedMissing.ranked.map(ranked => ranked.uri)).not.toContain(ghostUri);
+      expect(EffectArray.map(emptyHydration.ranked, ranked => ranked.uri)).toContain(presentUri);
+      expect(EffectArray.map(loadedMissing.ranked, ranked => ranked.uri)).not.toContain(ghostUri);
     }),
   );
   effectIt.effect('drops an indexed memory when extra record hydration misses an empty store', () =>
@@ -715,19 +732,22 @@ describe('recall runtime orchestration', () => {
       yield* Effect.promise(() =>
         writeFile(
           ghostPath,
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: stale-lexical-ghost',
-            'source_agent_client: test',
-            'timestamp: 2026-07-30T00:00:00.000Z',
-            '',
-            '# Stale lexical ghost',
-            '',
-            sentinel,
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: stale-lexical-ghost',
+              'source_agent_client: test',
+              'timestamp: 2026-07-30T00:00:00.000Z',
+              '',
+              '# Stale lexical ghost',
+              '',
+              sentinel,
+            ],
+            '\n',
+          ),
         ),
       );
       const config: RuntimeConfig = {
@@ -765,7 +785,7 @@ describe('recall runtime orchestration', () => {
         semanticResult: Option.none(),
       }).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(prepared.ranked.map(ranked => ranked.uri)).not.toContain(ghostUri);
+      expect(EffectArray.map(prepared.ranked, ranked => ranked.uri)).not.toContain(ghostUri);
     }),
   );
   effectIt.effect('surfaces one CLI warning when exact and ranked lexical recovery both fail', () =>
@@ -795,7 +815,13 @@ describe('recall runtime orchestration', () => {
         ),
       ).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(recalled.output.match(/Recall index warning:/g)).toHaveLength(1);
+      expect(
+        Effect2.pipe(
+          recalled.output,
+          EffectString.match(/Recall index warning:/g),
+          Effect2.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(1);
       expect(recalled.output).toContain('could not be read or recovered');
       expect(recalled.output).toContain('threadnote doctor --dry-run');
     }),
@@ -854,7 +880,9 @@ describe('recall runtime orchestration', () => {
         }),
       );
       const targetPaths = [join(targetRoot, 'target-old-one.md'), join(targetRoot, 'target-old-two.md')];
-      yield* Effect.promise(() => Promise.all(targetPaths.map(path => writeFile(path, `# Target\n\n${path}`))));
+      yield* Effect.promise(() =>
+        Promise.all(EffectArray.map(targetPaths, path => writeFile(path, `# Target\n\n${path}`))),
+      );
       yield* Effect.promise(() =>
         Promise.all(
           Array.from(
@@ -862,12 +890,17 @@ describe('recall runtime orchestration', () => {
               length: 225,
             },
             (_unused, index) =>
-              writeFile(join(outsideRoot, `outside-${String(index).padStart(3, '0')}.md`), `# Outside ${index}`),
+              writeFile(
+                join(outsideRoot, `outside-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`),
+                `# Outside ${index}`,
+              ),
           ),
         ),
       );
       const oldTimestamp = DateTime.toDateUtc(DateTime.makeUnsafe('2020-01-01T00:00:00.000Z'));
-      yield* Effect.promise(() => Promise.all(targetPaths.map(path => utimes(path, oldTimestamp, oldTimestamp))));
+      yield* Effect.promise(() =>
+        Promise.all(EffectArray.map(targetPaths, path => utimes(path, oldTimestamp, oldTimestamp))),
+      );
       const hiddenMemory = join(
         home,
         'data',
@@ -888,17 +921,20 @@ describe('recall runtime orchestration', () => {
       yield* Effect.promise(() =>
         writeFile(
           hiddenMemory,
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: hidden-memory-topic',
-            'source_agent_client: codex',
-            'timestamp: 2026-07-28T00:00:00.000Z',
-            '',
-            'Must remain outside the resource-only fallback scope.',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: hidden-memory-topic',
+              'source_agent_client: codex',
+              'timestamp: 2026-07-28T00:00:00.000Z',
+              '',
+              'Must remain outside the resource-only fallback scope.',
+            ],
+            '\n',
+          ),
         ),
       );
       const config = {
@@ -939,10 +975,17 @@ describe('recall runtime orchestration', () => {
       const second = yield* loadRecallExpansionVocabulary(config, input).pipe(provideTestLayer(ApplicationLayer));
       expect(second).toEqual(first);
       expect(first[0]).toContain('ranked-priority');
-      expect(first.some(term => term.includes('target-old-one'))).toBe(true);
-      expect(first.some(term => term.includes('target-old-two'))).toBe(true);
-      expect(first.some(term => term.includes('outside-'))).toBe(false);
-      expect(first.some(term => term.includes('hidden-memory-topic') || term.includes('hidden-ranked'))).toBe(false);
+      expect(EffectArray.some(first, term => Effect2.pipe(term, EffectString.includes('target-old-one')))).toBe(true);
+      expect(EffectArray.some(first, term => Effect2.pipe(term, EffectString.includes('target-old-two')))).toBe(true);
+      expect(EffectArray.some(first, term => Effect2.pipe(term, EffectString.includes('outside-')))).toBe(false);
+      expect(
+        EffectArray.some(
+          first,
+          term =>
+            Effect2.pipe(term, EffectString.includes('hidden-memory-topic')) ||
+            Effect2.pipe(term, EffectString.includes('hidden-ranked')),
+        ),
+      ).toBe(false);
     }),
   );
 });

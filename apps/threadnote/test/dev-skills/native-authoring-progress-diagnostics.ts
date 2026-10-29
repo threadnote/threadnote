@@ -1,5 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Exit, type FileSystem, Tracer} from 'effect';
 import type {ResourceStoreShape} from '@threadnote/store/resource-store';
+import * as EffectRecord from 'effect/Record';
 
 // Test-only vocabulary: input, output, attributes, IDs, paths and errors never enter this recorder.
 export const nativeProgressBoundaries = [
@@ -15,7 +17,7 @@ export const nativeProgressBoundaries = [
 ] as const;
 export type NativeProgressBoundary = (typeof nativeProgressBoundaries)[number];
 export const nativeProgressSpanLabels = [
-  ...nativeProgressBoundaries.map(label => `native.progress.${label}`),
+  ...EffectArray.map(nativeProgressBoundaries, label => `native.progress.${label}`),
   'workflowAutomation.run',
   'workflowAutomation.bound',
   'workflowAutomation.save',
@@ -117,9 +119,11 @@ export const makeNativeProgressDiagnostics = (
   };
   const origin = clock();
   const elapsed = () => bounded(clock() - origin);
-  const counters = Object.fromEntries(
-    nativeProgressBoundaries.map(label => [label, {started: 0, succeeded: 0, failed: 0}]),
-  ) as Record<NativeProgressBoundary, Counts>;
+  const counterEntries: readonly (readonly [NativeProgressBoundary, Counts])[] = EffectArray.map(
+    nativeProgressBoundaries,
+    (label): readonly [NativeProgressBoundary, Counts] => [label, {started: 0, succeeded: 0, failed: 0}],
+  );
+  const counters = EffectRecord.fromEntries(counterEntries);
   const totals: Record<string, {started: number; ended: number; failed: number; inclusiveMs: number}> = {};
   const active = new Map<Tracer.Span, SpanRecord>();
   const recent: SpanEnd[] = [];
@@ -134,7 +138,9 @@ export const makeNativeProgressDiagnostics = (
   let bodyEndedMs = 0;
   let reported = false;
   const progress = () => ({
-    counters: Object.fromEntries(nativeProgressBoundaries.map(label => [label, {...counters[label]}])),
+    counters: EffectRecord.fromEntries(
+      EffectArray.map(nativeProgressBoundaries, label => [label, {...counters[label]}]),
+    ),
     saveStarted: counters['authoring-save'].started,
     saveSucceeded: counters['authoring-save'].succeeded,
     historyReadsSucceeded,
@@ -232,16 +238,21 @@ export const makeNativeProgressDiagnostics = (
         ...progress(),
         bodyExitSnapshot: bodyExitSnapshot && {
           ...bodyExitSnapshot,
-          counters: Object.fromEntries(
-            Object.entries(bodyExitSnapshot.counters).map(([label, counts]) => [label, {...counts}]),
+          counters: EffectRecord.fromEntries(
+            EffectArray.map(EffectRecord.toEntries(bodyExitSnapshot.counters), ([label, counts]) => [
+              label,
+              {...counts},
+            ]),
           ),
           lastBoundary: bodyExitSnapshot.lastBoundary && {...bodyExitSnapshot.lastBoundary},
         },
-        totals: Object.fromEntries(Object.entries(totals).map(([label, total]) => [label, {...total}])),
+        totals: EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.toEntries(totals), ([label, total]) => [label, {...total}]),
+        ),
         activeCount,
         unlistedActiveCount: activeCount - active.size,
-        active: [...active.values()].map(entry => ({...entry, ageMs: bounded(at - entry.startedMs)})),
-        recent: recent.map(entry => ({...entry})),
+        active: EffectArray.map([...active.values()], entry => ({...entry, ageMs: bounded(at - entry.startedMs)})),
+        recent: EffectArray.map(recent, entry => ({...entry})),
         recentDropped,
       };
     },
@@ -322,6 +333,9 @@ export const reportNativeFailure = <A, E, R>(program: Effect.Effect<A, E, R>, ob
 
 // These returned facades are never provided back into the application service graph.
 const storeFacades = new WeakMap<NativeProgressDiagnostics, WeakMap<object, object>>();
+const storeFacadeSources = new WeakMap<object, object>();
+const isStoreFacadeFor = <S extends Pick<ResourceStoreShape, 'read'>>(value: object, store: S): value is S =>
+  storeFacadeSources.get(value) === store;
 const progressStore = <S extends Pick<ResourceStoreShape, 'read'>>(
   store: S,
   observer: NativeProgressDiagnostics,
@@ -332,9 +346,11 @@ const progressStore = <S extends Pick<ResourceStoreShape, 'read'>>(
     storeFacades.set(observer, facades);
   }
   const existing = facades.get(store);
-  if (existing) return existing as S;
+  if (existing && isStoreFacadeFor(existing, store)) return existing;
   const facade = {...store, read: nativeProgressMethod(store, store.read, () => 'fixture-raw-store-read', observer)};
+  storeFacadeSources.set(facade, store);
   facades.set(store, facade);
+  if (!isStoreFacadeFor(facade, store)) throw new Error('Native progress store facade was not registered.');
   return facade;
 };
 export const nativeProgressFacades = <

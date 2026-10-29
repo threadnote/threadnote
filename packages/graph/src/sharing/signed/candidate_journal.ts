@@ -1,9 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {readBoundedPrivateBytes, writePrivateJsonFile} from '../atomic.js';
 import {graphSharingFailure, GraphSharingError} from '../errors.js';
+import * as EffectRecord from 'effect/Record';
 
 export const SIGNED_CANDIDATE_PAGE_MAXIMUM_ITEMS = 512;
 export const SIGNED_CANDIDATE_PAGE_MAXIMUM_BYTES = 512 * 1_024;
@@ -54,7 +56,7 @@ export const appendSignedCandidateJournal = Effect.fn('codeGraph.sharing.appendS
   readonly spec: SignedCandidateJournalSpec<T, V, M>;
 }) {
   if (input.additions.length === 0) return {queued: 0};
-  if (input.additions.some(candidate => !input.spec.validCandidate(candidate)))
+  if (EffectArray.some(input.additions, candidate => !input.spec.validCandidate(candidate)))
     return yield* graphSharingFailure('Signed candidate journal entry is invalid.');
   return yield* withJournalLock(
     input.manifestPath,
@@ -73,17 +75,17 @@ export const appendSignedCandidateJournal = Effect.fn('codeGraph.sharing.appendS
       }
       const additions = [...unseen.values()];
       const pages = yield* attemptMetadata(() => splitPages(additions, input.spec.pageVersion));
-      const known = new Set(current.segments.map(segment => segment.id));
-      const newPages = pages.filter(page => !known.has(page.descriptor.id));
+      const known = new Set(EffectArray.map(current.segments, segment => segment.id));
+      const newPages = EffectArray.filter(pages, page => !known.has(page.descriptor.id));
       const next = {
         schemaVersion: input.spec.manifestVersion,
-        segments: [...current.segments, ...newPages.map(page => page.descriptor)],
+        segments: [...current.segments, ...EffectArray.map(newPages, page => page.descriptor)],
       } satisfies JournalManifest<M>;
       yield* attemptMetadata(() => checkQuota(next));
       for (const page of newPages) yield* writeSegmentLocked(input.manifestPath, page);
       if (newPages.length > 0) yield* writeDurableJson(input.manifestPath, next);
       yield* removeOrphansLocked(input.manifestPath, next);
-      return {queued: newPages.reduce((sum, page) => sum + page.descriptor.count, 0)};
+      return {queued: EffectArray.reduce(newPages, 0, (sum, page) => sum + page.descriptor.count)};
     }),
   );
 });
@@ -98,7 +100,7 @@ export const listSignedCandidateJournalSegments = Effect.fn('codeGraph.sharing.l
       Effect.gen(function* () {
         const manifest = yield* loadManifestLocked(input.manifestPath, input.spec);
         yield* removeOrphansLocked(input.manifestPath, manifest);
-        return manifest.segments.map(segment => segment.id);
+        return EffectArray.map(manifest.segments, segment => segment.id);
       }),
     );
   },
@@ -114,7 +116,9 @@ export const readSignedCandidateJournalPage = Effect.fn('codeGraph.sharing.readS
     input.manifestPath,
     Effect.gen(function* () {
       const manifest = yield* loadManifestLocked(input.manifestPath, input.spec);
-      const descriptor = manifest.segments.find(segment => segment.id === input.id);
+      const descriptor = Option.getOrUndefined(
+        EffectArray.findFirst(manifest.segments, segment => segment.id === input.id),
+      );
       if (descriptor === undefined) return undefined;
       const page = yield* readSegmentLocked(input.manifestPath, descriptor, input.spec);
       return {candidates: page.candidates, id: descriptor.id} satisfies SignedCandidateJournalPage<T>;
@@ -135,14 +139,18 @@ export const acknowledgeSignedCandidateJournalPage = Effect.fn('codeGraph.sharin
       input.manifestPath,
       Effect.gen(function* () {
         const manifest = yield* loadManifestLocked(input.manifestPath, input.spec);
-        const index = manifest.segments.findIndex(segment => segment.id === input.id);
+        const index = Option.getOrElse(
+          EffectArray.findFirstIndex(manifest.segments, segment => segment.id === input.id),
+          () => -1,
+        );
         if (index < 0)
           return {
             acknowledged: 0,
             absent: !(yield* hasIdentityLocked(input.manifestPath, manifest, input.spec, input.acceptedIdentities)),
           };
         const oldPage = yield* readSegmentLocked(input.manifestPath, manifest.segments[index], input.spec);
-        const retained = oldPage.candidates.filter(
+        const retained = EffectArray.filter(
+          oldPage.candidates,
           candidate => !input.acceptedIdentities.has(input.spec.identity(candidate)),
         );
         if (retained.length === oldPage.candidates.length) return {acknowledged: 0, absent: false};
@@ -150,7 +158,10 @@ export const acknowledgeSignedCandidateJournalPage = Effect.fn('codeGraph.sharin
         const segments = [...manifest.segments];
         const replacementExists =
           replacement !== undefined &&
-          segments.some((segment, position) => position !== index && segment.id === replacement.descriptor.id);
+          EffectArray.some(
+            segments,
+            (segment, position) => position !== index && segment.id === replacement.descriptor.id,
+          );
         segments.splice(index, 1, ...(replacement === undefined || replacementExists ? [] : [replacement.descriptor]));
         const next = {schemaVersion: input.spec.manifestVersion, segments} satisfies JournalManifest<M>;
         yield* attemptMetadata(() => checkQuota(next));
@@ -197,7 +208,7 @@ const hasIdentityLocked = Effect.fn('codeGraph.sharing.hasCandidateIdentity')(fu
 ) {
   for (const descriptor of manifest.segments) {
     const page = yield* readSegmentLocked(manifestPath, descriptor, spec);
-    if (page.candidates.some(candidate => identities.has(spec.identity(candidate)))) return true;
+    if (EffectArray.some(page.candidates, candidate => identities.has(spec.identity(candidate)))) return true;
   }
   return false;
 });
@@ -219,7 +230,7 @@ const loadManifestLocked = Effect.fn('codeGraph.sharing.loadCandidateManifest')(
     return yield* attemptMetadata(() => parseManifest(value, spec.manifestVersion));
   const legacy = yield* attemptMetadata(() => spec.parseLegacy(value));
   const pages = yield* attemptMetadata(() => splitPages(legacy.candidates, spec.pageVersion));
-  const migrated = {schemaVersion: spec.manifestVersion, segments: pages.map(page => page.descriptor)};
+  const migrated = {schemaVersion: spec.manifestVersion, segments: EffectArray.map(pages, page => page.descriptor)};
   yield* attemptMetadata(() => checkQuota(migrated));
   for (const page of pages) yield* writeSegmentLocked(manifestPath, page);
   yield* writeDurableJson(manifestPath, migrated);
@@ -228,9 +239,9 @@ const loadManifestLocked = Effect.fn('codeGraph.sharing.loadCandidateManifest')(
 
 function parseManifest<M extends number>(value: Record<string, unknown>, version: M): JournalManifest<M> {
   if (
-    Object.keys(value).sort().join(',') !== 'schemaVersion,segments' ||
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') !== 'schemaVersion,segments' ||
     value.schemaVersion !== version ||
-    !Array.isArray(value.segments) ||
+    !EffectArray.isArray(value.segments) ||
     value.segments.length > MAXIMUM_SEGMENTS
   )
     throw graphSharingFailure('Signed candidate manifest is invalid.');
@@ -239,7 +250,7 @@ function parseManifest<M extends number>(value: Record<string, unknown>, version
   for (const item of value.segments) {
     if (
       !isRecord(item) ||
-      Object.keys(item).sort().join(',') !== 'count,id,size' ||
+      EffectArray.join(EffectRecord.keys(item).sort(), ',') !== 'count,id,size' ||
       typeof item.id !== 'string' ||
       !DIGEST.test(item.id) ||
       seen.has(item.id) ||
@@ -254,7 +265,7 @@ function parseManifest<M extends number>(value: Record<string, unknown>, version
     )
       throw graphSharingFailure('Signed candidate manifest segment is invalid.');
     seen.add(item.id);
-    segments.push(item as unknown as SegmentDescriptor);
+    segments.push({count: item.count, id: item.id, size: item.size});
   }
   const manifest = {schemaVersion: version, segments};
   checkQuota(manifest);
@@ -298,7 +309,8 @@ function serializedPage<T, V extends number>(candidates: readonly T[], version: 
 function checkQuota(manifest: JournalManifest<number>): void {
   if (
     manifest.segments.length > MAXIMUM_SEGMENTS ||
-    manifest.segments.reduce((total, item) => total + item.size, 0) > SIGNED_CANDIDATE_JOURNAL_MAXIMUM_BYTES ||
+    EffectArray.reduce(manifest.segments, 0, (total, item) => total + item.size) >
+      SIGNED_CANDIDATE_JOURNAL_MAXIMUM_BYTES ||
     new TextEncoder().encode(`${JSON.stringify(manifest)}\n`).byteLength > MAXIMUM_MANIFEST_BYTES
   )
     throw graphSharingFailure('Signed candidate journal quota is full.');
@@ -366,7 +378,7 @@ const removeOrphansLocked = Effect.fn('codeGraph.sharing.removeCandidateOrphans'
   const names = yield* fs.readDirectory(directory);
   if (names.length > MAXIMUM_SEGMENTS * 2)
     return yield* graphSharingFailure('Signed candidate journal has too many segment files.');
-  const active = new Set(manifest.segments.map(segment => `${segment.id}.json`));
+  const active = new Set(EffectArray.map(manifest.segments, segment => `${segment.id}.json`));
   for (const name of names) {
     if (!(SEGMENT_NAME.test(name) || SEGMENT_TEMP_NAME.test(name)) || active.has(name)) continue;
     yield* fs.remove(path.join(directory, name));
@@ -381,7 +393,7 @@ const syncPath = Effect.fn('codeGraph.sharing.syncCandidatePath')(function* (tar
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function attemptMetadata<A>(evaluate: () => A) {

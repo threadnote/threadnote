@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {workflowArchiveStem, workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {uriSegment} from '@threadnote/store/resource-segment';
@@ -11,6 +12,7 @@ import {
   type WorkflowJournal,
   type WorkflowRequest,
 } from './protocol.js';
+import * as EffectRecord from 'effect/Record';
 
 type ArtifactName = NonNullable<WorkflowArtifact['naming']>;
 export const workflowStateTopic = (binding: WorkflowBinding) =>
@@ -73,7 +75,7 @@ export const allocateWorkflowArtifactName = Effect.fn('workflowMemory.allocateAr
       'Replacing or archiving an artifact must preserve its name role.',
     );
   if (original && request.action !== 'archive' && request.mutation !== 'archive') return original.naming;
-  const prior = Object.values(state.operations).map(operation => operation.artifact);
+  const prior = EffectArray.map(EffectRecord.values(state.operations), operation => operation.artifact);
   for (let ordinal = 1; ordinal <= 1_000_000; ordinal++) {
     const naming: ArtifactName = original
       ? {role, version: original.naming!.version, archiveOrdinal: ordinal}
@@ -89,7 +91,7 @@ export const allocateWorkflowArtifactName = Effect.fn('workflowMemory.allocateAr
     const uri = original
       ? workflowArchiveUri(state.binding, artifact, request.operationId!)
       : workflowArtifactUri(state.binding, artifact);
-    if (prior.some(item => item.canonicalUri === uri) || state.manifestUri === uri) continue;
+    if (EffectArray.some(prior, item => item.canonicalUri === uri) || state.manifestUri === uri) continue;
     const existing = yield* (yield* ResourceStore)
       .read({account: config.account, home: config.agentContextHome, user: config.user}, uri)
       .pipe(Effect.catchTag('ResourceNotFound', () => Effect.void));

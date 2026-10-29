@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -23,6 +24,9 @@ import {
   verifyThreadnote5LocalSubsystemReceipts,
   type Threadnote5LocalSubsystemReceiptRecordV1,
 } from './threadnote-5-release-readiness-receipts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const THREADNOTE_5_RELEASE_CAPTURE_VERSION = 1 as const;
 const MAX_RUNTIME_BOUNDARIES_BYTES = 256 * 1024;
@@ -64,11 +68,14 @@ export function captureThreadnote5ReleaseCandidateV1(input: {
   const fixture = parseThreadnote5ReleaseReadinessFixtureV1(input.fixture);
   const candidate = parseThreadnote5TrustedSourceV1(input.candidate, 'candidate');
   const runtimeBoundaries = new Map(
-    canonicalizeThreadnote5ScenarioRuntimeBoundariesV1(
-      candidate,
-      fixture.scenarios.map(item => item.id),
-      input.runtimeBoundaries,
-    ).map(boundary => [boundary.scenario, boundary] as const),
+    EffectArray.map(
+      canonicalizeThreadnote5ScenarioRuntimeBoundariesV1(
+        candidate,
+        EffectArray.map(fixture.scenarios, item => item.id),
+        input.runtimeBoundaries,
+      ),
+      boundary => [boundary.scenario, boundary] as const,
+    ),
   );
   const derived = deriveThreadnote5LocalScenarioClaims({
     authorityManifest: input.authorityManifest,
@@ -76,15 +83,19 @@ export function captureThreadnote5ReleaseCandidateV1(input: {
     expectedAuthorityManifestSha256: input.expectedAuthorityManifestSha256,
     retainedRecords: input.retainedSubsystemReceipts,
   });
-  const expectedRecordCount = fixture.scenarios.reduce((sum, scenario) => sum + scenario.subsystems.length, 0);
+  const expectedRecordCount = EffectArray.reduce(
+    fixture.scenarios,
+    0,
+    (sum, scenario) => sum + scenario.subsystems.length,
+  );
   if (fixture.scenarios.length !== 15 || expectedRecordCount !== 24 || derived.records.length !== expectedRecordCount) {
     throw new Error('Production capture requires exactly 15 observations and 24 source records.');
   }
-  const claims = new Map(derived.scenarios.map(scenario => [scenario.scenario, scenario] as const));
+  const claims = new Map(EffectArray.map(derived.scenarios, scenario => [scenario.scenario, scenario] as const));
   for (const contract of fixture.scenarios) {
     const scenarioClaims = claims.get(contract.id);
     if (scenarioClaims === undefined) throw new Error(`Production capture lacks source claims for ${contract.id}.`);
-    for (const record of derived.records.filter(item => item.scenario === contract.id)) {
+    for (const record of EffectArray.filter(derived.records, item => item.scenario === contract.id)) {
       const count = sourceTrialCount(record);
       const contributesToMetric = scenarioClaims.metricContributingKinds.includes(record.kind);
       if ((!contributesToMetric && count !== 1) || (contributesToMetric && count < 10)) {
@@ -98,13 +109,15 @@ export function captureThreadnote5ReleaseCandidateV1(input: {
   }
   let previousTranscriptDigest: string | null = null;
   const sourceHash = threadnote5SourceHash(candidate);
-  const candidateObservations = fixture.scenarios.map((contract, index) => {
+  const candidateObservations = EffectArray.map(fixture.scenarios, (contract, index) => {
     const scenarioClaims = claims.get(contract.id);
     if (scenarioClaims === undefined || scenarioClaims.missingKinds.length > 0) {
       throw new Error(`Production capture lacks complete source authority for ${contract.id}.`);
     }
-    const receipts = contract.subsystems.map(kind => {
-      const receipt = scenarioClaims.subsystemReceipts.find(item => item.kind === kind);
+    const receipts = EffectArray.map(contract.subsystems, kind => {
+      const receipt = EffectOption.getOrUndefined(
+        EffectArray.findFirst(scenarioClaims.subsystemReceipts, item => item.kind === kind),
+      );
       if (receipt === undefined) throw new Error(`Production capture lacks ${kind} evidence for ${contract.id}.`);
       return receipt;
     });
@@ -114,9 +127,13 @@ export function captureThreadnote5ReleaseCandidateV1(input: {
     ) {
       throw new Error(`Production capture source claims do not match the ${contract.id} contract.`);
     }
-    const measurements = contract.metricIds.map(id => {
-      const measurement = scenarioClaims.measurements.find(item => item.id === id);
-      const minimum = contract.metricMinimums.find(item => item.id === id);
+    const measurements = EffectArray.map(contract.metricIds, id => {
+      const measurement = EffectOption.getOrUndefined(
+        EffectArray.findFirst(scenarioClaims.measurements, item => item.id === id),
+      );
+      const minimum = EffectOption.getOrUndefined(
+        EffectArray.findFirst(contract.metricMinimums, item => item.id === id),
+      );
       if (
         measurement === undefined ||
         minimum === undefined ||
@@ -130,7 +147,7 @@ export function captureThreadnote5ReleaseCandidateV1(input: {
       throw new Error(`Production capture has surplus or mislabeled metrics for ${contract.id}.`);
     }
     const transcript = {
-      assertionResults: contract.requiredAssertions.map(id => ({id, observed: true})),
+      assertionResults: EffectArray.map(contract.requiredAssertions, id => ({id, observed: true})),
       measurements,
       outcome: 'passed' as const,
       reason: null,
@@ -145,9 +162,10 @@ export function captureThreadnote5ReleaseCandidateV1(input: {
         subsystemReceipts: receipts,
         transcriptDigest,
       },
-      observationId: `obs_${sha256HexSync(
-        `threadnote-5-release-observation-id-v1\0${sourceHash}\0${contract.id}\0${index}`,
-      ).slice(0, 32)}`,
+      observationId: `obs_${Effect.pipe(
+        sha256HexSync(`threadnote-5-release-observation-id-v1\0${sourceHash}\0${contract.id}\0${index}`),
+        EffectString.slice(0, 32),
+      )}`,
       scenario: contract.id,
       sourceHash,
       transcript,
@@ -203,21 +221,22 @@ export function canonicalizeThreadnote5ScenarioRuntimeBoundariesV1(
 ): readonly Threadnote5ScenarioRuntimeBoundaryV1[] {
   const candidate = parseThreadnote5TrustedSourceV1(candidateValue, 'candidate');
   if (
-    !Array.isArray(value) ||
+    !EffectArray.isArray(value) ||
     value.length !== scenarios.length ||
     new TextEncoder().encode(canonicalJson(value)).byteLength > MAX_RUNTIME_BOUNDARIES_BYTES
   ) {
     throw new Error('Production capture runtime boundaries must exactly cover all scenarios within size limits.');
   }
   const expectedRuntime = {executableSha256: candidate.executableSha256, sourceCommit: candidate.commit};
-  const boundaries = value.map(parseRuntimeBoundary);
+  const boundaries = EffectArray.map(value, parseRuntimeBoundary);
   if (
-    new Set(boundaries.map(item => item.scenario)).size !== boundaries.length ||
+    new Set(EffectArray.map(boundaries, item => item.scenario)).size !== boundaries.length ||
     !sameStrings(
-      boundaries.map(item => item.scenario),
+      EffectArray.map(boundaries, item => item.scenario),
       scenarios,
     ) ||
-    boundaries.some(
+    EffectArray.some(
+      boundaries,
       item =>
         canonicalJson(item.preRuntime) !== canonicalJson(expectedRuntime) ||
         canonicalJson(item.postRuntime) !== canonicalJson(expectedRuntime),
@@ -225,7 +244,7 @@ export function canonicalizeThreadnote5ScenarioRuntimeBoundariesV1(
   ) {
     throw new Error('Production capture runtime boundaries are missing, duplicated, mislabeled, or drifting.');
   }
-  const order = new Map(scenarios.map((item, index) => [item, index] as const));
+  const order = new Map(EffectArray.map(scenarios, (item, index) => [item, index] as const));
   return [...boundaries].sort((left, right) => order.get(left.scenario)! - order.get(right.scenario)!);
 }
 
@@ -255,7 +274,9 @@ function measurementEligibleCount(measurement: Threadnote5MeasurementV1): number
 }
 
 function sourceTrialCount(record: Threadnote5LocalSubsystemReceiptRecordV1): number {
-  const artifact = record.artifact as Record<string, unknown>;
+  if (!Predicate.isObject(record.artifact))
+    throw new Error(`Production capture source ${record.kind} has no structured artifact.`);
+  const artifact = record.artifact;
   const values =
     record.kind === 'activation' || record.kind === 'recall' || record.kind === 'sharing'
       ? artifact.trials
@@ -272,7 +293,7 @@ function sourceTrialCount(record: Threadnote5LocalSubsystemReceiptRecordV1): num
                   ? artifact.repairs
                   : artifact.reports
                 : [record.artifact];
-  if (!Array.isArray(values)) throw new Error(`Production capture source ${record.kind} has no bounded trials.`);
+  if (!EffectArray.isArray(values)) throw new Error(`Production capture source ${record.kind} has no bounded trials.`);
   return values.length;
 }
 
@@ -281,11 +302,11 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
 }
 
 function exactObject(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!Predicate.isObject(value)) {
     throw new Error(`${label} must be an object.`);
   }
-  const source = value as Record<string, unknown>;
-  if (canonicalJson(Object.keys(source).sort()) !== canonicalJson([...keys].sort())) {
+  const source = value;
+  if (canonicalJson(EffectRecord.keys(source).sort()) !== canonicalJson([...keys].sort())) {
     throw new Error(`${label} has unsupported or missing fields.`);
   }
   return source;
@@ -297,8 +318,12 @@ function matching(value: unknown, pattern: RegExp, label: string): string {
 }
 
 function scenario(value: unknown): Threadnote5ReleaseScenario {
-  if (typeof value !== 'string' || !THREADNOTE_5_RELEASE_SCENARIOS.includes(value as Threadnote5ReleaseScenario)) {
-    throw new Error('Runtime boundary scenario is invalid.');
-  }
-  return value as Threadnote5ReleaseScenario;
+  const result =
+    typeof value === 'string'
+      ? EffectOption.getOrUndefined(
+          EffectArray.findFirst(THREADNOTE_5_RELEASE_SCENARIOS, candidate => candidate === value),
+        )
+      : undefined;
+  if (result === undefined) throw new Error('Runtime boundary scenario is invalid.');
+  return result;
 }

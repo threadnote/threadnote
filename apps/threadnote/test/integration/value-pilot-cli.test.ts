@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -6,18 +7,20 @@ import {promisify} from 'node:util';
 import {afterEach, expect, it} from 'vitest';
 import {inspectCliInvocation} from '@threadnote/threadnote/effect/cli';
 import {pilotInput} from '../helpers/value-pilot-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const exec = promisify(execFile);
 const homes: string[] = [];
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 it('previews offline, exports only after apply, and resets with content-free receipts', async () => {
   const home = await mkdtemp(join(tmpdir(), 'value-pilot-cli-'));
   homes.push(home);
   const input = join(home, 'private-input.json');
-  const day = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const day = Effect.pipe(new Date(Date.now() - 86_400_000).toISOString(), EffectString.slice(0, 10));
   const raw = JSON.stringify({...pilotInput(), windowStart: day, elapsedDays: 1});
   await writeFile(input, raw);
   const args = ['value', 'pilot', '--input', input];
@@ -37,7 +40,9 @@ it('previews offline, exports only after apply, and resets with content-free rec
   expect(JSON.parse(applied.stdout)).toMatchObject({applied: true, publication: 'none'});
   const names = await readdir(join(home, 'exports', 'value-reports'));
   expect(names).toHaveLength(1);
-  expect((await readFile(join(home, 'exports', 'value-reports', names[0]), 'utf8')).trim()).toBe(preview.stdout.trim());
+  expect(Effect.pipe(await readFile(join(home, 'exports', 'value-reports', names[0]), 'utf8'), EffectString.trim)).toBe(
+    Effect.pipe(preview.stdout, EffectString.trim),
+  );
   const reset = await run(['value', 'pilot', '--action', 'reset'], home);
   expect(JSON.parse(reset.stdout)).toMatchObject({applied: false, selected: 1, removed: 0, correlationRecords: 0});
   await run(

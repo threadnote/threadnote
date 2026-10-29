@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {Effect, FileSystem, ManagedRuntime, Path, PlatformError, Schema} from 'effect';
@@ -14,8 +15,13 @@ import {
 } from '../development-runtime.js';
 import {processInstanceIdentityMatches} from '@threadnote/threadnote/process/process_identity';
 import {assertStage3, stage3Record, type Stage3ExecuteOptions} from './code-graph-stage3-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export const stage3SourceRoot = Bun.fileURLToPath(new URL('../../', import.meta.url)).replace(/\/$/u, '');
+export const stage3SourceRoot = Effect2.pipe(
+  Bun.fileURLToPath(new URL('../../', import.meta.url)),
+  EffectString.replace(/\/$/u, ''),
+);
 export const STAGE3_DEADLINE = 120_000;
 export const STAGE3_POLL = 250;
 const DemandTarget = {
@@ -93,7 +99,7 @@ export function classifyStage3OutputParentGitResult(
   if (result.timedOut || result.exitCode === 0) return result.exitCode === 0 ? 'inside-worktree' : 'unknown';
   return markers === 'clear' &&
     result.exitCode === 128 &&
-    result.stdout.trim() === '' &&
+    Effect2.pipe(result.stdout, EffectString.trim) === '' &&
     /^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/u.test(result.stderr)
     ? 'outside-worktree'
     : 'unknown';
@@ -216,8 +222,14 @@ export class Stage3Driver {
       await this.git(repository, ['worktree', 'add', '--detach', cwd, 'HEAD']);
       this.worktrees.push(await this.worktree(cwd));
     }
-    assertStage3(new Set(this.worktrees.map(tree => tree.identity.checkoutId)).size === 1, 'linked-checkout');
-    assertStage3(new Set(this.worktrees.map(tree => tree.identity.worktreeId)).size === 3, 'linked-worktree-identity');
+    assertStage3(
+      new Set(EffectArray.map(this.worktrees, tree => tree.identity.checkoutId)).size === 1,
+      'linked-checkout',
+    );
+    assertStage3(
+      new Set(EffectArray.map(this.worktrees, tree => tree.identity.worktreeId)).size === 3,
+      'linked-worktree-identity',
+    );
     for (const tree of this.worktrees)
       await this.command(
         this.options.candidateExecutable,
@@ -323,7 +335,8 @@ export class Stage3Driver {
   }
 
   async rawStatuses(tree: Stage3Worktree) {
-    return (await this.runtime.runPromise(readCodeGraphBuildStatuses(tree.layout))).filter(
+    return EffectArray.filter(
+      await this.runtime.runPromise(readCodeGraphBuildStatuses(tree.layout)),
       status => status.identity.worktreeId === tree.identity.worktreeId,
     );
   }
@@ -331,7 +344,7 @@ export class Stage3Driver {
   async statuses(tree: Stage3Worktree) {
     const statuses = await this.rawStatuses(tree);
     assertStage3(
-      statuses.filter(status => status.observation.liveness === 'active').length <= 1,
+      EffectArray.filter(statuses, status => status.observation.liveness === 'active').length <= 1,
       'duplicate-active-build',
     );
     for (const status of statuses) {
@@ -407,9 +420,10 @@ export class Stage3Driver {
   }
 
   async git(cwd: string, arguments_: readonly string[]) {
-    return (
-      await this.command('git', ['-C', cwd, ...arguments_], this.root ? this.environment : undefined)
-    ).stdout.trim();
+    return Effect2.pipe(
+      (await this.command('git', ['-C', cwd, ...arguments_], this.root ? this.environment : undefined)).stdout,
+      EffectString.trim,
+    );
   }
 
   async inspectOutputParentMarkers(outputParent: string): Promise<Stage3OutputParentMarkerInspection> {
@@ -548,5 +562,5 @@ export class Stage3Driver {
 
 export function stage3Fixture(target: string) {
   assertStage3(/^[a-z0-9-]+$/u.test(target), 'fixture-target');
-  return `export function stage3Leaf(value: number) { return value + 1; }\nexport function stage3Entry(value: number) { return stage3Leaf(value); }\nexport const stage3Target_${target.replaceAll('-', '_')} = '${target}';\n`;
+  return `export function stage3Leaf(value: number) { return value + 1; }\nexport function stage3Entry(value: number) { return stage3Leaf(value); }\nexport const stage3Target_${Effect2.pipe(target, EffectString.replaceAll('-', '_'))} = '${target}';\n`;
 }

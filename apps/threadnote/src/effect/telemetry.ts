@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import * as HttpClient from 'effect/http/HttpClient';
 import * as HttpClientResponse from 'effect/http/HttpClientResponse';
@@ -17,6 +18,9 @@ import {
 } from '../telemetry/diagnostic.js';
 import {safeAnonymousTelemetryOperation} from '../telemetry/operations.js';
 import {anonymousTelemetrySerializationLayer} from '../telemetry/otlp_serialization.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TELEMETRY_SCHEMA_VERSION = 6;
 const TELEMETRY_VERSION_MAX_BYTES = 96;
@@ -839,7 +843,10 @@ function emitSafeSpan(
     if (diagnostic?.domain !== undefined) attributes['threadnote.failure.domain'] = diagnostic.domain;
     if (diagnostic?.code !== undefined) attributes['threadnote.failure.code'] = diagnostic.code;
     if (diagnostic?.operation !== undefined)
-      attributes['threadnote.failure.operation'] = diagnostic.operation.replaceAll(' ', '-');
+      attributes['threadnote.failure.operation'] = Effect2.pipe(
+        diagnostic.operation,
+        EffectString.replaceAll(' ', '-'),
+      );
     if (diagnostic?.recovery !== undefined) attributes['threadnote.failure.recovery'] = diagnostic.recovery;
     if (diagnostic?.reason !== undefined) attributes['threadnote.failure.reason'] = diagnostic.reason;
     if (diagnostic?.retryable !== undefined) attributes['threadnote.failure.retryable'] = diagnostic.retryable;
@@ -1056,18 +1063,19 @@ function telemetryFieldAttributes(fields: AnonymousTelemetryFields | undefined):
   ) {
     attributes['threadnote.graph.snapshot_selection'] = fields.snapshotSelection;
   }
-  for (const [key, attribute] of Object.entries(GRAPH_QUANTITY_BUCKET_ATTRIBUTE_KEYS)) {
+  for (const [key, attribute] of EffectRecord.toEntries(GRAPH_QUANTITY_BUCKET_ATTRIBUTE_KEYS)) {
     const value = recordValue(fields, key);
     if (isQuantityBucket(value)) Reflect.set(attributes, attribute, value);
   }
-  for (const [key, attribute] of Object.entries(CONTEXT_BRIEF_QUANTITY_BUCKET_ATTRIBUTE_KEYS)) {
+  for (const [key, attribute] of EffectRecord.toEntries(CONTEXT_BRIEF_QUANTITY_BUCKET_ATTRIBUTE_KEYS)) {
     const value = recordValue(fields, key);
     if (isQuantityBucket(value)) Reflect.set(attributes, attribute, value);
   }
-  for (const [key, attribute] of Object.entries(CODE_ANCHOR_FINALIZATION_QUANTITY_BUCKET_ATTRIBUTE_KEYS)) {
+  for (const [key, attribute] of EffectRecord.toEntries(CODE_ANCHOR_FINALIZATION_QUANTITY_BUCKET_ATTRIBUTE_KEYS)) {
     const value = recordValue(fields, key);
     if (isQuantityBucket(value)) Reflect.set(attributes, attribute, value);
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
   for (const [key, value] of Object.entries(fields)) {
     if (
       key === 'phase' ||
@@ -1418,12 +1426,12 @@ function recordValue(record: object, key: string): unknown {
 
 function recordEntries(record: object): readonly (readonly [string, unknown])[] {
   const entries: [string, unknown][] = [];
-  for (const key of Object.keys(record)) entries.push([key, Reflect.get(record, key)]);
+  for (const key of EffectRecord.keys(record)) entries.push([key, Reflect.get(record, key)]);
   return entries;
 }
 
 function isOneOf<const Values extends readonly string[]>(value: unknown, options: Values): value is Values[number] {
-  return typeof value === 'string' && options.some(option => option === value);
+  return typeof value === 'string' && EffectArray.some(options, option => option === value);
 }
 
 function isQuantityBucket(value: unknown): value is AnonymousTelemetryQuantityBucket {
@@ -1461,7 +1469,10 @@ function safeCorrelationScope(value: string): 'broker' | 'invocation' | 'provide
 function safeAnonymousInvocationId(): string | undefined {
   const generated = Result.try(() => {
     const bytes = crypto.getRandomValues(new Uint8Array(12));
-    return `tni_${[...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
+    return `tni_${EffectArray.join(
+      EffectArray.map([...bytes], byte => Effect2.pipe(byte.toString(16), EffectString.padStart(2, '0'))),
+      '',
+    )}`;
   });
   return Result.isSuccess(generated) ? generated.success : undefined;
 }

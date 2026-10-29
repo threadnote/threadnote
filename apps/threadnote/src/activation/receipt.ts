@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -50,7 +51,7 @@ export function createActivationReceiptV1(suppliedPlan: ActivationPlanV1, starte
   const body = {
     activationId: plan.activationId,
     generation: 0,
-    operations: plan.operations.map(operation => ({
+    operations: EffectArray.map(plan.operations, operation => ({
       attempt: 0,
       id: operation.id,
       inputHash: operation.inputHash,
@@ -98,8 +99,12 @@ export function recordActivationOutcomeV1(input: RecordActivationOutcomeInputV1)
   const plan = parseActivationPlanV1(input.plan);
   const receipt = parseActivationReceiptV1(input.receipt);
   assertIsoInstant(input.now);
-  const plannedOperation = plan.operations.find(operation => operation.id === input.operationId);
-  const receiptOperation = receipt.operations.find(operation => operation.id === input.operationId);
+  const plannedOperation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(plan.operations, operation => operation.id === input.operationId),
+  );
+  const receiptOperation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(receipt.operations, operation => operation.id === input.operationId),
+  );
   if (plannedOperation === undefined || receiptOperation === undefined) {
     return {code: 'operation-not-ready', status: 'conflict'};
   }
@@ -143,8 +148,12 @@ export function activationReceiptTransitionMatchesV1(
     const resume = previewActivationResumeV1(plan, previous);
     if (resume.status === 'completed' || resume.status === 'drifted') return false;
     const operationId = resume.operationId;
-    const plannedOperation = plan.operations.find(operation => operation.id === operationId);
-    const nextOperation = next.operations.find(operation => operation.id === operationId);
+    const plannedOperation = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.operations, operation => operation.id === operationId),
+    );
+    const nextOperation = EffectOption.getOrUndefined(
+      EffectArray.findFirst(next.operations, operation => operation.id === operationId),
+    );
     if (plannedOperation === undefined || nextOperation === undefined) return false;
     const outcome = activationOutcomeFromReceiptOperation(nextOperation);
     if (outcome === undefined) return false;
@@ -171,8 +180,12 @@ function recordActivationOutcomeWithApprovalHashV1(input: {
   readonly receipt: ActivationReceiptV1;
 }): ActivationTransitionResultV1 {
   const {approvalHash, plan, receipt} = input;
-  const plannedOperation = plan.operations.find(operation => operation.id === input.operationId);
-  const receiptOperation = receipt.operations.find(operation => operation.id === input.operationId);
+  const plannedOperation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(plan.operations, operation => operation.id === input.operationId),
+  );
+  const receiptOperation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(receipt.operations, operation => operation.id === input.operationId),
+  );
   if (
     plannedOperation === undefined ||
     receiptOperation === undefined ||
@@ -206,7 +219,7 @@ function recordActivationOutcomeWithApprovalHashV1(input: {
   }
   if (Date.parse(input.now) < Date.parse(receipt.updatedAt)) return {code: 'time-invalid', status: 'conflict'};
   const nextOperation = receiptOperationWithOutcome(receiptOperation, input.outcome, outcomeHash, approvalHash);
-  const operations = receipt.operations.map(operation =>
+  const operations = EffectArray.map(receipt.operations, operation =>
     operation.id === input.operationId ? nextOperation : operation,
   );
   const status = activationReceiptStatusV1(operations);

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
@@ -10,6 +11,8 @@ import {archiveRelease} from '../../../../scripts/archive-release.js';
 import {extractGzipTar} from '../../src/effect/archive.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const systemLayer = Layer.effect(
   SystemInfo,
@@ -69,11 +72,13 @@ const verifyRoundtrip = Effect.fn('test.releaseArchive.verifyRoundtrip')(functio
     `${sha256HexSync(archiveBytes)}  ${f.path.basename(archive.artifactPath)}\n`,
   );
   yield* extractGzipTar(archive.artifactPath, f.extracted);
-  const inventory = (yield* f.fs.readDirectory(f.extracted, {recursive: true})).map(name => name.replaceAll('\\', '/'));
+  const inventory = EffectArray.map(yield* f.fs.readDirectory(f.extracted, {recursive: true}), name =>
+    Effect2.pipe(name, EffectString.replaceAll('\\', '/')),
+  );
   const expectedEntries = new Set(
-    f.files.flatMap(file => {
-      const parts = file.name.split('/');
-      return parts.map((_, index) => parts.slice(0, index + 1).join('/'));
+    EffectArray.flatMap(f.files, file => {
+      const parts = Effect2.pipe(file.name, EffectString.split('/'));
+      return EffectArray.map(parts, (_, index) => EffectArray.join(parts.slice(0, index + 1), '/'));
     }),
   );
   expect(inventory.sort()).toEqual([...expectedEntries].sort());
@@ -130,7 +135,10 @@ describe('production release archives', () => {
         yield* verifyRoundtrip(f);
         for (const destination of [file, directory])
           expect(
-            (yield* runCommandEffect('xattr', ['-p', 'com.threadnote.archive-test', destination])).stdout.trim(),
+            Effect2.pipe(
+              (yield* runCommandEffect('xattr', ['-p', 'com.threadnote.archive-test', destination])).stdout,
+              EffectString.trim,
+            ),
           ).toBe('benign-fixture-metadata');
       }).pipe(testLayer),
   );
@@ -151,7 +159,7 @@ describe('production release archives', () => {
     ({files}) =>
       Effect.gen(function* () {
         const f = yield* fixture(
-          files.map((file, index) => ({
+          EffectArray.map(files, (file, index) => ({
             name: `config/agent-skills/dev-cycle/${file.nested ? 'scripts/nested/' : ''}file ${index}.bin`,
             bytes: Uint8Array.from(file.bytes),
             executable: file.executable,

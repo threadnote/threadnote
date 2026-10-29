@@ -18,6 +18,8 @@ import {evaluateRecallNonInferiority} from '@threadnote/threadnote/evaluation/re
 import {evaluateRecallRunV2, runLexicalRecallEvaluationV2} from '@threadnote/threadnote/evaluation/recall';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {atomicWrite, fixtureHash, markFailure, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const evaluateRecall = Effect.gen(function* () {
   const options = parseArguments(yield* scriptArguments());
@@ -146,7 +148,12 @@ function positiveInteger(value: string | undefined, option: string): number {
 }
 
 function requiredValue(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
 

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -19,6 +21,8 @@ import {
   type CodeMemoryLinkBenchScenarioKind,
   type CodeMemoryLinkBenchThresholdsV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-bench-contract';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('CodeMemoryLinkBench contract', () => {
   it('passes the reviewed retrieval, safety, coverage, latency, and budget gates', () => {
@@ -45,10 +49,12 @@ describe('CodeMemoryLinkBench contract', () => {
   });
 
   it('accepts the bounded unresolved-anchor recovery field without changing frozen coverage truth', () => {
-    const queryId = FIXTURE.queries.find(query => query.scenario === 'stale-graph')!.id;
+    const queryId = EffectOption.getOrUndefined(
+      EffectArray.findFirst(FIXTURE.queries, query => query.scenario === 'stale-graph'),
+    )!.id;
     const candidate = {
       ...OBSERVATIONS,
-      observations: OBSERVATIONS.observations.map(observation =>
+      observations: EffectArray.map(OBSERVATIONS.observations, observation =>
         observation.queryId === queryId
           ? {...observation, coverage: {...observation.coverage, unresolvedOrdinals: [0]}}
           : observation,
@@ -56,7 +62,11 @@ describe('CodeMemoryLinkBench contract', () => {
     };
 
     const parsed = parseCodeMemoryLinkBenchObservationBundleV1(candidate, FIXTURE);
-    expect(parsed.observations.find(observation => observation.queryId === queryId)?.coverage).toEqual({
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(parsed.observations, observation => observation.queryId === queryId),
+      )?.coverage,
+    ).toEqual({
       ...INCOMPLETE_COVERAGE,
       unresolvedOrdinals: [0],
     });
@@ -64,10 +74,12 @@ describe('CodeMemoryLinkBench contract', () => {
   });
 
   it('rejects unresolved-anchor ordinals outside the requested coverage', () => {
-    const queryId = FIXTURE.queries.find(query => query.scenario === 'stale-graph')!.id;
+    const queryId = EffectOption.getOrUndefined(
+      EffectArray.findFirst(FIXTURE.queries, query => query.scenario === 'stale-graph'),
+    )!.id;
     const candidate = {
       ...OBSERVATIONS,
-      observations: OBSERVATIONS.observations.map(observation =>
+      observations: EffectArray.map(OBSERVATIONS.observations, observation =>
         observation.queryId === queryId
           ? {...observation, coverage: {...observation.coverage, unresolvedOrdinals: [1]}}
           : observation,
@@ -112,7 +124,7 @@ describe('CodeMemoryLinkBench contract', () => {
         ({observationOffset, queryOffset, reverseCodeRefs, reverseJudgments}) => {
           const fixture: CodeMemoryLinkBenchFixtureV1 = {
             ...FIXTURE,
-            queries: rotate(FIXTURE.queries, queryOffset).map(query => ({
+            queries: EffectArray.map(rotate(FIXTURE.queries, queryOffset), query => ({
               ...query,
               codeRefs: reverseCodeRefs ? [...query.codeRefs].reverse() : query.codeRefs,
               judgments: reverseJudgments ? [...query.judgments].reverse() : query.judgments,
@@ -149,12 +161,19 @@ describe('CodeMemoryLinkBench contract', () => {
           };
         });
         const result = evaluateCodeMemoryLinkBench(FIXTURE, candidate);
-        expect(result.queries.find(query => query.id === 'exact-symbol')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(result.queries, query => query.id === 'exact-symbol')),
+        ).toMatchObject({
           duplicateResultCount: duplicateCount,
-          ndcgAt3: baseline.queries.find(query => query.id === 'exact-symbol')!.ndcgAt3,
-          directCodeCitationPrecisionAt3: baseline.queries.find(query => query.id === 'exact-symbol')!
-            .directCodeCitationPrecisionAt3,
-          recallAt3: baseline.queries.find(query => query.id === 'exact-symbol')!.recallAt3,
+          ndcgAt3: EffectOption.getOrUndefined(
+            EffectArray.findFirst(baseline.queries, query => query.id === 'exact-symbol'),
+          )!.ndcgAt3,
+          directCodeCitationPrecisionAt3: EffectOption.getOrUndefined(
+            EffectArray.findFirst(baseline.queries, query => query.id === 'exact-symbol'),
+          )!.directCodeCitationPrecisionAt3,
+          recallAt3: EffectOption.getOrUndefined(
+            EffectArray.findFirst(baseline.queries, query => query.id === 'exact-symbol'),
+          )!.recallAt3,
         });
         expect(result.metrics.duplicateResultCount).toBe(duplicateCount);
         expect(result.gate.failures).toContain(`duplicate ranked result count ${duplicateCount}; required 0`);
@@ -177,15 +196,24 @@ describe('CodeMemoryLinkBench contract', () => {
 
     const baseline = evaluateCodeMemoryLinkBench(FIXTURE, OBSERVATIONS);
     const result = evaluateCodeMemoryLinkBench(FIXTURE, candidate);
-    const query = result.queries.find(query => query.id === 'exact-symbol')!;
+    const query = EffectOption.getOrUndefined(
+      EffectArray.findFirst(result.queries, query => query.id === 'exact-symbol'),
+    )!;
     expect(query).toMatchObject({
       directFirst: false,
       directCodeCitationPrecisionAt3: 1,
       recallAt3: 1,
     });
     expect(query.codeCitationRankedUris).toEqual([query.rankedUris[1]]);
-    expect(query.ndcgAt3).toBeLessThan(baseline.queries.find(query => query.id === 'exact-symbol')!.ndcgAt3);
-    expect(result.gate.failures.some(failure => failure.startsWith('direct-first rate'))).toBe(true);
+    expect(query.ndcgAt3).toBeLessThan(
+      EffectOption.getOrUndefined(EffectArray.findFirst(baseline.queries, query => query.id === 'exact-symbol'))!
+        .ndcgAt3,
+    );
+    expect(
+      EffectArray.some(result.gate.failures, failure =>
+        Effect.pipe(failure, EffectString.startsWith('direct-first rate')),
+      ),
+    ).toBe(true);
   });
 
   it('does not let empty no-answer controls dilute a 0.333 direct-query Precision@3', () => {
@@ -203,16 +231,17 @@ describe('CodeMemoryLinkBench contract', () => {
     const controls = Array.from({length: 20}, (_, index) => emptyControl(index));
     const fixtureWithControls: CodeMemoryLinkBenchFixtureV1 = {
       ...FIXTURE,
-      queries: [...FIXTURE.queries, ...controls.map(control => control.query)],
+      queries: [...FIXTURE.queries, ...EffectArray.map(controls, control => control.query)],
     };
     const observationsWithControls: CodeMemoryLinkBenchObservationBundleV1 = {
       ...lowPrecision,
-      observations: [...lowPrecision.observations, ...controls.map(control => control.observation)],
+      observations: [...lowPrecision.observations, ...EffectArray.map(controls, control => control.observation)],
     };
     const afterControls = evaluateCodeMemoryLinkBench(fixtureWithControls, observationsWithControls);
 
     expect(
-      beforeControls.queries.find(query => query.id === 'exact-symbol')!.directCodeCitationPrecisionAt3,
+      EffectOption.getOrUndefined(EffectArray.findFirst(beforeControls.queries, query => query.id === 'exact-symbol'))!
+        .directCodeCitationPrecisionAt3,
     ).toBeCloseTo(1 / 3);
     expect(beforeControls.metrics.directCodeCitationPrecisionQueryCount).toBe(9);
     expect(afterControls.metrics.directCodeCitationPrecisionQueryCount).toBe(
@@ -222,9 +251,17 @@ describe('CodeMemoryLinkBench contract', () => {
       beforeControls.metrics.directCodeCitationPrecisionAt3,
     );
     expect(
-      afterControls.queries
-        .filter(query => query.id.startsWith('empty-control-'))
-        .every(query => query.directCodeCitationPrecisionAt3 === null),
+      EffectArray.every(
+        EffectArrayPipe(afterControls.queries, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (query, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues &&
+              Effect.pipe(query.id, EffectString.startsWith('empty-control-')),
+          ),
+        ),
+        query => query.directCodeCitationPrecisionAt3 === null,
+      ),
     ).toBe(true);
   });
 
@@ -243,7 +280,10 @@ describe('CodeMemoryLinkBench contract', () => {
     };
 
     const result = evaluateCodeMemoryLinkBench(fixture, observations);
-    expect(result.queries.find(query => query.id === control.query.id)?.codeCitationNoAnswerCorrect).toBe(false);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.queries, query => query.id === control.query.id))
+        ?.codeCitationNoAnswerCorrect,
+    ).toBe(false);
     expect(result.gate.failures).toContain('code-citation no-answer accuracy 0.857143; minimum 1');
   });
 
@@ -272,7 +312,11 @@ describe('CodeMemoryLinkBench contract', () => {
         expect(result.metrics.falseCurrentCount).toBe(1);
         expect(result.metrics.falseCurrentRate).toBeGreaterThan(0);
         expect(result.gate.passed).toBe(false);
-        expect(result.gate.failures.some(failure => failure.startsWith('false-current rate'))).toBe(true);
+        expect(
+          EffectArray.some(result.gate.failures, failure =>
+            Effect.pipe(failure, EffectString.startsWith('false-current rate')),
+          ),
+        ).toBe(true);
       }),
       {numRuns: 30},
     );
@@ -300,21 +344,21 @@ const INCOMPLETE_COVERAGE: CodeMemoryLinkBenchCoverageV1 = {
 
 const FIXTURE: CodeMemoryLinkBenchFixtureV1 = {
   id: CODE_MEMORY_LINK_BENCH_ID,
-  queries: CODE_MEMORY_LINK_BENCH_SCENARIO_KINDS.map(queryForScenario),
+  queries: EffectArray.map(CODE_MEMORY_LINK_BENCH_SCENARIO_KINDS, queryForScenario),
   thresholds: CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS,
   version: 1,
 };
 
 const OBSERVATIONS: CodeMemoryLinkBenchObservationBundleV1 = {
   fixtureId: CODE_MEMORY_LINK_BENCH_ID,
-  observations: FIXTURE.queries.map(observationForQuery),
+  observations: EffectArray.map(FIXTURE.queries, observationForQuery),
   version: 1,
 };
 
 function queryForScenario(scenario: CodeMemoryLinkBenchScenarioKind): CodeMemoryLinkBenchQueryV1 {
   const judgments = judgmentsForScenario(scenario);
   const incomplete = scenario === 'stale-graph';
-  const matchedMemories = judgments.some(judgment => judgment.label !== 'irrelevant-harmful');
+  const matchedMemories = EffectArray.some(judgments, judgment => judgment.label !== 'irrelevant-harmful');
   return {
     budgetClass: scenario === 'high-noise-budget' ? 'worst-case' : 'default',
     codeRefs: [`src/${scenario}.ts`],
@@ -364,10 +408,12 @@ function judgmentsForScenario(scenario: CodeMemoryLinkBenchScenarioKind): readon
 }
 
 function observationForQuery(query: CodeMemoryLinkBenchQueryV1): CodeMemoryLinkBenchObservationV1 {
-  const rankedMemories = query.judgments
-    .filter(judgment => judgment.label !== 'irrelevant-harmful')
-    .sort((left, right) => labelRank(left.label) - labelRank(right.label))
-    .map(memoryForJudgment);
+  const rankedMemories = EffectArray.map(
+    EffectArray.filter(query.judgments, judgment => judgment.label !== 'irrelevant-harmful').sort(
+      (left, right) => labelRank(left.label) - labelRank(right.label),
+    ),
+    memoryForJudgment,
+  );
   return {
     coverage: query.expectedCoverage,
     elapsedMilliseconds: 200,
@@ -440,7 +486,7 @@ function replaceObservation(
 ): CodeMemoryLinkBenchObservationBundleV1 {
   return {
     ...bundle,
-    observations: bundle.observations.map(observation =>
+    observations: EffectArray.map(bundle.observations, observation =>
       observation.queryId === queryId ? replace(observation) : observation,
     ),
   };

@@ -11,6 +11,8 @@ import {
 import {loadPublishedProcedureCandidates} from '@threadnote/threadnote/procedure/repository';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('published procedure repository evidence', () => {
   effectIt.effect('distinguishes an unconfigured team registry from a corrupt one', () =>
@@ -103,7 +105,7 @@ describe('published procedure repository evidence', () => {
           const procedures = path.join(fixture.worktree, 'agent-artifacts', 'procedures');
           yield* fs.makeDirectory(procedures, {recursive: true});
           yield* Effect.forEach(
-            Array.from({length: 257}, (_, index) => index.toString(16).padStart(64, '0')),
+            Array.from({length: 257}, (_, index) => Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'))),
             name => fs.makeDirectory(path.join(procedures, name)),
             {concurrency: 32, discard: true},
           );
@@ -135,7 +137,7 @@ describe('published procedure repository evidence', () => {
             },
           ];
           for (const invalid of invalidCases) {
-            const fixture = yield* repositoryFixture(invalid.id.replace('/', '-'));
+            const fixture = yield* repositoryFixture(Effect2.pipe(invalid.id, EffectString.replace('/', '-')));
             yield* writePublishedCandidate(fixture, invalid.id, invalid.text, invalid.bytes);
             expect(yield* loadPublishedProcedureCandidates(fixture.config)).toEqual({
               candidates: [],

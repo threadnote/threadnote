@@ -6,6 +6,7 @@ import {
   type TreeSitterLanguageDefinition,
 } from '../../tree_sitter/extractor.js';
 import type {CodeGraphCapability, CodeGraphFileMatcher, CodeGraphLanguagePack} from '../types.js';
+import {Array as EffectArray} from 'effect';
 
 export interface GenericTreeSitterLanguagePackOptions {
   readonly capabilities: ReadonlySet<CodeGraphCapability>;
@@ -20,16 +21,19 @@ export function createGenericTreeSitterLanguagePack(
 ): CodeGraphLanguagePack {
   const {definition} = options;
   const extractorVersion = sha256HexSync(
-    [
-      'threadnote-generic-tree-sitter-pack-v1',
-      TREE_SITTER_EXTRACTOR_POLICY_VERSION,
-      definition.id,
-      options.definitionVersion,
-      definition.asset.sha256,
-      definition.declarationQuery,
-      definition.metadataQuery,
-      definition.referenceQuery,
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'threadnote-generic-tree-sitter-pack-v1',
+        TREE_SITTER_EXTRACTOR_POLICY_VERSION,
+        definition.id,
+        options.definitionVersion,
+        definition.asset.sha256,
+        definition.declarationQuery,
+        definition.metadataQuery,
+        definition.referenceQuery,
+      ],
+      '\n',
+    ),
   );
   return {
     assets: [definition.asset],

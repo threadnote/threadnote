@@ -1,6 +1,6 @@
 import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Predicate} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {describe, expect} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -50,10 +50,15 @@ describe('remote memory portability filesystem boundaries', () => {
         expect(yield* fs.readFileString(path.join(target, 'durable', 'projects', 'threadnote', 'decision.md'))).toBe(
           content,
         );
-        const manifest = JSON.parse(yield* fs.readFileString(path.join(target, 'threadnote-export.v1.json'))) as {
-          bundleDigest: string;
-        };
-        expect(manifest.bundleDigest).toBe(exportPlan.bundleDigest);
+        const parsedManifest: unknown = JSON.parse(
+          yield* fs.readFileString(path.join(target, 'threadnote-export.v1.json')),
+        );
+        const manifest = Predicate.isObject(parsedManifest) ? parsedManifest : {};
+        const bundleDigest =
+          Predicate.hasProperty(manifest, 'bundleDigest') && typeof manifest.bundleDigest === 'string'
+            ? manifest.bundleDigest
+            : undefined;
+        expect(bundleDigest).toBe(exportPlan.bundleDigest);
         const duplicate = yield* Effect.exit(writeRemoteMemoryExportBundle(target, exportPlan));
         expect(duplicate._tag).toBe('Failure');
       }),

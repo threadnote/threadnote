@@ -1,12 +1,15 @@
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {createOAuthTokenVerifier, createLocalOAuthTokenVerifier} from '@threadnote/remote-memory/oauth';
+import {isJsonObject} from '@threadnote/platform/json';
 import {
   COMPOSER_OAUTH_CLIENT_ID,
   COMPOSER_OAUTH_REDIRECT_URIS,
   createLocalIdp,
   pkceS256Challenge,
 } from '@threadnote/threadnote/remote_memory/local_idp';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const ISSUER = 'http://127.0.0.1:18788';
 const AUDIENCE = 'http://127.0.0.1:18788/mcp';
@@ -26,8 +29,10 @@ async function localIdp() {
 }
 
 async function jsonBody(response: Response | undefined): Promise<Record<string, unknown>> {
-  expect(response).toBeInstanceOf(Response);
-  return (await (response as Response).json()) as Record<string, unknown>;
+  if (!(response instanceof Response)) throw new Error('Expected an OAuth response.');
+  const body: unknown = await response.json();
+  if (!isJsonObject(body)) throw new Error('Expected an OAuth JSON object.');
+  return body;
 }
 
 describe('local composer OAuth issuer', () => {
@@ -76,7 +81,7 @@ describe('local composer OAuth issuer', () => {
 
   it('completes authorization-code PKCE and rejects client-credentials grants', async () => {
     const idp = await localIdp();
-    const verifier = 'a'.repeat(43);
+    const verifier = Effect.pipe('a', EffectString.repeat(43));
     const authorize = await idp.handle(
       new Request(
         `${ISSUER}/authorize?client_id=${COMPOSER_OAUTH_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=code&code_challenge=${pkceS256Challenge(verifier)}&code_challenge_method=S256&state=xyz`,
@@ -101,8 +106,10 @@ describe('local composer OAuth issuer', () => {
         method: 'POST',
       }),
     );
-    expect(token?.status).toBe(200);
-    const body = (await token?.json()) as {access_token: string; token_type: string};
+    if (!(token instanceof Response) || token.status !== 200) throw new Error('Expected an OAuth token response.');
+    const body = await jsonBody(token);
+    if (typeof body.token_type !== 'string' || typeof body.access_token !== 'string')
+      throw new Error('Expected an access token response.');
     expect(body.token_type).toBe('Bearer');
     expect(await idp.verifier().verify(body.access_token)).toMatchObject({subject: SUBJECT});
 
@@ -147,7 +154,7 @@ describe('local composer OAuth issuer', () => {
     const idp = await localIdp();
     const authorize = await idp.handle(
       new Request(
-        `${ISSUER}/authorize?client_id=${COMPOSER_OAUTH_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=code&code_challenge=${pkceS256Challenge('a'.repeat(43))}&code_challenge_method=S256`,
+        `${ISSUER}/authorize?client_id=${COMPOSER_OAUTH_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT)}&response_type=code&code_challenge=${pkceS256Challenge(Effect.pipe('a', EffectString.repeat(43)))}&code_challenge_method=S256`,
       ),
     );
     const code = new URL(authorize?.headers.get('location') ?? '').searchParams.get('code');
@@ -156,7 +163,7 @@ describe('local composer OAuth issuer', () => {
         body: new URLSearchParams({
           client_id: COMPOSER_OAUTH_CLIENT_ID,
           code: code ?? '',
-          code_verifier: 'b'.repeat(43),
+          code_verifier: Effect.pipe('b', EffectString.repeat(43)),
           grant_type: 'authorization_code',
           redirect_uri: REDIRECT,
         }).toString(),

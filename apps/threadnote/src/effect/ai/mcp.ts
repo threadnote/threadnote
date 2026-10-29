@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunStdio from '@effect/platform-bun/BunStdio';
 import {Cause, Context, Effect, Layer, Logger, Option, Schema, Sink, Stdio} from 'effect';
 import {McpProtocol, McpSchema, McpServer} from 'effect/ai';
@@ -17,6 +18,9 @@ import {
 import {isMemoryReadRecoveryV1, type MemoryReadRecoveryV1} from '@threadnote/memory/read/recovery';
 import {omitAnonymousTelemetryRecorder, withAnonymousTelemetry} from '../telemetry.js';
 import {flattenJsonSchemaConstraints} from '../../mcp/json_schema_constraints.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 // Windows antivirus and filesystem scheduling can make an otherwise healthy
 // append exceed 50 ms. Keep MCP diagnostics best-effort and bounded without
@@ -253,9 +257,12 @@ export interface McpRegistrationLayerOptions {
   readonly productionLogHome?: string;
 }
 
-class ToolInvocationError extends Schema.TaggedError<ToolInvocationError>()('ToolInvocationError', {
-  message: Schema.String,
-}) {}
+class ToolInvocationError extends Schema.TaggedError<ToolInvocationError, {readonly brand: unique symbol}>()(
+  'ToolInvocationError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export class EffectMcpServerRegistry {
   readonly #resourceTemplates: RegisteredResourceTemplate[] = [];
@@ -280,7 +287,7 @@ export class EffectMcpServerRegistry {
 
   /** Invoke the same validated application handler without starting an MCP transport. */
   invokeTool(name: string, args: Record<string, unknown>) {
-    const registration = this.#tools.find(tool => tool.name === name);
+    const registration = Option.getOrUndefined(EffectArray.findFirst(this.#tools, tool => tool.name === name));
     return Effect.gen(function* () {
       if (!registration) return yield* ToolInvocationError.make({message: `Unknown memory operation: ${name}`});
       const services = yield* Effect.context<ApplicationServices>();
@@ -332,14 +339,12 @@ export class EffectMcpServerRegistry {
         }
         for (const registration of registrations) {
           const input = Schema.Struct(registration.definition.inputSchema);
+          const flattenedInputSchema = flattenJsonSchemaConstraints(Schema.toJsonSchemaDocument(input).schema);
           const inputSchema =
-            Object.keys(registration.definition.inputSchema).length === 0
+            EffectRecord.keys(registration.definition.inputSchema).length === 0
               ? {additionalProperties: false, properties: {}, type: 'object'}
               : {
-                  ...(flattenJsonSchemaConstraints(Schema.toJsonSchemaDocument(input).schema) as Record<
-                    string,
-                    unknown
-                  >),
+                  ...(isMcpRecord(flattenedInputSchema) ? flattenedInputSchema : {}),
                   additionalProperties: false,
                 };
           yield* server.addTool({
@@ -527,7 +532,7 @@ function isMcpCancelledNotification(value: unknown): boolean {
 }
 
 function isMcpJsonRpcMethod(value: unknown, method: string): boolean {
-  if (Array.isArray(value)) return value.some(item => isMcpJsonRpcMethod(item, method));
+  if (EffectArray.isArray(value)) return EffectArray.some(value, item => isMcpJsonRpcMethod(item, method));
   return typeof value === 'object' && value !== null && 'method' in value && value.method === method;
 }
 
@@ -654,7 +659,10 @@ export function makeMcpCancellationCompatibleProtocol(
       protocol.run((clientId, externalRequest) => {
         let request = externalRequest;
         let progressAssociation: McpProgressRequestAssociation | undefined;
-        if (externalRequest._tag === 'Request' && externalRequest.tag.startsWith('notifications/')) {
+        if (
+          externalRequest._tag === 'Request' &&
+          Effect2.pipe(externalRequest.tag, EffectString.startsWith('notifications/'))
+        ) {
           if (
             externalRequest.tag === 'notifications/cancelled' &&
             typeof externalRequest.payload === 'object' &&
@@ -801,18 +809,21 @@ export function mcpStdioSerialization(
         decode: data => {
           const decoded: unknown[] = [];
           for (const frame of frames.decode(data)) {
-            if (Array.isArray(frame)) {
+            if (EffectArray.isArray(frame)) {
               if (
                 selectedProtocol?.runtime.transport.jsonRpc.acceptsBatches !== true ||
                 frame.length === 0 ||
-                frame.some(mcpStdioInitializeMessage)
+                EffectArray.some(frame, mcpStdioInitializeMessage)
               ) {
                 decoded.push({_tag: 'Request', headers: [], id: null, payload: null, tag: MCP_INVALID_BATCH_METHOD});
                 continue;
               }
             } else if (mcpStdioInitializeMessage(frame)) {
               const offered = mcpStdioProtocolVersion(frame);
-              selectedProtocol = protocols.find(protocol => protocol.protocolVersion === offered) ?? protocols[0];
+              selectedProtocol =
+                Option.getOrUndefined(
+                  EffectArray.findFirst(protocols, protocol => protocol.protocolVersion === offered),
+                ) ?? protocols[0];
             }
             decoded.push(...parser.decode(JSON.stringify(frame)));
           }
@@ -868,7 +879,7 @@ function mcpInvalidBatchExit(response: unknown): response is {
     !('_tag' in response.exit) ||
     response.exit._tag !== 'Failure' ||
     !('cause' in response.exit) ||
-    !Array.isArray(response.exit.cause) ||
+    !EffectArray.isArray(response.exit.cause) ||
     response.exit.cause.length !== 1
   ) {
     return false;
@@ -890,8 +901,11 @@ function mcpInvalidBatchExit(response: unknown): response is {
 }
 
 export type EffectMcpServer = Context.Service.Shape<typeof McpServer.McpServer>;
+export type EffectMcpProgressBridgeServer = Pick<EffectMcpServer, 'callTool'> & {
+  readonly notifications: Pick<EffectMcpServer['notifications'], 'notifications/progress'>;
+};
 
-export function installCallToolProgressBridge(server: EffectMcpServer): boolean {
+export function installCallToolProgressBridge(server: EffectMcpProgressBridgeServer): boolean {
   // Effect's live protocol handlers bypass public callTool, so
   // registrationLayer rehydrates their progress from the transport context.
   // Keep this wrapper for direct callTool consumers and, more importantly,
@@ -903,7 +917,7 @@ export function installCallToolProgressBridge(server: EffectMcpServer): boolean 
   }
   const originalCallToolMethod = server.callTool;
   const stdioInitializedClients = new StdioSingleClientSet();
-  const wrappedCallTool: EffectMcpServer['callTool'] = request =>
+  const wrappedCallTool: EffectMcpProgressBridgeServer['callTool'] = request =>
     Effect.gen(function* () {
       // McpServerClient middleware rejects non-initialize requests before
       // providing this service, so reaching this point cannot promote a
@@ -1063,25 +1077,33 @@ export function withMcpProgressHeartbeat<A, E, R>(
 }
 
 function boundedMcpProgressPhase(value: string): string {
-  const bounded = value.trim().slice(0, MCP_PROGRESS_PHASE_MAX_CHARACTERS);
+  const bounded = Effect2.pipe(value, EffectString.trim, EffectString.slice(0, MCP_PROGRESS_PHASE_MAX_CHARACTERS));
   return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(bounded) ? bounded : 'working';
 }
 
 function boundedMcpProgressMessage(value: string): string {
-  const normalized = [...value.slice(0, MCP_PROGRESS_MESSAGE_MAX_BYTES)]
-    .map(character => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint <= 31 || codePoint === 127 ? ' ' : character;
-    })
-    .join('')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  const normalized = Effect2.pipe(
+    EffectArray.join(
+      EffectArray.map([...Effect2.pipe(value, EffectString.slice(0, MCP_PROGRESS_MESSAGE_MAX_BYTES))], character => {
+        const codePoint =
+          Effect2.pipe(
+            character,
+            EffectString.codePointAt(0),
+            Effect2.Option.getOrElse(() => undefined),
+          ) ?? 0;
+        return codePoint <= 31 || codePoint === 127 ? ' ' : character;
+      }),
+      '',
+    ),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
   const fallback = normalized || 'Threadnote is working.';
   const encoded = MCP_PROGRESS_ENCODER.encode(fallback);
   if (encoded.byteLength <= MCP_PROGRESS_MESSAGE_MAX_BYTES) return fallback;
   let end = MCP_PROGRESS_MESSAGE_MAX_BYTES;
   while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
-  return MCP_PROGRESS_DECODER.decode(encoded.subarray(0, end)).trimEnd();
+  return Effect2.pipe(MCP_PROGRESS_DECODER.decode(encoded.subarray(0, end)), EffectString.trimEnd);
 }
 
 export function mcpResourceFailureResult(
@@ -1256,8 +1278,8 @@ type McpJsonRpcEnvelope = Record<string, unknown> | readonly Record<string, unkn
 
 function parseMcpJsonRpcEnvelope(input: string): McpJsonRpcEnvelope | undefined {
   const parsed = Option.getOrUndefined(Option.liftThrowable(parseMcpJson)(input));
-  if (Array.isArray(parsed)) {
-    if (parsed.length === 0 || !parsed.every(mcpRecord)) {
+  if (EffectArray.isArray(parsed)) {
+    if (parsed.length === 0 || !EffectArray.every(parsed, isMcpRecord)) {
       return undefined;
     }
     return parsed;
@@ -1268,7 +1290,7 @@ function parseMcpJsonRpcEnvelope(input: string): McpJsonRpcEnvelope | undefined 
 function repairMcpJsonRpcValue(parsed: McpJsonRpcEnvelope, instructions: string | undefined): McpJsonRpcEnvelope {
   if (!isMcpJsonRpcBatch(parsed)) return repairMcpJsonRpcObject(parsed, instructions);
   let changed = false;
-  const transformed = parsed.map(item => {
+  const transformed = EffectArray.map(parsed, item => {
     const repaired = repairMcpJsonRpcObject(item, instructions);
     if (repaired !== item) changed = true;
     return repaired;
@@ -1277,7 +1299,9 @@ function repairMcpJsonRpcValue(parsed: McpJsonRpcEnvelope, instructions: string 
 }
 
 function mcpJsonRpcEnvelopeContainsInitializeResponse(parsed: McpJsonRpcEnvelope): boolean {
-  return isMcpJsonRpcBatch(parsed) ? parsed.some(item => mcpInitializeResponse(item)) : mcpInitializeResponse(parsed);
+  return isMcpJsonRpcBatch(parsed)
+    ? EffectArray.some(parsed, item => mcpInitializeResponse(item))
+    : mcpInitializeResponse(parsed);
 }
 
 function repairMcpJsonRpcObject(
@@ -1314,11 +1338,11 @@ function mcpRecord(value: unknown): Readonly<Record<string, unknown>> | undefine
 }
 
 function isMcpRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function isMcpJsonRpcBatch(value: McpJsonRpcEnvelope): value is readonly Record<string, unknown>[] {
-  return Array.isArray(value);
+  return EffectArray.isArray(value);
 }
 
 function parseMcpJson(content: string): unknown {
@@ -1335,7 +1359,7 @@ function mcpResponseWithPublicProgressMetadata<Response extends object>(
 }
 
 function interruptCause(cause: Cause.Cause<unknown>): Cause.Cause<never> {
-  return Cause.interrupt(cause.reasons.find(Cause.isInterruptReason)?.fiberId);
+  return Cause.interrupt(Option.getOrUndefined(EffectArray.findFirst(cause.reasons, Cause.isInterruptReason))?.fiberId);
 }
 
 function mcpInitializeResponse(parsed: Record<string, unknown>): parsed is Record<string, unknown> & {
@@ -1346,11 +1370,13 @@ function mcpInitializeResponse(parsed: Record<string, unknown>): parsed is Recor
 }
 
 function couldContainMcpResourceError(input: string | Uint8Array): boolean {
-  return [EFFECT_RPC_CAUSE_MARKER, MCP_RESOURCE_ERROR_BRAND_MARKER].some(marker => containsMcpMarker(input, marker));
+  return EffectArray.some([EFFECT_RPC_CAUSE_MARKER, MCP_RESOURCE_ERROR_BRAND_MARKER], marker =>
+    containsMcpMarker(input, marker),
+  );
 }
 
 function containsMcpMarker(input: string | Uint8Array, marker: Uint8Array): boolean {
-  if (typeof input === 'string') return input.includes(new TextDecoder().decode(marker));
+  if (typeof input === 'string') return Effect2.pipe(input, EffectString.includes(new TextDecoder().decode(marker)));
   outer: for (let index = 0; index <= input.length - marker.length; index += 1) {
     for (let offset = 0; offset < marker.length; offset += 1) {
       if (input[index + offset] !== marker[offset]) continue outer;
@@ -1384,7 +1410,7 @@ function unwrapEffectRpcMcpError(parsed: Record<string, unknown>): Record<string
     }
   }
   if (!('_tag' in error) || error._tag !== 'Cause') return parsed;
-  if (!('data' in error) || !Array.isArray(error.data)) return parsed;
+  if (!('data' in error) || !EffectArray.isArray(error.data)) return parsed;
   if (error.data.length !== 1) return parsed;
   const failure = error.data[0];
   if (
@@ -1397,20 +1423,14 @@ function unwrapEffectRpcMcpError(parsed: Record<string, unknown>): Record<string
     return parsed;
   }
   const typed = failure.error;
-  if (
-    typeof typed !== 'object' ||
-    typed === null ||
-    !('code' in typed) ||
-    typeof typed.code !== 'number' ||
-    !('message' in typed) ||
-    typeof typed.message !== 'string' ||
-    !isRecognizedMcpError(typed) ||
-    !hasMcpResourceErrorBrand(typed)
-  ) {
-    return parsed;
-  }
-  if (error.code !== 0 && error.code !== typed.code) return parsed;
-  return projectMcpResourceError(parsed, typed);
+  if (typeof typed !== 'object' || typed === null || !('code' in typed) || !('message' in typed)) return parsed;
+  const code = typed.code;
+  const message = typed.message;
+  if (typeof code !== 'number' || typeof message !== 'string') return parsed;
+  const typedError = {...typed, code, message};
+  if (!isRecognizedMcpError(typedError) || !hasMcpResourceErrorBrand(typedError)) return parsed;
+  if (error.code !== 0 && error.code !== code) return parsed;
+  return projectMcpResourceError(parsed, typedError);
 }
 
 function projectMcpResourceError(
@@ -1431,10 +1451,10 @@ function projectMcpResourceError(
 function hasMcpResourceErrorBrand(error: unknown): boolean {
   if (typeof error !== 'object' || error === null || !('data' in error)) return false;
   const data = error.data;
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
+  if (typeof data !== 'object' || data === null || EffectArray.isArray(data)) return false;
   const record = mcpRecord(data);
   if (!record) return false;
-  const keys = Object.keys(record);
+  const keys = EffectRecord.keys(record);
   const brand = record[MCP_RESOURCE_ERROR_BRAND_KEY];
   if (brand === 1) return keys.length === 1;
   if (brand !== 2) return false;

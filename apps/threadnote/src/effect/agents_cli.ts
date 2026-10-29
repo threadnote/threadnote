@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {composeWorkflowSetup, setupWorkflowSelector} from '../setup/workflows.js';
 import {Clock, Console, DateTime, Effect} from 'effect';
 import {Argument, Command} from 'effect/cli';
@@ -8,6 +9,7 @@ import {AGENT_CATALOG} from '@threadnote/integrations/catalog';
 import {isAgentSetupCompletion} from '../agent_integration/registry.js';
 import {AgentSurfaceError} from '../agent_integration/surfaces.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {CliRuntimeRunner} from './cli.js';
 import {recordSetupCompletionValueEvent} from '../value_report/events.js';
 import {boolean, optionalChoice} from './cli/flags.js';
 
@@ -49,24 +51,24 @@ export const runAgentCliAction = Effect.fn('agents.cliAction')(function* (
   return result;
 });
 
-export function makeAgentsCommand(
-  withRuntime: <E, R>(body: (config: RuntimeConfig) => Effect.Effect<void, E, R>) => Effect.Effect<void, E, R>,
-) {
+export function makeAgentsCommand(withRuntime: CliRuntimeRunner) {
   const catalog = AGENT_CATALOG;
   const list = Command.make('list', {json: boolean('json', 'Print the canonical support catalog as JSON')}, ({json}) =>
     Console.log(
       json
         ? JSON.stringify({version: 1, agents: catalog}, undefined, 2)
-        : catalog
-            .map(
+        : EffectArray.join(
+            EffectArray.map(
+              catalog,
               entry =>
-                `${entry.id}\t${entry.tier}\t${entry.displayName}\n  ${entry.setup.join(' ')}\n  Project guidance: ${
+                `${entry.id}\t${entry.tier}\t${entry.displayName}\n  ${EffectArray.join(entry.setup, ' ')}\n  Project guidance: ${
                   entry.projectGuidance.status === 'managed'
                     ? entry.projectGuidance.targetPath
                     : entry.projectGuidance.reason
                 }`,
-            )
-            .join('\n'),
+            ),
+            '\n',
+          ),
     ),
   );
   const status = Command.make('status', {json: boolean('json', 'Print installed surface status as JSON')}, ({json}) =>
@@ -76,12 +78,15 @@ export function makeAgentsCommand(
         yield* Console.log(
           json
             ? JSON.stringify({version: 1, agents}, undefined, 2)
-            : agents.map(agent => `${agent.id}\t${agent.state}\t${agent.detail}`).join('\n'),
+            : EffectArray.join(
+                EffectArray.map(agents, agent => `${agent.id}\t${agent.state}\t${agent.detail}`),
+                '\n',
+              ),
         );
       }),
     ),
   );
-  const actions = (['install', 'repair', 'remove'] as const).map(action =>
+  const actions = EffectArray.map(['install', 'repair', 'remove'] as const, action =>
     Command.make(
       action,
       {

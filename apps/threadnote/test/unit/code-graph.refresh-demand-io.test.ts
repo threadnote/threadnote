@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -34,14 +35,30 @@ import {runIsolatedCodeGraphIndex} from '@threadnote/graph/isolated/builder';
 import {resolveCodeGraphRefreshRoute} from '@threadnote/graph/scope/routing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const checkoutId = 'a'.repeat(64);
-const worktreeId = 'b'.repeat(64);
-const firstKey = '1'.repeat(64);
-const secondKey = '2'.repeat(64);
-const scopeA = `code-graph-scope:${'c'.repeat(64)}`;
-const scopeB = `code-graph-scope:${'d'.repeat(64)}`;
+const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
+const worktreeId = Effect2.pipe('b', EffectString.repeat(64));
+const firstKey = Effect2.pipe('1', EffectString.repeat(64));
+const secondKey = Effect2.pipe('2', EffectString.repeat(64));
+const scopeA = `code-graph-scope:${Effect2.pipe('c', EffectString.repeat(64))}`;
+const scopeB = `code-graph-scope:${Effect2.pipe('d', EffectString.repeat(64))}`;
 const TestLayer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
+
+const refreshDemandActiveStateSchema = Schema.StructWithRest(
+  Schema.Struct({active: Schema.Record(Schema.String, Schema.Unknown)}),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const refreshDemandObservedStateSchema = Schema.StructWithRest(
+  Schema.Struct({
+    active: Schema.optional(Schema.Unknown),
+    desired: Schema.optional(
+      Schema.StructWithRest(Schema.Struct({targetKey: Schema.String}), [Schema.Record(Schema.String, Schema.Unknown)]),
+    ),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
 
 describe('code graph refresh demand sidecar', () => {
   fcEffectProp(
@@ -51,13 +68,17 @@ describe('code graph refresh demand sidecar', () => {
     ([values]) =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
-        const paths = values.flatMap(value => {
-          const scope = `code-graph-scope:${value.toString(16).padStart(64, '0')}`;
+        const paths = EffectArray.flatMap(values, value => {
+          const scope = `code-graph-scope:${Effect2.pipe(value.toString(16), EffectString.padStart(64, '0'))}`;
           const data = codeGraphRefreshDemandPath(path, '/private/home', checkoutId, worktreeId, scope);
           const lock = codeGraphRefreshDemandLockPath(path, '/private/home', checkoutId, worktreeId, scope);
           const spawn = codeGraphWorktreeSpawnLockPath(path, '/private/home', checkoutId, worktreeId, scope);
           expect(data).toBe(codeGraphRefreshDemandPath(path, '/private/home', checkoutId, worktreeId, scope));
-          for (const component of [data, `${lock}.recovery-${'f'.repeat(64)}`, `${spawn}.recovery-${'f'.repeat(64)}`])
+          for (const component of [
+            data,
+            `${lock}.recovery-${Effect2.pipe('f', EffectString.repeat(64))}`,
+            `${spawn}.recovery-${Effect2.pipe('f', EffectString.repeat(64))}`,
+          ])
             expect(new TextEncoder().encode(path.basename(component)).length).toBeLessThanOrEqual(255);
           return [data, lock, spawn];
         });
@@ -87,15 +108,19 @@ describe('code graph refresh demand sidecar', () => {
           expect(fullPath).toContain(`-${worktreeId}.json`);
           expect(firstPath).not.toBe(secondPath);
           expect(firstPath).not.toBe(fullPath);
-          expect(firstPath.split('/').at(-1)?.length).toBeLessThan(200);
-          expect(secondPath.split('/').at(-1)?.length).toBeLessThan(200);
+          expect(Effect2.pipe(firstPath, EffectString.split('/')).at(-1)?.length).toBeLessThan(200);
+          expect(Effect2.pipe(secondPath, EffectString.split('/')).at(-1)?.length).toBeLessThan(200);
           const lock = codeGraphRefreshDemandLockPath(path, home, checkoutId, worktreeId, scopeA);
           const spawn = codeGraphWorktreeSpawnLockPath(path, home, checkoutId, worktreeId, scopeA);
           expect(path.dirname(lock)).toBe(path.dirname(firstPath));
           expect(firstPath).toMatch(/\.json$/u);
           expect(lock).toMatch(/\.lock$/u);
           expect(new Set([firstPath, lock, spawn]).size).toBe(3);
-          for (const file of [firstPath, `${lock}.recovery-${'f'.repeat(64)}`, `${spawn}.recovery-${'f'.repeat(64)}`]) {
+          for (const file of [
+            firstPath,
+            `${lock}.recovery-${Effect2.pipe('f', EffectString.repeat(64))}`,
+            `${spawn}.recovery-${Effect2.pipe('f', EffectString.repeat(64))}`,
+          ]) {
             expect(new TextEncoder().encode(path.basename(file)).length).toBeLessThanOrEqual(255);
           }
           expect(yield* fs.exists(firstPath)).toBe(true);
@@ -255,14 +280,17 @@ describe('code graph refresh demand sidecar', () => {
         expect(retained.active?.targetToken).toBe(claimed.target.targetToken);
 
         const sidecar = codeGraphRefreshDemandPath(path, home, checkoutId, worktreeId);
-        const persisted = JSON.parse(yield* fs.readFileString(sidecar)) as Record<string, unknown> & {
-          active: Record<string, unknown>;
+        const persisted = yield* Schema.decodeUnknownEffect(refreshDemandActiveStateSchema)(
+          JSON.parse(yield* fs.readFileString(sidecar)),
+        );
+        const persistedWithDeadClaim = {
+          ...persisted,
+          active: {
+            ...persisted.active,
+            claimOwner: {processId: 2_000_000_000, processStartIdentity: 'dead-process'},
+          },
         };
-        persisted.active = {
-          ...persisted.active,
-          claimOwner: {processId: 2_000_000_000, processStartIdentity: 'dead-process'},
-        };
-        yield* fs.writeFileString(sidecar, `${JSON.stringify(persisted)}\n`, {flag: 'w', mode: 0o600});
+        yield* fs.writeFileString(sidecar, `${JSON.stringify(persistedWithDeadClaim)}\n`, {flag: 'w', mode: 0o600});
 
         const recovered = yield* recoverCodeGraphBackgroundDemand(identity, {liveness: 'inactive'});
         expect(recovered.active).toBeUndefined();
@@ -421,7 +449,10 @@ describe('code graph refresh demand sidecar', () => {
         const identity = {checkoutId, threadnoteHome: home, worktreeId};
         yield* registerCodeGraphBackgroundDemand(identity, firstKey);
         const sidecar = codeGraphRefreshDemandPath(path, home, checkoutId, worktreeId);
-        yield* fs.writeFileString(sidecar, 'x'.repeat(8 * 1024 + 1), {flag: 'w', mode: 0o600});
+        yield* fs.writeFileString(sidecar, Effect2.pipe('x', EffectString.repeat(8 * 1024 + 1)), {
+          flag: 'w',
+          mode: 0o600,
+        });
 
         const reconstructed = yield* registerCodeGraphBackgroundDemand(identity, secondKey);
         expect(reconstructed.type).toBe('claimed');
@@ -458,7 +489,7 @@ describe('code graph refresh demand sidecar', () => {
           runGit(repository, ['commit', '--quiet', '-m', 'fixture']);
         });
         const manifestPath = path.join(home, 'manifest.json');
-        const projects = ['docs', 'web'].map(name => ({
+        const projects = EffectArray.map(['docs', 'web'], name => ({
           name,
           path: repository,
           seed: [],
@@ -542,7 +573,7 @@ describe('code graph refresh demand sidecar', () => {
             cwd: nested,
             project: route.route.project,
             ensureVectors: false,
-            refreshDemandToken: `cgdq_${'f'.repeat(32)}`,
+            refreshDemandToken: `cgdq_${Effect2.pipe('f', EffectString.repeat(32))}`,
             threadnoteHome: home,
           })
           .pipe(Effect.flip);
@@ -627,10 +658,9 @@ describe('code graph refresh demand sidecar', () => {
           expect(Schema.is(CodeGraphRefreshDemandSuperseded)(failure)).toBe(true);
 
           const sidecar = codeGraphRefreshDemandPath(path, home, identity.checkoutId, identity.worktreeId);
-          const state = JSON.parse(yield* fs.readFileString(sidecar)) as {
-            readonly active?: unknown;
-            readonly desired?: {readonly targetKey: string};
-          };
+          const state = yield* Schema.decodeUnknownEffect(refreshDemandObservedStateSchema)(
+            JSON.parse(yield* fs.readFileString(sidecar)),
+          );
           expect(state.active).toBeUndefined();
           expect(state.desired?.targetKey).toBe(secondKey);
         }),

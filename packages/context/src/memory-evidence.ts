@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {uriSegment} from '@threadnote/workspace/manifest';
 export const MEMORY_RECALL_EMPTY_GAP = 'memory-recall-no-active-durable-or-handoff';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -21,6 +22,9 @@ import type {
   ContextBriefSnapshotV1,
   ContextBriefTopicMaintenanceV1,
 } from './types.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MEMORY_EXCERPT_BYTES = 240;
 const CONTINUATION_FIELD_BYTES = {
@@ -150,7 +154,7 @@ export function classifyMemoryFreshness(
 export function parseMemoryActionCard(body: string): ContextBriefMemoryActionCardV1 | undefined {
   const fields = new Map<string, string>();
   let fence: MarkdownFence | undefined;
-  for (const line of body.split(/\r?\n/gu).slice(0, 80)) {
+  for (const line of Effect.pipe(body, EffectString.split(/\r?\n/gu)).slice(0, 80)) {
     const fenceLine = parseMarkdownFenceLine(line);
     if (fence !== undefined) {
       if (fenceLine !== undefined && closesMarkdownFence(fence, fenceLine)) fence = undefined;
@@ -162,13 +166,18 @@ export function parseMemoryActionCard(body: string): ContextBriefMemoryActionCar
     }
     const match = /^\s{0,3}(?:#{1,3}\s*)?(Applies to|Invariant|Avoid|Verify):\s*(.+?)\s*$/iu.exec(line);
     if (!match) continue;
-    const key = match[1].toLowerCase();
+    const key = Effect.pipe(match[1], EffectString.toLowerCase);
     if (fields.has(key)) continue;
-    const value = match[2].replace(/\s+/gu, ' ').trim();
+    const value = Effect.pipe(match[2], EffectString.replace(/\s+/gu, ' '), EffectString.trim);
     if (
       value &&
-      ![...value].some(character => {
-        const code = character.codePointAt(0) ?? 0;
+      !EffectArray.some([...value], character => {
+        const code =
+          Effect.pipe(
+            character,
+            EffectString.codePointAt(0),
+            Effect.Option.getOrElse(() => undefined),
+          ) ?? 0;
         return code < 32 || code === 127;
       })
     )
@@ -317,9 +326,16 @@ export function unresolvedContextBriefCodeAnchorOrdinals(
   resolvedOrdinals: readonly number[],
 ): readonly number[] {
   const resolved = new Set(
-    resolvedOrdinals.filter(ordinal => Number.isSafeInteger(ordinal) && ordinal >= 0 && ordinal < requested),
+    EffectArray.filter(
+      resolvedOrdinals,
+      (ordinal, __effectArrayIndex) =>
+        __effectArrayIndex in resolvedOrdinals && Number.isSafeInteger(ordinal) && ordinal >= 0 && ordinal < requested,
+    ),
   );
-  return Array.from({length: requested}, (_, ordinal) => ordinal).filter(ordinal => !resolved.has(ordinal));
+  return EffectArray.filter(
+    Array.from({length: requested}, (_, ordinal) => ordinal),
+    ordinal => !resolved.has(ordinal),
+  );
 }
 
 /** Keep direct citation matches ahead of topical recall without mixing their ranking semantics. */
@@ -332,7 +348,7 @@ export function mergeContextBriefMemoryEvidence(
   if (codeLinked === undefined) return lexical;
   const candidates: ContextBriefMemoryCandidateV1[] = [];
   const seen = new Set<string>();
-  const lexicalUris = new Set(lexical.candidates.map(candidate => candidate.uri));
+  const lexicalUris = new Set(EffectArray.map(lexical.candidates, candidate => candidate.uri));
   const boundedDirectCandidateLimit = Math.max(0, Math.min(candidateLimit, directCandidateLimit));
   for (const candidate of codeLinked.candidates) {
     if (candidates.length >= boundedDirectCandidateLimit) break;
@@ -353,7 +369,7 @@ export function mergeContextBriefMemoryEvidence(
     if (candidates.length >= candidateLimit) break;
   }
   const lexicalGaps =
-    candidates.length === 0 ? lexical.gaps : lexical.gaps.filter(gap => gap !== MEMORY_RECALL_EMPTY_GAP);
+    candidates.length === 0 ? lexical.gaps : EffectArray.filter(lexical.gaps, gap => gap !== MEMORY_RECALL_EMPTY_GAP);
   return {
     ...(codeLinked.codeAnchorCoverage === undefined ? {} : {codeAnchorCoverage: codeLinked.codeAnchorCoverage}),
     candidates,
@@ -389,8 +405,14 @@ export function contextBriefMemoryCandidate(
   const sourceCommit = boundedSourceCommit(record.metadata.sourceCommit);
   const topic = contextBriefTopicProjection(record, topicAttention);
   const codeCitations = topic?.citations ?? record.metadata.codeCitations ?? [];
-  const citationIds = new Set(codeCitations.map(citation => citation.id));
-  const currentCodeLinkMatches = codeLinkMatches?.filter(match => citationIds.has(match.citationId));
+  const citationIds = new Set(EffectArray.map(codeCitations, citation => citation.id));
+  const currentCodeLinkMatches = Effect.pipe(
+    Effect.Option.fromNullishOr(codeLinkMatches),
+    Effect.Option.map(matches =>
+      EffectArray.filter(matches, (match, index) => index in matches && citationIds.has(match.citationId)),
+    ),
+    Effect.Option.getOrUndefined,
+  );
   const actionCard =
     record.metadata.kind === 'durable' && topic === undefined ? parseMemoryActionCard(record.body) : undefined;
   const continuationCard =
@@ -442,25 +464,32 @@ export function contextBriefTopicProjection(
     const sections = consolidationSections(record.body);
     const ids = [
       ...new Set([
-        ...manifest.paragraphs
-          .filter(paragraph => paragraph.role !== 'historical')
-          .flatMap(paragraph => paragraph.citationIds),
-        ...manifest.additionalDependencies.map(dependency => dependency.citationId),
+        ...EffectArray.flatMap(
+          EffectArray.filter<(typeof manifest.paragraphs)[number]>(
+            manifest.paragraphs,
+            paragraph => paragraph.role !== 'historical',
+          ),
+          paragraph => paragraph.citationIds,
+        ),
+        ...EffectArray.map(manifest.additionalDependencies, dependency => dependency.citationId),
       ]),
     ].sort();
-    const accepted = ids.map(id => topicMaintenanceAcceptedCitation(record, id));
+    const accepted = EffectArray.map(ids, id => topicMaintenanceAcceptedCitation(record, id));
     return {
-      citations: [...new Map(accepted.map(citation => [citation.id, citation])).values()].sort((a, b) =>
-        a.id.localeCompare(b.id),
+      citations: [...new Map(EffectArray.map(accepted, citation => [citation.id, citation])).values()].sort((a, b) =>
+        Effect.pipe(a.id, EffectString.localeCompare(b.id)),
       ),
       excerpt: memoryEvidenceExcerpt(sections[0]),
       status: {
         coverage: 'declared-only',
         excerptOrdinal: first.ordinal + 1,
         excerptRole: first.role,
-        historicalParagraphs: manifest.paragraphs.filter(paragraph => paragraph.role === 'historical').length,
-        normativeParagraphs: manifest.paragraphs.filter(paragraph => paragraph.role === 'normative').length,
-        unresolvedParagraphs: manifest.paragraphs.filter(paragraph => paragraph.support === 'unresolved').length,
+        historicalParagraphs: EffectArray.filter(manifest.paragraphs, paragraph => paragraph.role === 'historical')
+          .length,
+        normativeParagraphs: EffectArray.filter(manifest.paragraphs, paragraph => paragraph.role === 'normative')
+          .length,
+        unresolvedParagraphs: EffectArray.filter(manifest.paragraphs, paragraph => paragraph.support === 'unresolved')
+          .length,
         ...attention,
       },
     };
@@ -501,27 +530,39 @@ function resumeAlignmentTerms(value: string): {
   readonly phrases: ReadonlySet<string>;
   readonly words: ReadonlySet<string>;
 } {
-  const orderedWords = (
-    value
-      .normalize('NFKC')
-      .toLowerCase()
-      .match(/[\p{L}\p{N}]+/gu) ?? []
-  ).filter(word => word.length >= 3 && !RESUME_ALIGNMENT_STOP_WORDS.has(word));
+  const orderedWords = EffectArray.filter(
+    Effect.pipe(value, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.normalize('NFKC'));
+      const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.toLowerCase);
+      const __effectPipeStage2 = Effect.pipe(
+        __effectPipeStage1,
+        EffectString.match(/[\p{L}\p{N}]+/gu),
+        Effect.Option.getOrElse(() => null),
+      );
+      return __effectPipeStage2;
+    }) ?? [],
+    word => word.length >= 3 && !RESUME_ALIGNMENT_STOP_WORDS.has(word),
+  );
   return {
-    phrases: new Set(orderedWords.slice(1).map((word, index) => `${orderedWords[index]}\u0000${word}`)),
+    phrases: new Set(EffectArray.map(orderedWords.slice(1), (word, index) => `${orderedWords[index]}\u0000${word}`)),
     words: new Set(orderedWords),
   };
 }
 
 export function memoryEvidenceExcerpt(body: string): string {
-  const evidence = body
-    .split(/\r?\n/gu)
-    .map(line => line.replace(/^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/u, '').trim())
-    .filter(line => line && !line.startsWith('```'))
-    .slice(0, 3)
-    .join(' ')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  const evidence = Effect.pipe(
+    EffectArray.join(
+      EffectArray.filter(
+        EffectArray.map(Effect.pipe(body, EffectString.split(/\r?\n/gu)), line =>
+          Effect.pipe(line, EffectString.replace(/^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/u, ''), EffectString.trim),
+        ),
+        line => Boolean(line) && !Effect.pipe(line, EffectString.startsWith('```')),
+      ).slice(0, 3),
+      ' ',
+    ),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
   return utf8Prefix(evidence, MEMORY_EXCERPT_BYTES);
 }
 
@@ -533,25 +574,29 @@ export function handoffEvidenceExcerpt(
   const card = parsedCard;
   if (card === undefined) return memoryEvidenceExcerpt(body);
   return utf8Prefix(
-    [
-      card.task === undefined ? undefined : `task: ${card.task}`,
-      card.decisions === undefined ? undefined : `decisions: ${card.decisions}`,
-      card.graphQuestion === undefined ? undefined : `graph_question: ${card.graphQuestion}`,
-      card.graphQuery === undefined ? undefined : `graph_query: ${card.graphQuery}`,
-      card.observations === undefined ? undefined : `observed: ${card.observations}`,
-      card.anchors === undefined ? undefined : `anchors: ${card.anchors}`,
-      card.attempted === undefined ? undefined : `attempted: ${card.attempted}`,
-      card.invariants === undefined ? undefined : `invariants: ${card.invariants}`,
-      card.rationale === undefined ? undefined : `rationale: ${card.rationale}`,
-      card.verification === undefined ? undefined : `verification: ${card.verification}`,
-      card.unresolved === undefined ? undefined : `unresolved: ${card.unresolved}`,
-      card.avoidRepeat === undefined ? undefined : `avoid_repeat: ${card.avoidRepeat}`,
-      card.blockers === undefined ? undefined : `blockers: ${card.blockers}`,
-      card.risks === undefined ? undefined : `risks: ${card.risks}`,
-      card.nextStep === undefined ? undefined : `next_step: ${card.nextStep}`,
-    ]
-      .filter((value): value is string => value !== undefined)
-      .join(' '),
+    EffectArray.join(
+      EffectArray.filter(
+        [
+          card.task === undefined ? undefined : `task: ${card.task}`,
+          card.decisions === undefined ? undefined : `decisions: ${card.decisions}`,
+          card.graphQuestion === undefined ? undefined : `graph_question: ${card.graphQuestion}`,
+          card.graphQuery === undefined ? undefined : `graph_query: ${card.graphQuery}`,
+          card.observations === undefined ? undefined : `observed: ${card.observations}`,
+          card.anchors === undefined ? undefined : `anchors: ${card.anchors}`,
+          card.attempted === undefined ? undefined : `attempted: ${card.attempted}`,
+          card.invariants === undefined ? undefined : `invariants: ${card.invariants}`,
+          card.rationale === undefined ? undefined : `rationale: ${card.rationale}`,
+          card.verification === undefined ? undefined : `verification: ${card.verification}`,
+          card.unresolved === undefined ? undefined : `unresolved: ${card.unresolved}`,
+          card.avoidRepeat === undefined ? undefined : `avoid_repeat: ${card.avoidRepeat}`,
+          card.blockers === undefined ? undefined : `blockers: ${card.blockers}`,
+          card.risks === undefined ? undefined : `risks: ${card.risks}`,
+          card.nextStep === undefined ? undefined : `next_step: ${card.nextStep}`,
+        ],
+        (value): value is string => value !== undefined,
+      ),
+      ' ',
+    ),
     MEMORY_EXCERPT_BYTES,
   );
 }
@@ -561,7 +606,7 @@ export function parseContextBriefContinuationCard(body: string): ContextBriefCon
   const values = new Map<keyof ContextBriefContinuationCardV1, CappedContinuationValue>();
   let fence: MarkdownFence | undefined;
   let current: keyof ContextBriefContinuationCardV1 | undefined;
-  for (const rawLine of body.split(/\r?\n/gu)) {
+  for (const rawLine of Effect.pipe(body, EffectString.split(/\r?\n/gu))) {
     const fenceLine = parseMarkdownFenceLine(rawLine);
     if (fence !== undefined) {
       if (fenceLine !== undefined && closesMarkdownFence(fence, fenceLine)) fence = undefined;
@@ -571,25 +616,36 @@ export function parseContextBriefContinuationCard(body: string): ContextBriefCon
       fence = {marker: fenceLine.marker, length: fenceLine.length};
       continue;
     }
-    const match = rawLine.match(
-      /^\s{0,3}(?:#{1,6}\s*)?(task|decisions|graph_query|graph query|graph_question|graph question|observed|observations|findings|anchors|attempted|tried|avoid_repeat|avoid repeat|constraints|invariants|rationale|verification|untested_invariant|untested invariant|unresolved|unknowns|blockers|risks|next_step|next step)\s*:\s*(.*)$/iu,
+    const match = Effect.pipe(
+      rawLine,
+      EffectString.match(
+        /^\s{0,3}(?:#{1,6}\s*)?(task|decisions|graph_query|graph query|graph_question|graph question|observed|observations|findings|anchors|attempted|tried|avoid_repeat|avoid repeat|constraints|invariants|rationale|verification|untested_invariant|untested invariant|unresolved|unknowns|blockers|risks|next_step|next step)\s*:\s*(.*)$/iu,
+      ),
+      Effect.Option.getOrElse(() => null),
     );
     if (match !== null) {
       const key = continuationKey(match[1]);
+      if (key === undefined) {
+        current = undefined;
+        continue;
+      }
       current = key;
       const value = compactContinuationText(match[2]);
       if (value !== '') appendContinuationValue(values, key, value);
       continue;
     }
-    const value = compactContinuationText(rawLine.replace(/^\s*[-*+]\s+/u, ''));
+    const value = compactContinuationText(Effect.pipe(rawLine, EffectString.replace(/^\s*[-*+]\s+/u, '')));
     if (current !== undefined && value !== '') appendContinuationValue(values, current, value);
   }
-  const card = Object.fromEntries(
-    [...values.entries()]
-      .map(([key, value]) => [key, continuationValueText(value)])
-      .filter(([, value]) => value !== ''),
-  ) as ContextBriefContinuationCardV1;
-  return Object.keys(card).length === 0 ? undefined : card;
+  const card: {-readonly [Key in keyof ContextBriefContinuationCardV1]: ContextBriefContinuationCardV1[Key]} = {};
+  let hasValue = false;
+  for (const [key, value] of values) {
+    const text = continuationValueText(value);
+    if (text === '') continue;
+    card[key] = text;
+    hasValue = true;
+  }
+  return hasValue ? card : undefined;
 }
 
 interface MarkdownFence {
@@ -614,11 +670,13 @@ function parseMarkdownFenceLine(line: string): MarkdownFenceLine | undefined {
 }
 
 function closesMarkdownFence(fence: MarkdownFence, line: MarkdownFenceLine): boolean {
-  return line.marker === fence.marker && line.length >= fence.length && line.suffix.trim() === '';
+  return (
+    line.marker === fence.marker && line.length >= fence.length && Effect.pipe(line.suffix, EffectString.trim) === ''
+  );
 }
 
 function opensMarkdownFence(line: MarkdownFenceLine): boolean {
-  return line.marker === '~' || !line.suffix.includes('`');
+  return line.marker === '~' || !Effect.pipe(line.suffix, EffectString.includes('`'));
 }
 
 /** Keep continuation capture linear in input size while preserving the visible UTF-8 budget. */
@@ -654,7 +712,12 @@ function continuationValueText(value: CappedContinuationValue): string {
 }
 
 function utf8CharacterBytes(character: string): number {
-  const code = character.codePointAt(0) ?? 0;
+  const code =
+    Effect.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect.Option.getOrElse(() => undefined),
+    ) ?? 0;
   return code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
 }
 
@@ -664,11 +727,12 @@ function utf8ByteLength(value: string): number {
   return byteLength;
 }
 
-function continuationKey(value: string): keyof ContextBriefContinuationCardV1 {
-  switch (value.toLowerCase().replace(/\s+/gu, '_')) {
-    case 'constraints':
-    case 'invariants':
-      return 'invariants';
+function continuationKey(value: string): keyof ContextBriefContinuationCardV1 | undefined {
+  switch (Effect.pipe(value, EffectString.toLowerCase, EffectString.replace(/\s+/gu, '_'))) {
+    case 'task':
+      return 'task';
+    case 'decisions':
+      return 'decisions';
     case 'graph_query':
       return 'graphQuery';
     case 'graph_question':
@@ -677,27 +741,42 @@ function continuationKey(value: string): keyof ContextBriefContinuationCardV1 {
     case 'findings':
     case 'observations':
       return 'observations';
+    case 'anchors':
+      return 'anchors';
     case 'tried':
     case 'attempted':
       return 'attempted';
-    case 'unknowns':
-    case 'untested_invariant':
-    case 'unresolved':
-      return 'unresolved';
     case 'avoid_repeat':
       return 'avoidRepeat';
+    case 'constraints':
+    case 'invariants':
+      return 'invariants';
+    case 'rationale':
+      return 'rationale';
+    case 'verification':
+      return 'verification';
+    case 'untested_invariant':
+    case 'unresolved':
+    case 'unknowns':
+      return 'unresolved';
+    case 'blockers':
+      return 'blockers';
+    case 'risks':
+      return 'risks';
     case 'next_step':
       return 'nextStep';
     default:
-      return value.toLowerCase() as Exclude<keyof ContextBriefContinuationCardV1, 'invariants' | 'nextStep'>;
+      return undefined;
   }
 }
 
 function compactContinuationText(value: string): string {
-  return value
-    .replace(/(?:^|\s)(?:\/[\w.~-]+){2,}/gu, ' [path omitted]')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  return Effect.pipe(
+    value,
+    EffectString.replace(/(?:^|\s)(?:\/[\w.~-]+){2,}/gu, ' [path omitted]'),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
 }
 
 function parsePreciseEvidence(value: ContextBriefPreciseCodeEvidenceV1): ContextBriefPreciseCodeEvidenceV1 {
@@ -726,8 +805,8 @@ function parsePreciseObservation(value: ContextBriefPreciseCodeObservationV1): C
 }
 
 function exactKeys(value: object, allowed: readonly string[], label: string): void {
-  const keys = Object.keys(value);
-  const extras = keys.filter(key => !allowed.includes(key));
+  const keys = EffectRecord.keys(value);
+  const extras = EffectArray.filter(keys, key => !allowed.includes(key));
   if (extras.length > 0) throw new Error(`Invalid Context Brief ${label}: unsupported field ${extras.sort()[0]}.`);
 }
 
@@ -735,9 +814,12 @@ function repositoryPath(value: string): void {
   if (
     !value ||
     new TextEncoder().encode(value).byteLength > 4_096 ||
-    value.startsWith('/') ||
-    value.includes('\\') ||
-    value.split('/').some(segment => !segment || segment === '.' || segment === '..')
+    Effect.pipe(value, EffectString.startsWith('/')) ||
+    Effect.pipe(value, EffectString.includes('\\')) ||
+    EffectArray.some(
+      Effect.pipe(value, EffectString.split('/')),
+      segment => !segment || segment === '.' || segment === '..',
+    )
   ) {
     throw invalid('repository-relative path');
   }
@@ -745,7 +827,7 @@ function repositoryPath(value: string): void {
 
 function boundedSourceCommit(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
-  const normalized = value.normalize('NFKC').trim();
+  const normalized = Effect.pipe(value, EffectString.normalize('NFKC'), EffectString.trim);
   return normalized && new TextEncoder().encode(normalized).byteLength <= 128 ? normalized : undefined;
 }
 
@@ -781,9 +863,12 @@ function invalid(field: string): Error {
 /** Stable identity helper for future structured-evidence receipts. */
 export function contextBriefPreciseEvidenceId(evidence: ContextBriefPreciseCodeEvidenceV1): string {
   const value = parsePreciseEvidence(evidence);
-  return `cbpe_${sha256HexSync(
-    `${value.repositoryId}\u0000${value.sourceCommit}\u0000${value.path}\u0000${value.nodeId ?? ''}\u0000${value.contentHash}`,
-  ).slice(0, 24)}`;
+  return `cbpe_${Effect.pipe(
+    sha256HexSync(
+      `${value.repositoryId}\u0000${value.sourceCommit}\u0000${value.path}\u0000${value.nodeId ?? ''}\u0000${value.contentHash}`,
+    ),
+    EffectString.slice(0, 24),
+  )}`;
 }
 
 /** Select locators only from already admitted recall evidence, independently of citation freshness. */
@@ -798,12 +883,15 @@ export function contextBriefTaskGraphAnchors(
   if (repositoryId === undefined) return [];
   // Generic verification language cannot by itself make a candidate task-aligned.
   const specific = (text: string) =>
-    text.replace(
-      /\b(?:verify|verification|installed|contracts?|source|replacement|baseline|test|tests|check|checks|support)\b/giu,
-      ' ',
+    Effect.pipe(
+      text,
+      EffectString.replace(
+        /\b(?:verify|verification|installed|contracts?|source|replacement|baseline|test|tests|check|checks|support)\b/giu,
+        ' ',
+      ),
     );
-  const eligible = memory.candidates
-    .map(candidate => ({
+  const eligible = EffectArray.filter(
+    EffectArray.map(memory.candidates, candidate => ({
       candidate,
       score: contextBriefResumeTaskAlignmentScore(specific(task), {
         topic: specific(candidate.topic ?? ''),
@@ -813,30 +901,53 @@ export function contextBriefTaskGraphAnchors(
       }),
       paths: [
         ...new Set(
-          candidate.codeCitations
-            .filter(citation => citation.repositoryId === repositoryId && canonicalTaskAnchorPath(citation.path))
-            .map(citation => citation.path),
+          EffectArray.map(
+            EffectArray.filter(
+              candidate.codeCitations,
+              (citation, __effectArrayIndex) =>
+                __effectArrayIndex in candidate.codeCitations &&
+                citation.repositoryId === repositoryId &&
+                canonicalTaskAnchorPath(citation.path),
+            ),
+            citation => citation.path,
+          ),
         ),
       ].sort(),
-    }))
-    .filter(item => item.score > 0 && item.paths.length > 0)
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        left.candidate.rank - right.candidate.rank ||
-        compareText(left.candidate.uri, right.candidate.uri),
-    );
+    })),
+    item => item.score > 0 && item.paths.length > 0,
+  ).sort(
+    (left, right) =>
+      right.score - left.score ||
+      left.candidate.rank - right.candidate.rank ||
+      compareText(left.candidate.uri, right.candidate.uri),
+  );
   return eligible[0]?.paths.slice(0, Math.min(8, maximumRefs)) ?? [];
 }
 
 function canonicalTaskAnchorPath(path: string): boolean {
   return (
     path.length > 0 &&
-    path.trim() === path &&
+    Effect.pipe(path, EffectString.trim) === path &&
     new TextEncoder().encode(path).byteLength <= 4096 &&
     !/^(?:[a-z]:|\/|cgs_|cgr_)/iu.test(path) &&
-    !path.includes('\\') &&
-    ![...path].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) &&
-    path.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..')
+    !Effect.pipe(path, EffectString.includes('\\')) &&
+    !EffectArray.some(
+      [...path],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) < 32 ||
+        Effect.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ) === 127,
+    ) &&
+    EffectArray.every(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => segment !== '' && segment !== '.' && segment !== '..',
+    )
   );
 }

@@ -1,13 +1,22 @@
+import {TestError} from '@threadnote/testing/test-error';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import * as FC from 'fast-check';
 
 import {expireRecallIndexValidation, loadRecallIndexData, recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const RecallIndexTestLayer = Layer.merge(BunServices.layer, TestSystemInfoLayer);
 const UNICODE_NAMES = ['alpha', 'omega', 'ßeta', 'λambda', '中間', '\uE000-private', '😀-face', '𐀀-linear-b'] as const;
@@ -49,7 +58,7 @@ describe('recall refresh source paging', () => {
             yield* fs.makeDirectory(memoryRoot, {recursive: true});
             const asciiNames = Array.from(
               {length: 264},
-              (_unused, index) => `document-${String(index).padStart(3, '0')}.md`,
+              (_unused, index) => `document-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`,
             );
             const unicodeNames = [
               'ßeta.md',
@@ -79,7 +88,7 @@ describe('recall refresh source paging', () => {
               '𐀀-linear-b.md',
             ]);
             yield* Effect.forEach(
-              names.filter(name => !retainedNames.has(name)),
+              EffectArray.filter(names, name => !retainedNames.has(name)),
               name => fs.remove(path.join(resourceRoot, name), {force: true}),
               {concurrency: 32, discard: true},
             );
@@ -99,7 +108,7 @@ describe('recall refresh source paging', () => {
               includeInactive: false,
               query: 'unicode-refresh-anchor added-refresh-anchor',
             });
-            expect(refreshed.candidates.map(candidate => candidate.uri)).toEqual(
+            expect(EffectArray.map(refreshed.candidates, candidate => candidate.uri)).toEqual(
               expect.arrayContaining([resourceUri(changedName), resourceUri(addedName)]),
             );
             expect(readDocumentCount(home)).toBe(retainedNames.size + 2);
@@ -110,7 +119,12 @@ describe('recall refresh source paging', () => {
               query: 'legacy-page-continuity-anchor',
             });
             expect(
-              legacy.candidates.find(candidate => candidate.fields?.topic === 'recall-refresh-legacy-v1'),
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  legacy.candidates,
+                  candidate => candidate.fields?.topic === 'recall-refresh-legacy-v1',
+                ),
+              ),
             ).toMatchObject({
               text: expect.stringContaining('legacy-page-continuity-anchor'),
               uri: 'threadnote://user/paging-user/memories/durable/projects/threadnote/legacy-v1.md',
@@ -136,9 +150,9 @@ describe('recall refresh source paging', () => {
             yield* writeCorpus(fs, path, resourceRoot, initial);
             yield* loadRecallIndexData(config, {includeInactive: false, query: 'property-refresh-anchor'});
 
-            const nextByName = new Map(next.map(entry => [entry.name, entry]));
+            const nextByName = new Map(EffectArray.map(next, entry => [entry.name, entry]));
             yield* Effect.forEach(
-              initial.filter(entry => !nextByName.has(entry.name)),
+              EffectArray.filter(initial, entry => !nextByName.has(entry.name)),
               entry => fs.remove(path.join(resourceRoot, `${entry.name}.md`), {force: true}),
               {discard: true},
             );
@@ -146,14 +160,15 @@ describe('recall refresh source paging', () => {
             yield* expireRecallIndexValidation(
               home,
               false,
-              next.map(entry => resourceUri(`${entry.name}.md`)),
+              EffectArray.map(next, entry => resourceUri(`${entry.name}.md`)),
             );
             yield* loadRecallIndexData(config, {includeInactive: false, query: 'property-refresh-anchor'});
 
             expect(readResourceModel(home)).toEqual(
-              [...next]
-                .sort((left, right) => left.name.localeCompare(right.name))
-                .map(entry => ({name: `${entry.name}.md`, variant: entry.variant})),
+              EffectArray.map(
+                [...next].sort((left, right) => Effect2.pipe(left.name, EffectString.localeCompare(right.name))),
+                entry => ({name: `${entry.name}.md`, variant: entry.variant}),
+              ),
             );
           }),
         ),
@@ -188,18 +203,21 @@ function resourceDocument(name: string, variant: number): string {
 }
 
 function legacyV1Memory(): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    'topic: recall-refresh-legacy-v1',
-    'source_agent_client: codex',
-    'timestamp: 2025-01-01T00:00:00.000Z',
-    'schema_version: 1',
-    '',
-    'legacy-page-continuity-anchor remains recallable after a paged refresh.',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      'topic: recall-refresh-legacy-v1',
+      'source_agent_client: codex',
+      'timestamp: 2025-01-01T00:00:00.000Z',
+      'schema_version: 1',
+      '',
+      'legacy-page-continuity-anchor remains recallable after a paged refresh.',
+    ],
+    '\n',
+  );
 }
 
 function writeCorpus(fs: FileSystem.FileSystem, path: Path.Path, root: string, entries: readonly CorpusEntry[]) {
@@ -213,7 +231,9 @@ function writeCorpus(fs: FileSystem.FileSystem, path: Path.Path, root: string, e
 function readDocumentCount(home: string): number {
   const database = openRecallDatabase(home);
   try {
-    return (database.query('SELECT COUNT(*) AS count FROM documents').get() as {readonly count: number}).count;
+    return requiredRow(
+      database.query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM documents').get(),
+    ).count;
   } finally {
     database.close(false);
   }
@@ -222,13 +242,14 @@ function readDocumentCount(home: string): number {
 function readResourceNames(home: string): readonly string[] {
   const database = openRecallDatabase(home);
   try {
-    return (
+    return EffectArray.map(
       database
-        .query("SELECT source_path FROM documents WHERE uri LIKE 'threadnote://resources/%' ORDER BY uri")
-        .all() as readonly {readonly source_path: string}[]
-    )
-      .map(row => row.source_path.split(/[\\/]/u).at(-1)!)
-      .sort();
+        .query<{readonly source_path: string}, SQLQueryBindings[]>(
+          "SELECT source_path FROM documents WHERE uri LIKE 'threadnote://resources/%' ORDER BY uri",
+        )
+        .all(),
+      row => Effect2.pipe(row.source_path, EffectString.split(/[\\/]/u)).at(-1)!,
+    ).sort();
   } finally {
     database.close(false);
   }
@@ -237,21 +258,27 @@ function readResourceNames(home: string): readonly string[] {
 function readResourceModel(home: string): readonly {readonly name: string; readonly variant: number}[] {
   const database = openRecallDatabase(home);
   try {
-    return (
+    return EffectArray.map(
       database
-        .query(
+        .query<{readonly candidate_json: string; readonly source_path: string}, SQLQueryBindings[]>(
           "SELECT source_path, candidate_json FROM documents WHERE uri LIKE 'threadnote://resources/%' ORDER BY uri",
         )
-        .all() as readonly {readonly candidate_json: string; readonly source_path: string}[]
-    )
-      .map(row => ({
-        name: row.source_path.split(/[\\/]/u).at(-1)!,
-        variant: Number(/variant-(\d+)/u.exec((JSON.parse(row.candidate_json) as {readonly text: string}).text)?.[1]),
-      }))
-      .sort((left, right) => left.name.localeCompare(right.name));
+        .all(),
+      row => ({
+        name: Effect2.pipe(row.source_path, EffectString.split(/[\\/]/u)).at(-1)!,
+        variant: Number(/variant-(\d+)/u.exec(readCandidateText(row.candidate_json))?.[1]),
+      }),
+    ).sort((left, right) => Effect2.pipe(left.name, EffectString.localeCompare(right.name)));
   } finally {
     database.close(false);
   }
+}
+
+function readCandidateText(candidateJson: string): string {
+  const value: unknown = JSON.parse(candidateJson);
+  if (!Schema.is(Schema.Struct({text: Schema.String}))(value))
+    throw new Error('Expected a recall resource candidate with text content.');
+  return value.text;
 }
 
 function openRecallDatabase(home: string): Database {

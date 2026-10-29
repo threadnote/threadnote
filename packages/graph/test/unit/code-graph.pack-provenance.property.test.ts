@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -25,9 +27,9 @@ describe('code graph language-pack provenance', () => {
     },
     ({changed, reverseCurrent, reversePrevious}) =>
       Effect.sync(() => {
-        const previous = packIds.map(pack);
+        const previous = EffectArray.map(packIds, pack);
         const changedIds = new Set<string>(changed);
-        const current = previous.map(value =>
+        const current = EffectArray.map(previous, value =>
           changedIds.has(value.id) ? {...value, cacheIdentity: `${value.cacheIdentity}-next`} : value,
         );
         const result = assessCodeGraphLanguagePackDelta(
@@ -73,9 +75,14 @@ describe('code graph language-pack provenance', () => {
     ({activeIds, reverseCatalog, reverseReceipt}) =>
       Effect.sync(() => {
         const activeIdSet = new Set<string>(activeIds);
-        const selected = BUILTIN_LANGUAGE_PACK_REGISTRY.packs.filter(value => activeIdSet.has(value.id));
+        const selected = EffectArrayPipe(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (value, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && activeIdSet.has(value.id),
+          ),
+        );
         const registry = createCodeGraphLanguagePackRegistry(reverseCatalog ? [...selected].reverse() : selected);
-        const provenance = selected.map(codeGraphLanguagePackProvenance);
+        const provenance = EffectArray.map(selected, codeGraphLanguagePackProvenance);
         const extractorSet = extractorSetIdentityFromPackProvenance(provenance);
         const snapshot = {extractorSet};
         const storedProvenance = reverseReceipt ? [...provenance].reverse() : provenance;
@@ -84,7 +91,7 @@ describe('code graph language-pack provenance', () => {
         expect(
           codeGraphSnapshotMatchesCurrentLanguagePacks(
             snapshot,
-            storedProvenance.map((value, index) =>
+            EffectArray.map(storedProvenance, (value, index) =>
               index === 0 ? {...value, cacheIdentity: `${value.cacheIdentity}-stale`} : value,
             ),
             registry,

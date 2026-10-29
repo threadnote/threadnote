@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -10,8 +11,10 @@ import {
 import type {CodeGraphMonikerV1} from '@threadnote/graph/cross_repository/types';
 import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const snapshotId = `cgsn_${'1'.repeat(40)}`;
+const snapshotId = `cgsn_${Effect.pipe('1', EffectString.repeat(40))}`;
 const repositoryId = sha256HexSync('snapshot-moniker-repository');
 const span = {column: 1, endColumn: 20, endLine: 1, line: 1} as const;
 
@@ -19,7 +22,9 @@ describe('cross-repository snapshot moniker reader', () => {
   const temporaryDirectories: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(temporaryDirectories.splice(0).map(path => rm(path, {force: true, recursive: true})));
+    await Promise.all(
+      EffectArray.map(temporaryDirectories.splice(0), path => rm(path, {force: true, recursive: true})),
+    );
   });
 
   it('keyset-pages canonical rows from the exact ready repository snapshot', async () => {
@@ -29,7 +34,9 @@ describe('cross-repository snapshot moniker reader', () => {
       readCodeGraphSnapshotMonikers(databasePath, {pageSize: 1, repositoryId, snapshotId}),
     );
 
-    expect(result).toEqual([...fixtureMonikers()].sort((left, right) => left.id.localeCompare(right.id)));
+    expect(result).toEqual(
+      [...fixtureMonikers()].sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id))),
+    );
   });
 
   it('accepts an authoritative direct-persistent snapshot identity', async () => {
@@ -107,7 +114,7 @@ describe('cross-repository snapshot moniker reader', () => {
 function fixtureMonikers(): readonly CodeGraphMonikerV1[] {
   return [
     codeGraphPackageMoniker({
-      componentId: `cgp_${'2'.repeat(32)}`,
+      componentId: `cgp_${Effect.pipe('2', EffectString.repeat(32))}`,
       evidence: {path: 'package.json', span},
       packageName: '@acme/shared',
       packageVersion: '1.4.0',
@@ -119,7 +126,7 @@ function fixtureMonikers(): readonly CodeGraphMonikerV1[] {
       packageName: 'acme.orders.v1',
       qualifiedName: 'acme.orders.v1.Orders',
       role: 'export',
-      symbolId: `cgs_${'3'.repeat(32)}`,
+      symbolId: `cgs_${Effect.pipe('3', EffectString.repeat(32))}`,
     }),
   ];
 }

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {describe, expect, test} from 'vitest';
 import fc from 'fast-check';
@@ -12,6 +14,8 @@ import {
 } from '@threadnote/graph/languages/corpus/policy';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph corpus extraction', () => {
   test('classifies opaque media by final extension independent of path shape and case', () => {
@@ -21,8 +25,8 @@ describe('code graph corpus extraction', () => {
         fc.array(fc.stringMatching(/^[a-z0-9_-]{1,12}$/u), {maxLength: 4}),
         fc.boolean(),
         (extension, directories, uppercase) => {
-          const suffix = uppercase ? extension.toUpperCase() : extension;
-          const path = [...directories, `asset${suffix}`].join('/');
+          const suffix = uppercase ? Effect.pipe(extension, EffectString.toUpperCase) : extension;
+          const path = EffectArray.join([...directories, `asset${suffix}`], '/');
           expect(isOpaqueCorpusMediaPath(path)).toBe(true);
           expect(isOpaqueCorpusMediaPath(`${path}.txt`)).toBe(false);
         },
@@ -35,40 +39,51 @@ describe('code graph corpus extraction', () => {
     const facts = await extractCorpusFile(
       textFile(
         'docs/reliability.rst',
-        [
-          'Reliability architecture',
-          '========================',
-          '',
-          'Retries use bounded exponential backoff.',
-          '',
-          'https://example.test/adr',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'Reliability architecture',
+            '========================',
+            '',
+            'Retries use bounded exponential backoff.',
+            '',
+            'https://example.test/adr',
+          ],
+          '\n',
+        ),
       ),
     );
 
-    expect(facts.symbols.map(symbol => [symbol.kind, symbol.name])).toEqual(
+    expect(EffectArray.map(facts.symbols, symbol => [symbol.kind, symbol.name])).toEqual(
       expect.arrayContaining([
         ['document', 'Reliability'],
         ['section', 'Reliability architecture'],
         ['external-resource', 'https://example.test/adr'],
       ]),
     );
-    expect(facts.edges.map(edge => edge.relation)).toEqual(expect.arrayContaining(['contains', 'references']));
+    expect(EffectArray.map(facts.edges, edge => edge.relation)).toEqual(
+      expect.arrayContaining(['contains', 'references']),
+    );
   });
 
   test('never exposes script or style bodies through whitespace-tolerant HTML end tags', async () => {
     const facts = await extractCorpusFile(
       textFile(
         'docs/overview.html',
-        [
-          '<h1>Public architecture overview</h1>',
-          '<script>privateScriptPayload()</script >',
-          '<style>.private-style-payload { display: block }</STYLE \n>',
-          '<p>Visible operational guidance.</p>',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            '<h1>Public architecture overview</h1>',
+            '<script>privateScriptPayload()</script >',
+            '<style>.private-style-payload { display: block }</STYLE \n>',
+            '<p>Visible operational guidance.</p>',
+          ],
+          '\n',
+        ),
       ),
     );
-    const searchableEvidence = facts.symbols.map(symbol => `${symbol.name}\n${symbol.documentation ?? ''}`).join('\n');
+    const searchableEvidence = EffectArray.join(
+      EffectArray.map(facts.symbols, symbol => `${symbol.name}\n${symbol.documentation ?? ''}`),
+      '\n',
+    );
 
     expect(searchableEvidence).toContain('Public architecture overview');
     expect(searchableEvidence).toContain('Visible operational guidance');
@@ -87,8 +102,17 @@ describe('code graph corpus extraction', () => {
     const facts = await extractCorpusFile(binaryFile('handbook/on-call.docx', bytes));
 
     expect(facts.diagnostics).toEqual([]);
-    expect(facts.symbols.some(symbol => symbol.documentation?.includes('Portable incident handoff'))).toBe(true);
-    expect(facts.symbols.some(symbol => symbol.qualifiedName.includes('word/media'))).toBe(false);
+    expect(
+      EffectArray.some(
+        facts.symbols,
+        symbol =>
+          symbol.documentation !== undefined &&
+          Effect.pipe(symbol.documentation, EffectString.includes('Portable incident handoff')),
+      ),
+    ).toBe(true);
+    expect(
+      EffectArray.some(facts.symbols, symbol => Effect.pipe(symbol.qualifiedName, EffectString.includes('word/media'))),
+    ).toBe(false);
   });
 
   test('rejects a compressed document entry before expanding past the per-entry budget', async () => {
@@ -96,7 +120,7 @@ describe('code graph corpus extraction', () => {
     const facts = await extractCorpusFile(binaryFile('handbook/oversized.docx', bytes));
 
     expect(facts.symbols[0]).toMatchObject({kind: 'asset', name: 'Oversized'});
-    expect(facts.diagnostics.join('\n')).toContain('per-entry safety budget');
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('per-entry safety budget');
   });
 
   test('caps inspected and selected archive entries before materializing an archive fan-out', async () => {
@@ -124,9 +148,9 @@ describe('code graph corpus extraction', () => {
     );
 
     expect(inspected.symbols[0]).toMatchObject({kind: 'asset', name: 'Inspected'});
-    expect(inspected.diagnostics.join('\n')).toContain('inspected entry-count safety budget');
+    expect(EffectArray.join(inspected.diagnostics, '\n')).toContain('inspected entry-count safety budget');
     expect(selected.symbols[0]).toMatchObject({kind: 'asset', name: 'Selected'});
-    expect(selected.diagnostics.join('\n')).toContain('selected entry-count safety budget');
+    expect(EffectArray.join(selected.diagnostics, '\n')).toContain('selected entry-count safety budget');
   });
 
   test('deduplicates normalized archive names before expansion', async () => {
@@ -140,7 +164,10 @@ describe('code graph corpus extraction', () => {
       ),
     );
 
-    const documentation = facts.symbols.map(symbol => symbol.documentation ?? '').join('\n');
+    const documentation = EffectArray.join(
+      EffectArray.map(facts.symbols, symbol => symbol.documentation ?? ''),
+      '\n',
+    );
     expect(documentation).toContain('trusted first copy');
     expect(documentation).not.toContain('shadow duplicate copy');
   });
@@ -156,17 +183,26 @@ describe('code graph corpus extraction', () => {
       ),
     );
 
-    expect(facts.symbols.filter(symbol => symbol.kind === 'section').map(symbol => symbol.name)).toEqual([
-      'chapter2',
-      'chapter10',
-    ]);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(facts.symbols, symbol => symbol.kind === 'section'),
+        symbol => symbol.name,
+      ),
+    ).toEqual(['chapter2', 'chapter10']);
   });
 
   test('extracts pages and links from a tracked PDF', async () => {
     const facts = await extractCorpusFile(binaryFile('docs/reliability.pdf', minimalPdf('Retry queue architecture')));
 
     expect(facts.diagnostics).toEqual([]);
-    expect(facts.symbols.some(symbol => symbol.documentation?.includes('Retry queue architecture'))).toBe(true);
+    expect(
+      EffectArray.some(
+        facts.symbols,
+        symbol =>
+          symbol.documentation !== undefined &&
+          Effect.pipe(symbol.documentation, EffectString.includes('Retry queue architecture')),
+      ),
+    ).toBe(true);
     expect(facts.symbols[0]?.signature).toContain('1 page');
   });
 
@@ -196,10 +232,16 @@ describe('code graph corpus extraction', () => {
         ),
         fc.integer({max: 200, min: 0}),
         (items, maximumCharacters) => {
-          const expected = items
-            .filter((item): item is Extract<(typeof items)[number], {str: string}> => 'str' in item)
-            .map(item => `${item.str}${item.hasEOL ? '\n' : ''}`)
-            .join('');
+          const expected = EffectArray.join(
+            EffectArray.map(
+              EffectArray.filter(
+                items,
+                (item): item is Extract<(typeof items)[number], {str: string}> => 'str' in item,
+              ),
+              item => `${item.str}${item.hasEOL ? '\n' : ''}`,
+            ),
+            '',
+          );
           if (expected.length <= maximumCharacters) {
             expect(joinPdfTextItemsWithinLimit(items, maximumCharacters)).toBe(expected);
           } else {
@@ -217,7 +259,7 @@ describe('code graph corpus extraction', () => {
     });
 
     expect(facts.symbols[0]).toMatchObject({kind: 'asset', name: 'Text Bomb'});
-    expect(facts.diagnostics.join('\n')).toContain('character safety budget');
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('character safety budget');
   });
 
   test('enforces the PDF elapsed budget independently of page count', async () => {
@@ -228,7 +270,7 @@ describe('code graph corpus extraction', () => {
     });
 
     expect(facts.symbols[0]).toMatchObject({kind: 'asset', name: 'Slow'});
-    expect(facts.diagnostics.join('\n')).toContain('elapsed-time safety budget');
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('elapsed-time safety budget');
   });
 
   test('propagates in-flight caller cancellation instead of caching an asset fallback', async () => {
@@ -258,7 +300,7 @@ describe('code graph corpus extraction', () => {
     const facts = await extractCorpusFile(
       textFile(
         'diagrams/generated.svg',
-        `<svg viewBox="0 0 10 10"><!-- no <text> element --><path d="${'M0 0 L10 10 '.repeat(100_000)}"/></svg>`,
+        `<svg viewBox="0 0 10 10"><!-- no <text> element --><path d="${Effect.pipe('M0 0 L10 10 ', EffectString.repeat(100_000))}"/></svg>`,
       ),
     );
     const duration = performance.now() - startedAt;
@@ -266,7 +308,7 @@ describe('code graph corpus extraction', () => {
     expect(facts.symbols).toHaveLength(1);
     expect(facts.symbols[0]).toMatchObject({kind: 'asset', name: 'Generated'});
     expect(facts.symbols[0]?.documentation).not.toContain('M0 0');
-    expect(facts.diagnostics.join('\n')).toContain('SVG has no text elements');
+    expect(EffectArray.join(facts.diagnostics, '\n')).toContain('SVG has no text elements');
     expect(duration).toBeLessThan(1_000);
   });
 
@@ -277,7 +319,10 @@ describe('code graph corpus extraction', () => {
         '<svg><svg:title>Retry architecture</svg:title><text>Backoff queue</text><path d="M0 0 L10 10"/></svg>',
       ),
     );
-    const documentation = facts.symbols.map(symbol => symbol.documentation ?? '').join('\n');
+    const documentation = EffectArray.join(
+      EffectArray.map(facts.symbols, symbol => symbol.documentation ?? ''),
+      '\n',
+    );
 
     expect(facts.symbols[0]).toMatchObject({kind: 'document', name: 'Retry'});
     expect(documentation).toContain('Retry architecture');
@@ -289,32 +334,45 @@ describe('code graph corpus extraction', () => {
     const facts = await extractCorpusFile(
       textFile(
         'app/src/main/res/mipmap-anydpi-v33/ic_appicon.xml',
-        [
-          '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">',
-          '  <background android:drawable="@color/ic_appicon_background"/>',
-          '  <foreground android:drawable="@drawable/ic_appicon_foreground"/>',
-          '  <monochrome android:drawable="@drawable/ic_appicon_monochrome"/>',
-          '</adaptive-icon>',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">',
+            '  <background android:drawable="@color/ic_appicon_background"/>',
+            '  <foreground android:drawable="@drawable/ic_appicon_foreground"/>',
+            '  <monochrome android:drawable="@drawable/ic_appicon_monochrome"/>',
+            '</adaptive-icon>',
+          ],
+          '\n',
+        ),
       ),
       {},
       {packageName: Option.some(':app'), project: Option.none()},
     );
 
     expect(facts.symbols[0]).toMatchObject({kind: 'resource', packageName: ':app'});
-    expect(facts.symbols.filter(symbol => symbol.kind === 'resource-reference').map(symbol => symbol.name)).toEqual([
-      '@color/ic_appicon_background',
-      '@drawable/ic_appicon_foreground',
-      '@drawable/ic_appicon_monochrome',
-    ]);
-    expect(facts.symbols.every(symbol => symbol.packageName === ':app')).toBe(true);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(facts.symbols, symbol => symbol.kind === 'resource-reference'),
+        symbol => symbol.name,
+      ),
+    ).toEqual(['@color/ic_appicon_background', '@drawable/ic_appicon_foreground', '@drawable/ic_appicon_monochrome']);
+    expect(EffectArray.every(facts.symbols, symbol => symbol.packageName === ':app')).toBe(true);
     const resourceReferenceIds = new Set(
-      facts.symbols.filter(symbol => symbol.kind === 'resource-reference').map(symbol => symbol.id),
+      EffectArray.map(
+        EffectArray.filter(facts.symbols, symbol => symbol.kind === 'resource-reference'),
+        symbol => symbol.id,
+      ),
     );
     expect(
-      facts.edges.filter(
-        edge =>
-          edge.relation === 'references' && edge.targetId !== undefined && resourceReferenceIds.has(edge.targetId),
+      EffectArrayPipe(facts.edges, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (edge, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues &&
+            edge.relation === 'references' &&
+            edge.targetId !== undefined &&
+            resourceReferenceIds.has(edge.targetId),
+        ),
       ),
     ).toHaveLength(3);
     expect(facts.diagnostics).toEqual([]);
@@ -329,13 +387,20 @@ describe('code graph corpus extraction', () => {
     );
 
     expect(facts.symbols[0]).toMatchObject({kind: 'resource'});
-    expect(facts.symbols.filter(symbol => symbol.kind === 'resource-reference').map(symbol => symbol.name)).toEqual([
-      'AppIconMonochrome',
-      'LaunchImageView',
-    ]);
-    expect(facts.symbols.some(symbol => symbol.documentation?.includes('attribute image AppIconMonochrome'))).toBe(
-      true,
-    );
+    expect(
+      EffectArray.map(
+        EffectArray.filter(facts.symbols, symbol => symbol.kind === 'resource-reference'),
+        symbol => symbol.name,
+      ),
+    ).toEqual(['AppIconMonochrome', 'LaunchImageView']);
+    expect(
+      EffectArray.some(
+        facts.symbols,
+        symbol =>
+          symbol.documentation !== undefined &&
+          Effect.pipe(symbol.documentation, EffectString.includes('attribute image AppIconMonochrome')),
+      ),
+    ).toBe(true);
   });
 
   test('keeps an oversized artifact searchable without materializing or interpreting its bytes', async () => {
@@ -406,7 +471,10 @@ function binaryFile(path: string, bytes: Uint8Array): CodeGraphInventoryFile {
     blobId: 'blob',
     bytes,
     contentHash: `hash:${path}`,
-    language: path.endsWith('.pdf') || path.endsWith('.docx') ? 'office-document' : 'image',
+    language:
+      Effect.pipe(path, EffectString.endsWith('.pdf')) || Effect.pipe(path, EffectString.endsWith('.docx'))
+        ? 'office-document'
+        : 'image',
     mode: '100644',
     path,
     size: bytes.byteLength,
@@ -415,7 +483,12 @@ function binaryFile(path: string, bytes: Uint8Array): CodeGraphInventoryFile {
 }
 
 function minimalPdf(text: string): Uint8Array {
-  const escaped = text.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)');
+  const escaped = Effect.pipe(
+    text,
+    EffectString.replaceAll('\\', '\\\\'),
+    EffectString.replaceAll('(', '\\('),
+    EffectString.replaceAll(')', '\\)'),
+  );
   const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
@@ -426,13 +499,16 @@ function minimalPdf(text: string): Uint8Array {
   ];
   let output = '%PDF-1.4\n';
   const offsets: number[] = [];
-  objects.forEach((object, index) => {
+  EffectArray.forEach(objects, (object, index) => {
     offsets.push(new TextEncoder().encode(output).byteLength);
     output += `${index + 1} 0 obj\n${object}\nendobj\n`;
   });
   const xrefOffset = new TextEncoder().encode(output).byteLength;
   output += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  output += offsets.map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('');
+  output += EffectArray.join(
+    EffectArray.map(offsets, offset => `${Effect.pipe(String(offset), EffectString.padStart(10, '0'))} 00000 n \n`),
+    '',
+  );
   output += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
   return new TextEncoder().encode(output);
 }

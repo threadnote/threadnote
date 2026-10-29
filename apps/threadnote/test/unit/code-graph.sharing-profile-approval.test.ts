@@ -15,6 +15,8 @@ import {
   loadGraphShareManagedApprovalFile,
   parseGraphShareManagedApproval,
 } from '@threadnote/graph/sharing/profile/approval';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const registryCanonical = 'oci://registry.example.test/acme/canonical';
 const registryWorker = 'oci://registry.example.test/acme/worker';
@@ -26,7 +28,7 @@ const profile = {
     coordinatorUrl,
     organization: 'acme',
     publisherKeyFingerprint: sha256Digest('publisher'),
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   }),
   registry: {canonical: registryCanonical, worker: registryWorker},
 };
@@ -62,7 +64,7 @@ describe('managed OCI profile approval', () => {
       repositoryId: enrollment.repositoryId,
     });
     for (const wrong of [
-      {...enrollment, repositoryId: 'b'.repeat(64)},
+      {...enrollment, repositoryId: Effect2.pipe('b', EffectString.repeat(64))},
       {...enrollment, publisherKeyFingerprint: sha256Digest('other')},
       {...enrollment, profileDigest: sha256Digest('other')},
       {...enrollment, profile: ociProfilePointer('oci://other.example.test/acme/canonical', artifact.manifestDigest)},
@@ -199,7 +201,7 @@ effectIt.effect('loads only a bounded, stable, private approval file outside che
     expect(
       (yield* Effect.result(loadGraphShareManagedApprovalFile({...input, approvalPath: 'approval.json'})))._tag,
     ).toBe('Failure');
-    yield* fs.writeFileString(approvalPath, 'x'.repeat(16_385), {mode: 0o600});
+    yield* fs.writeFileString(approvalPath, Effect2.pipe('x', EffectString.repeat(16_385)), {mode: 0o600});
     expect((yield* Effect.result(loadGraphShareManagedApprovalFile(input)))._tag).toBe('Failure');
   }).pipe(provideTestLayer(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer))),
 );

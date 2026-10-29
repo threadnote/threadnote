@@ -1,18 +1,21 @@
+import {Array as EffectArray} from 'effect';
 import type {ThreadnoteProcessDiagnostic} from './diagnostics.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function orderThreadnoteProcessesByAttention<T extends ThreadnoteProcessDiagnostic>(
   processes: readonly T[],
 ): readonly T[] {
-  return processes
-    .map((process, inputIndex) => ({inputIndex, process}))
-    .sort(
+  return EffectArray.map(
+    EffectArray.map(processes, (process, inputIndex) => ({inputIndex, process})).sort(
       (left, right) =>
         processAttentionRank(left.process) - processAttentionRank(right.process) ||
-        left.process.startedAt.localeCompare(right.process.startedAt) ||
+        Effect.pipe(left.process.startedAt, EffectString.localeCompare(right.process.startedAt)) ||
         left.process.processId - right.process.processId ||
         left.inputIndex - right.inputIndex,
-    )
-    .map(entry => entry.process);
+    ),
+    entry => entry.process,
+  );
 }
 
 function processAttentionRank(process: ThreadnoteProcessDiagnostic): number {

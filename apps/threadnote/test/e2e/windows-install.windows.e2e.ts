@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -7,7 +8,10 @@ import {promisify} from '@threadnote/testing/node-util';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {expect, it} from 'vitest';
+import {Schema} from 'effect';
 import {windowsCommandLauncherInvocation} from '@threadnote/testing/windows-command-launcher';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execute = promisify(execFile);
 const windowsIt = process.platform === 'win32' ? it : it.skip;
@@ -17,7 +21,9 @@ const failureOutputLimit = 8_192;
 windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release', async () => {
   const root = await mkdtemp(join(tmpdir(), 'threadnote windows bootstrap-'));
   const distribution = join(process.cwd(), 'dist');
-  const packageManifest = (await Bun.file(join(process.cwd(), 'package.json')).json()) as {readonly version: string};
+  const packageManifest = Schema.decodeUnknownSync(Schema.Struct({version: Schema.String}))(
+    await Bun.file(join(process.cwd(), 'package.json')).json(),
+  );
   const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
   const artifactName = `threadnote-windows-${architecture}.tar.gz`;
   const artifact = join(root, artifactName);
@@ -39,7 +45,7 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
       hostname: '127.0.0.1',
       port: 0,
       fetch(request) {
-        const name = new URL(request.url).pathname.slice(1);
+        const name = Effect.pipe(new URL(request.url).pathname, EffectString.slice(1));
         if (name === 'stable-winner-releases') {
           return Response.json([
             {
@@ -118,7 +124,10 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
         DOCKER_CONFIG: join(userHome, '.docker'),
         HOME: userHome,
         LOCALAPPDATA: join(userHome, 'AppData', 'Local'),
-        PATH: [powerShellDirectory, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')].join(delimiter),
+        PATH: EffectArray.join(
+          [powerShellDirectory, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')],
+          delimiter,
+        ),
         THREADNOTE_BIN_DIR: binRoot,
         THREADNOTE_INSTALL_ROOT: installRoot,
         THREADNOTE_HOME: join(userHome, '.threadnote'),
@@ -141,7 +150,7 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
       });
       const stableOnlyFailure = await execute(
         join(powerShellDirectory, 'powershell.exe'),
-        installerArguments.filter(argument => argument !== '-Beta'),
+        EffectArray.filter(installerArguments, argument => argument !== '-Beta'),
         {
           env: {
             ...installEnvironment,
@@ -162,9 +171,9 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
           env: {...installEnvironment, THREADNOTE_VERSION: rejectedVersion},
           timeout: 60_000,
         }).catch((cause: unknown) => cause);
-        expect(
-          `${String((failure as {readonly stdout?: unknown}).stdout)}${String((failure as {readonly stderr?: unknown}).stderr)}`,
-        ).toContain(`Threadnote ${rejectedVersion} is not a published immutable release.`);
+        expect(`${String(outputProperty(failure, 'stdout'))}${String(outputProperty(failure, 'stderr'))}`).toContain(
+          `Threadnote ${rejectedVersion} is not a published immutable release.`,
+        );
         expect(assetRequests).toHaveLength(requestsBefore);
       }
       const exactFailure = await execute(join(powerShellDirectory, 'powershell.exe'), installerArguments, {
@@ -176,14 +185,14 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
         timeout: 60_000,
       }).catch((cause: unknown) => cause);
       expect(
-        `${String((exactFailure as {readonly stdout?: unknown}).stdout)}${String((exactFailure as {readonly stderr?: unknown}).stderr)}`,
+        `${String(outputProperty(exactFailure, 'stdout'))}${String(outputProperty(exactFailure, 'stderr'))}`,
       ).toContain(`Downloading Threadnote ${packageManifest.version}`);
       expect(assetRequests.at(-1)).toBe(`missing-assets/${artifactName}`);
       const installationLock = join(installRoot, '.installation.lock');
       await writeFile(installationLock, '');
       const staleInstallationLockDate = new Date(Date.now() - 120_000);
       await utimes(installationLock, staleInstallationLockDate, staleInstallationLockDate);
-      const archiveRequestsBeforeInstall = assetRequests.filter(name => name === artifactName).length;
+      const archiveRequestsBeforeInstall = EffectArray.filter(assetRequests, name => name === artifactName).length;
       const result = await execute(join(powerShellDirectory, 'powershell.exe'), installerArguments, {
         env: installEnvironment,
         timeout: 600_000,
@@ -193,7 +202,9 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
       expect(output).toContain('Wrote command launcher');
       expect(output).toContain('Threadnote is installed');
       expect(output).not.toMatch(/\bnpm\b|Python|OpenViking/i);
-      expect(assetRequests.filter(name => name === artifactName)).toHaveLength(archiveRequestsBeforeInstall + 3);
+      expect(EffectArray.filter(assetRequests, name => name === artifactName)).toHaveLength(
+        archiveRequestsBeforeInstall + 3,
+      );
       const installedExecutable = join(installRoot, 'versions', packageManifest.version, 'threadnote.exe');
       await expect(stat(installedExecutable)).resolves.toMatchObject({size: expect.any(Number)});
       const version = await execute(installedExecutable, ['--version']);
@@ -216,12 +227,12 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
       const posixLauncher = join(binRoot, 'threadnote');
       const posixMcpLauncher = join(binRoot, 'threadnote-mcp-server');
       const posixLauncherContent = await readFile(posixLauncher, 'utf8');
-      expect(posixLauncherContent.startsWith('#!/usr/bin/env sh\n')).toBe(true);
+      expect(Effect.pipe(posixLauncherContent, EffectString.startsWith('#!/usr/bin/env sh\n'))).toBe(true);
       expect(posixLauncherContent).toContain('threadnote.exe');
       expect(posixLauncherContent).not.toContain('\r');
       expect(posixLauncherContent).not.toContain('\\');
       const posixMcpLauncherContent = await readFile(posixMcpLauncher, 'utf8');
-      expect(posixMcpLauncherContent.startsWith('#!/usr/bin/env sh\n')).toBe(true);
+      expect(Effect.pipe(posixMcpLauncherContent, EffectString.startsWith('#!/usr/bin/env sh\n'))).toBe(true);
       expect(posixMcpLauncherContent).toContain('mcp-broker');
       const gitBash = await windowsGitBashExecutable();
       if (process.env.GITHUB_ACTIONS === 'true') {
@@ -254,10 +265,10 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
             },
           },
         );
-        const resolved = gitBashWhich.stdout
-          .trim()
-          .split(/\r?\n/u)
-          .map(line => line.trim());
+        const resolved = EffectArray.map(
+          Effect.pipe(gitBashWhich.stdout, EffectString.trim, EffectString.split(/\r?\n/u)),
+          line => Effect.pipe(line, EffectString.trim),
+        );
         expect(gitBashWhich.stdout).not.toContain('.cmd');
         expect(resolved[0]).toMatch(/\/threadnote$/);
         expect(resolved[1]).toMatch(/\/threadnote-mcp-server$/);
@@ -277,7 +288,7 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
       const client = new Client({name: 'threadnote-windows-installer-e2e', version: packageManifest.version});
       try {
         await client.connect(transport);
-        expect((await client.listTools()).tools.map(tool => tool.name)).toContain('recall_context');
+        expect(EffectArray.map((await client.listTools()).tools, tool => tool.name)).toContain('recall_context');
       } finally {
         await client.close();
       }
@@ -307,8 +318,8 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
         timeout: 600_000,
       }).catch((cause: unknown) => cause);
       expect(
-        `${String((interruptedPromotion as {readonly stdout?: unknown}).stdout)}${String(
-          (interruptedPromotion as {readonly stderr?: unknown}).stderr,
+        `${String(outputProperty(interruptedPromotion, 'stdout'))}${String(
+          outputProperty(interruptedPromotion, 'stderr'),
         )}`,
       ).toContain('Injected installer interruption after promotion step: previous-backed-up');
       await expect(stat(releaseRoot)).rejects.toThrow();
@@ -324,8 +335,8 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
         timeout: 600_000,
       }).catch((cause: unknown) => cause);
       expect(
-        `${String((recoveredPromotion as {readonly stdout?: unknown}).stdout)}${String(
-          (recoveredPromotion as {readonly stderr?: unknown}).stderr,
+        `${String(outputProperty(recoveredPromotion, 'stdout'))}${String(
+          outputProperty(recoveredPromotion, 'stderr'),
         )}`,
       ).toContain('Injected installer interruption after promotion step: journaled');
       await expect(readFile(recoverySentinel, 'utf8')).resolves.toBe('preserve the previous release\n');
@@ -339,33 +350,30 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
   }
 });
 
+function outputProperty(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null && key in value ? Reflect.get(value, key) : undefined;
+}
+
 function expectInstallerFailure(
   outcome: unknown,
   scenario: string,
   expected: {readonly stderr: string; readonly stdout: string},
 ): void {
-  const failure = outcome as {
-    readonly code?: unknown;
-    readonly killed?: boolean;
-    readonly signal?: unknown;
-    readonly stderr?: unknown;
-    readonly stdout?: unknown;
-  };
-  const stderr = String(failure.stderr ?? '');
-  const stdout = String(failure.stdout ?? '');
+  const stderr = String(outputProperty(outcome, 'stderr') ?? '');
+  const stdout = String(outputProperty(outcome, 'stdout') ?? '');
   const diagnostics = boundedFailureOutput(
-    `code: ${String(failure.code ?? 'unknown')}\nkilled: ${String(failure.killed ?? false)}\nsignal: ${String(
-      failure.signal ?? 'none',
+    `code: ${String(outputProperty(outcome, 'code') ?? 'unknown')}\nkilled: ${String(outputProperty(outcome, 'killed') ?? false)}\nsignal: ${String(
+      outputProperty(outcome, 'signal') ?? 'none',
     )}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
   );
   if (!(outcome instanceof Error)) {
     throw TestError.make({message: `${scenario} unexpectedly succeeded.\n${diagnostics}`});
   }
-  if (failure.killed === true) {
+  if (outputProperty(outcome, 'killed') === true) {
     throw TestError.make({
       cause: outcome,
       message: `${scenario} exceeded the ${releaseMetadataProbeTimeoutMilliseconds} ms deadline (signal ${String(
-        failure.signal ?? 'unknown',
+        outputProperty(outcome, 'signal') ?? 'unknown',
       )}).\n${diagnostics}`,
     });
   }
@@ -374,7 +382,9 @@ function expectInstallerFailure(
 }
 
 function boundedFailureOutput(output: string): string {
-  return output.length <= failureOutputLimit ? output : `${output.slice(0, failureOutputLimit)}\n[output truncated]`;
+  return output.length <= failureOutputLimit
+    ? output
+    : `${Effect.pipe(output, EffectString.slice(0, failureOutputLimit))}\n[output truncated]`;
 }
 
 async function windowsGitBashExecutable(): Promise<string | undefined> {
@@ -391,7 +401,8 @@ async function windowsGitBashExecutable(): Promise<string | undefined> {
       continue;
     }
     const identity = await execute(candidate, ['-c', 'uname -s'], {timeout: 10_000}).catch(() => undefined);
-    if (identity !== undefined && /^(MINGW|MSYS)/u.test(identity.stdout.trim())) return candidate;
+    if (identity !== undefined && /^(MINGW|MSYS)/u.test(Effect.pipe(identity.stdout, EffectString.trim)))
+      return candidate;
   }
   return undefined;
 }

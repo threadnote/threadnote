@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import {Cause, Crypto, Deferred, Effect, Exit, Fiber, FileSystem, Path} from 'effect';
@@ -128,7 +129,7 @@ describe('publisher contribution evidence with an independent clean control', ()
               const target = yield* resolveRepositoryIdentity(contributor);
               yield* indexer.index({cwd: contributor, ensureVectors: false, threadnoteHome: workerHome});
               const status = yield* graphShareControlGetStatus(url);
-              const receipts = status.receipts.filter(receipt => receipt.batchId === target.headCommit);
+              const receipts = EffectArray.filter(status.receipts, receipt => receipt.batchId === target.headCommit);
               expect(receipts).toHaveLength(eligibleFiles);
               const identity = yield* resolveRepositoryIdentity(repo);
               expect(identity.headCommit).toBe(baseline.sourceCommit);
@@ -200,7 +201,9 @@ describe('publisher contribution evidence with an independent clean control', ()
                   repositoryId: identity.repositoryId,
                   threadnoteHome: home,
                 });
-                const original = verifiedReceipts.find(item => item.parsed.normalizedPath === 'src/a.ts')!;
+                const original = EffectOption.getOrUndefined(
+                  EffectArray.findFirst(verifiedReceipts, item => item.parsed.normalizedPath === 'src/a.ts'),
+                )!;
                 const forged = graphShareParseResultArtifact({
                   ...original.parsed,
                   facts: {...original.parsed.facts, diagnostics: ['forged but validly hashed facts']},
@@ -222,7 +225,7 @@ describe('publisher contribution evidence with an independent clean control', ()
                   ...state,
                   receipts: {
                     ...state.receipts,
-                    receipts: state.receipts.receipts.map(receipt =>
+                    receipts: EffectArray.map(state.receipts.receipts, receipt =>
                       receipt.resultManifestDigest === original.announcement.resultManifestDigest
                         ? announcement
                         : receipt,
@@ -303,10 +306,10 @@ describe('publisher contribution evidence with an independent clean control', ()
                 index: {reusedFiles: 0, totalFiles: eligibleFiles},
               });
               expect(advanced.contributionEvidence?.resultManifestDigests).toEqual(
-                receipts.map(item => item.resultManifestDigest).sort(),
+                EffectArray.map(receipts, item => item.resultManifestDigest).sort(),
               );
               expect(advanced.contributionEvidence?.sourceUse?.consumedResultManifestDigests).toEqual(
-                receipts.map(item => item.resultManifestDigest).sort(),
+                EffectArray.map(receipts, item => item.resultManifestDigest).sort(),
               );
               // Compare whole logical graphs, independently built from the same baseline and target Git source.
               const actual = yield* runCodeGraphCheckpointExport(config(home), {

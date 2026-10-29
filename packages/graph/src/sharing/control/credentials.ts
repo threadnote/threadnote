@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Effect, FileSystem, Path, Redacted, Schema, Semaphore} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -82,18 +83,23 @@ export const makeGraphControlCredentialLoader = Effect.fn('codeGraph.sharing.con
         STRICT,
       )(text).pipe(Effect.mapError(() => graphSharingFailure('Graph control credential configuration is invalid.')));
       if (
-        config.bindings.some(
+        EffectArray.some(
+          config.bindings,
           binding =>
             !canonicalOAuthUrl(binding.coordinatorUrl) ||
             !canonicalOAuthUrl(binding.issuer) ||
             !canonicalOAuthUrl(binding.audience),
         ) ||
-        new Set(config.bindings.map(binding => JSON.stringify([binding.coordinatorUrl, binding.organization]))).size !==
-          config.bindings.length
+        new Set(
+          EffectArray.map(config.bindings, binding => JSON.stringify([binding.coordinatorUrl, binding.organization])),
+        ).size !== config.bindings.length
       )
         return yield* graphSharingFailure('Graph control credential configuration is invalid.');
-      const binding = config.bindings.find(
-        item => item.coordinatorUrl === scope.coordinatorUrl && item.organization === scope.organization,
+      const binding = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          config.bindings,
+          item => item.coordinatorUrl === scope.coordinatorUrl && item.organization === scope.organization,
+        ),
       );
       if (binding === undefined) {
         cached = undefined;

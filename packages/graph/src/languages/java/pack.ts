@@ -9,6 +9,8 @@ import {
 import {JAVA_GRAMMAR} from '../tree_sitter_assets.js';
 import type {CodeGraphLanguagePack} from '../types.js';
 import {jvmReferenceLookupTiers, jvmSymbolLookupKeys, parseJvmImport, parseJvmNamespace} from '../jvm/lookup.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const DECLARATIONS = `
 (class_declaration name: (identifier) @name) @definition.class
@@ -81,13 +83,16 @@ export const codeGraphLanguagePack: CodeGraphLanguagePack = {
 };
 
 function importTarget(value: string): string {
-  return value
-    .replace(/^\s*import\s+/, '')
-    .replace(/^\s*static\s+/, '')
-    .replace(/[;\s]+$/g, '')
-    .trim();
+  return Effect.pipe(
+    value,
+    EffectString.replace(/^\s*import\s+/, ''),
+    EffectString.replace(/^\s*static\s+/, ''),
+    EffectString.replace(/[;\s]+$/g, ''),
+    EffectString.trim,
+  );
 }
 
 function header(node: Node): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   return node.text.split(/[{\n]/, 1)[0] ?? '';
 }

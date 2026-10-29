@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -13,6 +14,8 @@ import {
   projectContextCheckReportSarif,
   serializeContextCheckReportJson,
 } from '@threadnote/context/check';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function healthReport(findings: readonly ContextHealthFindingV1[], omittedFindings = 0): ContextHealthReportV1 {
   return {
@@ -45,7 +48,7 @@ function finding(category: ContextHealthFindingV1['category'], uris: readonly st
   return {
     category,
     confidence: category === 'citation-unknown' ? 'low' : 'high',
-    id: `${category}\u0000${uris.join('\u0000')}`,
+    id: `${category}\u0000${EffectArray.join(uris, '\u0000')}`,
     repair: {kind: 'review-memory', summary: 'A reviewable repair.'},
     repairability: category === 'citation-unknown' ? 'requires-evidence' : 'reviewable',
     severity: category === 'citation-unknown' ? 'low' : 'high',
@@ -57,10 +60,10 @@ function finding(category: ContextHealthFindingV1['category'], uris: readonly st
 describe('buildContextCheckReport', () => {
   it('rejects a changed-path observation that no longer matches the graph read fence', () => {
     const observed = {
-      baseCommit: 'a'.repeat(40),
+      baseCommit: Effect.pipe('a', EffectString.repeat(40)),
       caseMode: 'sensitive' as const,
       paths: ['src/changed.ts'],
-      repositoryId: 'b'.repeat(64),
+      repositoryId: Effect.pipe('b', EffectString.repeat(64)),
       repoRoot: '/repository',
     };
     expect(sameChangedPathSelection(observed, observed)).toBe(true);
@@ -88,9 +91,11 @@ describe('buildContextCheckReport', () => {
           {nil: undefined},
         ),
         (categories, limit, evidenceReason) => {
-          const uris = categories.map((_, index) => `threadnote://memory/${index}`);
+          const uris = EffectArray.map(categories, (_, index) => `threadnote://memory/${index}`);
           const report = buildContextCheckReport({
-            healthReport: healthReport(categories.map((category, index) => finding(category, [uris[index]]))),
+            healthReport: healthReport(
+              EffectArray.map(categories, (category, index) => finding(category, [uris[index]])),
+            ),
             limit,
             selection: {
               affectedMemoryUris: uris,
@@ -225,7 +230,7 @@ describe('buildContextCheckReport', () => {
       },
     });
 
-    expect(report.findings.map(item => item.category)).toEqual(['citation-changed', 'citation-unknown']);
+    expect(EffectArray.map(report.findings, item => item.category)).toEqual(['citation-changed', 'citation-unknown']);
     expect(report.exitClassification).toBe('invalid-or-required-evidence-unavailable');
     expect(report.exitCode).toBe(2);
     expect(report.evidenceStatus).toBe('complete');
@@ -277,7 +282,7 @@ describe('buildContextCheckReport', () => {
       },
     });
 
-    expect(report.findings.map(item => item.category)).toEqual([
+    expect(EffectArray.map(report.findings, item => item.category)).toEqual([
       'candidate-contradiction',
       'cited-document-missing',
       'graph-impact',
@@ -419,10 +424,12 @@ describe('buildContextCheckReport', () => {
         fc.uniqueArray(fc.stringMatching(/^[a-z]{1,10}$/u), {maxLength: 20}),
         fc.uniqueArray(fc.stringMatching(/^[a-z]{1,10}$/u), {maxLength: 20}),
         (affected, unaffected) => {
-          const selectedUris = affected.map(value => `threadnote://memory/${value}`);
+          const selectedUris = EffectArray.map(affected, value => `threadnote://memory/${value}`);
           const records = [
-            ...selectedUris.map(uri => finding('citation-changed', [uri])),
-            ...unaffected.map(value => finding('validity-expired', [`threadnote://memory/other-${value}`])),
+            ...EffectArray.map(selectedUris, uri => finding('citation-changed', [uri])),
+            ...EffectArray.map(unaffected, value =>
+              finding('validity-expired', [`threadnote://memory/other-${value}`]),
+            ),
           ];
           const input = {
             healthReport: healthReport(records),
@@ -439,7 +446,9 @@ describe('buildContextCheckReport', () => {
             selection: {...input.selection, affectedMemoryUris: [...selectedUris].reverse()},
           });
 
-          expect(first.findings.map(item => item.fingerprint)).toEqual(second.findings.map(item => item.fingerprint));
+          expect(EffectArray.map(first.findings, item => item.fingerprint)).toEqual(
+            EffectArray.map(second.findings, item => item.fingerprint),
+          );
           expect(parseContextCheckReportJson(serializeContextCheckReportJson(first))).toEqual(first);
           expect(first.findings).toHaveLength(selectedUris.length);
         },

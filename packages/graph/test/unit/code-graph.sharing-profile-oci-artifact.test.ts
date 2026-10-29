@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
@@ -11,6 +12,7 @@ import {
   GRAPH_SHARE_OCI_EMPTY_CONFIG_DIGEST,
 } from '@threadnote/graph/sharing/descriptor';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
+import {isJsonObject} from '@threadnote/platform/json';
 import {
   GRAPH_SHARE_PROFILE_OCI_BODY_MAX_BYTES,
   GRAPH_SHARE_PROFILE_OCI_MANIFEST_MAX_BYTES,
@@ -18,18 +20,32 @@ import {
   parseGraphShareProfileOciArtifact,
 } from '@threadnote/graph/sharing/profile/oci_artifact';
 import {defaultGraphShareProfile, parseGraphShareProfile} from '@threadnote/graph/sharing/profile';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const UTF8 = new TextEncoder();
 const PROFILE = defaultGraphShareProfile({
   branch: 'refs/heads/main',
   canonicalRemote: 'github.com/acme/monorepo',
   organization: 'acme',
-  publisherKeyFingerprint: `sha256:${'a'.repeat(64)}`,
-  repositoryId: 'b'.repeat(64),
+  publisherKeyFingerprint: `sha256:${Effect.pipe('a', EffectString.repeat(64))}`,
+  repositoryId: Effect.pipe('b', EffectString.repeat(64)),
 });
 
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireJsonObjectArray(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array of JSON objects.');
+  return EffectArray.map(value, requireJsonObject);
+}
+
 function manifestFrom(bytes: Uint8Array): Record<string, unknown> {
-  return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+  const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+  return requireJsonObject(parsed);
 }
 
 function withManifest(value: unknown, profileBytes = graphShareProfileOciArtifact(PROFILE).profileBytes) {
@@ -84,8 +100,9 @@ describe('OCI graph profile artifact', () => {
   it('rejects manifest type, config, layer count, extra fields, and noncanonical bytes', () => {
     const artifact = graphShareProfileOciArtifact(PROFILE);
     const manifest = manifestFrom(artifact.manifestBytes);
-    const config = manifest.config as Record<string, unknown>;
-    const layer = (manifest.layers as Record<string, unknown>[])[0];
+    const config = requireJsonObject(manifest.config);
+    const layer = requireJsonObjectArray(manifest.layers)[0];
+    if (layer === undefined) throw new Error('OCI manifest has no profile layer.');
     for (const mutation of [
       {...manifest, artifactType: 'application/octet-stream'},
       {...manifest, mediaType: 'application/vnd.oci.image.index.v1+json'},
@@ -112,9 +129,10 @@ describe('OCI graph profile artifact', () => {
       /canonical JSON/i,
     );
     const duplicate = UTF8.encode(
-      new TextDecoder()
-        .decode(artifact.manifestBytes)
-        .replace('"schemaVersion":2', '"schemaVersion":2,"schemaVersion":2'),
+      Effect.pipe(
+        new TextDecoder().decode(artifact.manifestBytes),
+        EffectString.replace('"schemaVersion":2', '"schemaVersion":2,"schemaVersion":2'),
+      ),
     );
     expect(() => parseGraphShareProfileOciArtifact(duplicate, sha256Digest(duplicate), artifact.profileBytes)).toThrow(
       /canonical JSON/i,
@@ -133,7 +151,8 @@ describe('OCI graph profile artifact', () => {
     );
     const padded = UTF8.encode(` ${new TextDecoder().decode(artifact.profileBytes)}`);
     const manifest = manifestFrom(artifact.manifestBytes);
-    const layer = (manifest.layers as Record<string, unknown>[])[0];
+    const layer = requireJsonObjectArray(manifest.layers)[0];
+    if (layer === undefined) throw new Error('OCI manifest has no profile layer.');
     const paddedManifest = {...manifest, layers: [{...layer, digest: sha256Digest(padded), size: padded.byteLength}]};
     expect(withManifest(paddedManifest, padded)).toThrow(/canonical JSON/i);
     const malformed = new Uint8Array([0xc3, 0x28]);
@@ -159,11 +178,11 @@ describe('OCI graph profile artifact', () => {
 });
 
 function reorderKeys(value: unknown, reverse: boolean): unknown {
-  if (Array.isArray(value)) return value.map(item => reorderKeys(item, reverse));
-  if (value !== null && typeof value === 'object') {
-    const keys = Object.keys(value);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, item => reorderKeys(item, reverse));
+  if (isJsonObject(value)) {
+    const keys = EffectRecord.keys(value);
     const ordered = reverse ? keys.slice().reverse() : keys.slice().sort();
-    return Object.fromEntries(ordered.map(key => [key, reorderKeys((value as Record<string, unknown>)[key], reverse)]));
+    return EffectRecord.fromEntries(EffectArray.map(ordered, key => [key, reorderKeys(value[key], reverse)]));
   }
   return value;
 }

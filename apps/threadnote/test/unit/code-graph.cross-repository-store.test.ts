@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {Database} from 'bun:sqlite';
 import {Effect} from 'effect';
@@ -33,8 +34,10 @@ import {
   type CodeGraphWorksetCatalogGenerationMemberV1,
 } from '@threadnote/graph/workset_catalog/types';
 import type {CodeGraphMonikerV1} from '@threadnote/graph/cross_repository/types';
-import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
+import {pathService, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const span = {column: 1, endColumn: 12, endLine: 1, line: 1} as const;
 
@@ -42,7 +45,7 @@ describe('cross-repository bridge catalog', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('publishes bounded npm and protobuf bridge rows with indexed forward and reverse endpoint reads', async () => {
@@ -117,7 +120,9 @@ describe('cross-repository bridge catalog', () => {
     );
     expect(repositoryPage?.bridges).toEqual(fixture.bridges);
 
-    const protobuf = fixture.bridges.find(bridge => bridge.resolutionDomain === 'protobuf')!;
+    const protobuf = EffectOption.getOrUndefined(
+      EffectArray.findFirst(fixture.bridges, bridge => bridge.resolutionDomain === 'protobuf'),
+    )!;
     const incoming = await runEffect(
       readCodeGraphWorksetCatalogBridgePage(home, {
         direction: 'incoming',
@@ -133,10 +138,10 @@ describe('cross-repository bridge catalog', () => {
 
     const database = new Database(catalogPath(home), {readonly: true, strict: true});
     try {
-      const columns = database
-        .query<{readonly name: string}, []>('PRAGMA table_info(cross_repository_bridges)')
-        .all()
-        .map(row => row.name);
+      const columns = EffectArray.map(
+        database.query<{readonly name: string}, []>('PRAGMA table_info(cross_repository_bridges)').all(),
+        row => row.name,
+      );
       expect(columns).toEqual(
         expect.arrayContaining([
           'source_repository_id',
@@ -169,7 +174,11 @@ describe('cross-repository bridge catalog', () => {
             ? fixture.packageBridges[0].source.reference.componentId
             : '',
         );
-      expect(plan.some(row => row.detail.includes('cross_repository_bridges_source_endpoint'))).toBe(true);
+      expect(
+        EffectArray.some(plan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('cross_repository_bridges_source_endpoint')),
+        ),
+      ).toBe(true);
       const repositoryPlan = database
         .query<{readonly detail: string}, [string, string, string]>(
           `EXPLAIN QUERY PLAN
@@ -177,7 +186,11 @@ describe('cross-repository bridge catalog', () => {
            WHERE generation_id = ? AND source_repository_id = ? AND source_snapshot_id = ?`,
         )
         .all(staged.id, fixture.packageBridges[0].source.repositoryId, fixture.packageBridges[0].source.snapshotId);
-      expect(repositoryPlan.some(row => row.detail.includes('cross_repository_bridges_source_endpoint'))).toBe(true);
+      expect(
+        EffectArray.some(repositoryPlan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('cross_repository_bridges_source_endpoint')),
+        ),
+      ).toBe(true);
     } finally {
       database.close(false);
     }
@@ -363,10 +376,13 @@ describe('cross-repository bridge catalog', () => {
         );
         expect(cleanReceipt.digest).toBe(
           sha256HexSync(
-            [
-              'threadnote-cross-repository-bridge-set-v1',
-              ...fixture.bridges.map(bridge => JSON.stringify(bridge)),
-            ].join('\n'),
+            EffectArray.join(
+              [
+                'threadnote-cross-repository-bridge-set-v1',
+                ...EffectArray.map(fixture.bridges, bridge => JSON.stringify(bridge)),
+              ],
+              '\n',
+            ),
           ),
         );
         await runEffect(
@@ -456,8 +472,8 @@ function bridgeFixture(seed: string, options: {readonly consumerSnapshot?: strin
     throw TestError.make({message: 'Invalid test fixture.'});
   return {
     bridges: resolution.bridges,
-    members: repositories.map((repository, index) => member(repository, index)),
-    packageBridges: resolution.bridges.filter(bridge => bridge.resolutionDomain === 'package:npm'),
+    members: EffectArray.map(repositories, (repository, index) => member(repository, index)),
+    packageBridges: EffectArray.filter(resolution.bridges, bridge => bridge.resolutionDomain === 'package:npm'),
     worksetName: `engineering-${seed}`,
   };
 }
@@ -492,7 +508,10 @@ function member(repository: CodeGraphBridgeRepositoryV1, ordinal: number): CodeG
   return {
     projection: createCodeGraphWorksetRoutingProjection({
       checkoutId: digest(`checkout:${repository.repositoryKey}:${repository.snapshotId}`),
-      commitId: digest(`commit:${repository.repositoryKey}:${repository.snapshotId}`).slice(0, 40),
+      commitId: Effect2.pipe(
+        digest(`commit:${repository.repositoryKey}:${repository.snapshotId}`),
+        EffectString.slice(0, 40),
+      ),
       componentCount: 1,
       extractorGeneration: 13,
       projectorVersion: CODE_GRAPH_WORKSET_CATALOG_PROJECTOR_VERSION,
@@ -523,7 +542,10 @@ async function stage(home: string, fixture: BridgeFixture) {
   return runEffect(
     stageCodeGraphWorksetCatalogGeneration(home, {
       manifestDigest: digest(
-        `manifest:${fixture.worksetName}:${fixture.members.map(entry => entry.projection.snapshotId).join(':')}`,
+        `manifest:${fixture.worksetName}:${EffectArray.join(
+          EffectArray.map(fixture.members, entry => entry.projection.snapshotId),
+          ':',
+        )}`,
       ),
       members: fixture.members,
       worksetName: fixture.worksetName,
@@ -566,19 +588,19 @@ async function temporaryHome(homes: string[]): Promise<string> {
 }
 
 function catalogPath(home: string): string {
-  return codeGraphWorksetCatalogDatabasePath({join} as never, home);
+  return codeGraphWorksetCatalogDatabasePath(pathService, home);
 }
 
 function componentId(seed: string): string {
-  return `cgp_${digest(`component:${seed}`).slice(0, 32)}`;
+  return `cgp_${Effect2.pipe(digest(`component:${seed}`), EffectString.slice(0, 32))}`;
 }
 
 function symbolId(seed: string): string {
-  return `cgs_${digest(`symbol:${seed}`).slice(0, 32)}`;
+  return `cgs_${Effect2.pipe(digest(`symbol:${seed}`), EffectString.slice(0, 32))}`;
 }
 
 function snapshotId(seed: string): string {
-  return `cgsn_${digest(`snapshot:${seed}`).slice(0, 40)}`;
+  return `cgsn_${Effect2.pipe(digest(`snapshot:${seed}`), EffectString.slice(0, 40))}`;
 }
 
 function digest(value: string): string {

@@ -1,10 +1,13 @@
 import {Effect, Schema} from 'effect';
 
-export class ApplicationError extends Schema.TaggedError<ApplicationError>()('ApplicationError', {
-  cause: Schema.Defect(),
-  message: Schema.String,
-  operation: Schema.String,
-}) {}
+export class ApplicationError extends Schema.TaggedError<ApplicationError, {readonly brand: unique symbol}>()(
+  'ApplicationError',
+  {
+    cause: Schema.Defect(),
+    message: Schema.String,
+    operation: Schema.String,
+  },
+) {}
 
 export function applicationError(operation: string, cause: unknown): ApplicationError {
   return ApplicationError.make({
@@ -56,7 +59,10 @@ export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export class UtilityOperationError extends Schema.TaggedError<UtilityOperationError>()('UtilityOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+export class UtilityOperationError extends Schema.TaggedError<UtilityOperationError, {readonly brand: unique symbol}>()(
+  'UtilityOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}

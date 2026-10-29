@@ -15,8 +15,10 @@ import {
   type ContextBriefCitationScaleReleaseIdentityV1,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale-contract';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const COMMIT = 'a'.repeat(40);
+const COMMIT = Effect2.pipe('a', EffectString.repeat(40));
 const identity: ContextBriefCitationScaleReleaseIdentityV1 = {
   architecture: 'arm64',
   candidateCommit: COMMIT,
@@ -107,8 +109,8 @@ describe('Context Brief release candidate version binding', () => {
           });
           const observed = {
             ...identity,
-            candidateCommit: commitMatches ? COMMIT : 'b'.repeat(40),
-            commit: commitMatches ? COMMIT : 'b'.repeat(40),
+            candidateCommit: commitMatches ? COMMIT : Effect2.pipe('b', EffectString.repeat(40)),
+            commit: commitMatches ? COMMIT : Effect2.pipe('b', EffectString.repeat(40)),
             runtime: runtimeMatches ? 'bun/1.4.2' : 'bun/1.4.3',
             sourceVersion: `threadnote-${major}.${minor}.${versionMatches ? patch : patch + 1}`,
           };
@@ -147,7 +149,10 @@ describe('Context Brief release candidate version binding', () => {
         ],
         {cwd: root},
       );
-      const commit = (yield* runCommandEffect('git', ['rev-parse', 'HEAD'], {cwd: root})).stdout.trim();
+      const commit = Effect2.pipe(
+        (yield* runCommandEffect('git', ['rev-parse', 'HEAD'], {cwd: root})).stdout,
+        EffectString.trim,
+      );
       expect(yield* readContextBriefCitationScaleCandidate(commit, 'threadnote-4.6.8', root)).toEqual({
         commit,
         runtime: 'bun/1.4.2',

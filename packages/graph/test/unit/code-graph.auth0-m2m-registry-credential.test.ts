@@ -5,6 +5,9 @@ import {
   getAuth0M2MRegistryCredential,
   parseAuth0M2MRegistryCredentialConfig,
 } from '@threadnote/graph/sharing/auth0/m2m_registry_credential';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const now = Math.floor(Date.now() / 1000);
 const origin = 'https://registry.threadnote.test';
@@ -33,7 +36,7 @@ describe('Auth0 M2M Zot registry Docker helper', () => {
         calls++;
         expect(String(url)).toBe(`${issuer}oauth/token`);
         const form = new URLSearchParams(String(init?.body));
-        expect(Object.fromEntries(form)).toEqual({
+        expect(EffectRecord.fromEntries(form)).toEqual({
           audience: origin,
           client_id: environment.THREADNOTE_AUTH0_REGISTRY_M2M_CLIENT_ID,
           client_secret: environment.THREADNOTE_AUTH0_REGISTRY_M2M_CLIENT_SECRET,
@@ -111,7 +114,7 @@ describe('Auth0 M2M Zot registry Docker helper', () => {
 
   it('rejects a signed JWT that exceeds the downstream Docker Secret bound', async () => {
     const {publicKey, privateKey} = await generateKeyPair('RS256');
-    const token = await signedToken(privateKey, {diagnostic_padding: 'x'.repeat(9000)});
+    const token = await signedToken(privateKey, {diagnostic_padding: Effect.pipe('x', EffectString.repeat(9000))});
     expect(token.length).toBeGreaterThan(8192);
     expect(token.length).toBeLessThan(16384);
     await expect(

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {MANAGER_LIVE_LIMITS, managerLiveResourceKey, type ManagerLiveResource} from './contracts.js';
 
 export type ManagerLiveSnapshot<T = unknown> =
@@ -34,11 +35,11 @@ export class ManagerLiveStore {
   }
 
   values(): readonly ManagerLiveEntry[] {
-    return [...this.groups.values()].flatMap(group => [...group.queries.values()]);
+    return EffectArray.flatMap([...this.groups.values()], group => [...group.queries.values()]);
   }
 
   resources(): readonly ManagerLiveResource[] {
-    return [...this.groups.values()].map(group => group.resource);
+    return EffectArray.map([...this.groups.values()], group => group.resource);
   }
 
   queries(resource: ManagerLiveResource): readonly ManagerLiveEntry[] {
@@ -54,7 +55,7 @@ export class ManagerLiveStore {
     queryKey: string,
     read: (signal: AbortSignal) => Promise<T>,
     listener: () => void,
-  ): ManagerLiveEntry<T> {
+  ): ManagerLiveEntry {
     const key = managerLiveResourceKey(resource);
     let group = this.groups.get(key);
     if (!group) {
@@ -62,7 +63,7 @@ export class ManagerLiveStore {
       group = {resource, queries: new Map()};
       this.groups.set(key, group);
     }
-    let entry = group.queries.get(queryKey) as ManagerLiveEntry<T> | undefined;
+    let entry = group.queries.get(queryKey);
     if (!entry) {
       if (this.queryCount >= MANAGER_LIVE_LIMITS.queries) {
         if (group.queries.size === 0) this.groups.delete(key);

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {DateTime, Effect} from 'effect';
 import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {readSourceEvidence, serializeSourceEvidenceCitation} from '@threadnote/store/source-evidence';
@@ -19,6 +20,8 @@ import {
   uriSegment,
   withStaleVersionNotice,
 } from './common.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function registerObsidianEvidenceTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
@@ -44,18 +47,21 @@ export function registerObsidianEvidenceTools(server: EffectMcpServerAdapter, co
           content: [
             {
               type: 'text' as const,
-              text: [
-                'OBSIDIAN SANITIZED REVISION',
-                `sourceId: ${note.sourceId}`,
-                `relativePath: ${note.relativePath}`,
-                `sourceInstanceId: ${note.sourceInstanceId}`,
-                `noteId: ${note.noteId}`,
-                `revisionHash: ${note.revisionHash}`,
-                `sanitizerVersion: ${note.sanitizerVersion}`,
-                '',
-                'SANITIZED NOTE',
-                note.sanitizedContent,
-              ].join('\n'),
+              text: EffectArray.join(
+                [
+                  'OBSIDIAN SANITIZED REVISION',
+                  `sourceId: ${note.sourceId}`,
+                  `relativePath: ${note.relativePath}`,
+                  `sourceInstanceId: ${note.sourceInstanceId}`,
+                  `noteId: ${note.noteId}`,
+                  `revisionHash: ${note.revisionHash}`,
+                  `sanitizerVersion: ${note.sanitizerVersion}`,
+                  '',
+                  'SANITIZED NOTE',
+                  note.sanitizedContent,
+                ],
+                '\n',
+              ),
             },
           ],
           structuredContent: {
@@ -128,7 +134,7 @@ export function registerObsidianEvidenceTools(server: EffectMcpServerAdapter, co
         requiredText(project, 'derive_from_obsidian', 'project', {project: 'threadnote'}),
         requiredText(topic, 'derive_from_obsidian', 'topic', {topic: 'decision'}),
       ];
-      const invalid = fields.find(field => !field.ok);
+      const invalid = EffectOption.getOrUndefined(EffectArray.findFirst(fields, field => !field.ok));
       if (invalid && !invalid.ok) return invalid.error;
       return Effect.gen(function* () {
         const [
@@ -141,7 +147,7 @@ export function registerObsidianEvidenceTools(server: EffectMcpServerAdapter, co
           checkedText,
           checkedProject,
           checkedTopic,
-        ] = fields.map(field => (field.ok ? field.value : ''));
+        ] = EffectArray.map(fields, field => (field.ok ? field.value : ''));
         if (typeof fragment !== 'string' || fragment.length === 0)
           return argumentError('derive_from_obsidian needs an exact non-empty fragment.');
         const citation = yield* captureObsidianEvidence(config, {
@@ -211,7 +217,10 @@ export function registerObsidianEvidenceTools(server: EffectMcpServerAdapter, co
           return argumentError('read_source_evidence requires a canonical private memory URI.');
         }
         const personalRoot = `threadnote://user/${uriSegment(config.user)}/memories`;
-        if (!resourceIdIsWithin(canonical, personalRoot) || canonical.includes('/memories/shared/')) {
+        if (
+          !resourceIdIsWithin(canonical, personalRoot) ||
+          Effect2.pipe(canonical, EffectString.includes('/memories/shared/'))
+        ) {
           return argumentError('read_source_evidence is restricted to private local memories.');
         }
         const [record] = yield* readMemoryRecordsByUri(config, [canonical]);

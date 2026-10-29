@@ -1,3 +1,5 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
+import {isOneOf as checkedIsOneOf} from '@threadnote/platform/validation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   matchedEvaluationArmForLabelV1,
@@ -15,6 +17,9 @@ import {
   type MatchedEvaluationOutcomeV1,
   type MatchedEvaluationProviderTokensV1,
 } from './matched-evaluation-runner.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MATCHED_TOKEN_EFFICIENCY_VERSION = 2 as const;
 export const MATCHED_TOKEN_EFFICIENCY_REPORT_VERSION = 3 as const;
@@ -208,13 +213,17 @@ export function createMatchedTokenEfficiencyStudyV1(
 ): MatchedTokenEfficiencyStudyV1 {
   const canonical = {
     ...input,
-    clusters: input.clusters
-      .map(cluster => ({...cluster, taskIds: [...cluster.taskIds].sort()}))
-      .sort((left, right) => left.clusterId.localeCompare(right.clusterId)),
-    lifecycle: MATCHED_EVALUATION_ARMS.map(arm => required(input.lifecycle.find(entry => entry.arm === arm))),
+    clusters: EffectArray.map(input.clusters, cluster => ({...cluster, taskIds: [...cluster.taskIds].sort()})).sort(
+      (left, right) => Effect.pipe(left.clusterId, EffectString.localeCompare(right.clusterId)),
+    ),
+    lifecycle: EffectArray.map(MATCHED_EVALUATION_ARMS, arm =>
+      required(EffectOption.getOrUndefined(EffectArray.findFirst(input.lifecycle, entry => entry.arm === arm))),
+    ),
     promptPolicy: input.promptPolicy,
     targetArms: [...input.targetArms].sort(),
-    taskContexts: [...input.taskContexts].sort((left, right) => left.taskId.localeCompare(right.taskId)),
+    taskContexts: [...input.taskContexts].sort((left, right) =>
+      Effect.pipe(left.taskId, EffectString.localeCompare(right.taskId)),
+    ),
   };
   return parseMatchedTokenEfficiencyStudyV1({
     ...canonical,
@@ -226,7 +235,9 @@ export function createMatchedTokenEfficiencyStudyV1(
 export function createMatchedTokenEfficiencyTaskContextV1(
   input: Omit<MatchedTokenEfficiencyTaskContextV1, 'linkReceiptsHash' | 'taskContextHash'>,
 ): MatchedTokenEfficiencyTaskContextV1 {
-  const linkReceipts = [...input.linkReceipts].sort((left, right) => left.memoryId.localeCompare(right.memoryId));
+  const linkReceipts = [...input.linkReceipts].sort((left, right) =>
+    Effect.pipe(left.memoryId, EffectString.localeCompare(right.memoryId)),
+  );
   const withoutHash = {
     ...input,
     linkReceipts,
@@ -257,45 +268,56 @@ export function parseMatchedTokenEfficiencyStudyV1(value: unknown): MatchedToken
   );
   if (study.version !== MATCHED_TOKEN_EFFICIENCY_VERSION) invalid('study version must be 2');
   const bootstrap = parseBootstrap(study.bootstrap);
-  const clusters = array(study.clusters, 'study clusters').map(parseCluster);
+  const clusters = EffectArray.map(array(study.clusters, 'study clusters'), parseCluster);
   unique(
-    clusters.map(cluster => cluster.clusterId),
+    EffectArray.map(clusters, cluster => cluster.clusterId),
     'study cluster ids',
   );
   unique(
-    clusters.map(cluster => cluster.repositoryUrl),
+    EffectArray.map(clusters, cluster => cluster.repositoryUrl),
     'study cluster repository URLs',
   );
   const gates = parseGates(study.gates);
-  const lifecycle = array(study.lifecycle, 'study lifecycle').map(parseLifecycleArm);
+  const lifecycle = EffectArray.map(array(study.lifecycle, 'study lifecycle'), parseLifecycleArm);
   unique(
-    lifecycle.map(entry => entry.arm),
+    EffectArray.map(lifecycle, entry => entry.arm),
     'study lifecycle arms',
   );
   if (lifecycle.length !== MATCHED_EVALUATION_ARMS.length) invalid('study lifecycle must cover every arm');
-  const orderedLifecycle = MATCHED_EVALUATION_ARMS.map(arm => required(lifecycle.find(entry => entry.arm === arm)));
-  const targetArms = array(study.targetArms, 'study target arms').map((arm, index) =>
+  const orderedLifecycle = EffectArray.map(MATCHED_EVALUATION_ARMS, arm =>
+    required(EffectOption.getOrUndefined(EffectArray.findFirst(lifecycle, entry => entry.arm === arm))),
+  );
+  const targetArms = EffectArray.map(array(study.targetArms, 'study target arms'), (arm, index) =>
     literal(arm, MATCHED_TOKEN_EFFICIENCY_TARGET_ARMS, `study target arm ${index}`),
   );
   unique(targetArms, 'study target arms');
-  if (targetArms.some(arm => arm === 'threadnote-compact' && !lifecycle.some(entry => entry.arm === arm))) {
+  if (
+    EffectArray.some(
+      targetArms,
+      arm => arm === 'threadnote-compact' && !EffectArray.some(lifecycle, entry => entry.arm === arm),
+    )
+  ) {
     invalid('study target arm must have a lifecycle entry');
   }
-  const taskContexts = array(study.taskContexts, 'study task contexts').map(parseTaskContext);
+  const taskContexts = EffectArray.map(array(study.taskContexts, 'study task contexts'), parseTaskContext);
   unique(
-    taskContexts.map(context => context.taskId),
+    EffectArray.map(taskContexts, context => context.taskId),
     'study task context ids',
   );
   const withoutHash = {
     bootstrap,
-    clusters: [...clusters].sort((left, right) => left.clusterId.localeCompare(right.clusterId)),
+    clusters: [...clusters].sort((left, right) =>
+      Effect.pipe(left.clusterId, EffectString.localeCompare(right.clusterId)),
+    ),
     gates,
     lifecycle: orderedLifecycle,
     manifestHash: matchingString(study.manifestHash, HASH, 'study manifest hash'),
     promptPolicy: literal(study.promptPolicy, ['identical-as-issued'] as const, 'study prompt policy'),
     studyId: matchingString(study.studyId, STUDY_ID, 'study id'),
     targetArms: [...targetArms].sort(),
-    taskContexts: [...taskContexts].sort((left, right) => left.taskId.localeCompare(right.taskId)),
+    taskContexts: [...taskContexts].sort((left, right) =>
+      Effect.pipe(left.taskId, EffectString.localeCompare(right.taskId)),
+    ),
     verificationPlanHash: matchingString(study.verificationPlanHash, HASH, 'study verification plan hash'),
   };
   const studyHash = matchingString(study.studyHash, HASH, 'study hash');
@@ -354,7 +376,9 @@ export function assertMatchedTokenEfficiencyObservationContextV1(input: {
   readonly taskId: string;
 }): void {
   const study = parseMatchedTokenEfficiencyStudyV1(input.study);
-  const expected = study.taskContexts.find(context => context.taskId === input.taskId);
+  const expected = EffectOption.getOrUndefined(
+    EffectArray.findFirst(study.taskContexts, context => context.taskId === input.taskId),
+  );
   if (expected === undefined) invalid(`study does not contain task context ${input.taskId}`);
   const verification = input.metrics.verification;
   if (
@@ -404,17 +428,17 @@ export function evaluateMatchedTokenEfficiencyV1(input: {
   const outcomes = assertMatchedEvaluationOutcomePrefixV1(manifest, input.outcomes);
   assertMatchedTokenEfficiencyStudyMatchesV1(study, corpus, manifest);
   assertOutcomeContexts(study, manifest, outcomes);
-  const taskById = new Map(corpus.tasks.map(task => [task.taskId, task]));
-  const contextByTask = new Map(study.taskContexts.map(context => [context.taskId, context]));
+  const taskById = new Map(EffectArray.map(corpus.tasks, task => [task.taskId, task]));
+  const contextByTask = new Map(EffectArray.map(study.taskContexts, context => [context.taskId, context]));
   const selectedArms = manifest.activeArms ?? MATCHED_EVALUATION_ARMS;
-  const arms = selectedArms.map(arm => summarizeArm(arm, manifest, outcomes, study, taskById));
-  const baseline = arms.find(arm => arm.arm === 'files');
-  const graphOnly = arms.find(arm => arm.arm === 'threadnote-graph');
+  const arms = EffectArray.map(selectedArms, arm => summarizeArm(arm, manifest, outcomes, study, taskById));
+  const baseline = EffectOption.getOrUndefined(EffectArray.findFirst(arms, arm => arm.arm === 'files'));
+  const graphOnly = EffectOption.getOrUndefined(EffectArray.findFirst(arms, arm => arm.arm === 'threadnote-graph'));
   const totalComparisons =
     baseline === undefined
       ? []
-      : study.targetArms.flatMap(targetArm => {
-          const target = arms.find(arm => arm.arm === targetArm);
+      : EffectArray.flatMap(study.targetArms, targetArm => {
+          const target = EffectOption.getOrUndefined(EffectArray.findFirst(arms, arm => arm.arm === targetArm));
           return target === undefined
             ? []
             : [
@@ -447,7 +471,7 @@ export function evaluateMatchedTokenEfficiencyV1(input: {
             targetArm: 'threadnote-graph',
           }),
         ];
-  const compact = arms.find(arm => arm.arm === 'threadnote-compact');
+  const compact = EffectOption.getOrUndefined(EffectArray.findFirst(arms, arm => arm.arm === 'threadnote-compact'));
   const memoryComparison =
     graphOnly === undefined || compact === undefined || !study.targetArms.includes('threadnote-compact')
       ? []
@@ -465,7 +489,7 @@ export function evaluateMatchedTokenEfficiencyV1(input: {
           }),
         ];
   const comparisons = [...graphComparison, ...totalComparisons, ...memoryComparison];
-  const supportedClaims = comparisons.flatMap(comparison =>
+  const supportedClaims = EffectArray.flatMap(comparisons, comparison =>
     comparison.status !== 'passed' || comparison.tokenReductionPercent === null
       ? []
       : comparison.effect === 'memory-increment'
@@ -480,7 +504,7 @@ export function evaluateMatchedTokenEfficiencyV1(input: {
     arms,
     baselineArm: 'files' as const,
     comparisons,
-    corpusClusters: study.clusters.map(cluster => ({
+    corpusClusters: EffectArray.map(study.clusters, cluster => ({
       clusterId: cluster.clusterId,
       repositoryFixtureHash: cluster.repositoryFixtureHash,
       repositoryIdentityHash: cluster.repositoryIdentityHash,
@@ -525,7 +549,7 @@ export function renderMatchedTokenEfficiencyArticleEvidenceV1(report: MatchedTok
     '',
   ];
   if (report.supportedClaims.length === 0) lines.push('No comparative claim passed the preregistered gates.');
-  else lines.push(...report.supportedClaims.map(claim => `- ${claim}`));
+  else lines.push(...EffectArray.map(report.supportedClaims, claim => `- ${claim}`));
   lines.push('', '## Arm accounting', '');
   for (const arm of report.arms) {
     lines.push(
@@ -571,14 +595,14 @@ export function renderMatchedTokenEfficiencyArticleEvidenceV1(report: MatchedTok
         `- As-issued context ${stratum.sufficiency} (${stratum.clusterCount} cluster${stratum.clusterCount === 1 ? '' : 's'}): ${formatNullablePercent(stratum.tokenReductionPercent)} token reduction; ${formatPercent(stratum.completionDeltaPercentagePoints)} percentage-point completion delta`,
       );
     }
-    if (comparison.failures.length > 0) lines.push(`- Failed gates: ${comparison.failures.join('; ')}`);
+    if (comparison.failures.length > 0) lines.push(`- Failed gates: ${EffectArray.join(comparison.failures, '; ')}`);
     if (comparison.insufficiencies.length > 0) {
-      lines.push(`- Evidence insufficiencies: ${comparison.insufficiencies.join('; ')}`);
+      lines.push(`- Evidence insufficiencies: ${EffectArray.join(comparison.insufficiencies, '; ')}`);
     }
     lines.push('');
   }
-  lines.push('## Limitations', '', ...report.limitations.map(limitation => `- ${limitation}`), '');
-  return `${lines.join('\n')}\n`;
+  lines.push('## Limitations', '', ...EffectArray.map(report.limitations, limitation => `- ${limitation}`), '');
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 export function assertMatchedTokenEfficiencyStudyMatchesV1(
@@ -589,18 +613,20 @@ export function assertMatchedTokenEfficiencyStudyMatchesV1(
   if (study.manifestHash !== manifest.manifestHash) invalid('study manifest hash differs from the evaluated manifest');
   if (study.taskContexts.length !== manifest.tasks.length)
     invalid('study task contexts do not exactly cover the manifest');
-  const clusteredTaskIds = study.clusters.flatMap(cluster => cluster.taskIds);
+  const clusteredTaskIds = EffectArray.flatMap(study.clusters, cluster => cluster.taskIds);
   unique(clusteredTaskIds, 'study clustered task ids');
   if (
     clusteredTaskIds.length !== manifest.tasks.length ||
-    [...clusteredTaskIds].sort().some((taskId, index) => taskId !== manifest.tasks[index]?.taskId)
+    EffectArray.some([...clusteredTaskIds].sort(), (taskId, index) => taskId !== manifest.tasks[index]?.taskId)
   ) {
     invalid('held-out clusters do not exactly cover the manifest tasks');
   }
-  const corpusById = new Map(corpus.tasks.map(task => [task.taskId, task]));
+  const corpusById = new Map(EffectArray.map(corpus.tasks, task => [task.taskId, task]));
   const clusters = new Set<string>();
   for (const context of study.taskContexts) {
-    const manifestTask = manifest.tasks.find(task => task.taskId === context.taskId);
+    const manifestTask = EffectOption.getOrUndefined(
+      EffectArray.findFirst(manifest.tasks, task => task.taskId === context.taskId),
+    );
     const corpusTask = corpusById.get(context.taskId);
     if (manifestTask === undefined || corpusTask === undefined)
       invalid(`study task ${context.taskId} is outside the corpus`);
@@ -610,7 +636,9 @@ export function assertMatchedTokenEfficiencyStudyMatchesV1(
     ) {
       invalid(`study task ${context.taskId} context identity differs from the manifest`);
     }
-    const cluster = study.clusters.find(candidate => candidate.clusterId === context.clusterId);
+    const cluster = EffectOption.getOrUndefined(
+      EffectArray.findFirst(study.clusters, candidate => candidate.clusterId === context.clusterId),
+    );
     if (
       cluster === undefined ||
       !cluster.taskIds.includes(context.taskId) ||
@@ -618,10 +646,12 @@ export function assertMatchedTokenEfficiencyStudyMatchesV1(
     ) {
       invalid(`study task ${context.taskId} differs from its held-out cluster provenance`);
     }
-    const linked = new Set(context.linkReceipts.map(receipt => receipt.memoryId));
+    const linked = new Set(EffectArray.map(context.linkReceipts, receipt => receipt.memoryId));
     if (
-      context.linkReceipts.some(receipt => {
-        const memory = corpusTask.memoryFixtures.find(candidate => candidate.memoryId === receipt.memoryId);
+      EffectArray.some(context.linkReceipts, receipt => {
+        const memory = EffectOption.getOrUndefined(
+          EffectArray.findFirst(corpusTask.memoryFixtures, candidate => candidate.memoryId === receipt.memoryId),
+        );
         return memory === undefined || memory.source === null;
       })
     ) {
@@ -629,11 +659,13 @@ export function assertMatchedTokenEfficiencyStudyMatchesV1(
     }
     if (
       corpusTask.memoryFixtures.length > 0 &&
-      !corpusTask.memoryFixtures.some(
+      !EffectArray.some(
+        corpusTask.memoryFixtures,
         memory =>
           memory.status === 'active' &&
           linked.has(memory.memoryId) &&
-          context.linkReceipts.some(
+          EffectArray.some(
+            context.linkReceipts,
             receipt =>
               receipt.memoryId === memory.memoryId && (receipt.status === 'exact' || receipt.status === 'relocated'),
           ),
@@ -670,27 +702,40 @@ function summarizeArm(
   study: MatchedTokenEfficiencyStudyV1,
   taskById: ReadonlyMap<string, MatchedEvaluationCorpusV1['tasks'][number]>,
 ): MatchedTokenEfficiencyArmResultV1 {
-  const armOutcomes = outcomes.filter(outcome => matchedEvaluationArmForLabelV1(manifest, outcome.blindLabel) === arm);
-  const lifecycle = required(study.lifecycle.find(entry => entry.arm === arm));
+  const armOutcomes = EffectArray.filter(
+    outcomes,
+    outcome => matchedEvaluationArmForLabelV1(manifest, outcome.blindLabel) === arm,
+  );
+  const lifecycle = required(
+    EffectOption.getOrUndefined(EffectArray.findFirst(study.lifecycle, entry => entry.arm === arm)),
+  );
   const stats = aggregateOutcomes(armOutcomes, undefined, study.gates.minimumCorrectnessScoreMilli);
   const setupTokens = totalSetupTokens(lifecycle);
   const amortized = stats.verifiedCompletions === 0 ? null : setupTokens / stats.verifiedCompletions;
-  const categories = [...new Set([...taskById.values()].map(task => task.category))].sort().map(category => {
-    const taskIds = new Set([...taskById.values()].filter(task => task.category === category).map(task => task.taskId));
-    const categoryStats = aggregateOutcomes(
-      armOutcomes.filter(outcome => taskIds.has(outcome.taskId)),
-      undefined,
-      study.gates.minimumCorrectnessScoreMilli,
-    );
-    return {
-      assigned: categoryStats.assigned,
-      category,
-      onlineTokensPerVerifiedCompletion: categoryStats.tokensPerVerifiedCompletion,
-      providerTokens: categoryStats.providerTokens.totalTokens,
-      verifiedCompletionRate: categoryStats.verifiedCompletionRate,
-      verifiedCompletions: categoryStats.verifiedCompletions,
-    };
-  });
+  const categories = EffectArray.map(
+    [...new Set(EffectArray.map([...taskById.values()], task => task.category))].sort(),
+    category => {
+      const taskIds = new Set(
+        EffectArray.map(
+          EffectArray.filter([...taskById.values()], task => task.category === category),
+          task => task.taskId,
+        ),
+      );
+      const categoryStats = aggregateOutcomes(
+        EffectArray.filter(armOutcomes, outcome => taskIds.has(outcome.taskId)),
+        undefined,
+        study.gates.minimumCorrectnessScoreMilli,
+      );
+      return {
+        assigned: categoryStats.assigned,
+        category,
+        onlineTokensPerVerifiedCompletion: categoryStats.tokensPerVerifiedCompletion,
+        providerTokens: categoryStats.providerTokens.totalTokens,
+        verifiedCompletionRate: categoryStats.verifiedCompletionRate,
+        verifiedCompletions: categoryStats.verifiedCompletions,
+      };
+    },
+  );
   return {
     amortizedSetupTokensPerCompletion: amortized,
     arm,
@@ -777,16 +822,25 @@ function compareArm(input: {
       `hybrid verifier-and-judge completion was inferior by more than ${formatPercent(nonInferiority)} percentage points`,
     );
   }
+  if (!checkedIsOneOf(['files', 'threadnote-graph'] as const, input.baseline.arm)) {
+    throw new Error('Matched token-efficiency baseline arm is unsupported.');
+  }
   const onlineSavings =
     input.baseline.onlineTokensPerVerifiedCompletion !== null && input.target.onlineTokensPerVerifiedCompletion !== null
       ? input.baseline.onlineTokensPerVerifiedCompletion - input.target.onlineTokensPerVerifiedCompletion
       : 0;
-  const lifecycle = required(input.study.lifecycle.find(entry => entry.arm === input.targetArm));
-  const baselineLifecycle = required(input.study.lifecycle.find(entry => entry.arm === input.baseline.arm));
+  const lifecycle = required(
+    EffectOption.getOrUndefined(EffectArray.findFirst(input.study.lifecycle, entry => entry.arm === input.targetArm)),
+  );
+  const baselineLifecycle = required(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.study.lifecycle, entry => entry.arm === input.baseline.arm),
+    ),
+  );
   const incrementalSetupTokens = Math.max(0, totalSetupTokens(lifecycle) - totalSetupTokens(baselineLifecycle));
   const breakEvenReuseCount = onlineSavings <= 0 ? null : Math.ceil(incrementalSetupTokens / onlineSavings);
   return {
-    baselineArm: input.baseline.arm as 'files' | 'threadnote-graph',
+    baselineArm: input.baseline.arm,
     breakEvenReuseCount,
     completionDeltaPercentagePoints,
     completionDeltaPercentagePoints95: intervals?.completionDelta ?? null,
@@ -813,26 +867,33 @@ function summarizeContextStrata(input: {
 }): readonly MatchedTokenEfficiencyContextStratumV1[] {
   const baselineOutcomes = outcomesForArm(input.manifest, input.outcomes, input.baseline.arm);
   const targetOutcomes = outcomesForArm(input.manifest, input.outcomes, input.targetArm);
-  return MATCHED_TOKEN_EFFICIENCY_CONTEXT_SUFFICIENCY.flatMap(sufficiency => {
-    const contexts = [...input.contextByTask.values()].filter(
+  return EffectArray.flatMap(MATCHED_TOKEN_EFFICIENCY_CONTEXT_SUFFICIENCY, sufficiency => {
+    const contexts = EffectArray.filter(
+      [...input.contextByTask.values()],
       context => context.asIssuedContext.sufficiency === sufficiency,
     );
     if (contexts.length === 0) return [];
-    const taskIds = new Set(contexts.map(context => context.taskId));
+    const taskIds = new Set(EffectArray.map(contexts, context => context.taskId));
     const baseline = aggregateOutcomes(
-      baselineOutcomes.filter(outcome => taskIds.has(outcome.taskId)),
+      EffectArray.filter(
+        baselineOutcomes,
+        (outcome, __effectArrayIndex) => __effectArrayIndex in baselineOutcomes && taskIds.has(outcome.taskId),
+      ),
       undefined,
       input.study.gates.minimumCorrectnessScoreMilli,
     );
     const target = aggregateOutcomes(
-      targetOutcomes.filter(outcome => taskIds.has(outcome.taskId)),
+      EffectArray.filter(
+        targetOutcomes,
+        (outcome, __effectArrayIndex) => __effectArrayIndex in targetOutcomes && taskIds.has(outcome.taskId),
+      ),
       undefined,
       input.study.gates.minimumCorrectnessScoreMilli,
     );
     return [
       {
         baselineTokensPerVerifiedCompletion: baseline.tokensPerVerifiedCompletion,
-        clusterCount: new Set(contexts.map(context => context.clusterId)).size,
+        clusterCount: new Set(EffectArray.map(contexts, context => context.clusterId)).size,
         completionDeltaPercentagePoints: (target.verifiedCompletionRate - baseline.verifiedCompletionRate) * 100,
         sufficiency,
         targetTokensPerVerifiedCompletion: target.tokensPerVerifiedCompletion,
@@ -857,7 +918,7 @@ function bootstrapIntervals(input: {
   readonly hybridCompletionDelta: MatchedTokenEfficiencyIntervalV1;
   readonly tokenReduction: MatchedTokenEfficiencyIntervalV1;
 } | null {
-  const clusters = [...new Set(input.study.taskContexts.map(context => context.clusterId))].sort();
+  const clusters = [...new Set(EffectArray.map(input.study.taskContexts, context => context.clusterId))].sort();
   const baselineOutcomes = outcomesForArm(input.manifest, input.outcomes, input.baseline.arm);
   const targetOutcomes = outcomesForArm(input.manifest, input.outcomes, input.targetArm);
   const reductions: number[] = [];
@@ -897,7 +958,7 @@ function outcomesForArm(
   outcomes: readonly MatchedEvaluationOutcomeV1[],
   arm: MatchedEvaluationArm,
 ): readonly MatchedEvaluationOutcomeV1[] {
-  return outcomes.filter(outcome => matchedEvaluationArmForLabelV1(manifest, outcome.blindLabel) === arm);
+  return EffectArray.filter(outcomes, outcome => matchedEvaluationArmForLabelV1(manifest, outcome.blindLabel) === arm);
 }
 
 function aggregateOutcomes(
@@ -1071,7 +1132,7 @@ function parseCluster(value: unknown, index: number): MatchedTokenEfficiencyClus
     `study cluster ${index}`,
   );
   if (cluster.heldOut !== true) invalid(`study cluster ${index} must be held out`);
-  const taskIds = array(cluster.taskIds, `study cluster ${index} task ids`).map((taskId, taskIndex) =>
+  const taskIds = EffectArray.map(array(cluster.taskIds, `study cluster ${index} task ids`), (taskId, taskIndex) =>
     matchingString(taskId, TASK_ID, `study cluster ${index} task ${taskIndex}`),
   );
   unique(taskIds, `study cluster ${index} task ids`);
@@ -1143,15 +1204,18 @@ function parseTaskContext(value: unknown, index: number): MatchedTokenEfficiency
     ],
     `study task context ${index}`,
   );
-  const linkReceipts = array(context.linkReceipts, `study task context ${index} link receipts`).map(
+  const linkReceipts = EffectArray.map(
+    array(context.linkReceipts, `study task context ${index} link receipts`),
     (receipt, receiptIndex) => parseLinkReceipt(receipt, index, receiptIndex),
   );
   if (linkReceipts.length > 32) invalid(`study task context ${index} links are unbounded`);
   unique(
-    linkReceipts.map(receipt => receipt.memoryId),
+    EffectArray.map(linkReceipts, receipt => receipt.memoryId),
     `study task context ${index} linked memories`,
   );
-  const orderedLinkReceipts = [...linkReceipts].sort((left, right) => left.memoryId.localeCompare(right.memoryId));
+  const orderedLinkReceipts = [...linkReceipts].sort((left, right) =>
+    Effect.pipe(left.memoryId, EffectString.localeCompare(right.memoryId)),
+  );
   const asIssuedContext = parseAsIssuedContext(context.asIssuedContext, index);
   const withoutHash = {
     asIssuedContext,
@@ -1305,7 +1369,7 @@ function percentile(sorted: readonly number[], probability: number): number {
 }
 
 function digestInteger(input: string): number {
-  return Number.parseInt(sha256HexSync(input).slice(0, 8), 16);
+  return Number.parseInt(Effect.pipe(sha256HexSync(input), EffectString.slice(0, 8)), 16);
 }
 
 function digest(label: string, value: unknown): string {
@@ -1313,12 +1377,13 @@ function digest(label: string, value: unknown): string {
 }
 
 function canonicalJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, canonicalJson);
   if (typeof value !== 'object' || value === null) return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => [key, canonicalJson(entry)]),
+  return EffectRecord.fromEntries(
+    EffectArray.map(
+      EffectRecord.toEntries(value).sort(([left], [right]) => Effect.pipe(left, EffectString.localeCompare(right))),
+      ([key, entry]) => [key, canonicalJson(entry)],
+    ),
   );
 }
 
@@ -1339,19 +1404,19 @@ function formatNumber(value: number | null): string {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -1366,7 +1431,12 @@ function matchingString(value: unknown, pattern: RegExp, label: string): string 
 }
 
 function boundedString(value: unknown, minimum: number, maximum: number, label: string): string {
-  if (typeof value !== 'string' || value.length < minimum || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} is invalid`);
   }
   return value;

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   CONTEXT_HEALTH_SELECTOR_MAXIMUM_BYTES,
@@ -28,6 +29,7 @@ describe('context health selectors', () => {
   it.each([
     [{topic: ''}, '--topic must not be empty'],
     [{topic: 'unsafe\nvalue'}, '--topic contains control characters'],
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     [{topic: '🙂'.repeat(CONTEXT_HEALTH_SELECTOR_MAXIMUM_BYTES / 4 + 1)}, '--topic exceeds 256 UTF-8 bytes'],
     [{kind: 'unknown'}, 'Unknown --kind'],
     [{findingCategory: 'unknown'}, 'Unknown --finding-category'],
@@ -72,10 +74,10 @@ describe('context health selectors', () => {
     expect(kind).toHaveLength(2);
     expect(topic).toHaveLength(2);
     expect(combined).toHaveLength(1);
-    const kindUris = new Set(kind.map(item => item.uri));
-    const topicUris = new Set(topic.map(item => item.uri));
-    expect(combined.every(item => kindUris.has(item.uri))).toBe(true);
-    expect(combined.every(item => topicUris.has(item.uri))).toBe(true);
+    const kindUris = new Set(EffectArray.map(kind, item => item.uri));
+    const topicUris = new Set(EffectArray.map(topic, item => item.uri));
+    expect(EffectArray.every(combined, item => kindUris.has(item.uri))).toBe(true);
+    expect(EffectArray.every(combined, item => topicUris.has(item.uri))).toBe(true);
   });
 });
 

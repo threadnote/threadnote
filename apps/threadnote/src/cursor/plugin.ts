@@ -6,11 +6,17 @@ import {errorMessage} from '@threadnote/platform/errors';
 import {findExecutable, readFileIfExists} from '../utils.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {toolRoot} from '@threadnote/workspace/installation';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
-class CursorPluginError extends Schema.TaggedError<CursorPluginError>()('CursorPluginError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class CursorPluginError extends Schema.TaggedError<CursorPluginError, {readonly brand: unique symbol}>()(
+  'CursorPluginError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 const CURSOR_PLUGIN_NAME = 'threadnote';
 const CURSOR_PLUGIN_MANIFEST = '.cursor-plugin/plugin.json';
@@ -44,7 +50,7 @@ export const isCursorInstalled = Effect.fn('cursorPlugin.isCursorInstalled')(fun
   const homeIsTemporary =
     homeRelativeToTemporary === '' ||
     (homeRelativeToTemporary !== '..' &&
-      !homeRelativeToTemporary.startsWith(`..${path.sep}`) &&
+      !Effect2.pipe(homeRelativeToTemporary, EffectString.startsWith(`..${path.sep}`)) &&
       !path.isAbsolute(homeRelativeToTemporary));
   const includeSystemMarkers = !homeIsTemporary;
   const markers: string[] = [];
@@ -121,7 +127,7 @@ const findCursorMarketplacePluginRoot = Effect.fn('cursorPlugin.findMarketplaceR
   const candidates: Array<{readonly manifest: CursorPluginManifest; readonly root: string}> = [];
   const entries = (yield* fs.readDirectory(cacheRoot, {recursive: true})).sort();
   for (const entry of entries) {
-    if (!normalizePath(entry).endsWith(CURSOR_PLUGIN_MANIFEST)) continue;
+    if (!Effect2.pipe(normalizePath(entry), EffectString.endsWith(CURSOR_PLUGIN_MANIFEST))) continue;
     const manifestPath = path.join(cacheRoot, entry);
     const manifest = yield* readCursorPluginManifest(manifestPath).pipe(Effect.orElseSucceed(() => undefined));
     if (manifest?.name !== CURSOR_PLUGIN_NAME) continue;
@@ -217,17 +223,27 @@ function cursorRuleProblem(content: string): string | undefined {
   if (!frontmatter) return 'has no valid MDC frontmatter';
   if (!/^description:\s*\S.+$/m.test(frontmatter)) return 'has no non-empty description';
   if (!/^alwaysApply:\s*true\s*$/m.test(frontmatter)) return 'is not marked alwaysApply: true';
-  const start = normalized.indexOf(USER_INSTRUCTIONS_START_MARKER);
-  const end = normalized.indexOf(USER_INSTRUCTIONS_END_MARKER);
+  const start = Effect2.pipe(
+    normalized,
+    EffectString.indexOf(USER_INSTRUCTIONS_START_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const end = Effect2.pipe(
+    normalized,
+    EffectString.indexOf(USER_INSTRUCTIONS_END_MARKER),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (start === -1 || end < start) return 'does not contain the complete Threadnote instruction block';
   return undefined;
 }
 
 function compareSemver(left: string, right: string): number {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const [leftCore, leftPrerelease] = left.split('-', 2);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const [rightCore, rightPrerelease] = right.split('-', 2);
-  const leftParts = leftCore.split('.').map(Number);
-  const rightParts = rightCore.split('.').map(Number);
+  const leftParts = EffectArray.map(Effect2.pipe(leftCore, EffectString.split('.')), Number);
+  const rightParts = EffectArray.map(Effect2.pipe(rightCore, EffectString.split('.')), Number);
   for (let index = 0; index < 3; index += 1) {
     const difference = leftParts[index] - rightParts[index];
     if (difference !== 0) return difference;
@@ -235,7 +251,7 @@ function compareSemver(left: string, right: string): number {
   if (leftPrerelease === rightPrerelease) return 0;
   if (leftPrerelease === undefined) return 1;
   if (rightPrerelease === undefined) return -1;
-  return leftPrerelease.localeCompare(rightPrerelease);
+  return Effect2.pipe(leftPrerelease, EffectString.localeCompare(rightPrerelease));
 }
 
 function isSemver(value: string): boolean {
@@ -243,9 +259,9 @@ function isSemver(value: string): boolean {
 }
 
 function normalizeNewlines(value: string): string {
-  return value.replaceAll('\r\n', '\n');
+  return Effect2.pipe(value, EffectString.replaceAll('\r\n', '\n'));
 }
 
 function normalizePath(value: string): string {
-  return value.replaceAll('\\', '/');
+  return Effect2.pipe(value, EffectString.replaceAll('\\', '/'));
 }

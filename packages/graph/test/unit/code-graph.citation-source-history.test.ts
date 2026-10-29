@@ -6,6 +6,8 @@ import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '@threadn
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('historical citation source hash compatibility', () => {
   effectIt.layer(citationPlatformLayer)(it => {
@@ -23,14 +25,14 @@ describe('historical citation source hash compatibility', () => {
           yield* fs.writeFile(path.join(repository, 'source.ts'), bytes);
           yield* git(['add', '.']);
           yield* git(['commit', '--quiet', '-m', 'original']);
-          const commit = (yield* git(['rev-parse', 'HEAD'])).stdout.trim();
+          const commit = Effect2.pipe((yield* git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
           yield* fs.writeFileString(path.join(repository, 'source.ts'), 'export const original = false;\n');
           const source = {expectedContentHash: sha256HexSync(bytes), repositoryPath: 'source.ts', requireBytes: true};
           const input = {
             objectFormat: 'sha1' as const,
             repositoryRoot: repository,
             sourceCommit: commit,
-            sources: [source, {...source, expectedContentHash: 'f'.repeat(64)}],
+            sources: [source, {...source, expectedContentHash: Effect2.pipe('f', EffectString.repeat(64))}],
           };
           const historical = yield* readCodeGraphCitationSources(input);
           expect(historical.get(codeGraphCitationSourceKey(source))).toEqual(bytes);
@@ -44,7 +46,11 @@ describe('historical citation source hash compatibility', () => {
           ).toEqual(new Uint8Array());
           yield* fs.writeFile(path.join(repository, 'source.ts'), bytes);
           expect(
-            (yield* readCodeGraphCitationSources({...input, commitOnly: true, sourceCommit: 'f'.repeat(40)})).size,
+            (yield* readCodeGraphCitationSources({
+              ...input,
+              commitOnly: true,
+              sourceCommit: Effect2.pipe('f', EffectString.repeat(40)),
+            })).size,
           ).toBe(0);
           expect(
             (yield* readCodeGraphCitationSources({...input, commitOnly: true})).get(codeGraphCitationSourceKey(source)),

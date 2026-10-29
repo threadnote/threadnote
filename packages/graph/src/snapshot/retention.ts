@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {compareCodeUnits} from '../ordering.js';
 import {retireReadySnapshotsIfUnused} from '../store/cleanup_core.js';
 import {CODE_GRAPH_SNAPSHOT_ID, validCanonicalTimestamp} from '../store/reconciliation/core.js';
 import {CodeGraphStoreError} from '../types.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_DETACHED_READY_COUNT_MAXIMUM = 2;
 export const CODE_GRAPH_DETACHED_READY_ESTIMATED_BYTES_MAXIMUM = 4 * 1_024 * 1_024 * 1_024;
@@ -167,7 +171,7 @@ export const retireExcessReadySnapshotsPage = Effect.fn('codeGraph.retireExcessR
       LIMIT ?`,
     [now, limit],
   );
-  const candidates = rows.flatMap(row => {
+  const candidates = EffectArray.flatMap(rows, row => {
     const decoded = decodeSnapshotRetentionCandidate(row);
     return decoded === undefined ? [] : [decoded];
   });
@@ -175,7 +179,7 @@ export const retireExcessReadySnapshotsPage = Effect.fn('codeGraph.retireExcessR
   const retire = selection.retire.slice(0, CODE_GRAPH_RETENTION_RETIRE_PAGE_SIZE);
   const retired = yield* retireReadySnapshotsIfUnused(
     sql,
-    retire.map(candidate => candidate.id),
+    EffectArray.map(retire, candidate => candidate.id),
     now,
   );
   if (retired !== retire.length) {
@@ -197,7 +201,7 @@ function decodeSnapshotRetentionCandidate(
     (row.graph_content_id !== null &&
       (typeof row.graph_content_id !== 'string' ||
         row.graph_content_id.length > 128 ||
-        row.graph_content_id.includes('\0'))) ||
+        Effect2.pipe(row.graph_content_id, EffectString.includes('\0')))) ||
     typeof row.completed_at !== 'string' ||
     !validCanonicalTimestamp(row.completed_at) ||
     typeof row.symbol_count !== 'number' ||
@@ -241,10 +245,10 @@ const snapshotRetentionSchemaCurrent = Effect.fn('codeGraph.snapshotRetentionSch
       'symbol_count',
     ],
   } as const;
-  for (const [table, columns] of Object.entries(required)) {
+  for (const [table, columns] of EffectRecord.toEntries(required)) {
     const rows = yield* sql.unsafe<{readonly name: unknown}>('SELECT name FROM pragma_table_info(?) LIMIT 64', [table]);
-    const names = new Set(rows.flatMap(row => (typeof row.name === 'string' ? [row.name] : [])));
-    if (columns.some(column => !names.has(column))) return false;
+    const names = new Set(EffectArray.flatMap(rows, row => (typeof row.name === 'string' ? [row.name] : [])));
+    if (EffectArray.some(columns, column => !names.has(column))) return false;
   }
   const indexes = yield* sql.unsafe<{readonly name: unknown; readonly type: unknown}>(
     `SELECT name, type FROM sqlite_schema
@@ -252,7 +256,7 @@ const snapshotRetentionSchemaCurrent = Effect.fn('codeGraph.snapshotRetentionSch
   );
   return (
     indexes.length === 2 &&
-    indexes.every(row => typeof row.name === 'string' && row.type === 'index') &&
-    new Set(indexes.map(row => row.name)).size === 2
+    EffectArray.every(indexes, row => typeof row.name === 'string' && row.type === 'index') &&
+    new Set(EffectArray.map(indexes, row => row.name)).size === 2
   );
 });

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -10,10 +11,12 @@ import * as FC from 'fast-check';
 import {cleanupCodeGraphVectorPointers, prepareCodeGraphVectorRetirement} from '@threadnote/graph/vector/maintenance';
 import {makeCachedProcessStartIdentityResolver, SystemInfo} from '@threadnote/platform/system';
 import {codeGraphVectorViewId} from '@threadnote/graph/vector/identity';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const WORKTREE_ID = '1'.repeat(64);
-const SHARED_WORKTREE_ID = '2'.repeat(64);
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
+const SHARED_WORKTREE_ID = Effect2.pipe('2', EffectString.repeat(64));
 const EXPECTED_SNAPSHOT_ID = 'snapshot-expected';
 const VectorMaintenanceTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
 
@@ -27,13 +30,19 @@ describe('code graph vector pointer maintenance', () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-scope-cleanup-'});
-          const scopeIds = scopes.map(value => `code-graph-scope:${value.toString(16).padStart(64, '0')}`);
-          const views = [WORKTREE_ID, ...scopeIds.map(scopeId => codeGraphVectorViewId(WORKTREE_ID, scopeId))];
+          const scopeIds = EffectArray.map(
+            scopes,
+            value => `code-graph-scope:${Effect2.pipe(value.toString(16), EffectString.padStart(64, '0'))}`,
+          );
+          const views = [
+            WORKTREE_ID,
+            ...EffectArray.map(scopeIds, scopeId => codeGraphVectorViewId(WORKTREE_ID, scopeId)),
+          ];
           const databasePath = yield* seedVectorDatabase(
             home,
             'scoped-model',
             [{generation: 'shared-snapshot-generation', snapshotId: EXPECTED_SNAPSHOT_ID}],
-            views.map(worktreeId => ({generation: 'shared-snapshot-generation', worktreeId})),
+            EffectArray.map(views, worktreeId => ({generation: 'shared-snapshot-generation', worktreeId})),
           );
           const first = yield* cleanupCodeGraphVectorPointers(
             home,
@@ -52,11 +61,9 @@ describe('code graph vector pointer maintenance', () => {
           expect(first.pointersRemoved).toBe(1);
           expect(first.warnings).toEqual([]);
           expect(second.pointersRemoved).toBe(0);
-          expect(
-            readPointers(databasePath)
-              .map(row => row.worktree_id)
-              .sort(),
-          ).toEqual(views.filter(view => view !== views[1]).sort());
+          expect(EffectArray.map(readPointers(databasePath), row => row.worktree_id).sort()).toEqual(
+            EffectArray.filter(views, view => view !== views[1]).sort(),
+          );
           expect(readGenerations(databasePath)).toEqual(['shared-snapshot-generation']);
         }),
       {fastCheck: {numRuns: 8}},
@@ -115,14 +122,14 @@ describe('code graph vector pointer maintenance', () => {
           Effect.gen(function* () {
             const fs = yield* FileSystem.FileSystem;
             const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-maintenance-property-'});
-            const fixtures = matches.map((matchesExpected, index) => ({index, matchesExpected}));
+            const fixtures = EffectArray.map(matches, (matchesExpected, index) => ({index, matchesExpected}));
             if (reverse) fixtures.reverse();
             const databases = yield* Effect.forEach(
               fixtures,
               fixture =>
                 seedVectorDatabase(
                   home,
-                  `model-${String(fixture.index).padStart(2, '0')}`,
+                  `model-${Effect2.pipe(String(fixture.index), EffectString.padStart(2, '0'))}`,
                   [
                     {
                       generation: `generation-${fixture.index}`,
@@ -137,7 +144,7 @@ describe('code graph vector pointer maintenance', () => {
             const first = yield* cleanupCodeGraphVectorPointers(home, CHECKOUT_ID, WORKTREE_ID, EXPECTED_SNAPSHOT_ID);
             const second = yield* cleanupCodeGraphVectorPointers(home, CHECKOUT_ID, WORKTREE_ID, EXPECTED_SNAPSHOT_ID);
 
-            expect(first.pointersRemoved).toBe(matches.filter(Boolean).length);
+            expect(first.pointersRemoved).toBe(EffectArray.filter(matches, Boolean).length);
             expect(first.warnings).toEqual([]);
             expect(second.pointersRemoved).toBe(0);
             for (const [position, fixture] of fixtures.entries()) {
@@ -252,7 +259,7 @@ describe('code graph vector pointer maintenance', () => {
               index =>
                 seedVectorDatabase(
                   home,
-                  `model-load-${String(index).padStart(2, '0')}`,
+                  `model-load-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
                   [{generation: `generation-load-${index}`, snapshotId: EXPECTED_SNAPSHOT_ID}],
                   [{generation: `generation-load-${index}`, worktreeId: WORKTREE_ID}],
                 ),
@@ -367,7 +374,13 @@ function createVectorDatabase(
            (generation, snapshot_id, model_id, model_sha256, dimensions, template_version, count, state, created_at)
            VALUES (?, ?, ?, ?, 3, 1, 0, 'ready', ?)`,
         )
-        .run(generation.generation, generation.snapshotId, modelId, 'f'.repeat(64), new Date(0).toISOString());
+        .run(
+          generation.generation,
+          generation.snapshotId,
+          modelId,
+          Effect2.pipe('f', EffectString.repeat(64)),
+          new Date(0).toISOString(),
+        );
     }
     for (const pointer of pointers) {
       database
@@ -395,10 +408,12 @@ function readPointers(databasePath: string): readonly {readonly generation: stri
 function readGenerations(databasePath: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query<{readonly generation: string}, []>('SELECT generation FROM vector_generations ORDER BY generation')
-      .all()
-      .map(row => row.generation);
+    return EffectArray.map(
+      database
+        .query<{readonly generation: string}, []>('SELECT generation FROM vector_generations ORDER BY generation')
+        .all(),
+      row => row.generation,
+    );
   } finally {
     database.close(false);
   }

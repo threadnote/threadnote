@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {Command} from 'effect/cli';
 import {argument, boolean, optionalString} from '../effect/cli/flags.js';
@@ -24,6 +25,9 @@ import {
   sharedMemoryUriParts,
   teamsFilePath,
 } from './core.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ShareReconcileOptions {
   readonly apply?: boolean;
@@ -46,9 +50,12 @@ export function makeShareReconcileCommand<E, R>(
   ).pipe(Command.withDescription('Preview or apply one guarded committed shared memory import'));
 }
 
-export class ShareReconcileError extends Schema.TaggedError<ShareReconcileError>()('ShareReconcileError', {
-  message: Schema.String,
-}) {}
+export class ShareReconcileError extends Schema.TaggedError<ShareReconcileError, {readonly brand: unique symbol}>()(
+  'ShareReconcileError',
+  {
+    message: Schema.String,
+  },
+) {}
 const fail = (message: string) => ShareReconcileError.make({message});
 const hash = (text: string | Uint8Array) => sha256HexSync(text);
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -69,19 +76,19 @@ const fields = {
 };
 const planSchema = Schema.Struct({...fields, approvalDigest: digest});
 export type ShareReconcilePlan = typeof planSchema.Type;
-const planKeys = [...Object.keys(fields), 'approvalDigest'];
+const planKeys = [...EffectRecord.keys(fields), 'approvalDigest'];
 // Fixed field order gives approvals a stable data encoding independent of JSON key order.
 const approval = (plan: Omit<ShareReconcilePlan, 'approvalDigest'>) =>
-  hash(JSON.stringify(Object.keys(fields).map(key => [key, plan[key as keyof typeof plan]])));
+  hash(JSON.stringify(EffectArray.map(EffectRecord.keys(fields), key => [key, plan[key]])));
 
 /** Closed-schema data parser; does not read files or execute values from a saved preview. */
 export function parseShareReconcilePlan(input: unknown, uri: string, approvalDigest: string): ShareReconcilePlan {
   if (
     typeof input !== 'object' ||
     input === null ||
-    Array.isArray(input) ||
-    Object.keys(input).length !== planKeys.length ||
-    Object.keys(input).some(key => !planKeys.includes(key))
+    EffectArray.isArray(input) ||
+    EffectRecord.keys(input).length !== planKeys.length ||
+    EffectArray.some(EffectRecord.keys(input), key => !planKeys.includes(key))
   )
     throw fail('Reconciliation requires an exact closed-schema saved preview.');
   const plan = Schema.decodeUnknownSync(planSchema)(input);
@@ -97,9 +104,13 @@ const git = Effect.fn('share.reconcile.git')(function* (cwd: string, args: reado
 function validateMemory(uri: string, content: string, project: string, topic: string) {
   assertMemoryDocumentSchemaWritable(content);
   const record = parseMemoryDocument(uri, content);
-  const header = content.trim().split('\n\n', 1)[0].split('\n');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  const header = Effect2.pipe(Effect2.pipe(content, EffectString.trim).split('\n\n', 1)[0], EffectString.split('\n'));
   const single = (key: string, expected?: string) => {
-    const lines = header.filter(line => new RegExp(`^\\s*${key}\\s*:`, 'u').test(line));
+    const lines = EffectArray.filter(
+      header,
+      __effectArrayValue => !!(line => new RegExp(`^\\s*${key}\\s*:`, 'u').test(line))(__effectArrayValue),
+    );
     return lines.length === 1 && lines[0] === `${key}: ${expected}`;
   };
   const metadata = record?.metadata;
@@ -124,10 +135,12 @@ function validateMemory(uri: string, content: string, project: string, topic: st
     metadata.topicMaintenanceError ||
     metadata.sourceEvidenceError ||
     metadata.obsidianEvidenceError ||
-    header.some(
+    EffectArray.some(
+      header,
       line =>
         /^\s*relation\s*:/u.test(line) &&
-        (!line.startsWith('relation: ') || !parseMemoryRelationValue(line.slice('relation: '.length))),
+        (!Effect2.pipe(line, EffectString.startsWith('relation: ')) ||
+          !parseMemoryRelationValue(Effect2.pipe(line, EffectString.slice('relation: '.length)))),
     )
   )
     throw fail('Reconciliation requires valid active shared durable metadata and established identity.');
@@ -164,7 +177,7 @@ const inspect = Effect.fn('share.reconcile.inspect')(function* (config: ShareRun
   if (
     resource.canonicalUri !== uri ||
     resource.anchor !== undefined ||
-    !uri.endsWith('.md') ||
+    !Effect2.pipe(uri, EffectString.endsWith('.md')) ||
     !parts?.kind ||
     !parts.project ||
     !parts.topic
@@ -176,8 +189,12 @@ const inspect = Effect.fn('share.reconcile.inspect')(function* (config: ShareRun
   );
   const worktree = yield* fs.realPath(team.config.worktree);
   const gitdir = yield* fs.realPath(team.config.gitdir);
-  const actualRoot = yield* fs.realPath((yield* git(worktree, ['rev-parse', '--show-toplevel'])).trim());
-  const actualGitdir = yield* fs.realPath((yield* git(worktree, ['rev-parse', '--absolute-git-dir'])).trim());
+  const actualRoot = yield* fs.realPath(
+    Effect2.pipe(yield* git(worktree, ['rev-parse', '--show-toplevel']), EffectString.trim),
+  );
+  const actualGitdir = yield* fs.realPath(
+    Effect2.pipe(yield* git(worktree, ['rev-parse', '--absolute-git-dir']), EffectString.trim),
+  );
   if (worktree !== actualRoot || gitdir !== actualGitdir)
     return yield* fail('Configured shared repository identity does not match Git.');
   const configSha256 = hash(
@@ -192,7 +209,7 @@ const inspect = Effect.fn('share.reconcile.inspect')(function* (config: ShareRun
       gitConfig: yield* git(worktree, ['config', '--local', '--list', '--null']),
     }),
   );
-  const head = (yield* git(worktree, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
+  const head = Effect2.pipe(yield* git(worktree, ['rev-parse', '--verify', 'HEAD^{commit}']), EffectString.trim);
   // Literal pathspecs prevent wildcard/magic interpretation. All tracked/untracked dirt is rejected.
   if (
     (yield* git(worktree, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).length ||
@@ -216,7 +233,8 @@ const inspect = Effect.fn('share.reconcile.inspect')(function* (config: ShareRun
     return yield* fail('Shared worktree bytes differ from the committed blob.');
   const inbound = yield* prepareSharedInboundContentEffect(uri, raw);
   // Canonical outer whitespace is allowed; no approved header or body may be stripped or rewritten.
-  if (inbound !== raw.trim()) return yield* fail('Shared inbound projection changes the approved content.');
+  if (inbound !== Effect2.pipe(raw, EffectString.trim))
+    return yield* fail('Shared inbound projection changes the approved content.');
   const identity = yield* Effect.try(() => validateMemory(uri, inbound, parts.project!, parts.topic!));
   const native = yield* readExistingNativeContent(config, uri);
   const nativeIdentity = yield* Effect.try(() => validateMemory(uri, native, parts.project!, parts.topic!));

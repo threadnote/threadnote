@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect, Schema} from 'effect';
 import {Command, Flag} from 'effect/cli';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -55,10 +56,16 @@ export function makeCloseoutCommand<E, R>(config: Effect.Effect<RuntimeConfig, E
       Effect.flatMap(config, config =>
         Effect.gen(function* () {
           const result = yield* runCloseoutApply(config, options);
-          const text = result.content
-            .filter((content): content is {readonly type: 'text'; readonly text: string} => content.type === 'text')
-            .map(content => content.text)
-            .join('\n');
+          const text = EffectArray.join(
+            EffectArray.map(
+              EffectArray.filter(
+                result.content,
+                (content): content is {readonly type: 'text'; readonly text: string} => content.type === 'text',
+              ),
+              content => content.text,
+            ),
+            '\n',
+          );
           if (result.isError === true) {
             return yield* applicationError('apply closeout candidate', new Error(text));
           }

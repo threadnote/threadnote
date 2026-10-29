@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Effect, Option, Predicate, Ref, Result, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -30,6 +31,8 @@ import {
   type CodeGraphWorksetRoutingTermV1,
   type CodeGraphWorksetScopeReceiptV1,
 } from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_PAGE_SIZE = 256;
 const MAXIMUM_PAGE_SIZE = CODE_GRAPH_WORKSET_CATALOG_PROJECTION_PAGE_MAXIMUM;
@@ -485,7 +488,7 @@ function readProjection(selected: CodeGraphSnapshot, input: NormalizedProjection
       const page = yield* selectSymbolPage(sql, selected.id, baseSnapshotId, afterNodeId, input.pageSize);
       if (page.length === 0) break;
       stats.pagesRead += 1;
-      const nodeIds = page.map(row => requiredText(row.id, 'symbol identity'));
+      const nodeIds = EffectArray.map(page, row => requiredText(row.id, 'symbol identity'));
       const lookupRows = yield* selectLookupRows(sql, nodeIds);
       const termRows = yield* selectTermRows(sql, nodeIds);
       const lookupBySymbol = groupLookupRows(lookupRows);
@@ -757,10 +760,10 @@ function scanProjectionSymbolPages<E, R>(
       const page = yield* selectSymbolPage(sql, snapshotId, baseSnapshotId, afterNodeId, input.pageSize);
       if (page.length === 0) break;
       stats.pagesRead += 1;
-      const nodeIds = page.map(row => requiredText(row.id, 'symbol identity'));
+      const nodeIds = EffectArray.map(page, row => requiredText(row.id, 'symbol identity'));
       const lookupBySymbol = groupLookupRows(yield* selectLookupRows(sql, nodeIds));
       const termsBySymbol = groupTermRows(yield* selectTermRows(sql, nodeIds));
-      const symbols: CodeGraphWorksetRoutingSymbolV1[] = page.map(row => {
+      const symbols: CodeGraphWorksetRoutingSymbolV1[] = EffectArray.map(page, row => {
         const nodeId = requiredText(row.id, 'symbol identity');
         return normalizeCodeGraphWorksetRoutingSymbol({
           exported: booleanInteger(row.exported, 'symbol exported state'),
@@ -836,13 +839,15 @@ function normalizeInput(
       if (
         typeof input.databasePath !== 'string' ||
         input.databasePath.length === 0 ||
-        input.databasePath.includes('\0')
+        Effect2.pipe(input.databasePath, EffectString.includes('\0'))
       ) {
         throw invalid('Workset projection database path is invalid.');
       }
       if (
         input.snapshotId !== undefined &&
-        (input.snapshotId.length === 0 || input.snapshotId.length > 256 || input.snapshotId.includes('\0'))
+        (input.snapshotId.length === 0 ||
+          input.snapshotId.length > 256 ||
+          Effect2.pipe(input.snapshotId, EffectString.includes('\0')))
       ) {
         throw invalid('Workset projection snapshot identity is invalid.');
       }
@@ -975,7 +980,10 @@ function selectLookupRows(sql: SqlClient.SqlClient, nodeIds: readonly string[]) 
   return sql.unsafe<LookupProjectionRow>(
     `SELECT symbol_id, lookup_key
      FROM temp.${PROJECTION_LOOKUP_TABLE}
-     WHERE symbol_id IN (${nodeIds.map(() => '?').join(', ')})
+     WHERE symbol_id IN (${EffectArray.join(
+       EffectArray.map(nodeIds, () => '?'),
+       ', ',
+     )})
      ORDER BY symbol_id, lookup_key`,
     nodeIds,
   );
@@ -1046,7 +1054,7 @@ function selectProjectionTemporaryTextPragma(sql: SqlClient.SqlClient, pragma: '
     Effect.flatMap(rows => {
       const value = rows[0]?.[pragma];
       return typeof value === 'string' && value.length > 0
-        ? Effect.succeed(value.toLowerCase())
+        ? Effect.succeed(Effect2.pipe(value, EffectString.toLowerCase))
         : Effect.fail(temporaryStorageIncompatible());
     }),
   );
@@ -1106,8 +1114,8 @@ export const inspectCodeGraphWorksetProjectionPreparationQueryPlan = Effect.fn(
     {concurrency: 1},
   );
   return {
-    lookup: lookupRows.map(row => requiredText(row.detail, 'routing lookup query-plan detail')),
-    terms: termRows.map(row => requiredText(row.detail, 'routing term query-plan detail')),
+    lookup: EffectArray.map(lookupRows, row => requiredText(row.detail, 'routing lookup query-plan detail')),
+    terms: EffectArray.map(termRows, row => requiredText(row.detail, 'routing term query-plan detail')),
   };
 });
 
@@ -1193,7 +1201,10 @@ function selectTermRows(sql: SqlClient.SqlClient, nodeIds: readonly string[]) {
   return sql.unsafe<TermProjectionRow>(
     `SELECT symbol_id, term, weight
      FROM temp.${PROJECTION_TERMS_TABLE}
-     WHERE symbol_id IN (${nodeIds.map(() => '?').join(', ')})
+     WHERE symbol_id IN (${EffectArray.join(
+       EffectArray.map(nodeIds, () => '?'),
+       ', ',
+     )})
      ORDER BY symbol_id, weight DESC, term`,
     nodeIds,
   );
@@ -1232,7 +1243,7 @@ function selectLexicalReceipts(sql: SqlClient.SqlClient, snapshotId: string, bas
        ORDER BY snapshot_id`,
       [snapshotId, baseSnapshotId ?? ''],
     );
-    return rows.map(row => ({
+    return EffectArray.map(rows, row => ({
       formatVersion: safeCount(row.format_version, 'lexical format version'),
       postingCount: safeCount(row.posting_count, 'lexical posting count'),
       snapshotId: requiredText(row.snapshot_id, 'lexical snapshot identity'),
@@ -1273,7 +1284,7 @@ function selectLookupKeys(
 ): readonly string[] {
   const intrinsicKeys = [...new Set(intrinsic)].sort(compareText);
   const intrinsicSet = new Set(intrinsicKeys);
-  const aliasKeys = [...new Set(resolved)].filter(key => !intrinsicSet.has(key)).sort(compareText);
+  const aliasKeys = EffectArray.filter([...new Set(resolved)], key => !intrinsicSet.has(key)).sort(compareText);
   const all = [...intrinsicKeys, ...aliasKeys];
   stats.lookupKeysObserved += all.length;
   stats.lookupKeysOmitted += Math.max(0, all.length - CODE_GRAPH_WORKSET_CATALOG_LIMITS.lookupKeysPerSymbol);
@@ -1286,9 +1297,9 @@ function selectTerms(
 ): readonly CodeGraphWorksetRoutingTermV1[] {
   const unique = new Map<string, number>();
   for (const term of terms) unique.set(term.term, Math.max(unique.get(term.term) ?? 0, term.weight));
-  const ranked = [...unique]
-    .map(([term, weight]) => ({term, weight}))
-    .sort((left, right) => right.weight - left.weight || compareText(left.term, right.term));
+  const ranked = EffectArray.map([...unique], ([term, weight]) => ({term, weight})).sort(
+    (left, right) => right.weight - left.weight || compareText(left.term, right.term),
+  );
   stats.termsObserved += ranked.length;
   stats.termsOmitted += Math.max(0, ranked.length - CODE_GRAPH_WORKSET_CATALOG_LIMITS.termsPerSymbol);
   return ranked.slice(0, CODE_GRAPH_WORKSET_CATALOG_LIMITS.termsPerSymbol);
@@ -1299,8 +1310,8 @@ function decodeLookupKeys(value: unknown): readonly string[] {
     throw corrupt('A ready snapshot symbol has an invalid lookup-key surface.');
   }
   const parsed = parseJson(value, 'symbol lookup-key surface');
-  if (!Array.isArray(parsed)) throw corrupt('A ready snapshot symbol has an invalid lookup-key surface.');
-  return parsed.map(candidate => requiredText(candidate, 'symbol lookup key'));
+  if (!EffectArray.isArray(parsed)) throw corrupt('A ready snapshot symbol has an invalid lookup-key surface.');
+  return EffectArray.map(parsed, candidate => requiredText(candidate, 'symbol lookup key'));
 }
 
 function decodeSpan(value: unknown): CodeGraphWorksetCatalogSpanV1 {
@@ -1362,7 +1373,7 @@ function validateOptionalReceipts(
   if (component !== undefined && (component.version !== 1 || !SHA256_HEX.test(component.digest))) {
     throw corrupt('The ready snapshot component receipt is inconsistent.');
   }
-  if (lexical.some(receipt => receipt.formatVersion !== CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION)) {
+  if (EffectArray.some(lexical, receipt => receipt.formatVersion !== CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION)) {
     throw corrupt('The ready snapshot lexical receipt is incompatible.');
   }
 }
@@ -1430,7 +1441,7 @@ function sameSnapshotProjectionRow(left: SnapshotProjectionRow, right: SnapshotP
 }
 
 function requiredText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
+  if (typeof value !== 'string' || value.length === 0 || Effect2.pipe(value, EffectString.includes('\0'))) {
     throw corrupt(`The ${label} is invalid.`);
   }
   return value;

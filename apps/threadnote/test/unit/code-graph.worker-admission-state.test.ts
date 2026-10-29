@@ -1,7 +1,9 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it, it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Layer} from 'effect';
+import {Clock, Effect, FileSystem, Layer, Schema} from 'effect';
 import * as FC from 'fast-check';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {
@@ -22,24 +24,26 @@ import type {GraphWorkerResultAuthority} from '@threadnote/graph/sharing/worker/
 import {makeGraphWorkerSigner} from '@threadnote/graph/sharing/worker/signing';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const NOW = 1000;
 const authority: GraphWorkerResultAuthority = {
   expiresAt: 2000,
-  graphAbi: 'a'.repeat(64),
+  graphAbi: Effect2.pipe('a', EffectString.repeat(64)),
   principalId: sha256Digest('principal'),
   profileDigest: sha256Digest('profile'),
-  repositoryId: 'b'.repeat(64),
-  signingPublicKey: 'c'.repeat(64),
-  workerId: `gw_${'d'.repeat(32)}`,
+  repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+  signingPublicKey: Effect2.pipe('c', EffectString.repeat(64)),
+  workerId: `gw_${Effect2.pipe('d', EffectString.repeat(32))}`,
 };
 
 function announcement(
   seed: number,
   semantic = seed,
-  actionKey = 'e'.repeat(64),
-  batchId = 'f'.repeat(40),
+  actionKey = Effect2.pipe('e', EffectString.repeat(64)),
+  batchId = Effect2.pipe('f', EffectString.repeat(40)),
 ): GraphWorkerResultAnnouncement {
   const fields = {
     actionKey,
@@ -60,7 +64,7 @@ function announcement(
     },
     publicKey: authority.signingPublicKey,
     schemaVersion: 1,
-    signature: seed.toString(16).padStart(128, '0'),
+    signature: Effect2.pipe(seed.toString(16), EffectString.padStart(128, '0')),
   };
 }
 
@@ -110,7 +114,7 @@ describe('signed worker admission state', () => {
     const signed = announcement(1);
     const first = admit(emptyGraphWorkerAdmissionStore(), signed);
     const changedBody = {...signed, body: {...signed.body, semanticDigest: sha256Digest('changed')}};
-    const changedSignature = {...signed, signature: '0'.repeat(128)};
+    const changedSignature = {...signed, signature: Effect2.pipe('0', EffectString.repeat(128))};
     for (const changed of [changedBody, changedSignature]) {
       const result = admit(first.store, changed);
       expect(result.status).toBe('operation-conflict');
@@ -121,7 +125,7 @@ describe('signed worker admission state', () => {
 
   it('quarantines every same-action semantic conflict regardless of arrival order or batch', () => {
     const first = announcement(1, 1);
-    const other = announcement(2, 2, first.body.actionKey, '1'.repeat(40));
+    const other = announcement(2, 2, first.body.actionKey, Effect2.pipe('1', EffectString.repeat(40)));
     const left = admit(admit(emptyGraphWorkerAdmissionStore(), first).store, other);
     const right = admit(admit(emptyGraphWorkerAdmissionStore(), other).store, first);
     expect(left.status).toBe('quarantined');
@@ -148,7 +152,9 @@ describe('signed worker admission state', () => {
     expect(union.quarantine).toHaveLength(1);
     expect(mergeGraphWorkerAdmissionReceipts(first.store.receipts, first.store.receipts).receipts).toHaveLength(1);
     expect(() =>
-      mergeGraphWorkerAdmissionReceipts(first.store.receipts, [{...first.store.receipts[0], graphAbi: '0'.repeat(64)}]),
+      mergeGraphWorkerAdmissionReceipts(first.store.receipts, [
+        {...first.store.receipts[0], graphAbi: Effect2.pipe('0', EffectString.repeat(64))},
+      ]),
     ).toThrow();
   });
 
@@ -160,8 +166,13 @@ describe('signed worker admission state', () => {
         (seeds, partition) => {
           let store = emptyGraphWorkerAdmissionStore();
           for (const seed of seeds) store = admit(store, announcement(seed, seed % 3)).store;
-          const hot = store.receipts.filter((_, index) => partition[index]);
-          const cold = store.receipts.filter((_, index) => !partition[index]);
+          const hot = EffectArrayPipe(store.receipts, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (_, index) => index in __effectArrayValues && Boolean(partition[index]),
+            ),
+          );
+          const cold = EffectArray.filter(store.receipts, (_, index) => !partition[index]);
           expect(mergeGraphWorkerAdmissionReceipts(hot, cold)).toEqual({
             quarantine: store.quarantine,
             receipts: store.receipts,
@@ -173,9 +184,9 @@ describe('signed worker admission state', () => {
   });
 
   it('retires only the exact canonical source, recomputes quarantine, and is idempotent', () => {
-    const prefix = 'f'.repeat(40);
-    const firstCommit = prefix + 'a'.repeat(24);
-    const nextCommit = prefix + 'b'.repeat(24);
+    const prefix = Effect2.pipe('f', EffectString.repeat(40));
+    const firstCommit = prefix + Effect2.pipe('a', EffectString.repeat(24));
+    const nextCommit = prefix + Effect2.pipe('b', EffectString.repeat(24));
     const first = admit(emptyGraphWorkerAdmissionStore(), announcement(1, 1), authority, firstCommit);
     const conflict = admit(first.store, announcement(2, 2), authority, firstCommit);
     const future = admit(conflict.store, announcement(3, 2), authority, nextCommit);
@@ -194,15 +205,20 @@ describe('signed worker admission state', () => {
         FC.uniqueArray(FC.integer({min: 1, max: 100_000}), {minLength: 1, maxLength: 8}),
         FC.array(FC.boolean(), {minLength: 8, maxLength: 8}),
         (seeds, selected) => {
-          const commits = seeds.map(seed => seed.toString(16).padStart(40, '0'));
+          const commits = EffectArray.map(seeds, seed =>
+            Effect2.pipe(seed.toString(16), EffectString.padStart(40, '0')),
+          );
           let store = emptyGraphWorkerAdmissionStore();
           for (const [index, seed] of seeds.entries())
             store = admit(store, announcement(seed, seed, authority.repositoryId, commits[index])).store;
           const original = canonicalJson(store);
-          const covered = new Set(commits.filter((_, index) => selected[index]));
+          const covered = new Set(EffectArray.filter(commits, (_, index) => index in commits && selected[index]));
           const retired = retireGraphWorkerAdmissionsForPublishedSources(store, covered);
-          expect(retired.receipts.map(receipt => receipt.sourceCommit)).toEqual(
-            store.receipts.filter(receipt => !covered.has(receipt.sourceCommit)).map(receipt => receipt.sourceCommit),
+          expect(EffectArray.map(retired.receipts, receipt => receipt.sourceCommit)).toEqual(
+            EffectArray.map(
+              EffectArray.filter(store.receipts, receipt => !covered.has(receipt.sourceCommit)),
+              receipt => receipt.sourceCommit,
+            ),
           );
           expect(retireGraphWorkerAdmissionsForPublishedSources(retired, covered)).toBe(retired);
           expect(canonicalJson(store)).toBe(original);
@@ -219,13 +235,15 @@ describe('signed worker admission state', () => {
     for (const changed of [
       {...authority, expiresAt: NOW},
       {...authority, principalId: sha256Digest('other')},
-      {...authority, signingPublicKey: '0'.repeat(64)},
+      {...authority, signingPublicKey: Effect2.pipe('0', EffectString.repeat(64))},
     ]) {
       const result = admit(first.store, signed, changed);
       expect(result.status).toBe('invalid-authority');
       expect(result.store).toBe(first.store);
     }
-    expect(admit(first.store, signed, {...authority, graphAbi: '0'.repeat(64)}).status).toBe('operation-conflict');
+    expect(
+      admit(first.store, signed, {...authority, graphAbi: Effect2.pipe('0', EffectString.repeat(64))}).status,
+    ).toBe('operation-conflict');
   });
 
   it('refuses capacity without losing an existing receipt or quarantine', () => {
@@ -247,10 +265,14 @@ describe('signed worker admission state', () => {
 
   it('rejects malformed or inconsistent durable state rather than accepting it as empty', () => {
     const result = admit(emptyGraphWorkerAdmissionStore(), announcement(1));
-    const valid = JSON.parse(JSON.stringify(result.store)) as Record<string, unknown>;
+    const valid = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(
+      JSON.parse(JSON.stringify(result.store)),
+    );
     expect(() => parseGraphWorkerAdmissionStore({...valid, schemaVersion: 1})).toThrow();
     expect(() => parseGraphWorkerAdmissionStore({...valid, extra: true})).toThrow();
-    const receipts = valid.receipts as Array<Record<string, unknown>>;
+    const receipts = Schema.decodeUnknownSync(Schema.Array(Schema.Record(Schema.String, Schema.Unknown)))(
+      valid.receipts,
+    );
     expect(() =>
       parseGraphWorkerAdmissionStore({
         ...valid,
@@ -265,8 +287,8 @@ describe('signed worker admission state', () => {
         ...valid,
         quarantine: [
           {
-            actionKey: '0'.repeat(64),
-            repositoryId: '0'.repeat(64),
+            actionKey: Effect2.pipe('0', EffectString.repeat(64)),
+            repositoryId: Effect2.pipe('0', EffectString.repeat(64)),
             semanticDigests: [sha256Digest('a'), sha256Digest('b')],
           },
         ],
@@ -277,7 +299,7 @@ describe('signed worker admission state', () => {
   it('is order-independent and does not mutate prior state or announcements', () => {
     FC.assert(
       FC.property(FC.uniqueArray(FC.integer({min: 1, max: 100_000}), {minLength: 1, maxLength: 6}), seeds => {
-        const signed = seeds.map(seed => announcement(seed, seed % 3));
+        const signed = EffectArray.map(seeds, seed => announcement(seed, seed % 3));
         const original = JSON.parse(JSON.stringify(signed));
         let forward = emptyGraphWorkerAdmissionStore();
         let reverse = emptyGraphWorkerAdmissionStore();

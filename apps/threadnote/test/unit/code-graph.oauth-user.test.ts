@@ -23,8 +23,12 @@ import {createAccessTokenVerifier} from '@threadnote/protocol/access-token';
 
 import {CliOutput} from '@threadnote/threadnote/effect/cli/output';
 import {SystemInfo} from '@threadnote/platform/system';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
+import {Array as EffectArray} from 'effect';
 
 const systemLayer = TestSystemInfoLayer;
 const layer = Layer.merge(systemLayer, TestCommandExecutorLayer.pipe(Layer.provide(systemLayer))).pipe(
@@ -57,7 +61,7 @@ const request = {
   issuer,
   organization: graph.organization,
   profileDigest: sha256Digest('profile'),
-  repositoryId: 'a'.repeat(64),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   schemaVersion: 1,
   scopes: ['graph:contribute'],
 } as const;
@@ -69,7 +73,7 @@ describe('provider-neutral OAuth user credentials', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-oauth-user-'});
-        const runtime = {agentContextHome: home} as RuntimeConfig;
+        const runtime = runtimeConfigForTest({agentContextHome: home});
         yield* configureGraphOAuthUser(runtime, graph);
         const publicConfig = JSON.parse(yield* fs.readFileString(path.join(home, 'graph-sharing', 'oauth-user.json')));
         expect(publicConfig).toEqual({
@@ -163,7 +167,7 @@ describe('provider-neutral OAuth user credentials', () => {
             schemaVersion: 1,
           }),
         );
-        yield* configureGraphOAuthUser({agentContextHome: home} as RuntimeConfig, graph);
+        yield* configureGraphOAuthUser(runtimeConfigForTest({agentContextHome: home}), graph);
         const migrated = JSON.parse(yield* fs.readFileString(path.join(root, 'oauth-user.json')));
         expect(migrated.schemaVersion).toBe(2);
         expect(migrated.bindings).toHaveLength(2);
@@ -188,16 +192,19 @@ describe('provider-neutral OAuth user credentials', () => {
           organization: 'legacy',
         });
         expect(removed).toEqual([
-          sha256Digest(
-            JSON.stringify([
-              home,
-              'https://legacy.auth0.test/',
-              'https://legacy-graph.example.test',
-              'legacyNativeClient1234',
-              'https://legacy-graph.example.test/team',
-              'legacy',
-            ]),
-          ).slice(7),
+          Effect2.pipe(
+            sha256Digest(
+              JSON.stringify([
+                home,
+                'https://legacy.auth0.test/',
+                'https://legacy-graph.example.test',
+                'legacyNativeClient1234',
+                'https://legacy-graph.example.test/team',
+                'legacy',
+              ]),
+            ),
+            EffectString.slice(7),
+          ),
         ]);
       }),
     ).pipe(provideTestLayer(layer)),
@@ -211,7 +218,7 @@ describe('provider-neutral OAuth user credentials', () => {
         const system = yield* SystemInfo;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'oauth-legacy-command-'});
         const docker = yield* fs.makeTempDirectoryScoped({prefix: 'oauth-legacy-docker-'});
-        const runtime = {agentContextHome: home} as RuntimeConfig;
+        const runtime = runtimeConfigForTest({agentContextHome: home});
         const legacyIssuer = 'https://legacy.auth0.test/';
         yield* runGraphOAuthConfigureCommand(runtime, {
           audience: 'https://legacy-graph.example.test',
@@ -305,16 +312,19 @@ describe('provider-neutral OAuth user credentials', () => {
         );
         expect(result.accessToken).toBe('legacy.token');
         expect(selectedAccount).toBe(
-          sha256Digest(
-            JSON.stringify([
-              home,
-              legacy.issuer,
-              legacy.audience,
-              legacy.clientId,
-              legacy.coordinatorUrl,
-              legacy.organization,
-            ]),
-          ).slice(7),
+          Effect2.pipe(
+            sha256Digest(
+              JSON.stringify([
+                home,
+                legacy.issuer,
+                legacy.audience,
+                legacy.clientId,
+                legacy.coordinatorUrl,
+                legacy.organization,
+              ]),
+            ),
+            EffectString.slice(7),
+          ),
         );
       }),
     ).pipe(provideTestLayer(layer)),
@@ -327,7 +337,7 @@ describe('provider-neutral OAuth user credentials', () => {
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-oauth-cross-origin-'});
         const result = yield* Effect.result(
-          configureGraphOAuthUser({agentContextHome: home} as RuntimeConfig, {
+          configureGraphOAuthUser(runtimeConfigForTest({agentContextHome: home}), {
             ...graph,
             tokenUrl: 'https://another.example.test/v1/token',
           }),
@@ -346,7 +356,7 @@ describe('provider-neutral OAuth user credentials', () => {
         const system = yield* SystemInfo;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'registry-oauth-user-'});
         const docker = yield* fs.makeTempDirectoryScoped({prefix: 'registry-oauth-docker-'});
-        yield* configureRegistryOAuthUser({agentContextHome: home} as RuntimeConfig, {
+        yield* configureRegistryOAuthUser(runtimeConfigForTest({agentContextHome: home}), {
           ...graph,
           audience: 'https://registry.example.test',
           origin: 'https://registry.example.test',
@@ -391,7 +401,7 @@ describe('provider-neutral OAuth access-token claims', () => {
             exp: now + 300,
             iat: now,
             iss: issuer,
-            scope: scopes.join(' '),
+            scope: EffectArray.join(scopes, ' '),
             scp: [...scopes].reverse(),
             sub: '00u-pilot-user',
           })

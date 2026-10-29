@@ -1,72 +1,138 @@
-import {Array as EffectArray, Option} from 'effect';
+import {Array as EffectArray, Option, Predicate, Schema} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
+import fc from 'fast-check';
 import {JSON_SCHEMA, load} from 'js-yaml';
 import {describe, expect, it} from 'vitest';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-interface WorkflowJob {
-  readonly env?: Readonly<Record<string, string>>;
-  readonly if?: string;
-  readonly name?: string;
-  readonly needs?: string | readonly string[];
-  readonly outputs?: Readonly<Record<string, string>>;
-  readonly permissions?: Readonly<Record<string, string>>;
-  readonly 'runs-on'?: string;
-  readonly steps?: readonly {
-    readonly 'continue-on-error'?: boolean;
-    readonly id?: string;
-    readonly if?: string;
-    readonly env?: Readonly<Record<string, string>>;
-    readonly name?: string;
-    readonly run?: string;
-    readonly 'timeout-minutes'?: number;
-    readonly uses?: string;
-    readonly with?: Readonly<Record<string, boolean | number | string>>;
-  }[];
-  readonly strategy?: {
-    readonly 'max-parallel'?: number;
-    readonly matrix?: {
-      readonly include?: readonly {
-        readonly hotQuerySamples?: number;
-        readonly os?: string;
-      }[];
-      readonly replica?: readonly number[];
-      readonly scale?: readonly number[];
-    };
-  };
-  readonly 'timeout-minutes'?: number;
-  readonly uses?: string;
-  readonly with?: Readonly<Record<string, unknown>>;
-}
-
-interface BenchmarkWorkflow {
-  readonly jobs: Readonly<Record<string, WorkflowJob>>;
-  readonly on: {
-    readonly push?: {
-      readonly tags?: readonly string[];
-    };
-    readonly pull_request?: {
-      readonly paths?: readonly string[];
-    };
-    readonly workflow_dispatch?: {
-      readonly inputs?: Readonly<Record<string, unknown>>;
-    };
-    readonly workflow_call?: {
-      readonly inputs?: Readonly<Record<string, unknown>>;
-    };
-  };
+const OpenObject = Schema.Record(Schema.String, Schema.Unknown);
+const WorkflowEnvironmentValue = Schema.Union([Schema.Boolean, Schema.Finite, Schema.String]);
+const WorkflowStepSchema = Schema.StructWithRest(
+  Schema.Struct({
+    'continue-on-error': Schema.optionalKey(Schema.Boolean),
+    id: Schema.optionalKey(Schema.String),
+    if: Schema.optionalKey(Schema.String),
+    env: Schema.optionalKey(Schema.Record(Schema.String, WorkflowEnvironmentValue)),
+    name: Schema.optionalKey(Schema.String),
+    run: Schema.optionalKey(Schema.String),
+    'timeout-minutes': Schema.optionalKey(Schema.Finite),
+    uses: Schema.optionalKey(Schema.String),
+    with: Schema.optionalKey(Schema.Record(Schema.String, WorkflowEnvironmentValue)),
+  }),
+  [OpenObject],
+);
+const WorkflowMatrixSchema = Schema.StructWithRest(
+  Schema.Struct({
+    include: Schema.optionalKey(
+      Schema.Array(
+        Schema.StructWithRest(
+          Schema.Struct({
+            hotQuerySamples: Schema.optionalKey(Schema.Finite),
+            os: Schema.optionalKey(Schema.String),
+          }),
+          [OpenObject],
+        ),
+      ),
+    ),
+    replica: Schema.optionalKey(Schema.Array(Schema.Finite)),
+    scale: Schema.optionalKey(Schema.Array(Schema.Finite)),
+  }),
+  [OpenObject],
+);
+const WorkflowJobSchema = Schema.StructWithRest(
+  Schema.Struct({
+    env: Schema.optionalKey(Schema.Record(Schema.String, WorkflowEnvironmentValue)),
+    if: Schema.optionalKey(Schema.String),
+    name: Schema.optionalKey(Schema.String),
+    needs: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
+    outputs: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    permissions: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    'runs-on': Schema.optionalKey(Schema.String),
+    steps: Schema.optionalKey(Schema.Array(WorkflowStepSchema)),
+    strategy: Schema.optionalKey(
+      Schema.StructWithRest(
+        Schema.Struct({
+          'fail-fast': Schema.optionalKey(Schema.Boolean),
+          'max-parallel': Schema.optionalKey(Schema.Finite),
+          matrix: Schema.optionalKey(WorkflowMatrixSchema),
+        }),
+        [OpenObject],
+      ),
+    ),
+    'timeout-minutes': Schema.optionalKey(Schema.Finite),
+    uses: Schema.optionalKey(Schema.String),
+    with: Schema.optionalKey(OpenObject),
+  }),
+  [OpenObject],
+);
+const WorkflowTriggerSchema = Schema.StructWithRest(
+  Schema.Struct({
+    push: Schema.optionalKey(
+      Schema.NullOr(
+        Schema.StructWithRest(Schema.Struct({tags: Schema.optionalKey(Schema.Array(Schema.String))}), [OpenObject]),
+      ),
+    ),
+    pull_request: Schema.optionalKey(
+      Schema.NullOr(
+        Schema.StructWithRest(Schema.Struct({paths: Schema.optionalKey(Schema.Array(Schema.String))}), [OpenObject]),
+      ),
+    ),
+    workflow_dispatch: Schema.optionalKey(
+      Schema.NullOr(Schema.StructWithRest(Schema.Struct({inputs: Schema.optionalKey(OpenObject)}), [OpenObject])),
+    ),
+    workflow_call: Schema.optionalKey(
+      Schema.NullOr(Schema.StructWithRest(Schema.Struct({inputs: Schema.optionalKey(OpenObject)}), [OpenObject])),
+    ),
+  }),
+  [OpenObject],
+);
+const BenchmarkWorkflowSchema = Schema.StructWithRest(
+  Schema.Struct({
+    jobs: Schema.Record(Schema.String, WorkflowJobSchema),
+    on: WorkflowTriggerSchema,
+  }),
+  [OpenObject],
+);
+type BenchmarkWorkflow = typeof BenchmarkWorkflowSchema.Type;
+const decodeWorkflowSchema = Schema.decodeUnknownSync(BenchmarkWorkflowSchema);
+function decodeWorkflow(value: unknown): BenchmarkWorkflow {
+  if (!Predicate.isObject(value) || !Predicate.isObject(value.on)) {
+    return decodeWorkflowSchema(value);
+  }
+  const triggers = value.on;
+  return decodeWorkflowSchema({
+    ...value,
+    on: {
+      ...triggers,
+      ...(triggers.pull_request === '' ? {pull_request: {}} : {}),
+      ...(triggers.workflow_call === '' ? {workflow_call: {}} : {}),
+      ...(triggers.workflow_dispatch === '' ? {workflow_dispatch: {}} : {}),
+      ...(triggers.push === '' ? {push: {}} : {}),
+    },
+  });
 }
 
 function expectBroadPullRequestTrigger(workflow: BenchmarkWorkflow): void {
-  expect(Object.prototype.hasOwnProperty.call(workflow.on, 'pull_request')).toBe(true);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  expect(Object.hasOwn(workflow.on, 'pull_request')).toBe(true);
   const pullRequest = workflow.on.pull_request;
-  expect(Object.prototype.hasOwnProperty.call(pullRequest ?? {}, 'paths')).toBe(false);
-  expect(Object.prototype.hasOwnProperty.call(pullRequest ?? {}, 'paths-ignore')).toBe(false);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  expect(Object.hasOwn(pullRequest ?? {}, 'paths')).toBe(false);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  expect(Object.hasOwn(pullRequest ?? {}, 'paths-ignore')).toBe(false);
 }
 
 function captureSteps(workflow: BenchmarkWorkflow): readonly {readonly jobName: string; readonly run: string}[] {
-  return Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
-    (job.steps ?? []).flatMap(step =>
-      step.run?.split('\n').some(line => line.includes('bench:') || line.includes('scripts/benchmark-'))
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  return EffectArray.flatMap(Object.entries(workflow.jobs), ([jobName, job]) =>
+    EffectArray.flatMap(job.steps ?? [], step =>
+      step.run != null &&
+      Boolean(
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional chaining so the matching step narrows `run`.
+        EffectArray.some(step.run.split('\n'), line => line.includes('bench:') || line.includes('scripts/benchmark-')),
+      )
         ? [{jobName, run: step.run}]
         : [],
     ),
@@ -74,16 +140,53 @@ function captureSteps(workflow: BenchmarkWorkflow): readonly {readonly jobName: 
 }
 
 describe('platform benchmark workflow', () => {
+  it('preserves raw extension fields while normalizing empty YAML triggers and accepting scalar env values', () => {
+    fc.assert(
+      fc.property(fc.jsonValue(), extra => {
+        const workflow = decodeWorkflow({
+          jobs: {
+            probe: {
+              steps: [{env: {BOOLEAN: false, NUMBER: 5, TEXT: 'value'}, extensionStep: extra}],
+              strategy: {matrix: {include: [{os: 'ubuntu-latest', extensionMatrix: extra}], extensionMatrix: extra}},
+              extensionJob: extra,
+            },
+          },
+          on: {pull_request: '', workflow_dispatch: {inputs: {enabled: {default: false}}}, extensionTrigger: extra},
+          extensionWorkflow: extra,
+        });
+        const job = workflow.jobs.probe;
+        const step = job.steps?.[0];
+        const matrix = job.strategy?.matrix;
+        expect(workflow.extensionWorkflow).toEqual(extra);
+        expect(workflow.on.extensionTrigger).toEqual(extra);
+        expect(workflow.on.pull_request).toEqual({});
+        expect(job.extensionJob).toEqual(extra);
+        expect(step?.extensionStep).toEqual(extra);
+        expect(step?.env).toEqual({BOOLEAN: false, NUMBER: 5, TEXT: 'value'});
+        expect(matrix?.extensionMatrix).toEqual(extra);
+        expect(matrix?.include?.[0]?.extensionMatrix).toEqual(extra);
+      }),
+      {numRuns: 40},
+    );
+  });
+
   it('runs a Bazel correctness preflight independently while keeping measured captures as direct Bun commands', () => {
-    const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
-    const productionLarge = load(readFileSync('.github/workflows/production-large-evidence.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
+    const productionLarge = decodeWorkflow(
+      load(readFileSync('.github/workflows/production-large-evidence.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     const preflight = workflow.jobs['benchmark-preflight'];
-    const preflightRun = preflight.steps?.find(
-      step => step.name === 'Validate declared benchmark harness inputs and contracts',
+    const preflightRun = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(preflight.steps), effectFindReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            effectFindReceiver,
+            step => step.name === 'Validate declared benchmark harness inputs and contracts',
+          ),
+        ),
+      ),
     )?.run;
 
     expect(preflight).toMatchObject({
@@ -93,13 +196,31 @@ describe('platform benchmark workflow', () => {
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 10,
     });
-    expect(preflight.steps?.find(step => step.uses === 'actions/checkout@v7')?.with?.['fetch-depth']).toBe(0);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(preflight.steps), effectFindReceiver =>
+          Option.getOrUndefined(EffectArray.findFirst(effectFindReceiver, step => step.uses === 'actions/checkout@v7')),
+        ),
+      )?.with?.['fetch-depth'],
+    ).toBe(0);
     expect(preflightRun).toBe(
       'bun run bazel -- test //:platform_benchmark_preflight --test_output=errors --cache_test_results=no',
     );
     expect(
-      Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
-        (job.steps ?? []).flatMap(step => (step.run?.match(/\bbazel\b/u) ? [{jobName, run: step.run}] : [])),
+      EffectArray.flatMap(EffectRecord.toEntries(workflow.jobs), ([jobName, job]) =>
+        EffectArray.flatMap(job.steps ?? [], step =>
+          Effect.pipe(step.run, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(
+                  effectOptionalString,
+                  EffectString.match(/\bbazel\b/u),
+                  Effect.Option.getOrElse(() => null),
+                ),
+          )
+            ? [{jobName, run: step.run}]
+            : [],
+        ),
       ),
     ).toEqual([
       {jobName: 'benchmark-preflight', run: 'bun tools/bazel/prepare.mjs'},
@@ -110,12 +231,16 @@ describe('platform benchmark workflow', () => {
     expect(captures.length).toBeGreaterThan(10);
     for (const capture of captures) {
       expect(capture.run).not.toMatch(/\bbazel\b/u);
-      const commandLines = capture.run
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.includes('bench:') || line.includes('scripts/benchmark-'));
+      const commandLines = EffectArray.filter(
+        EffectArray.map(Effect.pipe(capture.run, EffectString.split('\n')), line =>
+          Effect.pipe(line, EffectString.trim),
+        ),
+        line =>
+          Effect.pipe(line, EffectString.includes('bench:')) ||
+          Effect.pipe(line, EffectString.includes('scripts/benchmark-')),
+      );
       expect(commandLines.length).toBeGreaterThan(0);
-      expect(commandLines.every(line => /^bun (?:run bench:|scripts\/benchmark-)/u.test(line))).toBe(true);
+      expect(EffectArray.every(commandLines, line => /^bun (?:run bench:|scripts\/benchmark-)/u.test(line))).toBe(true);
       const needs = workflow.jobs[capture.jobName]?.needs;
       expect(typeof needs === 'string' ? [needs] : (needs ?? [])).not.toContain('benchmark-preflight');
     }
@@ -127,20 +252,64 @@ describe('platform benchmark workflow', () => {
     expect(preflight.if).toContain("github.event_name != 'pull_request'");
 
     expect(
-      Object.entries(productionLarge.jobs).flatMap(([, job]) => job.steps?.map(step => step.run ?? '') ?? []),
+      EffectArray.flatMap(
+        EffectRecord.toEntries(productionLarge.jobs),
+        ([, job]) =>
+          Option.getOrUndefined(
+            Option.map(Option.fromNullishOr(job.steps), mapReceiver =>
+              EffectArray.map(mapReceiver, step => step.run ?? ''),
+            ),
+          ) ?? [],
+      ),
     ).not.toContainEqual(expect.stringMatching(/\bbazel\b/u));
   });
 
   it('signs the inverse scale capture before independently verifying and retaining release evidence', () => {
-    const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     const job = workflow.jobs['code-memory-link-inverse-scale'];
     const steps = job.steps ?? [];
-    const capture = steps.findIndex(step => step.run?.includes('bench:code-memory-link-scale'));
-    const attest = steps.findIndex(step => step.uses?.startsWith('actions/attest@'));
-    const verify = steps.findIndex(step => step.run?.includes('verify-code-memory-link-scale-provenance.ts'));
-    const stage = steps.findIndex(step => step.name === 'Stage the exact content-addressed G artifact');
+    const capture = Option.getOrElse(
+      EffectArray.findFirstIndex(steps, step =>
+        Boolean(
+          Effect.pipe(step.run, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('bench:code-memory-link-scale')),
+          ),
+        ),
+      ),
+      () => -1,
+    );
+    const attest = Option.getOrElse(
+      EffectArray.findFirstIndex(steps, step =>
+        Boolean(
+          Effect.pipe(step.uses, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.startsWith('actions/attest@')),
+          ),
+        ),
+      ),
+      () => -1,
+    );
+    const verify = Option.getOrElse(
+      EffectArray.findFirstIndex(steps, step =>
+        Boolean(
+          Effect.pipe(step.run, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('verify-code-memory-link-scale-provenance.ts')),
+          ),
+        ),
+      ),
+      () => -1,
+    );
+    const stage = Option.getOrElse(
+      EffectArray.findFirstIndex(steps, step => step.name === 'Stage the exact content-addressed G artifact'),
+      () => -1,
+    );
     expect(job.permissions).toMatchObject({
       'id-token': 'write',
       attestations: 'write',
@@ -153,29 +322,98 @@ describe('platform benchmark workflow', () => {
     expect(steps[attest].with?.['subject-path']).toContain('.subject.json');
     expect(steps[verify].env?.GH_TOKEN).toBe('${{ github.token }}');
     expect(steps[verify].run).toContain('--candidate-commit');
-    expect(steps.map(step => step.run ?? '').join('\n')).not.toContain('--runner-binding');
+    expect(
+      EffectArray.join(
+        EffectArray.map(steps, step => step.run ?? ''),
+        '\n',
+      ),
+    ).not.toContain('--runner-binding');
   });
   it('runs only bounded lexical scale gates for graph and runtime pull requests', () => {
-    const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     expectBroadPullRequestTrigger(workflow);
     const classifier = workflow.jobs['classify-platform-benchmark'];
     const pullRequestJob = workflow.jobs['code-graph-pr-scale'];
-    const command = pullRequestJob.steps?.flatMap(step => (step.run ? [step.run] : [])).join('\n') ?? '';
+    const command =
+      Option.getOrUndefined(
+        Option.map(
+          Option.fromNullishOr(
+            Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(pullRequestJob.steps), __effectArrayValues =>
+                EffectArray.flatMap(__effectArrayValues, (step, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues ? (step.run ? [step.run] : []) : [],
+                ),
+              ),
+            ),
+          ),
+          __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, '\n'),
+        ),
+      ) ?? '';
     const recallJob = workflow.jobs['recall-pr-10k'];
-    const recallCommand = recallJob.steps?.flatMap(step => (step.run ? [step.run] : [])).join('\n') ?? '';
+    const recallCommand =
+      Option.getOrUndefined(
+        Option.map(
+          Option.fromNullishOr(
+            Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(recallJob.steps), __effectArrayValues =>
+                EffectArray.flatMap(__effectArrayValues, (step, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues ? (step.run ? [step.run] : []) : [],
+                ),
+              ),
+            ),
+          ),
+          __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, '\n'),
+        ),
+      ) ?? '';
     const worksetJob = workflow.jobs['code-graph-workset'];
-    const worksetCommand = worksetJob.steps?.flatMap(step => (step.run ? [step.run] : [])).join('\n') ?? '';
+    const worksetCommand =
+      Option.getOrUndefined(
+        Option.map(
+          Option.fromNullishOr(
+            Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(worksetJob.steps), __effectArrayValues =>
+                EffectArray.flatMap(__effectArrayValues, (step, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues ? (step.run ? [step.run] : []) : [],
+                ),
+              ),
+            ),
+          ),
+          __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, '\n'),
+        ),
+      ) ?? '';
     const nativeJob = workflow.jobs['code-graph'];
-    const nativeCapture = nativeJob.steps?.find(step => step.name === 'Capture native graph benchmark');
+    const nativeCapture = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(nativeJob.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.name === 'Capture native graph benchmark')),
+      ),
+    );
     const windowsReplicas = workflow.jobs['code-graph-windows-replicas'];
-    const windowsCapture = windowsReplicas.steps?.find(step => step.name === 'Capture fixed native graph replica');
-    const windowsUpload = windowsReplicas.steps?.find(step => step.uses === 'actions/upload-artifact@v7');
+    const windowsCapture = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(windowsReplicas.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(findArray, step => step.name === 'Capture fixed native graph replica'),
+        ),
+      ),
+    );
+    const windowsUpload = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(windowsReplicas.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/upload-artifact@v7')),
+      ),
+    );
     const windowsGate = workflow.jobs['code-graph-windows'];
-    const windowsDownload = windowsGate.steps?.find(step => step.uses === 'actions/download-artifact@v8');
-    const windowsAdjudication = windowsGate.steps?.find(
-      step => step.name === 'Adjudicate fixed hosted-runner replicas',
+    const windowsDownload = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(windowsGate.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/download-artifact@v8')),
+      ),
+    );
+    const windowsAdjudication = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(windowsGate.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(findArray, step => step.name === 'Adjudicate fixed hosted-runner replicas'),
+        ),
+      ),
     );
 
     expect(classifier.if).toBe("github.event_name == 'pull_request'");
@@ -183,12 +421,24 @@ describe('platform benchmark workflow', () => {
       run_code_graph_pr: '${{ steps.scope.outputs.run_code_graph_pr }}',
       run_recall_pr: '${{ steps.scope.outputs.run_recall_pr }}',
     });
-    expect(classifier.steps?.find(step => step.id === 'scope')?.run).toContain(
-      'tools/ci/platform-benchmark-scope.ts --base "$BASE_SHA" --head "$HEAD_SHA"',
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(classifier.steps), effectFindReceiver =>
+          Option.getOrUndefined(EffectArray.findFirst(effectFindReceiver, step => step.id === 'scope')),
+        ),
+      )?.run,
+    ).toContain('tools/ci/platform-benchmark-scope.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
+    const classifierCheckout = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(classifier.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/checkout@v7')),
+      ),
     );
-    const classifierCheckout = classifier.steps?.find(step => step.uses === 'actions/checkout@v7');
     expect(classifierCheckout?.with?.['fetch-depth']).toBe(0);
-    const classifierScope = classifier.steps?.find(step => step.id === 'scope');
+    const classifierScope = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(classifier.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.id === 'scope')),
+      ),
+    );
     expect(classifierScope?.env).toEqual({
       BASE_SHA: '${{ github.event.pull_request.base.sha }}',
       HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
@@ -210,10 +460,17 @@ describe('platform benchmark workflow', () => {
     expect(recallJob['runs-on']).toBe('ubuntu-latest');
     expect(recallJob['timeout-minutes']).toBeLessThanOrEqual(15);
     expect(recallCommand).toContain('bun run eval:recall');
-    const recallDiagnosticsStep = recallJob.steps?.find(
-      step =>
-        step.uses === 'actions/upload-artifact@v7' &&
-        step.with?.name === 'recall-production-pr-10000-Linux-${{ runner.arch }}',
+    const recallDiagnosticsStep = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(recallJob.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            findArray,
+            step =>
+              step.uses === 'actions/upload-artifact@v7' &&
+              step.with?.name === 'recall-production-pr-10000-Linux-${{ runner.arch }}',
+          ),
+        ),
+      ),
     );
     expect(recallDiagnosticsStep?.if).toBe('always()');
     expect(recallDiagnosticsStep?.with?.path).toBe('artifacts/recall-production-10000.json');
@@ -221,10 +478,17 @@ describe('platform benchmark workflow', () => {
     expect(recallCommand).toContain('bun run bench:recall:vectors');
     expect(recallCommand).toContain('--documents 10000');
     expect(recallCommand).toContain('--fail-on-budget');
-    const recallArtifactStep = recallJob.steps?.find(
-      step =>
-        step.uses === 'actions/upload-artifact@v7' &&
-        step.with?.name === 'recall-vector-benchmark-pr-10000-Linux-${{ runner.arch }}',
+    const recallArtifactStep = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(recallJob.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            findArray,
+            step =>
+              step.uses === 'actions/upload-artifact@v7' &&
+              step.with?.name === 'recall-vector-benchmark-pr-10000-Linux-${{ runner.arch }}',
+          ),
+        ),
+      ),
     );
     expect(recallArtifactStep?.if).toBe('always()');
     expect(recallArtifactStep?.with?.['if-no-files-found']).toBe('warn');
@@ -269,7 +533,11 @@ describe('platform benchmark workflow', () => {
     expect(windowsAdjudication?.run).toContain('gate:code-graph:windows-replicas');
     expect(windowsAdjudication?.run).toContain('--expected-commit "${{ github.sha }}"');
     expect(windowsAdjudication?.run).toContain('--fail-on-budget');
-    expect(windowsAdjudication?.run?.toLowerCase()).not.toContain('retry');
+    expect(
+      Effect.pipe(windowsAdjudication?.run, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+      ),
+    ).not.toContain('retry');
 
     for (const jobName of [
       'code-graph',
@@ -287,7 +555,13 @@ describe('platform benchmark workflow', () => {
     }
 
     const loadEvidence = workflow.jobs['code-graph-load-evidence'];
-    const loadEvidenceStep = loadEvidence.steps?.find(step => step.env?.THREADNOTE_VITEST_LONG_GROUP);
+    const loadEvidenceStep = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(loadEvidence.steps), effectFindReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(effectFindReceiver, step => Boolean(step.env?.THREADNOTE_VITEST_LONG_GROUP)),
+        ),
+      ),
+    );
     expect(loadEvidence['runs-on']).toBe('ubuntu-latest');
     expect(loadEvidence['timeout-minutes']).toBe(30);
     expect(loadEvidenceStep).toMatchObject({
@@ -308,18 +582,36 @@ describe('platform benchmark workflow', () => {
       'code-graph-100k',
       'code-graph-vectors-100k',
     ]) {
-      const upload = workflow.jobs[jobName]?.steps?.find(step => step.uses === 'actions/upload-artifact@v7');
+      const upload = Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(workflow.jobs[jobName]?.steps), findArray =>
+          Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/upload-artifact@v7')),
+        ),
+      );
       expect(upload?.if).toBe('always()');
     }
   });
 
   it('runs one reduced production ratchet only for graph-affecting pull requests', () => {
-    const ratchetWorkflow = load(readFileSync('.github/workflows/code-graph-production-ratchet.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const ratchetWorkflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/code-graph-production-ratchet.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     const classifier = ratchetWorkflow.jobs.classify;
     const job = ratchetWorkflow.jobs.ratchet;
-    const command = job.steps?.flatMap(step => (step.run ? [step.run] : [])).join('\n') ?? '';
+    const command =
+      Option.getOrUndefined(
+        Option.map(
+          Option.fromNullishOr(
+            Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(job.steps), __effectArrayValues =>
+                EffectArray.flatMap(__effectArrayValues, (step, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues ? (step.run ? [step.run] : []) : [],
+                ),
+              ),
+            ),
+          ),
+          __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, '\n'),
+        ),
+      ) ?? '';
 
     expectBroadPullRequestTrigger(ratchetWorkflow);
     expect(job['runs-on']).toBe('ubuntu-24.04');
@@ -327,50 +619,97 @@ describe('platform benchmark workflow', () => {
     expect(job.needs).toBe('classify');
     expect(job.if).toBe("always() && github.event_name == 'pull_request'");
     expect(classifier.outputs?.run_benchmark).toBe('${{ steps.scope.outputs.run_benchmark }}');
-    expect(classifier.steps?.find(step => step.id === 'scope')).toMatchObject({
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(classifier.steps), findArray =>
+          Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.id === 'scope')),
+        ),
+      ),
+    ).toMatchObject({
       name: 'Classify the production-ratchet diff',
       run: 'bun tools/ci/code-graph-production-ratchet-scope.ts --base "$BASE_SHA" --head "$HEAD_SHA"',
     });
-    const guardedSteps = job.steps?.filter(
-      step =>
-        step.uses === 'actions/checkout@v7' ||
-        step.uses === 'oven-sh/setup-bun@v2' ||
-        step.run === 'bun install --frozen-lockfile' ||
-        step.name === 'Measure the governed reduced production profile' ||
-        step.name === 'Enforce the reviewed static ratchet',
+    const guardedSteps = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (step, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues &&
+            (step.uses === 'actions/checkout@v7' ||
+              step.uses === 'oven-sh/setup-bun@v2' ||
+              step.run === 'bun install --frozen-lockfile' ||
+              step.name === 'Measure the governed reduced production profile' ||
+              step.name === 'Enforce the reviewed static ratchet'),
+        ),
+      ),
     );
     expect(guardedSteps).toHaveLength(5);
     for (const step of guardedSteps ?? []) {
       expect(step.if).toBe("needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'");
     }
-    expect(job.steps?.find(step => step.uses === 'actions/checkout@v7')?.with).toMatchObject({'fetch-depth': '0'});
-    const candidateMeasurement = job.steps?.find(
-      step => step.name === 'Measure the governed reduced production profile',
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(job.steps), effectFindReceiver =>
+          Option.getOrUndefined(EffectArray.findFirst(effectFindReceiver, step => step.uses === 'actions/checkout@v7')),
+        ),
+      )?.with,
+    ).toMatchObject({'fetch-depth': '0'});
+    const candidateMeasurement = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(findArray, step => step.name === 'Measure the governed reduced production profile'),
+        ),
+      ),
     );
     expect(candidateMeasurement?.run).not.toContain('--ratchet');
     expect(candidateMeasurement?.run).toContain('code-graph-production-ratchet-Linux-');
-    const staticGate = job.steps?.find(step => step.id === 'static-ratchet');
+    const staticGate = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.id === 'static-ratchet')),
+      ),
+    );
     expect(staticGate).toMatchObject({
       'continue-on-error': true,
       name: 'Enforce the reviewed static ratchet',
     });
     expect(staticGate?.run).toContain('tools/ci/code-graph-production-ratchet-gate.ts');
-    const controlMeasurement = job.steps?.find(
-      step => step.name === 'Measure the exact protected-base control on the same runner',
+    const controlMeasurement = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            findArray,
+            step => step.name === 'Measure the exact protected-base control on the same runner',
+          ),
+        ),
+      ),
     );
     expect(controlMeasurement?.if).toBe("steps.static-ratchet.outcome == 'failure'");
     expect(controlMeasurement?.run).toContain('git worktree add --detach "$control_root" "$BASE_SHA"');
     expect(controlMeasurement?.run).toContain('GITHUB_WORKSPACE="$control_root" GITHUB_SHA="$BASE_SHA"');
     expect(controlMeasurement?.run).toContain('code-graph-production-ratchet-control-Linux-');
-    const pairedCandidateMeasurement = job.steps?.find(
-      step => step.name === 'Remeasure the exact candidate immediately after the control',
+    const pairedCandidateMeasurement = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            findArray,
+            step => step.name === 'Remeasure the exact candidate immediately after the control',
+          ),
+        ),
+      ),
     );
     expect(pairedCandidateMeasurement?.if).toBe("steps.static-ratchet.outcome == 'failure'");
     expect(pairedCandidateMeasurement?.run).toContain('code-graph-production-ratchet-paired-candidate-Linux-');
     expect(job.steps?.indexOf(candidateMeasurement!)).toBeLessThan(job.steps?.indexOf(controlMeasurement!) ?? 0);
     expect(job.steps?.indexOf(controlMeasurement!)).toBeLessThan(job.steps?.indexOf(pairedCandidateMeasurement!) ?? 0);
-    const pairedGate = job.steps?.find(
-      step => step.name === 'Enforce same-runner confirmatory fallback with bounded wall tail',
+    const pairedGate = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            findArray,
+            step => step.name === 'Enforce same-runner confirmatory fallback with bounded wall tail',
+          ),
+        ),
+      ),
     );
     expect(pairedGate?.if).toBe("steps.static-ratchet.outcome == 'failure'");
     expect(pairedGate?.run).toContain('--artifact artifacts/code-graph-production-ratchet-paired-candidate-Linux-');
@@ -378,17 +717,57 @@ describe('platform benchmark workflow', () => {
     expect(pairedGate?.run).toContain('--expected-control-commit "$BASE_SHA"');
     expect(pairedGate?.run).toContain('--initial-candidate artifacts/code-graph-production-ratchet-Linux-');
     expect(job.steps?.indexOf(pairedCandidateMeasurement!)).toBeLessThan(job.steps?.indexOf(pairedGate!) ?? 0);
-    expect(job.steps?.find(step => step.uses === 'actions/upload-artifact@v7')?.if).toContain(
-      "needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'",
-    );
-    expect(command.match(/--samples 1/g)).toHaveLength(3);
-    expect(command.match(/--profile production-large/g)).toHaveLength(3);
-    expect(command.match(/--profile-files 3000/g)).toHaveLength(3);
-    expect(command.match(/--profile-symbols 110000/g)).toHaveLength(3);
-    expect(command.match(/--minimum-free-gib 20/g)).toHaveLength(3);
     expect(
-      command.match(
-        /--ratchet apps\/threadnote\/test\/evaluation\/baselines\/code-graph-v1\/production-ratchet-github-linux-x64.json/g,
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(job.steps), effectFindReceiver =>
+          Option.getOrUndefined(
+            EffectArray.findFirst(effectFindReceiver, step => step.uses === 'actions/upload-artifact@v7'),
+          ),
+        ),
+      )?.if,
+    ).toContain("needs.classify.result != 'success' || needs.classify.outputs.run_benchmark != 'false'");
+    expect(
+      Effect.pipe(
+        command,
+        EffectString.match(/--samples 1/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        command,
+        EffectString.match(/--profile production-large/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        command,
+        EffectString.match(/--profile-files 3000/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        command,
+        EffectString.match(/--profile-symbols 110000/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        command,
+        EffectString.match(/--minimum-free-gib 20/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        command,
+        EffectString.match(
+          /--ratchet apps\/threadnote\/test\/evaluation\/baselines\/code-graph-v1\/production-ratchet-github-linux-x64.json/g,
+        ),
+        Effect.Option.getOrElse(() => null),
       ),
     ).toHaveLength(2);
     expect(command).not.toContain('bench:code-graph:production:ratchet');
@@ -416,20 +795,35 @@ describe('platform benchmark workflow', () => {
   });
 
   it('prepares one verified model artifact before every vector benchmark lane', () => {
-    const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     const preparation = workflow.jobs['prepare-code-graph-vector-model'];
     const preparationSteps = preparation.steps ?? [];
 
     expect(preparation.if).toContain("github.event_name == 'schedule'");
     expect(preparation.if).toContain("github.event_name == 'workflow_dispatch'");
     expect(preparation['timeout-minutes']).toBeLessThanOrEqual(10);
-    expect(preparationSteps.find(step => step.id === 'graph-model-cache')?.uses).toBe('actions/cache@v6');
-    expect(preparationSteps.find(step => step.run?.includes('models install'))?.run).toContain(
-      '${CODE_GRAPH_EMBEDDING_MODEL_ID}',
-    );
-    expect(preparationSteps.find(step => step.uses === 'actions/upload-artifact@v7')?.with).toMatchObject({
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(preparationSteps, step => step.id === 'graph-model-cache'))?.uses,
+    ).toBe('actions/cache@v6');
+    expect(
+      Option.getOrUndefined(
+        EffectArray.findFirst(preparationSteps, step =>
+          Boolean(
+            Effect.pipe(step.run, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('models install')),
+            ),
+          ),
+        ),
+      )?.run,
+    ).toContain('${CODE_GRAPH_EMBEDDING_MODEL_ID}');
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(preparationSteps, step => step.uses === 'actions/upload-artifact@v7'))
+        ?.with,
+    ).toMatchObject({
       'if-no-files-found': 'error',
       name: 'code-graph-core-embedding-model',
     });
@@ -437,13 +831,27 @@ describe('platform benchmark workflow', () => {
     for (const jobName of ['code-graph-vectors', 'code-graph-vectors-10k', 'code-graph-vectors-100k']) {
       const job = workflow.jobs[jobName];
       expect(job.needs).toBe('prepare-code-graph-vector-model');
-      const download = job.steps?.find(step => step.uses === 'actions/download-artifact@v8');
+      const download = Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(job.steps), findArray =>
+          Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/download-artifact@v8')),
+        ),
+      );
       expect(download?.with).toMatchObject({name: 'code-graph-core-embedding-model'});
-      expect(job.steps?.some(step => step.uses === 'actions/cache@v6')).toBe(false);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(job.steps), findArray2 =>
+            EffectArray.some(findArray2, step => step.uses === 'actions/cache@v6'),
+          ),
+        ),
+      ).toBe(false);
     }
 
     const vector10k = workflow.jobs['code-graph-vectors-10k'];
-    const retainedFailureEvidence = vector10k.steps?.find(step => step.uses === 'actions/upload-artifact@v7');
+    const retainedFailureEvidence = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(vector10k.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/upload-artifact@v7')),
+      ),
+    );
     expect(retainedFailureEvidence?.if).toBe('always()');
     expect(retainedFailureEvidence?.with).toMatchObject({
       'if-no-files-found': 'warn',
@@ -452,9 +860,27 @@ describe('platform benchmark workflow', () => {
     });
 
     const vector100k = workflow.jobs['code-graph-vectors-100k'];
-    const vector100kCapture = vector100k.steps?.find(step => step.run?.includes('--scale-symbols 100000'));
+    const vector100kCapture = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(vector100k.steps), effectFindReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(effectFindReceiver, step =>
+            Boolean(
+              Effect.pipe(step.run, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect.pipe(effectOptionalString, EffectString.includes('--scale-symbols 100000')),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
     const vector100kCommand = vector100kCapture?.run;
-    const vector100kArtifact = vector100k.steps?.find(step => step.uses === 'actions/upload-artifact@v7');
+    const vector100kArtifact = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(vector100k.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/upload-artifact@v7')),
+      ),
+    );
     expect(vector100k['runs-on']).toBe('macos-15');
     expect(vector100k['timeout-minutes']).toBe(60);
     expect(vector100k.env).toBeUndefined();
@@ -476,27 +902,101 @@ describe('platform benchmark workflow', () => {
   });
 
   it('bounds the shared production-large n=1 workflow for schedule, opt-in, and release evidence', () => {
-    const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
-    const evidence = load(readFileSync('.github/workflows/production-large-evidence.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
+    const evidence = decodeWorkflow(
+      load(readFileSync('.github/workflows/production-large-evidence.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     const caller = workflow.jobs['code-graph-production-large'];
     const job = evidence.jobs['code-graph-production-large'];
-    const command = job.steps?.flatMap(step => (step.run ? [step.run] : [])).join('\n') ?? '';
-    const capture = job.steps?.find(step => step.id === 'capture_production_large');
-    const fallback = job.steps?.find(step => step.id === 'capture_hosted_reduced');
-    const checkout = job.steps?.find(step => step.uses === 'actions/checkout@v7');
-    const verifyReleaseSource = job.steps?.find(
-      step => step.name === 'Verify the release tag resolves to the measured commit',
+    const command =
+      Option.getOrUndefined(
+        Option.map(
+          Option.fromNullishOr(
+            Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(job.steps), __effectArrayValues =>
+                EffectArray.flatMap(__effectArrayValues, (step, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues ? (step.run ? [step.run] : []) : [],
+                ),
+              ),
+            ),
+          ),
+          __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, '\n'),
+        ),
+      ) ?? '';
+    const capture = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.id === 'capture_production_large')),
+      ),
     );
-    const admission = job.steps?.find(step => step.id === 'classify_production_large_admission');
-    const upload = job.steps?.find(step => step.uses?.startsWith('actions/upload-artifact@'));
-    const summary = job.steps?.find(step => step.run?.includes('Production-large release evidence'));
-    const enforcement = job.steps?.find(step => step.name === 'Enforce a completed production-shaped observation');
-    const productionInput = workflow.on.workflow_dispatch?.inputs?.include_production_large as
-      {readonly description?: string} | undefined;
+    const fallback = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.id === 'capture_hosted_reduced')),
+      ),
+    );
+    const checkout = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(EffectArray.findFirst(findArray, step => step.uses === 'actions/checkout@v7')),
+      ),
+    );
+    const verifyReleaseSource = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            findArray,
+            step => step.name === 'Verify the release tag resolves to the measured commit',
+          ),
+        ),
+      ),
+    );
+    const admission = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(findArray, step => step.id === 'classify_production_large_admission'),
+        ),
+      ),
+    );
+    const upload = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), effectFindReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(effectFindReceiver, step =>
+            Boolean(
+              Effect.pipe(step.uses, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect.pipe(effectOptionalString, EffectString.startsWith('actions/upload-artifact@')),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    const summary = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), effectFindReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(effectFindReceiver, step =>
+            Boolean(
+              Effect.pipe(step.run, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect.pipe(effectOptionalString, EffectString.includes('Production-large release evidence')),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    const enforcement = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), findArray =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(findArray, step => step.name === 'Enforce a completed production-shaped observation'),
+        ),
+      ),
+    );
+    const productionInputValue = workflow.on.workflow_dispatch?.inputs?.include_production_large;
+    const productionInputSchema = Schema.Struct({description: Schema.optionalKey(Schema.String)});
+    const productionInput = Schema.is(productionInputSchema)(productionInputValue) ? productionInputValue : undefined;
 
     expect(workflow.on.workflow_dispatch?.inputs).toHaveProperty('include_production_large');
     expect(productionInput?.description).toContain('73k-repository/59,936-eligible');
@@ -572,21 +1072,33 @@ describe('platform benchmark workflow', () => {
   });
 
   it('publishes every channel after platform artifacts while retaining independent exact-commit evidence', () => {
-    const workflow = load(readFileSync('.github/workflows/publish.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
-    const releaseEvidence = load(readFileSync('.github/workflows/release-evidence.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
-    const publisher = load(readFileSync('.github/workflows/publish-release-assets.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const workflow = decodeWorkflow(load(readFileSync('.github/workflows/publish.yml', 'utf8'), {schema: JSON_SCHEMA}));
+    const releaseEvidence = decodeWorkflow(
+      load(readFileSync('.github/workflows/release-evidence.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
+    const publisher = decodeWorkflow(
+      load(readFileSync('.github/workflows/publish-release-assets.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     const evidence = releaseEvidence.jobs['production-large-evidence'];
     const linux = workflow.jobs.linux;
     const macos = workflow.jobs.macos;
     const publish = workflow.jobs['publish-release'];
     const release = publisher.jobs.publish;
-    const releaseCommand = release.steps?.flatMap(step => (step.run ? [step.run] : [])).join('\n') ?? '';
+    const releaseCommand =
+      Option.getOrUndefined(
+        Option.map(
+          Option.fromNullishOr(
+            Option.getOrUndefined(
+              Option.map(Option.fromNullishOr(release.steps), __effectArrayValues =>
+                EffectArray.flatMap(__effectArrayValues, (step, __effectArrayIndex) =>
+                  __effectArrayIndex in __effectArrayValues ? (step.run ? [step.run] : []) : [],
+                ),
+              ),
+            ),
+          ),
+          __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, '\n'),
+        ),
+      ) ?? '';
 
     expect(evidence.needs).toBeUndefined();
     expect(releaseEvidence.on.push?.tags).toEqual(['v4.*', 'v5.*']);
@@ -618,11 +1130,25 @@ describe('platform benchmark workflow', () => {
   });
 
   it('reports bounded evidence outcomes without coupling them to publication', () => {
-    const evidence = load(readFileSync('.github/workflows/production-large-evidence.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const evidence = decodeWorkflow(
+      load(readFileSync('.github/workflows/production-large-evidence.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     const job = evidence.jobs['code-graph-production-large'];
-    const summary = job.steps?.find(step => step.run?.includes('Production-large release evidence'));
+    const summary = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), effectFindReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(effectFindReceiver, step =>
+            Boolean(
+              Effect.pipe(step.run, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect.pipe(effectOptionalString, EffectString.includes('Production-large release evidence')),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
 
     expect(summary?.env).toMatchObject({
       ADMISSION_CLASSIFICATION: '${{ steps.classify_production_large_admission.outputs.classification }}',
@@ -636,12 +1162,40 @@ describe('platform benchmark workflow', () => {
   });
 
   it('runs the large-monorepo heavy-tail regression only by schedule or explicit opt-in', () => {
-    const workflow = load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {
-      schema: JSON_SCHEMA,
-    }) as BenchmarkWorkflow;
+    const workflow = decodeWorkflow(
+      load(readFileSync('.github/workflows/benchmarks.yml', 'utf8'), {schema: JSON_SCHEMA}),
+    );
     const job = workflow.jobs['code-graph-heavy-tail'];
-    const capture = job.steps?.find(step => step.run?.includes('bench:code-graph:heavy-tail'));
-    const upload = job.steps?.find(step => step.uses?.startsWith('actions/upload-artifact@'));
+    const capture = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), effectFindReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(effectFindReceiver, step =>
+            Boolean(
+              Effect.pipe(step.run, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect.pipe(effectOptionalString, EffectString.includes('bench:code-graph:heavy-tail')),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    const upload = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(job.steps), effectFindReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(effectFindReceiver, step =>
+            Boolean(
+              Effect.pipe(step.uses, effectOptionalString =>
+                effectOptionalString == null
+                  ? undefined
+                  : Effect.pipe(effectOptionalString, EffectString.startsWith('actions/upload-artifact@')),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
 
     expect(workflow.on.workflow_dispatch?.inputs).toHaveProperty('include_heavy_tail');
     expect(job.if).toContain("github.event_name == 'schedule'");

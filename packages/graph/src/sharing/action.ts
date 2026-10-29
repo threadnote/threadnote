@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export const GRAPH_SHARE_ACTION_DOMAIN = 'threadnote-graph-action-v1';
@@ -50,5 +51,5 @@ export function graphShareMaterializedActionKey(input: GraphShareMaterializedAct
 }
 
 function domainSeparatedActionKey(kind: 'materialize' | 'parse', parts: readonly string[]): GraphShareActionKey {
-  return sha256HexSync([GRAPH_SHARE_ACTION_DOMAIN, kind, ...parts].join('\0'));
+  return sha256HexSync(EffectArray.join([GRAPH_SHARE_ACTION_DOMAIN, kind, ...parts], '\0'));
 }

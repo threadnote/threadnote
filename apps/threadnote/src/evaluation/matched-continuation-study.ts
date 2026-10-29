@@ -1,4 +1,9 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MATCHED_CONTINUATION_STUDY_VERSION = 1 as const;
 export const MATCHED_CONTINUATION_VARIANTS = [
@@ -164,7 +169,7 @@ export function parseMatchedContinuationStudyRuntimeV1(value: unknown): MatchedC
     'continuation study runtime',
   );
   if (runtime.version !== MATCHED_CONTINUATION_STUDY_VERSION) invalid('continuation runtime version must be 1');
-  const tasks = array(runtime.tasks, 'continuation runtime tasks').map((entry, index) => {
+  const tasks = EffectArray.map(array(runtime.tasks, 'continuation runtime tasks'), (entry, index) => {
     const task = object(entry, `continuation runtime task ${index}`);
     exactKeys(task, ['pilotDirectory', 'planPath', 'planSha256', 'taskId'], `continuation runtime task ${index}`);
     return {
@@ -175,15 +180,15 @@ export function parseMatchedContinuationStudyRuntimeV1(value: unknown): MatchedC
     };
   });
   unique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'continuation runtime task ids',
   );
   unique(
-    tasks.map(task => task.planPath),
+    EffectArray.map(tasks, task => task.planPath),
     'continuation runtime plan paths',
   );
   unique(
-    tasks.map(task => task.pilotDirectory),
+    EffectArray.map(tasks, task => task.pilotDirectory),
     'continuation runtime pilot directories',
   );
   return {
@@ -213,13 +218,15 @@ export function assertMatchedContinuationRuntimeMatchesStudyV1(
   if (runtime.exposureAuditSha256 !== study.sourceEvidence.exposureAuditSha256) {
     invalid('continuation runtime exposure audit hash differs from the study');
   }
-  const expected = study.tasks.map(task => task.taskId).sort();
-  const actual = runtime.tasks.map(task => task.taskId).sort();
-  if (expected.length !== actual.length || expected.some((taskId, index) => taskId !== actual[index])) {
+  const expected = EffectArray.map(study.tasks, task => task.taskId).sort();
+  const actual = EffectArray.map(runtime.tasks, task => task.taskId).sort();
+  if (expected.length !== actual.length || EffectArray.some(expected, (taskId, index) => taskId !== actual[index])) {
     invalid('continuation runtime tasks do not exactly cover the study');
   }
   for (const task of study.tasks) {
-    const runtimeTask = runtime.tasks.find(candidate => candidate.taskId === task.taskId);
+    const runtimeTask = EffectOption.getOrUndefined(
+      EffectArray.findFirst(runtime.tasks, candidate => candidate.taskId === task.taskId),
+    );
     if (runtimeTask?.planSha256 !== task.planSha256) {
       invalid(`continuation runtime plan hash differs for task ${task.taskId}`);
     }
@@ -266,23 +273,23 @@ function parseStudyWithoutHash(
     'continuation study source evidence',
   );
   const variants = canonicalVariantSet(array(study.variants, 'continuation study variants'));
-  const tasks = array(study.tasks, 'continuation study tasks')
-    .map(parseTask)
-    .sort((left, right) => left.taskId.localeCompare(right.taskId));
+  const tasks = EffectArray.map(array(study.tasks, 'continuation study tasks'), parseTask).sort((left, right) =>
+    Effect.pipe(left.taskId, EffectString.localeCompare(right.taskId)),
+  );
   unique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'continuation study task ids',
   );
   unique(
-    tasks.map(task => task.clusterId),
+    EffectArray.map(tasks, task => task.clusterId),
     'continuation study cluster ids',
   );
   unique(
-    tasks.map(task => task.repositoryUrl),
+    EffectArray.map(tasks, task => task.repositoryUrl),
     'continuation study repository URLs',
   );
   unique(
-    tasks.map(task => task.planSha256),
+    EffectArray.map(tasks, task => task.planSha256),
     'continuation study plan hashes',
   );
   const parsedGates = {
@@ -320,9 +327,9 @@ function parseStudyWithoutHash(
     ),
   };
   if (tasks.length === 0) invalid('continuation study must contain at least one task');
-  const schedule = array(study.schedule, 'continuation study schedule')
-    .map(parseScheduleEntry)
-    .sort((left, right) => left.globalRunOrder - right.globalRunOrder);
+  const schedule = EffectArray.map(array(study.schedule, 'continuation study schedule'), parseScheduleEntry).sort(
+    (left, right) => left.globalRunOrder - right.globalRunOrder,
+  );
   validateSchedule(tasks, schedule, variants);
   if (study.workflowAccounting !== 'phase-one-plus-phase-two-per-attempt') {
     invalid('continuation study workflow accounting is invalid');
@@ -455,30 +462,30 @@ function validateSchedule(
     invalid('continuation schedule does not contain one attempt per task and variant');
   }
   unique(
-    schedule.map(entry => String(entry.globalRunOrder)),
+    EffectArray.map(schedule, entry => String(entry.globalRunOrder)),
     'continuation schedule global orders',
   );
   unique(
-    schedule.map(entry => entry.runNonce),
+    EffectArray.map(schedule, entry => entry.runNonce),
     'continuation schedule nonces',
   );
-  if (schedule.some((entry, index) => entry.globalRunOrder !== index + 1)) {
+  if (EffectArray.some(schedule, (entry, index) => entry.globalRunOrder !== index + 1)) {
     invalid('continuation schedule global orders must be contiguous');
   }
   for (const task of tasks) {
-    const entries = schedule.filter(entry => entry.taskId === task.taskId);
+    const entries = EffectArray.filter(schedule, entry => entry.taskId === task.taskId);
     if (
       entries.length !== variants.length ||
-      !sameStrings(entries.map(entry => entry.variant).sort(), [...variants].sort()) ||
+      !sameStrings(EffectArray.map(entries, entry => entry.variant).sort(), [...variants].sort()) ||
       !sameNumbers(
-        entries.map(entry => entry.withinTaskRunOrder).sort((left, right) => left - right),
-        variants.map((_, index) => index + 1),
+        EffectArray.map(entries, entry => entry.withinTaskRunOrder).sort((left, right) => left - right),
+        EffectArray.map(variants, (_, index) => index + 1),
       )
     ) {
       invalid(`continuation schedule is incomplete for task ${task.taskId}`);
     }
   }
-  if (schedule.some(entry => !tasks.some(task => task.taskId === entry.taskId))) {
+  if (EffectArray.some(schedule, entry => !EffectArray.some(tasks, task => task.taskId === entry.taskId))) {
     invalid('continuation schedule refers to an unknown task');
   }
 }
@@ -489,13 +496,13 @@ function canonicalStudy(
   return {
     ...input,
     schedule: [...input.schedule].sort((left, right) => left.globalRunOrder - right.globalRunOrder),
-    tasks: [...input.tasks].sort((left, right) => left.taskId.localeCompare(right.taskId)),
+    tasks: [...input.tasks].sort((left, right) => Effect.pipe(left.taskId, EffectString.localeCompare(right.taskId))),
     variants: canonicalVariantSet(input.variants),
   };
 }
 
 function canonicalVariantSet(values: readonly unknown[]): readonly MatchedContinuationVariant[] {
-  const variants = values.map((variant, index) =>
+  const variants = EffectArray.map(values, (variant, index) =>
     literal(variant, MATCHED_CONTINUATION_VARIANTS, `continuation study variant ${index}`),
   );
   unique(variants, 'continuation study variants');
@@ -511,24 +518,24 @@ function canonicalVariantSet(values: readonly unknown[]): readonly MatchedContin
 
 function absolutePath(value: unknown, label: string): string {
   const path = boundedString(value, 1, 4_096, label);
-  if (!path.startsWith('/')) invalid(`${label} must be absolute`);
+  if (!Effect.pipe(path, EffectString.startsWith('/'))) invalid(`${label} must be absolute`);
   return path;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -538,8 +545,8 @@ function boundedString(value: unknown, minimum: number, maximum: number, label: 
     typeof value !== 'string' ||
     value.length < minimum ||
     value.length > maximum ||
-    value.includes('\0') ||
-    value !== value.trim()
+    Effect.pipe(value, EffectString.includes('\0')) ||
+    value !== Effect.pipe(value, EffectString.trim)
   ) {
     invalid(`${label} is invalid`);
   }
@@ -553,10 +560,10 @@ function matchingString(value: unknown, pattern: RegExp, label: string): string 
 }
 
 function integer(value: unknown, minimum: number, maximum: number, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+  if (!checkedIsSafeInteger(value) || value < minimum || value > maximum) {
     invalid(`${label} is invalid`);
   }
-  return value as number;
+  return value;
 }
 
 function literal<const Values extends readonly string[]>(
@@ -573,11 +580,11 @@ function unique(values: readonly string[], label: string): void {
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+  return left.length === right.length && EffectArray.every(left, (value, index) => value === right[index]);
 }
 
 function sameNumbers(left: readonly number[], right: readonly number[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+  return left.length === right.length && EffectArray.every(left, (value, index) => value === right[index]);
 }
 
 function invalid(message: string): never {

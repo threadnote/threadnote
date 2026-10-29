@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {cursorCloudPersonalDocsSection} from './docsCursorCloudPersonal.js';
 import {agentIntegrationDocsSection} from './docsAgentIntegrations.js';
 import {graphCheckpointsDocsArticle, graphCliCommand} from './docsGraphCheckpoints.js';
@@ -32,6 +33,7 @@ import {jevConfigurationBlocks, jevConfigurationRows} from './docsJev.js';
 import {optionalAnonymousTelemetryCliCommand, optionalAnonymousTelemetryDocsArticle} from './docsTelemetry.js';
 import type {CliCommandReference, DocsSection, McpToolReference} from './docsTypes.js';
 import {upgradeFromThreadnote4DocsArticle} from './docsUpgradeV5.js';
+
 export type {
   CliCommandReference,
   DocsArticle,
@@ -1804,7 +1806,7 @@ threadnote report-issue \\
           {
             type: 'table',
             headers: ['Group', 'Commands'],
-            rows: cliCommands.map(item => [item.command, item.summary]),
+            rows: EffectArray.map(cliCommands, item => [item.command, item.summary]),
           },
           {
             type: 'note',
@@ -1824,7 +1826,7 @@ threadnote report-issue \\
           {
             type: 'table',
             headers: ['Tool', 'Toolset', 'Purpose'],
-            rows: mcpTools.map(item => [item.name, item.toolset, item.summary]),
+            rows: EffectArray.map(mcpTools, item => [item.name, item.toolset, item.summary]),
           },
           {
             type: 'note',

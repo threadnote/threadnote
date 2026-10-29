@@ -7,6 +7,9 @@ import {
   type OAuthTokenVerifier,
 } from '@threadnote/remote-memory/oauth';
 import {remoteMemoryError} from '@threadnote/remote-memory/errors';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export const COMPOSER_OAUTH_CLIENT_ID = 'threadnote-composer';
 export const LOCAL_COMPOSER_DEFAULT_LISTEN = '127.0.0.1:18788';
@@ -48,8 +51,8 @@ interface AuthorizationCode {
 
 export async function createLocalIdp(options: LocalIdpOptions): Promise<LocalIdp> {
   const issuer = canonicalizeIssuer(options.issuer);
-  const audience = options.audience.trim();
-  const subject = options.subject.trim();
+  const audience = Effect.pipe(options.audience, EffectString.trim);
+  const subject = Effect.pipe(options.subject, EffectString.trim);
   if (!audience || !subject) {
     throw remoteMemoryError('invalid_request', 'The local OAuth issuer requires an audience and subject.');
   }
@@ -61,7 +64,7 @@ export async function createLocalIdp(options: LocalIdpOptions): Promise<LocalIdp
   publicJwk.use = 'sig';
   const codes = new Map<string, AuthorizationCode>();
   const verifier = createLocalOAuthTokenVerifier({audience, issuer, publicKey});
-  const defaultScope = COMPOSER_OAUTH_SCOPES.join(' ');
+  const defaultScope = EffectArray.join(COMPOSER_OAUTH_SCOPES, ' ');
 
   const issueAccessToken = async (input?: {readonly scope?: string; readonly subject?: string}) => {
     const now = Math.floor(Date.now() / 1000);
@@ -71,8 +74,14 @@ export async function createLocalIdp(options: LocalIdpOptions): Promise<LocalIdp
       iat: now,
       iss: issuer,
       nbf: now,
-      scope: input?.scope?.trim() || defaultScope,
-      sub: input?.subject?.trim() || subject,
+      scope:
+        Effect.pipe(input?.scope, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) || defaultScope,
+      sub:
+        Effect.pipe(input?.subject, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) || subject,
     })
       .setProtectedHeader({alg: 'RS256', kid, typ: 'at+jwt'})
       .sign(privateKey);
@@ -152,7 +161,10 @@ function authorize(
   const challenge = url.searchParams.get('code_challenge') ?? '';
   const method = url.searchParams.get('code_challenge_method') ?? '';
   const state = url.searchParams.get('state') ?? '';
-  const scope = url.searchParams.get('scope')?.trim() || defaultScope;
+  const scope =
+    Effect.pipe(url.searchParams.get('scope'), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) || defaultScope;
   if (clientId !== COMPOSER_OAUTH_CLIENT_ID) return oauthError(400, 'invalid_client');
   if (responseType !== 'code') return oauthError(400, 'unsupported_response_type');
   if (!isAllowedRedirect(redirectUri)) return oauthError(400, 'invalid_request', 'redirect_uri is not allowed');
@@ -164,8 +176,14 @@ function authorize(
     if (stored.expiresAt <= now) codes.delete(storedCode);
   }
   if (codes.size >= MAX_OUTSTANDING_AUTHORIZATION_CODES) {
-    const oldest = [...codes.entries()].reduce((current, candidate) =>
-      candidate[1].expiresAt < current[1].expiresAt ? candidate : current,
+    const oldest = Effect.pipe([...codes.entries()], __effectReduceValues =>
+      EffectArray.reduce(
+        EffectArray.drop(__effectReduceValues, 1),
+        Effect.Option.getOrElse(EffectArray.head(__effectReduceValues), () => {
+          throw new TypeError('Reduce of empty array with no initial value');
+        }),
+        (current, candidate) => (candidate[1].expiresAt < current[1].expiresAt ? candidate : current),
+      ),
     );
     codes.delete(oldest[0]);
   }
@@ -251,7 +269,7 @@ function randomUrlSafe(bytes: number): string {
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
   for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+    bytes[index] = Number.parseInt(Effect.pipe(hex, EffectString.slice(index * 2, index * 2 + 2)), 16);
   }
   return bytes;
 }
@@ -259,14 +277,29 @@ function hexToBytes(hex: string): Uint8Array {
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  return Effect.pipe(
+    btoa(binary),
+    EffectString.replaceAll('+', '-'),
+    EffectString.replaceAll('/', '_'),
+    EffectString.replaceAll('=', ''),
+  );
 }
 
 function equalSecret(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
   let diff = 0;
   for (let index = 0; index < left.length; index += 1) {
-    diff |= left.charCodeAt(index) ^ right.charCodeAt(index);
+    diff |=
+      Effect.pipe(
+        left,
+        EffectString.charCodeAt(index),
+        Effect.Option.getOrElse(() => NaN),
+      ) ^
+      Effect.pipe(
+        right,
+        EffectString.charCodeAt(index),
+        Effect.Option.getOrElse(() => NaN),
+      );
   }
   return diff === 0;
 }
@@ -280,7 +313,7 @@ function canonicalizeIssuer(value: string): string {
   if (url.username || url.password || url.search || url.hash || url.pathname !== '/') {
     throw remoteMemoryError('invalid_request', 'The local OAuth issuer must be a credential-free origin.');
   }
-  return url.toString().replace(/\/$/u, '');
+  return Effect.pipe(url.toString(), EffectString.replace(/\/$/u, ''));
 }
 
 function jsonResponse(status: number, body: unknown): Response {

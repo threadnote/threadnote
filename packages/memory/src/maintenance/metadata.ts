@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {
@@ -8,6 +9,8 @@ import {
 } from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {migrateMemoryDocumentToCurrent} from '../migrations.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MAINTENANCE_METADATA_VERSION = 1 as const;
 const OWNER_MAXIMUM_CHARACTERS = 128;
@@ -120,10 +123,17 @@ export function rewriteMaintenanceMetadata(
   patch: MaintenanceMetadataPatchV1,
   updatedAt: string,
 ): string {
-  const canonical = migrateMemoryDocumentToCurrent(canonicalMemoryDocumentContent(content)).replace(/\r\n?/gu, '\n');
-  const separator = canonical.indexOf('\n\n');
-  const header = separator === -1 ? canonical : canonical.slice(0, separator);
-  const body = separator === -1 ? '' : canonical.slice(separator + 2);
+  const canonical = Effect.pipe(
+    migrateMemoryDocumentToCurrent(canonicalMemoryDocumentContent(content)),
+    EffectString.replace(/\r\n?/gu, '\n'),
+  );
+  const separator = Effect.pipe(
+    canonical,
+    EffectString.indexOf('\n\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const header = separator === -1 ? canonical : Effect.pipe(canonical, EffectString.slice(0, separator));
+  const body = separator === -1 ? '' : Effect.pipe(canonical, EffectString.slice(separator + 2));
   const desired = new Map<string, string | undefined>([
     ['owner', patch.owner === undefined ? headerValue(header, 'owner') : (patch.owner ?? undefined)],
     [
@@ -134,8 +144,22 @@ export function rewriteMaintenanceMetadata(
     ['updated_at', updatedAt],
   ]);
   const seen = new Set<string>();
-  const lines = header.split('\n').flatMap(line => {
-    const key = line.slice(0, line.indexOf(':')).trim();
+  const lines = EffectArray.flatMap(Effect.pipe(header, EffectString.split('\n')), line => {
+    const key = Effect.pipe(line, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(
+        __effectPipeInput,
+        EffectString.slice(
+          0,
+          Effect.pipe(
+            line,
+            EffectString.indexOf(':'),
+            Effect.Option.getOrElse(() => -1),
+          ),
+        ),
+      );
+      const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.trim);
+      return __effectPipeStage1;
+    });
     if (!desired.has(key)) return [line];
     if (seen.has(key)) return [line]; // malformed duplicates are preserved; eligibility rejects their parsed ambiguity.
     seen.add(key);
@@ -145,16 +169,19 @@ export function rewriteMaintenanceMetadata(
   for (const key of ['owner', 'review_after', 'valid_to', 'updated_at']) {
     if (!seen.has(key) && desired.get(key) !== undefined) lines.push(`${key}: ${desired.get(key)}`);
   }
-  return body ? `${lines.join('\n')}\n\n${body}` : lines.join('\n');
+  return body ? `${EffectArray.join(lines, '\n')}\n\n${body}` : EffectArray.join(lines, '\n');
 }
 
 function selectTarget(records: readonly MemoryRecord[], selector: string): MemoryRecord | MaintenanceMetadataPreviewV1 {
   const identity = memoryIdFromIdentityAlias(selector);
   const matches =
     identity === undefined
-      ? records.filter(record => record.uri === selector)
-      : records.filter(record => record.metadata.memoryId === identity);
-  const eligible = matches.map(eligibleRecord).filter((record): record is MemoryRecord => record !== undefined);
+      ? EffectArray.filter(records, record => record.uri === selector)
+      : EffectArray.filter(records, record => record.metadata.memoryId === identity);
+  const eligible = EffectArray.filter(
+    EffectArray.map(matches, eligibleRecord),
+    (record): record is MemoryRecord => record !== undefined,
+  );
   if (eligible.length !== 1) {
     return conflict(
       eligible.length === 0 ? 'target-ineligible' : 'ambiguous-identity',
@@ -173,8 +200,9 @@ function eligibleRecord(record: MemoryRecord): MemoryRecord | undefined {
 }
 
 function metadataDatesAreCanonical(record: MemoryRecord): boolean {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const header = canonicalMemoryDocumentContent(record.content).split(/\r?\n\r?\n/u, 1)[0] ?? '';
-  return ['owner', 'review_after', 'valid_to'].every(key => {
+  return EffectArray.every(['owner', 'review_after', 'valid_to'], key => {
     const values = headerValues(header, key);
     if (values.length > 1) return false;
     const value = values[0];
@@ -205,8 +233,13 @@ function validOwner(value: string): boolean {
   return (
     value.length > 0 &&
     value.length <= OWNER_MAXIMUM_CHARACTERS &&
-    ![...value].some(character => {
-      const code = character.codePointAt(0) ?? 0;
+    !EffectArray.some([...value], character => {
+      const code =
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        ) ?? 0;
       return code < 0x20 || code === 0x7f;
     }) &&
     !/\b(?:api[_-]?key|token|secret|password)\b\s*[:=]/iu.test(value) &&
@@ -242,22 +275,31 @@ function patchMatches(record: MemoryRecord, patch: MaintenanceMetadataPatchV1): 
 
 function normalizedPatch(patch: MaintenanceMetadataPatchV1): MaintenanceMetadataPatchV1 {
   return {
-    ...(patch.owner === undefined ? {} : {owner: patch.owner === null ? null : patch.owner.trim()}),
+    ...(patch.owner === undefined
+      ? {}
+      : {owner: patch.owner === null ? null : Effect.pipe(patch.owner, EffectString.trim)}),
     ...(patch.reviewAfter === undefined ? {} : {reviewAfter: patch.reviewAfter}),
     ...(patch.validTo === undefined ? {} : {validTo: patch.validTo}),
   };
 }
 
 function headerValue(headerOrContent: string, key: string): string | undefined {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const header = headerOrContent.split(/\r?\n\r?\n/u, 1)[0] ?? '';
   const values = headerValues(header, key);
   return values.length === 1 && values[0] ? values[0] : undefined;
 }
 
 function headerValues(header: string, key: string): readonly string[] {
-  return header.split(/\r?\n/u).flatMap(line => {
+  return EffectArray.flatMap(Effect.pipe(header, EffectString.split(/\r?\n/u)), line => {
     const match = new RegExp(`^${key}:\\s*(.*)$`, 'u').exec(line);
-    return match ? [match[1]?.trim() ?? ''] : [];
+    return match
+      ? [
+          Effect.pipe(match[1], effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ) ?? '',
+        ]
+      : [];
   });
 }
 
@@ -268,12 +310,14 @@ function memoryContentHash(content: string): string {
 function proposalId(
   proposal: Omit<MaintenanceMetadataProposalV1, 'proposalId' | 'revision'> | MaintenanceMetadataProposalV1,
 ) {
-  const {proposalId: _proposalId, revision: _revision, ...payload} = proposal as MaintenanceMetadataProposalV1;
-  return `maintenance-metadata-${sha256HexSync(JSON.stringify(payload)).slice(0, 40)}`;
+  const withoutRevision = 'revision' in proposal ? (({revision: _revision, ...rest}) => rest)(proposal) : proposal;
+  const payload =
+    'proposalId' in withoutRevision ? (({proposalId: _proposalId, ...rest}) => rest)(withoutRevision) : withoutRevision;
+  return `maintenance-metadata-${Effect.pipe(sha256HexSync(JSON.stringify(payload)), EffectString.slice(0, 40))}`;
 }
 
 function proposalRevision(proposal: Omit<MaintenanceMetadataProposalV1, 'revision'> | MaintenanceMetadataProposalV1) {
-  const {revision: _revision, ...payload} = proposal as MaintenanceMetadataProposalV1;
+  const payload = 'revision' in proposal ? (({revision: _revision, ...rest}) => rest)(proposal) : proposal;
   return sha256HexSync(JSON.stringify(payload));
 }
 

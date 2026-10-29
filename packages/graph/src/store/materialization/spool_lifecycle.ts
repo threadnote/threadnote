@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {Effect, FileSystem, Option} from 'effect';
 import type * as SqlClient from 'effect/sql/SqlClient';
@@ -44,6 +45,8 @@ import {persistedFullBatchFingerprint} from '../staging_core.js';
 import type {CodeGraphStoreRuntime} from '../runtime.js';
 import {classifyCodeGraphStoreFailure} from '../failure.js';
 import {CODE_GRAPH_SCHEMA_VERSION, CodeGraphStoreError, type CodeGraphStoreFailure} from '../../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface PersistentSpoolSnapshotRow {
   readonly extractor_set: string;
@@ -100,12 +103,12 @@ export const appendPersistentMaterializationSpoolFactBatches = Effect.fn(
           batch.monikers ?? [],
         ),
         batchIndex: batch.batchIndex,
-        candidateCount: spool.references.reduce((total, reference) => total + reference.candidateCount, 0),
+        candidateCount: EffectArray.reduce(spool.references, 0, (total, reference) => total + reference.candidateCount),
         edgeCount: batch.edges.length,
         factBytes: batch.finalFactBytes ?? 0,
         lookupCount: spool.lookup.length,
         referenceCount: full.boundedReferences.length,
-        reexportCount: full.reexportsByReferenceBatch.reduce((total, rows) => total + rows.length, 0),
+        reexportCount: EffectArray.reduce(full.reexportsByReferenceBatch, 0, (total, rows) => total + rows.length),
         rowCount: spool.rowCount,
         sourceBytes: batch.sourceBytes ?? 0,
         symbolCount: batch.symbols.length,
@@ -268,8 +271,8 @@ export const publishPersistentMaterializationSpool = Effect.fn('codeGraph.publis
 );
 
 export function materializationSpoolReadOnlyUri(filePath: string): string {
-  const normalized = filePath.replaceAll('\\', '/');
-  const absolute = normalized.startsWith('/') ? normalized : `/${normalized}`;
+  const normalized = Effect2.pipe(filePath, EffectString.replaceAll('\\', '/'));
+  const absolute = Effect2.pipe(normalized, EffectString.startsWith('/')) ? normalized : `/${normalized}`;
   const uri = new URL(`file://${absolute}`);
   uri.searchParams.set('immutable', '1');
   uri.searchParams.set('mode', 'ro');
@@ -283,8 +286,15 @@ export function materializationSpoolReadOnlyUri(filePath: string): string {
  * be opened. Every statement against this schema is a fixed SELECT; the main
  * graph database remains the only write target.
  */
+export type PersistentMaterializationSpoolSql = {
+  readonly unsafe: (
+    statement: string,
+    parameters?: ReadonlyArray<unknown>,
+  ) => Effect.Effect<ReadonlyArray<object>, unknown>;
+};
+
 export function attachPersistentMaterializationSpool(
-  sql: SqlClient.SqlClient,
+  sql: PersistentMaterializationSpoolSql,
   spoolPath: string,
 ): Effect.Effect<'readonly-uri' | 'verified-path-fallback', unknown> {
   return sql.unsafe('ATTACH DATABASE ? AS materialization_spool', [materializationSpoolReadOnlyUri(spoolPath)]).pipe(
@@ -366,7 +376,10 @@ function samePreparedSpoolSurfaces(
 ): boolean {
   return (
     left.length === right.length &&
-    left.every((surface, index) => surface.name === right[index]?.name && surface.rowCount === right[index]?.rowCount)
+    EffectArray.every(
+      left,
+      (surface, index) => surface.name === right[index]?.name && surface.rowCount === right[index]?.rowCount,
+    )
   );
 }
 

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -31,12 +32,15 @@ it('installs, refreshes, and removes only the managed Codex UserPromptSubmit hoo
       execute(process.execPath, [entry, ...args], {cwd: root, env: environment, timeout: 20_000});
 
     await run(['install-hooks', 'codex', '--apply']);
-    const installed = JSON.parse(await readFile(hooksPath, 'utf8')) as typeof original & {
-      hooks: typeof original.hooks & {UserPromptSubmit: unknown[]};
-    };
-    expect(installed.owner).toBe('caller');
-    expect(installed.hooks.Stop).toEqual(original.hooks.Stop);
-    expect(installed.hooks.UserPromptSubmit).toEqual([
+    const parsedInstalled: unknown = JSON.parse(await readFile(hooksPath, 'utf8'));
+    if (!Predicate.isObject(parsedInstalled) || !Predicate.isObject(parsedInstalled.hooks))
+      throw new Error('Installed Codex hooks configuration must contain a hooks object.');
+    const installedHooks = parsedInstalled.hooks;
+    const userPromptSubmit = installedHooks.UserPromptSubmit;
+    if (!EffectArray.isArray(userPromptSubmit)) throw new Error('Installed UserPromptSubmit hooks must be an array.');
+    expect(parsedInstalled.owner).toBe('caller');
+    expect(installedHooks.Stop).toEqual(original.hooks.Stop);
+    expect(userPromptSubmit).toEqual([
       {
         hooks: [
           {

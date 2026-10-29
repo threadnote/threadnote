@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import type {ProjectManifest} from '@threadnote/workspace/config';
 import type {CodeGraphInventory, CodeGraphInventoryOptions} from './models.js';
@@ -31,14 +32,17 @@ export function codeGraphInventoryScopeMetadata(
   overlay: string | undefined,
 ) {
   if (observation === undefined) return {};
-  const committed = accepted.map(entry => [entry.path, entry.mode, entry.blobId]);
+  const committed = EffectArray.map(accepted, entry => [entry.path, entry.mode, entry.blobId]);
   return {
     scope: observation.scope,
     scopeProject: options.project,
     scopeIncludeOpaqueCorpusAssets: options.includeOpaqueCorpusAssets !== false,
     scopeIncludeOverlay: options.includeOverlay,
     scopeCatalogFingerprint: observation.catalog.fingerprint,
-    scopeExclusions: {files: excluded.length, bytes: excluded.reduce((total, entry) => total + entry.size, 0)},
+    scopeExclusions: {
+      files: excluded.length,
+      bytes: EffectArray.reduce(excluded, 0, (total, entry) => total + entry.size),
+    },
     scopeInventoryFingerprint: sha256HexSync(JSON.stringify({committed, overlay: overlay ?? null})),
     scopeCommittedInventoryFingerprint: sha256HexSync(JSON.stringify({committed, overlay: null})),
   };
@@ -129,7 +133,7 @@ export const observeCodeGraphIndexScope = Effect.fn('codeGraph.observeIndexScope
     options.committed?.declared ??
     (yield* discoverDeclaredSourceRoots(
       identity,
-      entries.filter(entry => !policyExcluded.has(entry.path)),
+      EffectArray.filter(entries, entry => !policyExcluded.has(entry.path)),
       languagePacks,
     ));
   const ignoreSources =
@@ -137,7 +141,10 @@ export const observeCodeGraphIndexScope = Effect.fn('codeGraph.observeIndexScope
   const ignoreRules = compileThreadnoteIgnore(ignoreSources.committed, ignoreSources.local);
   const ignored = yield* ignoredPaths(identity.repoRoot, [...declared.files.keys()]);
   const files = new Map(
-    [...declared.files].filter(([relative]) => !ignored.has(relative) && !isIgnoredByThreadnote(relative, ignoreRules)),
+    EffectArray.filter(
+      [...declared.files],
+      ([relative]) => !ignored.has(relative) && !isIgnoredByThreadnote(relative, ignoreRules),
+    ),
   );
   if (options.includeOverlay !== false) {
     const overlay = yield* readDirtyOverlay(
@@ -150,7 +157,7 @@ export const observeCodeGraphIndexScope = Effect.fn('codeGraph.observeIndexScope
       declared.projectRoots,
       declared.sourceRoots,
       policyExcluded,
-      new Map(entries.map(entry => [entry.path, entry])),
+      new Map(EffectArray.map(entries, entry => [entry.path, entry])),
       undefined,
       true,
       undefined,

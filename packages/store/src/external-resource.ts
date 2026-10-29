@@ -1,7 +1,16 @@
+import {
+  isOneOf as checkedIsOneOf,
+  isFiniteNumber as checkedIsFiniteNumber,
+  isSafeInteger as checkedIsSafeInteger,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {Clock, Context, Effect, FileSystem, Option, Path, Result} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalResourceUri, parseResourceId, validatePortableSegment} from './resource-id.js';
 import type {ResourceStoreLocation} from './resource-store.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const SUPERHUMAN_ROOT = 'threadnote://resources/external/superhuman';
 const POCKET_ROOT = 'threadnote://resources/external/pocket';
@@ -91,9 +100,11 @@ export class ExternalSourcePolicy extends Context.Service<
 >()('@threadnote/store/external-resource/ExternalSourcePolicy') {}
 
 export function isExternalResourceUri(uri: string): boolean {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const value = uri.split('#', 1)[0];
-  return [SUPERHUMAN_ROOT, POCKET_ROOT, LINEAR_ROOT, GITHUB_ROOT].some(
-    root => value === root || value.startsWith(`${root}/`),
+  return EffectArray.some(
+    [SUPERHUMAN_ROOT, POCKET_ROOT, LINEAR_ROOT, GITHUB_ROOT],
+    root => value === root || Effect2.pipe(value, EffectString.startsWith(`${root}/`)),
   );
 }
 
@@ -134,14 +145,16 @@ export function serializeExternalSourceReceipt(receipt: ExternalSourceReceipt): 
 }
 
 export function parseExternalResourceIdentity(uri: string): ExternalResourceIdentity | undefined {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
   const value = uri.split('#', 1)[0];
   const match =
     /^threadnote:\/\/resources\/external\/(superhuman|pocket|linear|github)\/([^/]+)\/docs\/([^/]+)\/pages\/([^/]+)\/([^/]+)\.md$/.exec(
       value,
     );
   if (!match) return undefined;
+  if (!isExternalProvider(match[1])) return undefined;
   const identity = {
-    provider: match[1] as ExternalProvider,
+    provider: match[1],
     sourceId: match[2],
     documentId: match[3],
     pageId: match[4],
@@ -160,13 +173,14 @@ export function parseExternalResource(
   content: string,
 ): {readonly metadata: ExternalResourceMetadata; readonly body: string} | undefined {
   const identity = parseExternalResourceIdentity(uri);
-  if (!identity || !content.startsWith(ENVELOPE)) return undefined;
+  if (!identity || !Effect2.pipe(content, EffectString.startsWith(ENVELOPE))) return undefined;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const end = content.indexOf('\n\n', ENVELOPE.length);
   if (end < 0 || end - ENVELOPE.length > 8192) return undefined;
   try {
-    const metadata: unknown = JSON.parse(content.slice(ENVELOPE.length, end));
+    const metadata: unknown = JSON.parse(Effect2.pipe(content, EffectString.slice(ENVELOPE.length, end)));
     if (!validMetadata(metadata) || externalResourceUri(metadata) !== externalResourceUri(identity)) return undefined;
-    return {metadata, body: content.slice(end + 2)};
+    return {metadata, body: Effect2.pipe(content, EffectString.slice(end + 2))};
   } catch {
     return undefined;
   }
@@ -177,7 +191,11 @@ export function serializeExternalDocumentManifest(manifest: ExternalDocumentMani
   const content =
     JSON.stringify({
       ...manifest,
-      chunks: Object.fromEntries(Object.entries(manifest.chunks).sort(([left], [right]) => left.localeCompare(right))),
+      chunks: EffectRecord.fromEntries(
+        EffectRecord.toEntries(manifest.chunks).sort(([left], [right]) =>
+          Effect2.pipe(left, EffectString.localeCompare(right)),
+        ),
+      ),
     }) + '\n';
   if (new TextEncoder().encode(content).byteLength > MAX_RECEIPT_BYTES)
     throw new Error('External document manifest exceeds its budget.');
@@ -299,16 +317,17 @@ export const loadExternalResourceAccess = Effect.fn('external.loadAccess')(funct
             : SUPERHUMAN_ROOT,
     );
     const sources = yield* safeDirectories(fs, path, root);
-    for (const sourceId of sources.filter(value => SOURCE_ID.test(value))) {
+    for (const sourceId of EffectArray.filter(sources, value => SOURCE_ID.test(value))) {
       const policy = yield* policyService.value.current(location, sourceId, provider);
       if (policy?.enabled !== true) continue;
       const sourceReceipt = yield* readExternalSourceReceipt(location, sourceId, provider);
-      for (const documentId of (yield* safeDirectories(fs, path, path.join(root, sourceId, 'docs'))).filter(value =>
-        ID.test(value),
+      for (const documentId of EffectArray.filter(
+        yield* safeDirectories(fs, path, path.join(root, sourceId, 'docs')),
+        value => ID.test(value),
       )) {
         const manifest = yield* readExternalDocumentManifest(location, sourceId, documentId, provider);
         if (!manifestPermits(manifest, policy, sourceReceipt, now)) continue;
-        for (const [uri, expectedHash] of Object.entries(manifest!.chunks)) allowed[uri] = expectedHash;
+        for (const [uri, expectedHash] of EffectRecord.toEntries(manifest!.chunks)) allowed[uri] = expectedHash;
       }
     }
   }
@@ -328,7 +347,15 @@ function manifestPermits(
     (manifest.provider === 'github'
       ? sourceReceipt?.status === 'active' &&
         manifest.accessEpoch !== undefined &&
-        !sourceReceipt.deniedRepositoryIds?.some(id => manifest.documentId.startsWith(`r-${id}-`))
+        !Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(sourceReceipt.deniedRepositoryIds), __effectArrayReceiver =>
+            EffectArray.some(
+              __effectArrayReceiver,
+              __effectArrayValue =>
+                !!(id => Effect2.pipe(manifest.documentId, EffectString.startsWith(`r-${id}-`)))(__effectArrayValue),
+            ),
+          ),
+        )
       : sourceReceipt === undefined ||
         (manifest.provider === 'pocket' || manifest.provider === 'linear'
           ? sourceReceipt.status === 'active'
@@ -419,13 +446,14 @@ function safeDirectories(
   }).pipe(Effect.orElseSucceed(() => []));
 }
 
-function validIdentity(value: ExternalResourceIdentity): boolean {
+function validIdentity(value: unknown): value is ExternalResourceIdentity {
   if (
-    (value.provider !== undefined &&
-      value.provider !== 'superhuman' &&
-      value.provider !== 'pocket' &&
-      value.provider !== 'linear' &&
-      value.provider !== 'github') ||
+    !record(value) ||
+    (value.provider !== undefined && !isExternalProvider(value.provider)) ||
+    typeof value.sourceId !== 'string' ||
+    typeof value.documentId !== 'string' ||
+    typeof value.pageId !== 'string' ||
+    typeof value.chunkId !== 'string' ||
     !SOURCE_ID.test(value.sourceId) ||
     !ID.test(value.documentId) ||
     !ID.test(value.pageId) ||
@@ -441,8 +469,12 @@ function validIdentity(value: ExternalResourceIdentity): boolean {
   }
 }
 
+function isExternalProvider(value: unknown): value is ExternalProvider {
+  return value === 'superhuman' || value === 'pocket' || value === 'linear' || value === 'github';
+}
+
 function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 export function isExternalResourceMetadata(value: unknown): value is ExternalResourceMetadata {
@@ -462,7 +494,8 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
       value.provider !== 'pocket' &&
       value.provider !== 'linear' &&
       value.provider !== 'github') ||
-    !['sourceId', 'documentId', 'pageId', 'chunkId', 'title', 'rendererVersion', 'scrubberVersion'].every(
+    !EffectArray.every(
+      ['sourceId', 'documentId', 'pageId', 'chunkId', 'title', 'rendererVersion', 'scrubberVersion'],
       key => typeof value[key] === 'string',
     )
   )
@@ -470,10 +503,11 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
   if (value.provider === 'github' ? value.coverage !== 'github-conversation' : value.coverage === 'github-conversation')
     return false;
   if (
-    !validIdentity(value as unknown as ExternalResourceIdentity) ||
+    !validIdentity(value) ||
     (value.project !== null &&
       (typeof value.project !== 'string' || value.project.length === 0 || value.project.length > 256)) ||
-    (value.title as string).length > 1024
+    typeof value.title !== 'string' ||
+    value.title.length > 1024
   )
     return false;
   if (
@@ -501,7 +535,8 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
       if (
         (value.provider === 'linear'
           ? url.origin !== 'https://linear.app'
-          : url.origin !== 'https://docs.superhuman.com' || !url.pathname.startsWith('/d/')) ||
+          : url.origin !== 'https://docs.superhuman.com' ||
+            !Effect2.pipe(url.pathname, EffectString.startsWith('/d/'))) ||
         url.username ||
         url.password ||
         url.search
@@ -530,21 +565,21 @@ function validManifest(value: unknown): value is ExternalDocumentManifest {
     !ID.test(value.documentId) ||
     typeof value.configFingerprint !== 'string' ||
     !HASH.test(value.configFingerprint) ||
-    !['active', 'quarantined', 'pending'].includes(value.status as string) ||
+    !checkedIsOneOf(['active', 'quarantined', 'pending'], value.status) ||
     typeof value.fetchedAt !== 'number' ||
-    !Number.isFinite(value.fetchedAt) ||
+    !checkedIsFiniteNumber(value.fetchedAt) ||
     value.fetchedAt < 0 ||
     typeof value.maxStaleMilliseconds !== 'number' ||
-    !Number.isFinite(value.maxStaleMilliseconds) ||
+    !checkedIsFiniteNumber(value.maxStaleMilliseconds) ||
     value.maxStaleMilliseconds <= 0 ||
     !record(value.chunks) ||
-    Object.keys(value.chunks).length > 2048
+    EffectRecord.keys(value.chunks).length > 2048
   )
     return false;
   if (
     value.nextAttemptAt !== undefined &&
     (typeof value.nextAttemptAt !== 'number' ||
-      !Number.isFinite(value.nextAttemptAt) ||
+      !checkedIsFiniteNumber(value.nextAttemptAt) ||
       value.nextAttemptAt < 0 ||
       value.nextAttemptAt >= 8_640_000_000_000_000)
   )
@@ -557,7 +592,7 @@ function validManifest(value: unknown): value is ExternalDocumentManifest {
     (typeof value.inventoryGeneration !== 'string' || !HASH.test(value.inventoryGeneration))
   )
     return false;
-  return Object.entries(value.chunks).every(([uri, hash]) => {
+  return EffectArray.every(EffectRecord.toEntries(value.chunks), ([uri, hash]) => {
     const identity = parseExternalResourceIdentity(uri);
     return (
       identity !== undefined &&
@@ -594,9 +629,9 @@ function validSourceReceipt(value: unknown): value is ExternalSourceReceipt {
   if (
     value.deniedRepositoryIds !== undefined &&
     (value.provider !== 'github' ||
-      !Array.isArray(value.deniedRepositoryIds) ||
+      !EffectArray.isArray(value.deniedRepositoryIds) ||
       value.deniedRepositoryIds.length > 100 ||
-      value.deniedRepositoryIds.some(id => typeof id !== 'string' || !/^[1-9][0-9]*$/.test(id)) ||
+      EffectArray.some(value.deniedRepositoryIds, id => typeof id !== 'string' || !/^[1-9][0-9]*$/.test(id)) ||
       new Set(value.deniedRepositoryIds).size !== value.deniedRepositoryIds.length)
   )
     return false;
@@ -604,23 +639,19 @@ function validSourceReceipt(value: unknown): value is ExternalSourceReceipt {
     value.repositoryDenialGenerations !== undefined &&
     (value.provider !== 'github' ||
       !record(value.repositoryDenialGenerations) ||
-      Object.keys(value.repositoryDenialGenerations).length > 100 ||
-      Object.entries(value.repositoryDenialGenerations).some(
+      EffectRecord.keys(value.repositoryDenialGenerations).length > 100 ||
+      EffectArray.some(
+        EffectRecord.toEntries(value.repositoryDenialGenerations),
         ([id, generation]) =>
           !/^[1-9][0-9]{0,127}$/.test(id) || typeof generation !== 'string' || !HASH.test(generation),
       ))
   )
     return false;
-  if (
-    value.inventoryPage !== undefined &&
-    (!Number.isSafeInteger(value.inventoryPage) || (value.inventoryPage as number) < 1)
-  )
+  if (value.inventoryPage !== undefined && (!checkedIsSafeInteger(value.inventoryPage) || value.inventoryPage < 1))
     return false;
   if (
     value.inventoryOffset !== undefined &&
-    (!Number.isSafeInteger(value.inventoryOffset) ||
-      (value.inventoryOffset as number) < 0 ||
-      (value.inventoryOffset as number) > 100)
+    (!checkedIsSafeInteger(value.inventoryOffset) || value.inventoryOffset < 0 || value.inventoryOffset > 100)
   )
     return false;
   if (
@@ -630,13 +661,13 @@ function validSourceReceipt(value: unknown): value is ExternalSourceReceipt {
     return false;
   if (
     value.completedAt !== undefined &&
-    (typeof value.completedAt !== 'number' || !Number.isFinite(value.completedAt) || value.completedAt < 0)
+    (typeof value.completedAt !== 'number' || !checkedIsFiniteNumber(value.completedAt) || value.completedAt < 0)
   )
     return false;
   if (
     value.nextAttemptAt !== undefined &&
     (typeof value.nextAttemptAt !== 'number' ||
-      !Number.isFinite(value.nextAttemptAt) ||
+      !checkedIsFiniteNumber(value.nextAttemptAt) ||
       value.nextAttemptAt < 0 ||
       value.nextAttemptAt >= 8_640_000_000_000_000)
   )

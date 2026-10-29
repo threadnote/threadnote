@@ -1,11 +1,29 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it, vi} from 'vitest';
 import {it as effectIt} from '@effect/vitest';
 import type {FetchLike} from '@modelcontextprotocol/sdk/shared/transport.js';
 import fc from 'fast-check';
-import {Effect, Redacted} from 'effect';
+import {Effect, Redacted, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {provideSuperhumanTestLayer} from './layer.js';
 import {discoverSuperhumanTools, ProbeError, probeSuperhumanTools, SUPERHUMAN_MCP_URL} from '../src/probe.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const McpRequestSchema = Schema.StructWithRest(
+  Schema.Struct({
+    id: Schema.optionalKey(Schema.Unknown),
+    method: Schema.String,
+    params: Schema.optionalKey(
+      Schema.StructWithRest(Schema.Struct({cursor: Schema.optionalKey(Schema.String)}), [JsonRecordSchema]),
+    ),
+  }),
+  [JsonRecordSchema],
+);
+function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown): S['Type'] {
+  return Schema.decodeUnknownSync(schema)(value);
+}
 
 const token = Redacted.make('synthetic-private-token-123456');
 
@@ -18,7 +36,7 @@ function syntheticFetch(
   onRequest?: (method: string, init: RequestInit) => void,
 ): FetchLike {
   return async (_url: RequestInfo | URL, init?: RequestInit) => {
-    const request = JSON.parse(String(init?.body)) as {id?: unknown; method: string; params?: {cursor?: string}};
+    const request = decodeJson(McpRequestSchema, JSON.parse(String(init?.body)));
     onRequest?.(request.method, init ?? {});
     switch (request.method) {
       case 'initialize':
@@ -45,8 +63,8 @@ async function errorCode(work: Promise<unknown>) {
   try {
     await work;
   } catch (error) {
-    expect(error).toBeInstanceOf(ProbeError);
-    return (error as ProbeError).code;
+    if (!Schema.is(ProbeError)(error)) throw error;
+    return error.code;
   }
   throw new Error('expected probe failure');
 }
@@ -89,7 +107,7 @@ describe('Superhuman Docs MCP discovery probe', () => {
       new Response(null, {status: 302, headers: {Location: 'https://example.com'}});
     expect(await errorCode(discoverSuperhumanTools(token, {fetch: redirect}))).toBe('transport-rejected');
     const oversize: FetchLike = async () =>
-      new Response('x'.repeat(256 * 1024 + 1), {
+      new Response(Effect2.pipe('x', EffectString.repeat(256 * 1024 + 1)), {
         headers: {'content-type': 'application/json'},
       });
     expect(await errorCode(discoverSuperhumanTools(token, {fetch: oversize}))).toBe('response-too-large');
@@ -120,9 +138,11 @@ describe('Superhuman Docs MCP discovery probe', () => {
     const echoed = Redacted.value(token);
     const output: string[] = [];
     const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-array -- Preserve JavaScript ToString for arbitrary console arguments, including nullish and Symbol values.
       output.push(args.join(' '));
     });
     const error = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-array -- Preserve JavaScript ToString for arbitrary console arguments, including nullish and Symbol values.
       output.push(args.join(' '));
     });
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(chunk => {
@@ -143,7 +163,7 @@ describe('Superhuman Docs MCP discovery probe', () => {
         ],
       }));
       expect(await errorCode(discoverSuperhumanTools(token, {fetch: fetchImpl}))).toBe('catalog-invalid');
-      expect(output.join('\n')).not.toContain(echoed);
+      expect(EffectArray.join(output, '\n')).not.toContain(echoed);
       expect(output).toEqual([]);
     } finally {
       warn.mockRestore();
@@ -157,7 +177,7 @@ describe('Superhuman Docs MCP discovery probe', () => {
     let cancelled = 0;
     const json = syntheticFetch(() => ({tools: []}));
     const fetchImpl: FetchLike = async (url, init) => {
-      const request = JSON.parse(String(init?.body)) as {id?: unknown; method: string};
+      const request = decodeJson(McpRequestSchema, JSON.parse(String(init?.body)));
       if (request.method !== 'tools/list') return json(url, init);
       const event = `event: message\ndata: ${JSON.stringify({jsonrpc: '2.0', id: request.id, result: {tools: [tool('sse_read')]}})}\n\n`;
       return new Response(
@@ -177,7 +197,7 @@ describe('Superhuman Docs MCP discovery probe', () => {
       requestTimeoutMs: 100,
       totalTimeoutMs: 500,
     });
-    expect(catalog.tools.map(item => item.name)).toEqual(['sse_read']);
+    expect(EffectArray.map(catalog.tools, item => item.name)).toEqual(['sse_read']);
     expect(cancelled).toBe(1);
   });
 
@@ -187,7 +207,7 @@ describe('Superhuman Docs MCP discovery probe', () => {
       const publicController = new AbortController();
       const json = syntheticFetch(() => ({tools: []}));
       const fetchImpl: FetchLike = async (url, init) => {
-        const request = JSON.parse(String(init?.body)) as {method: string};
+        const request = decodeJson(McpRequestSchema, JSON.parse(String(init?.body)));
         if (request.method !== 'tools/list') return json(url, init);
         if (cancelViaPublicSignal) queueMicrotask(() => publicController.abort());
         return new Response(
@@ -218,12 +238,14 @@ describe('Superhuman Docs MCP discovery probe', () => {
   it('counts UTF-8 SSE bytes before the SDK parser sees an oversized event', async () => {
     const json = syntheticFetch(() => ({tools: []}));
     const fetchImpl: FetchLike = async (url, init) => {
-      const request = JSON.parse(String(init?.body)) as {method: string};
+      const request = decodeJson(McpRequestSchema, JSON.parse(String(init?.body)));
       if (request.method !== 'tools/list') return json(url, init);
       return new Response(
         new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode(`data: ${'🌟'.repeat(70_000)}\n\n`));
+            controller.enqueue(
+              new TextEncoder().encode(`data: ${Effect2.pipe('🌟', EffectString.repeat(70_000))}\n\n`),
+            );
           },
         }),
         {headers: {'content-type': 'text/event-stream'}},
@@ -237,7 +259,7 @@ describe('Superhuman Docs MCP discovery probe', () => {
     const padded = syntheticFetch(() => ({
       tools: [],
       nextCursor: String(++pageNumber),
-      ignoredProviderField: 'x'.repeat(240 * 1024),
+      ignoredProviderField: Effect2.pipe('x', EffectString.repeat(240 * 1024)),
     }));
     expect(await errorCode(discoverSuperhumanTools(token, {fetch: padded}))).toBe('response-too-large');
   });
@@ -339,7 +361,7 @@ describe('Superhuman Docs MCP discovery probe', () => {
       const catalog = yield* probeSuperhumanTools('PROBE_TEST_TOKEN', {
         fetch: syntheticFetch(() => ({tools: [tool('read')]})),
       }).pipe(Effect.provideService(SystemInfo, configuredSystem));
-      expect(catalog.tools.map(item => item.name)).toEqual(['read']);
+      expect(EffectArray.map(catalog.tools, item => item.name)).toEqual(['read']);
       expect(JSON.stringify(catalog)).not.toContain(Redacted.value(token));
     }).pipe(provideSuperhumanTestLayer),
   );
@@ -380,7 +402,7 @@ describe('Superhuman Docs MCP discovery probe', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.constantFrom('"', '\\'),
-        fc.array(character, {maxLength: 12}).map(parts => parts.join('')),
+        fc.array(character, {maxLength: 12}).map(parts => EffectArray.join(parts, '')),
         async (escape, suffix) => {
           const secret = `synthetic${escape}${suffix}`;
           const credential = Redacted.make(secret);

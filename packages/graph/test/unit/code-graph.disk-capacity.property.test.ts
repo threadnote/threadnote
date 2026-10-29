@@ -30,6 +30,9 @@ import {
   isCodeGraphStoreNoSpaceError,
 } from '@threadnote/graph/types';
 
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 const boundedBytes = fc.integer({max: 2 ** 42, min: 0});
 const capacityMagnitude = fc.oneof(
   boundedBytes,
@@ -89,7 +92,9 @@ describe('code graph disk capacity properties', () => {
     ]) {
       const revisionIdentity = `extension-r${CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION}`;
       expect(calibration.identityBase).toContain(`:${revisionIdentity}`);
-      expect(calibration.identityBase.replace(revisionIdentity, 'extension-r7')).not.toBe(calibration.identityBase);
+      expect(Effect2.pipe(calibration.identityBase, EffectString.replace(revisionIdentity, 'extension-r7'))).not.toBe(
+        calibration.identityBase,
+      );
     }
   });
 
@@ -209,8 +214,8 @@ describe('code graph disk capacity properties', () => {
       });
       expect(demand.state).toBe('measured');
       if (demand.state !== 'measured') return;
-      const durableKey = 'd'.repeat(64);
-      const temporaryKey = 'e'.repeat(64);
+      const durableKey = Effect2.pipe('d', EffectString.repeat(64));
+      const temporaryKey = Effect2.pipe('e', EffectString.repeat(64));
       const split = codeGraphDiskCapacityReservationProjection({
         demand,
         durableFilesystemKey: durableKey,
@@ -299,8 +304,8 @@ describe('code graph disk capacity properties', () => {
       state: 'measured',
       transientFilesystem: 'temporary',
     });
-    const durable = 'd'.repeat(64);
-    const temporary = 'e'.repeat(64);
+    const durable = Effect2.pipe('d', EffectString.repeat(64));
+    const temporary = Effect2.pipe('e', EffectString.repeat(64));
     const projection = codeGraphDiskCapacityReservationProjection({
       demand,
       durableFilesystemKey: durable,
@@ -571,8 +576,8 @@ describe('code graph disk capacity properties', () => {
       temporaryAvailableBytes: Number.MAX_SAFE_INTEGER,
     });
     const failure = codeGraphDiskCapacityFailure(decision, '/Users/private/graph.sqlite', {
-      checkoutId: 'a'.repeat(64),
-      scopeId: `code-graph-scope:${'b'.repeat(64)}`,
+      checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+      scopeId: `code-graph-scope:${Effect2.pipe('b', EffectString.repeat(64))}`,
     });
 
     expect(failure).toBeInstanceOf(CodeGraphDiskCapacityPressureError);
@@ -593,12 +598,13 @@ describe('code graph disk capacity properties', () => {
       recovery: 'free-space',
       retryable: false,
       scope: {
-        checkoutId: 'a'.repeat(64),
-        scopeId: `code-graph-scope:${'b'.repeat(64)}`,
+        checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+        scopeId: `code-graph-scope:${Effect2.pipe('b', EffectString.repeat(64))}`,
       },
     });
     expect(failure.message).not.toMatch(/[\\/]/u);
     expect(failure.operation).not.toContain('/Users/private');
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     expect(Object.keys(failure)).not.toContain('decision');
     expect(isNonResumableCodeGraphBuildFailure(failure)).toBe(true);
     expect(isCodeGraphCapacityPause(failure)).toBe(true);
@@ -628,7 +634,7 @@ describe('code graph disk capacity properties', () => {
     const failure = codeGraphDiskCapacityFailure(
       reserved,
       'stage persistent code graph facts',
-      {checkoutId: 'c'.repeat(64)},
+      {checkoutId: Effect2.pipe('c', EffectString.repeat(64))},
       'reservation',
     );
     expect(failure).toMatchObject({

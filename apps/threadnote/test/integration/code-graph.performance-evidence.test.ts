@@ -1,6 +1,8 @@
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Effect, FileSystem} from 'effect';
+import {Array as EffectArray, Effect, FileSystem} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
@@ -22,7 +24,7 @@ import {
 import {prepareCodeGraphFixture} from '../../../../scripts/code-graph-fixture.js';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
-import {ManagerGraphBusyError} from '@threadnote/graph/visualization';
+import {ManagerGraphBusyError, type ManagerGraphNode} from '@threadnote/graph/visualization';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 
 const PERFORMANCE_CONTROLS = [
@@ -85,8 +87,8 @@ describe('external performance evidence', () => {
       'C:/Users/alice/private-repository',
       'C:\\Users\\alice\\private-repository',
       '\\\\server\\share\\private-repository',
-      `ghp_${'a'.repeat(32)}`,
-      `sk-proj-${'a'.repeat(32)}`,
+      `ghp_${Effect2.pipe('a', EffectString.repeat(32))}`,
+      `sk-proj-${Effect2.pipe('a', EffectString.repeat(32))}`,
     ]) {
       expect(() => privacySafeExternalControlQuery(sensitive)).toThrow('privacy-safe public symbol');
       expect(() => privacySafeExternalControlPath(sensitive)).toThrow('repository-relative paths');
@@ -111,9 +113,9 @@ describe('external performance evidence', () => {
           {minLength: 1, maxLength: 8},
         ),
         segments => {
-          const portable = segments.join('/');
+          const portable = EffectArray.join(segments, '/');
           expect(privacySafeExternalControlPath(portable)).toBe(portable);
-          expect(privacySafeExternalControlPath(segments.join('\\'))).toBe(portable);
+          expect(privacySafeExternalControlPath(EffectArray.join(segments, '\\'))).toBe(portable);
         },
       ),
     );
@@ -125,19 +127,27 @@ describe('external performance evidence', () => {
     expect(() => assertPerformanceControlSet([...PERFORMANCE_CONTROLS, PERFORMANCE_CONTROLS[0]])).toThrow(
       'exactly java, kotlin',
     );
-    const results: readonly ExternalQueryControlResult[] = PERFORMANCE_CONTROLS.map((control, index) => ({
-      digest: `${index}`.repeat(64),
+    const results: readonly ExternalQueryControlResult[] = EffectArray.map(PERFORMANCE_CONTROLS, (control, index) => ({
+      digest: Effect2.pipe(`${index}`, EffectString.repeat(64)),
       durationMilliseconds: index + 1,
       expectedMatches: 1,
       language: control.expectedLanguage,
       returnedNodes: 2,
-      stableNodeId: `cgs_${String(index + 1).repeat(32)}`,
+      stableNodeId: `cgs_${Effect2.pipe(String(index + 1), EffectString.repeat(32))}`,
     }));
     expect(JSON.parse(retainedExternalControlEvidence(PERFORMANCE_CONTROLS, results))).toEqual({
-      bazel: {path: 'build/rules.bzl', query: 'buildRule', stableNodeId: `cgs_${'4'.repeat(32)}`},
-      java: {path: 'src/Main.java', query: 'Main', stableNodeId: `cgs_${'1'.repeat(32)}`},
-      kotlin: {path: 'src/App.kt', query: 'App', stableNodeId: `cgs_${'2'.repeat(32)}`},
-      typescript: {path: 'src/index.ts', query: 'indexSymbol', stableNodeId: `cgs_${'3'.repeat(32)}`},
+      bazel: {
+        path: 'build/rules.bzl',
+        query: 'buildRule',
+        stableNodeId: `cgs_${Effect2.pipe('4', EffectString.repeat(32))}`,
+      },
+      java: {path: 'src/Main.java', query: 'Main', stableNodeId: `cgs_${Effect2.pipe('1', EffectString.repeat(32))}`},
+      kotlin: {path: 'src/App.kt', query: 'App', stableNodeId: `cgs_${Effect2.pipe('2', EffectString.repeat(32))}`},
+      typescript: {
+        path: 'src/index.ts',
+        query: 'indexSymbol',
+        stableNodeId: `cgs_${Effect2.pipe('3', EffectString.repeat(32))}`,
+      },
     });
   });
 
@@ -153,11 +163,19 @@ describe('external performance evidence', () => {
   it('rejects Manager responses that exceed or misreport their requested graph budget', () => {
     const limits = {edgeLimit: 1_500, nodeLimit: 500};
     const bounded = {edges: [], nodes: [], paging: {...limits, hasMore: false}};
+    const excessNode: ManagerGraphNode = {
+      degree: 0,
+      id: 'fixture-symbol',
+      kind: 'function',
+      label: 'fixture symbol',
+      projectId: 'fixture-project',
+      type: 'symbol',
+    };
     expect(() => assertManagerVisualizationBounds('bounded', bounded, limits)).not.toThrow();
     expect(() =>
       assertManagerVisualizationBounds(
         'too many nodes',
-        {...bounded, nodes: Array.from({length: limits.nodeLimit + 1}, () => ({}) as never)},
+        {...bounded, nodes: Array.from({length: limits.nodeLimit + 1}, () => excessNode)},
         limits,
       ),
     ).toThrow('exceeded or misreported');
@@ -201,7 +219,7 @@ describe('external performance evidence', () => {
         expect(evidence.layoutPreparationProxyMilliseconds).toHaveLength(2);
         expect(evidence.overviewNodeCount).toBeGreaterThan(0);
         expect(evidence.detailNodeCount).toBeGreaterThan(0);
-        expect(evidence.maxResponsePayloadBytes.every(bytes => bytes > 0)).toBe(true);
+        expect(EffectArray.every(evidence.maxResponsePayloadBytes, bytes => bytes > 0)).toBe(true);
         expect(evidence).toMatchObject({
           edgeBudget: 1_500,
           nodeBudget: 500,

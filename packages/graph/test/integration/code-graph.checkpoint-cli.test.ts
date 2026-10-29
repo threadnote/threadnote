@@ -1,21 +1,44 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {describe, expect, it} from 'vitest';
+import {Schema} from 'effect';
 import {decodeCodeGraphCheckpointPackV1, encodeCodeGraphCheckpointPackV1} from '@threadnote/graph/checkpoint/pack';
 import type {CodeGraphCheckpointMetadataV1, CodeGraphCheckpointRecordV1} from '@threadnote/graph/checkpoint/schema';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execFilePromise = promisify(execFile);
-
-interface CheckpointImportResult {
-  readonly artifact: {readonly digest: string; readonly size: number};
-  readonly imported: 'created' | 'reused';
-  readonly publication: 'activated' | 'rebuilt' | 'stored';
-  readonly snapshotId: string;
-  readonly trust: 'expected-descriptor-verified' | 'local-unverified';
-}
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const CheckpointExportSchema = withRest(
+  Schema.Struct({
+    artifact: withRest(Schema.Struct({digest: Schema.String, size: Schema.Finite})),
+    logicalDigest: Schema.String,
+  }),
+);
+const CheckpointInspectionSchema = withRest(
+  Schema.Struct({
+    descriptor: withRest(Schema.Struct({digest: Schema.String})),
+    verification: Schema.String,
+  }),
+);
+const CheckpointImportSchema = withRest(
+  Schema.Struct({
+    artifact: withRest(Schema.Struct({digest: Schema.String, size: Schema.Finite})),
+    imported: Schema.Literals(['created', 'reused']),
+    publication: Schema.Literals(['activated', 'rebuilt', 'stored']),
+    snapshotId: Schema.String,
+    trust: Schema.Literals(['expected-descriptor-verified', 'local-unverified']),
+  }),
+);
+const decodeCheckpointExport = Schema.decodeUnknownSync(CheckpointExportSchema);
+const decodeCheckpointInspection = Schema.decodeUnknownSync(CheckpointInspectionSchema);
+const decodeCheckpointImport = Schema.decodeUnknownSync(CheckpointImportSchema);
 
 describe('code graph checkpoint CLI', () => {
   it('exports once, verifies fully, and selects safe receiver publication from Git state', async () => {
@@ -44,43 +67,47 @@ describe('code graph checkpoint CLI', () => {
 
       const exportHome = join(root, 'export-home');
       await runCli(['graph', 'index', '--home', exportHome, '--cwd', repository, '--json']);
-      const exported = JSON.parse(
-        (
-          await runCli([
-            'graph',
-            'checkpoint',
-            'export',
-            '--home',
-            exportHome,
-            '--cwd',
-            repository,
-            '--output',
-            artifact,
-            '--json',
-          ])
-        ).stdout,
-      ) as {readonly artifact: {readonly digest: string; readonly size: number}; readonly logicalDigest: string};
+      const exported = decodeCheckpointExport(
+        JSON.parse(
+          (
+            await runCli([
+              'graph',
+              'checkpoint',
+              'export',
+              '--home',
+              exportHome,
+              '--cwd',
+              repository,
+              '--output',
+              artifact,
+              '--json',
+            ])
+          ).stdout,
+        ),
+      );
       expect(exported.artifact.digest).toMatch(/^sha256:[0-9a-f]{64}$/u);
       expect(exported.artifact.size).toBeGreaterThan(0);
       expect(exported.logicalDigest).toMatch(/^[0-9a-f]{64}$/u);
 
       const originalBytes = await readFile(artifact);
-      const repeated = JSON.parse(
-        (
-          await runCli([
-            'graph',
-            'checkpoint',
-            'export',
-            '--home',
-            exportHome,
-            '--cwd',
-            repository,
-            '--output',
-            repeatedArtifact,
-            '--json',
-          ])
-        ).stdout,
-      ) as {readonly artifact: {readonly digest: string; readonly size: number}; readonly logicalDigest: string};
+      const repeated = decodeCheckpointExport(
+        JSON.parse(
+          (
+            await runCli([
+              'graph',
+              'checkpoint',
+              'export',
+              '--home',
+              exportHome,
+              '--cwd',
+              repository,
+              '--output',
+              repeatedArtifact,
+              '--json',
+            ])
+          ).stdout,
+        ),
+      );
       expect(repeated.artifact).toEqual(exported.artifact);
       expect(repeated.logicalDigest).toBe(exported.logicalDigest);
       expect(await readFile(repeatedArtifact)).toEqual(originalBytes);
@@ -89,34 +116,38 @@ describe('code graph checkpoint CLI', () => {
       ).rejects.toMatchObject({code: 1, stderr: expect.stringContaining('already exists')});
       expect(await readFile(artifact)).toEqual(originalBytes);
 
-      const inspected = JSON.parse(
-        (
-          await runCli([
-            'graph',
-            'checkpoint',
-            'inspect',
-            '--input',
-            artifact,
-            '--expected-digest',
-            exported.artifact.digest,
-            '--json',
-          ])
-        ).stdout,
-      ) as {readonly descriptor: {readonly digest: string}; readonly verification: string};
-      const verified = JSON.parse(
-        (
-          await runCli([
-            'graph',
-            'checkpoint',
-            'verify',
-            '--input',
-            artifact,
-            '--expected-digest',
-            exported.artifact.digest,
-            '--json',
-          ])
-        ).stdout,
-      ) as {readonly descriptor: {readonly digest: string}; readonly verification: string};
+      const inspected = decodeCheckpointInspection(
+        JSON.parse(
+          (
+            await runCli([
+              'graph',
+              'checkpoint',
+              'inspect',
+              '--input',
+              artifact,
+              '--expected-digest',
+              exported.artifact.digest,
+              '--json',
+            ])
+          ).stdout,
+        ),
+      );
+      const verified = decodeCheckpointInspection(
+        JSON.parse(
+          (
+            await runCli([
+              'graph',
+              'checkpoint',
+              'verify',
+              '--input',
+              artifact,
+              '--expected-digest',
+              exported.artifact.digest,
+              '--json',
+            ])
+          ).stdout,
+        ),
+      );
       expect(inspected).toMatchObject({
         descriptor: {digest: exported.artifact.digest},
         verification: 'artifact-and-framing',
@@ -141,7 +172,7 @@ describe('code graph checkpoint CLI', () => {
         falseGraphContentArtifact,
         rewriteCheckpoint(decoded, metadata => ({
           ...metadata,
-          source: {...metadata.source, graphContentId: `cgc_${'f'.repeat(40)}`},
+          source: {...metadata.source, graphContentId: `cgc_${Effect.pipe('f', EffectString.repeat(40))}`},
         })),
       );
       await expect(
@@ -161,7 +192,11 @@ describe('code graph checkpoint CLI', () => {
           falseGraphContentArtifact,
         ]),
       ).rejects.toMatchObject({code: 1});
-      expect((await recursiveFiles(rejectedHome)).some(file => file.endsWith('.sqlite'))).toBe(false);
+      expect(
+        EffectArray.some(await recursiveFiles(rejectedHome), file =>
+          Effect.pipe(file, EffectString.endsWith('.sqlite')),
+        ),
+      ).toBe(false);
 
       await writeFile(
         falseExtractorArtifact,
@@ -175,7 +210,10 @@ describe('code graph checkpoint CLI', () => {
         stderr: expect.stringContaining('extractor identity'),
       });
 
-      const packRecordIndex = decoded.records.findIndex(record => record.kind === 'pack-provenance');
+      const packRecordIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(decoded.records, record => record.kind === 'pack-provenance'),
+        () => -1,
+      );
       expect(packRecordIndex).toBeGreaterThanOrEqual(0);
       await writeFile(
         falsePackArtifact,
@@ -183,7 +221,7 @@ describe('code graph checkpoint CLI', () => {
           decoded,
           metadata => metadata,
           records =>
-            records.map((record, index) =>
+            EffectArray.map(records, (record, index) =>
               index === packRecordIndex && record.kind === 'pack-provenance'
                 ? {...record, resolutionVersion: `${record.resolutionVersion}-forged`}
                 : record,
@@ -204,22 +242,24 @@ describe('code graph checkpoint CLI', () => {
 
       const populated = await importCheckpoint(repository, exportHome, artifact, exported.artifact.digest);
       expect(populated).toMatchObject({imported: 'created', publication: 'activated'});
-      const importedExport = JSON.parse(
-        (
-          await runCli([
-            'graph',
-            'checkpoint',
-            'export',
-            '--home',
-            exportHome,
-            '--cwd',
-            repository,
-            '--output',
-            importedArtifact,
-            '--json',
-          ])
-        ).stdout,
-      ) as {readonly artifact: {readonly digest: string; readonly size: number}; readonly logicalDigest: string};
+      const importedExport = decodeCheckpointExport(
+        JSON.parse(
+          (
+            await runCli([
+              'graph',
+              'checkpoint',
+              'export',
+              '--home',
+              exportHome,
+              '--cwd',
+              repository,
+              '--output',
+              importedArtifact,
+              '--json',
+            ])
+          ).stdout,
+        ),
+      );
       expect(importedExport).toMatchObject({
         artifact: exported.artifact,
         logicalDigest: exported.logicalDigest,
@@ -273,9 +313,9 @@ describe('code graph checkpoint CLI', () => {
       const corrupted = Uint8Array.from(originalBytes);
       corrupted[corrupted.length - 1] = corrupted[corrupted.length - 1] ^ 0xff;
       await writeFile(corruptedArtifact, corrupted);
-      const corruptInspection = JSON.parse(
-        (await runCli(['graph', 'checkpoint', 'inspect', '--input', corruptedArtifact, '--json'])).stdout,
-      ) as {readonly descriptor: {readonly digest: string}; readonly verification: string};
+      const corruptInspection = decodeCheckpointInspection(
+        JSON.parse((await runCli(['graph', 'checkpoint', 'inspect', '--input', corruptedArtifact, '--json'])).stdout),
+      );
       expect(corruptInspection.verification).toBe('artifact-and-framing');
       expect(corruptInspection.descriptor.digest).not.toBe(exported.artifact.digest);
       await expect(
@@ -305,11 +345,15 @@ function rewriteCheckpoint(
   return encodeCodeGraphCheckpointPackV1(rewriteMetadata(metadata), rewriteRecords(decoded.records)).bytes;
 }
 
+function isNodeError(cause: unknown): cause is NodeJS.ErrnoException {
+  return typeof cause === 'object' && cause !== null && 'code' in cause;
+}
+
 async function recursiveFiles(root: string): Promise<readonly string[]> {
   try {
     return await readdir(root, {recursive: true});
   } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    if (isNodeError(cause) && cause.code === 'ENOENT') return [];
     throw cause;
   }
 }
@@ -319,7 +363,7 @@ async function importCheckpoint(
   home: string,
   artifact: string,
   digest?: string,
-): Promise<CheckpointImportResult> {
+): Promise<ReturnType<typeof decodeCheckpointImport>> {
   const result = await runCli([
     'graph',
     'checkpoint',
@@ -333,7 +377,7 @@ async function importCheckpoint(
     ...(digest === undefined ? [] : ['--expected-digest', digest]),
     '--json',
   ]);
-  return JSON.parse(result.stdout) as CheckpointImportResult;
+  return decodeCheckpointImport(JSON.parse(result.stdout));
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<void> {

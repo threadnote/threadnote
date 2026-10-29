@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
@@ -10,12 +11,14 @@ import * as FC from 'fast-check';
 import {afterEach, describe, expect, vi} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {checkForThreadnoteUpdate} from '@threadnote/threadnote/release/check';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   vi.unstubAllGlobals();
-  await Promise.all(temporaryDirectories.splice(0).map(path => rm(path, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryDirectories.splice(0), path => rm(path, {force: true, recursive: true})));
 });
 
 describe('Effect update check', () => {
@@ -117,7 +120,11 @@ describe('Effect update check', () => {
         latestVersion: '1.2.0',
         outdated: true,
       });
-      expect(fetch.mock.calls.some(([url]) => String(url).includes('/releases?per_page=100'))).toBe(true);
+      expect(
+        EffectArray.some(fetch.mock.calls, ([url]) =>
+          Effect2.pipe(String(url), EffectString.includes('/releases?per_page=100')),
+        ),
+      ).toBe(true);
       expect(yield* Effect.promise(() => readFile(cachePath, 'utf8'))).toContain('"channel":"latest"');
       expect(yield* Effect.promise(() => readFile(cachePath, 'utf8'))).toContain('"latestVersion":"1.2.0"');
     }),
@@ -165,7 +172,11 @@ describe('Effect update check', () => {
         latestVersion: '3.0.0',
         outdated: true,
       });
-      expect(fetch.mock.calls.some(([url]) => String(url).includes('/releases?per_page=100'))).toBe(true);
+      expect(
+        EffectArray.some(fetch.mock.calls, ([url]) =>
+          Effect2.pipe(String(url), EffectString.includes('/releases?per_page=100')),
+        ),
+      ).toBe(true);
       expect(yield* Effect.promise(() => readFile(cachePath, 'utf8'))).toContain('"channel":"beta"');
       expect(yield* Effect.promise(() => readFile(cachePath, 'utf8'))).toContain('"latestVersion":"3.0.0"');
       expect(yield* Effect.promise(() => readFile(cachePath, 'utf8'))).toContain('"version":3');

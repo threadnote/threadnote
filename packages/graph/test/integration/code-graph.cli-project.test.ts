@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_ISOLATED_BUILDER_ENV} from '@threadnote/graph/scope/routing';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -5,6 +6,8 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execFilePromise = promisify(execFile);
 
@@ -55,29 +58,32 @@ describe('code graph CLI project selection', () => {
       await mkdir(home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: a',
-          `    path: ${root}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/a',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/a]',
-          '  - name: b',
-          `    path: ${root}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/b',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/b]',
-          '  - name: full',
-          `    path: ${root}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/full',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: a',
+            `    path: ${root}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/a',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/a]',
+            '  - name: b',
+            `    path: ${root}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/b',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/b]',
+            '  - name: full',
+            `    path: ${root}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/full',
+            '',
+          ],
+          '\n',
+        ),
       );
       const base = ['--home', home, '--manifest', manifest, '--cwd', root];
       const ambiguous = await runCli(['graph', 'index', ...base, '--no-vectors']).catch(asProcessError);
@@ -188,18 +194,21 @@ describe('code graph CLI project selection', () => {
       await mkdir(home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: web',
-          `    path: ${root}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/web',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/web]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: web',
+            `    path: ${root}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/web',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/web]',
+            '',
+          ],
+          '\n',
+        ),
       );
       const base = ['--home', home, '--manifest', manifest, '--cwd', linked];
       const indexed = JSON.parse(
@@ -249,20 +258,23 @@ describe('code graph CLI project selection', () => {
       await mkdir(home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          ...['a', 'b'].flatMap(name => [
-            `  - name: ${name}`,
-            `    path: ${root}`,
-            '    seed: []',
-            `    uri: threadnote://resources/repos/${name}`,
-            '    graph:',
-            '      closure: dependencies',
-            `      roots: [apps/${name}]`,
-          ]),
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            ...EffectArray.flatMap(['a', 'b'], name => [
+              `  - name: ${name}`,
+              `    path: ${root}`,
+              '    seed: []',
+              `    uri: threadnote://resources/repos/${name}`,
+              '    graph:',
+              '      closure: dependencies',
+              `      roots: [apps/${name}]`,
+            ]),
+            '',
+          ],
+          '\n',
+        ),
       );
 
       const explicit = JSON.parse(
@@ -374,25 +386,28 @@ describe('code graph CLI project selection', () => {
       await mkdir(home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: outer',
-          `    path: ${root}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/outer',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/a]',
-          '  - name: foreign',
-          `    path: ${nested}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/foreign',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/b]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: outer',
+            `    path: ${root}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/outer',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/a]',
+            '  - name: foreign',
+            `    path: ${nested}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/foreign',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/b]',
+            '',
+          ],
+          '\n',
+        ),
       );
 
       const explicit = JSON.parse(
@@ -465,18 +480,21 @@ describe('code graph CLI project selection', () => {
       await mkdir(home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: web',
-          `    path: ${root}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/web',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/web]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: web',
+            `    path: ${root}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/web',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/web]',
+            '',
+          ],
+          '\n',
+        ),
       );
 
       const base = ['--home', home, '--manifest', manifest, '--cwd', root];
@@ -498,7 +516,10 @@ describe('code graph CLI project selection', () => {
       for (const name of ['docs', 'docs-mobile', 'unrelated']) {
         await mkdir(join(root, 'apps', name), {recursive: true});
         await writeFile(join(root, 'apps', name, 'package.json'), JSON.stringify({name: `@fixture/${name}`}));
-        await writeFile(join(root, 'apps', name, 'index.ts'), `export const ${name.replace('-', '_')} = true;\n`);
+        await writeFile(
+          join(root, 'apps', name, 'index.ts'),
+          `export const ${Effect.pipe(name, EffectString.replace('-', '_'))} = true;\n`,
+        );
       }
       await writeFile(join(root, 'package.json'), JSON.stringify({private: true, workspaces: ['apps/*']}));
       await execFilePromise('git', ['-C', root, 'init', '-q']);
@@ -517,18 +538,21 @@ describe('code graph CLI project selection', () => {
       await mkdir(home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: docs',
-          `    path: ${root}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/docs',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/docs, apps/docs-mobile]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: docs',
+            `    path: ${root}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/docs',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/docs, apps/docs-mobile]',
+            '',
+          ],
+          '\n',
+        ),
       );
 
       const base = ['--home', home, '--manifest', manifest, '--cwd', join(root, 'apps', 'docs-mobile')];
@@ -574,25 +598,28 @@ describe('code graph CLI project selection', () => {
       await mkdir(home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: first-web',
-          `    path: ${first}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/first-web',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/web]',
-          '  - name: second-web',
-          `    path: ${second}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/second-web',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/web]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: first-web',
+            `    path: ${first}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/first-web',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/web]',
+            '  - name: second-web',
+            `    path: ${second}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/second-web',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/web]',
+            '',
+          ],
+          '\n',
+        ),
       );
 
       const selected = JSON.parse(
@@ -684,25 +711,28 @@ describe('code graph CLI project selection', () => {
       await mkdir(home, {recursive: true});
       await writeFile(
         manifest,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: outer-web',
-          `    path: ${outer}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/outer-web',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/web]',
-          '  - name: nested-web',
-          `    path: ${nested}`,
-          '    seed: []',
-          '    uri: threadnote://resources/repos/nested-web',
-          '    graph:',
-          '      closure: dependencies',
-          '      roots: [apps/web]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: outer-web',
+            `    path: ${outer}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/outer-web',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/web]',
+            '  - name: nested-web',
+            `    path: ${nested}`,
+            '    seed: []',
+            '    uri: threadnote://resources/repos/nested-web',
+            '    graph:',
+            '      closure: dependencies',
+            '      roots: [apps/web]',
+            '',
+          ],
+          '\n',
+        ),
       );
 
       const indexed = JSON.parse(
@@ -748,8 +778,26 @@ describe('code graph CLI project selection', () => {
   }, 60_000);
 });
 
-function asProcessError(cause: unknown): NodeJS.ErrnoException & {stderr?: string} {
-  return cause as NodeJS.ErrnoException & {stderr?: string};
+interface CliProcessError {
+  readonly code: number;
+  readonly stderr: string;
+  readonly stdout: string;
+}
+
+function asProcessError(cause: unknown): CliProcessError {
+  if (
+    typeof cause === 'object' &&
+    cause !== null &&
+    'code' in cause &&
+    typeof cause.code === 'number' &&
+    'stderr' in cause &&
+    typeof cause.stderr === 'string' &&
+    'stdout' in cause &&
+    typeof cause.stdout === 'string'
+  ) {
+    return {code: cause.code, stderr: cause.stderr, stdout: cause.stdout};
+  }
+  throw cause;
 }
 
 function runCli(args: readonly string[], env?: NodeJS.ProcessEnv) {

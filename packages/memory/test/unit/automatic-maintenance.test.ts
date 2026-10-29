@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   captureReviewedSupportLegacyOrigin,
   validateReviewedSupportLegacyOrigin,
@@ -34,31 +35,34 @@ import {
   type MemoryObsidianEvidenceV1,
 } from '../../src/document.js';
 import {consolidationRevision, reviewConsolidation} from '../../src/consolidation.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const code = createMemoryCodeCitation({
   version: 1,
   evidenceRetention: 'capsule-retained',
   extractorSet: 'native-code-graph-13',
-  fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
   path: 'packages/memory/src/document.ts',
-  repositoryId: 'b'.repeat(64),
+  repositoryId: Effect.pipe('b', EffectString.repeat(64)),
   repositoryIdentityKind: 'remote',
-  sourceCommit: 'c'.repeat(40),
+  sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
   target: {kind: 'file'},
 });
 const imported: MemoryObsidianEvidenceV1 = {
   version: 1,
   sourceId: 'notes',
   sourceInstanceId: '11111111-1111-4111-8111-111111111111',
-  vaultHash: 'a'.repeat(64),
-  accessHash: 'b'.repeat(64),
+  vaultHash: Effect.pipe('a', EffectString.repeat(64)),
+  accessHash: Effect.pipe('b', EffectString.repeat(64)),
   noteId: '22222222-2222-4222-8222-222222222222',
   relativePath: 'Decision.md',
-  revisionHash: 'c'.repeat(64),
+  revisionHash: Effect.pipe('c', EffectString.repeat(64)),
   sanitizerVersion: 'scrubber-redact-v1',
-  fragmentHash: 'd'.repeat(64),
+  fragmentHash: Effect.pipe('d', EffectString.repeat(64)),
   fragmentStart: 0,
   fragmentEnd: 12,
   pinId: '33333333-3333-4333-8333-333333333333',
@@ -76,10 +80,10 @@ function fixture(
         ? {kind: 'obsidian', evidence: imported}
         : {
             kind: 'memory',
-            uri: uri.replace('target.md', 'support.md'),
+            uri: Effect.pipe(uri, EffectString.replace('target.md', 'support.md')),
             memoryId: 'tn_source',
-            canonicalHash: 'e'.repeat(64),
-            fragment: {ordinal: 0, hash: 'f'.repeat(64), startOffset: 0, endOffset: 12},
+            canonicalHash: Effect.pipe('e', EffectString.repeat(64)),
+            fragment: {ordinal: 0, hash: Effect.pipe('f', EffectString.repeat(64)), startOffset: 0, endOffset: 12},
           };
   const evidence: AutomaticMaintenanceEvidenceV1 = {
     id: automaticMaintenanceEvidenceId(source),
@@ -94,8 +98,8 @@ function fixture(
     kind: 'durable' as const,
     status: 'active' as const,
     schemaVersion: 10,
-    canonicalHash: '1'.repeat(64),
-    bodyHash: '2'.repeat(64),
+    canonicalHash: Effect.pipe('1', EffectString.repeat(64)),
+    bodyHash: Effect.pipe('2', EffectString.repeat(64)),
     paragraphCount: 1,
     visibility: 'personal' as const,
     readOnly: false,
@@ -104,7 +108,7 @@ function fixture(
   const paragraphs = [
     {
       ordinal: 0,
-      hash: '3'.repeat(64),
+      hash: Effect.pipe('3', EffectString.repeat(64)),
       role: 'descriptive' as const,
       roleAuthority: legacy ? ('legacy-approved' as const) : ('provisional' as const),
       support: 'direct' as const,
@@ -128,7 +132,12 @@ function fixture(
   return {
     version: 1,
     preparation: legacy
-      ? {version: 1, kind: 'legacy-approved', manifestVersion: 3, manifestHash: '4'.repeat(64)}
+      ? {
+          version: 1,
+          kind: 'legacy-approved',
+          manifestVersion: 3,
+          manifestHash: Effect.pipe('4', EffectString.repeat(64)),
+        }
       : {version: 1, kind: 'derived'},
     target,
     paragraphs,
@@ -167,8 +176,8 @@ describe('automatic maintenance closed assessment contract', () => {
           const input = recalculate({
             ...seed,
             target: {...seed.target, readOnly},
-            paragraphs: seed.paragraphs.map(item => ({...item, role})),
-            evidence: seed.evidence.map(item => ({...item, availability})),
+            paragraphs: EffectArray.map(seed.paragraphs, item => ({...item, role})),
+            evidence: EffectArray.map(seed.evidence, item => ({...item, availability})),
             coverage: {...seed.coverage, omittedSources: omitted},
           });
           const before = JSON.stringify(input);
@@ -187,7 +196,8 @@ describe('automatic maintenance closed assessment contract', () => {
   });
 
   it('keeps exact fragment IDs separate from stable source identity', () => {
-    const source = fixture().evidence[0].source as Extract<AutomaticMaintenanceSourceV1, {kind: 'memory'}>;
+    const source = fixture().evidence[0].source;
+    if (source.kind !== 'memory') throw new Error('expected a memory fixture source.');
     const second = {...source, fragment: {...source.fragment, ordinal: 1, startOffset: 14, endOffset: 26}};
     expect(automaticMaintenanceSourceIdentity(source)).toBe(automaticMaintenanceSourceIdentity(second));
     expect(automaticMaintenanceEvidenceId(source)).not.toBe(automaticMaintenanceEvidenceId(second));
@@ -223,7 +233,7 @@ describe('automatic maintenance closed assessment contract', () => {
             ...base.evidence[0],
             source: {
               ...base.evidence[0].source,
-              fragment: {ordinal: 0, hash: 'f'.repeat(64), startOffset: 12, endOffset: 12},
+              fragment: {ordinal: 0, hash: Effect.pipe('f', EffectString.repeat(64)), startOffset: 12, endOffset: 12},
             },
           },
         ],
@@ -235,7 +245,7 @@ describe('automatic maintenance closed assessment contract', () => {
             ...base.evidence[0],
             source: {
               ...base.evidence[0].source,
-              fragment: {ordinal: 64, hash: 'f'.repeat(64), startOffset: 0, endOffset: 12},
+              fragment: {ordinal: 64, hash: Effect.pipe('f', EffectString.repeat(64)), startOffset: 0, endOffset: 12},
             },
           },
         ],
@@ -260,7 +270,7 @@ describe('automatic maintenance closed assessment contract', () => {
       {...base, target: {...base.target, memoryId: ''}},
       {...base, target: {...base.target, artifact: true}},
       {...base, paragraphs: [{...base.paragraphs[0], ordinal: 1}]},
-      {...base, paragraphs: [{...base.paragraphs[0], scope: 'x'.repeat(513)}]},
+      {...base, paragraphs: [{...base.paragraphs[0], scope: Effect.pipe('x', EffectString.repeat(513))}]},
       {...base, paragraphs: [{...base.paragraphs[0], currentEvidenceIds: ['missing']}]},
       {...base, paragraphs: [{...base.paragraphs[0], historicalEvidenceIds: [base.evidence[0].id]}]},
       {...base, paragraphs: [{...base.paragraphs[0], roleAuthority: 'legacy-approved'}]},
@@ -272,6 +282,7 @@ describe('automatic maintenance closed assessment contract', () => {
       {...base, evidence: Array.from({length: 9}, () => base.evidence[0])},
     ];
     for (const value of cases) expect(() => parseAutomaticMaintenanceAssessment(JSON.stringify(value))).toThrow();
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     expect(() => parseAutomaticMaintenanceAssessment(' '.repeat(MAX_AUTOMATIC_MAINTENANCE_BYTES + 1))).toThrow();
     expect(() => parseAutomaticMaintenanceAssessment('{broken')).toThrow();
     expect(() =>
@@ -283,7 +294,11 @@ describe('automatic maintenance closed assessment contract', () => {
     const seed = fixture('code');
     const shared = recalculate({
       ...seed,
-      target: {...seed.target, uri: uri.replace('/memories/', '/memories/shared/default/'), visibility: 'shared'},
+      target: {
+        ...seed.target,
+        uri: Effect.pipe(uri, EffectString.replace('/memories/', '/memories/shared/default/')),
+        visibility: 'shared',
+      },
     });
     const before = JSON.stringify(shared);
     const projected = projectShareableAutomaticMaintenanceAssessment(shared);
@@ -308,7 +323,7 @@ describe('automatic maintenance closed assessment contract', () => {
       const rewritten = {
         ...shared,
         evidence: [evidence],
-        paragraphs: shared.paragraphs.map(item => ({...item, currentEvidenceIds: [evidence.id]})),
+        paragraphs: EffectArray.map(shared.paragraphs, item => ({...item, currentEvidenceIds: [evidence.id]})),
         dependencies: [],
       };
       expect(projectShareableAutomaticMaintenanceAssessment(recalculate(rewritten))).toBeUndefined();
@@ -339,12 +354,12 @@ describe('automatic maintenance closed assessment contract', () => {
         canonicalHash: consolidationRevision(canonicalMemoryDocumentContent(content)),
         bodyHash: consolidationRevision(record.body),
       },
-      paragraphs: seed.paragraphs.map(item => ({...item, hash: consolidationRevision(record.body)})),
+      paragraphs: EffectArray.map(seed.paragraphs, item => ({...item, hash: consolidationRevision(record.body)})),
     });
     expect(() => assertAutomaticMaintenanceTarget(assessment, record)).not.toThrow();
     const changed = parseMemoryDocument(
       uri,
-      content.replace('source_agent_client: test', 'source_agent_client: other'),
+      Effect.pipe(content, EffectString.replace('source_agent_client: test', 'source_agent_client: other')),
     )!;
     expect(changed.body).toBe(record.body);
     expect(() => assertAutomaticMaintenanceTarget(assessment, changed)).toThrow();
@@ -357,9 +372,9 @@ describe('canonical reviewed support', () => {
   const acceptance = {
     reviewId: 'review-canonical-support',
     approvedAt: '2026-10-21T00:00:00.000Z',
-    targetBeforeHash: '1'.repeat(64),
-    preparationDigest: '2'.repeat(64),
-    sourceVectorDigest: '3'.repeat(64),
+    targetBeforeHash: Effect.pipe('1', EffectString.repeat(64)),
+    preparationDigest: Effect.pipe('2', EffectString.repeat(64)),
+    sourceVectorDigest: Effect.pipe('3', EffectString.repeat(64)),
   };
   function support(body = 'Approved claim.', citation = code): ReviewedMemorySupportV1 {
     const source = {kind: 'code' as const, citation};
@@ -410,17 +425,30 @@ describe('canonical reviewed support', () => {
       /malformed or stale/u,
     );
     expect(
-      parseMemoryDocument(uri, stored.replace('Approved claim.', 'Changed claim.'))!.metadata.reviewedSupportError,
+      parseMemoryDocument(uri, Effect.pipe(stored, EffectString.replace('Approved claim.', 'Changed claim.')))!.metadata
+        .reviewedSupportError,
     ).toBeTruthy();
   });
   it('rejects duplicate, noncanonical, unsupported, and schema-10 approved headers', () => {
     const stored = content(support());
-    const line = stored.split('\n').find(line => line.startsWith('reviewed_support: '))!;
+    const line = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Effect.pipe(stored, EffectString.split('\n')),
+        __effectArrayValue =>
+          !!(line => Effect.pipe(line, EffectString.startsWith('reviewed_support: ')))(__effectArrayValue),
+      ),
+    )!;
     for (const modified of [
-      stored.replace(line, `${line}\n${line}`),
-      stored.replace(line, ` ${line}`),
-      stored.replace('schema_version: 11', 'schema_version: 10'),
-      stored.replace('"type":"reviewed-memory-support","version":1', '"type":"reviewed-memory-support","version":2'),
+      Effect.pipe(stored, EffectString.replace(line, `${line}\n${line}`)),
+      Effect.pipe(stored, EffectString.replace(line, ` ${line}`)),
+      Effect.pipe(stored, EffectString.replace('schema_version: 11', 'schema_version: 10')),
+      Effect.pipe(
+        stored,
+        EffectString.replace(
+          '"type":"reviewed-memory-support","version":1',
+          '"type":"reviewed-memory-support","version":2',
+        ),
+      ),
     ]) {
       expect(parseMemoryDocument(uri, modified)!.metadata.reviewedSupportError).toBeTruthy();
       expect(() => assertMemoryDocumentSchemaWritable(modified)).toThrow();
@@ -436,10 +464,14 @@ describe('canonical reviewed support', () => {
     );
     const source: AutomaticMaintenanceSourceV1 = {
       kind: 'memory',
-      uri: uri.replace('/durable/', '/shared/default/durable/').replace('target.md', 'source.md'),
+      uri: Effect.pipe(
+        uri,
+        EffectString.replace('/durable/', '/shared/default/durable/'),
+        EffectString.replace('target.md', 'source.md'),
+      ),
       memoryId: 'tn_source',
-      canonicalHash: '4'.repeat(64),
-      fragment: {ordinal: 0, hash: '5'.repeat(64), startOffset: 0, endOffset: 6},
+      canonicalHash: Effect.pipe('4', EffectString.repeat(64)),
+      fragment: {ordinal: 0, hash: Effect.pipe('5', EffectString.repeat(64)), startOffset: 0, endOffset: 6},
     };
     const descriptor = {id: automaticMaintenanceEvidenceId(source), source, scope: 'shared' as const};
     const active = createReviewedSupportSnapshot({
@@ -453,7 +485,11 @@ describe('canonical reviewed support', () => {
       sources: [
         {
           ...descriptor,
-          locator: {repositoryId: 'a'.repeat(64), teamId: 'default', path: 'durable/projects/threadnote/source.md'},
+          locator: {
+            repositoryId: Effect.pipe('a', EffectString.repeat(64)),
+            teamId: 'default',
+            path: 'durable/projects/threadnote/source.md',
+          },
         },
       ],
     });
@@ -461,13 +497,13 @@ describe('canonical reviewed support', () => {
   });
   it('preserves truthful consolidation source revisions and rejects private nested origin', () => {
     const body = 'Reviewed origin.';
-    const sourceUri = uri.replace('target.md', 'original.md');
+    const sourceUri = Effect.pipe(uri, EffectString.replace('target.md', 'original.md'));
     const reviewed = reviewConsolidation(
       body,
       [
         {
           uri: sourceUri,
-          revision: '9'.repeat(64),
+          revision: Effect.pipe('9', EffectString.repeat(64)),
           memoryId: 'tn_original',
           fragments: [body],
           codeCitations: [code],
@@ -522,15 +558,20 @@ describe('canonical reviewed support', () => {
     ).toBe(legacyOrigin);
   });
   it('accepts a large explicit manual body without weakening automatic draft bounds', () => {
-    const body = 'a'.repeat(40 * 1024);
+    const body = Effect.pipe('a', EffectString.repeat(40 * 1024));
     expect(parseMemoryDocument(uri, content(support(body), body))!.metadata.reviewedSupportError).toBeUndefined();
   });
   it('validates snapshot encoding without mutating the input', () => {
     fc.assert(
       fc.property(
-        fc.string({minLength: 1, maxLength: 200}).filter(value => value.trim().length > 0 && !value.includes('\n')),
+        fc
+          .string({minLength: 1, maxLength: 200})
+          .filter(
+            value =>
+              Effect.pipe(value, EffectString.trim).length > 0 && !Effect.pipe(value, EffectString.includes('\n')),
+          ),
         text => {
-          const body = text.trim();
+          const body = Effect.pipe(text, EffectString.trim);
           const value = support(body);
           const original = structuredClone(value);
           expect(validateReviewedMemorySupport(JSON.parse(JSON.stringify(value)), body)).toEqual(original);
@@ -547,18 +588,20 @@ it('keeps legacy private assessment byte and descriptor limits while preflightin
   const legacy = fixture();
   const encoded = encodeAutomaticMaintenanceAssessment(legacy);
   expect(() =>
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     parseAutomaticMaintenanceAssessment(`${encoded}${' '.repeat(MAX_AUTOMATIC_MAINTENANCE_BYTES)}`),
   ).toThrow();
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   expect(() => parseAutomaticMaintenanceAssessment(' '.repeat(MAX_AUTOMATIC_MAINTENANCE_V2_BYTES + 1))).toThrow();
   const evidence = [
     legacy.evidence[0],
     ...Array.from({length: 8}, (_, ordinal) => {
       const source: AutomaticMaintenanceSourceV1 = {
         kind: 'memory',
-        uri: uri.replace('target.md', `source-${ordinal}.md`),
+        uri: Effect.pipe(uri, EffectString.replace('target.md', `source-${ordinal}.md`)),
         memoryId: `tn_source_${ordinal}`,
-        canonicalHash: 'a'.repeat(64),
-        fragment: {ordinal: 0, hash: 'b'.repeat(64), startOffset: 0, endOffset: 6},
+        canonicalHash: Effect.pipe('a', EffectString.repeat(64)),
+        fragment: {ordinal: 0, hash: Effect.pipe('b', EffectString.repeat(64)), startOffset: 0, endOffset: 6},
       };
       return {...legacy.evidence[0], source, id: automaticMaintenanceEvidenceId(source)};
     }),

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../../index_scope.js';
@@ -32,7 +33,7 @@ const scopedDefinitions = [
   {name: 'removed_view_cleanup_due', type: 'index', sql: SCOPED_REMOVED_VIEW_CLEANUP_DUE_INDEX_SQL},
   {name: 'snapshot_scope_receipts', type: 'table', sql: SNAPSHOT_SCOPE_RECEIPTS_TABLE_SQL},
   {name: 'scope_applicability', type: 'table', sql: SCOPE_APPLICABILITY_TABLE_SQL},
-  ...SCOPED_REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS.map(trigger => ({...trigger, type: 'trigger'})),
+  ...EffectArray.map(SCOPED_REMOVED_VIEW_CLEANUP_TRIGGER_DEFINITIONS, trigger => ({...trigger, type: 'trigger'})),
 ] as const;
 
 export const codeGraphScopeAuthoritySchemaCompatible = Effect.fn('codeGraph.scopeAuthoritySchemaCompatible')(function* (
@@ -91,11 +92,11 @@ export const migrateCodeGraphScopeAuthority = Effect.fn('codeGraph.migrateScopeA
     {
       name: 'removed_view_cleanup',
       sql: SCOPED_REMOVED_VIEW_CLEANUP_TABLE_SQL,
-      columns: REMOVED_VIEW_CLEANUP_COLUMNS.map(column => column.name),
+      columns: EffectArray.map(REMOVED_VIEW_CLEANUP_COLUMNS, column => column.name),
     },
   ];
   for (const table of tables) {
-    const projection = table.columns.join(', ');
+    const projection = EffectArray.join(table.columns, ', ');
     const temporary = `${table.name}_scope_migration`;
     yield* sql.unsafe(`CREATE TEMP TABLE ${temporary} AS SELECT ${projection} FROM ${table.name}`);
     yield* sql.unsafe(`DROP TABLE ${table.name}`);

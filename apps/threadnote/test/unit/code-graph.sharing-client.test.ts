@@ -68,6 +68,9 @@ import {runCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const sharingLayer = CodeGraphMaintenanceCoordinator.layer.pipe(
   Layer.provideMerge(CodeGraphLanguagePackRegistry.layer),
@@ -78,8 +81,8 @@ const sharingLayer = CodeGraphMaintenanceCoordinator.layer.pipe(
 );
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
-const REPOSITORY_ID = 'b'.repeat(64);
-const CHECKOUT_ID = 'c'.repeat(64);
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
+const CHECKOUT_ID = Effect2.pipe('c', EffectString.repeat(64));
 const CHECKPOINT_BYTES = new TextEncoder().encode('not-a-checkpoint');
 
 describe('graph share import and inspect source', () => {
@@ -94,13 +97,48 @@ describe('graph share import and inspect source', () => {
     expect(recall).not.toContain('maybeImportSharedGraphBase');
     expect(memory).not.toContain('maybeImportSharedGraphBase');
     expect(memory).not.toContain('captureSharedGraphImportBase');
-    const ensureCommit = indexer.slice(indexer.indexOf('const ensureCommitWithSummary'));
-    expect(ensureCommit.indexOf('captureSharedGraphImportBase')).toBeGreaterThan(-1);
-    expect(ensureCommit.indexOf('captureSharedGraphImportBase')).toBeLessThan(
-      ensureCommit.indexOf('withCodeGraphProcessLock'),
+    const ensureCommit = Effect2.pipe(
+      indexer,
+      EffectString.slice(
+        Effect2.pipe(
+          indexer,
+          EffectString.indexOf('const ensureCommitWithSummary'),
+          Effect2.Option.getOrElse(() => -1),
+        ),
+      ),
     );
-    expect(ensureCommit.indexOf('hydrateSharedParseCache')).toBeLessThan(
-      ensureCommit.indexOf('withCodeGraphProcessLock'),
+    expect(
+      Effect2.pipe(
+        ensureCommit,
+        EffectString.indexOf('captureSharedGraphImportBase'),
+        Effect2.Option.getOrElse(() => -1),
+      ),
+    ).toBeGreaterThan(-1);
+    expect(
+      Effect2.pipe(
+        ensureCommit,
+        EffectString.indexOf('captureSharedGraphImportBase'),
+        Effect2.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect2.pipe(
+        ensureCommit,
+        EffectString.indexOf('withCodeGraphProcessLock'),
+        Effect2.Option.getOrElse(() => -1),
+      ),
+    );
+    expect(
+      Effect2.pipe(
+        ensureCommit,
+        EffectString.indexOf('hydrateSharedParseCache'),
+        Effect2.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect2.pipe(
+        ensureCommit,
+        EffectString.indexOf('withCodeGraphProcessLock'),
+        Effect2.Option.getOrElse(() => -1),
+      ),
     );
   });
 
@@ -116,7 +154,7 @@ describe('graph share import and inspect source', () => {
       expect(
         yield* loadSharedGraphQuerySource({
           checkoutId: CHECKOUT_ID,
-          localCommit: 'a'.repeat(40),
+          localCommit: Effect2.pipe('a', EffectString.repeat(40)),
           repositoryId: REPOSITORY_ID,
           snapshot: {id: 'cgsn_imported'},
           threadnoteHome: home,
@@ -126,7 +164,7 @@ describe('graph share import and inspect source', () => {
       yield* writeSharedGraphProvenance(home, CHECKOUT_ID, {
         checkpointDigest: sha256Digest(CHECKPOINT_BYTES),
         deltaCount: 2,
-        frontierCommit: 'a'.repeat(40),
+        frontierCommit: Effect2.pipe('a', EffectString.repeat(40)),
         profileDigest: enrolled.profileDigest,
         repositoryId: REPOSITORY_ID,
         schemaVersion: 1,
@@ -135,7 +173,7 @@ describe('graph share import and inspect source', () => {
       expect(
         yield* loadSharedGraphQuerySource({
           checkoutId: CHECKOUT_ID,
-          localCommit: 'a'.repeat(40),
+          localCommit: Effect2.pipe('a', EffectString.repeat(40)),
           repositoryId: REPOSITORY_ID,
           snapshot: {id: 'cgsn_local'},
           threadnoteHome: home,
@@ -144,7 +182,7 @@ describe('graph share import and inspect source', () => {
       expect(
         yield* loadSharedGraphQuerySource({
           checkoutId: CHECKOUT_ID,
-          localCommit: 'a'.repeat(40),
+          localCommit: Effect2.pipe('a', EffectString.repeat(40)),
           repositoryId: REPOSITORY_ID,
           snapshot: {baseSnapshotId: 'cgsn_imported', id: 'cgsn_overlay'},
           threadnoteHome: home,
@@ -169,7 +207,7 @@ describe('graph share import and inspect source', () => {
       yield* writeSharedGraphProvenance(home, CHECKOUT_ID, {
         checkpointDigest: published.checkpointDigest,
         deltaCount: 0,
-        frontierCommit: 'a'.repeat(40),
+        frontierCommit: Effect2.pipe('a', EffectString.repeat(40)),
         profileDigest: published.profileDigest,
         repositoryId: REPOSITORY_ID,
         schemaVersion: 1,
@@ -196,7 +234,7 @@ describe('graph share import and inspect source', () => {
       yield* writeSharedGraphProvenance(home, CHECKOUT_ID, {
         checkpointDigest: published.checkpointDigest,
         deltaCount: 0,
-        frontierCommit: 'a'.repeat(40),
+        frontierCommit: Effect2.pipe('a', EffectString.repeat(40)),
         profileDigest: published.profileDigest,
         repositoryId: REPOSITORY_ID,
         schemaVersion: 1,
@@ -208,20 +246,20 @@ describe('graph share import and inspect source', () => {
         checkpoint: {
           manifestDigest: nextDigest,
           snapshotId: 'cgsn_compacted',
-          sourceCommit: 'a'.repeat(40),
+          sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
         },
         deltas: [],
         generation: 2,
-        graphAbi: 'e'.repeat(64),
-        graphContentId: `cgc_${'d'.repeat(40)}`,
-        logicalGraphDigest: `sha256:${'2'.repeat(64)}`,
+        graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
+        graphContentId: `cgc_${Effect2.pipe('d', EffectString.repeat(40))}`,
+        logicalGraphDigest: `sha256:${Effect2.pipe('2', EffectString.repeat(64))}`,
         previousManifestDigest: published.manifestDigest,
         profileDigest: published.profileDigest,
         publisherFence: 1,
         repositoryId: REPOSITORY_ID,
         schemaVersion: 1,
         snapshotId: 'cgsn_compacted',
-        sourceCommit: 'a'.repeat(40),
+        sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
       };
       const signed = yield* signGraphShareFrontier(published.key, compact);
       const manifestDigest = yield* putCasBytes(published.casRoot, new TextEncoder().encode(canonicalJson(compact)));
@@ -247,7 +285,7 @@ describe('graph share import and inspect source', () => {
       const enrolled = yield* enrolledHome(home, {includeFrontier: true, skipCheckpoint: true});
       yield* writeGraphShareTrustReceipt(home, {
         ...trustReceiptFromEnrollment(enrolled.enrollment, enrolled.profile, enrolled.profileDigest, 'read-only'),
-        publisherKeyFingerprint: `sha256:${'f'.repeat(64)}`,
+        publisherKeyFingerprint: `sha256:${Effect2.pipe('f', EffectString.repeat(64))}`,
       });
       const result = yield* maybeImportSharedGraphBase(importRequest(enrolled.repo, home));
       expect(result).toEqual({imported: false, reason: 'trust-pin-mismatch'});
@@ -351,9 +389,9 @@ describe('graph share import and inspect source', () => {
         new TextEncoder().encode('mutated-checkpoint'),
       );
       yield* writeSharedGraphProvenance(home, CHECKOUT_ID, {
-        checkpointDigest: `sha256:${'9'.repeat(64)}`,
+        checkpointDigest: `sha256:${Effect2.pipe('9', EffectString.repeat(64))}`,
         deltaCount: 0,
-        frontierCommit: 'a'.repeat(40),
+        frontierCommit: Effect2.pipe('a', EffectString.repeat(40)),
         profileDigest: enrolled.profileDigest,
         repositoryId: REPOSITORY_ID,
         schemaVersion: 1,
@@ -366,7 +404,7 @@ describe('graph share import and inspect source', () => {
       expect(
         yield* loadSharedGraphQuerySource({
           checkoutId: CHECKOUT_ID,
-          localCommit: 'a'.repeat(40),
+          localCommit: Effect2.pipe('a', EffectString.repeat(40)),
           repositoryId: REPOSITORY_ID,
           snapshot: {id: 'cgsn_imported'},
           threadnoteHome: home,
@@ -412,7 +450,7 @@ describe('graph share import and inspect source', () => {
           Effect.gen(function* () {
             const request = yield* HttpServerRequest.HttpServerRequest;
             remoteRequests += 1;
-            return request.url.startsWith('/v1/frontiers/')
+            return Effect2.pipe(request.url, EffectString.startsWith('/v1/frontiers/'))
               ? HttpServerResponse.jsonUnsafe(remote)
               : HttpServerResponse.empty({status: 404});
           }),
@@ -445,7 +483,10 @@ describe('graph share import and inspect source', () => {
         const failingOnce = {
           ...fs,
           rename: (from: string, to: string) => {
-            if (!failedCommit && to.startsWith(path.join(home, 'graph-sharing', 'accepted-frontiers'))) {
+            if (
+              !failedCommit &&
+              Effect2.pipe(to, EffectString.startsWith(path.join(home, 'graph-sharing', 'accepted-frontiers')))
+            ) {
               failedCommit = true;
               return graphSharingFailure('Synthetic baseline persistence failure.');
             }
@@ -552,11 +593,17 @@ describe('graph share import and inspect source', () => {
       yield* git(repo, ['init', '-q', '--initial-branch=main']);
       yield* git(repo, ['add', '.']);
       yield* git(repo, ['-c', 'user.name=Test', '-c', 'user.email=test@threadnote.local', 'commit', '-qm', 'one']);
-      const first = (yield* runCommandEffect('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+      const first = Effect2.pipe(
+        (yield* runCommandEffect('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout,
+        EffectString.trim,
+      );
       yield* fs.writeFileString(path.join(repo, 'src', 'b.ts'), 'export const b = 2;\n');
       yield* git(repo, ['add', '.']);
       yield* git(repo, ['-c', 'user.name=Test', '-c', 'user.email=test@threadnote.local', 'commit', '-qm', 'two']);
-      const second = (yield* runCommandEffect('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+      const second = Effect2.pipe(
+        (yield* runCommandEffect('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout,
+        EffectString.trim,
+      );
       const casRoot = path.join(home, 'cas');
       const profileDigest = sha256Digest('profile');
       const gen1 = parseGraphShareFrontierManifest({
@@ -568,13 +615,13 @@ describe('graph share import and inspect source', () => {
         },
         deltas: [],
         generation: 1,
-        graphAbi: 'e'.repeat(64),
-        graphContentId: `cgc_${'d'.repeat(40)}`,
+        graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
+        graphContentId: `cgc_${Effect2.pipe('d', EffectString.repeat(40))}`,
         logicalGraphDigest: sha256Digest('g1'),
         previousManifestDigest: null,
         profileDigest,
         publisherFence: 1,
-        repositoryId: 'b'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
         schemaVersion: 1,
         snapshotId: 'cgsn_one',
         sourceCommit: first,
@@ -589,13 +636,13 @@ describe('graph share import and inspect source', () => {
         },
         deltas: [],
         generation: 2,
-        graphAbi: 'e'.repeat(64),
-        graphContentId: `cgc_${'d'.repeat(40)}`,
+        graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
+        graphContentId: `cgc_${Effect2.pipe('d', EffectString.repeat(40))}`,
         logicalGraphDigest: sha256Digest('g2'),
         previousManifestDigest: gen1Digest,
         profileDigest,
         publisherFence: 1,
-        repositoryId: 'b'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
         schemaVersion: 1,
         snapshotId: 'cgsn_two',
         sourceCommit: second,
@@ -604,22 +651,22 @@ describe('graph share import and inspect source', () => {
       const identity = {
         branch: 'main',
         caseMode: 'sensitive' as const,
-        checkoutId: 'c'.repeat(64),
+        checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
         displayName: 'graph-share',
         gitCommonDirectory: repo,
         headCommit: first,
         objectFormat: 'sha1' as const,
         remoteIdentity: 'github.com/acme/graph-share',
         repoRoot: repo,
-        repositoryId: 'b'.repeat(64),
-        worktreeId: 'd'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
       };
       const selected = yield* selectPublishedAncestorManifest(casRoot, identity, gen2);
       expect(selected.sourceCommit).toBe(first);
       expect(selected.generation).toBe(1);
       const unavailable = yield* selectPublishedAncestorManifest(
         casRoot,
-        {...identity, headCommit: 'f'.repeat(40)},
+        {...identity, headCommit: Effect2.pipe('f', EffectString.repeat(40))},
         gen1,
       ).pipe(
         Effect.as(false),
@@ -655,20 +702,20 @@ describe('graph share import and inspect source', () => {
           manifestDigest: artifactDigest,
           metadataDigest: published.metadataDigest,
           snapshotId: 'cgsn_imported',
-          sourceCommit: 'a'.repeat(40),
+          sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
         },
         deltas: [],
         generation: 1,
-        graphAbi: 'e'.repeat(64),
-        graphContentId: `cgc_${'d'.repeat(40)}`,
-        logicalGraphDigest: `sha256:${'2'.repeat(64)}`,
+        graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
+        graphContentId: `cgc_${Effect2.pipe('d', EffectString.repeat(40))}`,
+        logicalGraphDigest: `sha256:${Effect2.pipe('2', EffectString.repeat(64))}`,
         previousManifestDigest: null,
         profileDigest: enrolled.profileDigest,
         publisherFence: 1,
         repositoryId: REPOSITORY_ID,
         schemaVersion: 1,
         snapshotId: 'cgsn_imported',
-        sourceCommit: 'a'.repeat(40),
+        sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
       };
       const signed = yield* signGraphShareFrontier(enrolled.key, manifest);
       const manifestDigest = yield* putCasBytes(enrolled.casRoot, new TextEncoder().encode(canonicalJson(manifest)));
@@ -699,7 +746,7 @@ describe('graph share import and inspect source', () => {
       yield* writeSharedGraphProvenance(home, CHECKOUT_ID, {
         checkpointDigest: sha256Digest(CHECKPOINT_BYTES),
         deltaCount: 0,
-        frontierCommit: 'a'.repeat(40),
+        frontierCommit: Effect2.pipe('a', EffectString.repeat(40)),
         profileDigest: enrolled.profileDigest,
         repositoryId: REPOSITORY_ID,
         schemaVersion: 1,
@@ -735,14 +782,17 @@ describe('graph share import and inspect source', () => {
     },
     ({suffix}) =>
       Effect.gen(function* () {
-        const snapshotId = `cgsn_${'imported'.slice(0, 8)}${suffix.join('')}`.slice(0, 45);
+        const snapshotId = Effect2.pipe(
+          `cgsn_${Effect2.pipe('imported', EffectString.slice(0, 8))}${EffectArray.join(suffix, '')}`,
+          EffectString.slice(0, 45),
+        );
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-share-idempotent-'});
         const published = yield* enrolledHome(home, {includeFrontier: true, skipCheckpoint: true, snapshotId});
         yield* writeSharedGraphProvenance(home, CHECKOUT_ID, {
           checkpointDigest: published.checkpointDigest,
           deltaCount: 0,
-          frontierCommit: 'a'.repeat(40),
+          frontierCommit: Effect2.pipe('a', EffectString.repeat(40)),
           profileDigest: published.profileDigest,
           repositoryId: REPOSITORY_ID,
           schemaVersion: 1,
@@ -794,12 +844,12 @@ function identity(repo: string): RepositoryIdentity {
     checkoutId: CHECKOUT_ID,
     displayName: 'graph-share',
     gitCommonDirectory: repo,
-    headCommit: 'a'.repeat(40),
+    headCommit: Effect2.pipe('a', EffectString.repeat(40)),
     objectFormat: 'sha1',
     remoteIdentity: 'github.com/acme/graph-share',
     repoRoot: repo,
     repositoryId: REPOSITORY_ID,
-    worktreeId: 'd'.repeat(64),
+    worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
   };
 }
 
@@ -844,20 +894,20 @@ const enrolledHome = Effect.fn('test.graphShare.enrolledHome')(function* (
     checkpoint: {
       manifestDigest: checkpointDigest,
       snapshotId,
-      sourceCommit: 'a'.repeat(40),
+      sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
     },
     deltas: [],
     generation: 1,
-    graphAbi: 'e'.repeat(64),
-    graphContentId: `cgc_${'d'.repeat(40)}`,
-    logicalGraphDigest: `sha256:${'2'.repeat(64)}`,
+    graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
+    graphContentId: `cgc_${Effect2.pipe('d', EffectString.repeat(40))}`,
+    logicalGraphDigest: `sha256:${Effect2.pipe('2', EffectString.repeat(64))}`,
     previousManifestDigest: null,
     profileDigest,
     publisherFence: 1,
     repositoryId,
     schemaVersion: 1,
     snapshotId,
-    sourceCommit: 'a'.repeat(40),
+    sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
   };
   const signed = yield* signGraphShareFrontier(key, manifest);
   const manifestDigest = yield* putCasBytes(casRoot, new TextEncoder().encode(canonicalJson(manifest)));
@@ -896,16 +946,23 @@ function quarantineNames(home: string) {
 }
 
 function flipHex(value: string): string {
-  const last = value.at(-1) === 'a' ? 'b' : 'a';
-  return `${value.slice(0, -1)}${last}`;
+  const last =
+    Effect2.pipe(
+      value,
+      EffectString.at(-1),
+      Effect2.Option.getOrElse(() => undefined),
+    ) === 'a'
+      ? 'b'
+      : 'a';
+  return `${Effect2.pipe(value, EffectString.slice(0, -1))}${last}`;
 }
 
 function git(repo: string, args: readonly string[]) {
   return runCommandEffect('git', ['-C', repo, ...args]);
 }
 
-const CLIENT_SHA256_ZERO = '0'.repeat(64);
-const CLIENT_SHA1_ZERO = '0'.repeat(40);
+const CLIENT_SHA256_ZERO = Effect2.pipe('0', EffectString.repeat(64));
+const CLIENT_SHA1_ZERO = Effect2.pipe('0', EffectString.repeat(40));
 const CLIENT_UTF8 = new TextEncoder();
 
 function clientCheckpointMetadata(eligibleFiles: number) {
@@ -936,7 +993,7 @@ function clientCheckpointMetadata(eligibleFiles: number) {
 }
 
 function clientCheckpointRecords(paths: readonly string[]) {
-  return paths.flatMap(filePath => {
+  return EffectArray.flatMap(paths, filePath => {
     const facts = {diagnostics: [], edges: [], path: filePath, symbols: []};
     return [
       {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Path, Result} from 'effect';
@@ -20,6 +21,9 @@ import {
   serializeExternalSourceReceipt,
   type ExternalSourceAccessPolicy,
 } from '@threadnote/store/external-resource';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const systemLayer = SystemInfo.layer.pipe(
   Layer.provide(
@@ -51,7 +55,7 @@ const metadata = {
 };
 const uri = externalResourceUri(metadata);
 const receiptUri = externalDocumentManifestUri(metadata.sourceId, metadata.documentId);
-const fingerprint = 'a'.repeat(64);
+const fingerprint = Effect2.pipe('a', EffectString.repeat(64));
 
 function provideLayer<Services, E, R>(layer: Layer.Layer<Services, E, R>) {
   return <A, E2, R2>(effect: Effect.Effect<A, E2, R2>) =>
@@ -82,7 +86,7 @@ describe('external source access', () => {
       };
       const githubUri = externalResourceUri(github);
       const content = renderExternalResource(github, 'Synthetic conversation');
-      const epoch = 'b'.repeat(64);
+      const epoch = Effect2.pipe('b', EffectString.repeat(64));
       const now = yield* Clock.currentTimeMillis;
       const manifest = {
         provider: 'github' as const,
@@ -125,7 +129,9 @@ describe('external source access', () => {
       );
       expect(yield* store.read(location, githubUri)).toBe(content);
       expect(yield* loadExternalResourceAccess(location)).toEqual({[githubUri]: manifest.chunks[githubUri]});
-      const generations = Object.fromEntries(Array.from({length: 100}, (_, i) => [String(i + 1), 'c'.repeat(64)]));
+      const generations = EffectRecord.fromEntries(
+        Array.from({length: 100}, (_, i) => [String(i + 1), Effect2.pipe('c', EffectString.repeat(64))]),
+      );
       yield* store.write(
         location,
         receiptUri,
@@ -177,7 +183,7 @@ describe('external source access', () => {
         readFileString: (filename, encoding) =>
           fs.readFileString(filename, encoding).pipe(
             Effect.map(content => {
-              if (!captureChangedBytes || !filename.endsWith('/line_1.md')) return content;
+              if (!captureChangedBytes || !Effect2.pipe(filename, EffectString.endsWith('/line_1.md'))) return content;
               intercepted++;
               return content + '\nUnauthorized needle bytes';
             }),
@@ -275,14 +281,14 @@ describe('external source access', () => {
         yield* store.write(location, receiptUri, serializeExternalDocumentManifest(receipt), {mode: 'replace'});
         expect(yield* store.read(location, uri)).toBe(content);
         expect(
-          (yield* store.list(location, 'threadnote://resources', {recursive: true})).filter(entry =>
-            entry.uri.startsWith('threadnote://resources/external/superhuman'),
+          EffectArray.filter(yield* store.list(location, 'threadnote://resources', {recursive: true}), entry =>
+            Effect2.pipe(entry.uri, EffectString.startsWith('threadnote://resources/external/superhuman')),
           ),
         ).toEqual([expect.objectContaining({uri})]);
-        expect((yield* store.grep(location, 'threadnote://resources', 'needle')).map(match => match.uri)).toEqual([
-          uri,
-        ]);
-        policy = {...policy!, configFingerprint: 'b'.repeat(64)};
+        expect(
+          EffectArray.map(yield* store.grep(location, 'threadnote://resources', 'needle'), match => match.uri),
+        ).toEqual([uri]);
+        policy = {...policy!, configFingerprint: Effect2.pipe('b', EffectString.repeat(64))};
         expect(Result.isFailure(yield* store.readBounded(location, uri, 64).pipe(Effect.result))).toBe(true);
         expect(yield* store.grep(location, 'threadnote://resources', 'needle')).toEqual([]);
         policy = {enabled: true, configFingerprint: fingerprint, project: 'threadnote'};

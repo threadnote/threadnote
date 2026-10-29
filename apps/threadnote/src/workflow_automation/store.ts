@@ -8,6 +8,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeBoundedWorkflowJson, encodeBoundedWorkflowJson} from '../workflow_memory/journal_codec.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {CurrentWorkflowReadCache, immutableWorkflowImage} from '../workflow_memory/read_cache.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CurrentNativeAuthoringSave = Context.Reference<string | undefined>('threadnote/NativeAuthoringSave', {
   defaultValue: () => undefined,
@@ -25,7 +27,7 @@ const STATE_CODEC = 'threadnote-native-workflow-state-gzip-v1';
 function checkRunId(runId: string): void {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) ||
-    runId.includes('..') ||
+    Effect2.pipe(runId, EffectString.includes('..')) ||
     /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(runId) ||
     ['constructor', 'prototype'].includes(runId)
   )
@@ -63,7 +65,13 @@ const statePath = Effect.fn('workflowAutomation.statePath')(function* (
   runId: string,
   create = false,
 ) {
-  yield* Effect.try({try: () => checkRunId(runId), catch: error => error as WorkflowAutomationError});
+  yield* Effect.try({
+    try: () => checkRunId(runId),
+    catch: error =>
+      Schema.is(WorkflowAutomationError)(error)
+        ? error
+        : issue('invalid-state', 'Could not validate native workflow state.'),
+  });
   const directory = yield* stateDirectory(config, create);
   return directory === undefined ? undefined : (yield* Path.Path).join(directory, runId + '.json');
 });
@@ -140,7 +148,10 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
   const cache = yield* CurrentWorkflowReadCache;
   const validated = yield* Effect.try({
     try: () => (cache ? cache.decodeNative(state) : decodeNativeWorkflowState(state, sha256HexSync)),
-    catch: error => error as WorkflowAutomationError,
+    catch: error =>
+      Schema.is(WorkflowAutomationError)(error)
+        ? error
+        : issue('invalid-state', 'Could not validate native workflow state.'),
   });
   const serialized = yield* Effect.try({
     try: () => serializeNativeWorkflowState(validated, cache?.stringify),

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect, Layer, Path} from 'effect';
@@ -10,10 +11,13 @@ import {
   assertCodeMemoryLinkAgentAbRuntimeIdentity,
   evaluateCodeMemoryLinkAgentAb,
   parseCodeMemoryLinkAgentAbManifestV1,
+  type CodeMemoryLinkAgentAbManifestV1,
   parseCodeMemoryLinkAgentAbTrialsJsonl,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-ab';
 import {parseCodeMemoryLinkAgentAttemptsJsonl} from '@threadnote/threadnote/evaluation/code-memory-link-agent-attempts';
 import {parseCodeMemoryLinkAgentEvidenceJsonl} from '@threadnote/threadnote/evaluation/code-memory-link-agent-evidence';
+import type {CodeMemoryLinkCodexRawEvidenceV1} from '@threadnote/threadnote/evaluation/code-memory-link-codex-evidence';
+import type {CodeMemoryLinkCodexAppServerEvidenceV1} from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
 import {
   assertCodeMemoryLinkSealedSuiteBindingsV1,
   codeMemoryLinkContextBriefResponseReceiptHashV1,
@@ -62,6 +66,9 @@ import {
 } from './code-memory-link-codex-suite.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import {scriptArguments} from './effect/script.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const options = parseArguments(yield* scriptArguments());
@@ -156,7 +163,7 @@ const program = Effect.gen(function* () {
       if (
         agentAb.evidence.manifestApprovalCommit === null ||
         dogfood.harnessCommit !== agentAb.evidence.manifestApprovalCommit ||
-        trials.some(trial => trial.attestation.harnessCommit !== agentAb.evidence.manifestApprovalCommit)
+        EffectArray.some(trials, trial => trial.attestation.harnessCommit !== agentAb.evidence.manifestApprovalCommit)
       ) {
         throw new Error('Agent A/B and dogfood did not execute from the same reviewed manifest-approval checkout.');
       }
@@ -208,13 +215,13 @@ const program = Effect.gen(function* () {
     version: 1,
   } as const;
   yield* Console.log(JSON.stringify(result, undefined, 2));
-  if (status !== 'passed') return yield* ScriptError.make({message: failures.join('\n')});
+  if (status !== 'passed') return yield* ScriptError.make({message: EffectArray.join(failures, '\n')});
 });
 
 /** Establish ancestry and governance before a candidate commit may be printed or executed. */
 export const resolveGovernedCodeMemoryLinkRelease = Effect.fn('codeMemoryLinkRelease.resolveGovernedRelease')(
   function* (sourceRoot: string, releaseDescriptorPath: string, releaseTag: string) {
-    const governanceCommit = (yield* git(sourceRoot, ['rev-parse', 'HEAD'])).stdout.trim();
+    const governanceCommit = Effect2.pipe((yield* git(sourceRoot, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
     const release = yield* loadCodeMemoryLinkReleaseDescriptorAtHead(
       sourceRoot,
       governanceCommit,
@@ -278,15 +285,10 @@ export const loadCodeMemoryLinkReleaseDescriptorAtHead = Effect.fn('codeMemoryLi
     const packageVersion = yield* Effect.try({
       try: () => {
         const value = json(packageSource, 'tracked package manifest');
-        if (
-          typeof value !== 'object' ||
-          value === null ||
-          Array.isArray(value) ||
-          typeof (value as {readonly version?: unknown}).version !== 'string'
-        ) {
+        if (!Predicate.isObject(value) || !('version' in value) || typeof value.version !== 'string') {
           throw new Error('package.json version is missing');
         }
-        return (value as {readonly version: string}).version;
+        return value.version;
       },
       catch: cause => ScriptError.make({message: 'Tracked package manifest is invalid.', cause}),
     });
@@ -325,7 +327,7 @@ export const loadCodeMemoryLinkRetainedBundleAtHead = Effect.fn('codeMemoryLinkR
       try: () => parseCodeMemoryLinkRetainedBundleIndexV1(json(indexContent, 'retained bundle index')),
       catch: cause => ScriptError.make({message: 'Retained bundle index is invalid.', cause}),
     });
-    const bundleDirectory = repositoryPath.slice(0, -'/bundle.json'.length);
+    const bundleDirectory = Effect2.pipe(repositoryPath, EffectString.slice(0, -'/bundle.json'.length));
     const blobEntries = yield* Effect.forEach(
       index.blobs,
       blob => {
@@ -339,7 +341,7 @@ export const loadCodeMemoryLinkRetainedBundleAtHead = Effect.fn('codeMemoryLinkR
     const contents = yield* Effect.try({
       try: () =>
         verifyCodeMemoryLinkRetainedBundleV1({
-          blobs: new Map(blobEntries.map(([hash, content]) => [hash, content])),
+          blobs: new Map(EffectArray.map(blobEntries, ([hash, content]) => [hash, content])),
           indexContent,
         }),
       catch: cause => ScriptError.make({message: 'Retained evidence bundle failed content verification.', cause}),
@@ -348,7 +350,7 @@ export const loadCodeMemoryLinkRetainedBundleAtHead = Effect.fn('codeMemoryLinkR
       bundleHash,
       contents,
       repositoryPath,
-      repositoryPaths: [repositoryPath, ...blobEntries.map(([, , blobPath]) => blobPath)].sort(),
+      repositoryPaths: [repositoryPath, ...EffectArray.map(blobEntries, ([, , blobPath]) => blobPath)].sort(),
     };
   },
 );
@@ -442,9 +444,22 @@ export const loadCodeMemoryLinkScaleCandidateBindingAtCommit = Effect.fn(
 export function assertRetainedBundleBindings(input: {
   readonly agentAb: ReturnType<typeof evaluateCodeMemoryLinkAgentAb>;
   readonly dogfood: ReturnType<typeof evaluateCodeMemoryLinkDogfood>;
-  readonly evidence: ReturnType<typeof parseCodeMemoryLinkAgentEvidenceJsonl>;
-  readonly manifest: ReturnType<typeof parseCodeMemoryLinkAgentAbManifestV1>;
-  readonly retained: CodeMemoryLinkRetainedBundleContentsV1;
+  readonly evidence: readonly {
+    readonly rawEvidence: {
+      readonly appServer: Pick<CodeMemoryLinkCodexAppServerEvidenceV1, 'checkpoints'>;
+      readonly bindings: Pick<CodeMemoryLinkCodexRawEvidenceV1['bindings'], 'arm' | 'clientId' | 'taskId'>;
+      readonly clientProtocol: CodeMemoryLinkCodexRawEvidenceV1['clientProtocol'];
+      readonly judge: Pick<
+        CodeMemoryLinkCodexRawEvidenceV1['judge'],
+        'commandArtifactId' | 'commandSha256' | 'programArtifactId' | 'programSha256'
+      >;
+    };
+  }[];
+  readonly manifest: Pick<
+    CodeMemoryLinkAgentAbManifestV1,
+    'adjudicationArtifactHash' | 'clients' | 'suiteHash' | 'tasks'
+  >;
+  readonly retained: Pick<CodeMemoryLinkRetainedBundleContentsV1, 'artifacts' | 'clients' | 'sealedFiles'>;
 }): void {
   const retainedResult = json(input.retained.artifacts.result, 'retained scored result');
   if (
@@ -457,41 +472,51 @@ export function assertRetainedBundleBindings(input: {
   const layout = parseCodeMemoryLinkCodexSuiteLayoutV1(
     json(input.retained.artifacts.sealedLayout, 'retained sealed layout'),
   );
-  const retainedSealedPaths = input.retained.sealedFiles.map(file => file.path).sort();
+  const retainedSealedPaths = EffectArray.map(input.retained.sealedFiles, file => file.path).sort();
   const layoutSources = [
-    ...layout.fixtureFiles.map(file => file.source),
-    ...layout.judge.files.map(file => file.source),
-    ...layout.tasks.flatMap(task => [task.packetSource, task.rubricSource]),
+    ...EffectArray.map(layout.fixtureFiles, file => file.source),
+    ...EffectArray.map(layout.judge.files, file => file.source),
+    ...EffectArray.flatMap(layout.tasks, task => [task.packetSource, task.rubricSource]),
   ];
   if (new Set(layoutSources).size !== layoutSources.length) {
     throw ScriptError.make({message: 'Retained sealed layout source paths must be unique.'});
   }
-  const expectedSealedPaths = layoutSources.filter(source => source !== 'adapter.json').sort();
+  const expectedSealedPaths = EffectArray.filter(layoutSources, source => source !== 'adapter.json').sort();
   if (JSON.stringify(retainedSealedPaths) !== JSON.stringify(expectedSealedPaths)) {
     throw ScriptError.make({message: 'Retained sealed files differ from the complete layout source set.'});
   }
   const sealedRawHashes = new Set([
     sha256HexSync(input.retained.artifacts.sealedLayout),
-    ...input.retained.sealedFiles.map(file => sha256HexSync(file.content)),
+    ...EffectArray.map(input.retained.sealedFiles, file => sha256HexSync(file.content)),
   ]);
   if (
     suite.suiteHash !== input.manifest.suiteHash ||
     suite.judge.judgeHash !== input.manifest.adjudicationArtifactHash ||
-    !suite.judge.artifacts.some(artifact => artifact.sha256 === sha256HexSync(input.retained.artifacts.sealedLayout)) ||
-    [...suite.fixture.artifacts, ...suite.judge.artifacts].some(artifact => !sealedRawHashes.has(artifact.sha256))
+    !EffectArray.some(
+      suite.judge.artifacts,
+      artifact => artifact.sha256 === sha256HexSync(input.retained.artifacts.sealedLayout),
+    ) ||
+    EffectArray.some(
+      [...suite.fixture.artifacts, ...suite.judge.artifacts],
+      artifact => !sealedRawHashes.has(artifact.sha256),
+    )
   ) {
     throw ScriptError.make({
       message: 'Retained sealed suite or layout differs from the manifest adjudication bindings.',
     });
   }
-  const sealedContentByPath = new Map(input.retained.sealedFiles.map(file => [file.path, file.content]));
-  const fixtureArtifactById = new Map(suite.fixture.artifacts.map(artifact => [artifact.artifactId, artifact]));
-  const judgeArtifactById = new Map(suite.judge.artifacts.map(artifact => [artifact.artifactId, artifact]));
+  const sealedContentByPath = new Map(EffectArray.map(input.retained.sealedFiles, file => [file.path, file.content]));
+  const fixtureArtifactById = new Map(
+    EffectArray.map(suite.fixture.artifacts, artifact => [artifact.artifactId, artifact]),
+  );
+  const judgeArtifactById = new Map(
+    EffectArray.map(suite.judge.artifacts, artifact => [artifact.artifactId, artifact]),
+  );
   if (
-    JSON.stringify(layout.fixtureFiles.map(file => file.artifactId)) !==
-      JSON.stringify(suite.fixture.artifacts.map(artifact => artifact.artifactId)) ||
-    JSON.stringify(layout.judge.files.map(file => file.artifactId)) !==
-      JSON.stringify(suite.judge.artifacts.map(artifact => artifact.artifactId))
+    JSON.stringify(EffectArray.map(layout.fixtureFiles, file => file.artifactId)) !==
+      JSON.stringify(EffectArray.map(suite.fixture.artifacts, artifact => artifact.artifactId)) ||
+    JSON.stringify(EffectArray.map(layout.judge.files, file => file.artifactId)) !==
+      JSON.stringify(EffectArray.map(suite.judge.artifacts, artifact => artifact.artifactId))
   ) {
     throw ScriptError.make({message: 'Retained sealed layout differs from the suite artifact rosters.'});
   }
@@ -505,8 +530,12 @@ export function assertRetainedBundleBindings(input: {
       });
     }
   }
-  const layoutArtifact = layout.judge.files.find(file => file.artifactId === layout.layoutArtifactId);
-  const commandArtifact = layout.judge.files.find(file => file.artifactId === layout.judge.commandArtifactId);
+  const layoutArtifact = EffectOption.getOrUndefined(
+    EffectArray.findFirst(layout.judge.files, file => file.artifactId === layout.layoutArtifactId),
+  );
+  const commandArtifact = EffectOption.getOrUndefined(
+    EffectArray.findFirst(layout.judge.files, file => file.artifactId === layout.judge.commandArtifactId),
+  );
   if (!layoutArtifact || layoutArtifact.source !== 'adapter.json' || !commandArtifact) {
     throw ScriptError.make({
       message: 'Retained sealed layout omits its exact layout or judge-command artifact binding.',
@@ -516,26 +545,41 @@ export function assertRetainedBundleBindings(input: {
   if (commandContent === undefined)
     throw ScriptError.make({message: 'Retained sealed layout omits the judge command bytes.'});
   const judgeCommand = parseCodeMemoryLinkCodexJudgeCommandV1(json(commandContent, 'retained sealed judge command'));
-  const packets = input.retained.sealedFiles
-    .filter(file => file.path.endsWith('/packet.json'))
-    .map(file => parseCodeMemoryLinkTaskPacketV1(json(file.content, `retained ${file.path}`)));
-  const rubrics = input.retained.sealedFiles
-    .filter(file => file.path.endsWith('/rubric.json'))
-    .map(file => parseCodeMemoryLinkRubricV1(json(file.content, `retained ${file.path}`)));
+  const sealedFiles = input.retained.sealedFiles;
+  const packets = EffectArray.map(
+    EffectArray.filter(
+      sealedFiles,
+      (file, index) => index in sealedFiles && Effect2.pipe(file.path, EffectString.endsWith('/packet.json')),
+    ),
+    file => parseCodeMemoryLinkTaskPacketV1(json(file.content, `retained ${file.path}`)),
+  );
+  const rubrics = EffectArray.map(
+    EffectArray.filter(
+      sealedFiles,
+      (file, index) => index in sealedFiles && Effect2.pipe(file.path, EffectString.endsWith('/rubric.json')),
+    ),
+    file => parseCodeMemoryLinkRubricV1(json(file.content, `retained ${file.path}`)),
+  );
   assertCodeMemoryLinkSealedSuiteBindingsV1({rubrics, suite, taskPackets: packets});
-  const suiteTaskBindings = suite.tasks
-    .map(({packetHash, rubricHash, taskId, taskKind}) => ({packetHash, rubricHash, taskId, taskKind}))
-    .sort((left, right) => left.taskId.localeCompare(right.taskId));
-  const manifestTaskBindings = input.manifest.tasks
-    .map(({packetHash, rubricHash, taskId, taskKind}) => ({packetHash, rubricHash, taskId, taskKind}))
-    .sort((left, right) => left.taskId.localeCompare(right.taskId));
+  const suiteTaskBindings = EffectArray.map(suite.tasks, ({packetHash, rubricHash, taskId, taskKind}) => ({
+    packetHash,
+    rubricHash,
+    taskId,
+    taskKind,
+  })).sort((left, right) => Effect2.pipe(left.taskId, EffectString.localeCompare(right.taskId)));
+  const manifestTaskBindings = EffectArray.map(input.manifest.tasks, ({packetHash, rubricHash, taskId, taskKind}) => ({
+    packetHash,
+    rubricHash,
+    taskId,
+    taskKind,
+  })).sort((left, right) => Effect2.pipe(left.taskId, EffectString.localeCompare(right.taskId)));
   if (JSON.stringify(suiteTaskBindings) !== JSON.stringify(manifestTaskBindings)) {
     throw ScriptError.make({message: 'Retained sealed suite task roster differs from the manifest task roster.'});
   }
   for (const task of input.manifest.tasks) {
-    const packet = packets.filter(value => value.taskId === task.taskId);
-    const rubric = rubrics.filter(value => value.taskId === task.taskId);
-    const layoutTask = layout.tasks.filter(value => value.taskId === task.taskId);
+    const packet = EffectArray.filter(packets, value => value.taskId === task.taskId);
+    const rubric = EffectArray.filter(rubrics, value => value.taskId === task.taskId);
+    const layoutTask = EffectArray.filter(layout.tasks, value => value.taskId === task.taskId);
     if (
       packet.length !== 1 ||
       rubric.length !== 1 ||
@@ -557,14 +601,14 @@ export function assertRetainedBundleBindings(input: {
     }
   }
   const expectedClients = [...input.manifest.clients].sort((left, right) =>
-    left.clientId.localeCompare(right.clientId),
+    Effect2.pipe(left.clientId, EffectString.localeCompare(right.clientId)),
   );
   const retainedClients = [...input.retained.clients].sort((left, right) =>
-    left.clientId.localeCompare(right.clientId),
+    Effect2.pipe(left.clientId, EffectString.localeCompare(right.clientId)),
   );
   if (
-    JSON.stringify(retainedClients.map(client => client.clientId)) !==
-    JSON.stringify(expectedClients.map(client => client.clientId))
+    JSON.stringify(EffectArray.map(retainedClients, client => client.clientId)) !==
+    JSON.stringify(EffectArray.map(expectedClients, client => client.clientId))
   ) {
     throw ScriptError.make({message: 'Retained client descriptor/config-projection roster differs from the manifest.'});
   }
@@ -574,12 +618,15 @@ export function assertRetainedBundleBindings(input: {
     const descriptor = parseCodeMemoryLinkClientImplementationDescriptorV1(descriptorInput);
     const descriptorHash = codeMemoryLinkClientImplementationDescriptorHash(descriptorInput);
     const configurationProjectionHash = sha256HexSync(client.configProjection);
-    const clientEvidence = input.evidence.filter(receipt => receipt.rawEvidence.bindings.clientId === client.clientId);
+    const clientEvidence = EffectArray.filter(
+      input.evidence,
+      receipt => receipt.rawEvidence.bindings.clientId === client.clientId,
+    );
     if (clientEvidence.length === 0) {
       throw ScriptError.make({message: `Retained evidence omits manifest client ${client.clientId}.`});
     }
     const expectedProjectionHashes = new Set(
-      clientEvidence.map(receipt => {
+      EffectArray.map(clientEvidence, receipt => {
         const protocol = receipt.rawEvidence.clientProtocol;
         if (JSON.stringify(protocol.expectedClient) !== JSON.stringify(expected.expectedClient)) {
           throw ScriptError.make({
@@ -619,7 +666,9 @@ export function assertRetainedBundleBindings(input: {
   }
   for (const receipt of input.evidence) {
     const raw = receipt.rawEvidence;
-    const task = input.manifest.tasks.find(candidate => candidate.taskId === raw.bindings.taskId)!;
+    const task = EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.manifest.tasks, candidate => candidate.taskId === raw.bindings.taskId),
+    )!;
     if (
       raw.judge.commandArtifactId !== layout.judge.commandArtifactId ||
       raw.judge.programArtifactId !== judgeCommand.programArtifactId ||
@@ -630,7 +679,7 @@ export function assertRetainedBundleBindings(input: {
         message: `Retained judge execution for ${raw.bindings.taskId} differs from the sealed suite judge artifacts.`,
       });
     }
-    const observedResponseHashes = raw.appServer.checkpoints.flatMap(checkpoint => {
+    const observedResponseHashes = EffectArray.flatMap(raw.appServer.checkpoints, checkpoint => {
       if (
         checkpoint.method !== 'item/completed' ||
         checkpoint.itemType !== 'mcpToolCall' ||
@@ -667,7 +716,11 @@ const readTrackedGitBlob = Effect.fn('codeMemoryLinkRelease.readTrackedGitBlob')
     ],
     {concurrency: 2},
   );
-  const [metadata, trackedPath, ...extra] = listing.stdout.trimEnd().split('\t');
+  const [metadata, trackedPath, ...extra] = Effect2.pipe(
+    listing.stdout,
+    EffectString.trimEnd,
+    EffectString.split('\t'),
+  );
   if (
     extra.length > 0 ||
     trackedPath !== repositoryPath ||
@@ -711,11 +764,11 @@ export const verifyApprovalCheckout = Effect.fn('codeMemoryLinkRelease.verifyApp
     ],
     {concurrency: 4},
   );
-  const commit = commitResult.stdout.trim();
-  if (statusResult.stdout.trim()) {
+  const commit = Effect2.pipe(commitResult.stdout, EffectString.trim);
+  if (Effect2.pipe(statusResult.stdout, EffectString.trim)) {
     return yield* ScriptError.make({message: 'Release evidence verification requires a clean governance checkout.'});
   }
-  if (mergeBaseResult.stdout.trim() !== candidateCommit) {
+  if (Effect2.pipe(mergeBaseResult.stdout, EffectString.trim) !== candidateCommit) {
     return yield* ScriptError.make({message: 'The tested candidate must be an ancestor of the governance checkout.'});
   }
   const history = parseLinearGovernanceHistory(historyResult.stdout, candidateCommit, commit);
@@ -727,25 +780,33 @@ export const verifyApprovalCheckout = Effect.fn('codeMemoryLinkRelease.verifyApp
       ),
     {concurrency: 4},
   );
-  const changedPaths = [...new Set(changedByCommit.flatMap(entry => entry.paths))].sort();
+  const changedPaths = [...new Set(EffectArray.flatMap(changedByCommit, entry => entry.paths))].sort();
   const allowedGovernancePaths = new Set(GOVERNANCE_ONLY_PATHS);
   if (releaseDescriptorPath !== undefined) allowedGovernancePaths.add(releaseDescriptorPath);
   if (scaleArtifactPath !== undefined) allowedGovernancePaths.add(scaleArtifactPath);
-  const invalidPaths = changedPaths.filter(
+  const invalidPaths = EffectArray.filter(
+    changedPaths,
     value =>
       !allowedGovernancePaths.has(value) &&
-      !value.startsWith('apps/threadnote/test/evaluation/retained/code-memory-link/'),
+      !Effect2.pipe(value, EffectString.startsWith('apps/threadnote/test/evaluation/retained/code-memory-link/')),
   );
   if (invalidPaths.length > 0) {
-    const offendingCommits = changedByCommit
-      .filter(entry => entry.paths.some(path => invalidPaths.includes(path)))
-      .map(entry => entry.commit)
-      .join(', ');
+    const offendingCommits = EffectArray.join(
+      EffectArray.map(
+        EffectArray.filter(
+          changedByCommit,
+          (entry, __effectArrayIndex) =>
+            __effectArrayIndex in changedByCommit && EffectArray.some(entry.paths, path => invalidPaths.includes(path)),
+        ),
+        entry => entry.commit,
+      ),
+      ', ',
+    );
     return yield* ScriptError.make({
-      message: `Runtime or product files changed in post-candidate history (${offendingCommits}): ${invalidPaths.join(', ')}`,
+      message: `Runtime or product files changed in post-candidate history (${offendingCommits}): ${EffectArray.join(invalidPaths, ', ')}`,
     });
   }
-  return {changedPaths, commit, governanceCommits: history.map(entry => entry.commit)};
+  return {changedPaths, commit, governanceCommits: EffectArray.map(history, entry => entry.commit)};
 });
 
 export const verifyManifestApproval = Effect.fn('codeMemoryLinkRelease.verifyManifestApproval')(function* (
@@ -768,12 +829,15 @@ export const verifyManifestApproval = Effect.fn('codeMemoryLinkRelease.verifyMan
     ],
     {concurrency: 3},
   );
-  if (candidateBase.stdout.trim() !== candidateCommit || governanceBase.stdout.trim() !== approvalCommit) {
+  if (
+    Effect2.pipe(candidateBase.stdout, EffectString.trim) !== candidateCommit ||
+    Effect2.pipe(governanceBase.stdout, EffectString.trim) !== approvalCommit
+  ) {
     return yield* ScriptError.make({
       message: 'Manifest approval chronology does not descend candidate -> approval -> evidence governance.',
     });
   }
-  const parents = approvalParents.stdout.trim().split(/\s+/u);
+  const parents = Effect2.pipe(approvalParents.stdout, EffectString.trim, EffectString.split(/\s+/u));
   if (parents.length !== 2) {
     return yield* ScriptError.make({message: 'Manifest approval must be a single-parent governance commit.'});
   }
@@ -840,12 +904,12 @@ export const verifyFinalEvidenceApproval = Effect.fn('codeMemoryLinkRelease.veri
     ],
     {concurrency: 5},
   );
-  if (governanceBase.stdout.trim() !== approvalCommit) {
+  if (Effect2.pipe(governanceBase.stdout, EffectString.trim) !== approvalCommit) {
     return yield* ScriptError.make({
       message: 'Final evidence approval chronology must descend from the manifest approval commit.',
     });
   }
-  const finalParents = governanceParents.stdout.trim().split(/\s+/u);
+  const finalParents = Effect2.pipe(governanceParents.stdout, EffectString.trim, EffectString.split(/\s+/u));
   if (finalParents.length !== 2 || finalParents[1] !== approvalCommit) {
     return yield* ScriptError.make({
       message: 'Final evidence approval must be the immediate single-parent commit after manifest approval.',
@@ -859,7 +923,7 @@ export const verifyFinalEvidenceApproval = Effect.fn('codeMemoryLinkRelease.veri
     `M\t${APPROVALS_PATH}`,
     `A\t${releaseDescriptorPath}`,
     `A\t${scaleArtifactPath}`,
-    ...retainedBundlePaths.map(path => `A\t${path}`),
+    ...EffectArray.map(retainedBundlePaths, path => `A\t${path}`),
   ].sort();
   if (JSON.stringify(changeStatusLines(finalDiff.stdout).sort()) !== JSON.stringify(expectedFinalChanges)) {
     return yield* ScriptError.make({
@@ -903,7 +967,7 @@ function parseLinearGovernanceHistory(
   const history: GovernanceHistoryEntry[] = [];
   let expectedParent = candidateCommit;
   for (const line of lines(source)) {
-    const [commit, ...parents] = line.split(/\s+/u);
+    const [commit, ...parents] = Effect2.pipe(line, EffectString.split(/\s+/u));
     if (!commit || parents.length !== 1 || parents[0] !== expectedParent) {
       throw ScriptError.make({
         message: 'Post-candidate evidence governance must be a linear, single-parent commit history.',
@@ -932,10 +996,10 @@ function parseApprovalJson(source: string): ParsedApprovalJson {
   } catch (cause) {
     throw ScriptError.make({message: 'Approval data must be valid JSON.', cause});
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!Predicate.isObject(value)) {
     throw ScriptError.make({message: 'Approval data must be a JSON object.'});
   }
-  const record = value as Record<string, unknown>;
+  const record = value;
   const expectedKeys = [
     'agentAbEvidenceHashes',
     'agentAbManifestHashes',
@@ -943,8 +1007,8 @@ function parseApprovalJson(source: string): ParsedApprovalJson {
     'retainedEvidenceBundleHashes',
     'version',
   ];
-  if (JSON.stringify(Object.keys(record).sort()) !== JSON.stringify([...expectedKeys].sort())) {
-    throw ScriptError.make({message: `Approval data must contain exactly: ${expectedKeys.join(', ')}.`});
+  if (JSON.stringify(EffectRecord.keys(record).sort()) !== JSON.stringify([...expectedKeys].sort())) {
+    throw ScriptError.make({message: `Approval data must contain exactly: ${EffectArray.join(expectedKeys, ', ')}.`});
   }
   if (record.version !== 1) throw ScriptError.make({message: 'Approval data version must be 1.'});
   return {
@@ -960,10 +1024,13 @@ function parseApprovalJsonEffect(source: string) {
 }
 
 function parseHashArray(value: unknown, name: string): readonly string[] {
-  if (!Array.isArray(value) || value.some(hash => typeof hash !== 'string' || !/^[0-9a-f]{64}$/u.test(hash))) {
+  if (
+    !EffectArray.isArray(value) ||
+    EffectArray.some(value, hash => typeof hash !== 'string' || !/^[0-9a-f]{64}$/u.test(hash))
+  ) {
     throw ScriptError.make({message: `${name} must contain only lowercase SHA-256 hashes.`});
   }
-  const values = value as readonly string[];
+  const values = EffectArray.filter(value, (hash): hash is string => typeof hash === 'string');
   if (new Set(values).size !== values.length)
     throw ScriptError.make({message: `${name} must not contain duplicate hashes.`});
   return values;
@@ -974,15 +1041,17 @@ function sameHashes(actual: readonly string[], expected: readonly string[]): boo
 }
 
 function lines(source: string): string[] {
-  return source
-    .split(/\r?\n/u)
-    .map(value => value.trim())
-    .filter(Boolean);
+  return EffectArray.filter(
+    EffectArray.map(Effect2.pipe(source, EffectString.split(/\r?\n/u)), value =>
+      Effect2.pipe(value, EffectString.trim),
+    ),
+    Boolean,
+  );
 }
 
 function changeStatusLines(source: string): string[] {
   const changes = lines(source);
-  if (changes.some(change => !/^[ACDMTUXB]\t[^\t]+$/u.test(change))) {
+  if (EffectArray.some(changes, change => !/^[ACDMTUXB]\t[^\t]+$/u.test(change))) {
     throw ScriptError.make({message: 'Final evidence approval contains an unsupported Git change status.'});
   }
   return changes;
@@ -1038,6 +1107,7 @@ function parseArguments(args: readonly string[]): {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }

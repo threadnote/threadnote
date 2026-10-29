@@ -1,3 +1,4 @@
+import { Array as EffectArray } from "effect"
 import {DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -24,6 +25,7 @@ import {chunk, lookupDomain, sortedBy, symbolTerms, uniqueBy} from '../utilities
 import {lastStatementChangeCount} from '../activation/core.js';
 import {type EdgeRow} from '../internal_models.js';
 import {persistedIncrementalSurfaceMatches} from '../incremental/surface.js';
+
 
 function persistentSnapshotBuildIdentityMatches(current: CodeGraphSnapshot, requested: CodeGraphSnapshot): boolean {
   return (
@@ -314,7 +316,7 @@ const retainKnownRawContentAliases = Effect.fn('codeGraph.retainKnownRawContentA
   sql: SqlClient.SqlClient,
   files: readonly CodeGraphInventoryFile[],
 ) {
-  const requested = [...new Set(files.flatMap(file => (file.rawContentHash ? [] : [file.contentHash])))];
+  const requested = [...new Set(EffectArray.flatMap(files, file => (file.rawContentHash ? [] : [file.contentHash])))];
   if (requested.length === 0) return files;
   const rows = yield* sql.unsafe<{readonly content_hash: string; readonly raw_content_hash: string}>(
     `WITH requested(content_hash) AS (
@@ -334,11 +336,9 @@ const retainKnownRawContentAliases = Effect.fn('codeGraph.retainKnownRawContentA
     [JSON.stringify(requested)],
   );
   const aliases = new Map(
-    rows
-      .filter(row => /^[0-9a-f]{64}$/u.test(row.raw_content_hash))
-      .map(row => [row.content_hash, row.raw_content_hash]),
+    EffectArray.map(EffectArray.filter(rows, row => /^[0-9a-f]{64}$/u.test(row.raw_content_hash)), row => [row.content_hash, row.raw_content_hash]),
   );
-  return files.map(file => {
+  return EffectArray.map(files, file => {
     const rawContentHash = file.rawContentHash ?? aliases.get(file.contentHash);
     return rawContentHash === undefined ? file : {...file, rawContentHash};
   });
@@ -350,7 +350,7 @@ const activationMode = Effect.fn('codeGraph.activationMode')(function* (sql: Sql
     FROM activation_state
     WHERE key IN ('base_snapshot_id', 'mode', 'owner_token', 'snapshot_id')
   `;
-  const values = new Map(rows.map(row => [row.key, row.value]));
+  const values = new Map(EffectArray.map(rows, row => [row.key, row.value]));
   const baseSnapshotId = values.get('base_snapshot_id');
   if (values.get('mode') === 'persisted-delta' && baseSnapshotId) {
     return {baseSnapshotId, mode: 'persisted-delta'} as const;
@@ -377,8 +377,8 @@ function stageActivationFiles(
       yield* sql.unsafe(
         `${activationInsertClause(mode)} INTO activation_files (
           path, content_hash, raw_content_hash, language, mode, size, source
-        ) VALUES ${retainedBatch.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-        retainedBatch.flatMap(file => [
+        ) VALUES ${EffectArray.join(EffectArray.map(retainedBatch, () => '(?, ?, ?, ?, ?, ?, ?)'), ', ')}`,
+        EffectArray.flatMap(retainedBatch, file => [
           file.path,
           file.contentHash,
           file.rawContentHash ?? null,
@@ -435,8 +435,8 @@ function stageActivationSymbols(
           id, content_hash, kind, name, qualified_name, path, language, package_name,
           arity, lookup_keys_json, resolution_domain, resolution_scope_id, exported, signature,
           documentation, span_json
-        ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-        batch.flatMap(symbol => [
+        ) VALUES ${EffectArray.join(EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'), ', ')}`,
+        EffectArray.flatMap(batch, symbol => [
           symbol.id,
           symbol.contentHash,
           symbol.kind,
@@ -458,9 +458,8 @@ function stageActivationSymbols(
       yield* observer?.('symbols', batch.length) ?? Effect.void;
       const lookupRows = [
         ...uniqueBy(
-          batch.flatMap(symbol =>
-            (symbol.lookupKeys ?? []).map(
-              key =>
+          EffectArray.flatMap(batch, symbol =>
+            EffectArray.map((symbol.lookupKeys ?? []), key =>
                 [
                   key,
                   symbol.id,
@@ -469,9 +468,7 @@ function stageActivationSymbols(
                   'symbol',
                   null,
                   symbol.path,
-                ] as const,
-            ),
-          ),
+                ] as const)),
           row => `${row[0]}\0${row[1]}`,
         ),
       ].sort((left, right) => compareCodeUnits(left[0], right[0]) || compareCodeUnits(left[1], right[1]));
@@ -480,7 +477,7 @@ function stageActivationSymbols(
         yield* sql.unsafe(
           `${activationInsertClause(mode)} INTO activation_symbol_lookup (
             lookup_key, symbol_id, resolution_domain, exported, provenance, evidence_edge_id, evidence_path
-          ) VALUES ${lookupBatch.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
+          ) VALUES ${EffectArray.join(EffectArray.map(lookupBatch, () => '(?, ?, ?, ?, ?, ?, ?)'), ', ')}`,
           lookupBatch.flat(),
         );
         yield* observer?.('lookup-keys', lookupBatch.length) ?? Effect.void;
@@ -509,7 +506,7 @@ function stageActivationSymbolTerms(
       return Effect.gen(function* () {
         yield* sql.unsafe(
           `${activationInsertClause(mode)} INTO activation_symbol_terms (term, symbol_id, weight)
-           VALUES ${current.map(() => '(?, ?, ?)').join(', ')}`,
+           VALUES ${EffectArray.join(EffectArray.map(current, () => '(?, ?, ?)'), ', ')}`,
           current.flat(),
         );
         yield* observer?.('terms', current.length) ?? Effect.void;
@@ -572,8 +569,8 @@ const stageCompactLexicalFacts = Effect.fn('codeGraph.stageCompactLexicalFacts')
   for (const batch of chunk(orderedSymbols, ACTIVATION_SYMBOL_BATCH_ROWS)) {
     yield* sql.unsafe(
       `INSERT INTO lexical_compact_symbols (snapshot_key, symbol_id)
-       VALUES ${batch.map(() => '(?, ?)').join(', ')}`,
-      batch.flatMap(symbol => [snapshotKey, symbol.id]),
+       VALUES ${EffectArray.join(EffectArray.map(batch, () => '(?, ?)'), ', ')}`,
+      EffectArray.flatMap(batch, symbol => [snapshotKey, symbol.id]),
     );
     const inserted = yield* lastStatementChangeCount(sql);
     if (inserted !== batch.length) {
@@ -593,18 +590,18 @@ const stageCompactLexicalFacts = Effect.fn('codeGraph.stageCompactLexicalFacts')
     );
     termBatch = [];
     return Effect.gen(function* () {
-      const terms = [...new Set(current.map(row => row[0]))].sort(compareCodeUnits);
+      const terms = [...new Set(EffectArray.map(current, row => row[0]))].sort(compareCodeUnits);
       for (const termRows of chunk(terms, ACTIVATION_TERM_BATCH_ROWS)) {
         yield* sql.unsafe(
           `INSERT OR IGNORE INTO lexical_compact_terms (snapshot_key, term)
-           VALUES ${termRows.map(() => '(?, ?)').join(', ')}`,
-          termRows.flatMap(term => [snapshotKey, term]),
+           VALUES ${EffectArray.join(EffectArray.map(termRows, () => '(?, ?)'), ', ')}`,
+          EffectArray.flatMap(termRows, term => [snapshotKey, term]),
         );
         termCount += yield* lastStatementChangeCount(sql);
       }
       yield* sql.unsafe(
         `WITH input(term, symbol_id, weight) AS (
-           VALUES ${current.map(() => '(?, ?, ?)').join(', ')}
+           VALUES ${EffectArray.join(EffectArray.map(current, () => '(?, ?, ?)'), ', ')}
          )
          INSERT INTO lexical_compact_postings (snapshot_key, term_key, symbol_key, weight)
          SELECT ?, terms.term_key, symbols.symbol_key, input.weight
@@ -651,7 +648,7 @@ function validatedCompactLexicalReceipt(
   expectedSymbolCount: number,
 ): Effect.Effect<CompactLexicalFormatReceipt, CodeGraphStoreFailure> {
   const counts = [receipt.postingCount, receipt.symbolCount, receipt.termCount];
-  if (counts.some(count => !Number.isSafeInteger(count) || count < 0)) {
+  if (EffectArray.some(counts, count => !Number.isSafeInteger(count) || count < 0)) {
     return Effect.fail(CodeGraphStoreError.of('Compact lexical receipt contains an invalid count.'));
   }
   if (receipt.postingCount !== expectedPostingCount || receipt.symbolCount !== expectedSymbolCount) {
@@ -716,8 +713,8 @@ function stageActivationEdges(
         `${activationInsertClause(mode)} INTO activation_edges (
           id, source_id, source_name, relation, target_id, target_name, provenance,
           confidence, evidence_path, evidence_span_json
-        ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
-        batch.flatMap(edge => [
+        ) VALUES ${EffectArray.join(EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'), ', ')}`,
+        EffectArray.flatMap(batch, edge => [
           edge.id,
           edge.sourceId ?? null,
           edge.sourceName,

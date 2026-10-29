@@ -11,6 +11,8 @@ import {
 } from '@threadnote/remote-memory/authorization';
 import {redactedRemoteMemoryConfig, remoteMemoryConfigFromEnvironment} from '@threadnote/remote-memory/config';
 import {bearerTokenFromRequest} from '@threadnote/remote-memory/oauth';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const productionEnvironment = {
   THREADNOTE_REMOTE_ALLOWED_HOSTS: 'memory.example.test,memory.internal.test:8443',
@@ -333,7 +335,12 @@ describe('remote memory request authorization', () => {
       ),
     ).toBe('opaque-token');
 
-    for (const authorization of ['Basic value', 'Bearer token trailing', 'Bearer', `Bearer ${'x'.repeat(16_385)}`]) {
+    for (const authorization of [
+      'Basic value',
+      'Bearer token trailing',
+      'Bearer',
+      `Bearer ${Effect.pipe('x', EffectString.repeat(16_385))}`,
+    ]) {
       expect(() =>
         bearerTokenFromRequest(new Request('https://memory.example.test/mcp', {headers: {authorization}})),
       ).toThrow('bearer access token');

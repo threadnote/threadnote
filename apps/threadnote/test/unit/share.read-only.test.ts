@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Effect, Exit, FileSystem, Path} from 'effect';
+import {Cause, Effect, Exit, FileSystem, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {beforeEach, describe, expect, vi} from 'vitest';
 import {
@@ -64,9 +65,9 @@ describe('read-only shared teams', () => {
           team: 'reference',
         });
 
-        const stored = JSON.parse(yield* fs.readFileString(path.join(home, 'share', 'teams.json'))) as {
-          teams: {reference: {access?: string}};
-        };
+        const stored = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({teams: Schema.Struct({reference: Schema.Struct({access: Schema.String})})}),
+        )(JSON.parse(yield* fs.readFileString(path.join(home, 'share', 'teams.json'))));
         expect(stored.teams.reference.access).toBe('read-only');
         expect(vi.mocked(utils.runCommand)).not.toHaveBeenCalled();
       }),
@@ -81,9 +82,9 @@ describe('read-only shared teams', () => {
         expect(legacyList.output).toContain('access: read-write');
 
         yield* runShareSetAccess(fixture.config, {mode: 'read-only'});
-        const stored = JSON.parse(yield* fixture.fs.readFileString(fixture.teamsPath)) as {
-          teams: {reference: {access?: string}};
-        };
+        const stored = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({teams: Schema.Struct({reference: Schema.Struct({access: Schema.String})})}),
+        )(JSON.parse(yield* fixture.fs.readFileString(fixture.teamsPath)));
         expect(stored.teams.reference.access).toBe('read-only');
 
         const [list, status, sync] = yield* Effect.all(
@@ -97,9 +98,9 @@ describe('read-only shared teams', () => {
         expect(list.output).toContain('access: read-only');
         expect(status.output).toContain('Access: read-only');
         expect(sync.output).toContain('push disabled');
-        const gitArguments = vi.mocked(utils.runCommand).mock.calls.map(([, args]) => args);
-        expect(gitArguments.some(args => args.includes('commit'))).toBe(false);
-        expect(gitArguments.some(args => args.includes('push'))).toBe(false);
+        const gitArguments = EffectArray.map(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args);
+        expect(EffectArray.some(gitArguments, args => args.includes('commit'))).toBe(false);
+        expect(EffectArray.some(gitArguments, args => args.includes('push'))).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -159,9 +160,9 @@ describe('read-only shared teams', () => {
         const failure = yield* failureText(runShareSync(fixture.config, {team: 'reference'}));
 
         expect(String(failure)).toContain('will not auto-commit read-only teams');
-        const gitArguments = vi.mocked(utils.runCommand).mock.calls.map(([, args]) => args);
-        expect(gitArguments.some(args => args.includes('commit'))).toBe(false);
-        expect(gitArguments.some(args => args.includes('push'))).toBe(false);
+        const gitArguments = EffectArray.map(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args);
+        expect(EffectArray.some(gitArguments, args => args.includes('commit'))).toBe(false);
+        expect(EffectArray.some(gitArguments, args => args.includes('push'))).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

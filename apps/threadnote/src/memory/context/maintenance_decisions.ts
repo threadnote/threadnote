@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect} from 'effect';
 import {
   CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION,
@@ -6,7 +7,7 @@ import {
   type ContextHealthSemanticUnknownReasonV2,
 } from '@threadnote/context/health_semantic';
 import {buildContextHealthReport, semanticFindings} from '@threadnote/context/health';
-import {listCandidateReviews} from '@threadnote/memory/candidate';
+import {listCandidateReviews, type CandidateReview} from '@threadnote/memory/candidate';
 import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
 import {contextHealthCaseIdV2, contextHealthFindingCaseIdentityV2} from '@threadnote/context/health_maintenance';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -21,27 +22,32 @@ import {
 } from './maintenance_evidence.js';
 import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance.js';
 import {reviewedSemanticContradictionIds} from './semantic_review_state.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const readMaintenanceCandidateDecisions = Effect.fn('contextMaintenance.candidateDecisions')(function* (
   config: RuntimeConfig,
   project?: string,
 ) {
   const reviews = yield* listCandidateReviews(config.agentContextHome);
-  return reviews
-    .filter(review => project === undefined || review.project === project)
-    .flatMap(review =>
-      review.candidates
-        .filter(
+  return EffectArray.flatMap(
+    EffectArray.filter<CandidateReview>(reviews, review => project === undefined || review.project === project),
+    review =>
+      EffectArray.map(
+        EffectArray.filter(
+          review.candidates,
           candidate =>
             ['pending', 'deferred', 'applying'].includes(candidate.state) &&
             ['contradiction', 'possible_duplicate'].includes(candidate.comparison),
-        )
-        .map(candidate => ({
+        ),
+        candidate => ({
           review,
           candidate,
           revision: sha256HexSync(JSON.stringify([review.reviewId, review.revision, candidate])),
-        })),
-    );
+        }),
+      ),
+  );
 });
 
 export const readMaintenanceSemanticRecords = Effect.fn('contextMaintenance.semanticSubjects')(function* (
@@ -50,19 +56,18 @@ export const readMaintenanceSemanticRecords = Effect.fn('contextMaintenance.sema
   inventory: readonly MemoryRecord[],
   cursor = 0,
 ) {
-  const eligible = inventory
-    .filter(
-      record =>
-        record.metadata.status === 'active' &&
-        record.metadata.kind === 'durable' &&
-        (record.metadata.project ?? 'unscoped') === project,
-    )
-    .sort((left, right) => left.uri.localeCompare(right.uri));
+  const eligible = EffectArray.filter(
+    inventory,
+    record =>
+      record.metadata.status === 'active' &&
+      record.metadata.kind === 'durable' &&
+      (record.metadata.project ?? 'unscoped') === project,
+  ).sort((left, right) => Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)));
   const admission = selectMaintenanceSemanticPairBatch(eligible, cursor);
   const selected = admission.records;
   const records = yield* readMemoryRecordsByUri(
     config,
-    selected.map(record => record.uri),
+    EffectArray.map(selected, record => record.uri),
   );
   return {...admission, records, eligibleRecords: eligible.length};
 });
@@ -95,6 +100,15 @@ export interface SemanticComparisonProgress {
   readonly claimCursor: number;
   readonly seenCaseIds: readonly string[];
   readonly seenOverflow?: boolean;
+}
+
+export interface LegacyMaintenanceSemanticProgress {
+  readonly version?: undefined;
+  readonly generation: string;
+  readonly cursor: number;
+  readonly totalBatches: number;
+  readonly eligibleRecords: number;
+  readonly partial: boolean;
 }
 
 export interface MaintenanceSemanticProgress {
@@ -171,14 +185,14 @@ export function maintenanceSemanticProgressPending(progress: MaintenanceSemantic
   return (
     progress.comparison.pairCursor < semanticPairCount(progress.records.length) ||
     progress.dirty.length > 0 ||
-    progress.records.some(record => !record.removed && record.claims === undefined)
+    EffectArray.some(progress.records, record => !record.removed && record.claims === undefined)
   );
 }
 
 export function maintenanceSemanticProgressUnsupported(progress: MaintenanceSemanticProgress): boolean {
   return (
     progress.outputOmittedFindings > 0 ||
-    progress.records.some(record => !record.removed && (record.reasons?.length ?? 0) > 0)
+    EffectArray.some(progress.records, record => !record.removed && (record.reasons?.length ?? 0) > 0)
   );
 }
 
@@ -196,36 +210,47 @@ export function prepareMaintenanceSemanticProgress(
 ) {
   const projects = [
     ...new Set(
-      active
-        .filter(record => record.metadata.kind === 'durable')
-        .filter(record => projectScope === undefined || record.metadata.project === projectScope)
-        .map(record => record.metadata.project!),
+      EffectArray.map(
+        EffectArray.filter(
+          EffectArray.filter(active, record => record.metadata.kind === 'durable'),
+          record => projectScope === undefined || record.metadata.project === projectScope,
+        ),
+        record => record.metadata.project!,
+      ),
     ),
   ].sort();
   const generations = new Map(
-    projects.map(project => [
+    EffectArray.map(projects, project => [
       project,
       sha256HexSync(
         JSON.stringify([
           CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION,
-          active
-            .filter(record => record.metadata.project === project && record.metadata.kind === 'durable')
-            .map(record => `${record.uri}:${hashes.get(record.uri)}`)
-            .sort(),
+          EffectArray.map(
+            EffectArray.filter(
+              active,
+              record => record.metadata.project === project && record.metadata.kind === 'durable',
+            ),
+            record => `${record.uri}:${hashes.get(record.uri)}`,
+          ).sort(),
         ]),
       ),
     ]),
   );
-  const progress: Record<string, MaintenanceSemanticProgress> = Object.fromEntries(
-    Object.entries(previous ?? {}).filter(
-      ([project]) => (projectScope !== undefined && project !== projectScope) || projects.includes(project),
-    ),
-  );
+  const progress: Record<string, MaintenanceSemanticProgress | LegacyMaintenanceSemanticProgress> =
+    EffectRecord.fromEntries(
+      EffectArray.filter(
+        EffectRecord.toEntries(previous ?? {}),
+        ([project]) => (projectScope !== undefined && project !== projectScope) || projects.includes(project),
+      ),
+    );
   for (const project of projects) {
     const generation = generations.get(project)!;
-    const eligible = active.filter(record => record.metadata.kind === 'durable' && record.metadata.project === project);
+    const eligible = EffectArray.filter(
+      active,
+      record => record.metadata.kind === 'durable' && record.metadata.project === project,
+    );
     const current = new Map(
-      eligible.map(record => [
+      EffectArray.map(eligible, record => [
         record.uri,
         {
           hash: hashes.get(record.uri) ?? record.content,
@@ -256,11 +281,14 @@ export function prepareMaintenanceSemanticProgress(
       if (revision.hash === item.hash && !item.removed) continue;
       churnCount += 1;
       records[index] = {uri: item.uri, ...revision};
-      const previousDirty = dirty.findIndex(entry => entry.uri === item.uri);
+      const previousDirty = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(dirty, entry => entry.uri === item.uri),
+        () => -1,
+      );
       if (previousDirty >= 0) dirty.splice(previousDirty, 1);
       dirty.push({uri: item.uri, otherCursor: 0, claimCursor: 0, seenCaseIds: []});
     }
-    for (const [uri, revision] of [...current].sort(([a], [b]) => a.localeCompare(b))) {
+    for (const [uri, revision] of [...current].sort(([a], [b]) => Effect2.pipe(a, EffectString.localeCompare(b)))) {
       records.push({uri, ...revision});
       if (reusable) {
         churnCount += 1;
@@ -268,7 +296,8 @@ export function prepareMaintenanceSemanticProgress(
       }
     }
     const retainedOmissions = reusable
-      ? (old.omissionPairs ?? []).filter(
+      ? EffectArray.filter(
+          old.omissionPairs ?? [],
           pair =>
             (hashes.get(pair.leftUri) === undefined
               ? !inventoryComplete
@@ -292,12 +321,20 @@ export function prepareMaintenanceSemanticProgress(
       dirty: reusable && !resetOmissions ? dirty : [],
       comparedClaimPairs: reusable ? old.comparedClaimPairs : 0,
       churnCount,
-      outputOmittedFindings: resetOmissions ? 0 : retainedOmissions.reduce((sum, pair) => sum + pair.count, 0),
+      outputOmittedFindings: resetOmissions
+        ? 0
+        : EffectArray.reduce(retainedOmissions, 0, (sum, pair) => sum + pair.count),
       omissionPairs: resetOmissions ? [] : retainedOmissions,
       omissionPairsOverflow: false,
     };
   }
-  const pending = projects.filter(project => maintenanceSemanticProgressPending(progress[project]));
+  const pending = EffectArray.filter(
+    projects,
+    (project, __effectArrayIndex) =>
+      __effectArrayIndex in projects &&
+      progress[project].version === 2 &&
+      maintenanceSemanticProgressPending(progress[project]),
+  );
   return {projects, generations, progress, pending};
 }
 
@@ -326,12 +363,15 @@ export function selectMaintenanceWorkPhase(
   const order = ['records', 'semantic', 'requested', 'topic'] as const;
   const start = Math.max(0, order.indexOf(previous?.nextPhase ?? 'records'));
   const phase =
-    [...order.slice(start), ...order.slice(0, start)].find(
-      item =>
-        (item === 'records' && hasRecordTasks) ||
-        (item === 'semantic' && projects.length > 0) ||
-        (item === 'requested' && roots.length > 0) ||
-        (item === 'topic' && hasTopicTasks),
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...order.slice(start), ...order.slice(0, start)],
+        item =>
+          (item === 'records' && hasRecordTasks) ||
+          (item === 'semantic' && projects.length > 0) ||
+          (item === 'requested' && roots.length > 0) ||
+          (item === 'topic' && hasTopicTasks),
+      ),
     ) ?? 'records';
   const nextPhase = order[(order.indexOf(phase) + 1) % order.length];
   if (phase === 'records') return {phase, next: {...previous, nextPhase}};
@@ -374,18 +414,21 @@ function recordSemanticOutputOmissions(
   omitted: number,
   output: SemanticOutputBudget,
 ) {
-  const [first, second] = [left, right].sort((a, b) => a.uri.localeCompare(b.uri));
+  const [first, second] = [left, right].sort((a, b) => Effect2.pipe(a.uri, EffectString.localeCompare(b.uri)));
   const key = sha256HexSync(`${first.uri}\0${second.uri}`);
   const previous = progress.omissionPairs ?? [];
-  const prior = previous.find(pair => pair.key === key);
-  const omissionPairs = startingPair ? previous.filter(pair => pair.key !== key) : [...previous];
+  const prior = EffectOption.getOrUndefined(EffectArray.findFirst(previous, pair => pair.key === key));
+  const omissionPairs = startingPair ? EffectArray.filter(previous, pair => pair.key !== key) : [...previous];
   const outputOmittedFindings = Math.max(
     0,
     progress.outputOmittedFindings - (startingPair ? (prior?.count ?? 0) : 0) + omitted,
   );
   let omissionPairsOverflow = progress.omissionPairsOverflow === true;
   if (omitted > 0) {
-    const existing = omissionPairs.findIndex(pair => pair.key === key);
+    const existing = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(omissionPairs, pair => pair.key === key),
+      () => -1,
+    );
     if (existing >= 0) {
       const old = omissionPairs[existing];
       const updated = {...old, count: old.count + omitted};
@@ -408,7 +451,11 @@ function recordSemanticOutputOmissions(
         count: omitted,
       };
       const encoder = new TextEncoder();
-      const ledgerBytes = omissionPairs.reduce((sum, pair) => sum + encoder.encode(JSON.stringify(pair)).length, 0);
+      const ledgerBytes = EffectArray.reduce(
+        omissionPairs,
+        0,
+        (sum, pair) => sum + encoder.encode(JSON.stringify(pair)).length,
+      );
       const entryBytes = encoder.encode(JSON.stringify(entry)).length + 1;
       if (
         omissionPairs.length < MAX_OMISSION_PAIRS &&
@@ -438,7 +485,13 @@ const runMaintenanceSemanticStep = Effect.fn('contextMaintenance.semanticStep')(
   const main = progress.comparison.pairCursor < totalPairs;
   const activeDirty = !main ? dirty[0] : undefined;
   const pairIndex = main ? maintenanceSemanticRecordPairAt(progress.comparison.pairCursor, records.length) : undefined;
-  const dirtyIndex = activeDirty === undefined ? -1 : records.findIndex(item => item.uri === activeDirty.uri);
+  const dirtyIndex =
+    activeDirty === undefined
+      ? -1
+      : EffectOption.getOrElse(
+          EffectArray.findFirstIndex(records, item => item.uri === activeDirty.uri),
+          () => -1,
+        );
   const otherIndex = activeDirty?.otherCursor ?? -1;
   const selected =
     pairIndex ?? (dirtyIndex >= 0 && otherIndex < records.length ? ([dirtyIndex, otherIndex] as const) : undefined);
@@ -447,7 +500,10 @@ const runMaintenanceSemanticStep = Effect.fn('contextMaintenance.semanticStep')(
       dirty.shift();
       return {...progress, dirty};
     }
-    const index = records.findIndex(record => !record.removed && record.claims === undefined);
+    const index = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(records, record => !record.removed && record.claims === undefined),
+      () => -1,
+    );
     if (index >= 0) {
       const [source] = yield* readMemoryRecordsByUriWithSourceHash(config, [records[index].uri]);
       if (source === undefined || source.sourceHash !== records[index].hash) return progress;
@@ -455,7 +511,7 @@ const runMaintenanceSemanticStep = Effect.fn('contextMaintenance.semanticStep')(
       records[index] = {
         ...records[index],
         claims: extracted.claims.length,
-        unsupportedClaims: extracted.claims.filter(claim => claim.extraction === 'unsupported').length,
+        unsupportedClaims: EffectArray.filter(extracted.claims, claim => claim.extraction === 'unsupported').length,
         reasons: extracted.reasons,
       };
     }
@@ -477,10 +533,13 @@ const runMaintenanceSemanticStep = Effect.fn('contextMaintenance.semanticStep')(
     records[leftIndex].uri,
     records[rightIndex].uri,
   ]);
-  if (sources.length !== 2 || sources.some((source, index) => source.sourceHash !== records[selected[index]].hash))
+  if (
+    sources.length !== 2 ||
+    EffectArray.some(sources, (source, index) => source.sourceHash !== records[selected[index]].hash)
+  )
     return progress;
-  const subjects = sources.map(source => source.record);
-  const [left, right] = subjects.map(record => extractContextHealthSemanticClaims(record));
+  const subjects = EffectArray.map(sources, source => source.record);
+  const [left, right] = EffectArray.map(subjects, record => extractContextHealthSemanticClaims(record));
   for (const [index, extracted] of [
     [leftIndex, left],
     [rightIndex, right],
@@ -488,7 +547,7 @@ const runMaintenanceSemanticStep = Effect.fn('contextMaintenance.semanticStep')(
     records[index] = {
       ...records[index],
       claims: extracted.claims.length,
-      unsupportedClaims: extracted.claims.filter(claim => claim.extraction === 'unsupported').length,
+      unsupportedClaims: EffectArray.filter(extracted.claims, claim => claim.extraction === 'unsupported').length,
       reasons: extracted.reasons,
     };
   }
@@ -526,7 +585,7 @@ const runMaintenanceSemanticStep = Effect.fn('contextMaintenance.semanticStep')(
     );
     const retained = {
       ...item,
-      subjectContentHashes: subjects.map(subject => ({
+      subjectContentHashes: EffectArray.map(subjects, subject => ({
         uri: subject.uri,
         hash: sha256HexSync(canonicalMemoryDocumentContent(subject.content)),
       })),
@@ -571,11 +630,14 @@ const runMaintenanceSemanticStep = Effect.fn('contextMaintenance.semanticStep')(
         continue;
       if (
         item.subjectContentHashes?.length !== 2 ||
-        !item.subjectContentHashes.every(subject => subjects.some(record => record.uri === subject.uri))
+        !EffectArray.every(item.subjectContentHashes, subject =>
+          EffectArray.some(subjects, record => record.uri === subject.uri),
+        )
       )
         continue;
-      const sameSources = item.subjectContentHashes.every(subject =>
-        subjects.some(
+      const sameSources = EffectArray.every(item.subjectContentHashes, subject =>
+        EffectArray.some(
+          subjects,
           record =>
             record.uri === subject.uri &&
             subject.hash === sha256HexSync(canonicalMemoryDocumentContent(record.content)),
@@ -659,7 +721,7 @@ export const runMaintenanceSemanticWindow = Effect.fn('contextMaintenance.semant
     if (
       current.comparison.pairCursor >= semanticPairCount(current.records.length) &&
       current.dirty.length === 0 &&
-      current.records.every(record => record.removed || record.claims !== undefined)
+      EffectArray.every(current.records, record => record.removed || record.claims !== undefined)
     )
       break;
   }
@@ -676,7 +738,7 @@ export function buildMaintenanceSemanticReport(
     project,
     reviewedSemanticContradictionIds: reviewedIds,
     now: new Date(now),
-    records: records.map(record => ({
+    records: EffectArray.map(records, record => ({
       ...record,
       metadata: {...record.metadata, project, relations: [], codeCitations: []},
     })),
@@ -685,17 +747,22 @@ export function buildMaintenanceSemanticReport(
 
 export function activeIncomingDependency(subject: MemoryRecord, records: readonly MemoryRecord[]): boolean {
   const identities = new Set(
-    [
-      subject.uri,
-      subject.metadata.archivedFrom,
-      subject.metadata.memoryId === undefined ? undefined : `threadnote://memory/${subject.metadata.memoryId}`,
-    ].filter((uri): uri is string => uri !== undefined),
+    EffectArray.filter(
+      [
+        subject.uri,
+        subject.metadata.archivedFrom,
+        subject.metadata.memoryId === undefined ? undefined : `threadnote://memory/${subject.metadata.memoryId}`,
+      ],
+      (uri): uri is string => uri !== undefined,
+    ),
   );
-  return records.some(
+  return EffectArray.some(
+    records,
     record =>
       record.uri !== subject.uri &&
       record.metadata.status === 'active' &&
-      (record.metadata.relations ?? []).some(
+      EffectArray.some(
+        record.metadata.relations ?? [],
         relation => relation.type === 'depends_on' && identities.has(relation.uri),
       ),
   );

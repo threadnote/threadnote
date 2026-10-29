@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -33,6 +34,8 @@ import {advanceGraphPublisherFrontier} from '@threadnote/graph/sharing/publisher
 import {collectGraphShareRegistryPublication} from '@threadnote/graph/sharing/registry/closure';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 effectIt.effect(
   'imports cold checkpoint chunks, deltas and predecessors from OCI without coordinator artifacts',
@@ -49,7 +52,7 @@ effectIt.effect(
             Effect.provideService(Console.Console, {
               ...parentConsole,
               log: (...args) => {
-                messages.push(args.join(' '));
+                messages.push(EffectArray.join(args, ' '));
               },
             }),
           );
@@ -76,7 +79,12 @@ effectIt.effect(
           writeConfig: true,
         });
         const previousProfile = parseGraphShareProfile(
-          yield* decodeJsonBytes(yield* readVerifiedCasBlob(cas, initial.enrollment.profile.slice('cas://'.length))),
+          yield* decodeJsonBytes(
+            yield* readVerifiedCasBlob(
+              cas,
+              Effect2.pipe(initial.enrollment.profile, EffectString.slice('cas://'.length)),
+            ),
+          ),
         );
         const profile = {
           ...previousProfile,
@@ -97,7 +105,7 @@ effectIt.effect(
           Effect.provideService(Console.Console, {
             ...parentConsole,
             log: (...args) => {
-              messages.push(args.join(' '));
+              messages.push(EffectArray.join(args, ' '));
             },
           }),
         );
@@ -123,7 +131,10 @@ effectIt.effect(
         );
         expect(advanced.publication.status).toBe('acknowledged');
         expect(advanced.published).toBe(true);
-        const writesBeforeBootstrapRetry = registry.requests.filter(request => request.method === 'PUT').length;
+        const writesBeforeBootstrapRetry = EffectArray.filter(
+          registry.requests,
+          request => request.method === 'PUT',
+        ).length;
         const bootstrappedAgain = yield* bootstrapCommand({cas, cwd: repository});
         expect(messages.at(-1)).toMatch(/^Published generation 2/u);
         expect(yield* readGraphPublisherRegistryStatus(publisher, {cas, cwd: repository})).toMatchObject({
@@ -132,7 +143,9 @@ effectIt.effect(
         });
         expect(bootstrappedAgain.generation).toBe(2);
         expect(bootstrappedAgain.manifestDigest).toBe(advanced.manifestDigest);
-        expect(registry.requests.filter(request => request.method === 'PUT')).toHaveLength(writesBeforeBootstrapRetry);
+        expect(EffectArray.filter(registry.requests, request => request.method === 'PUT')).toHaveLength(
+          writesBeforeBootstrapRetry,
+        );
         const frontier = parseGraphShareFrontierManifest(
           yield* decodeJsonBytes(yield* readVerifiedCasBlob(cas, advanced.manifestDigest)),
         );
@@ -156,7 +169,7 @@ effectIt.effect(
         const publication = yield* collectGraphShareRegistryPublication(publicationInput);
         expect(publication.historyFloor.generation).toBe(1);
         expect(publication.frontier.generation).toBe(2);
-        expect(publication.retention.entries.some(entry => entry.digest === unrelated)).toBe(false);
+        expect(EffectArray.some(publication.retention.entries, entry => entry.digest === unrelated)).toBe(false);
         expect(publication.descriptorDigest).toBe(advanced.descriptorDigest);
         const tag = graphShareFrontierDiscoveryTag(enrollment.repositoryId, 'refs/heads/main');
         expect(advanced.descriptorDigest).toBeDefined();
@@ -167,7 +180,7 @@ effectIt.effect(
           const metadata = parseGraphShareCheckpointMetadata(
             yield* decodeJsonBytes(yield* readVerifiedCasBlob(cas, artifact.metadataDigest!)),
           );
-          requiredChunks.push(metadata.prefixDigest, ...metadata.chunks.map(chunk => chunk.digest));
+          requiredChunks.push(metadata.prefixDigest, ...EffectArray.map(metadata.chunks, chunk => chunk.digest));
           expect(registry.blobs.has(artifact.manifestDigest)).toBe(false);
         }
         for (const [label, expectedGeneration, deltaCount] of [
@@ -196,7 +209,9 @@ effectIt.effect(
               repositoryId: enrollment.repositoryId,
               schemaVersion: 2,
             });
-            yield* fs.remove(path.join(clientCas, 'sha256', profileDigest.slice('sha256:'.length)));
+            yield* fs.remove(
+              path.join(clientCas, 'sha256', Effect2.pipe(profileDigest, EffectString.slice('sha256:'.length))),
+            );
           }
           const identity = yield* resolveRepositoryIdentity(repository);
           const imported = yield* registry.provide(
@@ -231,9 +246,11 @@ effectIt.effect(
         expect(requiredChunks.length).toBeGreaterThan(2);
         for (const digest of requiredChunks) {
           expect(registry.requests).toContainEqual({method: 'GET', pathname: `/v2/acme/canonical/blobs/${digest}`});
-          expect(publication.retention.entries.some(entry => entry.digest === digest)).toBe(true);
+          expect(EffectArray.some(publication.retention.entries, entry => entry.digest === digest)).toBe(true);
         }
-        yield* fs.remove(path.join(cas, 'sha256', requiredChunks[0].slice('sha256:'.length)));
+        yield* fs.remove(
+          path.join(cas, 'sha256', Effect2.pipe(requiredChunks[0], EffectString.slice('sha256:'.length))),
+        );
         const beforeFailure = yield* fs.readDirectory(path.join(cas, 'sha256'));
         expect(yield* Effect.result(collectGraphShareRegistryPublication(publicationInput))).toMatchObject({
           failure: {kind: 'unavailable'},

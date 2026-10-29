@@ -1,21 +1,23 @@
 import {Effect, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface RecallScoreThresholdPolicy {
   readonly source: 'default' | 'environment';
   readonly value: string;
 }
 
-export class InvalidRecallScoreThreshold extends Schema.TaggedError<InvalidRecallScoreThreshold>()(
-  'InvalidRecallScoreThreshold',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class InvalidRecallScoreThreshold extends Schema.TaggedError<
+  InvalidRecallScoreThreshold,
+  {readonly brand: unique symbol}
+>()('InvalidRecallScoreThreshold', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export function validatedRecallScoreThreshold(value: string, source = 'Recall threshold'): string {
-  const normalized = value.trim();
+  const normalized = Effect2.pipe(value, EffectString.trim);
   const parsed = Number(normalized);
   if (!normalized || !Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
     throw InvalidRecallScoreThreshold.make({message: `${source} must be a number from 0 to 1.`});
@@ -30,7 +32,11 @@ export function validatedRecallScoreThreshold(value: string, source = 'Recall th
  * override is marked as configured so exact-match rescue cannot bypass it.
  */
 export const recallScoreThresholdPolicy = Effect.fn('utils.recallScoreThresholdPolicy')(function* () {
-  const configured = (yield* SystemInfo).environment().THREADNOTE_RECALL_THRESHOLD?.trim();
+  const configured = Effect2.pipe(
+    (yield* SystemInfo).environment().THREADNOTE_RECALL_THRESHOLD,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!configured) return {source: 'default', value: '0.3'} satisfies RecallScoreThresholdPolicy;
   const value = yield* Effect.try({
     try: () => validatedRecallScoreThreshold(configured, 'THREADNOTE_RECALL_THRESHOLD'),

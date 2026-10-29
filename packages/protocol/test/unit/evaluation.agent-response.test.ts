@@ -7,6 +7,8 @@ import {
   measureAgentToolResponse,
   projectRankedJsonPrefix,
 } from '@threadnote/protocol/agent-response';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface TestEnvelope {
   readonly cards: readonly string[];
@@ -67,7 +69,7 @@ describe('agent response evaluation', () => {
     const nonMonotonicRender = (prefix: readonly string[], omittedCards: number) => ({
       cards: prefix,
       omittedCards,
-      padding: prefix.length === 1 ? 'x'.repeat(1_000) : '',
+      padding: prefix.length === 1 ? Effect.pipe('x', EffectString.repeat(1_000)) : '',
     });
     const twoCardBytes = encodedJsonBytes(nonMonotonicRender(cards, 0));
     const projection = projectRankedJsonPrefix(cards, twoCardBytes, nonMonotonicRender);

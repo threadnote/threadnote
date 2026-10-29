@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Redacted, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {readBoundedPrivateBytes} from '../atomic.js';
 import {graphSharingFailure} from '../errors.js';
 import type {GraphShareRegistryTarget} from './reference.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const HelperName = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u));
 const DockerConfig = Schema.Struct({
@@ -70,8 +73,20 @@ export const makeGraphShareRegistryCredentialLoader = Effect.fn('codeGraph.shari
         );
         if (
           credential.Username === '<token>' ||
-          [...credential.Username].some(
-            character => character === ':' || character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+          EffectArray.some(
+            [...credential.Username],
+            character =>
+              character === ':' ||
+              Effect2.pipe(
+                character,
+                EffectString.charCodeAt(0),
+                Effect2.Option.getOrElse(() => NaN),
+              ) < 32 ||
+              Effect2.pipe(
+                character,
+                EffectString.charCodeAt(0),
+                Effect2.Option.getOrElse(() => NaN),
+              ) === 127,
           ) ||
           (credential.ServerURL !== undefined &&
             credential.ServerURL !== target.registry &&

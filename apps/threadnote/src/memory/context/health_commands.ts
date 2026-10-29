@@ -1,3 +1,7 @@
+import * as MigrationSchema from 'effect/Schema';
+import {pipe as EffectArrayPipe} from 'effect';
+
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {DateTime, Effect, Result} from 'effect';
 import {
@@ -37,6 +41,8 @@ import {
 import {reviewedSemanticContradictionIds} from './semantic_review_state.js';
 import {nextContextHealthChangeAt} from '@threadnote/context/health';
 import {ManagerHealthObservationHints} from '../../manager/live_health_sources.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface RunContextHealthOptionsV1 {
   readonly after?: string;
@@ -51,7 +57,7 @@ export const runContextHealth = Effect.fn('memory.contextHealth.command')(functi
   config: RuntimeConfig,
   options: RunContextHealthOptionsV1,
 ) {
-  const project = options.project.trim();
+  const project = Effect2.pipe(options.project, EffectString.trim);
   if (!project) {
     return yield* MemoryOperationError.make({message: 'Provide --project for scoped context health.'});
   }
@@ -102,17 +108,27 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
 ) {
   const now = yield* DateTime.nowAsDate;
   const includedUris = options.includeFindingUris === undefined ? undefined : new Set(options.includeFindingUris);
-  const evidenceRecords = includedUris === undefined ? records : records.filter(record => includedUris.has(record.uri));
+  const evidenceRecords =
+    includedUris === undefined
+      ? records
+      : EffectArray.filter(
+          records,
+          (record: (typeof records)[number], __effectArrayIndex) =>
+            __effectArrayIndex in records && includedUris.has(record.uri),
+        );
   const citationRecords =
     options.citationRecords ??
-    evidenceRecords.map(record => ({
+    EffectArray.map(evidenceRecords, record => ({
       ...record,
       metadata: {...record.metadata, codeCitations: currentMemoryCodeCitations(record)},
     }));
+  const workerEvidence = options.workerEvidence;
   const citationResult =
-    options.evidenceMode === 'worker' && options.workerEvidence !== undefined
+    options.evidenceMode === 'worker' && workerEvidence !== undefined
       ? Result.succeed(
-          citationRecords.flatMap(record => maintenanceWorkerRecordValidations(options.workerEvidence!, record)),
+          EffectArray.flatMap(citationRecords, (record, __effectArrayIndex4) =>
+            __effectArrayIndex4 in citationRecords ? maintenanceWorkerRecordValidations(workerEvidence, record) : [],
+          ),
         )
       : yield* collectContextMaintenanceCitationEvidence(
           config,
@@ -129,7 +145,10 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
               }),
           },
         ).pipe(Effect.result);
-  if (Result.isFailure(citationResult) && citationResult.failure instanceof ContextMaintenanceEvidenceRequestError)
+  if (
+    Result.isFailure(citationResult) &&
+    MigrationSchema.is(ContextMaintenanceEvidenceRequestError)(citationResult.failure)
+  )
     return yield* citationResult.failure;
   const citationValidations = Result.isSuccess(citationResult) ? citationResult.success : [];
   const relationEvidence = yield* relationStatusEvidence(
@@ -164,17 +183,33 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
   // Register the report's actual source selection, including cited repositories.
   // Non-Manager callers receive the no-op reference and do no observation work.
   if (options.liveObservation === true) {
-    const deadlines = [
-      nextContextHealthChangeAt({records, duplicateCorpus: options.duplicateCorpus, project, now}),
-      ...citationValidations.flatMap(validation =>
-        validation.receipts
-          .filter(receipt => receipt.status === 'unknown' && receipt.provenance !== 'historical-verified')
-          .map(receipt => Date.parse(receipt.observedAt) + 60_000),
-      ),
-    ].filter((value): value is number => value !== undefined && Number.isFinite(value) && value > now.getTime());
+    const deadlines = EffectArray.filter(
+      [
+        nextContextHealthChangeAt({records, duplicateCorpus: options.duplicateCorpus, project, now}),
+        ...EffectArray.flatMap(citationValidations, (validation, __effectArrayIndex4) =>
+          __effectArrayIndex4 in citationValidations
+            ? EffectArray.map(
+                EffectArrayPipe(validation.receipts, __effectArrayValues =>
+                  EffectArray.filter(
+                    __effectArrayValues,
+                    (receipt, __effectArrayIndex2) =>
+                      __effectArrayIndex2 in __effectArrayValues &&
+                      receipt.status === 'unknown' &&
+                      receipt.provenance !== 'historical-verified',
+                  ),
+                ),
+                receipt => Date.parse(receipt.observedAt) + 60_000,
+              )
+            : [],
+        ),
+      ],
+      (value): value is number => value !== undefined && Number.isFinite(value) && value > now.getTime(),
+    );
     yield* (yield* ManagerHealthObservationHints).register(project, {
       cwd,
-      citations: citationRecords.flatMap(record => record.metadata.codeCitations ?? []),
+      citations: EffectArray.flatMap(citationRecords, (record, __effectArrayIndex3) =>
+        __effectArrayIndex3 in citationRecords ? (record.metadata.codeCitations ?? []) : [],
+      ),
       ...(deadlines.length === 0 ? {} : {nextChangeAt: Math.min(...deadlines)}),
     });
   }
@@ -191,9 +226,13 @@ function citationCandidates(
   records: Parameters<typeof buildContextHealthReport>[0]['records'],
   project: string,
 ): readonly ContextHealthCitationSubjectV1[] {
-  return records.flatMap(record =>
-    record.metadata.status === 'active' && record.metadata.project === project && record.metadata.codeCitations?.length
-      ? [{codeCitations: record.metadata.codeCitations, uri: record.uri}]
+  return EffectArray.flatMap(records, (record, effectFlatMapIndex) =>
+    effectFlatMapIndex in records
+      ? record.metadata.status === 'active' &&
+        record.metadata.project === project &&
+        record.metadata.codeCitations?.length
+        ? [{codeCitations: record.metadata.codeCitations, uri: record.uri}]
+        : []
       : [],
   );
 }
@@ -204,56 +243,73 @@ const relationStatusEvidence = Effect.fn('memory.contextHealth.relationEvidence'
   selectedCorpus?: Parameters<typeof buildContextHealthReport>[0]['records'],
 ) {
   const corpus = selectedCorpus ?? (yield* readMaintenanceMemoryRecords(config));
-  const identityCandidates = corpus.map(record => ({
+  const identityCandidates = EffectArray.map(corpus, record => ({
     memoryId: record.metadata.memoryId,
     status: record.metadata.status,
     uri: record.uri,
   }));
   const allowedScopes = [`threadnote://user/${uriSegment(config.user)}/memories`];
-  return records.flatMap(record =>
-    (record.metadata.relations ?? [])
-      .filter(relation => !isAgentArtifactUri(relation.uri))
-      .map(relation => {
-        const memoryId = memoryIdFromIdentityAlias(relation.uri);
-        const resolution =
-          memoryId === undefined
-            ? undefined
-            : classifyMemoryIdentityCandidates(identityCandidates, memoryId, allowedScopes);
-        const directMatches =
-          memoryId === undefined
-            ? corpus.filter(
-                candidate =>
-                  candidate.uri === relation.uri ||
-                  (candidate.metadata.status !== 'active' && candidate.metadata.archivedFrom === relation.uri),
-              )
-            : undefined;
-        const target =
-          resolution?.state === 'resolved'
-            ? corpus.find(candidate => candidate.uri === resolution.uri)
-            : memoryId === undefined
-              ? directMatches?.length === 1
-                ? directMatches[0]
-                : undefined
-              : undefined;
-        const inactiveIdentityMatches =
-          memoryId === undefined
-            ? []
-            : corpus.filter(
-                candidate => candidate.metadata.memoryId === memoryId && candidate.metadata.status !== 'active',
-              );
-        return {
-          sourceUri: record.uri,
-          status:
-            resolution?.state === 'ambiguous' || (directMatches !== undefined && directMatches.length > 1)
-              ? 'conflicted'
-              : target?.metadata.status === 'active'
-                ? 'active'
-                : target !== undefined || inactiveIdentityMatches.length > 0
-                  ? 'inactive'
-                  : 'missing',
-          targetUri: relation.uri,
-        } satisfies ContextHealthRelationEvidenceV1;
-      }),
+  return EffectArray.flatMap(records, (record, __effectArrayIndex5) =>
+    __effectArrayIndex5 in records
+      ? EffectArray.map(
+          EffectArrayPipe(record.metadata.relations ?? [], __effectArrayValues3 =>
+            EffectArray.filter(
+              __effectArrayValues3,
+              (relation, __effectArrayIndex4) =>
+                __effectArrayIndex4 in __effectArrayValues3 && !isAgentArtifactUri(relation.uri),
+            ),
+          ),
+          relation => {
+            const memoryId = memoryIdFromIdentityAlias(relation.uri);
+            const resolution =
+              memoryId === undefined
+                ? undefined
+                : classifyMemoryIdentityCandidates(identityCandidates, memoryId, allowedScopes);
+            const directMatches =
+              memoryId === undefined
+                ? EffectArray.filter(
+                    corpus,
+                    (candidate: (typeof corpus)[number], __effectArrayIndex) =>
+                      __effectArrayIndex in corpus &&
+                      (candidate.uri === relation.uri ||
+                        (candidate.metadata.status !== 'active' && candidate.metadata.archivedFrom === relation.uri)),
+                  )
+                : undefined;
+            const target =
+              resolution?.state === 'resolved'
+                ? EffectOption.getOrUndefined(
+                    EffectArray.findFirst(corpus, candidate => candidate.uri === resolution.uri),
+                  )
+                : memoryId === undefined
+                  ? directMatches?.length === 1
+                    ? directMatches[0]
+                    : undefined
+                  : undefined;
+            const inactiveIdentityMatches =
+              memoryId === undefined
+                ? []
+                : EffectArray.filter(
+                    corpus,
+                    (candidate: (typeof corpus)[number], __effectArrayIndex) =>
+                      __effectArrayIndex in corpus &&
+                      candidate.metadata.memoryId === memoryId &&
+                      candidate.metadata.status !== 'active',
+                  );
+            return {
+              sourceUri: record.uri,
+              status:
+                resolution?.state === 'ambiguous' || (directMatches !== undefined && directMatches.length > 1)
+                  ? 'conflicted'
+                  : target?.metadata.status === 'active'
+                    ? 'active'
+                    : target !== undefined || inactiveIdentityMatches.length > 0
+                      ? 'inactive'
+                      : 'missing',
+              targetUri: relation.uri,
+            } satisfies ContextHealthRelationEvidenceV1;
+          },
+        )
+      : [],
   );
 });
 
@@ -262,22 +318,30 @@ const candidateStatusEvidence = Effect.fn('memory.contextHealth.candidateEvidenc
   project: string,
 ) {
   const reviews = yield* listCandidateReviews(config.agentContextHome);
-  return reviews
-    .filter(review => review.project === project)
-    .flatMap(review =>
-      review.candidates.flatMap(candidate =>
-        candidate.state === 'pending' || candidate.state === 'deferred' || candidate.state === 'applying'
-          ? [
-              {
-                candidateId: candidate.candidateId,
-                comparison: candidate.comparison,
-                project: candidate.project,
-                ...(candidate.targetUri === undefined ? {} : {targetUri: candidate.targetUri}),
-              } satisfies ContextHealthCandidateEvidenceV1,
-            ]
-          : [],
+  return EffectArray.flatMap(
+    EffectArray.filter(
+      reviews,
+      (review: (typeof reviews)[number], __effectArrayIndex) =>
+        __effectArrayIndex in reviews && review.project === project,
+    ),
+    (review: (typeof reviews)[number]) =>
+      EffectArrayPipe(review.candidates, __effectFlatMapValues =>
+        EffectArray.flatMap(__effectFlatMapValues, (candidate, __effectFlatMapIndex) =>
+          __effectFlatMapIndex in __effectFlatMapValues
+            ? candidate.state === 'pending' || candidate.state === 'deferred' || candidate.state === 'applying'
+              ? [
+                  {
+                    candidateId: candidate.candidateId,
+                    comparison: candidate.comparison,
+                    project: candidate.project ?? review.project,
+                    ...(candidate.targetUri === undefined ? {} : {targetUri: candidate.targetUri}),
+                  } satisfies ContextHealthCandidateEvidenceV1,
+                ]
+              : []
+            : [],
+        ),
       ),
-    );
+  );
 });
 
 export function renderContextHealth(
@@ -286,7 +350,13 @@ export function renderContextHealth(
 ): string {
   const visibleFindings =
     selector === undefined && report.maintenance !== undefined
-      ? report.findings.filter(finding => finding.classification === 'actionable')
+      ? EffectArrayPipe(report.findings, __effectFilterValues =>
+          EffectArray.filter(
+            __effectFilterValues,
+            (finding, __effectFilterIndex) =>
+              __effectFilterIndex in __effectFilterValues && finding.classification === 'actionable',
+          ),
+        )
       : report.findings;
   const shownFindings = visibleFindings.length;
   const totalFindings = shownFindings + report.omittedFindings;
@@ -305,29 +375,44 @@ export function renderContextHealth(
   ];
   if (visibleFindings.length <= 12) {
     lines.push(
-      ...visibleFindings.flatMap(finding => [
-        `- ${finding.severity} ${finding.category}: ${finding.summary}`,
-        ...(findingOwner(finding) === undefined ? [] : [`  owner: ${findingOwner(finding)}`]),
-        ...(finding.semanticEvidence === undefined
-          ? []
-          : [
-              `  comparison: ${finding.semanticEvidence.reason}; ${finding.semanticEvidence.classification}${finding.semanticEvidence.uncertainty.length === 0 ? '' : `; needs context: ${finding.semanticEvidence.uncertainty.join(', ')}`}`,
-              ...[finding.semanticEvidence.left, finding.semanticEvidence.right].map(
-                claim =>
-                  `  claim: ${JSON.stringify(claim.text)} (${claim.role}; environment=${claim.context.environment ?? 'unknown'}; headings=${claim.context.headings.join(' / ') || 'none'}; workspace=${claim.context.workspaceScope ?? 'repository'}; validity=${claim.context.validFrom ?? 'unknown'}..${claim.context.validTo ?? 'unknown'}; uri=${claim.recordUri}; body-span=${claim.span.start}..${claim.span.end}; revision=${claim.recordContentFingerprint})`,
-              ),
-            ]),
-      ]),
+      ...EffectArray.flatMap(visibleFindings, (finding, effectFlatMapIndex2) =>
+        effectFlatMapIndex2 in visibleFindings
+          ? [
+              `- ${finding.severity} ${finding.category}: ${finding.summary}`,
+              ...(findingOwner(finding) === undefined ? [] : [`  owner: ${findingOwner(finding)}`]),
+              ...(finding.semanticEvidence === undefined
+                ? []
+                : [
+                    `  comparison: ${finding.semanticEvidence.reason}; ${finding.semanticEvidence.classification}${finding.semanticEvidence.uncertainty.length === 0 ? '' : `; needs context: ${EffectArray.join(finding.semanticEvidence.uncertainty, ', ')}`}`,
+                    ...EffectArray.map(
+                      [finding.semanticEvidence.left, finding.semanticEvidence.right],
+                      claim =>
+                        `  claim: ${JSON.stringify(claim.text)} (${claim.role}; environment=${claim.context.environment ?? 'unknown'}; headings=${EffectArray.join(claim.context.headings, ' / ') || 'none'}; workspace=${claim.context.workspaceScope ?? 'repository'}; validity=${claim.context.validFrom ?? 'unknown'}..${claim.context.validTo ?? 'unknown'}; uri=${claim.recordUri}; body-span=${claim.span.start}..${claim.span.end}; revision=${claim.recordContentFingerprint})`,
+                    ),
+                  ]),
+            ]
+          : [],
+      ),
     );
   } else {
     lines.push('Shown findings grouped by severity and category:');
     for (const group of findingGroups(visibleFindings)) {
-      const owners = [...new Set(group.findings.flatMap(finding => findingOwner(finding) ?? []))];
+      const owners = [
+        ...new Set(
+          EffectArrayPipe(group.findings, __effectArrayValues2 =>
+            EffectArray.flatMap(__effectArrayValues2, (finding, __effectArrayIndex3) => {
+              if (!(__effectArrayIndex3 in __effectArrayValues2)) return [];
+              const owner = findingOwner(finding);
+              return owner === undefined ? [] : [owner];
+            }),
+          ),
+        ),
+      ];
       lines.push(
         `- ${group.findings.length} ${group.severity} ${group.category} finding${group.findings.length === 1 ? '' : 's'} across ${owners.length} owning memor${owners.length === 1 ? 'y' : 'ies'}.`,
       );
       lines.push(
-        ...group.findings.slice(0, 2).map(finding => {
+        ...EffectArray.map(group.findings.slice(0, 2), finding => {
           const owner = findingOwner(finding);
           return `  example: ${finding.summary}${owner === undefined ? '' : ` (owner: ${owner})`}`;
         }),
@@ -336,9 +421,10 @@ export function renderContextHealth(
   }
   if (report.semanticCompleteness.unknownReasons.length > 0) {
     lines.push(
-      `- Semantic unknown evidence: ${report.semanticCompleteness.unknownReasons
-        .map(item => `${item.reason}=${item.count}`)
-        .join(', ')}.`,
+      `- Semantic unknown evidence: ${EffectArray.join(
+        EffectArray.map(report.semanticCompleteness.unknownReasons, item => `${item.reason}=${item.count}`),
+        ', ',
+      )}.`,
     );
   }
   if (report.status === 'unknown' && report.semanticCompleteness.state !== 'complete') {
@@ -358,9 +444,21 @@ export function renderContextHealth(
     }
   }
   if (visibleFindings.length > 0) {
-    const reviewable = visibleFindings.filter(finding => finding.repairability === 'reviewable').length;
-    const manualReview = visibleFindings.filter(finding => finding.repairability === 'manual-review').length;
-    const requiresEvidence = visibleFindings.filter(finding => finding.repairability === 'requires-evidence').length;
+    const reviewable = EffectArray.filter(
+      visibleFindings,
+      (finding: (typeof visibleFindings)[number], __effectArrayIndex) =>
+        __effectArrayIndex in visibleFindings && finding.repairability === 'reviewable',
+    ).length;
+    const manualReview = EffectArray.filter(
+      visibleFindings,
+      (finding: (typeof visibleFindings)[number], __effectArrayIndex) =>
+        __effectArrayIndex in visibleFindings && finding.repairability === 'manual-review',
+    ).length;
+    const requiresEvidence = EffectArray.filter(
+      visibleFindings,
+      (finding: (typeof visibleFindings)[number], __effectArrayIndex) =>
+        __effectArrayIndex in visibleFindings && finding.repairability === 'requires-evidence',
+    ).length;
     lines.push('Next steps for the shown findings:');
     if (reviewable > 0) {
       lines.push(
@@ -379,7 +477,7 @@ export function renderContextHealth(
       `- Inspect structured details for the shown findings: threadnote context health --project ${project}${selectorFlags} --json`,
     );
   }
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }
 
 function findingOwner(finding: ReturnType<typeof buildContextHealthReport>['findings'][number]): string | undefined {

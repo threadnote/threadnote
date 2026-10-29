@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {layer as effectLayer} from '@effect/vitest';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
@@ -95,7 +96,7 @@ effectLayer(base)('durable integration coordinator', effectIt => {
       const [ticket] = yield* store.enqueue(current, [descriptor('retained')], 'automatic');
       yield* store.cleanup;
       yield* store.cleanup;
-      expect((yield* store.pending).map(({key, generation}) => ({key, generation}))).toEqual([ticket]);
+      expect(EffectArray.map(yield* store.pending, ({key, generation}) => ({key, generation}))).toEqual([ticket]);
     }),
   );
 
@@ -154,10 +155,12 @@ effectLayer(base)('durable integration coordinator', effectIt => {
         yield* Deferred.succeed(resume, undefined);
         const result = yield* Fiber.join(opening);
         expect(classifications).toEqual(['sidecar-stat:NotFound']);
-        expect(result._tag, `sidecar ${suffix}: ${classifications.join(',')}`).toBe('Success');
+        expect(result._tag, `sidecar ${suffix}: ${EffectArray.join(classifications, ',')}`).toBe('Success');
         if (result._tag !== 'Success') return;
         expect(result.success.home).toBe(paths.home);
-        expect((yield* result.success.pending).map(({key, generation}) => ({key, generation}))).toEqual([ticket]);
+        expect(EffectArray.map(yield* result.success.pending, ({key, generation}) => ({key, generation}))).toEqual([
+          ticket,
+        ]);
         expect(yield* fs.readFileString(sibling)).toBe('preserve sibling');
       }
     }),
@@ -254,7 +257,9 @@ effectLayer(base)('durable integration coordinator', effectIt => {
               });
               expect(store.home).toBe(paths.home);
               const tickets = yield* store.enqueue(current, [descriptor('retained')], 'automatic');
-              expect((yield* store.pending).map(({key, generation}) => ({key, generation}))).toEqual(tickets);
+              expect(EffectArray.map(yield* store.pending, ({key, generation}) => ({key, generation}))).toEqual(
+                tickets,
+              );
               return tickets;
             }),
           );
@@ -317,7 +322,7 @@ effectLayer(base)('durable integration coordinator', effectIt => {
       expect(yield* store.sql`PRAGMA journal_mode`).toEqual([{journal_mode: 'wal'}]);
       const tickets = yield* store.enqueue(current, [descriptor('one')], 'automatic');
       expect(tickets).toHaveLength(1);
-      expect((yield* store.pending).map(row => row.generation)).toEqual([1]);
+      expect(EffectArray.map(yield* store.pending, row => row.generation)).toEqual([1]);
     }),
   );
 
@@ -372,7 +377,7 @@ effectLayer(base)('durable integration coordinator', effectIt => {
       yield* TestClock.adjust(25);
       const tickets = yield* Fiber.join(publishing);
       expect(tickets).toHaveLength(1);
-      expect((yield* store.pending).map(row => ({generation: row.generation, state: row.state}))).toEqual([
+      expect(EffectArray.map(yield* store.pending, row => ({generation: row.generation, state: row.state}))).toEqual([
         {generation: 1, state: 'pending'},
       ]);
       expect(yield* store.enqueue(current, [descriptor('one')], 'explicit')).toEqual(tickets);
@@ -482,7 +487,8 @@ effectLayer(base)('durable integration coordinator', effectIt => {
           registration(sources, (_config, sourceId) =>
             Ref.update(visited, values => [
               ...values,
-              sources.find(source => source.sourceId === sourceId)!.accountKey,
+              EffectOption.getOrUndefined(EffectArray.findFirst(sources, source => source.sourceId === sourceId))!
+                .accountKey,
             ]).pipe(Effect.as({sourceId, syncedDocuments: [], warnings: []})),
           ),
         ],
@@ -516,7 +522,9 @@ effectLayer(base)('durable integration coordinator', effectIt => {
         registrations: [
           registration(sources, (_config, sourceId) =>
             Effect.gen(function* () {
-              const account = sources.find(source => source.sourceId === sourceId)!.accountKey;
+              const account = EffectOption.getOrUndefined(
+                EffectArray.findFirst(sources, source => source.sourceId === sourceId),
+              )!.accountKey;
               const accounts = yield* Ref.updateAndGet(active, values => [...values, account]);
               if (accounts.length === 2) yield* Deferred.succeed(started, undefined);
               yield* Deferred.await(release);
@@ -559,7 +567,7 @@ effectLayer(base)('durable integration coordinator', effectIt => {
       yield* engine.dispatch;
       expect(engine.activeCount()).toBe(1);
       const queued = yield* store.sql<{key: string}>`SELECT key FROM source_jobs WHERE state='queued'`;
-      expect(queued.map(row => row.key)).toEqual([sourceWorkKey(current, ready)]);
+      expect(EffectArray.map(queued, row => row.key)).toEqual([sourceWorkKey(current, ready)]);
       yield* engine.consume;
     }),
   );

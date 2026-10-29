@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Isolated native CLI evaluation adapter. */
 
@@ -36,9 +37,11 @@ import {
   applyTopicStudySourceChanges,
   assertTopicStudyModel,
   topicStudySourceTreeHash,
-  type TopicStudyVerifiedModel,
-  type TopicStudyRuntimeFingerprint,
 } from './topic-maintenance-longitudinal-runtime.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import * as Schema from 'effect/Schema';
 
 export interface TopicStudyNativeRequest {
   readonly version: 1;
@@ -49,14 +52,6 @@ export interface TopicStudyNativeRequest {
   readonly repository: string;
   readonly home: string;
   readonly baseline: string;
-}
-
-interface RunManifest {
-  readonly modelId: string;
-  readonly alternateModelId: string | null;
-  readonly alternatePermitted: boolean;
-  readonly verifiedModel: TopicStudyVerifiedModel;
-  readonly runtime: TopicStudyRuntimeFingerprint;
 }
 
 interface State {
@@ -76,6 +71,315 @@ interface State {
   readonly manualBody: string;
   readonly lastApplied: {readonly reviewId: string; readonly revision: number; readonly digest: string} | null;
 }
+
+const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const isUnknownRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+const TopicStudySourceBriefSchema = Schema.StructWithRest(
+  Schema.Struct({
+    activeHandoffs: Schema.optionalKey(Schema.Unknown.pipe(Schema.Array)),
+    durableDecisions: Schema.optionalKey(Schema.Unknown.pipe(Schema.Array)),
+    stalenessAndConflicts: Schema.optionalKey(UnknownRecordSchema.pipe(Schema.Array)),
+    coverage: Schema.optionalKey(
+      Schema.StructWithRest(
+        Schema.Struct({
+          gaps: Schema.optionalKey(Schema.Unknown.pipe(Schema.Array)),
+          memory: Schema.optionalKey(
+            Schema.StructWithRest(
+              Schema.Struct({
+                consideredCandidates: Schema.optionalKey(Schema.Unknown),
+                durableCandidates: Schema.optionalKey(Schema.Unknown),
+                handoffCandidates: Schema.optionalKey(Schema.Unknown),
+                codeAnchors: Schema.optionalKey(
+                  Schema.StructWithRest(Schema.Struct({matchedMemories: Schema.optionalKey(Schema.Unknown)}), [
+                    UnknownRecordSchema,
+                  ]),
+                ),
+              }),
+              [UnknownRecordSchema],
+            ),
+          ),
+          omissions: Schema.optionalKey(
+            Schema.StructWithRest(
+              Schema.Struct({
+                sourceExcerpts: Schema.optionalKey(Schema.Unknown),
+                activeHandoffs: Schema.optionalKey(Schema.Unknown),
+                durableDecisions: Schema.optionalKey(Schema.Unknown),
+              }),
+              [UnknownRecordSchema],
+            ),
+          ),
+        }),
+        [UnknownRecordSchema],
+      ),
+    ),
+    scope: Schema.optionalKey(
+      Schema.StructWithRest(Schema.Struct({freshness: Schema.optionalKey(Schema.Unknown)}), [UnknownRecordSchema]),
+    ),
+    evidenceState: Schema.optionalKey(Schema.Unknown),
+    output: Schema.optionalKey(
+      Schema.StructWithRest(Schema.Struct({truncated: Schema.optionalKey(Schema.Unknown)}), [UnknownRecordSchema]),
+    ),
+    graph: Schema.optionalKey(
+      Schema.StructWithRest(Schema.Struct({sources: Schema.optionalKey(UnknownRecordSchema.pipe(Schema.Array))}), [
+        UnknownRecordSchema,
+      ]),
+    ),
+  }),
+  [UnknownRecordSchema],
+);
+
+const withUnknownFields = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [UnknownRecordSchema]);
+const RuntimeFingerprintSchema = withUnknownFields(
+  Schema.Struct({
+    sourceRoot: Schema.String,
+    sourceHead: Schema.String,
+    sourceTree: Schema.String,
+    bunPath: Schema.String,
+    bunVersion: Schema.String,
+    bunHash: Schema.String,
+    lockHash: Schema.String,
+    dependencyHash: Schema.String,
+    dependencyStampHash: Schema.String,
+    bunStamp: Schema.String,
+    lockStamp: Schema.String,
+  }),
+);
+const VerifiedModelSchema = withUnknownFields(
+  Schema.Struct({
+    id: Schema.String,
+    sha256: Schema.String,
+    size: Schema.Finite,
+    path: Schema.String,
+    stamp: Schema.String,
+  }),
+);
+const RunManifestSchema = withUnknownFields(
+  Schema.Struct({
+    modelId: Schema.String,
+    alternateModelId: Schema.NullOr(Schema.String),
+    alternatePermitted: Schema.Boolean,
+    verifiedModel: VerifiedModelSchema,
+    runtime: Schema.optionalKey(RuntimeFingerprintSchema),
+  }),
+);
+const StateSchema = withUnknownFields(
+  Schema.Struct({
+    uri: Schema.String,
+    memoryId: Schema.String,
+    caseId: Schema.String,
+    accepted: Schema.String,
+    originalParagraphs: Schema.Array(Schema.String),
+    lastEvidenceRevision: Schema.NullOr(Schema.String),
+    reviewId: Schema.NullOr(Schema.String),
+    reviewRevision: Schema.NullOr(Schema.Finite),
+    preconditionFailure: Schema.optionalKey(Schema.String),
+    commonSourceIndexHash: Schema.optionalKey(Schema.String),
+    naiveSourceHash: Schema.optionalKey(Schema.String),
+    naiveBody: Schema.String,
+    manualUri: Schema.NullOr(Schema.String),
+    manualBody: Schema.String,
+    lastApplied: Schema.NullOr(
+      Schema.Struct({reviewId: Schema.String, revision: Schema.Finite, digest: Schema.String}).pipe(withUnknownFields),
+    ),
+  }),
+);
+const LocalGenerationSchema = withUnknownFields(
+  Schema.Struct({
+    draft: Schema.NullOr(Schema.String),
+    elapsedMilliseconds: Schema.Finite,
+    model: Schema.NullOr(
+      Schema.Struct({
+        backend: Schema.String,
+        id: Schema.String,
+        digest: Schema.NullOr(Schema.String),
+        settingsHash: Schema.NullOr(Schema.String),
+        modelVersion: Schema.NullOr(Schema.String),
+        promptVersion: Schema.NullOr(Schema.String),
+        attempts: Schema.NullOr(Schema.Finite),
+      }).pipe(withUnknownFields),
+    ),
+    promptHash: Schema.String,
+    providerInputTokens: Schema.NullOr(Schema.Finite),
+    providerOutputTokens: Schema.NullOr(Schema.Finite),
+    providerChargeMicros: Schema.NullOr(Schema.Finite),
+  }),
+);
+const ScopeFreshnessSchema = withUnknownFields(Schema.Struct({scopeFreshness: Schema.String}));
+const PublicReviewSchema = withUnknownFields(
+  Schema.Struct({
+    reviewId: Schema.String,
+    revision: Schema.Finite,
+    project: Schema.String,
+    candidates: Schema.Struct({candidateId: Schema.String, state: Schema.String}).pipe(withUnknownFields, Schema.Array),
+    maintenance: withUnknownFields(
+      Schema.Struct({
+        basis: withUnknownFields(Schema.Struct({targetUri: Schema.String, observationRevision: Schema.String})),
+      }),
+    ),
+    auditEvents: Schema.optionalKey(
+      Schema.Struct({
+        action: Schema.String,
+        revision: Schema.Finite,
+        candidateId: Schema.String,
+        reviewId: Schema.String,
+      }).pipe(withUnknownFields, Schema.Array),
+    ),
+    maintenanceApproval: Schema.optionalKey(Schema.Struct({stage: Schema.String}).pipe(withUnknownFields)),
+  }),
+);
+const StatusCasesSchema = withUnknownFields(
+  Schema.Struct({
+    cases: Schema.optionalKey(
+      Schema.Struct({
+        caseId: Schema.String,
+        family: Schema.String,
+        project: Schema.String,
+        slot: Schema.String,
+        subjectUri: Schema.String,
+      }).pipe(withUnknownFields, Schema.Array),
+    ),
+  }),
+);
+const MaintainResultSchema = withUnknownFields(
+  Schema.Struct({
+    state: Schema.optionalKey(Schema.String),
+    paused: Schema.optionalKey(Schema.Boolean),
+    cases: Schema.optionalKey(UnknownRecordSchema.pipe(Schema.Array)),
+  }),
+);
+const BaselineFixtureSchema = withUnknownFields(
+  Schema.Struct({
+    paragraphs: Schema.Struct({
+      text: Schema.String,
+      role: Schema.String,
+      support: Schema.String,
+      sourcePath: Schema.String,
+      scope: Schema.optionalKey(Schema.String),
+    }).pipe(withUnknownFields, Schema.Array),
+    additionalDependencies: Schema.Struct({kind: Schema.String, sourcePath: Schema.String}).pipe(
+      withUnknownFields,
+      Schema.Array,
+    ),
+  }),
+);
+const InspectSchema = withUnknownFields(
+  Schema.Struct({
+    memoryId: Schema.String,
+    citations: Schema.Struct({path: Schema.String, id: Schema.String}).pipe(withUnknownFields, Schema.Array),
+  }),
+);
+const TopicPreviewSchema = withUnknownFields(
+  Schema.Struct({
+    proposal: withUnknownFields(Schema.Struct({expectedContentHash: Schema.String, revision: Schema.String})),
+  }),
+);
+const DraftResultSchema = withUnknownFields(
+  Schema.Struct({
+    reviewId: Schema.String,
+    revision: Schema.Finite,
+    candidates: Schema.optionalKey(Schema.Struct({candidateId: Schema.String}).pipe(withUnknownFields, Schema.Array)),
+    maintenance: Schema.optionalKey(
+      Schema.Struct({
+        basis: Schema.optionalKey(
+          Schema.Struct({targetUri: Schema.String, observationRevision: Schema.String}).pipe(withUnknownFields),
+        ),
+        proposal: Schema.optionalKey(Schema.Unknown),
+        generation: Schema.optionalKey(
+          Schema.Struct({
+            usage: Schema.optionalKey(
+              Schema.Struct({
+                inputTokens: Schema.optionalKey(Schema.Finite),
+                outputTokens: Schema.optionalKey(Schema.Finite),
+                costMicros: Schema.optionalKey(Schema.Finite),
+              }).pipe(withUnknownFields),
+            ),
+            model: Schema.optionalKey(Schema.String),
+            modelVersion: Schema.optionalKey(Schema.String),
+            promptVersion: Schema.optionalKey(Schema.String),
+            attempts: Schema.optionalKey(Schema.Finite),
+          }).pipe(withUnknownFields),
+        ),
+      }).pipe(withUnknownFields),
+    ),
+  }),
+);
+const ReviewPreviewSchema = withUnknownFields(
+  Schema.Struct({
+    revision: Schema.Finite,
+    maintenanceApproval: Schema.optionalKey(
+      Schema.Struct({
+        preview: Schema.optionalKey(
+          Schema.Struct({content: Schema.String, approvalDigest: Schema.String}).pipe(withUnknownFields),
+        ),
+      }).pipe(withUnknownFields),
+    ),
+  }),
+);
+const RevisionSchema = withUnknownFields(Schema.Struct({revision: Schema.Finite}));
+const TopicStudyEventSchema = withUnknownFields(
+  Schema.Struct({
+    index: Schema.Int,
+    id: Schema.String,
+    operation: Schema.String,
+    expectedClass: Schema.Literals([
+      'unchanged',
+      'review-required',
+      'unavailable',
+      'policy-conflict',
+      'insufficient-evidence',
+      'stale-conflict',
+    ]),
+    declaredPositive: Schema.Boolean,
+    expectedBodyHash: Schema.NullOr(Schema.String),
+    sourceHistoryAvailable: Schema.Boolean,
+    changes: Schema.Struct({path: Schema.String, content: Schema.NullOr(Schema.String)}).pipe(
+      withUnknownFields,
+      Schema.Array,
+    ),
+    postReviewChanges: Schema.Struct({path: Schema.String, content: Schema.NullOr(Schema.String)}).pipe(
+      withUnknownFields,
+      Schema.Array,
+    ),
+    allowedEditOrdinals: Schema.Array(Schema.Int),
+    commit: Schema.Boolean,
+    indexGraph: Schema.Boolean,
+    fault: Schema.Literals([
+      'none',
+      'graph-outage',
+      'dirty-source',
+      'target-race',
+      'metadata-race',
+      'source-race',
+      'duplicate-restart',
+      'reviewer-edit',
+      'reject',
+      'defer-resume',
+      'packet-overflow',
+      'shared-conflict',
+      'semantic-ambiguity',
+      'history-missing',
+      'validity-window',
+    ]),
+    probes: Schema.Struct({id: Schema.String, question: Schema.String, answer: Schema.NullOr(Schema.String)}).pipe(
+      withUnknownFields,
+      Schema.Array,
+    ),
+  }),
+);
+const NativeRequestSchema = withUnknownFields(
+  Schema.Struct({
+    version: Schema.Literal(1),
+    event: TopicStudyEventSchema,
+    arm: Schema.Literals(['scripted-manual', 'maintained-local', 'maintained-alternate', 'naive-local']),
+    manifestPath: Schema.String,
+    binary: Schema.String,
+    repository: Schema.String,
+    home: Schema.String,
+    baseline: Schema.String,
+  }),
+);
 
 const MAX_COMMAND_BYTES = 512 * 1024;
 const MAX_SECONDS = 300;
@@ -107,89 +411,65 @@ type SourceCoverage = 'included' | 'omitted' | 'truncated' | 'unknown';
 
 /** Normalize only selected public source facts; accidental memory evidence invalidates the comparison. */
 export function projectTopicStudySourceBriefV1(value: unknown, declared: DeclaredSources): string {
-  const brief = value as {
-    activeHandoffs?: unknown[];
-    durableDecisions?: unknown[];
-    stalenessAndConflicts?: {kind: string; uri?: string; message?: string}[];
-    coverage?: {
-      gaps: string[];
-      memory: {
-        consideredCandidates: number;
-        durableCandidates?: number;
-        handoffCandidates?: number;
-        codeAnchors?: {matchedMemories: number};
-      };
-      omissions: {sourceExcerpts?: number; activeHandoffs?: number; durableDecisions?: number};
-    };
-    scope?: {freshness: string};
-    evidenceState?: string;
-    output?: {truncated: boolean};
-    graph?: {
-      sources?: {
-        path: string;
-        content: string;
-        startLine: number;
-        endLine: number;
-        freshness: string;
-        evidenceKind: string;
-        snapshotIdentity: string;
-        truncated: boolean;
-      }[];
-    };
-  };
+  const brief = Schema.decodeUnknownSync(TopicStudySourceBriefSchema)(value);
   if (
     !brief ||
-    !Array.isArray(brief.activeHandoffs) ||
-    !Array.isArray(brief.durableDecisions) ||
-    !Array.isArray(brief.stalenessAndConflicts) ||
+    !EffectArray.isArray(brief.activeHandoffs) ||
+    !EffectArray.isArray(brief.durableDecisions) ||
+    !EffectArray.isArray(brief.stalenessAndConflicts) ||
     brief.activeHandoffs.length ||
     brief.durableDecisions.length ||
     brief.coverage?.memory?.consideredCandidates !== 0 ||
     (brief.coverage.memory.durableCandidates ?? 0) !== 0 ||
     (brief.coverage.memory.handoffCandidates ?? 0) !== 0 ||
     (brief.coverage.memory.codeAnchors?.matchedMemories ?? 0) !== 0 ||
-    brief.stalenessAndConflicts.some(issue => !issue || issue.kind === 'topic-support' || issue.uri !== undefined) ||
+    EffectArray.some(
+      brief.stalenessAndConflicts,
+      issue => !isUnknownRecord(issue) || issue.kind === 'topic-support' || issue.uri !== undefined,
+    ) ||
     typeof brief.scope?.freshness !== 'string' ||
     typeof brief.evidenceState !== 'string' ||
-    !Array.isArray(brief.coverage.gaps) ||
+    !EffectArray.isArray(brief.coverage.gaps) ||
     !brief.coverage.omissions ||
     (brief.coverage.omissions.activeHandoffs ?? 0) !== 0 ||
     (brief.coverage.omissions.durableDecisions ?? 0) !== 0 ||
     !brief.graph ||
     (brief.graph.sources !== undefined &&
-      (!Array.isArray(brief.graph.sources) ||
-        brief.graph.sources.some(source => !source || typeof source.path !== 'string')))
+      (!EffectArray.isArray(brief.graph.sources) ||
+        EffectArray.some(brief.graph.sources, source => !isUnknownRecord(source) || typeof source.path !== 'string')))
   )
     throw new Error(
       `${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Common source brief is invalid or contains memory evidence.`,
     );
-  const refs = TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs.map(path => {
-    const sources = (brief.graph!.sources ?? [])
-      .filter(source => source.path === path)
-      .map(source => {
+  const refs = EffectArray.map(TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs, path => {
+    const sources = EffectArray.map(
+      EffectArray.filter(brief.graph!.sources ?? [], source => isUnknownRecord(source) && source.path === path),
+      source => {
+        const content = source.content;
+        const startLine = source.startLine;
+        const endLine = source.endLine;
+        const truncated = source.truncated;
+        const freshness = source.freshness;
+        const evidenceKind = source.evidenceKind;
+        const snapshotIdentity = source.snapshotIdentity;
         if (
-          typeof source.content !== 'string' ||
-          !Number.isSafeInteger(source.startLine) ||
-          !Number.isSafeInteger(source.endLine) ||
-          typeof source.truncated !== 'boolean' ||
-          typeof source.freshness !== 'string' ||
-          typeof source.evidenceKind !== 'string' ||
-          typeof source.snapshotIdentity !== 'string'
+          typeof content !== 'string' ||
+          !Number.isSafeInteger(startLine) ||
+          !Number.isSafeInteger(endLine) ||
+          typeof truncated !== 'boolean' ||
+          typeof freshness !== 'string' ||
+          typeof evidenceKind !== 'string' ||
+          typeof snapshotIdentity !== 'string'
         )
           throw new Error(`${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Public source excerpt is invalid.`);
-        return {
-          content: source.content,
-          startLine: source.startLine,
-          endLine: source.endLine,
-          freshness: source.freshness,
-          evidenceKind: source.evidenceKind,
-          snapshotIdentity: source.snapshotIdentity,
-          truncated: source.truncated,
-        };
-      });
+        return {content, startLine, endLine, freshness, evidenceKind, snapshotIdentity, truncated};
+      },
+    );
     return {
       path,
-      availability: declared.files.find(file => file.path === path)?.availability ?? 'unavailable',
+      availability:
+        EffectOption.getOrUndefined(EffectArray.findFirst(declared.files, file => file.path === path))?.availability ??
+        'unavailable',
       selection: sources.length ? 'included' : 'not-returned-by-public-brief',
       sources,
     };
@@ -201,14 +481,16 @@ export function projectTopicStudySourceBriefV1(value: unknown, declared: Declare
     scopeFreshness: brief.scope.freshness,
     evidenceState: brief.evidenceState,
     // Expected empty-home recall absence is not a source-support gap. The full receipt retains it.
-    gaps: brief.coverage.gaps.filter(gap => gap !== 'code-anchor-recall-no-active-memory'),
+    gaps: EffectArray.filter(brief.coverage.gaps, gap => gap !== 'code-anchor-recall-no-active-memory'),
     publicSourceOmissions: brief.coverage.omissions.sourceExcerpts ?? 0,
     publicOutputTruncated: brief.output?.truncated === true,
     refs,
   };
   // The public budget selects evidence; this additional fixed byte ceiling bounds its JSON representation too.
   while (new TextEncoder().encode(JSON.stringify(projection)).byteLength > 6000) {
-    const ref = [...refs].reverse().find(item => item.sources.length);
+    const ref = EffectOption.getOrUndefined(
+      EffectArray.findFirst([...refs].reverse(), item => item.sources.length > 0),
+    );
     if (!ref)
       throw new Error(
         `${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Common source metadata exceeds the fixed answer budget.`,
@@ -224,8 +506,8 @@ function eligibleFullDeclaredSource(declared: DeclaredSources, scopeFreshness: s
     declared.clean &&
     declared.indexFresh &&
     scopeFreshness === 'fresh' &&
-    TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs.every(path => {
-      const file = declared.files.find(item => item.path === path);
+    EffectArray.every(TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs, path => {
+      const file = EffectOption.getOrUndefined(EffectArray.findFirst(declared.files, item => item.path === path));
       return (
         file?.availability === 'present' &&
         file.content !== null &&
@@ -239,19 +521,32 @@ export function diagnoseTopicStudySourceCoverageV1(publicProjection: string | nu
   const projection =
     publicProjection === null
       ? null
-      : (JSON.parse(publicProjection) as {
-          scopeFreshness: string;
-          evidenceState: string;
-          publicSourceOmissions: number;
-          publicOutputTruncated: boolean;
-          refs: readonly {path: string; selection: string; sources: readonly {truncated: boolean}[]}[];
-        });
-  const refs = TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs.map(path => {
-    const file = declared.files.find(item => item.path === path);
-    const ref = projection?.refs.find(item => item.path === path);
+      : Schema.decodeUnknownSync(
+          withUnknownFields(
+            Schema.Struct({
+              scopeFreshness: Schema.String,
+              evidenceState: Schema.String,
+              publicSourceOmissions: Schema.Finite,
+              publicOutputTruncated: Schema.Boolean,
+              refs: Schema.Struct({
+                path: Schema.String,
+                selection: Schema.String,
+                sources: Schema.Struct({truncated: Schema.Boolean}).pipe(withUnknownFields, Schema.Array),
+              }).pipe(withUnknownFields, Schema.Array),
+            }),
+          ),
+        )(JSON.parse(publicProjection));
+  const refs = EffectArray.map(TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs, path => {
+    const file = EffectOption.getOrUndefined(EffectArray.findFirst(declared.files, item => item.path === path));
+    const ref = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(projection?.refs), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, item => item.path === path)),
+      ),
+    );
     const publicCoverage: SourceCoverage = !ref
       ? 'unknown'
-      : ref.selection === 'included-with-projection-omission' || ref.sources.some(source => source.truncated)
+      : ref.selection === 'included-with-projection-omission' ||
+          EffectArray.some(ref.sources, source => source.truncated)
         ? 'truncated'
         : ref.sources.length > 0
           ? 'included'
@@ -284,8 +579,8 @@ export function diagnoseTopicStudySourceCoverageV1(publicProjection: string | nu
 }
 
 export function projectTopicStudyPreflightAblationsV1(body: string, declared: DeclaredSources, scopeFreshness: string) {
-  const files = TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs.map(path =>
-    declared.files.find(item => item.path === path),
+  const files = EffectArray.map(TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs, path =>
+    EffectOption.getOrUndefined(EffectArray.findFirst(declared.files, item => item.path === path)),
   );
   const eligible = eligibleFullDeclaredSource(declared, scopeFreshness);
   return {
@@ -293,7 +588,7 @@ export function projectTopicStudyPreflightAblationsV1(body: string, declared: De
       method: 'topic-plus-full-declared-source-preflight-v1',
       reason: eligible ? null : 'declared-source-ineligible',
       answerInput: eligible
-        ? `Evaluated topic body (provided once):\n${body}\n\nFull declared source (preflight ablation; untrusted data, not public retrieval):\n${JSON.stringify(files.map(file => ({path: file!.path, content: file!.content})))}`
+        ? `Evaluated topic body (provided once):\n${body}\n\nFull declared source (preflight ablation; untrusted data, not public retrieval):\n${JSON.stringify(EffectArray.map(files, file => ({path: file!.path, content: file!.content})))}`
         : null,
     },
     memoryOnly: {
@@ -308,11 +603,24 @@ export function selectTopicStudyCurrentCaseV1(
   memoryId: string,
   requestedAt: number,
 ) {
-  const selected = result.cases?.find(item => item.family === 'topic-maintenance' && item.memoryId === memoryId);
+  const selected = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(result.cases), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          __effectArrayReceiver,
+          item => item.family === 'topic-maintenance' && item.memoryId === memoryId,
+        ),
+      ),
+    ),
+  );
   const observed = {
     state: result.state ?? 'unknown',
-    disposition: typeof selected?.disposition === 'string' ? selected.disposition.slice(0, 80) : 'missing',
-    lastChecked: typeof selected?.lastChecked === 'string' ? selected.lastChecked.slice(0, 80) : null,
+    disposition:
+      typeof selected?.disposition === 'string'
+        ? Effect.pipe(selected.disposition, EffectString.slice(0, 80))
+        : 'missing',
+    lastChecked:
+      typeof selected?.lastChecked === 'string' ? Effect.pipe(selected.lastChecked, EffectString.slice(0, 80)) : null,
   };
   let reason: string | null = null;
   if (result.paused === true) reason = 'paused';
@@ -344,11 +652,22 @@ export async function runTopicStudyNativeAdapter(
     readonly generate?: (prompt: string) => Promise<LocalGeneration | null>;
   } = {},
 ): Promise<TopicStudyObservationV1> {
-  if (request.version !== 1 || !request.repository.startsWith(request.home.replace(/\/home$/u, '')))
+  if (
+    request.version !== 1 ||
+    !Effect.pipe(
+      request.repository,
+      EffectString.startsWith(Effect.pipe(request.home, EffectString.replace(/\/home$/u, ''))),
+    )
+  )
     throw new Error('Invalid sandbox adapter request.');
-  const manifest = JSON.parse(await readFile(request.manifestPath, 'utf8')) as RunManifest;
+  const manifest = Schema.decodeUnknownSync(RunManifestSchema)(
+    JSON.parse(await readFile(request.manifestPath, 'utf8')),
+  );
   const statePath = join(request.home, 'study-state.json');
-  let state: State | null = request.event.index === 1 ? null : (JSON.parse(await readFile(statePath, 'utf8')) as State);
+  let state: State | null =
+    request.event.index === 1
+      ? null
+      : Schema.decodeUnknownSync(StateSchema)(JSON.parse(await readFile(statePath, 'utf8')));
   if (state?.preconditionFailure)
     return {...topicStudyUnavailableObservationV1(request.event, state.preconditionFailure), status: 'failed'};
   const receipts: string[] = [];
@@ -417,7 +736,7 @@ export async function runTopicStudyNativeAdapter(
   const cli = async (args: readonly string[], required = true) => {
     const result = await run([request.binary, ...args]);
     if (required && result.exitCode !== 0)
-      throw new Error(`CLI ${args.slice(0, 3).join(' ')} exited ${result.exitCode}.`);
+      throw new Error(`CLI ${EffectArray.join(args.slice(0, 3), ' ')} exited ${result.exitCode}.`);
     return result;
   };
   const localModel = async (prompt: string) => {
@@ -435,22 +754,14 @@ export async function runTopicStudyNativeAdapter(
       }),
     );
     if (result.exitCode !== 0) return null;
-    const parsed = JSON.parse(result.stdout) as {
-      draft: string | null;
-      elapsedMilliseconds: number;
-      model: TopicStudyObservationV1['model'];
-      promptHash: string;
-      providerInputTokens: number | null;
-      providerOutputTokens: number | null;
-      providerChargeMicros: number | null;
-    };
+    const parsed = Schema.decodeUnknownSync(LocalGenerationSchema)(JSON.parse(result.stdout));
     await assertTopicStudyModel(manifest.verifiedModel);
     return parsed;
   };
   const git = async (args: readonly string[]) => {
     const result = await run(['git', ...args]);
     if (result.exitCode !== 0) throw new Error(`Sandbox Git ${args[0]} exited ${result.exitCode}.`);
-    return result.stdout.trim();
+    return Effect.pipe(result.stdout, EffectString.trim);
   };
   const readDeclaredSources = async (): Promise<DeclaredSources> => {
     const started = performance.now();
@@ -510,7 +821,7 @@ export async function runTopicStudyNativeAdapter(
       false,
     );
     commonRetrievalMilliseconds += response.elapsed;
-    if (response.exitCode !== 0 || !response.stdout.trim())
+    if (response.exitCode !== 0 || !Effect.pipe(response.stdout, EffectString.trim))
       return {
         declared,
         evidence: null,
@@ -524,7 +835,7 @@ export async function runTopicStudyNativeAdapter(
       };
     const parsed = JSON.parse(response.stdout) as unknown;
     const evidence = projectTopicStudySourceBriefV1(parsed, declared);
-    const scopeFreshness = (JSON.parse(evidence) as {scopeFreshness: string}).scopeFreshness;
+    const scopeFreshness = Schema.decodeUnknownSync(ScopeFreshnessSchema)(JSON.parse(evidence)).scopeFreshness;
     return {
       declared,
       evidence,
@@ -532,7 +843,7 @@ export async function runTopicStudyNativeAdapter(
         declared.clean &&
         declared.indexFresh &&
         scopeFreshness === 'fresh' &&
-        declared.files.every(file => file.availability === 'present'),
+        EffectArray.every(declared.files, file => file.availability === 'present'),
       opportunityHash: topicStudyHash('topic-study-source-opportunity-v1', {
         hash: declared.hash,
         clean: declared.clean,
@@ -544,8 +855,12 @@ export async function runTopicStudyNativeAdapter(
   const expectationFor = (before: string, common: Awaited<ReturnType<typeof readCommonEvidence>>) =>
     topicStudyReviewExpectationV1(before, {
       eligible: common.eligible,
-      config: common.declared.files.find(file => file.path === 'config.ts')?.content ?? null,
-      health: common.declared.files.find(file => file.path === 'health.ts')?.content ?? null,
+      config:
+        EffectOption.getOrUndefined(EffectArray.findFirst(common.declared.files, file => file.path === 'config.ts'))
+          ?.content ?? null,
+      health:
+        EffectOption.getOrUndefined(EffectArray.findFirst(common.declared.files, file => file.path === 'health.ts'))
+          ?.content ?? null,
     });
   const literalState = (expectation: ReturnType<typeof expectationFor>) => ({
     beforeHash: expectation.beforeHash,
@@ -598,9 +913,13 @@ export async function runTopicStudyNativeAdapter(
   };
   const readAccepted = async (uri: string) => {
     const read = await cli(['read', uri]);
-    const index = read.stdout.indexOf('MEMORY\n');
+    const index = Effect.pipe(
+      read.stdout,
+      EffectString.indexOf('MEMORY\n'),
+      Effect.Option.getOrElse(() => -1),
+    );
     if (index < 0) throw new Error('CLI read had no canonical MEMORY section.');
-    return read.stdout.slice(index).trim();
+    return Effect.pipe(read.stdout, EffectString.slice(index), EffectString.trim);
   };
   type PublicReview = {
     reviewId: string;
@@ -685,10 +1004,12 @@ export async function runTopicStudyNativeAdapter(
         review.maintenance?.basis?.targetUri === target.uri &&
         topicStudyHash('topic-study-review-basis-v1', review.maintenance.basis) === selected.basisHash;
       const readReview = async () =>
-        JSON.parse(
-          (await cli(['context', 'maintain', '--action', 'draft-view', '--review-id', selected.reviewId, '--json']))
-            .stdout,
-        ) as PublicReview;
+        Schema.decodeUnknownSync(PublicReviewSchema)(
+          JSON.parse(
+            (await cli(['context', 'maintain', '--action', 'draft-view', '--review-id', selected.reviewId, '--json']))
+              .stdout,
+          ),
+        );
       const verifyAccepted = async () => {
         cleanupReadback = await readAccepted(target.uri);
         if (cleanupReadback !== acceptedBaseline)
@@ -697,12 +1018,18 @@ export async function runTopicStudyNativeAdapter(
       const review = await readReview();
       if (!sameReview(review, selected.revision))
         throw new Error('Produced review identity, basis or exact revision changed before rejection.');
-      const status = JSON.parse(
-        (await cli(['context', 'maintain', '--action', 'status', '--case-id', target.caseId, '--json'])).stdout,
-      ) as {
-        cases?: readonly {caseId: string; family: string; project: string; slot: string; subjectUri: string}[];
-      };
-      const item = status.cases?.find(item => item.caseId === target.caseId);
+      const status = Schema.decodeUnknownSync(StatusCasesSchema)(
+        JSON.parse(
+          (await cli(['context', 'maintain', '--action', 'status', '--case-id', target.caseId, '--json'])).stdout,
+        ),
+      );
+      const item = EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(status.cases), __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectArrayReceiver, item => item.caseId === target.caseId),
+          ),
+        ),
+      );
       if (
         !item ||
         item.family !== 'topic-maintenance' ||
@@ -730,7 +1057,7 @@ export async function runTopicStudyNativeAdapter(
         target.caseId,
         '--json',
       ]);
-      const rejected = JSON.parse(decision.stdout) as PublicReview;
+      const rejected = Schema.decodeUnknownSync(PublicReviewSchema)(JSON.parse(decision.stdout));
       const revision = selected.revision + 1;
       const terminalMatches = (value: PublicReview) => {
         const audit = value.auditEvents?.at(-1);
@@ -768,11 +1095,7 @@ export async function runTopicStudyNativeAdapter(
     let lastDiagnosis: ReturnType<typeof selectTopicStudyCurrentCaseV1> | null = null;
     for (let turn = 0; turn < 8 && performance.now() - started < 30_000; turn++) {
       const response = await cli(['context', 'maintain', '--project', 'fixture', '--action', 'run', '--json']);
-      const result = JSON.parse(response.stdout) as {
-        state?: string;
-        paused?: boolean;
-        cases?: readonly Record<string, unknown>[];
-      };
+      const result = Schema.decodeUnknownSync(MaintainResultSchema)(JSON.parse(response.stdout));
       lastDiagnosis = selectTopicStudyCurrentCaseV1(result, memoryId, requestedAt);
       if (lastDiagnosis.caseRecord) return lastDiagnosis.caseRecord;
     }
@@ -785,11 +1108,13 @@ export async function runTopicStudyNativeAdapter(
   try {
     if (request.event.index === 1) {
       await cli(['graph', 'index', '--cwd', request.repository, '--no-vectors']);
-      const fixture = JSON.parse(await readFile(request.baseline, 'utf8')) as {
-        paragraphs: readonly {text: string; role: string; support: string; sourcePath: string; scope?: string}[];
-        additionalDependencies: readonly {kind: string; sourcePath: string}[];
-      };
-      const body = fixture.paragraphs.map(paragraph => paragraph.text).join('\n\n');
+      const fixture = Schema.decodeUnknownSync(BaselineFixtureSchema)(
+        JSON.parse(await readFile(request.baseline, 'utf8')),
+      );
+      const body = EffectArray.join(
+        EffectArray.map(fixture.paragraphs, paragraph => paragraph.text),
+        '\n\n',
+      );
       const stored = await cli([
         'remember',
         '--project',
@@ -806,19 +1131,18 @@ export async function runTopicStudyNativeAdapter(
       ]);
       const uri = /Stored memory:\s+(threadnote:\/\/\S+)/u.exec(stored.stdout)?.[1];
       if (!uri) throw new Error('Enrollment setup did not return a target URI.');
-      const inspect = JSON.parse((await cli(['context', 'topic', 'inspect', '--uri', uri, '--json'])).stdout) as {
-        memoryId: string;
-        citations: readonly {path: string; id: string}[];
-      };
-      const citationIds = Object.fromEntries(inspect.citations.map(item => [item.path, item.id]));
+      const inspect = Schema.decodeUnknownSync(InspectSchema)(
+        JSON.parse((await cli(['context', 'topic', 'inspect', '--uri', uri, '--json'])).stdout),
+      );
+      const citationIds = EffectRecord.fromEntries(EffectArray.map(inspect.citations, item => [item.path, item.id]));
       const input = {
-        paragraphs: fixture.paragraphs.map(paragraph => ({
+        paragraphs: EffectArray.map(fixture.paragraphs, paragraph => ({
           role: paragraph.role,
           support: paragraph.support,
           ...(paragraph.scope ? {scope: paragraph.scope} : {}),
           citationIds: [citationIds[paragraph.sourcePath]],
         })),
-        additionalDependencies: fixture.additionalDependencies.map(item => ({
+        additionalDependencies: EffectArray.map(fixture.additionalDependencies, item => ({
           kind: item.kind,
           citationId: citationIds[item.sourcePath],
         })),
@@ -826,9 +1150,9 @@ export async function runTopicStudyNativeAdapter(
       const supportPath = join(request.home, 'enrollment.json');
       await writeFile(supportPath, JSON.stringify(input));
       const args = ['--uri', uri, '--cwd', request.repository, '--input', supportPath, '--json'];
-      const preview = JSON.parse((await cli(['context', 'topic', 'preview', ...args])).stdout) as {
-        proposal: {expectedContentHash: string; revision: string};
-      };
+      const preview = Schema.decodeUnknownSync(TopicPreviewSchema)(
+        JSON.parse((await cli(['context', 'topic', 'preview', ...args])).stdout),
+      );
       await cli([
         'context',
         'topic',
@@ -867,7 +1191,7 @@ export async function runTopicStudyNativeAdapter(
         memoryId: inspect.memoryId,
         caseId: firstCase.caseId,
         accepted,
-        originalParagraphs: fixture.paragraphs.map(item => item.text),
+        originalParagraphs: EffectArray.map(fixture.paragraphs, item => item.text),
         lastEvidenceRevision: String(firstCase.evidenceRevision ?? ''),
         reviewId: null,
         reviewRevision: null,
@@ -919,9 +1243,10 @@ export async function runTopicStudyNativeAdapter(
       caseRecord = await maintain(state.memoryId);
     } catch (error) {
       if (
-        request.arm.startsWith('maintained') ||
+        Effect.pipe(request.arm, EffectString.startsWith('maintained')) ||
         commandTrace.failure ||
-        (error instanceof Error && error.message.startsWith(TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX))
+        (error instanceof Error &&
+          Effect.pipe(error.message, EffectString.startsWith(TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX)))
       )
         throw error;
       detectorReason = 'Enrollment-control detector unavailable; comparator uses independent declared evidence.';
@@ -977,7 +1302,11 @@ export async function runTopicStudyNativeAdapter(
       ...(reviewerExpectation ? {reviewerExpectation} : {}),
     });
     const supportedReviewFault = ['source-race', 'reject', 'defer-resume'].includes(request.event.fault);
-    if (detected && request.arm.startsWith('maintained') && (request.event.fault === 'none' || supportedReviewFault)) {
+    if (
+      detected &&
+      Effect.pipe(request.arm, EffectString.startsWith('maintained')) &&
+      (request.event.fault === 'none' || supportedReviewFault)
+    ) {
       const backend = request.arm === 'maintained-local' ? 'local-ai' : 'effect-ai';
       const modelId = request.arm === 'maintained-local' ? manifest.modelId : manifest.alternateModelId;
       if (!modelId || (backend === 'effect-ai' && !manifest.alternatePermitted)) {
@@ -1022,29 +1351,14 @@ export async function runTopicStudyNativeAdapter(
           } catch {
             envelope = undefined;
           }
-          const result = (envelope ?? {}) as {
-            reviewId: string;
-            revision: number;
-            candidates?: readonly {candidateId: string}[];
-            maintenance?: {
-              basis?: {targetUri: string; observationRevision: string};
-              proposal?: unknown;
-              generation?: {
-                usage?: {inputTokens?: number; outputTokens?: number; costMicros?: number};
-                model?: string;
-                modelVersion?: string;
-                promptVersion?: string;
-                attempts?: number;
-              };
-            };
-          };
+          const result = Schema.decodeUnknownSync(DraftResultSchema)(envelope ?? {});
           if (draft.exitCode === 0) {
             if (
               typeof result.reviewId !== 'string' ||
               !result.reviewId ||
               !Number.isSafeInteger(result.revision) ||
               result.revision < 1 ||
-              !Array.isArray(result.candidates) ||
+              !EffectArray.isArray(result.candidates) ||
               result.candidates.length !== 1 ||
               typeof result.candidates[0]?.candidateId !== 'string' ||
               !result.candidates[0].candidateId ||
@@ -1069,7 +1383,9 @@ export async function runTopicStudyNativeAdapter(
           });
           if (generationObservation) {
             computeMilliseconds = generationObservation.elapsedMilliseconds;
-            const usage = topicGenerationUsage(generationObservation.attempts.map(attempt => attempt.usage));
+            const usage = topicGenerationUsage(
+              EffectArray.map(generationObservation.attempts, attempt => attempt.usage),
+            );
             providerInputTokens = usage.status === 'measured' ? usage.inputTokens : null;
             providerOutputTokens = usage.status === 'measured' ? usage.outputTokens : null;
             providerChargeMicros = backend === 'local-ai' ? 0 : null;
@@ -1077,7 +1393,12 @@ export async function runTopicStudyNativeAdapter(
               backend,
               id: generationObservation.model,
               digest:
-                backend === 'local-ai' && generationObservation.modelVersion?.includes(manifest.verifiedModel.sha256)
+                backend === 'local-ai' &&
+                Effect.pipe(generationObservation.modelVersion, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.includes(manifest.verifiedModel.sha256)),
+                )
                   ? manifest.verifiedModel.sha256
                   : null,
               modelVersion: generationObservation.modelVersion ?? null,
@@ -1099,7 +1420,11 @@ export async function runTopicStudyNativeAdapter(
               digest:
                 backend === 'local-ai' &&
                 generation?.model === manifest.verifiedModel.id &&
-                generation.modelVersion?.includes(manifest.verifiedModel.sha256)
+                Effect.pipe(generation.modelVersion, effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.includes(manifest.verifiedModel.sha256)),
+                )
                   ? manifest.verifiedModel.sha256
                   : null,
               modelVersion: generation?.modelVersion ?? null,
@@ -1158,10 +1483,7 @@ export async function runTopicStudyNativeAdapter(
                 status = 'failed';
                 reason = 'Draft review preview failed.';
               } else {
-                const prepared = JSON.parse(preview.stdout) as {
-                  revision: number;
-                  maintenanceApproval?: {preview?: {content: string; approvalDigest: string}};
-                };
+                const prepared = Schema.decodeUnknownSync(ReviewPreviewSchema)(JSON.parse(preview.stdout));
                 await recordReviewRevision(result.reviewId, prepared.revision);
                 const document = prepared.maintenanceApproval?.preview?.content ?? '';
                 const assessment = checkTopicStudyReviewV1(before, document, independentBefore!);
@@ -1216,7 +1538,7 @@ export async function runTopicStudyNativeAdapter(
                       status = 'failed';
                       reason = 'Public defer decision failed.';
                     } else {
-                      const deferredReview = JSON.parse(deferred.stdout) as {revision: number};
+                      const deferredReview = Schema.decodeUnknownSync(RevisionSchema)(JSON.parse(deferred.stdout));
                       await recordReviewRevision(result.reviewId, deferredReview.revision);
                       const resumed = await cli(
                         [
@@ -1238,7 +1560,7 @@ export async function runTopicStudyNativeAdapter(
                         status = 'failed';
                         reason = 'Public resume decision failed.';
                       } else {
-                        const resumedReview = JSON.parse(resumed.stdout) as {revision: number};
+                        const resumedReview = Schema.decodeUnknownSync(RevisionSchema)(JSON.parse(resumed.stdout));
                         await recordReviewRevision(result.reviewId, resumedReview.revision);
                         const preparedAgain = await cli(
                           [
@@ -1260,10 +1582,9 @@ export async function runTopicStudyNativeAdapter(
                           status = 'failed';
                           reason = 'Resumed review preview failed.';
                         } else {
-                          const resumedPreview = JSON.parse(preparedAgain.stdout) as {
-                            revision: number;
-                            maintenanceApproval?: {preview?: {content: string; approvalDigest: string}};
-                          };
+                          const resumedPreview = Schema.decodeUnknownSync(ReviewPreviewSchema)(
+                            JSON.parse(preparedAgain.stdout),
+                          );
                           await recordReviewRevision(result.reviewId, resumedPreview.revision);
                           const resumedContent = resumedPreview.maintenanceApproval?.preview?.content ?? '';
                           const resumedDigest = resumedPreview.maintenanceApproval?.preview?.approvalDigest;
@@ -1389,7 +1710,10 @@ export async function runTopicStudyNativeAdapter(
           }
         }
       }
-    } else if (request.event.fault === 'duplicate-restart' && request.arm.startsWith('maintained')) {
+    } else if (
+      request.event.fault === 'duplicate-restart' &&
+      Effect.pipe(request.arm, EffectString.startsWith('maintained'))
+    ) {
       if (!state.lastApplied) {
         status = 'unavailable';
         reason = 'No prior reviewed apply receipt to replay.';
@@ -1429,14 +1753,27 @@ export async function runTopicStudyNativeAdapter(
       }
     } else if (request.arm === 'scripted-manual') {
       actualClass = 'unchanged';
-      if (!independentBefore!.eligible) {
+      const manualExpectation = independentBefore;
+      if (!manualExpectation) throw new Error('Scripted manual expectation was not initialized.');
+      if (!manualExpectation.eligible) {
         actualClass = 'unavailable';
         reason = 'Scripted manual abstained: declared source evidence or registered literal expectation unavailable.';
-      } else if (independentBefore!.repairOrdinals.length > 0 && state.manualUri) {
-        const next = independentBefore!.expectedBody!;
-        const anticipated = evaluatedBefore.slice(0, evaluatedBefore.indexOf('\n\n') + 2) + next;
-        const assessment = checkTopicStudyReviewV1(evaluatedBefore, anticipated, independentBefore!);
-        await recordExpectation('manual-preview', independentBefore!, assessment);
+      } else if (manualExpectation.repairOrdinals.length > 0 && state.manualUri) {
+        const next = manualExpectation.expectedBody!;
+        const anticipated =
+          Effect.pipe(
+            evaluatedBefore,
+            EffectString.slice(
+              0,
+              Effect.pipe(
+                evaluatedBefore,
+                EffectString.indexOf('\n\n'),
+                Effect.Option.getOrElse(() => -1),
+              ) + 2,
+            ),
+          ) + next;
+        const assessment = checkTopicStudyReviewV1(evaluatedBefore, anticipated, manualExpectation);
+        await recordExpectation('manual-preview', manualExpectation, assessment);
         if (!assessment.acceptable) throw new Error('Scripted manual expected body failed independent review.');
         const updated = await cli(
           [
@@ -1465,9 +1802,9 @@ export async function runTopicStudyNativeAdapter(
             approved = true;
             actualClass = 'review-required';
             const readback = await readAccepted(nextUri);
-            const assessment = checkTopicStudyReviewV1(evaluatedBefore, readback, independentBefore!);
+            const assessment = checkTopicStudyReviewV1(evaluatedBefore, readback, manualExpectation);
             observePhysicalAfter(readback, assessment);
-            await recordExpectation('manual-readback', independentBefore!, assessment);
+            await recordExpectation('manual-readback', manualExpectation, assessment);
             if (!assessment.acceptable) {
               status = 'failed';
               reason = assessment.reason;
@@ -1526,15 +1863,17 @@ export async function runTopicStudyNativeAdapter(
       actualClass = null;
     }
     if (producedResponse && !accepted) await closeProducedReview();
+    if (!state) throw new Error('Native topic study state disappeared before final readback.');
+    const finalState = state;
     await finishSourceTimeline();
     sourceCommit = await git(['rev-parse', 'HEAD']);
     sourceTreeHash = await topicStudySourceTreeHash(request.repository);
-    const after = await readAccepted(state.uri);
+    const after = await readAccepted(finalState.uri);
     const evaluatedBody =
       request.arm === 'naive-local'
-        ? state.naiveBody
-        : request.arm === 'scripted-manual' && state.manualUri
-          ? await readAccepted(state.manualUri)
+        ? finalState.naiveBody
+        : request.arm === 'scripted-manual' && finalState.manualUri
+          ? await readAccepted(finalState.manualUri)
           : after;
     const preservation = measureTopicStudyPreservationV1(
       evaluatedBefore,
@@ -1543,13 +1882,14 @@ export async function runTopicStudyNativeAdapter(
     );
     if (request.arm !== 'naive-local') observePhysicalAfter(evaluatedBody, preservation);
     const {identityPreserved, provenancePreserved} = preservation;
-    const beforeSections = topicStudyBodyV1(evaluatedBefore).split('\n\n');
-    const afterSections = topicStudyBodyV1(evaluatedBody).split('\n\n');
+    const beforeSections = Effect.pipe(topicStudyBodyV1(evaluatedBefore), EffectString.split('\n\n'));
+    const afterSections = Effect.pipe(topicStudyBodyV1(evaluatedBody), EffectString.split('\n\n'));
     const unrelatedBodyPreserved =
       preservation.unrelatedBodyPreserved ??
       (request.arm === 'naive-local'
         ? beforeSections.length === afterSections.length &&
-          beforeSections.every(
+          EffectArray.every(
+            beforeSections,
             (text, ordinal) => request.event.allowedEditOrdinals.includes(ordinal) || afterSections[ordinal] === text,
           )
         : null);
@@ -1574,7 +1914,7 @@ export async function runTopicStudyNativeAdapter(
     let retrievalHash: string | null = null;
     if (commonForProbe?.evidence === null || commonForProbe === null) {
       probes.push(
-        ...request.event.probes.map(probe => ({
+        ...EffectArray.map(request.event.probes, probe => ({
           id: probe.id,
           answer: null,
           evidence: null,
@@ -1596,14 +1936,15 @@ export async function runTopicStudyNativeAdapter(
       if (probeResponse !== null) {
         try {
           const parsed = JSON.parse(probeResponse) as unknown;
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
-            answers = parsed as Record<string, unknown>;
+          if (parsed && typeof parsed === 'object' && !EffectArray.isArray(parsed))
+            answers = Schema.decodeUnknownSync(UnknownRecordSchema)(parsed);
         } catch {
           /* Explicit unavailable answers below preserve the denominator. */
         }
       }
       for (const probe of request.event.probes) {
-        const answer = typeof answers[probe.id] === 'string' ? (answers[probe.id] as string) : null;
+        const candidateAnswer = answers[probe.id];
+        const answer = typeof candidateAnswer === 'string' ? candidateAnswer : null;
         const judged = gradeTopicStudyAnswerV1(probe, answer);
         probes.push({
           id: probe.id,
@@ -1652,7 +1993,7 @@ export async function runTopicStudyNativeAdapter(
       adjudication: null,
       ...(reviewerExpectation ? {reviewerExpectation} : {}),
     };
-    state = {...state, accepted: after, lastEvidenceRevision: evidenceRevision};
+    state = {...finalState, accepted: after, lastEvidenceRevision: evidenceRevision};
     await persistState();
   } catch (error) {
     let reason = error instanceof Error ? error.message : 'Native CLI adapter failed.';
@@ -1715,5 +2056,9 @@ export async function runTopicStudyNativeAdapter(
 
 if (import.meta.main)
   process.stdout.write(
-    JSON.stringify(await runTopicStudyNativeAdapter(JSON.parse(await Bun.stdin.text()) as TopicStudyNativeRequest)),
+    JSON.stringify(
+      await runTopicStudyNativeAdapter(
+        Schema.decodeUnknownSync(NativeRequestSchema)(JSON.parse(await Bun.stdin.text())),
+      ),
+    ),
   );

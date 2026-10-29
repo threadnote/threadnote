@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Console, DateTime, Effect, FileSystem, Result} from 'effect';
 
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -78,6 +79,9 @@ import {
   restoreTrackedSharedChanges,
   stageShareableChanges,
 } from './git.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const refreshSharedReposInBackground = Effect.fn('share.refreshSharedReposInBackground')(function* (
   config: ShareRuntime,
@@ -99,7 +103,8 @@ export const syncSharedReposBeforeAgentRead = Effect.fn('share.syncSharedReposBe
       yield* loadPendingReindexes(config, state);
       const warnings = yield* refreshShareUpdateStateLocked(config, state, {force: false, teams: selectedTeams});
       const syncTeams = new Set(
-        [...state.behindTeams, ...state.pendingReindexes.keys()].filter(
+        EffectArray.filter(
+          [...state.behindTeams, ...state.pendingReindexes.keys()],
           team => !selectedTeams || selectedTeams.has(team),
         ),
       );
@@ -154,9 +159,13 @@ const refreshShareUpdateStateLocked = Effect.fn('share.refreshShareUpdateStateLo
 ) {
   const now = yield* Clock.currentTimeMillis;
   const teamsFile = yield* readTeamsFile(config);
-  const configuredTeams = Object.keys(teamsFile.teams).filter(team => !options.teams || options.teams.has(team));
+  const configuredTeams = EffectArray.filter(
+    EffectRecord.keys(teamsFile.teams),
+    team => !options.teams || options.teams.has(team),
+  );
   const teamsToCheck = new Set(
-    configuredTeams.filter(
+    EffectArray.filter(
+      configuredTeams,
       team =>
         options.force ||
         state.forceNextCheck ||
@@ -180,7 +189,7 @@ const refreshShareUpdateStateLocked = Effect.fn('share.refreshShareUpdateStateLo
       }
     }
     state.behindTeams = nextBehindTeams;
-    return statuses.flatMap(status => (status.warning ? [status.warning] : []));
+    return EffectArray.flatMap(statuses, status => (status.warning ? [status.warning] : []));
   }).pipe(
     Effect.ensuring(
       Effect.gen(function* () {
@@ -203,7 +212,10 @@ const fetchShareUpdateStatuses = Effect.fn('share.fetchShareUpdateStatuses')(fun
   selectedTeams?: ReadonlySet<string>,
 ) {
   const teamsFile = yield* readTeamsFile(config);
-  const teams = Object.entries(teamsFile.teams).filter(([name]) => !selectedTeams || selectedTeams.has(name));
+  const teams = EffectArray.filter(
+    EffectRecord.toEntries(teamsFile.teams),
+    ([name]) => !selectedTeams || selectedTeams.has(name),
+  );
   if (teams.length === 0) {
     return [];
   }
@@ -227,7 +239,9 @@ const fetchShareUpdateStatuses = Effect.fn('share.fetchShareUpdateStatuses')(fun
     if (fetchResult.exitCode !== 0) {
       const warning = boundedShareFetchWarning(
         `Auto-sync check for shared team "${name}" failed: ${
-          fetchResult.stderr.trim() || fetchResult.stdout.trim() || 'unknown git fetch error'
+          Effect2.pipe(fetchResult.stderr, EffectString.trim) ||
+          Effect2.pipe(fetchResult.stdout, EffectString.trim) ||
+          'unknown git fetch error'
         }`,
       );
       yield* persistShareFetchReceipt(config, {
@@ -371,7 +385,7 @@ function parseFreshShareFetchReceipt(
 function boundedShareFetchWarning(warning: string): string {
   return warning.length <= SHARE_FETCH_WARNING_MAXIMUM_LENGTH
     ? warning
-    : `${warning.slice(0, SHARE_FETCH_WARNING_MAXIMUM_LENGTH - 1)}…`;
+    : `${Effect2.pipe(warning, EffectString.slice(0, SHARE_FETCH_WARNING_MAXIMUM_LENGTH - 1))}…`;
 }
 
 export const runShareSync = Effect.fn('share.runShareSync')(function* (
@@ -403,10 +417,13 @@ export const runShareSync = Effect.fn('share.runShareSync')(function* (
 
   if (failures.length > 0) {
     throw ShareOperationError.make({
-      message: [
-        `share sync failed for ${failures.length} shared team(s):`,
-        ...failures.map(failure => `- ${failure}`),
-      ].join('\n'),
+      message: EffectArray.join(
+        [
+          `share sync failed for ${failures.length} shared team(s):`,
+          ...EffectArray.map(failures, failure => `- ${failure}`),
+        ],
+        '\n',
+      ),
     });
   }
 });
@@ -448,13 +465,17 @@ const runShareSyncForTeam = Effect.fn('share.runShareSyncForTeam')(function* (
       if (yield* hasUncommittedChanges(worktree)) {
         throw ShareOperationError.make({
           message: `Worktree ${worktree} has uncommitted changes that Threadnote did not auto-commit. Commit, remove, or ignore the remaining files, then rerun \`threadnote share sync\`.\nGit said: ${
-            commitResult.stderr.trim() || commitResult.stdout.trim() || 'unknown git commit error'
+            Effect2.pipe(commitResult.stderr, EffectString.trim) ||
+            Effect2.pipe(commitResult.stdout, EffectString.trim) ||
+            'unknown git commit error'
           }`,
         });
       }
       throw ShareOperationError.make({
         message: `Could not auto-commit share worktree changes in ${worktree}: ${
-          commitResult.stderr.trim() || commitResult.stdout.trim() || 'unknown git commit error'
+          Effect2.pipe(commitResult.stderr, EffectString.trim) ||
+          Effect2.pipe(commitResult.stdout, EffectString.trim) ||
+          'unknown git commit error'
         }`,
       });
     }
@@ -489,7 +510,7 @@ const runShareSyncForTeam = Effect.fn('share.runShareSyncForTeam')(function* (
       });
     }
     throw ShareOperationError.make({
-      message: `git rebase @{u} failed in ${worktree}: ${pullResult.stderr.trim() || pullResult.stdout.trim() || 'unknown error'}`,
+      message: `git rebase @{u} failed in ${worktree}: ${Effect2.pipe(pullResult.stderr, EffectString.trim) || Effect2.pipe(pullResult.stdout, EffectString.trim) || 'unknown error'}`,
     });
   }
   const afterRev = yield* gitOutput(worktree, ['rev-parse', 'HEAD'], dryRun);
@@ -527,7 +548,7 @@ const runShareSyncForTeam = Effect.fn('share.runShareSyncForTeam')(function* (
       yield* Console.log(`Would run: ${formatShellCommand(git, ['-C', worktree, 'push', DEFAULT_GIT_REMOTE_NAME])}`);
     } else if (pushResult && pushResult.exitCode !== 0) {
       throw ShareOperationError.make({
-        message: `git push failed in ${worktree}: ${pushResult.stderr.trim() || pushResult.stdout.trim() || 'unknown error'}`,
+        message: `git push failed in ${worktree}: ${Effect2.pipe(pushResult.stderr, EffectString.trim) || Effect2.pipe(pushResult.stdout, EffectString.trim) || 'unknown error'}`,
       });
     }
   }
@@ -603,7 +624,7 @@ const runShareSyncQuiet = Effect.fn('share.runShareSyncQuiet')(function* (
       });
     }
     throw ShareOperationError.make({
-      message: `Automatic share sync failed in ${worktree}: ${pullResult.stderr.trim() || pullResult.stdout.trim() || 'unknown error'}`,
+      message: `Automatic share sync failed in ${worktree}: ${Effect2.pipe(pullResult.stderr, EffectString.trim) || Effect2.pipe(pullResult.stdout, EffectString.trim) || 'unknown error'}`,
     });
   }
   const afterRev = yield* gitOutput(worktree, ['rev-parse', 'HEAD'], false);
@@ -771,7 +792,8 @@ const sharedIdentityLockPlan = Effect.fn('share.identityLockPlan')(function* (
   return {
     currentContent,
     incomingContent,
-    lockKeys: [memoryIdentityLockKey(currentMemoryId), memoryIdentityLockKey(incomingMemoryId)].filter(
+    lockKeys: EffectArray.filter(
+      [memoryIdentityLockKey(currentMemoryId), memoryIdentityLockKey(incomingMemoryId)],
       (key): key is string => key !== undefined,
     ),
   };
@@ -817,7 +839,7 @@ const isHistoricalSharedIdentityRestoration = Effect.fn('share.isHistoricalIdent
   );
   if (history.exitCode !== 0) return false;
   const historyMemoryIds = yield* Effect.forEach(
-    history.stdout.split('\n').filter(Boolean),
+    EffectArray.filter(Effect2.pipe(history.stdout, EffectString.split('\n')), Boolean),
     Effect.fn('share.callback')(function* (revision) {
       const historyContent = yield* gitFileContent(worktree, revision, change.relativePath);
       return historyContent === undefined ? undefined : parseMemoryDocument(uri, historyContent)?.metadata.memoryId;
@@ -845,7 +867,8 @@ const assertRestoredSharedMemoryIdentityAvailable = Effect.fn('share.assertResto
     validateNow: true,
   });
   if (
-    candidates.some(
+    EffectArray.some(
+      candidates,
       candidate => candidate.memoryId === memoryId && (candidate.identityConflict === true || candidate.uri !== uri),
     )
   ) {
@@ -868,16 +891,16 @@ const assertRestoredSharedMemoryIdentityAvailable = Effect.fn('share.assertResto
       message: `Cannot verify stable memory_id ownership in shared team ${team.name}. Inspect the shared worktree and retry.`,
     });
   }
-  for (const candidate of listing.split('\0').filter(Boolean)) {
+  for (const candidate of EffectArray.filter(Effect2.pipe(listing, EffectString.split('\0')), Boolean)) {
     const relativePath = assertSafeShareRelativePath(candidate);
-    if (!relativePath.endsWith('.md')) continue;
+    if (!Effect2.pipe(relativePath, EffectString.endsWith('.md'))) continue;
     const rawContent = yield* gitFileContent(team.worktree, head, relativePath);
     if (rawContent === undefined) {
       return yield* ShareOperationError.make({
         message: `Cannot verify stable memory_id ownership for shared file ${relativePath}. Inspect the shared worktree and retry.`,
       });
     }
-    const candidatePath = yield* pathJoin(team.worktree, ...relativePath.split('/'));
+    const candidatePath = yield* pathJoin(team.worktree, ...Effect2.pipe(relativePath, EffectString.split('/')));
     const candidateUri = yield* workfileToResourceUri(config, team, candidatePath);
     const record = parseMemoryDocument(candidateUri, rawContent);
     if (record?.metadata.status === 'active' && record.metadata.memoryId === memoryId && candidateUri !== uri) {

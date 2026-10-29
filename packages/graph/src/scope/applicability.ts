@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY, type ResolvedCodeGraphIndexScope} from '../index_scope.js';
 import type {CodeGraphScopeAdmissionEvidence} from '../admission_freshness.js';
 import type {CodeGraphWorkspace} from '../languages/types.js';
@@ -11,6 +13,8 @@ import type {CodeGraphInventory} from '../inventory/models.js';
 import type {CodeGraphInventoryFile, CodeGraphSnapshot, RepositoryIdentity} from '../types.js';
 import type {CodeGraphReusableBaseReceipt} from '../store/models.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Catalog/commit changes trigger reassessment, but do not themselves invalidate a scoped view. */
 export interface CodeGraphScopeApplicabilityEvidence {
@@ -47,7 +51,7 @@ export function assessCodeGraphScopeApplicability(
       ? 'missing-applicability'
       : observed.scopeKey === CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY && active.observedCommit !== observed.observedCommit
         ? 'observedCommit'
-        : fields.find(field => active[field] !== observed[field]);
+        : EffectOption.getOrUndefined(EffectArray.findFirst(fields, field => active[field] !== observed[field]));
   return {
     buildRequired: mismatch !== undefined,
     reason: mismatch ?? 'equivalent-scope',
@@ -75,7 +79,10 @@ export function codeGraphScopeAdmitsPath(
   return (
     scope === undefined ||
     scope.controlPaths.includes(path) ||
-    scope.admittedPrefixes.some(prefix => prefix === '' || path === prefix || path.startsWith(`${prefix}/`))
+    EffectArray.some(
+      scope.admittedPrefixes,
+      prefix => prefix === '' || path === prefix || Effect2.pipe(path, EffectString.startsWith(`${prefix}/`)),
+    )
   );
 }
 
@@ -100,7 +107,7 @@ export const codeGraphScopedBaseReusable = Effect.fn('codeGraph.scopedBaseReusab
     base.snapshot.scopeId !== scope.scopeKey ||
     base.snapshot.repositoryId !== input.identity.repositoryId ||
     base.snapshot.graphContentId !== codeGraphContentIdentity(base.snapshot.extractorSet, base.files, scope) ||
-    base.files.some(file => !codeGraphScopeAdmitsPath(scope, file.path)) ||
+    EffectArray.some(base.files, file => !codeGraphScopeAdmitsPath(scope, file.path)) ||
     admission === undefined ||
     admission.includeOpaqueCorpusAssets !== (input.inventory.scopeIncludeOpaqueCorpusAssets !== false) ||
     admission.contract !== codeGraphInventoryReuseContract(input.languagePacks, admission.includeOpaqueCorpusAssets) ||
@@ -116,13 +123,19 @@ export function scopedCodeGraphWorkspace(
   scope: ResolvedCodeGraphIndexScope,
 ): CodeGraphWorkspace {
   const selected = new Set(scope.includedProjectIds);
-  const projects = workspace.projects
-    .filter(project => selected.has(project.id))
-    .sort((left, right) => compareCodeUnits(left.id, right.id));
-  const workspaceIds = new Set(projects.map(project => project.workspaceId));
-  const workspaces = workspace.workspaces
-    .filter(candidate => workspaceIds.has(candidate.id))
-    .sort((left, right) => compareCodeUnits(left.id, right.id));
+  const projects = EffectArrayPipe(workspace.projects, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (project, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && selected.has(project.id),
+    ),
+  ).sort((left, right) => compareCodeUnits(left.id, right.id));
+  const workspaceIds = new Set(EffectArray.map(projects, project => project.workspaceId));
+  const workspaces = EffectArrayPipe(workspace.workspaces, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (candidate, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && workspaceIds.has(candidate.id),
+    ),
+  ).sort((left, right) => compareCodeUnits(left.id, right.id));
   return mergeCodeGraphWorkspaces([
     {
       diagnostics: scope.diagnostics,

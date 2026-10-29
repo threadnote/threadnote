@@ -1,7 +1,10 @@
-import type {Sql, TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import type {Sql, ISql} from 'postgres';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {remoteMemoryError} from './errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface RuntimeGrant {
   readonly privilege: string;
@@ -405,7 +408,8 @@ export async function assertHostedContextCiWorkerPrivileges(sql: Sql): Promise<v
     routines.length !== 1 ||
     routines[0].name !== 'lock_context_ci_target' ||
     !routines[0].safe ||
-    sha256HexSync(routines[0].source.trim().replace(/\s+/gu, ' ')) !== CONTEXT_CI_LOCK_DIGEST
+    sha256HexSync(Effect.pipe(routines[0].source, EffectString.trim, EffectString.replace(/\s+/gu, ' '))) !==
+      CONTEXT_CI_LOCK_DIGEST
   ) {
     throw privilegeError(reason);
   }
@@ -432,7 +436,7 @@ async function assertPrivilegeContract(
 }
 
 async function inspectPrivileges(
-  sql: TransactionSql,
+  sql: ISql,
   grants: readonly RuntimeGrant[],
   requiresLifecycleLock: boolean,
   reason:
@@ -530,7 +534,7 @@ async function inspectPrivileges(
     JOIN pg_language l ON l.oid = p.prolang
     WHERE p.oid = to_regprocedure('remote_memory.lock_context_health_target(text,text,text,text)')
   `;
-  const presentTables = new Set(columns.map(column => column.table_name));
+  const presentTables = new Set(EffectArray.map(columns, column => column.table_name));
   const routineIdentity =
     routine &&
     routineIdentityDigest({
@@ -559,16 +563,21 @@ async function inspectPrivileges(
         routine.search_path?.[0] !== 'search_path=pg_catalog' ||
         routineIdentity !== CONTEXT_HEALTH_LOCK_IDENTITY
       : routine?.can_execute === true || routine?.can_delegate === true) ||
-    grants.some(grant =>
-      grant.tables.some(
+    EffectArray.some(grants, grant =>
+      EffectArray.some(
+        grant.tables,
         table =>
           !presentTables.has(table) ||
-          grant.columns?.some(
-            column => !columns.some(actual => actual.table_name === table && actual.column_name === column),
-          ),
+          (grant.columns === undefined
+            ? false
+            : EffectArray.some(
+                grant.columns,
+                column =>
+                  !EffectArray.some(columns, actual => actual.table_name === table && actual.column_name === column),
+              )),
       ),
     ) ||
-    [...columns, ...tables].some(privilege => privilege.granted !== grantAllows(grants, privilege))
+    EffectArray.some([...columns, ...tables], privilege => privilege.granted !== grantAllows(grants, privilege))
   ) {
     throw privilegeError(reason);
   }
@@ -576,7 +585,8 @@ async function inspectPrivileges(
 
 function grantAllows(grants: readonly RuntimeGrant[], privilege: GrantedPrivilege): boolean {
   if (privilege.can_delegate) return false;
-  return grants.some(
+  return EffectArray.some(
+    grants,
     grant =>
       grant.privilege === privilege.privilege &&
       grant.tables.includes(privilege.table_name) &&
@@ -596,7 +606,9 @@ function routineIdentityDigest(input: {
   readonly strict: boolean;
   readonly volatility: string;
 }): string {
-  return sha256HexSync(canonicalJson({...input, source: input.source.trim().replace(/\s+/gu, ' ')}));
+  return sha256HexSync(
+    canonicalJson({...input, source: Effect.pipe(input.source, EffectString.trim, EffectString.replace(/\s+/gu, ' '))}),
+  );
 }
 
 function privilegeError(

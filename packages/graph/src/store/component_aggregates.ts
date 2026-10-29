@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -51,8 +52,8 @@ const materializeSnapshotComponentEdgeAggregates = Effect.fn('codeGraph.material
     const edgeStatement = componentEdgeAggregateMaterializationStatement(snapshotId, baseSnapshotId);
     yield* sql.unsafe(edgeStatement.text, [...edgeStatement.parameters]);
     const rows = yield* selectComponentEdgeAggregateRows(sql, snapshotId);
-    const edges = rows.map(componentEdgeFromRow);
-    const edgeCount = edges.reduce((total, edge) => total + edge.count, 0);
+    const edges = EffectArray.map(rows, componentEdgeFromRow);
+    const edgeCount = EffectArray.reduce(edges, 0, (total, edge) => total + edge.count);
     if (!Number.isSafeInteger(edgeCount) || edgeCount < 0) {
       return yield* CodeGraphStoreError.of('Component edge aggregation returned an invalid edge count.');
     }
@@ -128,11 +129,11 @@ const selectPersistedSnapshotComponentEdges = Effect.fn('codeGraph.selectPersist
     return Option.none<readonly CodeGraphVisualizationScopeEdge[]>();
   }
   const rows = yield* selectComponentEdgeAggregateRows(sql, snapshotId);
-  const edges = rows.flatMap(row => {
+  const edges = EffectArray.flatMap(rows, row => {
     const edge = componentEdgeFromRow(row);
     return Number.isSafeInteger(edge.count) && edge.count > 0 && Number.isFinite(edge.confidence) ? [edge] : [];
   });
-  const edgeCount = edges.reduce((total, edge) => total + edge.count, 0);
+  const edgeCount = EffectArray.reduce(edges, 0, (total, edge) => total + edge.count);
   if (
     edges.length !== rows.length ||
     edges.length !== Number(receipt.row_count) ||
@@ -168,7 +169,14 @@ function componentEdgeFromRow(row: PersistedComponentEdgeAggregateRow): CodeGrap
 function componentEdgeAggregateDigest(edges: readonly CodeGraphVisualizationScopeEdge[]): string {
   return sha256HexSync(
     JSON.stringify(
-      edges.map(edge => [edge.sourceId, edge.targetId, edge.provenance, edge.relation, edge.count, edge.confidence]),
+      EffectArray.map(edges, edge => [
+        edge.sourceId,
+        edge.targetId,
+        edge.provenance,
+        edge.relation,
+        edge.count,
+        edge.confidence,
+      ]),
     ),
   );
 }

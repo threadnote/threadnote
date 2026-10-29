@@ -7,6 +7,8 @@ import {
   type SecondSurfaceReadObservationV1,
   type SecondSurfaceRecallObservationV1,
 } from '@threadnote/threadnote/activation/second/surface';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const hash = fc.string({unit: fc.constantFrom(...'0123456789abcdef'), minLength: 64, maxLength: 64});
 const identity = fc.stringMatching(/^[a-z][a-z0-9-]{0,20}$/u).map(value => `team-${value}`);
@@ -217,21 +219,21 @@ function proofFixture(
 
 function fixedValues(): FixtureValues {
   return {
-    activationId: 'a'.repeat(64),
-    activationReceiptRevision: 'b'.repeat(64),
-    catalogSnapshotHash: 'c'.repeat(64),
-    contentHash: 'd'.repeat(64),
-    primaryCapabilities: 'e'.repeat(64),
-    primaryConfig: 'f'.repeat(64),
-    primaryReceipt: '0'.repeat(64),
-    publicationReceiptHash: '1'.repeat(64),
-    queryFingerprint: '2'.repeat(64),
-    repositoryIdentityHash: '3'.repeat(64),
-    secondaryCapabilities: '4'.repeat(64),
-    secondaryConfig: '5'.repeat(64),
-    secondaryReceipt: '6'.repeat(64),
-    server: '7'.repeat(64),
-    shareStateHash: '8'.repeat(64),
+    activationId: Effect.pipe('a', EffectString.repeat(64)),
+    activationReceiptRevision: Effect.pipe('b', EffectString.repeat(64)),
+    catalogSnapshotHash: Effect.pipe('c', EffectString.repeat(64)),
+    contentHash: Effect.pipe('d', EffectString.repeat(64)),
+    primaryCapabilities: Effect.pipe('e', EffectString.repeat(64)),
+    primaryConfig: Effect.pipe('f', EffectString.repeat(64)),
+    primaryReceipt: Effect.pipe('0', EffectString.repeat(64)),
+    publicationReceiptHash: Effect.pipe('1', EffectString.repeat(64)),
+    queryFingerprint: Effect.pipe('2', EffectString.repeat(64)),
+    repositoryIdentityHash: Effect.pipe('3', EffectString.repeat(64)),
+    secondaryCapabilities: Effect.pipe('4', EffectString.repeat(64)),
+    secondaryConfig: Effect.pipe('5', EffectString.repeat(64)),
+    secondaryReceipt: Effect.pipe('6', EffectString.repeat(64)),
+    server: Effect.pipe('7', EffectString.repeat(64)),
+    shareStateHash: Effect.pipe('8', EffectString.repeat(64)),
     teamId: 'default',
   };
 }
@@ -246,7 +248,10 @@ function coherentIdentityMutations(
   const revision = flipHash(context.activationReceiptRevision);
   const catalogHash = flipHash(context.catalogSnapshotHash);
   const contentHash = flipHash(context.decision.contentHash);
-  const decisionUri = context.decision.canonicalUri.replace('decision.md', 'decision-alt.md');
+  const decisionUri = Effect.pipe(
+    context.decision.canonicalUri,
+    EffectString.replace('decision.md', 'decision-alt.md'),
+  );
   const memoryId = `${context.decision.memoryId}_alt`;
   const query = flipHash(context.queryFingerprint);
   const repository = flipHash(context.repositoryIdentityHash);
@@ -257,7 +262,10 @@ function coherentIdentityMutations(
   const share = flipHash(context.teamShareStateHash);
   const recallResponse = flipHash(recall.responseFingerprint);
   const teamId = `${context.teamId}-alt`;
-  const teamUri = context.decision.canonicalUri.replace(`/shared/${context.teamId}/`, `/shared/${teamId}/`);
+  const teamUri = Effect.pipe(
+    context.decision.canonicalUri,
+    EffectString.replace(`/shared/${context.teamId}/`, `/shared/${teamId}/`),
+  );
   return [
     [{...context, activationId: flipHash(context.activationId)}, recall, read],
     [
@@ -366,5 +374,5 @@ function coherentIdentityMutations(
 }
 
 function flipHash(value: string): string {
-  return `${value[0] === '0' ? '1' : '0'}${value.slice(1)}`;
+  return `${value[0] === '0' ? '1' : '0'}${Effect.pipe(value, EffectString.slice(1))}`;
 }

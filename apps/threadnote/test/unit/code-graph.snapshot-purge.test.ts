@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -21,12 +22,14 @@ import {prepareCodeGraphVectorRetirement} from '@threadnote/graph/vector/mainten
 
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const REPOSITORY_ID = 'b'.repeat(64);
-const WORKTREE_ID = '1'.repeat(64);
-const SNAPSHOT_ID = `cgsn_${'c'.repeat(40)}-direct`;
-const OTHER_SNAPSHOT_ID = `cgsn_${'d'.repeat(40)}-direct`;
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}-direct`;
+const OTHER_SNAPSHOT_ID = `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`;
 
 const SnapshotPurgeTestLayer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
   Layer.provideMerge(TestSystemInfoLayer),
@@ -87,7 +90,7 @@ describe('code graph selected snapshot purge', () => {
 
           expect(preview.eligible).toBe(false);
           expect(preview.state).toBe('blocked');
-          expect(preview.blockers.map(blocker => blocker.code)).toEqual([
+          expect(EffectArray.map(preview.blockers, blocker => blocker.code)).toEqual([
             'active-view',
             'alias-snapshot',
             'base-required',
@@ -140,7 +143,7 @@ describe('code graph selected snapshot purge', () => {
             snapshotId: SNAPSHOT_ID,
           });
           expect(active).toMatchObject({applied: false, eligible: false, state: 'blocked'});
-          expect(active.blockers.map(blocker => blocker.code)).toEqual(['vector-active']);
+          expect(EffectArray.map(active.blockers, blocker => blocker.code)).toEqual(['vector-active']);
           expect(readSnapshotState(activeFixture.databasePath, SNAPSHOT_ID)).toBe('ready');
 
           const inactiveFixture = yield* snapshotPurgeFixture();
@@ -176,7 +179,7 @@ describe('code graph selected snapshot purge', () => {
                   try {
                     database
                       .query('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)')
-                      .run('4'.repeat(64), 'generation-target');
+                      .run(Effect2.pipe('4', EffectString.repeat(64)), 'generation-target');
                   } finally {
                     database.close(false);
                   }
@@ -187,7 +190,7 @@ describe('code graph selected snapshot purge', () => {
           );
 
           expect(result).toMatchObject({applied: false, state: 'state-changed'});
-          expect(result.blockers.map(blocker => blocker.code)).toEqual(['vector-active']);
+          expect(EffectArray.map(result.blockers, blocker => blocker.code)).toEqual(['vector-active']);
           expect(readSnapshotState(fixture.databasePath, SNAPSHOT_ID)).toBe('ready');
         }),
       ),
@@ -209,7 +212,7 @@ describe('code graph selected snapshot purge', () => {
           });
 
           expect(preview).toMatchObject({applied: false, eligible: false, state: 'blocked'});
-          expect(preview.blockers.map(blocker => blocker.code)).toEqual(['vector-unverifiable']);
+          expect(EffectArray.map(preview.blockers, blocker => blocker.code)).toEqual(['vector-unverifiable']);
           expect(readSnapshotState(fixture.databasePath, SNAPSHOT_ID)).toBe('ready');
         }),
       ),
@@ -371,7 +374,7 @@ describe('code graph selected snapshot purge', () => {
 function hexString(length: number): fc.Arbitrary<string> {
   return fc
     .array(fc.constantFrom(...'0123456789abcdef'), {maxLength: length, minLength: length})
-    .map(value => value.join(''));
+    .map(value => EffectArray.join(value, ''));
 }
 
 interface FixtureOptions {
@@ -457,11 +460,11 @@ function createSnapshotVectorDatabase(databasePath: string, active: boolean): vo
          (generation, snapshot_id, model_id, model_sha256, dimensions, template_version, count, state, created_at)
          VALUES ('generation-target', ?, 'snapshot-purge-model', ?, 3, 1, 0, 'ready', ?)`,
       )
-      .run(SNAPSHOT_ID, 'f'.repeat(64), new Date(0).toISOString());
+      .run(SNAPSHOT_ID, Effect2.pipe('f', EffectString.repeat(64)), new Date(0).toISOString());
     if (active) {
       database
         .query("INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, 'generation-target')")
-        .run('4'.repeat(64));
+        .run(Effect2.pipe('4', EffectString.repeat(64)));
     }
   } finally {
     database.close(false);
@@ -490,7 +493,7 @@ function seedGraph(databasePath: string, options: FixtureOptions): void {
       SNAPSHOT_ID,
       REPOSITORY_ID,
       WORKTREE_ID,
-      'f'.repeat(40),
+      Effect2.pipe('f', EffectString.repeat(40)),
       'content-target',
       options.alias ? OTHER_SNAPSHOT_ID : null,
       started,
@@ -499,8 +502,8 @@ function seedGraph(databasePath: string, options: FixtureOptions): void {
     insertSnapshot.run(
       OTHER_SNAPSHOT_ID,
       REPOSITORY_ID,
-      '2'.repeat(64),
-      'e'.repeat(40),
+      Effect2.pipe('2', EffectString.repeat(64)),
+      Effect2.pipe('e', EffectString.repeat(40)),
       'content-other',
       null,
       started,
@@ -529,7 +532,7 @@ function seedGraph(databasePath: string, options: FixtureOptions): void {
     if (options.cleanupPending) {
       database
         .query(`INSERT INTO removed_views (worktree_id, expected_snapshot_id, removed_at) VALUES (?, ?, ?)`)
-        .run('3'.repeat(64), SNAPSHOT_ID, completed);
+        .run(Effect2.pipe('3', EffectString.repeat(64)), SNAPSHOT_ID, completed);
       database
         .query(
           `INSERT INTO removed_view_cleanup (
@@ -537,7 +540,7 @@ function seedGraph(databasePath: string, options: FixtureOptions): void {
              blocked_code, next_attempt_at, revision, updated_at
            ) VALUES (?, ?, ?, 1, 'vector-pointers', NULL, 0, NULL, 0, 0, ?)`,
         )
-        .run('3'.repeat(64), SNAPSHOT_ID, completed, completed);
+        .run(Effect2.pipe('3', EffectString.repeat(64)), SNAPSHOT_ID, completed, completed);
     }
   } finally {
     database.close(false);
@@ -601,14 +604,17 @@ function approvalProjection(
   return {
     activeViewIds: activeViews,
     buildOwnerIds: [],
-    childSnapshotIds: childSnapshots.map(value => `cgsn_${value}`),
+    childSnapshotIds: EffectArray.map(childSnapshots, value => `cgsn_${value}`),
     cleanupEpochs: [],
-    graphEvidenceDigest: '1'.repeat(64),
-    liveLeases: leaseExpiries.map((expiresAt, index) => ({expiresAt, identity: `${index}`.repeat(64).slice(0, 64)})),
+    graphEvidenceDigest: Effect2.pipe('1', EffectString.repeat(64)),
+    liveLeases: EffectArray.map(leaseExpiries, (expiresAt, index) => ({
+      expiresAt,
+      identity: Effect2.pipe(`${index}`, EffectString.repeat(64), EffectString.slice(0, 64)),
+    })),
     operation: 'code-graph-snapshot-purge',
     snapshot: {
       baseSnapshotId: undefined,
-      commit: 'f'.repeat(40),
+      commit: Effect2.pipe('f', EffectString.repeat(40)),
       completedAt: new Date(1).toISOString(),
       dirty: false,
       edgeCount: 3,
@@ -622,7 +628,7 @@ function approvalProjection(
       symbolCount: 2,
       worktreeId: WORKTREE_ID,
     },
-    vectorEvidenceDigest: '2'.repeat(64),
+    vectorEvidenceDigest: Effect2.pipe('2', EffectString.repeat(64)),
     version: 1,
   };
 }

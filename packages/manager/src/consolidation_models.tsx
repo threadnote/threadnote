@@ -1,3 +1,5 @@
+import {isConsolidationModelsResponse} from './api/response_guards.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import React, {useEffect, useState} from 'react';
 import {api, errorMessage} from './ui/support.js';
 import type {ConsolidationModelOption, ConsolidationModelsResponse} from './ui/contracts.js';
@@ -12,8 +14,9 @@ export function reconcileConsolidationModelChoice(
   preferred: ModelChoice | undefined,
   models: readonly ConsolidationModelOption[],
 ): ModelChoice | undefined {
-  if (preferred?.explicit || models.some(model => model.id === preferred?.id)) return preferred;
-  const recommended = models.find(model => model.isDefault) ?? models[0];
+  if (preferred?.explicit || EffectArray.some(models, model => model.id === preferred?.id)) return preferred;
+  const recommended =
+    EffectOption.getOrUndefined(EffectArray.findFirst(models, model => Boolean(model.isDefault))) ?? models[0];
   return recommended ? {id: recommended.id, explicit: false} : undefined;
 }
 
@@ -37,16 +40,21 @@ export function useConsolidationModels(agent: string, enabled: boolean, storageK
       ? catalog
       : undefined;
   const models = current?.models ?? [];
-  const model = models.some(item => item.id === selected?.id) ? selected?.id : undefined;
+  const model = EffectArray.some(models, item => item.id === selected?.id) ? selected?.id : undefined;
 
   useEffect(() => {
     if (!enabled) return;
     const controller = new AbortController();
     setCatalog(undefined);
-    void api<ConsolidationModelsResponse>(`/api/consolidation-models?agent=${encodeURIComponent(agent)}`, undefined, {
-      signal: controller.signal,
-      timeoutMilliseconds: 20_000,
-    }).then(
+    void api<ConsolidationModelsResponse>(
+      `/api/consolidation-models?agent=${encodeURIComponent(agent)}`,
+      undefined,
+      {
+        signal: controller.signal,
+        timeoutMilliseconds: 20_000,
+      },
+      isConsolidationModelsResponse,
+    ).then(
       result => {
         if (controller.signal.aborted) return;
         const models = result.models;
@@ -77,7 +85,7 @@ export function useConsolidationModels(agent: string, enabled: boolean, storageK
     error: current?.error,
     reload: () => setAttempt(value => value + 1),
     select: (id: string) => {
-      if (!models.some(item => item.id === id)) return;
+      if (!EffectArray.some(models, item => item.id === id)) return;
       setChoices(previous => ({...previous, [key]: {id, explicit: true}}));
       try {
         localStorage.setItem(key, id);
@@ -124,7 +132,7 @@ export function ConsolidationModelPicker(props: {
           ) : !selection.models.length ? (
             <option value="">{selection.loading ? 'Loading models…' : 'No models loaded'}</option>
           ) : null}
-          {selection.models.map(model => (
+          {EffectArray.map(selection.models, model => (
             <option key={model.id} value={model.id}>
               {model.label}
               {model.isDefault ? ' (recommended)' : ''}

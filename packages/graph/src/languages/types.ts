@@ -1,6 +1,7 @@
 import {Effect, Option, Schema} from 'effect';
 import type {TreeSitterRuntime} from '../tree_sitter/runtime.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '../types.js';
+import {CodeGraphExternalDependencySchemaV1, CodeGraphMonikerSchemaV1} from '../cross_repository/types.js';
 import type {CodeGraphExternalDependencyV1, CodeGraphMonikerV1} from '../cross_repository/types.js';
 
 export type CodeGraphFileRole = 'corpus' | 'documentation' | 'manifest' | 'source' | 'workspace';
@@ -102,6 +103,70 @@ export interface CodeGraphWorkspace {
   readonly workspaces: readonly CodeGraphBuildWorkspace[];
 }
 
+/** Runtime validator for workspaces loaded from persisted cache and reuse receipts. */
+export const CodeGraphWorkspaceSchema = Schema.Struct({
+  diagnostics: Schema.Array(Schema.String),
+  fingerprint: Schema.String,
+  projects: Schema.Array(
+    Schema.Struct({
+      buildSystem: Schema.Literals([
+        'bazel',
+        'gradle',
+        'inferred',
+        'maven',
+        'node',
+        'nx',
+        'pnpm',
+        'swiftpm',
+        'typescript',
+        'xcode',
+      ]),
+      dependencies: Schema.Array(Schema.String),
+      dependencyDetails: Schema.Array(
+        Schema.Struct({
+          evidence: Schema.optionalKey(Schema.String),
+          provenance: Schema.Literals(['declared', 'inferred']),
+          targetId: Schema.String,
+        }),
+      ),
+      externalDependencies: Schema.optionalKey(Schema.Array(CodeGraphExternalDependencySchemaV1)),
+      diagnostics: Schema.Array(Schema.String),
+      id: Schema.String,
+      kind: Schema.Literals(['module', 'package', 'project', 'target']),
+      languages: Schema.Array(Schema.String),
+      monikers: Schema.optionalKey(Schema.Array(CodeGraphMonikerSchemaV1)),
+      name: Schema.String,
+      provenance: Schema.Literals(['declared', 'inferred']),
+      resolutionDomain: Schema.String,
+      root: Schema.String,
+      sourceRoots: Schema.Array(Schema.String),
+      workspaceId: Schema.String,
+      workspaceRoots: Schema.Array(Schema.String),
+    }),
+  ),
+  workspaces: Schema.Array(
+    Schema.Struct({
+      buildSystem: Schema.Literals([
+        'bazel',
+        'gradle',
+        'inferred',
+        'maven',
+        'node',
+        'nx',
+        'pnpm',
+        'swiftpm',
+        'typescript',
+        'xcode',
+      ]),
+      diagnostics: Schema.Array(Schema.String),
+      id: Schema.String,
+      name: Schema.String,
+      provenance: Schema.Literals(['declared', 'inferred']),
+      root: Schema.String,
+    }),
+  ),
+});
+
 export interface CodeGraphWorkspaceDetector {
   readonly contextFiles: readonly CodeGraphFileMatcher[];
   readonly detect: (
@@ -140,10 +205,10 @@ export interface CodeGraphLanguageMatch {
   readonly role: CodeGraphFileRole;
 }
 
-export class CodeGraphLanguagePackError extends Schema.TaggedError<CodeGraphLanguagePackError>()(
-  'CodeGraphLanguagePackError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphLanguagePackError extends Schema.TaggedError<
+  CodeGraphLanguagePackError,
+  {readonly brand: unique symbol}
+>()('CodeGraphLanguagePackError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}

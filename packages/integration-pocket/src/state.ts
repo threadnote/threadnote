@@ -1,6 +1,13 @@
+import {
+  isSafeInteger as checkedIsSafeInteger,
+  isFiniteNumber as checkedIsFiniteNumber,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Result} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const DOCUMENT = /^r-[a-f0-9]{40}$/;
@@ -40,7 +47,7 @@ const location = (config: RuntimeConfig) => ({
   user: config.user,
 });
 function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
 }
 function validState(value: unknown): value is PocketSyncState {
   return (
@@ -53,20 +60,20 @@ function validState(value: unknown): value is PocketSyncState {
     typeof value.generation === 'string' &&
     HASH.test(value.generation) &&
     (value.phase === 'list' || value.phase === 'confirm') &&
-    Number.isSafeInteger(value.page) &&
-    (value.page as number) >= 1 &&
-    Number.isSafeInteger(value.offset) &&
-    (value.offset as number) >= 0 &&
-    (value.offset as number) <= 100 &&
-    Array.isArray(value.pageIds) &&
+    checkedIsSafeInteger(value.page) &&
+    value.page >= 1 &&
+    checkedIsSafeInteger(value.offset) &&
+    value.offset >= 0 &&
+    value.offset <= 100 &&
+    EffectArray.isArray(value.pageIds) &&
     value.pageIds.length <= 100 &&
-    value.pageIds.every((id: unknown) => typeof id === 'string' && ID.test(id)) &&
+    EffectArray.every(value.pageIds, (id: unknown) => typeof id === 'string' && ID.test(id)) &&
     new Set(value.pageIds).size === value.pageIds.length &&
-    (value.offset as number) <= value.pageIds.length &&
+    value.offset <= value.pageIds.length &&
     typeof value.hasMore === 'boolean' &&
-    (value.total === undefined || (Number.isSafeInteger(value.total) && (value.total as number) >= 0)) &&
-    Number.isSafeInteger(value.seenCount) &&
-    (value.seenCount as number) >= 0 &&
+    (value.total === undefined || (checkedIsSafeInteger(value.total) && value.total >= 0)) &&
+    checkedIsSafeInteger(value.seenCount) &&
+    value.seenCount >= 0 &&
     typeof value.incomplete === 'boolean' &&
     (value.confirmAfter === undefined || (typeof value.confirmAfter === 'string' && DOCUMENT.test(value.confirmAfter)))
   );
@@ -81,10 +88,12 @@ function validMarker(value: unknown): value is PocketIdMarker {
     DOCUMENT.test(value.documentId) &&
     typeof value.generation === 'string' &&
     HASH.test(value.generation) &&
-    Number.isSafeInteger(value.page) &&
-    (value.page as number) >= 1 &&
+    checkedIsSafeInteger(value.page) &&
+    value.page >= 1 &&
     (value.nextAttemptAt === undefined ||
-      (typeof value.nextAttemptAt === 'number' && Number.isFinite(value.nextAttemptAt) && value.nextAttemptAt >= 0))
+      (typeof value.nextAttemptAt === 'number' &&
+        checkedIsFiniteNumber(value.nextAttemptAt) &&
+        value.nextAttemptAt >= 0))
   );
 }
 
@@ -201,8 +210,11 @@ export const listPocketIdMarkers = Effect.fn('pocket.listIdMarkers')(function* (
   if (Result.isFailure(listed) && listed.failure.reason._tag !== 'NotFound') return null;
   const names = Result.isSuccess(listed) ? listed.success : [];
   const markers: PocketIdMarker[] = [];
-  for (const name of names.filter(name => /^r-[a-f0-9]{40}\.json$/.test(name)).sort()) {
-    const marker = yield* readPocketIdMarker(config, sourceId, name.slice(0, -5));
+  for (const name of EffectArray.filter(
+    names,
+    (name, __effectArrayIndex) => __effectArrayIndex in names && /^r-[a-f0-9]{40}\.json$/.test(name),
+  ).sort()) {
+    const marker = yield* readPocketIdMarker(config, sourceId, Effect2.pipe(name, EffectString.slice(0, -5)));
     if (marker === null) return null;
     if (marker !== undefined) markers.push(marker);
   }

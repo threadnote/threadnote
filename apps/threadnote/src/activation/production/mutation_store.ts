@@ -134,6 +134,15 @@ export const completeActivationMutationIntentV1 = Effect.fn('activation.mutation
   );
 });
 
+function isActivationMutationOperationIdV1(value: string): value is ActivationMutationOperationIdV1 {
+  return (
+    value === 'surface-primary' ||
+    value === 'surface-secondary' ||
+    value === 'team-share' ||
+    /^candidate-[0-9a-f]{64}$/u.test(value)
+  );
+}
+
 export function activationCandidateMutationOperationIdV1(reviewId: string, candidateId: string) {
   return `candidate-${sha256HexSync(canonicalJson({candidateId, reviewId, version: 1}))}` as const;
 }
@@ -144,7 +153,11 @@ function parseIntent(
   operationId: ActivationMutationIntentV1['operationId'],
 ): ActivationMutationIntentV1 {
   const decoded = Schema.decodeUnknownSync(IntentSchema, {errors: 'all', onExcessProperty: 'error'})(value);
-  const intent = {...decoded, operationId: decoded.operationId as ActivationMutationOperationIdV1};
+  const decodedOperationId = decoded.operationId;
+  if (!isActivationMutationOperationIdV1(decodedOperationId)) {
+    throw new Error('Activation mutation intent operation ID is invalid.');
+  }
+  const intent = {...decoded, operationId: decodedOperationId};
   if (intent.activationId !== activationId || intent.operationId !== operationId) {
     throw new Error('Activation mutation intent target does not match its path.');
   }

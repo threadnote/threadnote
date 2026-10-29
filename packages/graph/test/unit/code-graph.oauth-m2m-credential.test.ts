@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {exportJWK, generateKeyPair, SignJWT} from 'jose';
 import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
@@ -7,6 +8,9 @@ import {
   getOAuthM2MPublisherRegistryCredential,
 } from '@threadnote/graph/sharing/oauth/m2m_registry_credential';
 import {createAccessTokenVerifier} from '@threadnote/protocol/access-token';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const now = Math.floor(Date.now() / 1000);
 const issuer = 'https://example.okta.test/oauth2/threadnote';
@@ -17,8 +21,8 @@ const request = {
   interactive: false,
   issuer,
   organization: 'threadnote',
-  profileDigest: `sha256:${'a'.repeat(64)}`,
-  repositoryId: 'b'.repeat(64),
+  profileDigest: `sha256:${Effect.pipe('a', EffectString.repeat(64))}`,
+  repositoryId: Effect.pipe('b', EffectString.repeat(64)),
   schemaVersion: 1,
   scopes: ['graph:contribute'],
 } as const;
@@ -86,7 +90,7 @@ describe('OAuth client credentials for an Okta custom authorization server', () 
         expect(new Headers(init.headers).get('authorization')).toBe(
           `Basic ${Buffer.from('syntheticGraphClient:synthetic%3A%2B+secret').toString('base64')}`,
         );
-        expect(Object.fromEntries(new URLSearchParams(String(init.body)))).toEqual({
+        expect(EffectRecord.fromEntries(new URLSearchParams(String(init.body)))).toEqual({
           grant_type: 'client_credentials',
           scope: 'graph:contribute',
         });
@@ -136,7 +140,7 @@ describe('OAuth client credentials for an Okta custom authorization server', () 
         now: () => now * 1000,
         fetch: async (_url, init) => {
           expect(new Headers(init.headers).has('authorization')).toBe(false);
-          expect(Object.fromEntries(new URLSearchParams(String(init.body)))).toEqual({
+          expect(EffectRecord.fromEntries(new URLSearchParams(String(init.body)))).toEqual({
             grant_type: 'client_credentials',
             scope: 'graph:contribute',
             audience: request.audience,
@@ -150,7 +154,9 @@ describe('OAuth client credentials for an Okta custom authorization server', () 
   });
 
   it('rejects missing, cross-origin, credential-bearing or noncanonical endpoints and ambiguous aliases before HTTP', async () => {
-    for (const changed of [
+    const changes: readonly Partial<
+      Record<'CLIENT_ID_CLAIM' | 'CLIENT_AUTHENTICATION' | 'TOKEN_URL' | 'JWKS_URL', string | undefined>
+    >[] = [
       {TOKEN_URL: undefined},
       {JWKS_URL: undefined},
       {TOKEN_URL: 'https://foreign.example/v1/token'},
@@ -160,12 +166,23 @@ describe('OAuth client credentials for an Okta custom authorization server', () 
       {TOKEN_URL: 'http://example.okta.test/token'},
       {CLIENT_AUTHENTICATION: 'none'},
       {CLIENT_ID_CLAIM: 'sub'},
-    ]) {
+    ];
+    for (const changed of changes) {
+      const ownChanges: Readonly<Record<string, string | undefined>> = {...changed};
       let called = false;
       const env = {
         ...environment,
-        ...Object.fromEntries(
-          Object.entries(changed).map(([name, value]) => [`THREADNOTE_OAUTH_GRAPH_M2M_${name}`, value]),
+        // The typed spread keeps only own keys, including explicit undefined overrides.
+        ...EffectRecord.fromEntries(
+          EffectArray.map(
+            EffectArray.map(
+              EffectArray.filter(['CLIENT_ID_CLAIM', 'CLIENT_AUTHENTICATION', 'TOKEN_URL', 'JWKS_URL'] as const, name =>
+                EffectRecord.has(ownChanges, name),
+              ),
+              name => [name, changed[name]] as const,
+            ),
+            ([name, value]) => [`THREADNOTE_OAUTH_GRAPH_M2M_${name}`, value] as const,
+          ),
         ),
       };
       await expect(
@@ -227,13 +244,13 @@ describe('OAuth client credentials for an Okta custom authorization server', () 
                 access_token: signed,
                 expires_in: 300,
                 token_type: 'Bearer',
-                scope: [...scopes].reverse().join(' '),
+                scope: EffectArray.join([...scopes].reverse(), ' '),
               }),
           });
           const valid =
             scopes.includes('graph:contribute') &&
             new Set(scopes).size === scopes.length &&
-            scopes.every(scope => ['graph:read', 'graph:contribute'].includes(scope));
+            EffectArray.every(scopes, scope => ['graph:read', 'graph:contribute'].includes(scope));
           if (valid) expect((await result).accessToken).toBe(signed);
           else await expect(result).rejects.toThrow('OAuth graph credential unavailable.');
         },

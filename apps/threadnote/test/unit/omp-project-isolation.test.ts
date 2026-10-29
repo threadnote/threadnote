@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Effect, FileSystem, Path, Exit} from 'effect';
 import {Command} from 'effect/cli';
@@ -17,6 +18,9 @@ import {runSetupWith, type SetupOrchestratorDependencies} from '@threadnote/thre
 import {USER_INSTRUCTIONS_START_MARKER, USER_INSTRUCTIONS_END_MARKER} from '@threadnote/threadnote/constants';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function runtime(home: string): RuntimeConfig {
   return {
@@ -60,7 +64,8 @@ const snapshot = (root: string): Effect.Effect<Record<string, string>, unknown, 
     for (const name of (yield* fs.readDirectory(root)).sort()) {
       const file = path.join(root, name);
       if ((yield* fs.stat(file)).type === 'Directory') {
-        for (const [child, content] of Object.entries(yield* snapshot(file))) result[`${name}/${child}`] = content;
+        for (const [child, content] of EffectRecord.toEntries(yield* snapshot(file)))
+          result[`${name}/${child}`] = content;
       } else result[name] = yield* fs.readFileString(file);
     }
     return result;
@@ -273,7 +278,10 @@ describe('OMP project isolation', () => {
         }
         expect({
           managedMcp: JSON.parse(yield* fs.readFileString(mcpPath)).mcpServers.threadnote !== undefined,
-          managedGuidance: (yield* fs.readFileString(instructions)).includes(USER_INSTRUCTIONS_START_MARKER),
+          managedGuidance: Effect2.pipe(
+            yield* fs.readFileString(instructions),
+            EffectString.includes(USER_INSTRUCTIONS_START_MARKER),
+          ),
           managedSkill: yield* fs.exists(path.join(previousRoot, 'skills', 'threadnote-context', 'SKILL.md')),
         }).toEqual({managedMcp: false, managedGuidance: false, managedSkill: false});
         expect(JSON.parse(yield* fs.readFileString(mcpPath)).mcpServers.other).toEqual(previousMcp.mcpServers.other);
@@ -397,7 +405,7 @@ describe('OMP project isolation', () => {
       Effect.gen(function* () {
         const {fs, path, root, user, home, testSystem} = yield* fixture;
         const config = runtime(home);
-        const projects = [0, 1, 2].map(index => path.join(root, `target-${index}`));
+        const projects = EffectArray.map([0, 1, 2], index => path.join(root, `target-${index}`));
         for (const project of projects) {
           yield* fs.makeDirectory(path.join(project, '.omp'), {recursive: true});
           yield* fs.writeFileString(
@@ -419,10 +427,12 @@ describe('OMP project isolation', () => {
           for (const index of visited) {
             const host = path.join(projects[index], '.omp');
             const mcp = JSON.parse(yield* fs.readFileString(path.join(host, 'mcp.json')));
-            expect(Object.keys(mcp.mcpServers).sort()).toEqual(index === target ? [name, 'other'] : ['other']);
+            expect(EffectRecord.keys(mcp.mcpServers).sort()).toEqual(index === target ? [name, 'other'] : ['other']);
             expect(mcp.mcpServers.other).toEqual({command: 'keep-other-server'});
             const guidance = yield* fs.readFileString(path.join(host, 'AGENTS.md'));
-            expect(guidance.includes(USER_INSTRUCTIONS_START_MARKER)).toBe(index === target);
+            expect(Effect2.pipe(guidance, EffectString.includes(USER_INSTRUCTIONS_START_MARKER))).toBe(
+              index === target,
+            );
             expect(guidance).toContain('Keep project instructions.');
             expect(yield* fs.exists(path.join(host, 'skills', 'threadnote-context', 'SKILL.md'))).toBe(
               index === target,
@@ -453,7 +463,7 @@ describe('OMP project isolation', () => {
           '.omp/profiles/release-candidate/agent/AGENTS.md': `Keep OMP.\n${legacyBlock}\n${note}`,
           '.omp/profiles/release-candidate/agent/hooks/pre/threadnote.ts': `// Existing managed hook\n${note}`,
         };
-        for (const [relative, content] of Object.entries(globalFiles)) {
+        for (const [relative, content] of EffectRecord.toEntries(globalFiles)) {
           const file = path.join(user, relative);
           yield* fs.makeDirectory(path.dirname(file), {recursive: true});
           yield* fs.writeFileString(file, content);
@@ -463,10 +473,15 @@ describe('OMP project isolation', () => {
         yield* runMcpInstall(config, 'omp', {apply: true, project}).pipe(Effect.provideService(SystemInfo, testSystem));
         expect(yield* snapshot(user)).toEqual(before);
         const registry = yield* readAgentIntegrationRegistry(config);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         expect(Object.keys(registry?.hosts ?? {})).toEqual(['omp']);
         expect(registry?.hosts.omp?.mcp.hostRoot).toBe(path.join(project, '.omp'));
         expect(
-          Object.keys(registry?.hosts.omp?.artifacts ?? {}).every(file => file.startsWith(`${project}${path.sep}`)),
+          EffectArray.every(
+            EffectRecord.keys(registry?.hosts.omp?.artifacts ?? {}),
+            __effectArrayValue =>
+              !!(file => Effect2.pipe(file, EffectString.startsWith(`${project}${path.sep}`)))(__effectArrayValue),
+          ),
         ).toBe(true);
         const projectBefore = yield* snapshot(project);
         yield* runMcpInstall(config, 'omp', {apply: true, project}).pipe(

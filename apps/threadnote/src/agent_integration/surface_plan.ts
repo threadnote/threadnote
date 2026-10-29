@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import {
   USER_INSTRUCTIONS_START_MARKER,
@@ -21,6 +22,9 @@ import {AGENT_SKILLS} from './skills.js';
 import {parseAgentJson, sameAgentContainer} from './json_config.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {readFileIfExists} from '../utils.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface SurfaceInstallOptions {
   readonly apply?: boolean;
@@ -120,7 +124,7 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
       : scope === 'project'
         ? (strategy.projectMcpFile ?? strategy.mcpFile)
         : strategy.mcpFile;
-  const candidateMcpPaths = [...(strategy.mcpFileAlternatives ?? []), defaultMcpFile].map(file =>
+  const candidateMcpPaths = EffectArray.map([...(strategy.mcpFileAlternatives ?? []), defaultMcpFile], file =>
     path.join(mcpRoot, file),
   );
   let mcpPath = previous?.mcp.path ?? path.join(mcpRoot, defaultMcpFile);
@@ -132,7 +136,7 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
       }
     }
   }
-  if (![root, skillRoot, mcpRoot, mcpPath, ...(cwd ? [cwd] : [])].every(target => path.isAbsolute(target)))
+  if (!EffectArray.every([root, skillRoot, mcpRoot, mcpPath, ...(cwd ? [cwd] : [])], target => path.isAbsolute(target)))
     return yield* AgentSurfaceError.make({message: 'Adapter receipt paths must be absolute.'});
   if (
     !candidateMcpPaths.includes(mcpPath) ||
@@ -151,7 +155,7 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
     const legacy =
       mcpContent === undefined && previous !== undefined
         ? sameAgentContainer(previous.strategy.container, strategy.legacySchema.container)
-        : strategy.legacySchema.keys.some(key => Object.hasOwn(parsed, key));
+        : EffectArray.some(strategy.legacySchema.keys, key => EffectRecord.has(parsed, key));
     if (legacy) {
       container = strategy.legacySchema.container;
       enablement = strategy.legacySchema.enablement;
@@ -160,7 +164,8 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
   }
   const templateRoot = path.join(yield* toolRoot(), 'config');
   const bootstrap =
-    strategy.instructionContent ?? (yield* fs.readFileString(path.join(templateRoot, 'agent-instructions.md'))).trim();
+    strategy.instructionContent ??
+    Effect2.pipe(yield* fs.readFileString(path.join(templateRoot, 'agent-instructions.md')), EffectString.trim);
   const instructionPrefix =
     scope === 'user' ? strategy.instructionPrefix : (strategy.projectInstructionPrefix ?? strategy.instructionPrefix);
   const instruction = `${instructionPrefix ?? ''}${USER_INSTRUCTIONS_START_MARKER}\n${bootstrap}\n${USER_INSTRUCTIONS_END_MARKER}`;
@@ -182,7 +187,7 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
           },
         ];
   for (const skill of strategy.skillRoot === 'none' ? [] : AGENT_SKILLS) {
-    const content = `${(yield* fs.readFileString(path.join(templateRoot, 'agent-skills', skill, 'SKILL.md'))).trim()}\n`;
+    const content = `${Effect2.pipe(yield* fs.readFileString(path.join(templateRoot, 'agent-skills', skill, 'SKILL.md')), EffectString.trim)}\n`;
     artifacts.push({
       content,
       hash: yield* sha256Hex(content),

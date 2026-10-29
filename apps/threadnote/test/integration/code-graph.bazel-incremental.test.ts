@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
@@ -10,6 +11,8 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphStore, type StoredCodeGraph} from '@threadnote/graph/store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('mixed Node and Bazel incremental indexing', () => {
   it.effect('keeps a comment-only nested MODULE.bazel edit local and equivalent to a full rebuild', () =>
@@ -52,7 +55,7 @@ describe('mixed Node and Bazel incremental indexing', () => {
             stagedFiles: 1,
             totalFiles: 14,
           });
-          expect(incrementalGraph.symbols.map(symbol => symbol.name)).toEqual(
+          expect(EffectArray.map(incrementalGraph.symbols, symbol => symbol.name)).toEqual(
             expect.arrayContaining(['bazelApp', 'shared', 'web']),
           );
           expect(normalizeGraph(incrementalGraph)).toEqual(normalizeGraph(fullGraph));
@@ -174,7 +177,7 @@ function git(root: string, arguments_: readonly string[]): void {
 
 function normalizeGraph(graph: StoredCodeGraph): unknown {
   return {
-    edges: [...graph.edges].sort((left, right) => left.id.localeCompare(right.id)),
-    symbols: [...graph.symbols].sort((left, right) => left.id.localeCompare(right.id)),
+    edges: [...graph.edges].sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id))),
+    symbols: [...graph.symbols].sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id))),
   };
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {REMOVED_VIEW_CLEANUP_EPOCH_SEQUENCE_KEY} from '../removed/view_schema_contracts.js';
@@ -104,13 +105,13 @@ const prepareWorktreeReconciliationIndex = Effect.fn('codeGraph.prepareWorktreeR
   const extensionInspections = yield* inspectPersistentExtensionTables(sql);
   const snapshotPreservingSchemaMigration =
     citationMigrationPreservesSnapshots &&
-    extensionInspections.every(inspection => inspection.exists && inspection.compatible);
+    EffectArray.every(extensionInspections, inspection => inspection.exists && inspection.compatible);
   const revisionPlan = planCodeGraphPersistentSchemaUpgrade(recordedRevision);
   const checkpointExtensionMigration =
     citationMigrationPreservesSnapshots &&
     revisionPlan.state === 'upgrade' &&
     revisionPlan.route === 'extend-checkpoint-import' &&
-    extensionInspections.every(inspection =>
+    EffectArray.every(extensionInspections, inspection =>
       inspection.group === 'checkpoint' ? !inspection.exists || inspection.compatible : inspection.compatible,
     );
   if (
@@ -121,15 +122,20 @@ const prepareWorktreeReconciliationIndex = Effect.fn('codeGraph.prepareWorktreeR
     const cleanupState = yield* removedViewCleanupSchemaState(sql);
     if (cleanupState !== 'absent') return {reason: 'incompatible-schema', state: 'deferred'} as const;
   }
-  const states = yield* Effect.forEach(
+  const states: readonly {
+    readonly index: (typeof CODE_GRAPH_RECONCILIATION_REQUIRED_INDEXES)[number];
+    readonly state: 'missing' | 'incompatible' | 'ready';
+  }[] = yield* Effect.forEach(
     CODE_GRAPH_RECONCILIATION_REQUIRED_INDEXES,
     index => codeGraphReconciliationIndexState(sql, index).pipe(Effect.map(state => ({index, state}))),
     {concurrency: 1},
   );
-  if (states.some(observation => observation.state === 'incompatible')) {
+  if (EffectArray.some(states, observation => observation.state === 'incompatible')) {
     return {reason: 'incompatible-schema', state: 'deferred'} as const;
   }
-  const missing = states.find(observation => observation.state === 'missing');
+  const missing = EffectOption.getOrUndefined(
+    EffectArray.findFirst(states, observation => observation.state === 'missing'),
+  );
   if (missing !== undefined) {
     yield* sql.unsafe(missing.index.definition);
     if ((yield* codeGraphReconciliationIndexState(sql, missing.index)) !== 'ready') {

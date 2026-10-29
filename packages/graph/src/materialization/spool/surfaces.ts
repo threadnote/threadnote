@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import type {Database} from 'bun:sqlite';
 import {codeGraphSqliteAll, codeGraphSqliteGet, codeGraphSqliteRun} from '../../sqlite_statement.js';
 
@@ -251,14 +252,15 @@ export function readCodeGraphMaterializationSpoolSurfaceCapacities(
   );
   if (
     rows.length !== CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES.length ||
-    rows.some(
+    EffectArray.some(
+      rows,
       (row, index) =>
         row.surface_index !== index || row.surface_name !== CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES[index].name,
     )
   ) {
     throw new Error('Code graph materialization spool surface capacity metadata is missing or corrupt.');
   }
-  return rows.map(row => {
+  return EffectArray.map(rows, row => {
     const bytes = Number(row.payload_bytes);
     const lexicalTermBytes = Number(row.lexical_term_bytes);
     const rowCount = Number(row.row_count);
@@ -283,7 +285,9 @@ export function recordCodeGraphMaterializationSpoolSurfaceCapacity(
   afterRowid: number,
   rowCount: number,
 ): void {
-  const surface = CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES.find(candidate => candidate.name === surfaceName);
+  const surface = EffectOption.getOrUndefined(
+    EffectArray.findFirst(CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES, candidate => candidate.name === surfaceName),
+  );
   if (
     surface === undefined ||
     !Number.isSafeInteger(afterRowid) ||
@@ -293,7 +297,10 @@ export function recordCodeGraphMaterializationSpoolSurfaceCapacity(
   ) {
     throw new Error('Code graph materialization spool surface capacity update is invalid.');
   }
-  const payload = surface.columns.map(column => `COALESCE(LENGTH(CAST(${column} AS BLOB)), 0)`).join(' + ');
+  const payload = EffectArray.join(
+    EffectArray.map(surface.columns, column => `COALESCE(LENGTH(CAST(${column} AS BLOB)), 0)`),
+    ' + ',
+  );
   const lexicalTermBytes = surface.name === 'symbol_terms' ? 'COALESCE(SUM(LENGTH(CAST(term AS BLOB))), 0)' : '0';
   const delta = codeGraphSqliteGet<{
     readonly bytes: bigint | number;
@@ -330,11 +337,14 @@ export function assertCodeGraphMaterializationSpoolSurfaceState(
   sortedSurfaceCount: number,
 ): void {
   const tables = new Set(
-    codeGraphSqliteAll<{readonly name: string}>(
-      database,
-      `SELECT name FROM sqlite_master
+    EffectArray.map(
+      codeGraphSqliteAll<{readonly name: string}>(
+        database,
+        `SELECT name FROM sqlite_master
        WHERE type = 'table' AND (name LIKE 'materialization_raw_%' OR name LIKE 'materialization_ordered_%')`,
-    ).map(row => row.name),
+      ),
+      row => row.name,
+    ),
   );
   for (let index = 0; index < CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES.length; index += 1) {
     const name = CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES[index].name;
@@ -373,7 +383,7 @@ export function sortCodeGraphMaterializationSpoolSurface(
   database.exec(
     lexicalTerms +
       `CREATE TABLE materialization_ordered_${surface.name} AS ` +
-      `SELECT ${distinct}${surface.columns.join(', ')} FROM materialization_raw_${surface.name} ORDER BY ${surface.orderBy}; ` +
+      `SELECT ${distinct}${EffectArray.join(surface.columns, ', ')} FROM materialization_raw_${surface.name} ORDER BY ${surface.orderBy}; ` +
       `DROP TABLE materialization_raw_${surface.name}`,
   );
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {testGitWorktreeLock} from '../helpers/git-worktree-lock.js';
 import {describe, expect, it} from 'vitest';
 import {rm} from '@threadnote/testing/node-fs-promises';
@@ -10,6 +11,8 @@ import {RemoteMemoryIndexer} from '@threadnote/remote-memory/indexer';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {richRemoteMemoryMetadata} from '@threadnote/memory/test/helpers/remote-memory-document';
 import {git} from '@threadnote/testing/git-share-worktree';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const DATABASE = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const postgresDescribe = DATABASE ? describe : describe.skip;
@@ -122,15 +125,25 @@ postgresDescribe('Git ingest system authority', () => {
       });
       expect(parsed?.metadata.updatedAt).not.toBe(metadata.updatedAt);
       const editedFields = /^(source_agent_client|timestamp|updated_at):/u;
-      const preservedLines = content
-        .split('\n\n', 1)[0]
-        .split('\n')
-        .filter(line => !editedFields.test(line));
+      const preservedLines = EffectArray.filter(
+        Effect.pipe(
+          content
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+            .split('\n\n', 1)[0],
+          EffectString.split('\n'),
+        ),
+        line => !editedFields.test(line),
+      );
       expect(
-        read.content
-          .split('\n\n', 1)[0]
-          .split('\n')
-          .filter(line => !editedFields.test(line)),
+        EffectArray.filter(
+          Effect.pipe(
+            read.content
+              // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+              .split('\n\n', 1)[0],
+            EffectString.split('\n'),
+          ),
+          line => !editedFields.test(line),
+        ),
       ).toEqual(preservedLines);
       expect(await git(['show', `HEAD:${path}`], f.git.remote)).toBe(read.content);
       expect((await f.repository.remember(principal, input, 'replay-rich')).revision).toBe(replaced.revision);
@@ -175,9 +188,11 @@ postgresDescribe('Git ingest system authority', () => {
             'replace-unsupported',
           ),
         ).rejects.toMatchObject({code: 'invalid_request', details: {reason: 'unsupported_remote_metadata'}});
-        expect((await f.store.listCanonicalPaths()).find(entry => entry.gitPath === path)?.gitCommit).toBe(
-          committed.gitCommit,
-        );
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(await f.store.listCanonicalPaths(), entry => entry.gitPath === path),
+          )?.gitCommit,
+        ).toBe(committed.gitCommit);
         const read = await f.repository.read(principal, {version: 1, uri}, 'read-after-rejection');
         expect(read.content).toBe(original.content);
         expect(read.receipt.revision).toBe(original.receipt.revision);
@@ -197,9 +212,11 @@ postgresDescribe('Git ingest system authority', () => {
         code: 'service_unavailable',
         details: {reason: 'git_ingest_metadata'},
       });
-      expect((await f.store.listCanonicalPaths()).find(entry => entry.gitPath === path)?.gitCommit).toBe(
-        committed.gitCommit,
-      );
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(await f.store.listCanonicalPaths(), entry => entry.gitPath === path),
+        )?.gitCommit,
+      ).toBe(committed.gitCommit);
       expect(await git(['show', `HEAD:${path}`], f.git.remote)).toBe(content);
       const projected = await f.database.migratorSql.begin(async tx => {
         await tx`SELECT set_config('threadnote.tenant_id', ${f.input.tenantId}, true)`;

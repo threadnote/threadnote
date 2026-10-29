@@ -13,6 +13,8 @@ import {
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CONTROL = JSON.stringify({
   expectedLanguage: 'typescript',
@@ -144,12 +146,10 @@ describe('external code graph benchmark execution safety', () => {
             ],
             {timeoutMs: 10_000},
           );
-          const unpublishedCommit = (yield* runCommandEffect('git', [
-            '-C',
-            repository,
-            'rev-parse',
-            'HEAD',
-          ])).stdout.trim();
+          const unpublishedCommit = Effect2.pipe(
+            (yield* runCommandEffect('git', ['-C', repository, 'rev-parse', 'HEAD'])).stdout,
+            EffectString.trim,
+          );
           const unpublishedFailure = yield* verifyPublicRepositoryCommit(
             publicRepository,
             unpublishedCommit,
@@ -219,19 +219,22 @@ describe('external code graph benchmark execution safety', () => {
             });
 
             const sourceDirty =
-              (yield* runCommandEffect('git', [
-                '-C',
-                path.resolve('.'),
-                '-c',
-                'core.fsmonitor=false',
-                '-c',
-                'core.untrackedCache=false',
-                '-c',
-                'status.showUntrackedFiles=all',
-                'status',
-                '--porcelain=v1',
-                '--untracked-files=all',
-              ])).stdout.trim().length > 0;
+              Effect2.pipe(
+                (yield* runCommandEffect('git', [
+                  '-C',
+                  path.resolve('.'),
+                  '-c',
+                  'core.fsmonitor=false',
+                  '-c',
+                  'core.untrackedCache=false',
+                  '-c',
+                  'status.showUntrackedFiles=all',
+                  'status',
+                  '--porcelain=v1',
+                  '--untracked-files=all',
+                ])).stdout,
+                EffectString.trim,
+              ).length > 0;
             const common = [
               '--repository',
               repository,
@@ -391,7 +394,10 @@ const initializeGitRepository = Effect.fn('benchmarkPreflightTest.initializeGitR
     ],
     {timeoutMs: 10_000},
   );
-  return (yield* runCommandEffect('git', ['-C', repository, 'rev-parse', 'HEAD'])).stdout.trim();
+  return Effect2.pipe(
+    (yield* runCommandEffect('git', ['-C', repository, 'rev-parse', 'HEAD'])).stdout,
+    EffectString.trim,
+  );
 });
 
 const runBenchmark = Effect.fn('benchmarkPreflightTest.runBenchmark')(function* (
@@ -399,7 +405,10 @@ const runBenchmark = Effect.fn('benchmarkPreflightTest.runBenchmark')(function* 
   args: readonly string[],
   publicProofRemote: string,
 ) {
-  const sourceCommit = (yield* runCommandEffect('git', ['rev-parse', 'HEAD'], {timeoutMs: 10_000})).stdout.trim();
+  const sourceCommit = Effect2.pipe(
+    (yield* runCommandEffect('git', ['rev-parse', 'HEAD'], {timeoutMs: 10_000})).stdout,
+    EffectString.trim,
+  );
   return yield* runCommandEffect(process.execPath, [script, ...args], {
     allowFailure: true,
     env: {

@@ -5,6 +5,8 @@ import {lstat, mkdtemp, readFile, realpath, rm} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import type {CodeMemoryLinkRuntimeIdentityV1} from '@threadnote/threadnote/evaluation/code-memory-link-attestation';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const COMMIT = /^[0-9a-f]{40}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
@@ -22,7 +24,7 @@ export async function verifyCodeMemoryLinkEvaluatedSubject(input: {
 }): Promise<CodeMemoryLinkEvaluatedSubject> {
   if (!COMMIT.test(input.sourceCommit)) throw new Error('Evaluated subject commit is invalid.');
   if (!HASH.test(input.executableSha256)) throw new Error('Evaluated subject executable hash is invalid.');
-  if (!input.executable.startsWith('/') || resolve(input.executable) !== input.executable) {
+  if (!Effect.pipe(input.executable, EffectString.startsWith('/')) || resolve(input.executable) !== input.executable) {
     throw new Error('Evaluated subject executable must be normalized and absolute.');
   }
   const metadata = await lstat(input.executable);
@@ -88,7 +90,7 @@ async function readVersion(executable: string): Promise<string> {
           rejectPromise(new Error('Evaluated subject version check emitted stderr.'));
           return;
         }
-        resolvePromise(Buffer.concat(stdout).toString('utf8').trim());
+        resolvePromise(Effect.pipe(Buffer.concat(stdout).toString('utf8'), EffectString.trim));
       });
     });
   } finally {

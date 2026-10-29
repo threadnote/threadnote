@@ -1,15 +1,20 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, test} from 'vitest';
 import {augmentRationaleFacts, captureRationaleInputs} from '@threadnote/graph/rationale';
+import {parseCodeGraphRationaleCacheSnapshot} from '../helpers/rationale-cache.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSymbol} from '@threadnote/graph/types';
 
 describe('code graph rationale extraction', () => {
   test('promotes explicit rationale comments and design references into provenance-tagged nodes', () => {
-    const content = [
-      'export function retry() {',
-      '  // WHY: Jitter prevents coordinated retry storms.',
-      '  // See ADR-104 for the bounded delay contract.',
-      '}',
-    ].join('\n');
+    const content = EffectArray.join(
+      [
+        'export function retry() {',
+        '  // WHY: Jitter prevents coordinated retry storms.',
+        '  // See ADR-104 for the bounded delay contract.',
+        '}',
+      ],
+      '\n',
+    );
     const file: CodeGraphInventoryFile = {
       blobId: 'blob',
       content,
@@ -25,15 +30,17 @@ describe('code graph rationale extraction', () => {
 
     const result = augmentRationaleFacts(file, facts);
 
-    expect(result.symbols.map(value => [value.kind, value.name])).toEqual(
+    expect(EffectArray.map(result.symbols, value => [value.kind, value.name])).toEqual(
       expect.arrayContaining([
         ['rationale', 'WHY: Jitter prevents coordinated retry storms.'],
         ['rationale', 'ADR-104'],
       ]),
     );
     expect(result.edges).toHaveLength(2);
-    expect(result.edges.every(edge => edge.relation === 'documents' && edge.provenance === 'declared')).toBe(true);
-    expect(result.edges.every(edge => edge.targetId === owner.id)).toBe(true);
+    expect(
+      EffectArray.every(result.edges, edge => edge.relation === 'documents' && edge.provenance === 'declared'),
+    ).toBe(true);
+    expect(EffectArray.every(result.edges, edge => edge.targetId === owner.id)).toBe(true);
   });
 
   test('does not interpret binary asset bytes as rationale', () => {
@@ -64,7 +71,7 @@ describe('code graph rationale extraction', () => {
       source: 'commit',
     };
     const facts: CodeGraphFileFacts = {diagnostics: [], edges: [], path: file.path, symbols: [symbol('retry', 1, 3)]};
-    const cached = JSON.parse(JSON.stringify(captureRationaleInputs(file, facts))) as CodeGraphFileFacts;
+    const cached = parseCodeGraphRationaleCacheSnapshot(JSON.stringify(captureRationaleInputs(file, facts)));
     const retainedFile: CodeGraphInventoryFile = {...file, content: undefined};
 
     const fresh = augmentRationaleFacts(file, cached);

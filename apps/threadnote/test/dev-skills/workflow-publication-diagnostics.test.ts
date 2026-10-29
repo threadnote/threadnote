@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it} from '@effect/vitest';
 import {Cause, Effect, Schema} from 'effect';
 import {expect} from 'vitest';
@@ -17,7 +18,14 @@ it.effect('classifies Git operations through resolved Unix and Windows executabl
     }
     yield* diagnostics.observe('/private/unknown', ['private-argument'], Effect.void);
     const report = diagnostics.snapshot();
-    expect(report.recent.map(command => command.operation)).toEqual(['push', 'push', 'push', 'push', 'push', 'other']);
+    expect(EffectArray.map(report.recent, command => command.operation)).toEqual([
+      'push',
+      'push',
+      'push',
+      'push',
+      'push',
+      'other',
+    ]);
     expect(JSON.stringify(report)).not.toContain('private');
     expect(JSON.stringify(report)).not.toContain('Program Files');
   }),
@@ -65,7 +73,7 @@ it.effect.prop(
       }
       const report = diagnostics.snapshot();
       expect(report.recent).toHaveLength(16);
-      expect(report.recent.map(command => command.sequence)).toEqual(
+      expect(EffectArray.map(report.recent, command => command.sequence)).toEqual(
         Array.from({length: 16}, (_, index) => index + 25),
       );
       expect(report.activeCount).toBe(0);

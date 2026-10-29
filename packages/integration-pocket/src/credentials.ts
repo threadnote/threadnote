@@ -9,10 +9,12 @@ import {
   storeExternalCredential,
   validExternalApiToken,
 } from '@threadnote/integration-core/external-credentials';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export {ExternalCredentialError as PocketCredentialError};
 export const validPocketApiToken = (token: Redacted.Redacted<string>) =>
-  Redacted.value(token).startsWith('pk_') && validExternalApiToken(token);
+  Effect.pipe(Redacted.value(token), EffectString.startsWith('pk_')) && validExternalApiToken(token);
 export const resolvePocketCredential = (config: Pick<RuntimeConfig, 'agentContextHome'>, source: PocketSourceConfig) =>
   resolveExternalCredential(config, source, 'pocket', validPocketApiToken);
 export const pocketCredentialConfigured = (

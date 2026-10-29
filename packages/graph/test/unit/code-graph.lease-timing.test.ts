@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Cause, Clock, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path} from 'effect';
@@ -11,6 +12,8 @@ import {CodeGraphStoreBusyError, type RepositoryIdentity} from '@threadnote/grap
 import {withCodeGraphLeaseTiming} from '../../src/store/lease_timing.js';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
 import {analysisSnapshot} from '../helpers/code-graph-analysis.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = CodeGraphStore.layer.pipe(Layer.provideMerge(citationPlatformLayer));
 
@@ -53,9 +56,9 @@ describe('snapshot lease diagnostic boundaries', () => {
         if (fail) {
           expect(Exit.isFailure(exit)).toBe(true);
           if (Exit.isFailure(exit))
-            expect(exit.cause.reasons.some(reason => Cause.isFailReason(reason) && reason.error === failure)).toBe(
-              true,
-            );
+            expect(
+              EffectArray.some(exit.cause.reasons, reason => Cause.isFailReason(reason) && reason.error === failure),
+            ).toBe(true);
         } else expect(exit).toEqual(Exit.succeed(42));
       }),
     {fastCheck: {numRuns: 32}},
@@ -71,7 +74,9 @@ describe('snapshot lease diagnostic boundaries', () => {
       const failed = yield* withCodeGraphLeaseTiming(observer, 'schema', Effect.die(defect)).pipe(Effect.exit);
       expect(Exit.isFailure(failed)).toBe(true);
       if (Exit.isFailure(failed))
-        expect(failed.cause.reasons.some(reason => Cause.isDieReason(reason) && reason.defect === defect)).toBe(true);
+        expect(
+          EffectArray.some(failed.cause.reasons, reason => Cause.isDieReason(reason) && reason.defect === defect),
+        ).toBe(true);
       const entered = yield* Deferred.make<void>();
       const fiber = yield* withCodeGraphLeaseTiming(
         observer,
@@ -101,14 +106,14 @@ describe('snapshot lease diagnostic boundaries', () => {
         const store = yield* CodeGraphStore;
         const identity: RepositoryIdentity = {
           caseMode: 'sensitive',
-          checkoutId: 'c'.repeat(64),
+          checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
           displayName: 'timing',
           gitCommonDirectory: root,
-          headCommit: '1'.repeat(40),
+          headCommit: Effect2.pipe('1', EffectString.repeat(40)),
           objectFormat: 'sha1',
           repoRoot: root,
-          repositoryId: 'r'.repeat(64),
-          worktreeId: 'w'.repeat(64),
+          repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
         };
         const snapshot = {
           ...analysisSnapshot([], []),

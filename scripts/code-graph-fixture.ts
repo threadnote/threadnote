@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from './effect/errors.js';
 import {Effect, FileSystem, Path, Schedule} from 'effect';
 import {
@@ -5,6 +6,10 @@ import {
   CODE_GRAPH_HIGH_SIGNAL_JSON_HARD_CAP_BYTES,
 } from '@threadnote/graph/inventory/policy';
 import {runCommandEffect} from '@threadnote/platform/command';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export interface PreparedCodeGraphFixture {
   readonly home: string;
@@ -267,8 +272,8 @@ export const prepareGeneratedCodeGraphFixture = Effect.fn('codeGraphFixture.prep
         declarations.push(generatedStaticReexportControlStatement());
       }
       return fs.writeFileString(
-        path.join(source, `module-${String(fileIndex).padStart(5, '0')}.ts`),
-        `${declarations.join('\n')}\n`,
+        path.join(source, `module-${Effect2.pipe(String(fileIndex), EffectString.padStart(5, '0'))}.ts`),
+        `${EffectArray.join(declarations, '\n')}\n`,
       );
     },
     {concurrency: 16, discard: true},
@@ -319,8 +324,12 @@ export const prepareProductionCodeGraphFixture = Effect.fn('codeGraphFixture.pre
   yield* fs.makeDirectory(home, {recursive: true, mode: 0o700});
 
   const workspaces = productionWorkspaceRoots(profile.workspaceCount, profile.activeWorkspaceExcludedPackageCount);
-  const includedWorkspaces = workspaces.filter(workspace => !isActiveWorkspaceExcludedRoot(workspace));
-  const excludedWorkspaces = workspaces.filter(isActiveWorkspaceExcludedRoot);
+  const includedWorkspaces = EffectArray.filter(workspaces, workspace => !isActiveWorkspaceExcludedRoot(workspace));
+  const excludedWorkspaces = EffectArray.filter(
+    workspaces,
+    (__effectFilterValue: (typeof workspaces)[number], __effectFilterIndex: number) =>
+      __effectFilterIndex in workspaces && isActiveWorkspaceExcludedRoot(__effectFilterValue),
+  );
   yield* fs.writeFileString(
     path.join(repository, 'package.json'),
     `${JSON.stringify(
@@ -338,7 +347,9 @@ export const prepareProductionCodeGraphFixture = Effect.fn('codeGraphFixture.pre
     `${JSON.stringify(
       {
         files: [],
-        references: workspaces.slice(0, profile.classMix.tsconfigFiles - 1).map(workspace => ({path: workspace})),
+        references: EffectArray.map(workspaces.slice(0, profile.classMix.tsconfigFiles - 1), workspace => ({
+          path: workspace,
+        })),
       },
       undefined,
       2,
@@ -346,16 +357,19 @@ export const prepareProductionCodeGraphFixture = Effect.fn('codeGraphFixture.pre
   );
   yield* fs.writeFileString(
     path.join(repository, 'pnpm-workspace.yaml'),
-    [
-      'packages:',
-      "  - 'apps/**'",
-      "  - 'libs/**'",
-      "  - 'services/**'",
-      "  - 'tools/**'",
-      "  - 'packages/**'",
-      "  - '!packages/active-excluded-*'",
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'packages:',
+        "  - 'apps/**'",
+        "  - 'libs/**'",
+        "  - 'services/**'",
+        "  - 'tools/**'",
+        "  - 'packages/**'",
+        "  - '!packages/active-excluded-*'",
+        '',
+      ],
+      '\n',
+    ),
   );
 
   yield* Effect.forEach(
@@ -407,7 +421,7 @@ export const prepareProductionCodeGraphFixture = Effect.fn('codeGraphFixture.pre
             path.join(repository, workspace, 'project.json'),
             `${JSON.stringify(
               {
-                name: `production-project-${String(workspaceIndex).padStart(4, '0')}`,
+                name: `production-project-${Effect2.pipe(String(workspaceIndex), EffectString.padStart(4, '0'))}`,
                 projectType: workspaceIndex % 5 === 0 ? 'application' : 'library',
                 sourceRoot: `${workspace}/src`,
               },
@@ -431,7 +445,7 @@ export const prepareProductionCodeGraphFixture = Effect.fn('codeGraphFixture.pre
     );
   }
 
-  const workspaceIndexes = new Map(workspaces.map((workspace, index) => [workspace, index]));
+  const workspaceIndexes = new Map(EffectArray.map(workspaces, (workspace, index) => [workspace, index]));
   const sourceOrdinals = new Map<string, number>();
   const sourceLocations = Array.from({length: profile.sourceFiles}, (_, fileIndex) => {
     const excluded = fileIndex < profile.activeWorkspaceExcludedSourceFiles;
@@ -466,14 +480,25 @@ export const prepareProductionCodeGraphFixture = Effect.fn('codeGraphFixture.pre
             const calls = Array.from({length: Math.min(profile.maxCallsPerDeclaration, offset)}, (_, callOffset) =>
               productionSymbolName(symbolIndex - callOffset - 1, workspaceIndex),
             );
-            const body = calls.length === 0 ? `${symbolIndex}` : calls.map(call => `${call}()`).join(' + ');
+            const body =
+              calls.length === 0
+                ? `${symbolIndex}`
+                : EffectArray.join(
+                    EffectArray.map(calls, call => `${call}()`),
+                    ' + ',
+                  );
             return (
               '/** Account workflow feature operation. */\n' + `export function ${name}(): number { return ${body}; }`
             );
           });
           return fs.writeFileString(
-            path.join(repository, workspace, 'src', `module-${String(ordinal).padStart(5, '0')}.${extension}`),
-            `${declarations.join('\n')}\n`,
+            path.join(
+              repository,
+              workspace,
+              'src',
+              `module-${Effect2.pipe(String(ordinal), EffectString.padStart(5, '0'))}.${extension}`,
+            ),
+            `${EffectArray.join(declarations, '\n')}\n`,
           );
         },
         {concurrency: 16, discard: true},
@@ -501,12 +526,14 @@ export const prepareProductionCodeGraphFixture = Effect.fn('codeGraphFixture.pre
     15 * 60_000,
   );
   const incremental =
-    sourceLocations.find(location => !isActiveWorkspaceExcludedRoot(location.workspace)) ?? sourceLocations[0];
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(sourceLocations, location => !isActiveWorkspaceExcludedRoot(location.workspace)),
+    ) ?? sourceLocations[0];
   const lastSource = sourceLocations.at(-1)!;
   const incrementalSourcePath = path.join(
     incremental.workspace,
     'src',
-    `module-${String(incremental.ordinal).padStart(5, '0')}.${incremental.extension}`,
+    `module-${Effect2.pipe(String(incremental.ordinal), EffectString.padStart(5, '0'))}.${incremental.extension}`,
   );
   return {
     home,
@@ -519,7 +546,7 @@ export const prepareProductionCodeGraphFixture = Effect.fn('codeGraphFixture.pre
 });
 
 export function generatedSymbolName(index: number): string {
-  return `scaleSymbol${String(index).padStart(6, '0')}`;
+  return `scaleSymbol${Effect2.pipe(String(index), EffectString.padStart(6, '0'))}`;
 }
 
 export function generatedStaticReexportControlStatement(): string {
@@ -528,8 +555,8 @@ export function generatedStaticReexportControlStatement(): string {
 
 export function productionSymbolName(index: number, workspaceIndex: number): string {
   return (
-    `workspace${String(workspaceIndex).padStart(2, '0')}AccountWorkflow` +
-    `FeatureOperation${String(index).padStart(7, '0')}`
+    `workspace${Effect2.pipe(String(workspaceIndex), EffectString.padStart(2, '0'))}AccountWorkflow` +
+    `FeatureOperation${Effect2.pipe(String(index), EffectString.padStart(7, '0'))}`
   );
 }
 
@@ -544,15 +571,33 @@ export function productionWorkspaceRoots(count: number, activeExcludedCount = 0)
   }
   const includedCount = count - activeExcludedCount;
   const fixedCandidates = [
-    ...Array.from({length: 6}, (_, index) => `apps/application-${String(index).padStart(2, '0')}`),
-    ...Array.from({length: 6}, (_, index) => `libs/library-${String(index).padStart(2, '0')}`),
-    ...Array.from({length: 4}, (_, index) => `services/service-${String(index).padStart(2, '0')}`),
-    ...Array.from({length: 2}, (_, index) => `tools/tool-${String(index).padStart(2, '0')}`),
-    ...Array.from({length: 3}, (_, index) => `apps/integrated/modules/module-${String(index).padStart(2, '0')}`),
-    ...Array.from({length: 3}, (_, index) => `apps/isolated/packages/package-${String(index).padStart(2, '0')}`),
+    ...Array.from(
+      {length: 6},
+      (_, index) => `apps/application-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+    ),
+    ...Array.from(
+      {length: 6},
+      (_, index) => `libs/library-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+    ),
+    ...Array.from(
+      {length: 4},
+      (_, index) => `services/service-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+    ),
+    ...Array.from(
+      {length: 2},
+      (_, index) => `tools/tool-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+    ),
+    ...Array.from(
+      {length: 3},
+      (_, index) => `apps/integrated/modules/module-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+    ),
+    ...Array.from(
+      {length: 3},
+      (_, index) => `apps/isolated/packages/package-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+    ),
   ];
   const generatedCandidates = Array.from({length: Math.max(0, includedCount - fixedCandidates.length)}, (_, index) => {
-    const ordinal = String(index).padStart(4, '0');
+    const ordinal = Effect2.pipe(String(index), EffectString.padStart(4, '0'));
     switch (index % 5) {
       case 0:
         return `apps/surrogate-application-${ordinal}`;
@@ -571,7 +616,7 @@ export function productionWorkspaceRoots(count: number, activeExcludedCount = 0)
     ...generatedCandidates,
     ...Array.from(
       {length: activeExcludedCount},
-      (_, index) => `packages/active-excluded-${String(index).padStart(3, '0')}`,
+      (_, index) => `packages/active-excluded-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}`,
     ),
   ];
 }
@@ -595,19 +640,19 @@ export function validateProductionProfile(
     workspaceCount: profile.workspaceCount,
     worktreeChurnScenarioCount: profile.worktreeChurnScenarioCount,
   };
-  for (const [name, value] of Object.entries(scalarCounts)) {
+  for (const [name, value] of EffectRecord.toEntries(scalarCounts)) {
     if (!Number.isSafeInteger(value) || value < 1) {
       throw ScriptError.make({message: `Production code graph profile ${name} must be a positive safe integer.`});
     }
   }
-  for (const [name, value] of Object.entries(profile.classMix)) {
+  for (const [name, value] of EffectRecord.toEntries(profile.classMix)) {
     if (!Number.isSafeInteger(value) || value < 1) {
       throw ScriptError.make({
         message: `Production code graph profile class mix ${name} must be a positive safe integer.`,
       });
     }
   }
-  for (const [name, value] of Object.entries(profile.duplicateBlobs)) {
+  for (const [name, value] of EffectRecord.toEntries(profile.duplicateBlobs)) {
     if (!Number.isSafeInteger(value) || value < 1) {
       throw ScriptError.make({
         message: `Production code graph profile duplicate blob ${name} must be a positive safe integer.`,
@@ -695,7 +740,7 @@ export function productionEligibleFileCount(classMix: ProductionCodeGraphFixture
 }
 
 export function productionRepositoryFileCount(classMix: ProductionCodeGraphFixtureClassMix): number {
-  return Object.values(classMix).reduce((total, count) => total + count, 0);
+  return EffectArray.reduce(EffectRecord.values(classMix), 0, (total, count) => total + count);
 }
 
 export function productionExcludedByteDistribution(profile: ProductionCodeGraphFixtureProfile): {
@@ -712,14 +757,14 @@ export function productionExcludedByteDistribution(profile: ProductionCodeGraphF
   );
   const remainingVariants = profile.classMix.generatedSvgFiles % profile.duplicateBlobs.generatedSvgVariants;
   const generatedSvgBytes =
-    completeVariantCycles * variantBytes.reduce((total, bytes) => total + bytes, 0) +
-    variantBytes.slice(0, remainingVariants).reduce((total, bytes) => total + bytes, 0);
+    completeVariantCycles * EffectArray.reduce(variantBytes, 0, (total, bytes) => total + bytes) +
+    EffectArray.reduce(variantBytes.slice(0, remainingVariants), 0, (total, bytes) => total + bytes);
   const heavyJsonBytes = profile.classMix.duplicateHeavyJsonFiles * profile.duplicateBlobs.heavyJsonPayloadBytes;
   return {generatedSvgBytes, heavyJsonBytes, totalBytes: generatedSvgBytes + heavyJsonBytes};
 }
 
 function isActiveWorkspaceExcludedRoot(workspace: string): boolean {
-  return workspace.startsWith('packages/active-excluded-');
+  return Effect2.pipe(workspace, EffectString.startsWith('packages/active-excluded-'));
 }
 
 function writeProductionSvgFiles(
@@ -735,7 +780,7 @@ function writeProductionSvgFiles(
         Array.from({length: profile.classMix.generatedSvgFiles}, (_, index) => index),
         index =>
           fs.writeFileString(
-            path.join(root, `generated-${String(index).padStart(5, '0')}.svg`),
+            path.join(root, `generated-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}.svg`),
             productionSvgBlob(index % profile.duplicateBlobs.generatedSvgVariants),
           ),
         {concurrency: 16, discard: true},
@@ -760,7 +805,7 @@ function writeProductionHeavyJsonFiles(
         Array.from({length: profile.classMix.duplicateHeavyJsonFiles}, (_, index) => index),
         index =>
           fs.writeFileString(
-            path.join(root, `payload-${String(index).padStart(4, '0')}.json`),
+            path.join(root, `payload-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}.json`),
             variants[index % variants.length],
           ),
         {concurrency: 8, discard: true},
@@ -782,7 +827,7 @@ function writeProductionSupportFiles(
         Array.from({length: profile.classMix.supportMarkdownFiles}, (_, index) => index),
         index =>
           fs.writeFileString(
-            path.join(root, `support-${String(index).padStart(5, '0')}.md`),
+            path.join(root, `support-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}.md`),
             `# Public monorepo surrogate support record ${index}\n`,
           ),
         {concurrency: 16, discard: true},
@@ -802,11 +847,11 @@ function productionSvgBlob(variant: number): string {
 function productionHeavyJsonBlob(variant: number, targetBytes: number): string {
   const prefix = `{"fixture":"threadnote-public-monorepo","variant":${variant},"payload":"`;
   const suffix = '"}\n';
-  return `${prefix}${'x'.repeat(Math.max(0, targetBytes - prefix.length - suffix.length))}${suffix}`;
+  return `${prefix}${Effect2.pipe('x', EffectString.repeat(Math.max(0, targetBytes - prefix.length - suffix.length)))}${suffix}`;
 }
 
 function productionPackageName(index: number): string {
-  return `@threadnote/production-workspace-${String(index).padStart(2, '0')}`;
+  return `@threadnote/production-workspace-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`;
 }
 
 export const git = Effect.fn('codeGraphFixture.git')((cwd: string, args: readonly string[], timeoutMs = 30_000) =>

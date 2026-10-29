@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -18,6 +19,8 @@ import type {
 
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
 import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ResolutionSummaryTestLayer = CodeGraphStore.layer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
@@ -95,25 +98,25 @@ describe('persistent reference lookup summaries', () => {
 function resolutionFacts(root: string, testCase: ResolutionCase) {
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'resolution-summary-property',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
   const file: CodeGraphInventoryFile = {
-    blobId: 'b'.repeat(40),
-    contentHash: 'h'.repeat(64),
+    blobId: Effect2.pipe('b', EffectString.repeat(40)),
+    contentHash: Effect2.pipe('h', EffectString.repeat(64)),
     language: 'typescript',
     mode: '100644',
     path: 'src/resolution.ts',
     size: 128,
     source: 'commit',
   };
-  const symbols: CodeGraphSymbol[] = testCase.symbols.map((definition, index) => ({
+  const symbols: CodeGraphSymbol[] = EffectArray.map(testCase.symbols, (definition, index) => ({
     contentHash: `hash-${index}`,
     exported: definition.exported,
     id: `symbol-${index}`,
@@ -148,7 +151,7 @@ function resolutionFacts(root: string, testCase: ResolutionCase) {
       evidencePath,
       evidenceSpan: source.span,
       exportedOnly: definition.exportedOnly,
-      lookupTiers: definition.tiers.map(tier => [...tier]),
+      lookupTiers: EffectArray.map(definition.tiers, tier => [...tier]),
       provenance: edge.provenance,
       relation: edge.relation,
       resolutionDomain: 'typescript',
@@ -221,16 +224,14 @@ function resolveWithPersistentActivation(databasePath: string, fixture: Resoluti
 
 function normalizedResolution(resolved: number, edges: ReadonlyArray<CodeGraphEdge>) {
   return {
-    edges: edges
-      .map(edge => ({
-        id: edge.id,
-        provenance: edge.provenance,
-        relation: edge.relation,
-        sourceId: edge.sourceId,
-        targetId: edge.targetId,
-        targetName: edge.targetName,
-      }))
-      .sort((left, right) => left.id.localeCompare(right.id)),
+    edges: EffectArray.map(edges, edge => ({
+      id: edge.id,
+      provenance: edge.provenance,
+      relation: edge.relation,
+      sourceId: edge.sourceId,
+      targetId: edge.targetId,
+      targetName: edge.targetName,
+    })).sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id))),
     resolved,
   };
 }

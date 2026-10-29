@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -24,8 +25,14 @@ import {
 } from '@threadnote/store/external-resource';
 import {chunkRecallDocument, RECALL_CHUNKER_VERSION, type RecallChunk} from './chunker.js';
 import {normalizeVector, type VectorSearchResult} from '@threadnote/inference/vector-search';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class VectorIndexOperationError extends Schema.TaggedError<VectorIndexOperationError>()('VectorIndexOperationError', {
+class VectorIndexOperationError extends Schema.TaggedError<
+  VectorIndexOperationError,
+  {readonly brand: unique symbol}
+>()('VectorIndexOperationError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
@@ -130,19 +137,22 @@ export interface VectorIndexStatus {
 
 export type VectorIndexGenerationReadiness = 'corrupt' | 'current' | 'missing' | 'stale';
 
-export class VectorIndexCorrupt extends Schema.TaggedError<VectorIndexCorrupt>()('VectorIndexCorrupt', {
-  message: Schema.String,
-  modelId: Schema.String,
-}) {}
-
-export class VectorCorpusGenerationChanged extends Schema.TaggedError<VectorCorpusGenerationChanged>()(
-  'VectorCorpusGenerationChanged',
+export class VectorIndexCorrupt extends Schema.TaggedError<VectorIndexCorrupt, {readonly brand: unique symbol}>()(
+  'VectorIndexCorrupt',
   {
     message: Schema.String,
     modelId: Schema.String,
-    requestedGeneration: Schema.String,
   },
 ) {}
+
+export class VectorCorpusGenerationChanged extends Schema.TaggedError<
+  VectorCorpusGenerationChanged,
+  {readonly brand: unique symbol}
+>()('VectorCorpusGenerationChanged', {
+  message: Schema.String,
+  modelId: Schema.String,
+  requestedGeneration: Schema.String,
+}) {}
 
 export type VectorIndexProgress =
   | {
@@ -337,7 +347,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
   const chunks = preparedChunks ?? vectorChunkMappings(candidates);
   const aliases = preparedAliases ?? vectorAliasMappings(candidates);
   const recipe = embeddingRecipe(manifest);
-  const desiredChunks = chunks.map(chunk => ({
+  const desiredChunks = EffectArray.map(chunks, chunk => ({
     ...chunk,
     vectorKey: vectorKeyForChunk(recipe, chunk),
   }));
@@ -371,7 +381,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
         building = undefined;
       }
       if (!building) {
-        const generation = `${yield* Clock.currentTimeMillis}-${(yield* crypto.randomUUIDv4()).slice(0, 8)}`;
+        const generation = `${yield* Clock.currentTimeMillis}-${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.slice(0, 8))}`;
         yield* sql`
           INSERT INTO vector_generations (
             generation,
@@ -458,18 +468,18 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
         const existingIds = yield* selectExistingChunkIds(
           sql,
           building.generation,
-          page.map(chunk => chunk.id),
+          EffectArray.map(page, chunk => chunk.id),
         );
-        const missing = page.filter(chunk => !existingIds.has(chunk.id));
+        const missing = EffectArray.filter(page, chunk => !existingIds.has(chunk.id));
         for (let start = 0; start < missing.length; start += VECTOR_INDEX_EMBED_BATCH_SIZE) {
           const batch = missing.slice(start, start + VECTOR_INDEX_EMBED_BATCH_SIZE);
           const vectors = yield* runtime.embedMany({
-            inputs: batch.map(chunk => `${manifest.promptPrefixes?.document ?? ''}${chunk.content}`),
+            inputs: EffectArray.map(batch, chunk => `${manifest.promptPrefixes?.document ?? ''}${chunk.content}`),
             manifest,
             modelPath: installed.path,
           });
           yield* verifyCurrentCorpusGeneration(manifest, options);
-          const rows = batch.map((chunk, index) => ({
+          const rows = EffectArray.map(batch, (chunk, index) => ({
             approvedAuthoritative: chunk.approvedAuthoritative,
             chunkId: chunk.id,
             fingerprint: chunk.fingerprint,
@@ -853,7 +863,7 @@ const initializeVectorDatabase = Effect.fn('vectorIndex.initializeDatabase')(fun
     )
   `);
   const generationColumns = yield* sql.unsafe<{readonly name: string}>('PRAGMA table_info(vector_generations)');
-  if (!generationColumns.some(column => column.name === 'scope_mapping_version')) {
+  if (!EffectArray.some(generationColumns, column => column.name === 'scope_mapping_version')) {
     yield* sql.unsafe(
       'ALTER TABLE vector_generations ADD COLUMN scope_mapping_version INTEGER NOT NULL DEFAULT 0 CHECK(scope_mapping_version >= 0)',
     );
@@ -924,17 +934,17 @@ const validateVectorDatabase = Effect.fn('vectorIndex.validateDatabase')(functio
 const validateVectorDatabaseStructure = Effect.fn('vectorIndex.validateDatabaseStructure')(function* (
   sql: SqlClient.SqlClient,
 ) {
-  for (const [table, expected] of Object.entries(VECTOR_INDEX_SCHEMA_COLUMNS)) {
+  for (const [table, expected] of EffectRecord.toEntries(VECTOR_INDEX_SCHEMA_COLUMNS)) {
     const rows = yield* sql.unsafe<{readonly name: string}>(`PRAGMA table_info('${table}')`);
-    const actual = rows.map(row => row.name);
+    const actual = EffectArray.map(rows, row => row.name);
     const compatibleColumns =
       table === 'vector_generations' && !actual.includes('scope_mapping_version') ? expected.slice(0, -1) : expected;
     if (
       actual.length !== compatibleColumns.length ||
-      actual.some((column, index) => column !== compatibleColumns[index])
+      EffectArray.some(actual, (column, index) => column !== compatibleColumns[index])
     ) {
       return yield* VectorIndexOperationError.make({
-        message: `Vector index table ${table} has invalid columns: ${actual.length > 0 ? actual.join(', ') : '(missing)'}.`,
+        message: `Vector index table ${table} has invalid columns: ${actual.length > 0 ? EffectArray.join(actual, ', ') : '(missing)'}.`,
       });
     }
   }
@@ -1006,8 +1016,11 @@ const prepareDesiredChunks = Effect.fn('vectorIndex.prepareDesiredChunks')(funct
          project,
          approved_authoritative,
          vector_key
-       ) VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?)').join(', ')}`,
-      batch.flatMap(chunk => [
+       ) VALUES ${EffectArray.join(
+         EffectArray.map(batch, () => '(?, ?, ?, ?, ?, ?)'),
+         ', ',
+       )}`,
+      EffectArray.flatMap(batch, chunk => [
         chunk.id,
         chunk.uri,
         chunk.fingerprint,
@@ -1029,8 +1042,11 @@ const replaceVectorAliases = Effect.fn('vectorIndex.replaceAliases')(function* (
     const batch = aliases.slice(start, start + VECTOR_INDEX_INSERT_BATCH_SIZE);
     yield* sql.unsafe(
       `INSERT INTO vector_aliases (generation, uri, representative_uri)
-       VALUES ${batch.map(() => '(?, ?, ?)').join(', ')}`,
-      batch.flatMap(alias => [generation, alias.uri, alias.representativeUri]),
+       VALUES ${EffectArray.join(
+         EffectArray.map(batch, () => '(?, ?, ?)'),
+         ', ',
+       )}`,
+      EffectArray.flatMap(batch, alias => [generation, alias.uri, alias.representativeUri]),
     );
   }
 });
@@ -1052,7 +1068,10 @@ const loadVectorAliasesForRepresentatives = Effect.fn('vectorIndex.loadAliasesFo
         `SELECT alias.uri, alias.representative_uri
          FROM vector_aliases AS alias
          WHERE alias.generation = ?
-           AND alias.representative_uri IN (${batch.map(() => '?').join(', ')})
+           AND alias.representative_uri IN (${EffectArray.join(
+             EffectArray.map(batch, () => '?'),
+             ', ',
+           )})
            AND ${uriScope.sql}
            AND EXISTS (
              SELECT 1
@@ -1163,7 +1182,10 @@ const removeInvalidVectorRows = Effect.fn('vectorIndex.removeInvalidRows')(funct
     if (invalid.length > 0) {
       yield* sql.unsafe(
         `DELETE FROM vector_chunks
-         WHERE generation = ? AND chunk_id IN (${invalid.map(() => '?').join(', ')})`,
+         WHERE generation = ? AND chunk_id IN (${EffectArray.join(
+           EffectArray.map(invalid, () => '?'),
+           ', ',
+         )})`,
         [generation, ...invalid],
       );
     }
@@ -1181,10 +1203,13 @@ const selectExistingChunkIds = Effect.fn('vectorIndex.selectExistingChunkIds')(f
   const rows = yield* sql.unsafe<{readonly chunk_id: string}>(
     `SELECT chunk_id
      FROM vector_chunks
-     WHERE generation = ? AND chunk_id IN (${chunkIds.map(() => '?').join(', ')})`,
+     WHERE generation = ? AND chunk_id IN (${EffectArray.join(
+       EffectArray.map(chunkIds, () => '?'),
+       ', ',
+     )})`,
     [generation, ...chunkIds],
   );
-  return new Set(rows.map(row => row.chunk_id));
+  return new Set(EffectArray.map(rows, row => row.chunk_id));
 });
 
 function insertVectorRows(sql: SqlClient.SqlClient, rows: readonly VectorInsertRow[]) {
@@ -1195,16 +1220,19 @@ function insertVectorRows(sql: SqlClient.SqlClient, rows: readonly VectorInsertR
         Effect.gen(function* () {
           yield* insertVectorValues(
             sql,
-            batch.map(row => [row.vectorKey, row.vector] as const),
+            EffectArray.map(batch, row => [row.vectorKey, row.vector] as const),
           );
           const values = yield* sql.unsafe<{readonly id: number; readonly vector_key: string}>(
             `SELECT id, vector_key
              FROM vector_values
-             WHERE vector_key IN (${batch.map(() => '?').join(', ')})`,
-            batch.map(row => row.vectorKey),
+             WHERE vector_key IN (${EffectArray.join(
+               EffectArray.map(batch, () => '?'),
+               ', ',
+             )})`,
+            EffectArray.map(batch, row => row.vectorKey),
           );
-          const idByKey = new Map(values.map(value => [value.vector_key, Number(value.id)]));
-          const mappings = batch.map(row => {
+          const idByKey = new Map(EffectArray.map(values, value => [value.vector_key, Number(value.id)]));
+          const mappings = EffectArray.map(batch, row => {
             const vectorId = idByKey.get(row.vectorKey);
             if (vectorId === undefined) {
               throw VectorIndexOperationError.make({message: `Could not resolve stored vector ${row.vectorKey}.`});
@@ -1228,7 +1256,10 @@ function insertVectorRows(sql: SqlClient.SqlClient, rows: readonly VectorInsertR
                project,
                approved_authoritative,
                vector_id
-             ) VALUES ${mappings.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
+             ) VALUES ${EffectArray.join(
+               EffectArray.map(mappings, () => '(?, ?, ?, ?, ?, ?, ?)'),
+               ', ',
+             )}`,
             mappings.flat(),
           );
         }),
@@ -1243,7 +1274,10 @@ function insertVectorValues(sql: SqlClient.SqlClient, rows: readonly (readonly [
       const batch = rows.slice(start, start + VECTOR_INDEX_INSERT_BATCH_SIZE);
       yield* sql.unsafe(
         `INSERT INTO vector_values (vector_key, vector)
-         VALUES ${batch.map(() => '(?, ?)').join(', ')}
+         VALUES ${EffectArray.join(
+           EffectArray.map(batch, () => '(?, ?)'),
+           ', ',
+         )}
          ON CONFLICT(vector_key) DO UPDATE SET vector = excluded.vector`,
         batch.flat(),
       );
@@ -1484,10 +1518,10 @@ function generationIsCompatible(generation: VectorGenerationRow, manifest: Local
 }
 
 function vectorChunkMappings(candidates: readonly RecallCandidate[]): readonly VectorChunkMapping[] {
-  return candidates.flatMap(candidate => {
+  return EffectArray.flatMap(candidates, candidate => {
     const project = recallIndexScopeProject(candidate.kind, candidate.fields?.project);
     const approvedAuthoritative = recallApprovedAuthoritative(candidate.authority, candidate.trust) ? 1 : 0;
-    return chunkRecallDocument(candidate.uri, candidate.text).map(chunk => ({
+    return EffectArray.map(chunkRecallDocument(candidate.uri, candidate.text), chunk => ({
       ...chunk,
       approvedAuthoritative,
       project,
@@ -1496,17 +1530,15 @@ function vectorChunkMappings(candidates: readonly RecallCandidate[]): readonly V
 }
 
 function vectorAliasMappings(candidates: readonly RecallCandidate[]): readonly VectorAliasMapping[] {
-  return candidates
-    .flatMap(candidate =>
-      [candidate.uri, ...(candidate.equivalentUris ?? [])].map(uri => ({
-        representativeUri: candidate.uri,
-        uri,
-      })),
-    )
-    .sort(
-      (left, right) =>
-        compareCodeUnits(left.uri, right.uri) || compareCodeUnits(left.representativeUri, right.representativeUri),
-    );
+  return EffectArray.flatMap(candidates, candidate =>
+    EffectArray.map([candidate.uri, ...(candidate.equivalentUris ?? [])], uri => ({
+      representativeUri: candidate.uri,
+      uri,
+    })),
+  ).sort(
+    (left, right) =>
+      compareCodeUnits(left.uri, right.uri) || compareCodeUnits(left.representativeUri, right.representativeUri),
+  );
 }
 
 function vectorJobId(
@@ -1515,15 +1547,13 @@ function vectorJobId(
   aliases: readonly VectorAliasMapping[],
   corpusGeneration: string | undefined,
 ) {
-  const identityChunks = chunks
-    .map(chunk => ({
-      approvedAuthoritative: chunk.approvedAuthoritative,
-      fingerprint: chunk.fingerprint,
-      id: chunk.id,
-      project: chunk.project,
-      uri: chunk.uri,
-    }))
-    .sort((left, right) => compareCodeUnits(left.id, right.id) || compareCodeUnits(left.uri, right.uri));
+  const identityChunks = EffectArray.map(chunks, chunk => ({
+    approvedAuthoritative: chunk.approvedAuthoritative,
+    fingerprint: chunk.fingerprint,
+    id: chunk.id,
+    project: chunk.project,
+    uri: chunk.uri,
+  })).sort((left, right) => compareCodeUnits(left.id, right.id) || compareCodeUnits(left.uri, right.uri));
   return sha256Hex(
     JSON.stringify({
       aliases,
@@ -1542,13 +1572,16 @@ function embeddingRecipe(manifest: LocalModelManifest): string {
   // Native backend/offload policy is intentionally excluded: the frozen Darwin
   // compatibility fixture verifies that it preserves this embedding space.
   return sha256HexSync(
-    [
-      'threadnote-recall-embedding-v1',
-      manifest.sha256,
-      String(manifest.dimensions ?? 0),
-      manifest.promptPrefixes?.document ?? '',
-      'l2',
-    ].join('\0'),
+    EffectArray.join(
+      [
+        'threadnote-recall-embedding-v1',
+        manifest.sha256,
+        String(manifest.dimensions ?? 0),
+        manifest.promptPrefixes?.document ?? '',
+        'l2',
+      ],
+      '\0',
+    ),
   );
 }
 
@@ -1664,5 +1697,5 @@ function withVectorIndexLock<A, E, R>(
 }
 
 export function chunksForRecallCandidates(candidates: readonly RecallCandidate[]): readonly RecallChunk[] {
-  return candidates.flatMap(candidate => chunkRecallDocument(candidate.uri, candidate.text));
+  return EffectArray.flatMap(candidates, candidate => chunkRecallDocument(candidate.uri, candidate.text));
 }

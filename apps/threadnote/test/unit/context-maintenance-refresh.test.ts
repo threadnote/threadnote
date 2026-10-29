@@ -27,6 +27,8 @@ import {
 import {readContextMaintenancePacket, readState, writeState} from '../../src/memory/context/maintenance.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NOW = '2026-10-03T15:00:00.000Z';
 const PREFIX = 'threadnote://user/tester/memories/';
@@ -72,7 +74,7 @@ function fixture(
     const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');
     const uri = `${PREFIX}${shared ? 'shared/default/' : ''}durable/projects/fixture/subject.md`;
     const record = memory(uri, relations);
-    const fileFor = (uri: string) => path.join(root, uri.slice(PREFIX.length));
+    const fileFor = (uri: string) => path.join(root, Effect2.pipe(uri, EffectString.slice(PREFIX.length)));
     const write = (record: ReturnType<typeof memory>) =>
       Effect.gen(function* () {
         yield* fs.makeDirectory(path.dirname(fileFor(record.uri)), {recursive: true});
@@ -366,7 +368,10 @@ describe('bounded selected relation maintenance refresh', () => {
     Effect.gen(function* () {
       const data = yield* fixture();
       const targetUri = data.record.metadata.relations![0].uri;
-      yield* data.fs.writeFileString(data.fileFor(targetUri), 'x'.repeat(8 * 1_024 * 1_024 + 1));
+      yield* data.fs.writeFileString(
+        data.fileFor(targetUri),
+        Effect2.pipe('x', EffectString.repeat(8 * 1_024 * 1_024 + 1)),
+      );
       const oversized = yield* readSelectedMaintenanceRelationResource(data.config, targetUri);
       expect(oversized).toEqual({record: undefined, observation: {uri: targetUri}});
       const foreign = 'threadnote://user/other/memories/durable/projects/fixture/private.md';

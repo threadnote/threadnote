@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -935,7 +936,11 @@ const inspectBoundedVectorGenerationManifest = Effect.fn('codeGraph.inspectBound
     row.bounded_state,
     row.bounded_created_at,
   ];
-  const finalFactBytes = strings.reduce((total, value) => total + new TextEncoder().encode(value).byteLength, 128);
+  const finalFactBytes = EffectArray.reduce(
+    strings,
+    128,
+    (total, value) => total + new TextEncoder().encode(value).byteLength,
+  );
   if (!Number.isSafeInteger(finalFactBytes)) {
     return yield* CodeGraphVectorRetirementError.make({message: 'Code graph vector generation manifest is invalid.'});
   }
@@ -1690,7 +1695,7 @@ export const inspectCodeGraphVectorSnapshotUsage = Effect.fn('codeGraph.inspectV
           message: 'Code graph vector snapshot evidence exceeded its bound.',
         });
       }
-      const generations = generationRows.map(row => {
+      const generations = EffectArray.map(generationRows, row => {
         if (
           typeof row.generation !== 'string' ||
           !validBoundedText(row.generation, VECTOR_GENERATION_BYTES) ||
@@ -1721,7 +1726,7 @@ export const inspectCodeGraphVectorSnapshotUsage = Effect.fn('codeGraph.inspectV
           row.created_at,
         ] as const;
       });
-      const pointers = pointerRows.map(row => {
+      const pointers = EffectArray.map(pointerRows, row => {
         if (
           typeof row.generation !== 'string' ||
           !validBoundedText(row.generation, VECTOR_GENERATION_BYTES) ||
@@ -1732,7 +1737,10 @@ export const inspectCodeGraphVectorSnapshotUsage = Effect.fn('codeGraph.inspectV
         }
         return [row.generation, row.worktree_id] as const;
       });
-      if (generations.some(row => row === undefined) || pointers.some(row => row === undefined)) {
+      if (
+        EffectArray.some(generations, row => row === undefined) ||
+        EffectArray.some(pointers, row => row === undefined)
+      ) {
         return yield* CodeGraphVectorRetirementError.make({message: 'Code graph vector snapshot evidence is invalid.'});
       }
       return {

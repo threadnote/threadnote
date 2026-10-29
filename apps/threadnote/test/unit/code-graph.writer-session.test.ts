@@ -5,6 +5,7 @@ import {describe, expect} from 'vitest';
 import {CodeGraphStore, type CodeGraphSqliteWriterSettings} from '@threadnote/graph/store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {Array as EffectArray} from 'effect';
 
 describe('code graph writer session configuration', () => {
   effectIt.effect('does not re-report a connection for normal-only build durability', () =>
@@ -20,7 +21,7 @@ describe('code graph writer session configuration', () => {
         writerLockPath: path.join(root, 'writer.lock'),
       });
 
-      expect(observed.filter(settings => settings.phase === 'connection')).toHaveLength(1);
+      expect(EffectArray.filter(observed, settings => settings.phase === 'connection')).toHaveLength(1);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -48,7 +49,7 @@ describe('code graph writer session configuration', () => {
       );
 
       expect(walAutoCheckpointPages).toBe(137);
-      expect(observed.filter(settings => settings.phase === 'connection')).toHaveLength(2);
+      expect(EffectArray.filter(observed, settings => settings.phase === 'connection')).toHaveLength(2);
       expect(observed.at(-1)?.walAutoCheckpointPages).toBe(137);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );

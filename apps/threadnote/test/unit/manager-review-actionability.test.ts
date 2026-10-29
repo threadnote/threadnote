@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Exit, Fiber, FileSystem, Path, Scope, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -37,6 +38,8 @@ import {
 import {handleManagerAttentionRequest} from '../../src/manager/attention.js';
 import {handleManagerHomeRequest} from '../../src/manager/home.js';
 import {loadCandidateReview, saveCandidateReview} from '@threadnote/memory/candidate';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function fixture(
   index = 0,
@@ -181,7 +184,9 @@ describe('Manager review eligibility', () => {
         fixture(i, i < 100 ? 'insufficient-evidence' : i === 104 ? 'propose-revalidation' : 'propose-update').review,
     );
     const before = JSON.stringify(reviews);
-    const ready = new Map(reviews.slice(100).map(r => [`${r.reviewId}:${r.revision}`, {state: 'actionable'} as const]));
+    const ready = new Map(
+      EffectArray.map(reviews.slice(100), r => [`${r.reviewId}:${r.revision}`, {state: 'actionable'} as const]),
+    );
     const result = projectManagerReviewEligibility(reviews, ready);
     expect(result.pendingCount).toBe(5);
     expect(result.background).toMatchObject({assessments: 100, awaitingSources: 0, obsolete: 0});
@@ -198,7 +203,7 @@ describe('Manager review eligibility', () => {
         }),
         kinds => {
           const readiness = new Map<string, ReviewReadiness>();
-          const reviews = kinds.map((kind, i) => {
+          const reviews = EffectArray.map(kinds, (kind, i) => {
             let review = fixture(i, kind === 'assessment' ? 'insufficient-evidence' : 'propose-update').review;
             if (kind === 'manual')
               review = {
@@ -216,7 +221,10 @@ describe('Manager review eligibility', () => {
                 },
               };
             if (kind === 'deferred' || kind === 'applying')
-              review = {...review, candidates: review.candidates.map(candidate => ({...candidate, state: kind}))};
+              review = {
+                ...review,
+                candidates: EffectArray.map(review.candidates, candidate => ({...candidate, state: kind})),
+              };
             if (kind === 'ready' || kind === 'waiting' || kind === 'obsolete')
               readiness.set(`${review.reviewId}:${review.revision}`, {state: kind === 'ready' ? 'actionable' : kind});
             return review;
@@ -225,7 +233,7 @@ describe('Manager review eligibility', () => {
           const result = projectManagerReviewEligibility(reviews, readiness);
           const reversed = projectManagerReviewEligibility([...reviews].reverse(), readiness);
           expect(result.pendingCount).toBe(
-            kinds.filter(kind => ['ready', 'manual', 'deferred', 'applying'].includes(kind)).length,
+            EffectArray.filter(kinds, kind => ['ready', 'manual', 'deferred', 'applying'].includes(kind)).length,
           );
           expect(
             result.pendingCount +
@@ -248,7 +256,7 @@ describe('Manager review eligibility', () => {
       expect(
         untouchedAutomaticReview({
           ...f.review,
-          candidates: f.review.candidates.map(candidate => ({...candidate, state})),
+          candidates: EffectArray.map(f.review.candidates, candidate => ({...candidate, state})),
         }),
       ).toBe(false);
     for (const action of ['defer', 'reject', 'resume', 'begin_apply'] as const)
@@ -300,8 +308,11 @@ describe('Manager review eligibility', () => {
                 // Narrower subsequent views must still drain the principal's already admitted queue fairly.
                 const visible =
                   pass === 0
-                    ? reviews.map(item => item.review)
-                    : reviews.filter(item => item.review.reviewId === checked[0]).map(item => item.review);
+                    ? EffectArray.map(reviews, item => item.review)
+                    : EffectArray.map(
+                        EffectArray.filter(reviews, item => item.review.reviewId === checked[0]),
+                        item => item.review,
+                      );
                 yield* readManagerReviewEligibility(f.config, visible);
                 expect(calls).toBe(pass + 1);
               }
@@ -330,7 +341,7 @@ describe('Manager review eligibility', () => {
                 yield* advanceCanonicalMutationGeneration(f.fs, f.path, f.home, 'local');
                 yield* readManagerReviewEligibility(
                   f.config,
-                  reviews.map(item => item.review),
+                  EffectArray.map(reviews, item => item.review),
                 );
               }
               expect(new Set(checked.slice(5)).size).toBe(5);
@@ -564,15 +575,23 @@ projects:
             extractorSet: 'native-code-graph-13',
             fileContentHash: {algorithm: 'sha256', value: hash('export const fixture = 1;\n')},
             path: name,
-            repositoryId: 'b'.repeat(64),
+            repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
             repositoryIdentityKind: 'remote',
             sourceCommit: commit,
             sourceDirty: false,
-            sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+            sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
             target: {kind: 'file'},
           });
-        const a = fixture(0, 'propose-update', code('a.ts', 'a'.repeat(40)), root);
-        const b = fixture(1, 'propose-update', code('b.ts', differentCommit ? 'c'.repeat(40) : 'a'.repeat(40)), root);
+        const a = fixture(0, 'propose-update', code('a.ts', Effect2.pipe('a', EffectString.repeat(40))), root);
+        const b = fixture(
+          1,
+          'propose-update',
+          code(
+            'b.ts',
+            differentCommit ? Effect2.pipe('c', EffectString.repeat(40)) : Effect2.pipe('a', EffectString.repeat(40)),
+          ),
+          root,
+        );
         for (const [index, item] of [a, b].entries()) {
           yield* fs.writeFileString(path.join(memoryRoot, `target-${index}.md`), item.content);
           yield* saveCandidateReview(home, item.review);
@@ -619,7 +638,7 @@ projects:
               }).pipe(Effect.andThen(loadCandidateReview(config.agentContextHome, id))),
             ),
           ]),
-          handles => Effect.sync(() => handles.forEach(handle => handle.mockRestore())),
+          handles => Effect.sync(() => EffectArray.forEach(handles, handle => handle.mockRestore())),
         );
         void spies;
         const observer = yield* makeManagerProjectLiveObservation(config, {
@@ -634,7 +653,7 @@ projects:
             available = yield* Deferred.make<void>();
             yield* observer.healthHints.register('alpha', {
               cwd: root,
-              citations: payload.basis.assessment.evidence.flatMap(e =>
+              citations: EffectArray.flatMap(payload.basis.assessment.evidence, e =>
                 e.source.kind === 'code' ? [e.source.citation] : [],
               ),
             });
@@ -670,7 +689,7 @@ projects:
         expect(JSON.stringify([a.review, b.review])).toBe(unchangedReviews);
         yield* observer.release('all-reviews');
         // Expected product contract. Frozen4b17 fails here although every controlled source verification succeeded.
-        expect(results.map(result => result.pendingCount)).toEqual([1, 1, 1]);
+        expect(EffectArray.map(results, result => result.pendingCount)).toEqual([1, 1, 1]);
       }).pipe(provideTestLayer(ApplicationLayer)),
   );
 }

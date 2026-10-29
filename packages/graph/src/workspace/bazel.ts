@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -12,6 +13,8 @@ import {compareCodeUnits} from '../ordering.js';
 import type {CodeGraphInventoryFile} from '../types.js';
 import {boundedCodeGraphWorkspaceDiagnostics, resolveCodeGraphWorkspaceDiagnostics} from './diagnostics.js';
 import {basename, dirname, materializeBuildWorkspaces, relativeContainedPath, workspaceIdentity} from './primitives.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface BazelPackageCandidate {
   readonly dependencyLabels: readonly {readonly evidence: string; readonly label: string}[];
@@ -44,28 +47,47 @@ const BAZEL_DEPENDENCY_ATTRIBUTES = new Set([
 export function discoverBazelWorkspace(files: readonly CodeGraphInventoryFile[]): CodeGraphWorkspace {
   const diagnostics: string[] = [];
   const nodePackageRoots = new Set(
-    files.filter(file => basename(file.path).toLowerCase() === 'package.json').map(file => dirname(file.path)),
+    EffectArray.map(
+      EffectArray.filter(files, file => Effect.pipe(basename(file.path), EffectString.toLowerCase) === 'package.json'),
+      file => dirname(file.path),
+    ),
   );
   const typeScriptConfigsByRoot = new Map<string, string>();
   for (const file of [...files].sort((left, right) => compareCodeUnits(left.path, right.path))) {
     if (!/^tsconfig(?:\.[^/]+)?\.jsonc?$/iu.test(basename(file.path))) continue;
     const root = dirname(file.path);
     const existing = typeScriptConfigsByRoot.get(root);
-    if (existing === undefined || basename(file.path).toLowerCase() === 'tsconfig.json') {
+    if (existing === undefined || Effect.pipe(basename(file.path), EffectString.toLowerCase) === 'tsconfig.json') {
       typeScriptConfigsByRoot.set(root, file.path);
     }
   }
-  const workspaceMarkers = files
-    .filter(file => BAZEL_WORKSPACE_MARKERS.has(basename(file.path).toLowerCase()))
-    .sort((left, right) => compareCodeUnits(left.path, right.path));
-  const declaredRoots = new Set(workspaceMarkers.map(file => dirname(file.path)));
+  const workspaceMarkers = EffectArray.filter(
+    files,
+    (file, __effectArrayIndex) =>
+      __effectArrayIndex in files &&
+      BAZEL_WORKSPACE_MARKERS.has(Effect.pipe(basename(file.path), EffectString.toLowerCase)),
+  ).sort((left, right) => compareCodeUnits(left.path, right.path));
+  const declaredRoots = new Set(EffectArray.map(workspaceMarkers, file => dirname(file.path)));
   const bazelRcRoots = new Set(
-    files.filter(file => basename(file.path).toLowerCase().endsWith('.bazelrc')).map(file => dirname(file.path)),
+    EffectArray.map(
+      EffectArray.filter(
+        files,
+        (file, __effectArrayIndex) =>
+          __effectArrayIndex in files &&
+          Effect.pipe(basename(file.path), EffectString.toLowerCase, EffectString.endsWith('.bazelrc')),
+      ),
+      file => dirname(file.path),
+    ),
   );
-  const candidates: BazelPackageCandidate[] = files
-    .filter(file => BAZEL_BUILD_FILES.has(basename(file.path).toLowerCase()) && file.content !== undefined)
-    .sort((left, right) => compareCodeUnits(left.path, right.path))
-    .map(file => {
+  const candidates: BazelPackageCandidate[] = EffectArray.map(
+    EffectArray.filter(
+      files,
+      (file, __effectArrayIndex) =>
+        __effectArrayIndex in files &&
+        BAZEL_BUILD_FILES.has(Effect.pipe(basename(file.path), EffectString.toLowerCase)) &&
+        file.content !== undefined,
+    ).sort((left, right) => compareCodeUnits(left.path, right.path)),
+    file => {
       const root = dirname(file.path);
       const workspaceRoot = nearestBazelWorkspaceRoot(root, declaredRoots, bazelRcRoots);
       const packagePath = relativeContainedPath(workspaceRoot, root) ?? root;
@@ -79,15 +101,17 @@ export function discoverBazelWorkspace(files: readonly CodeGraphInventoryFile[])
         root,
         workspaceRoot,
       };
-    });
+    },
+  );
 
   for (const marker of workspaceMarkers) {
     const root = dirname(marker.path);
-    if (candidates.some(candidate => candidate.root === root && candidate.workspaceRoot === root)) continue;
+    if (EffectArray.some(candidates, candidate => candidate.root === root && candidate.workspaceRoot === root))
+      continue;
     candidates.push({
       dependencyLabels: [],
       evidence: marker.path,
-      name: bazelDeclaredWorkspaceName(marker) ?? (root.split('/').at(-1) || 'root'),
+      name: bazelDeclaredWorkspaceName(marker) ?? (Effect.pipe(root, EffectString.split('/')).at(-1) || 'root'),
       packagePath: '',
       root,
       workspaceRoot: root,
@@ -108,7 +132,7 @@ export function discoverBazelWorkspace(files: readonly CodeGraphInventoryFile[])
     );
   }
   const diagnosticResolution = resolveCodeGraphWorkspaceDiagnostics(
-    candidates.map(candidate => {
+    EffectArray.map(candidates, candidate => {
       const id = bazelProjectIdentity(candidate.root, nodePackageRoots, typeScriptConfigsByRoot);
       const overlappingDomain = nodePackageRoots.has(candidate.root)
         ? 'typescript'
@@ -133,11 +157,13 @@ export function discoverBazelWorkspace(files: readonly CodeGraphInventoryFile[])
       );
       return {
         buildSystem: 'bazel',
-        dependencies: dependencyDetails.map(dependency => dependency.targetId),
+        dependencies: EffectArray.map(dependencyDetails, dependency => dependency.targetId),
         dependencyDetails,
         diagnostics: [],
         id,
-        kind: BAZEL_BUILD_FILES.has(basename(candidate.evidence).toLowerCase()) ? 'package' : 'project',
+        kind: BAZEL_BUILD_FILES.has(Effect.pipe(basename(candidate.evidence), EffectString.toLowerCase))
+          ? 'package'
+          : 'project',
         languages: ['bazel', 'starlark'],
         name: candidate.name,
         provenance: 'declared',
@@ -158,7 +184,7 @@ export function discoverBazelWorkspace(files: readonly CodeGraphInventoryFile[])
     fingerprint: sha256HexSync(
       JSON.stringify({
         diagnostics: orderedDiagnostics,
-        projects: projects.map(project => [
+        projects: EffectArray.map(projects, project => [
           project.id,
           project.workspaceId,
           project.name,
@@ -182,7 +208,7 @@ function bazelDependencyLabels(
 ): readonly {readonly evidence: string; readonly label: string}[] {
   const output = new Map<string, {readonly evidence: string; readonly label: string}>();
   for (const call of calls) {
-    const callee = call.callee.replace(/\s+/gu, '');
+    const callee = Effect.pipe(call.callee, EffectString.replace(/\s+/gu, ''));
     if (callee === 'load') {
       const label = call.strings[0]?.value;
       const canonical = label ? canonicalBazelLabel(label, packagePath) : Option.none();
@@ -202,9 +228,16 @@ function bazelDependencyLabels(
 
 function bazelDeclaredWorkspaceName(file: CodeGraphInventoryFile): string | undefined {
   if (file.content === undefined) return undefined;
-  const expected = basename(file.path).toLowerCase() === 'module.bazel' ? 'module' : 'workspace';
-  const declaration = parseBazelSyntax(file.content).calls.find(
-    call => call.topLevel && call.callee.replace(/\s+/gu, '') === expected,
+  const expected =
+    Effect.pipe(basename(file.path), EffectString.toLowerCase) === 'module.bazel' ? 'module' : 'workspace';
+  const declaration = Option.getOrUndefined(
+    EffectArray.findFirst(
+      parseBazelSyntax(file.content).calls,
+      __effectArrayValue =>
+        !!(call => call.topLevel && Effect.pipe(call.callee, EffectString.replace(/\s+/gu, '')) === expected)(
+          __effectArrayValue,
+        ),
+    ),
   );
   return Option.getOrUndefined(
     Option.flatMap(Option.fromUndefinedOr(declaration), call =>
@@ -242,5 +275,5 @@ function bazelProjectIdentity(
     : typeScriptConfigsByRoot.has(root)
       ? `tsconfig:${typeScriptConfigsByRoot.get(root)!}`
       : `bazel\n${root}`;
-  return `cgp_${sha256HexSync(`project-v1\n${identity}`).slice(0, 32)}`;
+  return `cgp_${Effect.pipe(sha256HexSync(`project-v1\n${identity}`), EffectString.slice(0, 32))}`;
 }

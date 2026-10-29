@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {Database} from 'bun:sqlite';
@@ -38,8 +39,18 @@ import {
   vectorIndexStatus,
 } from '@threadnote/recall/vector-index';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+function recallGeneration(value: unknown): string {
+  if (value !== null && typeof value === 'object' && 'generation' in value && typeof value.generation === 'string')
+    return value.generation;
+  throw new Error('Expected a materialized recall-index generation.');
+}
+
+const manifest = Option.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 
 describe('MCP recall background vector refresh', () => {
   for (const unavailable of ['unselected', 'wrong-role', 'uninstalled', 'not-built'] as const) {
@@ -60,7 +71,9 @@ describe('MCP recall background vector refresh', () => {
             if (unavailable !== 'unselected') {
               const selected =
                 unavailable === 'wrong-role'
-                  ? BUILTIN_MODEL_MANIFESTS.find(model => model.role !== 'embedding')!
+                  ? Option.getOrUndefined(
+                      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.role !== 'embedding'),
+                    )!
                   : manifest;
               yield* writeModelSelection(home, {version: 1, roles: {embedding: selected.id}});
             }
@@ -82,14 +95,16 @@ describe('MCP recall background vector refresh', () => {
             expect(queries).toHaveLength(0);
             const status = yield* recallIndexStatus(config);
             expect(status.ready).toBe(true);
-            expect(status.generation).not.toBe(initial.generation);
+            expect(recallGeneration(status)).not.toBe(initial.generation);
             const current = yield* loadRecallIndexData(config, {
               includeInactive: false,
               query: 'Latest materialization',
             });
-            expect(current.candidates.map(candidate => candidate.uri)).toContain(uri);
+            expect(EffectArray.map(current.candidates, candidate => candidate.uri)).toContain(uri);
             expect(
-              current.candidates.some(candidate => candidate.text.includes('Previous materialization token')),
+              EffectArray.some(current.candidates, candidate =>
+                Effect2.pipe(candidate.text, EffectString.includes('Previous materialization token')),
+              ),
             ).toBe(false);
             expect(yield* vectorIndexStatus(home, manifest)).toMatchObject({ready: false, reason: 'not built'});
           }),
@@ -139,7 +154,9 @@ describe('MCP recall background vector refresh', () => {
             'Synthetic metadata refresh regression body.',
           ),
         );
-        const runtime = fakeRuntime((inputs, dimensions) => Effect.succeed(inputs.map(() => unitVector(dimensions))));
+        const runtime = fakeRuntime((inputs, dimensions) =>
+          Effect.succeed(EffectArray.map(inputs, () => unitVector(dimensions))),
+        );
 
         yield* Effect.gen(function* () {
           const catalog = yield* LocalModelCatalog;
@@ -162,8 +179,8 @@ describe('MCP recall background vector refresh', () => {
           expect(applied.status).toBe('applied');
           const refreshed = yield* recallIndexStatus(config);
           expect(refreshed.ready).toBe(true);
-          expect(refreshed.generation).not.toBe(initial.generation);
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, refreshed.generation!)).toBe('current');
+          expect(recallGeneration(refreshed)).not.toBe(initial.generation);
+          expect(yield* vectorIndexGenerationReadiness(home, manifest, recallGeneration(refreshed))).toBe('current');
 
           const replacementUri = yield* storeMemory(config, {
             bodyText: 'Synthetic direct replacement regression body.',
@@ -186,8 +203,8 @@ describe('MCP recall background vector refresh', () => {
           expect(replacementUri).toBe(uri);
           const replaced = yield* recallIndexStatus(config);
           expect(replaced.ready).toBe(true);
-          expect(replaced.generation).not.toBe(refreshed.generation);
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, replaced.generation!)).toBe('current');
+          expect(recallGeneration(replaced)).not.toBe(recallGeneration(refreshed));
+          expect(yield* vectorIndexGenerationReadiness(home, manifest, recallGeneration(replaced))).toBe('current');
         }).pipe(
           Effect.provideService(LocalModelRuntime, runtime),
           Effect.provideService(LocalModelStore, installedModelStore(home)),
@@ -216,7 +233,7 @@ describe('MCP recall background vector refresh', () => {
             yield* fs.writeFileString(resource, '# Trusted mutation\n\nOriginal semantic content.\n');
             const runtime = fakeRuntime((inputs, dimensions) =>
               Ref.update(embedded, prior => [...prior, ...inputs]).pipe(
-                Effect.as(inputs.map(() => unitVector(dimensions))),
+                Effect.as(EffectArray.map(inputs, () => unitVector(dimensions))),
               ),
             );
             const modelStore = installedModelStore(home);
@@ -271,11 +288,21 @@ describe('MCP recall background vector refresh', () => {
 
               const refreshed = yield* recallIndexStatus(config);
               expect(refreshed.ready).toBe(true);
-              expect(refreshed.generation).not.toBe(initial.generation);
-              expect(yield* vectorIndexGenerationReadiness(home, manifest, refreshed.generation!)).toBe('current');
+              expect(recallGeneration(refreshed)).not.toBe(initial.generation);
+              expect(yield* vectorIndexGenerationReadiness(home, manifest, recallGeneration(refreshed))).toBe(
+                'current',
+              );
               const inputs = yield* Ref.get(embedded);
-              expect(inputs.some(input => input.includes('Changed semantic content'))).toBe(true);
-              expect(inputs.some(input => input.includes('Latest unrelated corpus member'))).toBe(true);
+              expect(
+                EffectArray.some(inputs, input =>
+                  Effect2.pipe(input, EffectString.includes('Changed semantic content')),
+                ),
+              ).toBe(true);
+              expect(
+                EffectArray.some(inputs, input =>
+                  Effect2.pipe(input, EffectString.includes('Latest unrelated corpus member')),
+                ),
+              ).toBe(true);
             }).pipe(
               Effect.provideService(LocalModelRuntime, runtime),
               Effect.provideService(LocalModelStore, observedStore),
@@ -330,10 +357,10 @@ describe('MCP recall background vector refresh', () => {
           Ref.updateAndGet(calls, count => count + 1).pipe(
             Effect.flatMap(call =>
               call === 1
-                ? Effect.succeed(inputs.map(() => unitVector(dimensions)))
+                ? Effect.succeed(EffectArray.map(inputs, () => unitVector(dimensions)))
                 : Deferred.succeed(vectorRefreshStarted, undefined).pipe(
                     Effect.andThen(Deferred.await(releaseVectorRefresh)),
-                    Effect.as(inputs.map(() => unitVector(dimensions))),
+                    Effect.as(EffectArray.map(inputs, () => unitVector(dimensions))),
                   ),
             ),
           ),
@@ -357,12 +384,12 @@ describe('MCP recall background vector refresh', () => {
 
           const lexical = yield* recallIndexStatus(config);
           expect(lexical.ready).toBe(true);
-          expect(lexical.generation).not.toBe(initial.generation);
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, lexical.generation!)).not.toBe('current');
+          expect(recallGeneration(lexical)).not.toBe(initial.generation);
+          expect(yield* vectorIndexGenerationReadiness(home, manifest, recallGeneration(lexical))).not.toBe('current');
 
           yield* Deferred.succeed(releaseVectorRefresh, undefined);
           yield* Fiber.join(refresh);
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, lexical.generation!)).toBe('current');
+          expect(yield* vectorIndexGenerationReadiness(home, manifest, recallGeneration(lexical))).toBe('current');
           expect(yield* Ref.get(calls)).toBe(2);
         }).pipe(
           Effect.provideService(LocalModelRuntime, runtime),
@@ -397,7 +424,7 @@ describe('MCP recall background vector refresh', () => {
                   )
                 : Effect.void,
             ),
-            Effect.as(inputs.map(() => unitVector(dimensions))),
+            Effect.as(EffectArray.map(inputs, () => unitVector(dimensions))),
           ),
         );
 
@@ -409,7 +436,7 @@ describe('MCP recall background vector refresh', () => {
           yield* expireRecallIndexValidation(home, false, [uri]);
           expect(yield* scheduleMcpRecallBackgroundRefresh(config, manifest)).toBe('scheduled');
           yield* Deferred.await(firstRefreshStarted);
-          const firstGeneration = (yield* recallIndexStatus(config)).generation;
+          const firstGeneration = recallGeneration(yield* recallIndexStatus(config));
           expect(firstGeneration).toBeDefined();
           expect(firstGeneration).not.toBe(initial.generation);
 
@@ -458,7 +485,7 @@ describe('MCP recall background vector refresh', () => {
                   ? Deferred.succeed(refreshStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseRefresh)))
                   : Effect.void,
               ),
-              Effect.as(inputs.map(() => unitVector(dimensions))),
+              Effect.as(EffectArray.map(inputs, () => unitVector(dimensions))),
             ),
           );
           const store = installedModelStore(home);
@@ -487,15 +514,32 @@ describe('MCP recall background vector refresh', () => {
             expect(Option.isSome(yield* Deferred.poll(requestsCompleted))).toBe(true);
             const results = yield* Fiber.join(requests);
             expect(results).toHaveLength(callers);
-            expect(results.every(result => result.status === 'unavailable')).toBe(true);
+            expect(EffectArray.every(results, result => result.status === 'unavailable')).toBe(true);
             expect(
-              results.every(result => Option.getOrUndefined(result.result.warning)?.includes('background refresh')),
+              EffectArray.every(results, result =>
+                Boolean(
+                  Effect2.pipe(Option.getOrUndefined(result.result.warning), effectOptionalString =>
+                    effectOptionalString == null
+                      ? undefined
+                      : Effect2.pipe(effectOptionalString, EffectString.includes('background refresh')),
+                  ),
+                ),
+              ),
             ).toBe(true);
             expect(
-              results.every(result => Option.getOrUndefined(result.result.warning)?.includes('without waiting')),
+              EffectArray.every(results, result =>
+                Boolean(
+                  Effect2.pipe(Option.getOrUndefined(result.result.warning), effectOptionalString =>
+                    effectOptionalString == null
+                      ? undefined
+                      : Effect2.pipe(effectOptionalString, EffectString.includes('without waiting')),
+                  ),
+                ),
+              ),
             ).toBe(true);
             expect(
-              results.every(
+              EffectArray.every(
+                results,
                 result =>
                   new TextEncoder().encode(Option.getOrUndefined(result.result.warning) ?? '').byteLength <= 180,
               ),
@@ -531,7 +575,7 @@ describe('MCP recall background vector refresh', () => {
         yield* fs.writeFileString(resource, '# First use\n\nFirst-use semantic content.\n');
         const calls = yield* Ref.make(0);
         const runtime = fakeRuntime((inputs, dimensions) =>
-          Ref.update(calls, count => count + 1).pipe(Effect.as(inputs.map(() => unitVector(dimensions)))),
+          Ref.update(calls, count => count + 1).pipe(Effect.as(EffectArray.map(inputs, () => unitVector(dimensions)))),
         );
 
         yield* Effect.gen(function* () {
@@ -588,7 +632,7 @@ describe('MCP recall background vector refresh', () => {
                       ),
                     ),
                   )
-                : Effect.succeed(inputs.map(() => unitVector(dimensions))),
+                : Effect.succeed(EffectArray.map(inputs, () => unitVector(dimensions))),
             ),
           ),
         );
@@ -629,7 +673,7 @@ describe('MCP recall background vector refresh', () => {
         yield* fs.writeFileString(resource, '# Corrupt\n\nCorrupt semantic content.\n');
         const calls = yield* Ref.make(0);
         const runtime = fakeRuntime((inputs, dimensions) =>
-          Ref.update(calls, count => count + 1).pipe(Effect.as(inputs.map(() => unitVector(dimensions)))),
+          Ref.update(calls, count => count + 1).pipe(Effect.as(EffectArray.map(inputs, () => unitVector(dimensions)))),
         );
 
         yield* Effect.gen(function* () {
@@ -754,7 +798,11 @@ const awaitRefreshedRecallReadiness = Effect.fn('test.awaitRefreshedRecallReadin
   for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const status = yield* recallIndexStatus(config);
     if (status.ready && status.generation && status.generation !== previousGeneration) {
-      const readiness = yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, status.generation);
+      const readiness = yield* vectorIndexGenerationReadiness(
+        config.agentContextHome,
+        manifest,
+        recallGeneration(status),
+      );
       if (readiness === 'current') return status.generation;
     }
     yield* Effect.yieldNow;

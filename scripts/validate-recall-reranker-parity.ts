@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -15,6 +16,8 @@ import {
   evaluateRecallRerankerParity,
   parseRecallRerankerParityFixtureV1,
 } from './training/recall-reranker-parity.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const validateParity = Effect.gen(function* () {
   const path = yield* Path.Path;
@@ -28,7 +31,7 @@ const validateParity = Effect.gen(function* () {
   const nativeScores = new Map<string, readonly number[]>();
   for (const group of fixture.groups) {
     const scores = yield* runtime.rerank({
-      documents: group.candidates.map(candidate => candidate.document),
+      documents: EffectArray.map(group.candidates, candidate => candidate.document),
       manifest,
       modelPath: options.model,
       query: group.query,
@@ -165,7 +168,12 @@ const verifyModelArtifact = Effect.fn('validateRecallRerankerParity.verifyModelA
 });
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
 

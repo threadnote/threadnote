@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {canonicalJson} from '../checkpoint/canonical_json.js';
 import {
   codeGraphCheckpointRecordOrderKey,
@@ -12,6 +13,7 @@ import {sha256Digest, type Sha256Digest} from './digest.js';
 import {graphSharingFailure} from './errors.js';
 import type {GraphShareFrontierManifestV1} from './artifacts.js';
 import type {GraphShareProfileV1} from './profile.js';
+import * as EffectRecord from 'effect/Record';
 
 export interface GraphShareLogicalModel {
   readonly records: ReadonlyMap<string, string>;
@@ -47,7 +49,7 @@ export function deleteLogicalRecord(model: GraphShareLogicalModel, key: string):
 export function logicalGraphDigest(model: GraphShareLogicalModel): Sha256Digest {
   return sha256Digest(
     canonicalJson(
-      Object.fromEntries([...model.records.entries()].sort(([left], [right]) => compareCodeUnits(left, right))),
+      EffectRecord.fromEntries([...model.records.entries()].sort(([left], [right]) => compareCodeUnits(left, right))),
     ),
   );
 }
@@ -62,11 +64,15 @@ export function diffLogicalGraphs(
     readonly targetCommit: string;
   },
 ): GraphShareLogicalDeltaV1 {
-  const deletions = [...base.records.keys()].filter(key => !target.records.has(key)).sort(compareCodeUnits);
-  const upserts = [...target.records.entries()]
-    .filter(([key, value]) => base.records.get(key) !== value)
-    .sort(([left], [right]) => compareCodeUnits(left, right))
-    .map(([key, value]) => ({key, value}));
+  const deletions = EffectArray.filter([...base.records.keys()], key => !target.records.has(key)).sort(
+    compareCodeUnits,
+  );
+  const upserts = EffectArray.map(
+    EffectArray.filter([...target.records.entries()], ([key, value]) => base.records.get(key) !== value).sort(
+      ([left], [right]) => compareCodeUnits(left, right),
+    ),
+    ([key, value]) => ({key, value}),
+  );
   return {
     ...meta,
     baseLogicalDigest: logicalGraphDigest(base),
@@ -119,21 +125,22 @@ export function diffCheckpointRecords(
   readonly upserts: readonly CodeGraphCheckpointRecordV1[];
 } {
   const targetByKey = new Map(
-    target.map(record => [checkpointRecordIdentityKey(codeGraphCheckpointRecordOrderKey(record)), record]),
+    EffectArray.map(target, record => [checkpointRecordIdentityKey(codeGraphCheckpointRecordOrderKey(record)), record]),
   );
-  const deletions = base
-    .map(record => codeGraphCheckpointRecordOrderKey(record))
-    .filter(key => !targetByKey.has(checkpointRecordIdentityKey(key)))
-    .sort(compareCodeGraphCheckpointRecordOrderKeys);
+  const deletions = EffectArray.filter(
+    EffectArray.map(base, record => codeGraphCheckpointRecordOrderKey(record)),
+    key => !targetByKey.has(checkpointRecordIdentityKey(key)),
+  ).sort(compareCodeGraphCheckpointRecordOrderKeys);
   const baseByKey = new Map(
-    base.map(record => [checkpointRecordIdentityKey(codeGraphCheckpointRecordOrderKey(record)), canonicalJson(record)]),
+    EffectArray.map(base, record => [
+      checkpointRecordIdentityKey(codeGraphCheckpointRecordOrderKey(record)),
+      canonicalJson(record),
+    ]),
   );
-  const upserts = target
-    .filter(record => {
-      const key = checkpointRecordIdentityKey(codeGraphCheckpointRecordOrderKey(record));
-      return baseByKey.get(key) !== canonicalJson(record);
-    })
-    .sort(compareCodeGraphCheckpointRecords);
+  const upserts = EffectArray.filter(target, record => {
+    const key = checkpointRecordIdentityKey(codeGraphCheckpointRecordOrderKey(record));
+    return baseByKey.get(key) !== canonicalJson(record);
+  }).sort(compareCodeGraphCheckpointRecords);
   return {deletions, upserts};
 }
 
@@ -145,7 +152,7 @@ export function applyCheckpointRecords(
   },
 ): readonly CodeGraphCheckpointRecordV1[] {
   const records = new Map(
-    base.map(record => [checkpointRecordIdentityKey(codeGraphCheckpointRecordOrderKey(record)), record]),
+    EffectArray.map(base, record => [checkpointRecordIdentityKey(codeGraphCheckpointRecordOrderKey(record)), record]),
   );
   for (const deletion of delta.deletions) records.delete(checkpointRecordIdentityKey(deletion));
   for (const upsert of delta.upserts) {
@@ -248,7 +255,8 @@ export function graphShareApplyBaseMatches(
   if (existing.snapshotId === selected.checkpoint.snapshotId || existing.snapshotId === selected.snapshotId) {
     return true;
   }
-  return selected.deltas.some(
+  return EffectArray.some(
+    selected.deltas,
     delta => delta.baseSnapshotId === existing.snapshotId || delta.targetSnapshotId === existing.snapshotId,
   );
 }

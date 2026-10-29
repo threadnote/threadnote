@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -29,19 +30,20 @@ interface OwnedEntry extends PreparedSpoolBudgetEntry {
   state?: 'active' | 'waiting';
 }
 
-class CodeGraphPreparedSpoolBudgetError extends Schema.TaggedError<CodeGraphPreparedSpoolBudgetError>()(
-  'CodeGraphPreparedSpoolBudgetError',
-  {message: Schema.String},
-) {}
+class CodeGraphPreparedSpoolBudgetError extends Schema.TaggedError<
+  CodeGraphPreparedSpoolBudgetError,
+  {readonly brand: unique symbol}
+>()('CodeGraphPreparedSpoolBudgetError', {message: Schema.String}) {}
 
 export function preparedSpoolBudgetCanAdmit(activeBytes: readonly number[], requestedBytes: number): boolean {
-  if (!validBytes(requestedBytes) || activeBytes.some(value => !validBytes(value))) return false;
+  if (!validBytes(requestedBytes) || EffectArray.some(activeBytes, value => !validBytes(value))) return false;
   if (activeBytes.length >= CODE_GRAPH_PREPARED_SPOOL_COUNT_LIMIT) return false;
   if (activeBytes.length === 0) return true;
   if (requestedBytes > CODE_GRAPH_PREPARED_SPOOL_BYTES_LIMIT) return false;
   return (
-    activeBytes.reduce((total, value) => Math.min(Number.MAX_SAFE_INTEGER, total + value), requestedBytes) <=
-    CODE_GRAPH_PREPARED_SPOOL_BYTES_LIMIT
+    EffectArray.reduce(activeBytes, requestedBytes, (total, value) =>
+      Math.min(Number.MAX_SAFE_INTEGER, total + value),
+    ) <= CODE_GRAPH_PREPARED_SPOOL_BYTES_LIMIT
   );
 }
 
@@ -160,18 +162,18 @@ const activateTicket = Effect.fn('codeGraph.preparedSpoolBudget.activate')(funct
     codeGraphPreparedSpoolBudgetLockPath(path, threadnoteHome),
     Effect.gen(function* () {
       const entries = yield* scanEntries(fs, path, system, threadnoteHome);
-      const current = entries.find(entry => entry.token === owned.token);
+      const current = Option.getOrUndefined(EffectArray.findFirst(entries, entry => entry.token === owned.token));
       if (!current || current.serialized !== owned.serialized || current.state !== 'waiting') {
         return yield* CodeGraphPreparedSpoolBudgetError.make({message: 'Prepared spool budget ticket changed.'});
       }
-      const active = entries.filter(entry => entry.state === 'active');
-      const waiting = entries.flatMap(entry =>
+      const active = EffectArray.filter(entries, entry => entry.state === 'active');
+      const waiting = EffectArray.flatMap(entries, entry =>
         entry.state === 'waiting' && entry.createdAt !== undefined
           ? [{bytes: entry.bytes, createdAt: entry.createdAt, token: entry.token}]
           : [],
       );
       const selected = selectCodeGraphPreparedSpoolBudgetTicket(
-        active.map(entry => entry.bytes),
+        EffectArray.map(active, entry => entry.bytes),
         waiting,
       );
       if (selected?.token !== owned.token) return undefined;
@@ -270,7 +272,7 @@ function parseEntry(serialized: string, token: string, version: 1 | 2): Prepared
       bytes: value.bytes,
       checkoutId: value.checkoutId,
       ...(version === 2
-        ? {createdAt: Number(value.createdAt), state: value.state as 'active' | 'waiting'}
+        ? {createdAt: Number(value.createdAt), state: value.state === 'waiting' ? 'waiting' : 'active'}
         : {state: 'active' as const}),
       processId: value.processId,
       ...(value.processStartIdentity === undefined ? {} : {processStartIdentity: value.processStartIdentity}),

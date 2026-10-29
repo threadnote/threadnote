@@ -1,3 +1,4 @@
+import {isManagerAutomaticReview} from '../api/response_guards.js';
 import React, {useEffect, useRef, useState} from 'react';
 import {ConsolidationModelPicker, useConsolidationModels} from '../consolidation_models.js';
 import {api, errorMessage} from '../ui/support.js';
@@ -30,14 +31,19 @@ export function AutomaticGenerate(props: {
     setBusy(true);
     setError('');
     try {
-      const result = await api<ManagerAutomaticReview>('/api/attention/automatic-review', {
-        action: 'generate',
-        project: props.project,
-        uri: props.item.uri,
-        expectedContentHash: props.item.targetHash,
-        backend,
-        modelId: model.model,
-      });
+      const result = await api<ManagerAutomaticReview>(
+        '/api/attention/automatic-review',
+        {
+          action: 'generate',
+          project: props.project,
+          uri: props.item.uri,
+          expectedContentHash: props.item.targetHash,
+          backend,
+          modelId: model.model,
+        },
+        undefined,
+        isManagerAutomaticReview,
+      );
       if (
         result.kind !== 'automatic-memory-review' ||
         result.project !== props.project ||
@@ -68,7 +74,13 @@ export function AutomaticGenerate(props: {
       <fieldset disabled={busy}>
         <label>
           Provider
-          <select value={backend} onChange={event => setBackend(event.target.value as 'local-ai' | 'effect-ai')}>
+          <select
+            value={backend}
+            onChange={event => {
+              const value = event.target.value;
+              if (value === 'local-ai' || value === 'effect-ai') setBackend(value);
+            }}
+          >
             <option value="local-ai">Local model</option>
             <option value="effect-ai">Configured remote provider</option>
           </select>

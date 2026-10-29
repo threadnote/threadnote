@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -63,25 +64,26 @@ describe('code graph progress telemetry properties', () => {
           {maxLength: 40, minLength: 1, selector: sample => sample.pathHash},
         ),
         samples => {
-          const telemetry = samples.map(sample => fixtureTelemetry(sample));
-          const forward = telemetry.reduce(
-            (current, sample) => retainCodeGraphSlowFileTelemetry(current, sample),
+          const telemetry = EffectArray.map(samples, sample => fixtureTelemetry(sample));
+          const forward = EffectArray.reduce(
+            telemetry,
             [] as readonly CodeGraphSlowFileTelemetry[],
+            (current, sample) => retainCodeGraphSlowFileTelemetry(current, sample),
           );
-          const reverse = [...telemetry]
-            .reverse()
-            .reduce(
-              (current, sample) => retainCodeGraphSlowFileTelemetry(current, sample),
-              [] as readonly CodeGraphSlowFileTelemetry[],
-            );
+          const reverse = EffectArray.reduce(
+            [...telemetry].reverse(),
+            [] as readonly CodeGraphSlowFileTelemetry[],
+            (current, sample) => retainCodeGraphSlowFileTelemetry(current, sample),
+          );
 
           expect(forward).toEqual(reverse);
           expect(forward.length).toBeLessThanOrEqual(10);
           expect(forward[0]?.durationMilliseconds).toBe(
-            Math.max(...telemetry.map(sample => sample.durationMilliseconds)),
+            Math.max(...EffectArray.map(telemetry, sample => sample.durationMilliseconds)),
           );
           expect(
-            forward.every(
+            EffectArray.every(
+              forward,
               (sample, index) => index === 0 || sample.durationMilliseconds <= forward[index - 1].durationMilliseconds,
             ),
           ).toBe(true);

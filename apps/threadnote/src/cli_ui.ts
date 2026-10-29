@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Console, Effect, Fiber, Ref, Schedule, Semaphore, Terminal} from 'effect';
 import {CliOutput, flushCliOutput} from './effect/cli/output.js';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type ColorName = 'blue' | 'cyan' | 'dim' | 'green' | 'red' | 'yellow';
 
@@ -86,12 +89,12 @@ export const promptForConfirmation = Effect.fn('cliUi.promptForConfirmation')(fu
 });
 
 export function confirmationAnswer(answer: string, defaultYes = false): boolean {
-  const normalized = answer.trim().toLowerCase();
+  const normalized = Effect2.pipe(answer, EffectString.trim, EffectString.toLowerCase);
   return normalized === '' ? defaultYes : normalized === 'y' || normalized === 'yes';
 }
 
 export function selectionIndex(answer: string, choiceCount: number, defaultIndex = 0): number | undefined {
-  const normalized = answer.trim();
+  const normalized = Effect2.pipe(answer, EffectString.trim);
   if (normalized === '') {
     return defaultIndex >= 0 && defaultIndex < choiceCount ? defaultIndex : undefined;
   }
@@ -179,7 +182,7 @@ export function clipInteractiveProgressText(text: string, columns: number): stri
   const characters = Array.from(text);
   if (characters.length <= budget) return text;
   if (budget <= 1) return '…';
-  return `${characters.slice(0, budget - 1).join('')}…`;
+  return `${EffectArray.join(characters.slice(0, budget - 1), '')}…`;
 }
 
 export function withProgressLine<A, E, R>(
@@ -307,5 +310,5 @@ export const startProgress = Effect.fn('cliUi.startProgress')(function* (message
 
 function progressMessageFamily(message: string): string {
   const separator = / · |:| \(/.exec(message);
-  return separator ? message.slice(0, separator.index) : message;
+  return separator ? Effect2.pipe(message, EffectString.slice(0, separator.index)) : message;
 }

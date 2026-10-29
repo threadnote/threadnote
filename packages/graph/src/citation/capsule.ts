@@ -1,4 +1,5 @@
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate} from 'effect';
 import {fromPromise} from '@threadnote/platform/errors';
 import {
   runtimePlatform,
@@ -10,6 +11,8 @@ import {codeGraphFileContentHashMatchesBytes} from '../content_identity.js';
 import {codeGraphRepositoryRoot} from '../layout.js';
 import {withCodeGraphLocalProvenanceLock} from '../local_provenance.js';
 import type {RepositoryIdentity} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_CITATION_CAPSULE_MAXIMUM_FILE_BYTES = 256 * 1_024;
 export const CODE_GRAPH_CITATION_CAPSULE_RETENTION = {
@@ -40,11 +43,23 @@ export interface CodeGraphCitationEvidenceCapsuleV1 {
   readonly version: 1;
 }
 
-function validSource(source: CodeGraphCitationEvidenceSourceV1): boolean {
+const isReferenceIdArray = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) &&
+  EffectArray.every(
+    value,
+    (reference): reference is string => typeof reference === 'string' && /^[0-9a-f]{64}$/.test(reference),
+  );
+
+function validSource(source: unknown): source is CodeGraphCitationEvidenceSourceV1 {
+  if (!Predicate.isObject(source)) return false;
   return (
+    typeof source.repositoryId === 'string' &&
     /^[0-9a-f]{64}$/.test(source.repositoryId) &&
+    typeof source.fileContentHash === 'string' &&
     /^[0-9a-f]{64}$/.test(source.fileContentHash) &&
+    typeof source.sourceCommit === 'string' &&
     /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(source.sourceCommit) &&
+    typeof source.sourceSnapshotId === 'string' &&
     /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/.test(source.sourceSnapshotId) &&
     typeof source.sourceDirty === 'boolean' &&
     typeof source.extractorSet === 'string' &&
@@ -52,9 +67,12 @@ function validSource(source: CodeGraphCitationEvidenceSourceV1): boolean {
     source.extractorSet.length <= 256 &&
     typeof source.path === 'string' &&
     source.path.length <= 4_096 &&
-    !source.path.startsWith('/') &&
+    !Effect2.pipe(source.path, EffectString.startsWith('/')) &&
     !/[\0\r\n\\]/.test(source.path) &&
-    source.path.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
+    EffectArray.every(
+      Effect2.pipe(source.path, EffectString.split('/')),
+      segment => segment.length > 0 && segment !== '.' && segment !== '..',
+    )
   );
 }
 
@@ -91,7 +109,16 @@ export function createCodeGraphCitationEvidenceCapsule(
     id: codeGraphCitationEvidenceCapsuleId(source),
     objectFormat,
     payload: Buffer.from(bytes).toString('base64'),
-    referenceIds: [...new Set(referenceIds.filter(value => /^[0-9a-f]{64}$/.test(value)))].sort().slice(0, 32),
+    referenceIds: [
+      ...new Set(
+        EffectArray.filter(
+          referenceIds,
+          (value, __effectArrayIndex) => __effectArrayIndex in referenceIds && /^[0-9a-f]{64}$/.test(value),
+        ),
+      ),
+    ]
+      .sort()
+      .slice(0, 32),
     retainedAt,
     source,
     version: 1,
@@ -111,19 +138,12 @@ export function parseCodeGraphCitationEvidenceCapsule(
       (value.objectFormat !== 'sha1' && value.objectFormat !== 'sha256') ||
       typeof value.payload !== 'string' ||
       typeof value.retainedAt !== 'string' ||
-      !Array.isArray(value.referenceIds) ||
-      !value.referenceIds.every(
-        (reference: unknown) => typeof reference === 'string' && /^[0-9a-f]{64}$/.test(reference),
-      ) ||
-      !Predicate.isObject(value.source)
+      !isReferenceIdArray(value.referenceIds) ||
+      !validSource(value.source)
     )
       return undefined;
-    const source = value.source as unknown as CodeGraphCitationEvidenceSourceV1;
-    if (
-      !validSource(source) ||
-      codeGraphCitationEvidenceCapsuleId(source) !== codeGraphCitationEvidenceCapsuleId(expected)
-    )
-      return undefined;
+    const source = value.source;
+    if (codeGraphCitationEvidenceCapsuleId(source) !== codeGraphCitationEvidenceCapsuleId(expected)) return undefined;
     const bytes = Buffer.from(value.payload, 'base64');
     if (bytes.toString('base64') !== value.payload) return undefined;
     const capsule = createCodeGraphCitationEvidenceCapsule(
@@ -158,7 +178,9 @@ export function selectCodeGraphCitationCapsuleRetention(
   readonly retire: readonly CodeGraphCitationCapsuleRetentionEntry[];
 } {
   const ordered = [...entries].sort(
-    (left, right) => right.retainedAt.localeCompare(left.retainedAt) || left.id.localeCompare(right.id),
+    (left, right) =>
+      Effect2.pipe(right.retainedAt, EffectString.localeCompare(left.retainedAt)) ||
+      Effect2.pipe(left.id, EffectString.localeCompare(right.id)),
   );
   const retain: CodeGraphCitationCapsuleRetentionEntry[] = [];
   const retire: CodeGraphCitationCapsuleRetentionEntry[] = [];
@@ -192,7 +214,11 @@ const capsuleDirectory = Effect.fn('codeGraph.citationCapsuleDirectory')(functio
   const path = yield* Path.Path;
   let parent = yield* fs.realPath(threadnoteHome);
   const root = codeGraphRepositoryRoot(path, parent, checkoutId);
-  const names = [...path.relative(parent, root).split(path.sep), 'local-context', 'citation-evidence'];
+  const names = [
+    ...Effect2.pipe(path.relative(parent, root), EffectString.split(path.sep)),
+    'local-context',
+    'citation-evidence',
+  ];
   for (const name of names) {
     const child = path.join(parent, name);
     if (Option.isSome(yield* fs.readLink(child).pipe(Effect.option))) return undefined;
@@ -316,7 +342,7 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
         (reservedAt === undefined
           ? now - Date.parse(previous.capsule.retainedAt) < 86_400_000
           : previous.capsule.retainedAt === retainedCapsule.retainedAt) &&
-        references.every(value => previous.capsule.referenceIds.includes(value))
+        EffectArray.every(references, value => previous.capsule.referenceIds.includes(value))
       )
         return true;
       const page = yield* runtimeTextDirectoryNamePage(
@@ -324,7 +350,12 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
         CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumCount + 1,
       );
       if (page.overflow) return false;
-      const names = page.names.filter(name => /^[0-9a-f]{64}\.json$/.test(name));
+      const names = EffectArrayPipe(page.names, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (name, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && /^[0-9a-f]{64}\.json$/.test(name),
+        ),
+      );
       const entries = yield* Effect.forEach(
         names,
         name =>
@@ -334,7 +365,7 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
               ? []
               : [
                   {
-                    id: name.slice(0, -5),
+                    id: Effect2.pipe(name, EffectString.slice(0, -5)),
                     regular: info.value.type === 'File',
                     bytes: Number(info.value.size),
                     retainedAt: Option.getOrUndefined(info.value.mtime)?.toISOString() ?? '',
@@ -345,7 +376,7 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
       );
       const serialized = `${JSON.stringify({...retainedCapsule, referenceIds: references})}\n`;
       const physical = [
-        ...entries.flat().filter(value => value.id !== capsule.id),
+        ...EffectArray.filter(entries.flat(), value => value.id !== capsule.id),
         {
           id: capsule.id,
           regular: true,
@@ -358,16 +389,20 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
       if (
         reservedAt !== undefined &&
         (entries.flat().length !== names.length ||
-          physical.some(entry => !entry.regular || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) ||
+          EffectArray.some(
+            physical,
+            entry => !entry.regular || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0,
+          ) ||
           physical.length > CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumCount ||
-          physical.reduce((sum, entry) => sum + entry.bytes, 0) > CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumBytes)
+          EffectArray.reduce(physical, 0, (sum, entry) => sum + entry.bytes) >
+            CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumBytes)
       )
         return false;
       const selection =
         reservedAt === undefined
           ? selectCodeGraphCitationCapsuleRetention(physical, now)
           : {retain: physical, retire: []};
-      if (!selection.retain.some(value => value.id === capsule.id)) return false;
+      if (!EffectArray.some(selection.retain, value => value.id === capsule.id)) return false;
       const crypto = yield* Crypto.Crypto;
       const temporary = path.join(directory, `pending-${yield* crypto.randomUUIDv4()}`);
       yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});

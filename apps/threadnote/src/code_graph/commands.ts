@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Console, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {startProgress, withProgressLine} from '../cli_ui.js';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
@@ -38,8 +39,6 @@ import {
 } from '@threadnote/graph/repository';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import type {
-  CodeGraphOverlayFallbackAssessment,
-  CodeGraphOverlayFallbackBoundary,
   CodeGraphProgress,
   CodeGraphQueryOptions,
   CodeGraphStatus,
@@ -86,7 +85,6 @@ import {
   type CodeGraphCliReadPlan,
 } from '@threadnote/graph/cli/freshness';
 import {exportCodeGraph, type CodeGraphExportFormat, type CodeGraphExportLimit} from '@threadnote/graph/export';
-import {materializationStorageShortfalls} from '@threadnote/graph/indexer/materialization';
 import {readCodeGraphBuildStatuses, selectCodeGraphBuildStatuses} from '@threadnote/graph/build_status';
 import {compactCodeGraphStorage, inspectCodeGraphStorage, type CodeGraphStorage} from '@threadnote/graph/storage';
 import {
@@ -119,16 +117,32 @@ import {
   serializeCodeGraphSnapshotPurgeResult,
 } from '@threadnote/graph/snapshot/purge';
 
+import * as EffectString from 'effect/String';
+import {
+  activeBatchNumber,
+  formatBytes,
+  formatMilliseconds,
+  materializationDiskWarning,
+  materializationStageLabel,
+  renderFallbackAssessment,
+  renderFallbackBoundary,
+  renderMaterializationRows,
+} from './materialization_output.js';
+import * as Effect2 from 'effect';
+
 interface CwdOption {
   readonly cwd?: string;
 }
 export {CODE_GRAPH_CLI_READ_TIMEOUT_MILLISECONDS, codeGraphCliReadPlan, codeGraphCliUsesBorrowedContinuity};
 export type {CodeGraphCliFreshnessPolicy, CodeGraphCliReadPlan};
 
-class CodeGraphCommandError extends Schema.TaggedError<CodeGraphCommandError>()('CodeGraphCommandError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class CodeGraphCommandError extends Schema.TaggedError<CodeGraphCommandError, {readonly brand: unique symbol}>()(
+  'CodeGraphCommandError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export function defaultCodeGraphCliFreshness(
   operation: CodeGraphQueryOptions['operation'],
@@ -278,7 +292,7 @@ export const runCodeGraphRepair = Effect.fn('codeGraph.command.repair')(function
   );
   if (completion) {
     yield* Console.log(
-      `${completion.doctorCheck.status.toUpperCase()} native code graph: ${completion.doctorCheck.detail}`,
+      `${Effect2.pipe(completion.doctorCheck.status, EffectString.toUpperCase)} native code graph: ${completion.doctorCheck.detail}`,
     );
   }
 });
@@ -297,7 +311,9 @@ export const runCodeGraphDiagnostics = Effect.fn('codeGraph.command.diagnostics'
             `${progress.phase === 'analyzing' ? 'Analyzing' : options.deep ? 'Deep-checking' : 'Checking'} native code graph database ${progress.current}/${progress.total}.`,
           ),
   });
-  yield* writeFinalCliOutput(options.json ? JSON.stringify(report) : renderCodeGraphDiagnostics(report).trimEnd());
+  yield* writeFinalCliOutput(
+    options.json ? JSON.stringify(report) : Effect2.pipe(renderCodeGraphDiagnostics(report), EffectString.trimEnd),
+  );
 });
 
 interface CodeGraphExportTemporaryIdentity {
@@ -343,16 +359,22 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
   const statuses = yield* readCodeGraphBuildStatuses(layout);
   const selection = selectCodeGraphBuildStatuses(statuses);
   const waitingFor = (reason: string) =>
-    statuses.find(
-      status => status.observation.liveness === 'active' && status.state === 'queued' && status.subphase === reason,
+    Option.getOrUndefined(
+      EffectArray.findFirst(
+        statuses,
+        status => status.observation.liveness === 'active' && status.state === 'queued' && status.subphase === reason,
+      ),
     );
   const waitingRepository =
-    statuses.find(
-      status =>
-        status.identity.worktreeId === identity.worktreeId &&
-        status.observation.liveness === 'active' &&
-        status.state === 'queued' &&
-        status.subphase === 'repository-lock',
+    Option.getOrUndefined(
+      EffectArray.findFirst(
+        statuses,
+        status =>
+          status.identity.worktreeId === identity.worktreeId &&
+          status.observation.liveness === 'active' &&
+          status.state === 'queued' &&
+          status.subphase === 'repository-lock',
+      ),
     ) ?? waitingFor('repository-lock');
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
@@ -393,9 +415,11 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
   };
   const buildStatuses = selection.builds;
   const current =
-    buildStatuses.find(status => status.identity.worktreeId === identity.worktreeId) ??
-    buildStatuses.find(status => status.observation.liveness === 'active');
-  const queuedWorktreeIds = [...new Set(selection.waiters.map(status => status.identity.worktreeId))];
+    Option.getOrUndefined(
+      EffectArray.findFirst(buildStatuses, status => status.identity.worktreeId === identity.worktreeId),
+    ) ??
+    Option.getOrUndefined(EffectArray.findFirst(buildStatuses, status => status.observation.liveness === 'active'));
+  const queuedWorktreeIds = [...new Set(EffectArray.map(selection.waiters, status => status.identity.worktreeId))];
   if (options.json) {
     yield* writeFinalCliOutput(
       serializeCodeGraphStatusV5(
@@ -407,6 +431,7 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
           databasePath: layout.databasePath,
           identity,
           languagePacks: ready.languagePacks,
+          // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
           ...(Object.keys(locks).length === 0 ? {} : {locks}),
           obsoleteStores,
           ...(ready.projectCoverage === undefined ? {} : {projectCoverage: ready.projectCoverage}),
@@ -446,9 +471,14 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
     if (current.scheduling?.blocker) yield* Console.log(`Waiting for: ${current.scheduling.blocker}`);
     if (current.scheduling?.phaseMilliseconds) {
       yield* Console.log(
-        `Phase time: ${Object.entries(current.scheduling.phaseMilliseconds)
-          .map(([phase, milliseconds]) => `${phase} ${formatStatusDuration(milliseconds)}`)
-          .join(' · ')}`,
+        `Phase time: ${EffectArray.join(
+          EffectArray.map(
+            // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+            Object.entries(current.scheduling.phaseMilliseconds),
+            ([phase, milliseconds]) => `${phase} ${formatStatusDuration(milliseconds)}`,
+          ),
+          ' · ',
+        )}`,
       );
     }
     if (locks.databaseWriter) {
@@ -462,7 +492,7 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
       const label =
         locks.repository.worktreeId === identity.worktreeId
           ? 'Repository lock'
-          : `Repository lock (worktree ${locks.repository.worktreeId.slice(0, 8)})`;
+          : `Repository lock (worktree ${Effect2.pipe(locks.repository.worktreeId, EffectString.slice(0, 8))})`;
       yield* Console.log(
         locks.repository.state === 'active'
           ? `${label}: PID ${locks.repository.owner.processId} · inspect with threadnote processes`
@@ -473,54 +503,63 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
     if (counters) yield* Console.log(`Progress: ${counters}`);
     if (current.activity) {
       const activity = current.activity;
-      const details = [
-        `${activity.stage} ${activity.language}`,
-        formatBytes(activity.bytes),
-        `batch ${activity.batchCompleted}/${activity.batchTotal}`,
-        activity.parseMilliseconds === undefined
-          ? undefined
-          : `parse ${formatMilliseconds(activity.parseMilliseconds)}`,
-        activity.persistMilliseconds === undefined
-          ? undefined
-          : `persist ${formatMilliseconds(activity.persistMilliseconds)}`,
-        activity.degraded ? 'metadata fallback' : undefined,
-      ].filter((value): value is string => value !== undefined);
-      yield* Console.log(`Current activity: ${details.join(' · ')}`);
+      const details = EffectArray.filter(
+        [
+          `${activity.stage} ${activity.language}`,
+          formatBytes(activity.bytes),
+          `batch ${activity.batchCompleted}/${activity.batchTotal}`,
+          activity.parseMilliseconds === undefined
+            ? undefined
+            : `parse ${formatMilliseconds(activity.parseMilliseconds)}`,
+          activity.persistMilliseconds === undefined
+            ? undefined
+            : `persist ${formatMilliseconds(activity.persistMilliseconds)}`,
+          activity.degraded ? 'metadata fallback' : undefined,
+        ],
+        (value): value is string => value !== undefined,
+      );
+      yield* Console.log(`Current activity: ${EffectArray.join(details, ' · ')}`);
     }
     if (current.materialization?.activity) {
       const activity = current.materialization.activity;
-      const details = [
-        materializationStageLabel(activity.stage),
-        `batch ${activeBatchNumber(activity.batchCompleted, activity.batchTotal)}/${activity.batchTotal}`,
-        `${formatBytes(activity.sourceBytes)} source`,
-        activity.cachedFactBytes === undefined ? undefined : `${formatBytes(activity.cachedFactBytes)} cached facts`,
-        activity.factsBytes === undefined ? undefined : `${formatBytes(activity.factsBytes)} final facts`,
-        renderMaterializationRows(activity.rows),
-        activity.elapsedMilliseconds === undefined
-          ? `active ${formatStatusDuration(Math.max(0, (yield* Clock.currentTimeMillis) - Date.parse(activity.startedAt)))}`
-          : `batch ${formatMilliseconds(activity.elapsedMilliseconds)}`,
-        activity.stageElapsedMilliseconds === undefined
-          ? undefined
-          : `stage ${formatMilliseconds(activity.stageElapsedMilliseconds)}`,
-        activity.transactionMilliseconds === undefined
-          ? undefined
-          : `transaction ${formatMilliseconds(activity.transactionMilliseconds)}`,
-      ].filter((value): value is string => value !== undefined);
-      yield* Console.log(`Current activity: ${details.join(' · ')}`);
+      const details = EffectArray.filter(
+        [
+          materializationStageLabel(activity.stage),
+          `batch ${activeBatchNumber(activity.batchCompleted, activity.batchTotal)}/${activity.batchTotal}`,
+          `${formatBytes(activity.sourceBytes)} source`,
+          activity.cachedFactBytes === undefined ? undefined : `${formatBytes(activity.cachedFactBytes)} cached facts`,
+          activity.factsBytes === undefined ? undefined : `${formatBytes(activity.factsBytes)} final facts`,
+          renderMaterializationRows(activity.rows),
+          activity.elapsedMilliseconds === undefined
+            ? `active ${formatStatusDuration(Math.max(0, (yield* Clock.currentTimeMillis) - Date.parse(activity.startedAt)))}`
+            : `batch ${formatMilliseconds(activity.elapsedMilliseconds)}`,
+          activity.stageElapsedMilliseconds === undefined
+            ? undefined
+            : `stage ${formatMilliseconds(activity.stageElapsedMilliseconds)}`,
+          activity.transactionMilliseconds === undefined
+            ? undefined
+            : `transaction ${formatMilliseconds(activity.transactionMilliseconds)}`,
+        ],
+        (value): value is string => value !== undefined,
+      );
+      yield* Console.log(`Current activity: ${EffectArray.join(details, ' · ')}`);
     }
     if (current.activation?.activity) {
       const activity = current.activation.activity;
-      const details = [
-        activity.stage.replaceAll('-', ' '),
-        activity.state,
-        activity.rows === undefined ? undefined : `${activity.rows.toLocaleString()} rows`,
-        `stage ${formatMilliseconds(activity.stageElapsedMilliseconds)}`,
-        `total ${formatMilliseconds(activity.elapsedMilliseconds)}`,
-        activity.transactionMilliseconds === undefined
-          ? undefined
-          : `transaction ${formatMilliseconds(activity.transactionMilliseconds)}`,
-      ].filter((value): value is string => value !== undefined);
-      yield* Console.log(`Current activity: activating · ${details.join(' · ')}`);
+      const details = EffectArray.filter(
+        [
+          Effect2.pipe(activity.stage, EffectString.replaceAll('-', ' ')),
+          activity.state,
+          activity.rows === undefined ? undefined : `${activity.rows.toLocaleString()} rows`,
+          `stage ${formatMilliseconds(activity.stageElapsedMilliseconds)}`,
+          `total ${formatMilliseconds(activity.elapsedMilliseconds)}`,
+          activity.transactionMilliseconds === undefined
+            ? undefined
+            : `transaction ${formatMilliseconds(activity.transactionMilliseconds)}`,
+        ],
+        (value): value is string => value !== undefined,
+      );
+      yield* Console.log(`Current activity: activating · ${EffectArray.join(details, ' · ')}`);
     }
     if (current.resolution?.activity) {
       const activity = current.resolution.activity;
@@ -535,41 +574,46 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
         `transactions ${formatMilliseconds(activity.transactionMilliseconds)}`,
         `total ${formatMilliseconds(activity.elapsedMilliseconds)}`,
       ];
-      yield* Console.log(`Reference resolution: ${details.join(' · ')}`);
+      yield* Console.log(`Reference resolution: ${EffectArray.join(details, ' · ')}`);
     }
     if (current.materialization?.metrics) {
       const metrics = current.materialization.metrics;
-      const details = [
-        metrics.mode === undefined ? undefined : `${metrics.mode.replaceAll('-', ' ')} materialization`,
-        metrics.fallbackReason === undefined
-          ? undefined
-          : `incremental fallback: ${metrics.fallbackReason.replaceAll('-', ' ')}`,
-        renderFallbackAssessment(metrics.fallbackAssessment),
-        renderFallbackBoundary(metrics.fallbackBoundary),
-        `${metrics.batchesCompleted}/${metrics.batchesTotal} batches committed`,
-        `${formatBytes(metrics.sourceBytesCompleted)}/${formatBytes(metrics.sourceBytesTotal)} source`,
-        metrics.cachedFactBytesCompleted === undefined
-          ? undefined
-          : `${formatBytes(metrics.cachedFactBytesCompleted)}${
-              metrics.cachedFactBytesTotal === undefined ? '' : `/${formatBytes(metrics.cachedFactBytesTotal)}`
-            } cached facts`,
-        metrics.factsBytesCompleted === undefined
-          ? undefined
-          : `${formatBytes(metrics.factsBytesCompleted)}${
-              metrics.factsBytesTotal === undefined ? '' : `/${formatBytes(metrics.factsBytesTotal)}`
-            } final facts`,
-        renderMaterializationRows(metrics.rows),
-        metrics.loadingMilliseconds === undefined
-          ? undefined
-          : `load ${formatMilliseconds(metrics.loadingMilliseconds)}`,
-        metrics.attributionMilliseconds === undefined
-          ? undefined
-          : `attribute ${formatMilliseconds(metrics.attributionMilliseconds)}`,
-        metrics.transactionMilliseconds === undefined
-          ? undefined
-          : `transactions ${formatMilliseconds(metrics.transactionMilliseconds)}`,
-      ].filter((value): value is string => value !== undefined);
-      yield* Console.log(`Materialized: ${details.join(' · ')}`);
+      const details = EffectArray.filter(
+        [
+          metrics.mode === undefined
+            ? undefined
+            : `${Effect2.pipe(metrics.mode, EffectString.replaceAll('-', ' '))} materialization`,
+          metrics.fallbackReason === undefined
+            ? undefined
+            : `incremental fallback: ${Effect2.pipe(metrics.fallbackReason, EffectString.replaceAll('-', ' '))}`,
+          renderFallbackAssessment(metrics.fallbackAssessment),
+          renderFallbackBoundary(metrics.fallbackBoundary),
+          `${metrics.batchesCompleted}/${metrics.batchesTotal} batches committed`,
+          `${formatBytes(metrics.sourceBytesCompleted)}/${formatBytes(metrics.sourceBytesTotal)} source`,
+          metrics.cachedFactBytesCompleted === undefined
+            ? undefined
+            : `${formatBytes(metrics.cachedFactBytesCompleted)}${
+                metrics.cachedFactBytesTotal === undefined ? '' : `/${formatBytes(metrics.cachedFactBytesTotal)}`
+              } cached facts`,
+          metrics.factsBytesCompleted === undefined
+            ? undefined
+            : `${formatBytes(metrics.factsBytesCompleted)}${
+                metrics.factsBytesTotal === undefined ? '' : `/${formatBytes(metrics.factsBytesTotal)}`
+              } final facts`,
+          renderMaterializationRows(metrics.rows),
+          metrics.loadingMilliseconds === undefined
+            ? undefined
+            : `load ${formatMilliseconds(metrics.loadingMilliseconds)}`,
+          metrics.attributionMilliseconds === undefined
+            ? undefined
+            : `attribute ${formatMilliseconds(metrics.attributionMilliseconds)}`,
+          metrics.transactionMilliseconds === undefined
+            ? undefined
+            : `transactions ${formatMilliseconds(metrics.transactionMilliseconds)}`,
+        ],
+        (value): value is string => value !== undefined,
+      );
+      yield* Console.log(`Materialized: ${EffectArray.join(details, ' · ')}`);
       if (metrics.subphaseMilliseconds) {
         const subphases = metrics.subphaseMilliseconds;
         yield* Console.log(
@@ -582,73 +626,76 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
       }
       if (metrics.storage) {
         const storage = metrics.storage;
-        const storageDetails = [
-          storage.materializationMode === undefined
-            ? undefined
-            : `${storage.materializationMode.replaceAll('-', ' ')} materialization`,
-          storage.durableDatabaseBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableDatabaseBytes)} allocated durable pages`,
-          storage.durableDatabaseHighWaterBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableDatabaseHighWaterBytes)} allocated-page high-water`,
-          storage.durableDatabaseGrowthHighWaterBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableDatabaseGrowthHighWaterBytes)} main-database growth`,
-          storage.durableFilesystemHighWaterBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableFilesystemHighWaterBytes)} DB + sidecars high-water`,
-          storage.durableSidecarDatabaseHighWaterBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableSidecarDatabaseHighWaterBytes)} sorted-sidecar high-water`,
-          storage.durableSidecarJournalHighWaterBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableSidecarJournalHighWaterBytes)} sidecar journal high-water`,
-          storage.durableSidecarWalHighWaterBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableSidecarWalHighWaterBytes)} sidecar WAL high-water`,
-          storage.durableWalHighWaterBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableWalHighWaterBytes)} WAL high-water`,
-          storage.durableJournalHighWaterBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableJournalHighWaterBytes)} rollback-journal high-water`,
-          `${formatBytes(storage.temporaryDatabaseBytes)} current TEMP database`,
-          `${formatBytes(storage.temporaryDatabaseHighWaterBytes)} TEMP database high-water`,
-          storage.estimatedRequiredBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.estimatedRequiredBytes)} combined estimate`,
-          storage.estimatedTemporaryFilesystemRequiredBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.estimatedTemporaryFilesystemRequiredBytes)} TEMP-filesystem requirement`,
-          storage.estimatedDurableFilesystemRequiredBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.estimatedDurableFilesystemRequiredBytes)} graph-filesystem requirement`,
-          storage.estimatedTemporaryDatabaseBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.estimatedTemporaryDatabaseBytes)} estimated TEMP`,
-          storage.estimatedDurableSnapshotBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.estimatedDurableSnapshotBytes)} estimated snapshot/WAL`,
-          storage.estimatedJournalBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.estimatedJournalBytes)} estimated journals`,
-          storage.estimatedConcurrentBuildBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.estimatedConcurrentBuildBytes)} concurrent-build allowance`,
-          storage.filesystemsShared === true ? 'TEMP and graph database share a filesystem' : undefined,
-          storage.temporaryAvailableBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.temporaryAvailableBytes)} available for TEMP`,
-          storage.durableAvailableBytes === undefined
-            ? undefined
-            : `${formatBytes(storage.durableAvailableBytes)} available for graph database`,
-          storage.estimateBasis === undefined
-            ? undefined
-            : `estimate from ${storage.estimateBasis.replaceAll('-', ' ')}`,
-        ].filter((value): value is string => value !== undefined);
+        const storageDetails = EffectArray.filter(
+          [
+            storage.materializationMode === undefined
+              ? undefined
+              : `${Effect2.pipe(storage.materializationMode, EffectString.replaceAll('-', ' '))} materialization`,
+            storage.durableDatabaseBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableDatabaseBytes)} allocated durable pages`,
+            storage.durableDatabaseHighWaterBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableDatabaseHighWaterBytes)} allocated-page high-water`,
+            storage.durableDatabaseGrowthHighWaterBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableDatabaseGrowthHighWaterBytes)} main-database growth`,
+            storage.durableFilesystemHighWaterBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableFilesystemHighWaterBytes)} DB + sidecars high-water`,
+            storage.durableSidecarDatabaseHighWaterBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableSidecarDatabaseHighWaterBytes)} sorted-sidecar high-water`,
+            storage.durableSidecarJournalHighWaterBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableSidecarJournalHighWaterBytes)} sidecar journal high-water`,
+            storage.durableSidecarWalHighWaterBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableSidecarWalHighWaterBytes)} sidecar WAL high-water`,
+            storage.durableWalHighWaterBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableWalHighWaterBytes)} WAL high-water`,
+            storage.durableJournalHighWaterBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableJournalHighWaterBytes)} rollback-journal high-water`,
+            `${formatBytes(storage.temporaryDatabaseBytes)} current TEMP database`,
+            `${formatBytes(storage.temporaryDatabaseHighWaterBytes)} TEMP database high-water`,
+            storage.estimatedRequiredBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.estimatedRequiredBytes)} combined estimate`,
+            storage.estimatedTemporaryFilesystemRequiredBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.estimatedTemporaryFilesystemRequiredBytes)} TEMP-filesystem requirement`,
+            storage.estimatedDurableFilesystemRequiredBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.estimatedDurableFilesystemRequiredBytes)} graph-filesystem requirement`,
+            storage.estimatedTemporaryDatabaseBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.estimatedTemporaryDatabaseBytes)} estimated TEMP`,
+            storage.estimatedDurableSnapshotBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.estimatedDurableSnapshotBytes)} estimated snapshot/WAL`,
+            storage.estimatedJournalBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.estimatedJournalBytes)} estimated journals`,
+            storage.estimatedConcurrentBuildBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.estimatedConcurrentBuildBytes)} concurrent-build allowance`,
+            storage.filesystemsShared === true ? 'TEMP and graph database share a filesystem' : undefined,
+            storage.temporaryAvailableBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.temporaryAvailableBytes)} available for TEMP`,
+            storage.durableAvailableBytes === undefined
+              ? undefined
+              : `${formatBytes(storage.durableAvailableBytes)} available for graph database`,
+            storage.estimateBasis === undefined
+              ? undefined
+              : `estimate from ${Effect2.pipe(storage.estimateBasis, EffectString.replaceAll('-', ' '))}`,
+          ],
+          (value): value is string => value !== undefined,
+        );
         yield* Console.log(
-          `Materialization storage: ${storageDetails.join(' · ')} · rollback journals excluded from TEMP totals`,
+          `Materialization storage: ${EffectArray.join(storageDetails, ' · ')} · rollback journals excluded from TEMP totals`,
         );
         const diskWarning = materializationDiskWarning(storage);
         if (diskWarning) yield* Console.log(`Warning: ${diskWarning}`);
@@ -710,9 +757,13 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
   yield* renderObsoleteStoreStatus(obsoleteStores);
   yield* renderActiveStorageStatus(storage);
   yield* Console.log(
-    `Language packs: ${status.languagePacks
-      .map(pack => `${pack.id}@${pack.version} [${pack.languages.join(', ')}]`)
-      .join('; ')}`,
+    `Language packs: ${EffectArray.join(
+      EffectArray.map(
+        status.languagePacks,
+        pack => `${pack.id}@${pack.version} [${EffectArray.join(pack.languages, ', ')}]`,
+      ),
+      '; ',
+    )}`,
   );
   if (!status.readySnapshot) {
     yield* Console.log('Ready snapshot: none');
@@ -723,7 +774,7 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
       `${status.readySnapshot.symbolCount} symbols · ${status.readySnapshot.edgeCount} edges`,
   );
   yield* Console.log(
-    `Source: ${status.readySnapshot.commit.slice(0, 12)}${status.readySnapshot.dirty ? ' + dirty overlay' : ''} · ${
+    `Source: ${Effect2.pipe(status.readySnapshot.commit, EffectString.slice(0, 12))}${status.readySnapshot.dirty ? ' + dirty overlay' : ''} · ${
       status.stale ? 'stale' : 'current'
     }`,
   );
@@ -731,11 +782,14 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
 
 function renderObsoleteStoreStatus(inventory: ObsoleteCodeGraphStoreInventory): Effect.Effect<void> {
   if (inventory.fileCount === 0 && inventory.unsafeEntryCount === 0) return Effect.void;
-  const versions = inventory.checkouts.flatMap(checkout => checkout.versions);
-  const versionSummary = [...new Set(versions)]
-    .sort((left, right) => left - right)
-    .map(version => `v${version}`)
-    .join(', ');
+  const versions = EffectArray.flatMap(inventory.checkouts, checkout => checkout.versions);
+  const versionSummary = EffectArray.join(
+    EffectArray.map(
+      [...new Set(versions)].sort((left, right) => left - right),
+      version => `v${version}`,
+    ),
+    ', ',
+  );
   return Console.log(
     `Obsolete stores: ${inventory.fileCount} file(s), ${inventory.bytes} byte(s)` +
       (versionSummary ? ` (${versionSummary})` : '') +
@@ -789,19 +843,6 @@ function renderActiveStorageStatus(storage: CodeGraphStorage): Effect.Effect<voi
         (page.threshold.reason === 'freelist-and-fragmentation' ? '; fragmentation crossed the threshold.' : '.'),
     );
   });
-}
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return 'unknown';
-  if (bytes < 1024) return `${Math.round(bytes)} B`;
-  const units = ['KiB', 'MiB', 'GiB', 'TiB'] as const;
-  let value = bytes / 1024;
-  let unit: (typeof units)[number] = units[0];
-  for (let index = 1; index < units.length && value >= 1024; index += 1) {
-    value /= 1024;
-    unit = units[index]!;
-  }
-  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${unit}`;
 }
 
 function formatPercent(ratio: number): string {
@@ -909,7 +950,9 @@ export const runCodeGraphWorksetPrepare = Effect.fn('codeGraph.command.worksetPr
     yield* healAnchorsAfterWorksetPrepare(config, result.workset);
   }
   yield* writeFinalCliOutput(
-    options.json ? JSON.stringify(result) : renderCodeGraphWorksetPrepareResult(result).trimEnd(),
+    options.json
+      ? JSON.stringify(result)
+      : Effect2.pipe(renderCodeGraphWorksetPrepareResult(result), EffectString.trimEnd),
   );
   if (result.state === 'failed') {
     return yield* CodeGraphCommandError.make({
@@ -924,7 +967,9 @@ export const runCodeGraphWorksetStatus = Effect.fn('codeGraph.command.worksetSta
 ) {
   const result = yield* inspectCodeGraphWorksetStatus(config, options.name);
   yield* writeFinalCliOutput(
-    options.json ? JSON.stringify(result) : renderCodeGraphWorksetStatusResult(result).trimEnd(),
+    options.json
+      ? JSON.stringify(result)
+      : Effect2.pipe(renderCodeGraphWorksetStatusResult(result), EffectString.trimEnd),
   );
 });
 
@@ -955,7 +1000,7 @@ export function renderCodeGraphWorksetPrepareResult(result: CodeGraphWorksetPrep
     for (const warning of result.bridges.warnings) lines.push(`Warning: ${warning}`);
   }
   if (result.published !== undefined) lines.push(`Published generation: ${result.published.id}`);
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 export function renderCodeGraphWorksetStatusResult(result: CodeGraphWorksetStatusResultV1): string {
@@ -973,7 +1018,7 @@ export function renderCodeGraphWorksetStatusResult(result: CodeGraphWorksetStatu
     lines.push(`- ${member.project}: ${member.state}${member.reason ? ` (${member.reason})` : ''}`);
   }
   for (const warning of result.warnings) lines.push(`Warning: ${warning}`);
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 export const runCodeGraphAnalysis = Effect.fn('codeGraph.command.analysis')(function* (
@@ -993,8 +1038,21 @@ export const runCodeGraphAnalysis = Effect.fn('codeGraph.command.analysis')(func
   const budgetMilliseconds = options.readTimeoutMilliseconds ?? CODE_GRAPH_CLI_READ_TIMEOUT_MILLISECONDS;
   const deadline = (yield* Clock.currentTimeMillis) + budgetMilliseconds;
   const cwd = yield* commandCwd(options.cwd);
-  const communityId = options.communityId?.trim();
-  if (options.view === 'community' && !communityId?.match(/^cgc_[a-f0-9]{32}$/)) {
+  const communityId = Effect2.pipe(options.communityId, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  if (
+    options.view === 'community' &&
+    !Effect2.pipe(communityId, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(
+            effectOptionalString,
+            EffectString.match(/^cgc_[a-f0-9]{32}$/),
+            Effect2.Option.getOrElse(() => null),
+          ),
+    )
+  ) {
     return yield* CodeGraphCommandError.make({
       message: 'Community drill-down requires --community-id with a stable cgc_ identifier from graph communities.',
     });
@@ -1057,9 +1115,13 @@ export const runCodeGraphAnalysis = Effect.fn('codeGraph.command.analysis')(func
     );
     return;
   }
-  const rendered = renderCodeGraphAnalysis(result, options.view).trimEnd().split('\n');
+  const rendered = Effect2.pipe(
+    renderCodeGraphAnalysis(result, options.view),
+    EffectString.trimEnd,
+    EffectString.split('\n'),
+  );
   rendered.splice(1, 0, `Snapshot freshness: ${status.freshness} (requested ${status.freshnessPolicy})`);
-  yield* writeFinalCliOutput(rendered.join('\n'));
+  yield* writeFinalCliOutput(EffectArray.join(rendered, '\n'));
 });
 
 export const runCodeGraphReport = Effect.fn('codeGraph.command.report')(function* (
@@ -1140,7 +1202,9 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
       readonly workset?: string;
     },
 ) {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Keep native optional chaining so the branch narrows `options.workset`.
   if (options.workset?.trim()) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This read uses the value narrowed by the guard above.
     const worksetName = options.workset.trim();
     if (options.operation === 'path') {
       const result = yield* findCodeGraphWorksetPath(config, {
@@ -1154,7 +1218,9 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
       return;
     }
     if (options.operation === 'impact') {
-      const query = options.query?.trim();
+      const query = Effect2.pipe(options.query, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
       if (!query) return yield* CodeGraphCommandError.make({message: 'A workset impact trace requires --query.'});
       const result = yield* traceCodeGraphWorksetImpact(config, {
         maxDepth: options.depth,
@@ -1168,7 +1234,9 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
     if (options.operation !== 'query') {
       return yield* CodeGraphCommandError.make({message: '--workset is valid for graph query, path, and impact.'});
     }
-    const cursor = options.cursor?.trim();
+    const cursor = Effect2.pipe(options.cursor, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
     const projected = cursor
       ? yield* continueCodeGraphWorksetQueryV2(config, {
           cursor,
@@ -1183,19 +1251,33 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
           nodeLimit: options.nodeLimit,
           packageName: options.packageName,
           query:
-            options.query?.trim() ||
-            (yield* CodeGraphCommandError.make({message: 'A workset graph query requires --query or --cursor.'})),
+            Effect2.pipe(options.query, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            ) || (yield* CodeGraphCommandError.make({message: 'A workset graph query requires --query or --cursor.'})),
           worksetName,
         });
-    yield* writeFinalCliOutput(options.json ? JSON.stringify(projected.structuredContent) : projected.text.trimEnd());
+    yield* writeFinalCliOutput(
+      options.json ? JSON.stringify(projected.structuredContent) : Effect2.pipe(projected.text, EffectString.trimEnd),
+    );
     return;
   }
-  if (options.cursor?.trim() || options.budgetTokens !== undefined) {
+  if (
+    Effect2.pipe(options.cursor, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ||
+    options.budgetTokens !== undefined
+  ) {
     return yield* CodeGraphCommandError.make({message: '--cursor and --budget-tokens require --workset.'});
   }
-  if (options.operation === 'query' && !options.query?.trim()) {
+  if (
+    options.operation === 'query' &&
+    !Effect2.pipe(options.query, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  ) {
     return yield* CodeGraphCommandError.make({message: 'A graph query requires --query.'});
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Keep optional-chain narrowing for the qualified node identifier.
   const qualifiedTarget = options.nodeId?.startsWith('cgr_')
     ? yield* resolveCodeGraphQualifiedRefTarget(config, options.nodeId, options.cwd, options.project)
     : undefined;
@@ -1218,7 +1300,9 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
   if (readPlan.unavailable) {
     const unavailable = codeGraphCliReadState(status, freshness, options.operation, 'no-ready-snapshot');
     yield* writeFinalCliOutput(
-      options.json ? JSON.stringify(unavailable) : renderCodeGraphCliReadState(unavailable).trimEnd(),
+      options.json
+        ? JSON.stringify(unavailable)
+        : Effect2.pipe(renderCodeGraphCliReadState(unavailable), EffectString.trimEnd),
     );
     return;
   }
@@ -1265,7 +1349,9 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
       readTimeoutMilliseconds,
     );
     yield* writeFinalCliOutput(
-      options.json ? JSON.stringify(timedOut) : renderCodeGraphCliReadState(timedOut).trimEnd(),
+      options.json
+        ? JSON.stringify(timedOut)
+        : Effect2.pipe(renderCodeGraphCliReadState(timedOut), EffectString.trimEnd),
     );
     return;
   }
@@ -1278,7 +1364,9 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
         ],
       }
     : result.value.result;
-  yield* writeFinalCliOutput(options.json ? JSON.stringify(output) : renderCodeGraphResult(output).trimEnd());
+  yield* writeFinalCliOutput(
+    options.json ? JSON.stringify(output) : Effect2.pipe(renderCodeGraphResult(output), EffectString.trimEnd),
+  );
 });
 
 export const runCodeGraphWorksetTopology = Effect.fn('codeGraph.command.worksetTopology')(function* (
@@ -1309,7 +1397,7 @@ export function renderCodeGraphWorksetTraversal(result: CodeGraphCrossRepository
       `- ${traversalEndpointLabel(edge.source)} --${edge.relation}/${edge.provenance.kind}--> ${traversalEndpointLabel(edge.target)}`,
     );
   }
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 export function renderCodeGraphWorksetTopology(result: CodeGraphWorksetTopologyResultV1): string {
@@ -1328,7 +1416,7 @@ export function renderCodeGraphWorksetTopology(result: CodeGraphWorksetTopologyR
     }
   }
   for (const warning of result.warnings) lines.push(`Warning: ${warning}`);
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 function traversalEndpointLabel(endpoint: CodeGraphCrossRepositoryTraversalResultV1['visited'][number]): string {
@@ -1350,8 +1438,16 @@ export const runCodeGraphImpact = Effect.fn('codeGraph.command.impact')(function
     readonly workset?: string;
   },
 ) {
-  if (options.workset?.trim()) {
-    if (!options.query?.trim()) {
+  if (
+    Effect2.pipe(options.workset, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  ) {
+    if (
+      !Effect2.pipe(options.query, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      )
+    ) {
       return yield* CodeGraphCommandError.make({
         message: 'A workset impact trace requires --query with a qualified endpoint.',
       });
@@ -1360,8 +1456,15 @@ export const runCodeGraphImpact = Effect.fn('codeGraph.command.impact')(function
     return;
   }
   const cwd = yield* commandCwd(options.cwd);
-  const changes = options.query?.trim() ? undefined : yield* repositoryChangesSince(cwd, options.base ?? 'HEAD~1');
-  const input = options.query?.trim() || changes!.paths.join(' ');
+  const changes = Effect2.pipe(options.query, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  )
+    ? undefined
+    : yield* repositoryChangesSince(cwd, options.base ?? 'HEAD~1');
+  const input =
+    Effect2.pipe(options.query, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || EffectArray.join(changes!.paths, ' ');
   yield* runCodeGraphInspect(config, {
     ...options,
     baseCommit: changes?.baseCommit,
@@ -1446,8 +1549,13 @@ export const runCodeGraphPurge = Effect.fn('codeGraph.command.purge')(function* 
     const action = options.dryRun ? 'Would remove' : 'Removed';
     yield* Console.log(
       `${action} ${summary.fileCount} verified obsolete code graph file(s), ${summary.bytes} byte(s), ` +
-        `from checkout ${summary.checkoutId.slice(0, 12)}` +
-        (summary.versions.length > 0 ? ` (schema ${summary.versions.map(version => `v${version}`).join(', ')})` : '') +
+        `from checkout ${Effect2.pipe(summary.checkoutId, EffectString.slice(0, 12))}` +
+        (summary.versions.length > 0
+          ? ` (schema ${EffectArray.join(
+              EffectArray.map(summary.versions, version => `v${version}`),
+              ', ',
+            )})`
+          : '') +
         '.',
     );
     return;
@@ -1476,11 +1584,13 @@ export const runCodeGraphPurge = Effect.fn('codeGraph.command.purge')(function* 
         }),
     );
     if (!summary.existed) {
-      yield* Console.log(`No derived code graph index exists for checkout ${summary.checkoutId.slice(0, 12)}.`);
+      yield* Console.log(
+        `No derived code graph index exists for checkout ${Effect2.pipe(summary.checkoutId, EffectString.slice(0, 12))}.`,
+      );
       return;
     }
     yield* Console.log(
-      `${options.dryRun ? 'Would remove' : 'Removed'} derived code graph index for checkout ${summary.checkoutId.slice(0, 12)}.`,
+      `${options.dryRun ? 'Would remove' : 'Removed'} derived code graph index for checkout ${Effect2.pipe(summary.checkoutId, EffectString.slice(0, 12))}.`,
     );
     return;
   }
@@ -1673,7 +1783,11 @@ function commandCwd(value: string | undefined) {
   return Effect.gen(function* () {
     const system = yield* SystemInfo;
     const path = yield* Path.Path;
-    return path.resolve(value?.trim() || system.currentDirectory());
+    return path.resolve(
+      Effect2.pipe(value, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || system.currentDirectory(),
+    );
   });
 }
 
@@ -1682,8 +1796,12 @@ function parseCodeGraphExportLimit(
   flag: '--edge-limit' | '--node-limit',
 ): Effect.Effect<CodeGraphExportLimit | undefined, Error> {
   if (value === undefined || value === 'all') return Effect.succeed(value);
-  const parsed = typeof value === 'number' ? value : Number(value.trim());
-  if (!Number.isSafeInteger(parsed) || parsed < 0 || (typeof value === 'string' && !/^\d+$/.test(value.trim()))) {
+  const parsed = typeof value === 'number' ? value : Number(Effect2.pipe(value, EffectString.trim));
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < 0 ||
+    (typeof value === 'string' && !/^\d+$/.test(Effect2.pipe(value, EffectString.trim)))
+  ) {
     return Effect.fail(CodeGraphCommandError.make({message: `${flag} must be "all" or a non-negative safe integer.`}));
   }
   return Effect.succeed(parsed);
@@ -1861,124 +1979,4 @@ function syncExportDirectory(fs: FileSystem.FileSystem, directory: string): Effe
       Effect.ignore,
     ),
   );
-}
-
-function renderFallbackAssessment(assessment: CodeGraphOverlayFallbackAssessment | undefined): string | undefined {
-  if (assessment === undefined) return undefined;
-  return `assessment: ${assessment.detail.replaceAll('-', ' ')} (${assessment.changedFiles.toLocaleString()} changed)`;
-}
-
-function renderFallbackBoundary(boundary: CodeGraphOverlayFallbackBoundary | undefined): string | undefined {
-  if (boundary === undefined) return undefined;
-  return (
-    `boundary: ${boundary.metric.replaceAll('-', ' ')} ` +
-    `${boundary.observedAtDecision.toLocaleString()} > ${boundary.limit.toLocaleString()} ` +
-    `(${boundary.changedFiles.toLocaleString()} changed)`
-  );
-}
-
-function materializationDiskWarning(
-  storage:
-    | NonNullable<NonNullable<Extract<CodeGraphProgress, {readonly phase: 'materializing'}>['metrics']>['storage']>
-    | undefined,
-): string | undefined {
-  if (!storage) return undefined;
-  const shortfalls = materializationStorageShortfalls(storage);
-  if (shortfalls.length === 0) return undefined;
-  if (shortfalls[0] === 'shared') {
-    return (
-      `low disk: ${formatBytes(storage.availableBytes!)} available is below the ` +
-      `${formatBytes(storage.estimatedRequiredBytes!)} conservative combined estimate; ` +
-      'indexing continues with live telemetry'
-    );
-  }
-  const scopes = shortfalls.map(scope => {
-    const available = scope === 'temporary' ? storage.temporaryAvailableBytes : storage.durableAvailableBytes;
-    const required =
-      scope === 'temporary'
-        ? storage.estimatedTemporaryFilesystemRequiredBytes
-        : storage.estimatedDurableFilesystemRequiredBytes;
-    return `${scope} filesystem (${formatBytes(available!)} available, ${formatBytes(required!)} estimated)`;
-  });
-  return `low disk on ${scopes.join(' and ')}; indexing continues with live telemetry`;
-}
-
-function activeBatchNumber(completed: number, total: number): number {
-  return total === 0 ? 0 : Math.min(total, completed + 1);
-}
-
-function materializationStageLabel(
-  stage: NonNullable<Extract<CodeGraphProgress, {readonly phase: 'materializing'}>['activity']>['stage'],
-): string {
-  switch (stage) {
-    case 'loading-cache':
-      return 'loading cached facts';
-    case 'attributing':
-      return 'attributing facts';
-    case 'preparing-rows':
-      return 'preparing rows';
-    case 'restoring-indexes':
-      return 'restoring query indexes';
-    case 'writing-analysis':
-      return 'writing analysis summary';
-    case 'writing-symbols':
-      return 'writing symbols';
-    case 'writing-lookups':
-      return 'writing lookup keys';
-    case 'writing-terms':
-      return 'writing lexical terms';
-    case 'writing-edges':
-      return 'writing relationships';
-    case 'writing-references':
-      return 'writing references';
-    case 'writing-receipt':
-      return 'recording resumable batch';
-    case 'writing-candidates':
-      return 'writing reference candidates';
-    case 'writing-facts':
-      return 'writing graph facts';
-    case 'committing':
-      return 'committing batch';
-  }
-}
-
-function renderMaterializationRows(
-  rows:
-    | {
-        readonly edges?: number;
-        readonly deduplicatedEdges?: number;
-        readonly deduplicatedReferences?: number;
-        readonly lookupKeys?: number;
-        readonly referenceCandidates?: number;
-        readonly references?: number;
-        readonly reexports?: number;
-        readonly symbols?: number;
-        readonly terms?: number;
-      }
-    | undefined,
-): string | undefined {
-  if (!rows) return undefined;
-  const values = [
-    rows.symbols === undefined ? undefined : `${rows.symbols.toLocaleString()} symbols`,
-    rows.lookupKeys === undefined ? undefined : `${rows.lookupKeys.toLocaleString()} lookup keys`,
-    rows.terms === undefined ? undefined : `${rows.terms.toLocaleString()} terms`,
-    rows.edges === undefined ? undefined : `${rows.edges.toLocaleString()} relationships`,
-    rows.references === undefined ? undefined : `${rows.references.toLocaleString()} references`,
-    rows.referenceCandidates === undefined ? undefined : `${rows.referenceCandidates.toLocaleString()} candidates`,
-    rows.reexports === undefined ? undefined : `${rows.reexports.toLocaleString()} re-exports`,
-    rows.deduplicatedEdges === undefined || rows.deduplicatedEdges === 0
-      ? undefined
-      : `${rows.deduplicatedEdges.toLocaleString()} repeated relationships collapsed`,
-    rows.deduplicatedReferences === undefined || rows.deduplicatedReferences === 0
-      ? undefined
-      : `${rows.deduplicatedReferences.toLocaleString()} repeated resolution records collapsed`,
-  ].filter((value): value is string => value !== undefined);
-  return values.length > 0 ? values.join(', ') : undefined;
-}
-
-function formatMilliseconds(milliseconds: number): string {
-  if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'unknown';
-  if (milliseconds < 1) return '<1ms';
-  if (milliseconds < 1_000) return `${milliseconds.toFixed(milliseconds >= 100 ? 0 : 1)}ms`;
-  return `${(milliseconds / 1_000).toFixed(milliseconds >= 10_000 ? 1 : 2)}s`;
 }

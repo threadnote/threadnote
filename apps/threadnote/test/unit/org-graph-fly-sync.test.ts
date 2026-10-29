@@ -4,6 +4,8 @@ import {mkdtempSync, mkdirSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {afterEach, describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const script = new URL('../../../../deploy/threadnote-org-graph/sync-checkout.sh', import.meta.url).pathname;
 const roots: string[] = [];
@@ -45,9 +47,10 @@ function fixture() {
   const commit = (directory: string, content: string) => {
     writeFileSync(join(directory, 'source.txt'), content);
     execFileSync('git', ['-C', directory, 'add', '.']);
-    execFileSync('git', ['-C', directory, 'commit', '-m', content.trim()]);
+    execFileSync('git', ['-C', directory, 'commit', '-m', Effect.pipe(content, EffectString.trim)]);
   };
-  const head = () => execFileSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
+  const head = () =>
+    Effect.pipe(execFileSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], {encoding: 'utf8'}), EffectString.trim);
   return {checkout, commit, head, remote, run, seed};
 }
 

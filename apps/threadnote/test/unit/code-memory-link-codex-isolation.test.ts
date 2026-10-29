@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, mkdir, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -10,12 +11,15 @@ import {
   sanitizeCodeMemoryLinkAppServerEnvironment,
   type CodeMemoryLinkCodexClientConfigV1,
 } from '../../../../scripts/code-memory-link-codex-isolation.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Code Memory Link Codex isolation', () => {
   const temporaryRoots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('constructs a fresh allowlisted environment without inherited Threadnote or host state', () => {
@@ -37,7 +41,9 @@ describe('Code Memory Link Codex isolation', () => {
       PATH: '/usr/bin:/bin',
       TMPDIR: '/private/tmp',
     });
-    expect(Object.keys(environment).some(key => key.startsWith('THREADNOTE_'))).toBe(false);
+    expect(
+      EffectArray.some(EffectRecord.keys(environment), key => Effect.pipe(key, EffectString.startsWith('THREADNOTE_'))),
+    ).toBe(false);
   });
 
   it('generates a strict config with exactly one proxy and no ambient agent surfaces', () => {
@@ -47,7 +53,13 @@ describe('Code Memory Link Codex isolation', () => {
       repositoryRoot: '/public/repository',
     });
 
-    expect(generated.match(/^\[mcp_servers\./gmu)).toHaveLength(1);
+    expect(
+      Effect.pipe(
+        generated,
+        EffectString.match(/^\[mcp_servers\./gmu),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
     expect(generated).toContain('[mcp_servers.context_brief_gate]');
     expect(generated).toContain('enabled_tools = ["context_brief"]');
     expect(generated).toContain('args = ["/reviewed/proxy.bundle.js"]');
@@ -112,26 +124,26 @@ function config(): CodeMemoryLinkCodexClientConfigV1 {
   return {
     appServer: {
       executable: '/opt/codex/0.149.0-alpha.4.1/codex',
-      executableSha256: 'a'.repeat(64),
+      executableSha256: Effect.pipe('a', EffectString.repeat(64)),
       version: 'codex-cli 0.149.0-alpha.4.1',
     },
     authSourcePath: '/host/codex/auth.json',
-    git: {executable: '/private/safe-bin/git', executableSha256: 'c'.repeat(64)},
+    git: {executable: '/private/safe-bin/git', executableSha256: Effect.pipe('c', EffectString.repeat(64))},
     limits: {turnTimeoutMilliseconds: 900_000},
     model: {id: 'gpt-5.6-luna', provider: 'openai', reasoningEffort: 'medium'},
     proxy: {
       bunExecutable: '/opt/bun/bin/bun',
-      bunExecutableSha256: 'd'.repeat(64),
+      bunExecutableSha256: Effect.pipe('d', EffectString.repeat(64)),
       bundlePath: '/reviewed/proxy.bundle.js',
-      bundleSha256: 'b'.repeat(64),
+      bundleSha256: Effect.pipe('b', EffectString.repeat(64)),
     },
-    safeBinaries: CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES.map((name, index) => ({
+    safeBinaries: EffectArray.map(CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES, (name, index) => ({
       name,
       path: `/private/safe-bin/${name}`,
-      sha256: index.toString(16).repeat(64),
+      sha256: Effect.pipe(index.toString(16), EffectString.repeat(64)),
     })),
     safeExecutablePath: '/private/safe-bin',
-    sealedSuite: {layoutArtifactId: `art_${'1'.repeat(16)}`, root: '/sealed/suite'},
+    sealedSuite: {layoutArtifactId: `art_${Effect.pipe('1', EffectString.repeat(16))}`, root: '/sealed/suite'},
     temporaryRoot: '/private/tmp',
     version: 1,
   };

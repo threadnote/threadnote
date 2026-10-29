@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -6,6 +7,8 @@ import {
   hostedContextCiDiagnosticsV1,
   type HostedContextCiEventV1,
 } from '@threadnote/remote-memory/hosted/context_ci';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const secret = 'webhook-test-key-at-least-thirty-two-bytes';
 const now = 1_800_000_000_000;
@@ -16,8 +19,8 @@ const event: HostedContextCiEventV1 = {
   headRepositoryId: 'repo-1',
   ref: 'refs/heads/main',
   baseRef: 'refs/heads/main',
-  headCommit: 'a'.repeat(40),
-  baseCommit: 'b'.repeat(40),
+  headCommit: Effect.pipe('a', EffectString.repeat(40)),
+  baseCommit: Effect.pipe('b', EffectString.repeat(40)),
   kind: 'push',
   trusted: true,
 };
@@ -90,8 +93,8 @@ describe('hosted Context CI admission and content-free contracts', () => {
         fc.array(fc.stringMatching(/^[A-Za-z0-9_-]{1,12}$/u), {minLength: 1, maxLength: 12}),
         fc.array(fc.stringMatching(/^[A-Za-z0-9_-]{1,12}$/u), {minLength: 1, maxLength: 12}),
         (refValues, baseRefValues) => {
-          const refs = refValues.map(value => `refs/heads/${value}`);
-          const baseRefs = baseRefValues.map(value => `refs/heads/${value}`);
+          const refs = EffectArray.map(refValues, value => `refs/heads/${value}`);
+          const baseRefs = EffectArray.map(baseRefValues, value => `refs/heads/${value}`);
           const permutedRefs = [...refs].reverse();
           const permutedBaseRefs = [...baseRefs].reverse();
           const duplicatedRefs = [...permutedRefs, refs[0]];
@@ -151,8 +154,10 @@ describe('hosted Context CI admission and content-free contracts', () => {
     expect(JSON.stringify(result)).not.toContain('private-project');
     expect(result).toEqual(hostedContextCiDiagnosticsV1(raw));
     expect(() =>
-      hostedContextCiDiagnosticsV1(raw.replace('"findings":[]', '"body":"private-memory","findings":[]')),
+      hostedContextCiDiagnosticsV1(
+        Effect.pipe(raw, EffectString.replace('"findings":[]', '"body":"private-memory","findings":[]')),
+      ),
     ).toThrow();
-    expect(() => hostedContextCiDiagnosticsV1('x'.repeat(262_145))).toThrow();
+    expect(() => hostedContextCiDiagnosticsV1(Effect.pipe('x', EffectString.repeat(262_145)))).toThrow();
   });
 });

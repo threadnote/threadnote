@@ -16,6 +16,7 @@
     "./linux_cgroup": "./src/linux_cgroup.ts",
     "./optional": "./src/optional.ts",
     "./paths": "./src/paths.ts",
+    "./readonly-array": "./src/readonly-array.ts",
     "./safe_scan": "./src/safe_scan.ts",
     "./scrubber": "./src/scrubber.ts",
     "./sha256": "./src/sha256.ts",
@@ -25,7 +26,8 @@
     "./uuid": "./src/uuid.ts",
     "./windows-disk-worker-contract": "./src/windows-disk-worker-contract.ts",
     "./windows_system": "./src/windows_system.ts",
-    "./runtime-entrypoint": "./src/runtime-entrypoint.ts"
+    "./runtime-entrypoint": "./src/runtime-entrypoint.ts",
+    "./validation": "./src/validation.ts"
   },
   "dependencies": {
     "effect": "4.0.7",

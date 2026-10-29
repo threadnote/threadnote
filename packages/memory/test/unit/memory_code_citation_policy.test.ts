@@ -4,6 +4,7 @@ import {
   memoryCodeCitationContentSharingBlocker,
   memoryHasPrivateEvidenceProvenance,
 } from '@threadnote/memory/code/citation-policy';
+import {Array as EffectArray} from 'effect';
 
 describe('memory code-citation sharing policy', () => {
   const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/projection.md';
@@ -25,14 +26,17 @@ describe('memory code-citation sharing policy', () => {
         fc.constantFrom('', ' ', '\t'),
         fc.string({maxLength: 40}),
         (header, newline, spacing, canary) => {
-          const content = [
-            'MEMORY',
-            'kind: durable',
-            'code_citation: {not-json}',
-            `${spacing}${header}${spacing}: ${JSON.stringify({canary})}`,
-            '',
-            'Private body',
-          ].join(newline);
+          const content = EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'code_citation: {not-json}',
+              `${spacing}${header}${spacing}: ${JSON.stringify({canary})}`,
+              '',
+              'Private body',
+            ],
+            newline,
+          );
           expect(memoryHasPrivateEvidenceProvenance(uri, content)).toBe(true);
           expect(memoryCodeCitationContentSharingBlocker(uri, content)).toBe('malformed-citation');
         },
@@ -62,17 +66,20 @@ describe('memory code-citation sharing policy', () => {
   it.each(['\n', '\r\n', '\r'])('fails closed on near-canonical citation keys with %j line endings', newline => {
     const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/near-canonical.md';
     for (const citationLine of ['code_citation : {not-json}', 'code_citation\t: {not-json}']) {
-      const parseable = [
-        'MEMORY',
-        'kind: durable',
-        'project: threadnote',
-        'topic: near-canonical',
-        'schema_version: 4',
-        citationLine,
-        '',
-        'Body',
-      ].join(newline);
-      const unparseable = ['not a memory', citationLine, '', 'Body'].join(newline);
+      const parseable = EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'project: threadnote',
+          'topic: near-canonical',
+          'schema_version: 4',
+          citationLine,
+          '',
+          'Body',
+        ],
+        newline,
+      );
+      const unparseable = EffectArray.join(['not a memory', citationLine, '', 'Body'], newline);
 
       expect(memoryCodeCitationContentSharingBlocker(uri, parseable)).toBe('malformed-citation');
       expect(memoryCodeCitationContentSharingBlocker(uri, unparseable)).toBe('malformed-citation');

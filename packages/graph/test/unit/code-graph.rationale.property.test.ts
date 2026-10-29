@@ -2,13 +2,17 @@ import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {augmentRationaleFacts, captureRationaleInputs} from '@threadnote/graph/rationale';
+import {parseCodeGraphRationaleCacheSnapshot} from '../helpers/rationale-cache.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSymbol} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const rationaleText = FC.array(
   FC.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_.,'),
   {maxLength: 96, minLength: 1},
 )
-  .map(characters => characters.join('').trim())
+  .map(characters => Effect.pipe(EffectArray.join(characters, ''), EffectString.trim))
   .filter(value => value.length > 0);
 
 describe('code graph rationale cache properties', () => {
@@ -38,14 +42,14 @@ describe('code graph rationale cache properties', () => {
         symbols: [ownerSymbol(marker)],
       };
       const captured = captureRationaleInputs(file, facts);
-      const cached = JSON.parse(JSON.stringify(captured)) as CodeGraphFileFacts;
+      const cached = parseCodeGraphRationaleCacheSnapshot(JSON.stringify(captured));
 
       const sourceBacked = augmentRationaleFacts(file, captured);
       const cacheBacked = augmentRationaleFacts({...file, content: undefined}, cached);
 
       expect(cacheBacked.symbols).toEqual(sourceBacked.symbols);
       expect(cacheBacked.edges).toEqual(sourceBacked.edges);
-      expect(cacheBacked.symbols.filter(symbol => symbol.kind === 'rationale')).toHaveLength(1);
+      expect(EffectArray.filter(cacheBacked.symbols, symbol => symbol.kind === 'rationale')).toHaveLength(1);
     },
   );
 });

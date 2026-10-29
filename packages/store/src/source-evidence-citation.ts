@@ -1,4 +1,12 @@
+import {
+  isSafeInteger as checkedIsSafeInteger,
+  isFiniteNumber as checkedIsFiniteNumber,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {parseExternalResourceIdentity, type ExternalProvider} from './external-resource.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -25,7 +33,7 @@ export interface SourceEvidenceCitationV1 {
 }
 
 function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function bytes(value: string): number {
@@ -37,8 +45,12 @@ export function validSourceEvidenceVersion(value: unknown): value is string {
     typeof value === 'string' &&
     value.length >= 1 &&
     value.length <= 128 &&
-    [...value].every(character => {
-      const code = character.codePointAt(0)!;
+    EffectArray.every([...value], character => {
+      const code = Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      )!;
       return (code > 31 && code < 127) || code > 159;
     })
   );
@@ -48,7 +60,7 @@ function citationRecord(value: unknown): value is SourceEvidenceCitationV1 {
   if (!object(value)) return false;
   const identity = typeof value.resourceUri === 'string' ? parseExternalResourceIdentity(value.resourceUri) : undefined;
   if (
-    Object.keys(value).length !== 15 ||
+    EffectRecord.keys(value).length !== 15 ||
     value.version !== 1 ||
     !identity ||
     value.resourceUri !==
@@ -69,13 +81,13 @@ function citationRecord(value: unknown): value is SourceEvidenceCitationV1 {
     !validSourceEvidenceVersion(value.sanitizerVersion) ||
     typeof value.pinId !== 'string' ||
     !UUID.test(value.pinId) ||
-    !Number.isSafeInteger(value.fragmentStart) ||
-    (value.fragmentStart as number) < 0 ||
-    !Number.isSafeInteger(value.fragmentEnd) ||
-    (value.fragmentEnd as number) <= (value.fragmentStart as number) ||
-    (value.fragmentEnd as number) > MAX_SOURCE_EVIDENCE_BYTES ||
+    !checkedIsSafeInteger(value.fragmentStart) ||
+    value.fragmentStart < 0 ||
+    !checkedIsSafeInteger(value.fragmentEnd) ||
+    value.fragmentEnd <= value.fragmentStart ||
+    value.fragmentEnd > MAX_SOURCE_EVIDENCE_BYTES ||
     typeof value.expiresAt !== 'string' ||
-    !Number.isFinite(Date.parse(value.expiresAt)) ||
+    !checkedIsFiniteNumber(Date.parse(value.expiresAt)) ||
     new Date(value.expiresAt).toISOString() !== value.expiresAt
   )
     return false;

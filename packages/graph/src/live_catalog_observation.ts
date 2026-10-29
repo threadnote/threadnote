@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
 import {Clock, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {runtimeTextDirectoryNamePage} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -5,8 +7,13 @@ import {codeGraphMaintenanceStatusPath, codeGraphRepositoriesRoot} from './layou
 import {CODE_GRAPH_BUILD_STALE_AFTER_MILLISECONDS} from './build_status.js';
 import {parseCodeGraphBuildStatus} from './build_status/codec.js';
 import {observeCodeGraphLocalProvenance} from './local_provenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class GraphLiveObservationError extends Schema.TaggedError<GraphLiveObservationError>()('GraphLiveObservationError', {
+class GraphLiveObservationError extends Schema.TaggedError<
+  GraphLiveObservationError,
+  {readonly brand: unique symbol}
+>()('GraphLiveObservationError', {
   message: Schema.String,
 }) {}
 
@@ -44,7 +51,12 @@ export const codeGraphLiveObservationPaths = Effect.fn('codeGraph.liveObservatio
         return yield* GraphLiveObservationError.make({message: 'Graph live file budget exceeded'});
       files.push(file);
     });
-  for (const checkout of (yield* names(root, 64)).filter(name => /^[a-f0-9]{64}$/.test(name))) {
+  for (const checkout of EffectArrayPipe(yield* names(root, 64), __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (name, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && /^[a-f0-9]{64}$/.test(name),
+    ),
+  )) {
     const repository = path.join(root, checkout);
     const provenance = yield* observeCodeGraphLocalProvenance(home, checkout, 32 - worktreeCount);
     worktreeCount += provenance.count;
@@ -59,11 +71,21 @@ export const codeGraphLiveObservationPaths = Effect.fn('codeGraph.liveObservatio
       if (/^graph-v\d+\.sqlite(?:-wal)?$/.test(name)) yield* add(path.join(repository, name));
     }
     const statuses = path.join(repository, 'build-status');
-    for (const view of (yield* names(statuses, 64)).filter(name =>
-      /^[a-f0-9]{64}(?:\.scope-[a-f0-9]{64})?$/.test(name),
+    for (const view of EffectArrayPipe(yield* names(statuses, 64), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (name, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && /^[a-f0-9]{64}(?:\.scope-[a-f0-9]{64})?$/.test(name),
+      ),
     )) {
       const directory = path.join(statuses, view);
-      for (const name of (yield* names(directory, 128)).filter(name => /^[a-f0-9-]{16,64}\.json$/.test(name))) {
+      for (const name of EffectArrayPipe(yield* names(directory, 128), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (name, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && /^[a-f0-9-]{16,64}\.json$/.test(name),
+        ),
+      )) {
         const file = path.join(directory, name);
         yield* add(file);
         const status = yield* Effect.scoped(
@@ -97,7 +119,13 @@ export const codeGraphLiveObservationPaths = Effect.fn('codeGraph.liveObservatio
       }
     }
     const stale = path.join(repository, 'stale');
-    for (const name of (yield* names(stale, 128)).filter(name => name.endsWith('.stale')))
+    for (const name of EffectArrayPipe(yield* names(stale, 128), __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (name, __effectArrayIndex) =>
+          __effectArrayIndex in __effectArrayValues && Effect2.pipe(name, EffectString.endsWith('.stale')),
+      ),
+    ))
       yield* add(path.join(stale, name));
   }
   return {

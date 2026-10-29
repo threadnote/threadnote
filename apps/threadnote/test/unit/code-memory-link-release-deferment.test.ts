@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -10,8 +11,10 @@ import {
   type CodeMemoryLinkReleaseDefermentGovernanceChange,
   type CodeMemoryLinkReleaseDefermentV1,
 } from '../../../../scripts/verify-code-memory-link-release-deferment.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const GOVERNANCE = '4'.repeat(40);
+const GOVERNANCE = Effect.pipe('4', EffectString.repeat(40));
 const WAIVER_PATH = codeMemoryLinkReleaseDefermentPath('v4.6.0');
 
 describe('Code Memory Link 4.6 release deferment', () => {
@@ -36,7 +39,7 @@ describe('Code Memory Link 4.6 release deferment', () => {
         expectedReleaseTag: 'v4.6.0',
         repositoryPath: WAIVER_PATH,
         source: `${JSON.stringify(
-          {...waiver(), candidate: {...waiver().candidate, commit: 'a'.repeat(40)}},
+          {...waiver(), candidate: {...waiver().candidate, commit: Effect.pipe('a', EffectString.repeat(40))}},
           undefined,
           2,
         )}\n`,
@@ -65,7 +68,7 @@ describe('Code Memory Link 4.6 release deferment', () => {
     });
     expect(() =>
       assertCodeMemoryLinkReleaseDefermentGovernance({
-        changes: changes().map(change =>
+        changes: EffectArray.map(changes(), change =>
           change.path === '.github/workflows/publish.yml' ? {...change, mode: '100755'} : change,
         ),
         governanceCommit: GOVERNANCE,
@@ -96,8 +99,8 @@ describe('Code Memory Link 4.6 release deferment', () => {
       fc.property(
         fc
           .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789-_.'), {minLength: 1, maxLength: 48})
-          .map(parts => `unexpected/${parts.join('')}`)
-          .filter(path => !changes().some(change => change.path === path)),
+          .map(parts => `unexpected/${EffectArray.join(parts, '')}`)
+          .filter(path => !EffectArray.some(changes(), change => change.path === path)),
         repositoryPath => {
           expect(() =>
             assertCodeMemoryLinkReleaseDefermentGovernance({
@@ -120,20 +123,76 @@ describe('Code Memory Link 4.6 release deferment', () => {
   it('keeps the one-shot v4.6.0 deferment out of later release publication', async () => {
     const workflow = await Bun.file(`${process.cwd()}/.github/workflows/publish.yml`).text();
     const recovery = await Bun.file(`${process.cwd()}/.github/workflows/publish-v4.6.0-recovery.yml`).text();
-    const shippingJobs = workflow.slice(workflow.indexOf('\n  linux:'), workflow.indexOf('\n  windows-sign:'));
+    const shippingJobs = Effect.pipe(
+      workflow,
+      EffectString.slice(
+        Effect.pipe(
+          workflow,
+          EffectString.indexOf('\n  linux:'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+        Effect.pipe(
+          workflow,
+          EffectString.indexOf('\n  windows-sign:'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
+    );
 
     expect(recovery).toContain('bun scripts/verify-code-memory-link-release-deferment.ts');
     expect(recovery).toContain('apps/threadnote/test/unit/code-memory-link-release-deferment.test.ts');
     expect(workflow).not.toContain('verify-code-memory-link-release-deferment.ts');
     expect(workflow).not.toContain('verify-code-memory-link-release.ts');
     expect(workflow).toContain('release_commit: ${{ steps.release_source.outputs.release_commit }}');
-    expect(shippingJobs.match(/name: Select exact verified release source/g)).toHaveLength(3);
-    expect(shippingJobs.match(/fetch-depth: 3/g)).toHaveLength(3);
-    expect(shippingJobs.match(/git checkout --detach "\$selected_commit"/g)).toHaveLength(3);
-    expect(shippingJobs.match(/needs\.verify\.outputs\.release_commit/g)).toHaveLength(3);
-    expect(shippingJobs.match(/GITHUB_EVENT_NAME" == 'workflow_dispatch'/g)).toHaveLength(3);
-    expect(shippingJobs.match(/GITHUB_EVENT_NAME" == 'push'/g)).toHaveLength(3);
-    expect(shippingJobs.match(/missing the exact verifier-selected tag commit/g)).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        shippingJobs,
+        EffectString.match(/name: Select exact verified release source/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        shippingJobs,
+        EffectString.match(/fetch-depth: 3/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        shippingJobs,
+        EffectString.match(/git checkout --detach "\$selected_commit"/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        shippingJobs,
+        EffectString.match(/needs\.verify\.outputs\.release_commit/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        shippingJobs,
+        EffectString.match(/GITHUB_EVENT_NAME" == 'workflow_dispatch'/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        shippingJobs,
+        EffectString.match(/GITHUB_EVENT_NAME" == 'push'/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect.pipe(
+        shippingJobs,
+        EffectString.match(/missing the exact verifier-selected tag commit/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
     expect(shippingJobs).not.toContain('CANDIDATE_COMMIT');
   });
 });

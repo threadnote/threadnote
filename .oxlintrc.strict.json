@@ -146,7 +146,8 @@
     "effecttsgo/unnecessary-pipe-chain": "error",
     "effecttsgo/unnecessary-typeof-type": "error",
     "effecttsgo/unstable-api-usage": "off",
-    "effecttsgo/unsafe-effect-type-assertion": "error"
+    "effecttsgo/unsafe-effect-type-assertion": "error",
+    "typescript/no-unsafe-type-assertion": "error"
   },
   "overrides": [
     {

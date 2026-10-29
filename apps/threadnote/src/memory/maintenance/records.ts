@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, PlatformError, Result, Schema} from 'effect';
 import {
   inspectContainedStableRegularFile,
@@ -16,6 +17,8 @@ import {
   type MemoryRecord,
 } from '@threadnote/memory/document';
 import {localUserMemoriesRoot} from '../migrations.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAINTENANCE_READ_CONCURRENCY = 16;
 const PERSONAL_PROJECT_READ_CONCURRENCY = 4;
@@ -23,10 +26,13 @@ const PERSONAL_PROJECT_FILE_LIMIT = 10_000;
 const PERSONAL_PROJECT_FILE_BYTE_LIMIT = 8 * 1_024 * 1_024;
 const PERSONAL_PROJECT_TOTAL_BYTE_LIMIT = 128 * 1_024 * 1_024;
 
-class PersonalProjectReadError extends Schema.TaggedError<PersonalProjectReadError>()('PersonalProjectReadError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class PersonalProjectReadError extends Schema.TaggedError<PersonalProjectReadError, {readonly brand: unique symbol}>()(
+  'PersonalProjectReadError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 /** Read canonical active records for one project without synchronizing or mutating storage. */
 export const readActiveProjectMemoryRecords = Effect.fn('memory.readActiveProjectRecords')(function* (
@@ -34,7 +40,10 @@ export const readActiveProjectMemoryRecords = Effect.fn('memory.readActiveProjec
   project: string,
 ) {
   const records = yield* readMaintenanceMemoryRecords(config);
-  return records.filter(record => record.metadata.status === 'active' && record.metadata.project === project);
+  return EffectArray.filter(
+    records,
+    record => record.metadata.status === 'active' && record.metadata.project === project,
+  );
 });
 
 /** Read active personal records without including local copies of shared team memories. */
@@ -43,7 +52,7 @@ export const readActivePersonalProjectMemoryRecords = Effect.fn('memory.readActi
   project: string,
 ) {
   const records = yield* readPersonalProjectMemoryRecords(config, project);
-  return records.filter(record => record.metadata.status === 'active');
+  return EffectArray.filter(records, record => record.metadata.status === 'active');
 });
 
 export const readPersonalProjectMemoryRecords = Effect.fn('memory.readPersonalProjectRecords')(function* (
@@ -70,11 +79,12 @@ export const readPersonalProjectMemoryRecords = Effect.fn('memory.readPersonalPr
       continue;
     }
     for (const name of before) {
-      if (!name.endsWith('.md') || name.startsWith('.')) continue;
+      if (!Effect2.pipe(name, EffectString.endsWith('.md')) || Effect2.pipe(name, EffectString.startsWith('.')))
+        continue;
       const nextFilesRead = admitPersonalProjectFileCount(filesRead);
       if (Result.isFailure(nextFilesRead)) return yield* personalProjectReadError(nextFilesRead.failure);
       filesRead = nextFilesRead.success;
-      const relative = [...location.relativeDirectory, name].join('/');
+      const relative = EffectArray.join([...location.relativeDirectory, name], '/');
       selectedEntries.push({location, name, relative});
     }
   }
@@ -161,7 +171,9 @@ export const readPersonalProjectMemoryRecords = Effect.fn('memory.readPersonalPr
       }),
     {concurrency: PERSONAL_PROJECT_READ_CONCURRENCY, discard: true},
   );
-  return selectedFiles.map(selected => selected.record).sort((left, right) => left.uri.localeCompare(right.uri));
+  return EffectArray.map(selectedFiles, selected => selected.record).sort((left, right) =>
+    Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+  );
 });
 
 /** Read every canonical memory document for maintenance evidence, including inactive relation targets. */
@@ -177,14 +189,15 @@ export const readMaintenanceMemoryRecords = Effect.fn('memory.readMaintenanceRec
       const relative = path.relative(root, directory);
       if (
         isAgentArtifactUri(
-          `threadnote://user/${uriSegment(config.user)}/memories/${relative.split(path.sep).join('/')}`,
+          `threadnote://user/${uriSegment(config.user)}/memories/${EffectArray.join(Effect2.pipe(relative, EffectString.split(path.sep)), '/')}`,
         )
       )
         return false;
       if (options.personalOnly !== true) return true;
-      return relative.split(path.sep)[0] !== 'shared';
+      return Effect2.pipe(relative, EffectString.split(path.sep))[0] !== 'shared';
     },
-    includeFile: (_filePath, name) => name.endsWith('.md') && !name.startsWith('.'),
+    includeFile: (_filePath, name) =>
+      Effect2.pipe(name, EffectString.endsWith('.md')) && !Effect2.pipe(name, EffectString.startsWith('.')),
     recursive: true,
   });
   const records = yield* Effect.forEach(
@@ -192,12 +205,19 @@ export const readMaintenanceMemoryRecords = Effect.fn('memory.readMaintenanceRec
     file =>
       Effect.gen(function* () {
         const content = yield* fs.readFileString(file.path);
-        const relative = path.relative(root, file.path).split(path.sep).join('/');
+        const relative = EffectArray.join(
+          Effect2.pipe(path.relative(root, file.path), EffectString.split(path.sep)),
+          '/',
+        );
         const record = parseMemoryDocument(
           `threadnote://user/${uriSegment(config.user)}/memories/${relative}`,
           content,
         );
-        if (record === undefined && options.requireReadable === true && !relative.startsWith('shared/')) {
+        if (
+          record === undefined &&
+          options.requireReadable === true &&
+          !Effect2.pipe(relative, EffectString.startsWith('shared/'))
+        ) {
           return yield* personalProjectReadError(
             'Maintenance corpus contains an unreadable memory; absence cannot be inferred.',
           );
@@ -206,9 +226,9 @@ export const readMaintenanceMemoryRecords = Effect.fn('memory.readMaintenanceRec
       }),
     {concurrency: MAINTENANCE_READ_CONCURRENCY},
   );
-  return records
-    .filter((record): record is MemoryRecord => record !== undefined)
-    .sort((left, right) => left.uri.localeCompare(right.uri));
+  return EffectArray.filter(records, (record): record is MemoryRecord => record !== undefined).sort((left, right) =>
+    Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+  );
 });
 
 interface PersonalProjectLocation {
@@ -309,12 +329,12 @@ function isMissingOrNonLink(error: PlatformError.PlatformError): boolean {
 }
 
 function sameEntries(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+  return left.length === right.length && EffectArray.every(left, (entry, index) => entry === right[index]);
 }
 
 function hasCanonicalPersonalFilename(record: MemoryRecord, filename: string, topicBound: boolean): boolean {
-  if (!filename.endsWith('.md')) return false;
-  const basename = filename.slice(0, -'.md'.length);
+  if (!Effect2.pipe(filename, EffectString.endsWith('.md'))) return false;
+  const basename = Effect2.pipe(filename, EffectString.slice(0, -'.md'.length));
   const topic = record.metadata.topic;
   try {
     validatePortableSegment(basename, basename);
@@ -325,9 +345,13 @@ function hasCanonicalPersonalFilename(record: MemoryRecord, filename: string, to
 }
 
 function hasPersonalVisibility(content: string): boolean {
-  const normalized = content.replace(/\r\n?/gu, '\n');
-  const separatorIndex = normalized.indexOf('\n\n');
-  const header = separatorIndex === -1 ? normalized : normalized.slice(0, separatorIndex);
+  const normalized = Effect2.pipe(content, EffectString.replace(/\r\n?/gu, '\n'));
+  const separatorIndex = Effect2.pipe(
+    normalized,
+    EffectString.indexOf('\n\n'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const header = separatorIndex === -1 ? normalized : Effect2.pipe(normalized, EffectString.slice(0, separatorIndex));
   const visibility = memoryHeaderValue(header, 'visibility');
   return visibility === undefined || visibility === 'personal';
 }

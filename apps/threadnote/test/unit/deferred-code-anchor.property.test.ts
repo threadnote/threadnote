@@ -1,9 +1,12 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
+import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {formatMemoryDocument} from '@threadnote/memory/document';
 import {
   classifyDeferredCodeAnchorEligibility,
   deferredCodeAnchorIntentMatchesFinalizationRoute,
@@ -20,6 +23,8 @@ import {
   deferredCodeAnchorIntentId,
   isDeferredCodeAnchorFullProjectScope,
 } from '@threadnote/threadnote/memory/deferred/code_anchor_scope';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const URI = 'threadnote://user/test/memories/durable/projects/threadnote/deferred.md';
 
@@ -44,7 +49,9 @@ describe('deferred code-anchor state model', () => {
     },
     input =>
       Effect.sync(() => {
-        const base = deferredIntent({codeRefs: input.qualified ? [`cgr_${'a'.repeat(40)}`] : ['src/index.ts']});
+        const base = deferredIntent({
+          codeRefs: input.qualified ? [`cgr_${Effect2.pipe('a', EffectString.repeat(40))}`] : ['src/index.ts'],
+        });
         const intent: DeferredCodeAnchorIntentV1 = {
           ...base,
           recovery: {
@@ -62,8 +69,8 @@ describe('deferred code-anchor state model', () => {
           deferredCodeAnchorIntentMatchesFinalizationRoute(intent, {
             kind: 'repository',
             callerCwd: intent.callerCwd,
-            repositoryId: input.matchingRepository ? intent.repositoryId : '3'.repeat(64),
-            worktreeId: input.matchingWorktree ? intent.worktreeId : '4'.repeat(64),
+            repositoryId: input.matchingRepository ? intent.repositoryId : Effect2.pipe('3', EffectString.repeat(64)),
+            worktreeId: input.matchingWorktree ? intent.worktreeId : Effect2.pipe('4', EffectString.repeat(64)),
           }),
         ).toBe(input.matchingRepository && input.matchingWorktree);
         expect(deferredCodeAnchorIntentMatchesFinalizationRoute(intent, {kind: 'workset', name: 'any-workset'})).toBe(
@@ -169,8 +176,8 @@ describe('deferred code-anchor state model', () => {
         const route: DeferredCodeAnchorFinalizationRoute = {
           callerCwd: '/other-checkout-spelling-is-not-authority',
           kind: 'repository',
-          repositoryId: input.repositoryMatches ? intent.repositoryId : '3'.repeat(64),
-          worktreeId: input.worktreeMatches ? intent.worktreeId : '4'.repeat(64),
+          repositoryId: input.repositoryMatches ? intent.repositoryId : Effect2.pipe('3', EffectString.repeat(64)),
+          worktreeId: input.worktreeMatches ? intent.worktreeId : Effect2.pipe('4', EffectString.repeat(64)),
         };
         expect(deferredCodeAnchorIntentMatchesFinalizationRoute(intent, route)).toBe(
           input.repositoryMatches && input.worktreeMatches,
@@ -189,7 +196,7 @@ describe('deferred code-anchor state model', () => {
     input =>
       Effect.sync(() => {
         const intent = deferredIntent({
-          codeRefs: input.hasQualifiedRef ? [`cgr_${'a'.repeat(40)}`] : ['src/index.ts'],
+          codeRefs: input.hasQualifiedRef ? [`cgr_${Effect2.pipe('a', EffectString.repeat(40))}`] : ['src/index.ts'],
           preparation: input.worksetPreparation ? 'workset' : 'caller',
         });
         const route: DeferredCodeAnchorFinalizationRoute = {
@@ -220,19 +227,21 @@ describe('deferred code-anchor state model', () => {
     input =>
       Effect.sync(() => {
         const cwds = ['/repo-a', '/repo-b', '/repo-missing'] as const;
-        const intents = input.intents.map((item, index) =>
+        const intents = EffectArray.map(input.intents, (item, index) =>
           deferredIntent({
             callerCwd: cwds[item.cwdIndex],
             memoryUri: `${URI}-${index}`,
             preparation: item.workset ? 'workset' : 'caller',
-            repositoryId: '1'.repeat(64),
-            worktreeId: `${item.cwdIndex + 2}`.repeat(64),
+            repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe(`${item.cwdIndex + 2}`, EffectString.repeat(64)),
           }),
         );
-        const match = intents.find((_, index) => {
-          const item = input.intents[index];
-          return item !== undefined && !item.workset && item.identity === 'match';
-        });
+        const match = EffectOption.getOrUndefined(
+          EffectArray.findFirst(intents, (_, index) => {
+            const item = input.intents[index];
+            return item !== undefined && !item.workset && item.identity === 'match';
+          }),
+        );
         if (input.duplicateWorktree && match !== undefined) {
           intents.push(
             deferredIntent({
@@ -259,62 +268,70 @@ describe('deferred code-anchor state model', () => {
           identityByCwd.set(
             intent.callerCwd,
             item.identity === 'mismatch'
-              ? {state: 'present', repositoryId: intent.repositoryId, worktreeId: '9'.repeat(64)}
+              ? {
+                  state: 'present',
+                  repositoryId: intent.repositoryId,
+                  worktreeId: Effect2.pipe('9', EffectString.repeat(64)),
+                }
               : {state: 'present', repositoryId: intent.repositoryId, worktreeId: intent.worktreeId},
           );
         }
         if (input.siblingPresent) {
           identityByCwd.set('/repo-sibling', {
             state: 'present',
-            repositoryId: '1'.repeat(64),
-            worktreeId: '5'.repeat(64),
+            repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('5', EffectString.repeat(64)),
           });
         }
         const targets = selectDeferredCodeAnchorWorkspaceRefreshTargets(intents, identityByCwd);
         const discarded = selectDeferredCodeAnchorMissingCheckoutIntents(intents, identityByCwd);
         const expectedCwds = new Set(
-          intents
-            .filter((intent, index) => {
+          EffectArray.map(
+            EffectArray.filter(intents, (intent, index) => {
               const item = input.intents[index];
               return item !== undefined && !item.workset && item.identity === 'match';
-            })
-            .map(intent => intent.callerCwd),
+            }),
+            intent => intent.callerCwd,
+          ),
         );
-        expect(new Set(targets.map(target => target.cwd))).toEqual(expectedCwds);
+        expect(new Set(EffectArray.map(targets, target => target.cwd))).toEqual(expectedCwds);
         expect(
           new Set(
-            targets.map(target => {
+            EffectArray.map(targets, target => {
               const scope = target.projectScope;
               return `${target.repositoryId}:${target.worktreeId}:${scope === undefined ? (target.project ?? 'full') : isDeferredCodeAnchorFullProjectScope(scope) ? 'full' : scope.scopeKey}`;
             }),
           ).size,
         ).toBe(targets.length);
-        expect(targets.some(target => target.cwd === '/repo-sibling')).toBe(false);
-        expect(targets.some(target => target.cwd === '/repo-missing' && !expectedCwds.has('/repo-missing'))).toBe(
-          false,
-        );
-        expect(discarded.map(intent => intent.memoryUri).sort()).toEqual(
-          intents
-            .filter(intent => identityByCwd.get(intent.callerCwd)?.state === 'missing')
-            .map(intent => intent.memoryUri)
-            .sort(),
+        expect(EffectArray.some(targets, target => target.cwd === '/repo-sibling')).toBe(false);
+        expect(
+          EffectArray.some(targets, target => target.cwd === '/repo-missing' && !expectedCwds.has('/repo-missing')),
+        ).toBe(false);
+        expect(EffectArray.map(discarded, intent => intent.memoryUri).sort()).toEqual(
+          EffectArray.map(
+            EffectArray.filter(intents, intent => identityByCwd.get(intent.callerCwd)?.state === 'missing'),
+            intent => intent.memoryUri,
+          ).sort(),
         );
         expect(
-          discarded.some(intent => {
+          EffectArray.some(discarded, intent => {
             const observation = identityByCwd.get(intent.callerCwd);
             return observation?.state === 'present';
           }),
         ).toBe(false);
         for (const discardedIntent of discarded) {
-          expect(targets.some(target => target.cwd === discardedIntent.callerCwd)).toBe(false);
+          expect(EffectArray.some(targets, target => target.cwd === discardedIntent.callerCwd)).toBe(false);
           expect(
-            targets.some(
+            EffectArray.some(
+              targets,
               target => target.worktreeId === discardedIntent.worktreeId && target.cwd !== discardedIntent.callerCwd,
             ),
           ).toBe(false);
         }
         for (const target of targets) {
-          const intent = intents.find(candidate => candidate.callerCwd === target.cwd);
+          const intent = EffectOption.getOrUndefined(
+            EffectArray.findFirst(intents, candidate => candidate.callerCwd === target.cwd),
+          );
           expect(intent).toBeDefined();
           expect(intent?.recovery.recovery).toBe('prepare-current-graph');
           if (intent?.recovery.recovery === 'prepare-current-graph') {
@@ -332,33 +349,38 @@ describe('deferred code-anchor state model', () => {
     {scopes: fc.array(fc.integer({min: 0, max: 3}), {maxLength: 8})},
     ({scopes}) =>
       Effect.sync(() => {
-        const intents = scopes.map((scope, index) =>
+        const intents = EffectArray.map(scopes, (scope, index) =>
           deferredIntent({
             memoryUri: `${URI}-${index}`,
             project: `project-${scope}`,
             projectScope: {
-              closureDigest: 'b'.repeat(64),
-              definitionDigest: 'a'.repeat(64),
+              closureDigest: Effect2.pipe('b', EffectString.repeat(64)),
+              definitionDigest: Effect2.pipe('a', EffectString.repeat(64)),
               project: `project-${scope}`,
               scopeKey: `scope-${scope}`,
             },
           }),
         );
         const observations = new Map([
-          ['/repo', {state: 'present' as const, repositoryId: '1'.repeat(64), worktreeId: '2'.repeat(64)}],
+          [
+            '/repo',
+            {
+              state: 'present' as const,
+              repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
+              worktreeId: Effect2.pipe('2', EffectString.repeat(64)),
+            },
+          ],
         ]);
         const identify = (values: readonly DeferredCodeAnchorIntentV1[]) =>
-          selectDeferredCodeAnchorWorkspaceRefreshTargets(values, observations)
-            .map(target => {
-              const scope = target.projectScope;
-              return scope === undefined
-                ? (target.project ?? 'full')
-                : isDeferredCodeAnchorFullProjectScope(scope)
-                  ? 'full'
-                  : scope.scopeKey;
-            })
-            .sort();
-        const expectedScopes = [...new Set(scopes.map(scope => `scope-${scope}`))].sort();
+          EffectArray.map(selectDeferredCodeAnchorWorkspaceRefreshTargets(values, observations), target => {
+            const scope = target.projectScope;
+            return scope === undefined
+              ? (target.project ?? 'full')
+              : isDeferredCodeAnchorFullProjectScope(scope)
+                ? 'full'
+                : scope.scopeKey;
+          }).sort();
+        const expectedScopes = [...new Set(EffectArray.map(scopes, scope => `scope-${scope}`))].sort();
         expect(identify(intents)).toEqual(expectedScopes);
         expect(identify([...intents, ...intents])).toEqual(expectedScopes);
         expect(identify([...intents].reverse())).toEqual(expectedScopes);
@@ -368,7 +390,14 @@ describe('deferred code-anchor state model', () => {
   effectIt.effect('keeps two project intents in the same worktree as separate startup refreshes', () =>
     Effect.sync(() => {
       const observation = new Map([
-        ['/repo', {state: 'present' as const, repositoryId: '1'.repeat(64), worktreeId: '2'.repeat(64)}],
+        [
+          '/repo',
+          {
+            state: 'present' as const,
+            repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('2', EffectString.repeat(64)),
+          },
+        ],
       ]);
       const targets = selectDeferredCodeAnchorWorkspaceRefreshTargets(
         [
@@ -376,8 +405,8 @@ describe('deferred code-anchor state model', () => {
             memoryUri: `${URI}-alpha`,
             project: 'alpha',
             projectScope: {
-              closureDigest: 'b'.repeat(64),
-              definitionDigest: 'a'.repeat(64),
+              closureDigest: Effect2.pipe('b', EffectString.repeat(64)),
+              definitionDigest: Effect2.pipe('a', EffectString.repeat(64)),
               project: 'alpha',
               scopeKey: 'scope-alpha',
             },
@@ -386,8 +415,8 @@ describe('deferred code-anchor state model', () => {
             memoryUri: `${URI}-beta`,
             project: 'beta',
             projectScope: {
-              closureDigest: 'd'.repeat(64),
-              definitionDigest: 'c'.repeat(64),
+              closureDigest: Effect2.pipe('d', EffectString.repeat(64)),
+              definitionDigest: Effect2.pipe('c', EffectString.repeat(64)),
               project: 'beta',
               scopeKey: 'scope-beta',
             },
@@ -395,8 +424,11 @@ describe('deferred code-anchor state model', () => {
         ],
         observation,
       );
-      expect(targets.map(target => target.project).sort()).toEqual(['alpha', 'beta']);
-      expect(targets.map(target => target.worktreeId)).toEqual(['2'.repeat(64), '2'.repeat(64)]);
+      expect(EffectArray.map(targets, target => target.project).sort()).toEqual(['alpha', 'beta']);
+      expect(EffectArray.map(targets, target => target.worktreeId)).toEqual([
+        Effect2.pipe('2', EffectString.repeat(64)),
+        Effect2.pipe('2', EffectString.repeat(64)),
+      ]);
     }),
   );
 });
@@ -449,11 +481,11 @@ function deferredIntent(
       type: 'memory-code-citation-capture-recovery',
       version: 1,
     },
-    repositoryId: options.repositoryId ?? '1'.repeat(64),
+    repositoryId: options.repositoryId ?? Effect2.pipe('1', EffectString.repeat(64)),
     type: 'threadnote-deferred-code-anchor-intent',
     version: 1,
     visibility: 'private-local',
-    worktreeId: options.worktreeId ?? '2'.repeat(64),
+    worktreeId: options.worktreeId ?? Effect2.pipe('2', EffectString.repeat(64)),
   };
 }
 
@@ -466,21 +498,35 @@ function deferredObservation(
     readonly visibility?: MemoryRecord['metadata']['visibility'];
   } = {},
 ): DeferredMemoryObservation {
-  const citations = Array.from({length: input.citationCount ?? 0}, (_, index) => ({id: `citation-${index}`}));
-  const record = {
-    body: 'Decision body.',
-    content: 'MEMORY\n\nDecision body.',
-    headerTitle: 'MEMORY',
-    metadata: {
+  const citations = Array.from({length: input.citationCount ?? 0}, (_, index) =>
+    createMemoryCodeCitation({
+      extractorSet: 'test',
+      fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
+      path: `src/citation-${index}.ts`,
+      repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
+      repositoryIdentityKind: 'local',
+      sourceCommit: Effect2.pipe('2', EffectString.repeat(40)),
+      sourceDirty: false,
+      sourceSnapshotId: `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`,
+      target: {kind: 'file'},
+      version: 1,
+    }),
+  );
+  const content = formatMemoryDocument(
+    'MEMORY',
+    {
       codeCitations: citations,
       kind: 'durable',
       memoryId: input.memoryId ?? 'tn_memory',
+      schemaVersion: MEMORY_SCHEMA_VERSION,
       sourceAgentClient: 'test',
       status: input.status ?? 'active',
       timestamp: '2026-08-29T00:00:00.000Z',
       visibility: input.visibility ?? 'personal',
     },
-    uri: URI,
-  } as unknown as MemoryRecord;
-  return {content: record.content, hash: input.hash ?? 'expected-hash', record};
+    'Decision body.',
+  );
+  const record = parseMemoryDocument(URI, content);
+  if (record === undefined) throw new Error('The deferred-anchor fixture must parse as a memory document.');
+  return {content, hash: input.hash ?? 'expected-hash', record};
 }

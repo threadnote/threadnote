@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ByteSize, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {
   deferredCodeAnchorPathEntryKind,
@@ -12,12 +13,17 @@ import {
   productCaptureIdentityDigest,
 } from './threadnote-5-product-capture.js';
 import type {Threadnote5ProductEventV1} from './threadnote-5-product-capture-events.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const PRODUCT_CAPTURE_ENVIRONMENT_VARIABLE = 'THREADNOTE_PRIVATE_CAPTURE_V1' as const;
 
-export class ProductCaptureError extends Schema.TaggedError<ProductCaptureError>()('ProductCaptureError', {
-  message: Schema.String,
-}) {}
+export class ProductCaptureError extends Schema.TaggedError<ProductCaptureError, {readonly brand: unique symbol}>()(
+  'ProductCaptureError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 /** @internal Test-only synchronization points for exercising process-crash windows. */
 export interface ProductCaptureTestHooks {
@@ -80,7 +86,7 @@ export const captureThreadnote5ProductEventV1 = Effect.fn('productCapture.publis
     !path.isAbsolute(root) ||
     path.normalize(root) !== root ||
     path.dirname(root) === root ||
-    root.endsWith(path.sep)
+    Effect2.pipe(root, EffectString.endsWith(path.sep))
   ) {
     return yield* ProductCaptureError.make({
       message: 'Private product capture requires a canonical absolute POSIX root.',
@@ -259,7 +265,7 @@ const assertDirectories = Effect.fn('productCapture.assertDirectories')(function
 function sameDirectories(left: readonly DirectoryAuthority[], right: readonly DirectoryAuthority[]): boolean {
   return (
     left.length === right.length &&
-    left.every((authority, index) => {
+    EffectArray.every(left, (authority, index) => {
       const candidate = right[index];
       return (
         candidate !== undefined &&

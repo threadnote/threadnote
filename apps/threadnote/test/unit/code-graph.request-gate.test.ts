@@ -8,6 +8,8 @@ import {withSharedCodeGraphRequestGate} from '@threadnote/graph/indexer/request/
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph request gate', () => {
   it('keys dirty requests deterministically by their exact overlay fingerprint (property)', () => {
@@ -50,13 +52,13 @@ describe('code graph request gate', () => {
             onProgress: (progress: {phase: string; reason?: string}) => Effect.Effect<void>,
           ) =>
             withSharedCodeGraphRequestGate({
-              checkoutId: 'a'.repeat(64),
+              checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
               effect,
               fs,
               onProgress,
               path,
               requestedOverlay: {dirty: true, fingerprint: 'same-overlay'},
-              requestKey: 'b'.repeat(64),
+              requestKey: Effect2.pipe('b', EffectString.repeat(64)),
               threadnoteHome: home,
             });
           const first = yield* Effect.forkScoped(

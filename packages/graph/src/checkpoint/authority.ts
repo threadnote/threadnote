@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -16,13 +17,13 @@ import {checkpointTerminalText} from './terminal_text.js';
 const AUTHORITY_INSERT_ROWS = 1_000;
 const AUTHORITY_READ_ROWS = 1_000;
 
-export class CodeGraphCheckpointAuthorityError extends Schema.TaggedError<CodeGraphCheckpointAuthorityError>()(
-  'CodeGraphCheckpointAuthorityError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphCheckpointAuthorityError extends Schema.TaggedError<
+  CodeGraphCheckpointAuthorityError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCheckpointAuthorityError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 /**
  * Binds source identity, ABI provenance, and logical records before any target
@@ -59,21 +60,24 @@ export function withCodeGraphCheckpointAuthorityVerification<A, E, R>(
              mode TEXT NOT NULL
            ) WITHOUT ROWID`,
             );
-            const remainingPacks = new Map(expectedPacks.map(pack => [pack.id, pack] as const));
+            const remainingPacks = new Map(EffectArray.map(expectedPacks, pack => [pack.id, pack] as const));
             const result = yield* sql.withTransaction(
               consume(records =>
                 Effect.gen(function* () {
-                  const files = records.filter(record => record.kind === 'file');
+                  const files = EffectArray.filter(records, record => record.kind === 'file');
                   for (let offset = 0; offset < files.length; offset += AUTHORITY_INSERT_ROWS) {
                     const batch = files.slice(offset, offset + AUTHORITY_INSERT_ROWS);
-                    const parameters = batch.flatMap(file => [
+                    const parameters = EffectArray.flatMap(batch, file => [
                       utf16SortKey(file.path),
                       file.path,
                       file.contentHash,
                       file.language,
                       file.mode,
                     ]);
-                    const placeholders = batch.map(() => '(?, ?, ?, ?, ?)').join(', ');
+                    const placeholders = EffectArray.join(
+                      EffectArray.map(batch, () => '(?, ?, ?, ?, ?)'),
+                      ', ',
+                    );
                     yield* sql.unsafe(
                       `INSERT INTO authority_files (sort_key, path, content_hash, language, mode) VALUES ${placeholders}`,
                       parameters,
@@ -151,11 +155,8 @@ function samePackProvenance(
 }
 
 function utf16SortKey(value: string): string {
-  let output = '';
-  for (let index = 0; index < value.length; index += 1) {
-    output += value.charCodeAt(index).toString(16).padStart(4, '0');
-  }
-  return output;
+  // Big-endian UTF-16 bytes retain JavaScript code-unit ordering, including lone surrogates.
+  return Buffer.from(value, 'utf16le').swap16().toString('hex');
 }
 
 function authorityFailure(message: string): Effect.Effect<never, CodeGraphCheckpointAuthorityError> {

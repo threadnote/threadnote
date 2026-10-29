@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphInventorySha256Hex} from './inventory/identity.js';
 import {compareCodeUnits} from './ordering.js';
@@ -5,6 +6,8 @@ import {codeGraphScopeIdentitySuffix, type CodeGraphScopeIdentity} from './scope
 import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from './store/build/core.js';
 import type {CodeGraphLanguagePackProvenance} from './store/models.js';
 import {CODE_GRAPH_EXTRACTOR_SET_VERSION} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface CodeGraphContentIdentityFile {
   readonly contentHash: string;
@@ -22,8 +25,8 @@ export function codeGraphExtractorSetIdentityFromPackProvenance(
   provenance: readonly CodeGraphLanguagePackProvenance[],
 ): string {
   return codeGraphExtractorSetIdentityFromIdentities(
-    [...new Set(provenance.map(pack => pack.cacheIdentity))],
-    [...new Set(provenance.map(pack => pack.derivationIdentity))],
+    [...new Set(EffectArray.map(provenance, pack => pack.cacheIdentity))],
+    [...new Set(EffectArray.map(provenance, pack => pack.derivationIdentity))],
   );
 }
 
@@ -31,8 +34,8 @@ export function codeGraphExtractorSetIdentityFromIdentities(
   cacheIdentities: readonly string[],
   derivationIdentities: readonly string[],
 ): string {
-  const activeParsers = [...cacheIdentities].sort(compareCodeUnits).join('\n');
-  const activeDerivations = [...derivationIdentities].sort(compareCodeUnits).join('\n');
+  const activeParsers = EffectArray.join([...cacheIdentities].sort(compareCodeUnits), '\n');
+  const activeDerivations = EffectArray.join([...derivationIdentities].sort(compareCodeUnits), '\n');
   return sha256HexSync(
     `${CODE_GRAPH_EXTRACTOR_SET_VERSION}\nactive-parser-packs:\n${activeParsers}\nactive-derivations:\n${activeDerivations}\nignore-policy:3\nresolution-context-policy:semantic-workspace-v1`,
   );
@@ -43,7 +46,7 @@ export function codeGraphContentIdentity(
   files: readonly CodeGraphContentIdentityFile[],
   scope?: CodeGraphScopeIdentity,
 ): string {
-  return `cgc_${codeGraphInventorySha256Hex(graphContentPrefix(extractorSet, scope), files, graphContentLine).slice(0, 40)}`;
+  return `cgc_${Effect.pipe(codeGraphInventorySha256Hex(graphContentPrefix(extractorSet, scope), files, graphContentLine), EffectString.slice(0, 40))}`;
 }
 
 /** Hashes an already strict UTF-16-code-unit-ordered inventory without retaining it in memory. */
@@ -58,12 +61,15 @@ export function createCodeGraphContentIdentityAccumulator(
   let rows = 0;
   return {
     digest: () => {
-      if (completed === undefined) completed = `cgc_${hasher.digest('hex').slice(0, 40)}`;
+      if (completed === undefined) completed = `cgc_${Effect.pipe(hasher.digest('hex'), EffectString.slice(0, 40))}`;
       return completed;
     },
     update: file => {
       if (completed !== undefined) throw new Error('Code graph content identity is already complete.');
-      if (file.path.includes('\0') || (previousPath !== undefined && compareCodeUnits(previousPath, file.path) >= 0)) {
+      if (
+        Effect.pipe(file.path, EffectString.includes('\0')) ||
+        (previousPath !== undefined && compareCodeUnits(previousPath, file.path) >= 0)
+      ) {
         throw new Error('Code graph content identity input is not in strict canonical order.');
       }
       if (rows > 0) hasher.update('\n');

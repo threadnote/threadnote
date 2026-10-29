@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
@@ -20,18 +21,20 @@ import {migrateMemoryDocumentToCurrent} from '../../src/migrations.js';
 import {consolidationRevision} from '../../src/consolidation.js';
 import {createReviewedSupportSnapshot} from '../../src/reviewed-support.js';
 import {automaticMaintenanceEvidenceId} from '../../src/automatic-maintenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const citation = (path: string) =>
   createMemoryCodeCitation({
     evidenceRetention: 'capsule-retained',
     extractorSet: 'test',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
     path,
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: 'local',
-    sourceCommit: 'a'.repeat(40),
+    sourceCommit: Effect.pipe('a', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });
@@ -92,9 +95,9 @@ describe('reviewed consolidation', () => {
       acceptance: {
         reviewId: 'review-capture-provenance',
         approvedAt: '2026-10-21T00:00:00.000Z',
-        targetBeforeHash: '1'.repeat(64),
-        preparationDigest: '2'.repeat(64),
-        sourceVectorDigest: '3'.repeat(64),
+        targetBeforeHash: Effect.pipe('1', EffectString.repeat(64)),
+        preparationDigest: Effect.pipe('2', EffectString.repeat(64)),
+        sourceVectorDigest: Effect.pipe('3', EffectString.repeat(64)),
       },
     });
     const content = formatMemoryDocument(
@@ -116,10 +119,18 @@ describe('reviewed consolidation', () => {
     expect(parsed.metadata.codeCitations).toEqual([root]);
     expect(parsed.metadata.reviewedSupport?.active.sources[0].source).toEqual(evidence);
     expect(() => captureConsolidationSource({uri, content})).toThrow(/reviewed support.*cannot preserve/iu);
-    const malformed = content.replace(/^reviewed_support: .*$/mu, 'reviewed_support: {not-json}');
+    const malformed = Effect.pipe(
+      content,
+      EffectString.replace(/^reviewed_support: .*$/mu, 'reviewed_support: {not-json}'),
+    );
     expect(parseMemoryDocument(uri, malformed)?.metadata.reviewedSupportError).toBeDefined();
     expect(() => captureConsolidationSource({uri, content: malformed})).toThrow();
-    expect(captureConsolidationSource({uri, content: content.replace(/^reviewed_support: .*\n/mu, '')})).toMatchObject({
+    expect(
+      captureConsolidationSource({
+        uri,
+        content: Effect.pipe(content, EffectString.replace(/^reviewed_support: .*\n/mu, '')),
+      }),
+    ).toMatchObject({
       fragments: [body],
       codeCitations: [root],
     });
@@ -168,7 +179,7 @@ describe('reviewed consolidation', () => {
       ],
       options,
     );
-    expect(result.codeCitations?.map(c => c.path)).toEqual(['one.ts']);
+    expect(EffectArray.map(result.codeCitations, c => c.path)).toEqual(['one.ts']);
     expect(result.provenance.reviews[1]?.disposition).toBe('contextual');
   });
   it('blocks explicit nine-citation overflow rather than truncating', () => {
@@ -176,11 +187,16 @@ describe('reviewed consolidation', () => {
       'First.',
       Array.from({length: 8}, (_, i) => citation(`${i}.ts`)),
     );
-    const second = {...source('Second.', [citation('ninth.ts')]), uri: first.uri.replace('source.md', 'second.md')};
-    const reviews = [first, second].map(s => ({
+    const second = {
+      ...source('Second.', [citation('ninth.ts')]),
+      uri: Effect.pipe(first.uri, EffectString.replace('source.md', 'second.md')),
+    };
+    const reviews = EffectArray.map([first, second], s => ({
       section: s.fragments[0],
       disposition: 'direct' as const,
-      supports: [{sourceUri: s.uri, fragment: 0, citationIds: s.codeCitations.map(c => c.id), relationIndexes: []}],
+      supports: [
+        {sourceUri: s.uri, fragment: 0, citationIds: EffectArray.map(s.codeCitations, c => c.id), relationIndexes: []},
+      ],
     }));
     expect(() => reviewConsolidation('First.\n\nSecond.', [first, second], reviews, options)).toThrow(/9.*8/);
   });
@@ -206,13 +222,13 @@ describe('reviewed consolidation', () => {
       'Keep this claim.',
     );
     expect(parseMemoryDocument(source().uri, content)?.metadata.consolidation).toEqual(result.provenance);
-    const schema8 = content.replace('schema_version: 6', 'schema_version: 8');
+    const schema8 = Effect.pipe(content, EffectString.replace('schema_version: 6', 'schema_version: 8'));
     const schema10 = migrateMemoryDocumentToCurrent(schema8);
-    expect(schema10).toBe(schema8.replace('schema_version: 8', 'schema_version: 10'));
+    expect(schema10).toBe(Effect.pipe(schema8, EffectString.replace('schema_version: 8', 'schema_version: 10')));
     expect(parseMemoryDocument(source().uri, schema10)?.metadata.consolidation).toEqual(result.provenance);
     expect(
-      parseMemoryDocument(source().uri, content.replace(/Keep this claim\.$/, 'Changed.'))?.metadata.citationErrors
-        ?.length,
+      parseMemoryDocument(source().uri, Effect.pipe(content, EffectString.replace(/Keep this claim\.$/, 'Changed.')))
+        ?.metadata.citationErrors?.length,
     ).toBeGreaterThan(0);
     expect(inferMemoryMetadata(content).consolidation).toEqual(result.provenance);
     for (const header of [
@@ -221,7 +237,7 @@ describe('reviewed consolidation', () => {
       'consolidation: {"version":2}',
       `consolidation: ${JSON.stringify(result.provenance)}\nconsolidation:`,
     ]) {
-      const malformed = content.replace(/^consolidation:.*$/mu, header);
+      const malformed = Effect.pipe(content, EffectString.replace(/^consolidation:.*$/mu, header));
       expect(parseMemoryDocument(source().uri, malformed)?.metadata.consolidationError).toBeDefined();
       expect(() => assertMemoryDocumentSchemaWritable(malformed)).toThrow();
     }
@@ -252,9 +268,9 @@ describe('reviewed consolidation', () => {
     };
     const receipt = buildConsolidationProvenanceV2(original.provenance, originalBody, body, manifest, {
       reviewId: 'review-one',
-      targetBeforeHash: '1'.repeat(64),
-      packetDigest: '2'.repeat(64),
-      observationRevision: '3'.repeat(64),
+      targetBeforeHash: Effect.pipe('1', EffectString.repeat(64)),
+      packetDigest: Effect.pipe('2', EffectString.repeat(64)),
+      observationRevision: Effect.pipe('3', EffectString.repeat(64)),
     });
     expect(validateConsolidationProvenanceV2(receipt, body)).toEqual(receipt);
     expect(receipt.origin).toEqual(original.provenance);
@@ -288,15 +304,15 @@ describe('reviewed consolidation', () => {
   it('retains only exact final sections and round trips bounded arbitrary unsupported prose', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[a-z]{1,24}$/), {minLength: 1, maxLength: 12}), paragraphs => {
-        const body = paragraphs.join('\n\n');
-        const reviews = consolidationSections(body).map(section => ({
+        const body = EffectArray.join(paragraphs, '\n\n');
+        const reviews = EffectArray.map(consolidationSections(body), section => ({
           section,
           disposition: 'unsupported' as const,
           supports: [],
         }));
         const result = reviewConsolidation(body, [source()], reviews, options);
         expect(result.codeCitations).toEqual([]);
-        expect(result.provenance.reviews.map(r => r.section)).toEqual(paragraphs);
+        expect(EffectArray.map(result.provenance.reviews, r => r.section)).toEqual(paragraphs);
         const metadata = {
           kind: 'durable' as const,
           status: 'active' as const,
@@ -315,14 +331,14 @@ describe('reviewed consolidation', () => {
   it('preserves exactly the independently selected evidence for retained direct paragraphs', () => {
     fc.assert(
       fc.property(
-        fc.array(fc.boolean(), {minLength: 3, maxLength: 3}).filter(retained => retained.some(Boolean)),
+        fc.array(fc.boolean(), {minLength: 3, maxLength: 3}).filter(retained => EffectArray.some(retained, Boolean)),
         fc.array(fc.boolean(), {minLength: 3, maxLength: 3}),
         fc.array(fc.uniqueArray(fc.integer({min: 0, max: 7}), {maxLength: 8}), {minLength: 3, maxLength: 3}),
         (retained, direct, slots) => {
           const citations = Array.from({length: 8}, (_, i) => citation(`source-${i}.ts`));
           const paragraphs = ['First.', 'Second.', 'Third.'];
-          const captured = source(paragraphs.join('\n\n'), citations);
-          const reviews = paragraphs.flatMap((section, index) =>
+          const captured = source(EffectArray.join(paragraphs, '\n\n'), citations);
+          const reviews = EffectArray.flatMap(paragraphs, (section, index) =>
             retained[index]
               ? [
                   {
@@ -333,7 +349,7 @@ describe('reviewed consolidation', () => {
                           {
                             sourceUri: captured.uri,
                             fragment: index,
-                            citationIds: slots[index].map(i => citations[i].id),
+                            citationIds: EffectArray.map(slots[index], i => citations[i].id),
                             relationIndexes: [],
                           },
                         ]
@@ -342,12 +358,17 @@ describe('reviewed consolidation', () => {
                 ]
               : [],
           );
-          const body = paragraphs.filter((_, i) => retained[i]).join('\n\n');
+          const body = EffectArray.join(
+            EffectArray.filter(paragraphs, (_, i) => retained[i]),
+            '\n\n',
+          );
           const expected = new Set(
-            slots.flatMap((ids, i) => (retained[i] && direct[i] ? ids.map(id => citations[id].id) : [])),
+            EffectArray.flatMap(slots, (ids, i) =>
+              retained[i] && direct[i] ? EffectArray.map(ids, id => citations[id].id) : [],
+            ),
           );
           const result = reviewConsolidation(body, [captured], reviews, options);
-          expect(new Set(result.codeCitations.map(c => c.id))).toEqual(expected);
+          expect(new Set(EffectArray.map(result.codeCitations, c => c.id))).toEqual(expected);
           expect(reviewConsolidation(body, [captured], reviews, options)).toEqual(result);
         },
       ),

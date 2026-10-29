@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {RecallOptions} from '../types.js';
 import type {RecallConfidence} from '@threadnote/recall/rank';
 import {
@@ -10,6 +11,8 @@ import {
   type ParsedRecallMemoryConnectionInput,
   type RecallMemoryConnectionsResult,
 } from '@threadnote/recall/memory/connections';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const RECALL_FEEDBACK_CLI_GUIDANCE =
   'Feedback: threadnote recall-feedback <threadnote://uri> --query <original-query> --action useful|wrong|pin|dismiss|applied (pin also requires --project).';
@@ -29,13 +32,19 @@ export function parseRecallCliInput(
   options: Pick<RecallOptions, 'memoryRefs' | 'query' | 'relationTypes'>,
 ): ParsedRecallCliInput {
   const memoryConnections = parseRecallCliMemoryConnectionInput(options);
-  const query = options.query?.trim() ?? '';
+  const query =
+    Effect.pipe(options.query, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) ?? '';
   if (query.length === 0 && memoryConnections === undefined) {
     throw new Error(
-      [
-        'Threadnote recall needs either a non-empty --query or at least one --memory-ref seed.',
-        'Examples: threadnote recall --query "latest handoff" or threadnote recall --memory-ref tn_example.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'Threadnote recall needs either a non-empty --query or at least one --memory-ref seed.',
+          'Examples: threadnote recall --query "latest handoff" or threadnote recall --memory-ref tn_example.',
+        ],
+        '\n',
+      ),
     );
   }
   return {memoryConnections, query};
@@ -56,19 +65,23 @@ export function parseRecallCliMemoryConnectionInput(
 }
 
 export function renderRecallMemoryConnections(result: RecallMemoryConnectionsResult): string {
-  const premiseLines = result.premises.map(
+  const premiseLines = EffectArray.map(
+    result.premises,
     premise => `- premise ${premise.requestedOrdinal + 1}: ${premise.uri ?? premise.requestedRef} [${premise.state}]`,
   );
-  const connectionLines = result.connections.map(connection => {
+  const connectionLines = EffectArray.map(result.connections, connection => {
     const pointer = connection.neighborUri ?? 'unresolved target';
     return `- ${connection.direction} ${connection.relationType}: ${pointer} [${connection.currentness}; ${connection.resolution}]`;
   });
-  return [
-    `Memory connections (one hop; ${result.coverage.resultCount} result(s)${result.coverage.truncated ? ', truncated' : ''}):`,
-    ...premiseLines,
-    ...connectionLines,
-    'Relations are navigation evidence, not entailment.',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Memory connections (one hop; ${result.coverage.resultCount} result(s)${result.coverage.truncated ? ', truncated' : ''}):`,
+      ...premiseLines,
+      ...connectionLines,
+      'Relations are navigation evidence, not entailment.',
+    ],
+    '\n',
+  );
 }
 
 export function explicitMemoryConnectionConfidence(
@@ -80,15 +93,18 @@ export function explicitMemoryConnectionConfidence(
 export function renderSeedOnlyRecallNavigation(result: RecallMemoryConnectionsResult): string {
   const firstNeighbor = actionableMemoryConnectionUris(result)[0];
   const confidence = explicitMemoryConnectionNavigationConfidence();
-  return [
-    ...(firstNeighbor
-      ? [
-          `Recall confidence: ${confidence.level} (${confidence.score.toFixed(2)}; ${EXPLICIT_MEMORY_CONNECTION_CONFIDENCE_BASIS}) — ${confidence.reason}`,
-        ]
-      : []),
-    renderRecallMemoryConnections(result),
-    ...(firstNeighbor ? [`Next: threadnote read ${firstNeighbor}`] : []),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      ...(firstNeighbor
+        ? [
+            `Recall confidence: ${confidence.level} (${confidence.score.toFixed(2)}; ${EXPLICIT_MEMORY_CONNECTION_CONFIDENCE_BASIS}) — ${confidence.reason}`,
+          ]
+        : []),
+      renderRecallMemoryConnections(result),
+      ...(firstNeighbor ? [`Next: threadnote read ${firstNeighbor}`] : []),
+    ],
+    '\n',
+  );
 }
 
 export function projectRecallCliResponse(
@@ -105,11 +121,14 @@ export function projectRecallCliResponse(
     ? input.memoryConnections
       ? [renderSeedOnlyRecallNavigation(input.memoryConnections)]
       : []
-    : [
-        input.semanticSection,
-        input.exactTail,
-        input.memoryConnections ? renderRecallMemoryConnections(input.memoryConnections) : undefined,
-      ].filter((section): section is string => section !== undefined);
+    : EffectArray.filter(
+        [
+          input.semanticSection,
+          input.exactTail,
+          input.memoryConnections ? renderRecallMemoryConnections(input.memoryConnections) : undefined,
+        ],
+        (section): section is string => section !== undefined,
+      );
   const surfacedSections = sections.length > 0 ? [...sections, RECALL_FEEDBACK_CLI_GUIDANCE] : sections;
   return {
     confidence:

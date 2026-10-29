@@ -1,9 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {ReviewDetail} from '../../src/attention_details.js';
+import {reviewPreviewFixture} from '../helpers/review_preview_fixture.js';
 
 let root: Root;
 const fetchMock = vi.fn();
@@ -20,7 +22,7 @@ const props = {
 };
 
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.stubGlobal('fetch', fetchMock);
   vi.clearAllMocks();
   fetchMock.mockReset();
@@ -52,40 +54,34 @@ function preview(
 ) {
   const operation = options.operation ?? 'replace';
   const safety = options.safety ?? 'preserving';
-  return {
+  const candidateId = props.candidateId;
+  const proposedText = 'Synthetic reviewed decision.';
+  return reviewPreviewFixture({
+    candidate: {
+      candidateId,
+      comparison: operation === 'no_action' ? 'duplicate' : operation === 'replace' ? 'replacement' : 'new',
+      kind: 'durable',
+      project: props.project,
+      proposedText,
+      reason: 'An existing memory has this identity.',
+      recommendation: operation === 'no_action' ? 'no_action' : operation === 'replace' ? 'replace' : 'create',
+      targetUri: options.targetUri ?? sharedUri,
+      topic: 'synthetic',
+    },
+    mutationPreview: {
+      bodyText: proposedText,
+      operation,
+      truncated: options.truncated ?? false,
+    },
+    ...(operation === 'no_action' ? {} : {replacementSafety: safety}),
     review: {
-      task: 'Synthetic candidate review',
+      project: props.project,
+      reviewId: props.reviewId,
       revision: 9,
-      candidates: [
-        {
-          candidateId: props.candidateId,
-          proposedText: 'Synthetic reviewed decision.',
-          kind: 'durable',
-          topic: 'synthetic',
-          reason: 'An existing memory has this identity.',
-          evidence: [],
-          state: 'pending',
-          targetUri: options.targetUri ?? sharedUri,
-        },
-      ],
+      task: 'Synthetic candidate review',
+      topic: 'synthetic',
     },
-    delta: {
-      items: [
-        {
-          candidateId: props.candidateId,
-          mutationPreview: {
-            operation,
-            replacementSafety: {
-              classification: safety,
-              requiresExplicitApproval: safety !== 'preserving',
-              warning: safety === 'preserving' ? undefined : 'Synthetic replacement warning.',
-            },
-            truncated: options.truncated ?? false,
-          },
-        },
-      ],
-    },
-  };
+  });
 }
 function response(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {status});
@@ -95,8 +91,11 @@ async function render(value: ReturnType<typeof preview>, key = 'review') {
   await act(async () => root.render(<ReviewDetail key={key} {...props} />));
 }
 function approveButton() {
-  const button = [...document.querySelectorAll('button')].find(
-    item => item.textContent === 'Approve and create personal copy',
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      item => item.textContent === 'Approve and create personal copy',
+    ),
   );
   expect(button).toBeDefined();
   return button!;
@@ -104,7 +103,7 @@ function approveButton() {
 async function chooseCreate() {
   const select = document.querySelector<HTMLSelectElement>('select');
   expect(select).not.toBeNull();
-  expect([...select!.options].map(option => option.value)).toEqual(['', 'create']);
+  expect(EffectArray.map([...select!.options], option => option.value)).toEqual(['', 'create']);
   await act(async () => {
     select!.value = 'create';
     select!.dispatchEvent(new Event('change', {bubbles: true}));
@@ -142,7 +141,12 @@ it.each<Safety>(['preserving', 'review-required', 'destructive-loss-risk'])(
 it('keeps shared duplicate confirmation as a no-write decision', async () => {
   await render(preview({operation: 'no_action'}));
   expect(document.querySelector('select')).toBeNull();
-  const button = [...document.querySelectorAll('button')].find(item => item.textContent === 'Confirm no change needed');
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      item => item.textContent === 'Confirm no change needed',
+    ),
+  );
   expect(button?.disabled).toBe(false);
   await act(async () => button?.click());
   expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body)).not.toHaveProperty('operation');
@@ -154,7 +158,9 @@ it('shows decision failures beside the action controls and keeps the review open
     .mockResolvedValueOnce(response(preview({targetUri: personal})))
     .mockResolvedValueOnce(response({error: 'Synthetic review changed; reopen it.'}, 409));
   await act(async () => root.render(<ReviewDetail {...props} />));
-  const button = [...document.querySelectorAll('button')].find(item => item.textContent === 'Approve and apply');
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst([...document.querySelectorAll('button')], item => item.textContent === 'Approve and apply'),
+  );
   await act(async () => button?.click());
   const alert = document.querySelector('[role="alert"]');
   expect(alert?.textContent).toBe('Synthetic review changed; reopen it.');

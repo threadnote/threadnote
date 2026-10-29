@@ -1,6 +1,8 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 export const THREADNOTE_5_RELEASE_READINESS_VERSION = 1 as const;
 export const THREADNOTE_5_RELEASE_READINESS_SUITE = 'threadnote-5-release-readiness' as const;
@@ -425,10 +427,11 @@ export function parseThreadnote5ReleaseReadinessFixtureV1(value: unknown): Threa
   if (fixture.version !== THREADNOTE_5_RELEASE_READINESS_VERSION) invalid('fixture version must be 1');
   if (fixture.suite !== THREADNOTE_5_RELEASE_READINESS_SUITE) invalid('fixture suite is invalid');
   if (fixture.networkAllowed !== false) invalid('release-readiness fixture must prohibit network access');
-  if (!Array.isArray(fixture.metrics) || !Array.isArray(fixture.scenarios)) invalid('fixture arrays are required');
+  if (!EffectArray.isArray(fixture.metrics) || !EffectArray.isArray(fixture.scenarios))
+    invalid('fixture arrays are required');
   const baselineComparison = parseBaselineComparisonPolicy(fixture.baselineComparison);
-  const metrics = fixture.metrics.map(parseMetricDefinition);
-  const scenarios = fixture.scenarios.map(parseScenarioContract);
+  const metrics = EffectArray.map(fixture.metrics, parseMetricDefinition);
+  const scenarios = EffectArray.map(fixture.scenarios, parseScenarioContract);
   if (canonicalJson(metrics) !== canonicalJson(APPROVED_THREADNOTE_5_METRICS)) {
     invalid('fixture metrics differ from the approved release contract');
   }
@@ -528,7 +531,7 @@ export function threadnote5CaptureManifestForEvidence(input: {
   ].sort(compareObservationIdentity);
   return {
     adapterId: input.adapterId,
-    entries: observations.map(observation => ({
+    entries: EffectArray.map(observations, observation => ({
       observationId: observation.observationId,
       receiptHash: observation.receiptHash,
       scenario: observation.scenario,
@@ -576,24 +579,23 @@ function parseMetricDefinition(value: unknown): Threadnote5MetricDefinitionV1 {
 function parseBaselineComparisonPolicy(value: unknown): Threadnote5BaselineComparisonPolicyV1 {
   const policy = record(value, 'baseline comparison policy');
   exactKeys(policy, ['commit', 'comparableMetricIds', 'id', 'notApplicableMetricIds', 'version']);
+  const commit = matching(policy.commit, /^[0-9a-f]{40}$/u, 'baseline comparison commit');
+  const version = matching(policy.version, /^4\.7\.8$/u, 'baseline comparison version');
+  if (commit !== THREADNOTE_5_BASELINE_COMMIT || version !== THREADNOTE_5_BASELINE_VERSION) {
+    invalid('baseline comparison policy differs from the approved release contract');
+  }
   const parsed: Threadnote5BaselineComparisonPolicyV1 = {
-    commit: matching(
-      policy.commit,
-      /^[0-9a-f]{40}$/u,
-      'baseline comparison commit',
-    ) as typeof THREADNOTE_5_BASELINE_COMMIT,
-    comparableMetricIds: stringArray(policy.comparableMetricIds, 'baseline comparable metric ids').map(id =>
-      literal(id, THREADNOTE_5_RELEASE_METRICS, 'baseline comparable metric id'),
+    commit,
+    comparableMetricIds: EffectArray.map(
+      stringArray(policy.comparableMetricIds, 'baseline comparable metric ids'),
+      id => literal(id, THREADNOTE_5_RELEASE_METRICS, 'baseline comparable metric id'),
     ),
     id: literal(policy.id, ['threadnote-4.7.x'] as const, 'baseline comparison source id'),
-    notApplicableMetricIds: stringArray(policy.notApplicableMetricIds, 'baseline not-applicable metric ids').map(id =>
-      literal(id, THREADNOTE_5_RELEASE_METRICS, 'baseline not-applicable metric id'),
+    notApplicableMetricIds: EffectArray.map(
+      stringArray(policy.notApplicableMetricIds, 'baseline not-applicable metric ids'),
+      id => literal(id, THREADNOTE_5_RELEASE_METRICS, 'baseline not-applicable metric id'),
     ),
-    version: matching(
-      policy.version,
-      /^4\.7\.8$/u,
-      'baseline comparison version',
-    ) as typeof THREADNOTE_5_BASELINE_VERSION,
+    version,
   };
   if (canonicalJson(parsed) !== canonicalJson(APPROVED_THREADNOTE_5_BASELINE_COMPARISON)) {
     invalid('baseline comparison policy differs from the approved release contract');
@@ -604,12 +606,12 @@ function parseBaselineComparisonPolicy(value: unknown): Threadnote5BaselineCompa
 function parseScenarioContract(value: unknown): Threadnote5ScenarioContractV1 {
   const scenario = record(value, 'scenario contract');
   exactKeys(scenario, ['id', 'metricIds', 'metricMinimums', 'requiredAssertions', 'subsystems']);
-  const metricIds = stringArray(scenario.metricIds, 'scenario metric ids').map(id =>
+  const metricIds = EffectArray.map(stringArray(scenario.metricIds, 'scenario metric ids'), id =>
     literal(id, THREADNOTE_5_RELEASE_METRICS, 'scenario metric id'),
   );
-  if (!Array.isArray(scenario.metricMinimums)) invalid('scenario metric minimums must be an array');
-  const metricMinimums = scenario.metricMinimums.map(parseMetricMinimum);
-  if (canonicalJson(metricMinimums.map(minimum => minimum.id)) !== canonicalJson(metricIds)) {
+  if (!EffectArray.isArray(scenario.metricMinimums)) invalid('scenario metric minimums must be an array');
+  const metricMinimums = EffectArray.map(scenario.metricMinimums, parseMetricMinimum);
+  if (canonicalJson(EffectArray.map(metricMinimums, minimum => minimum.id)) !== canonicalJson(metricIds)) {
     invalid('scenario metric minimums must exactly match its metric ids');
   }
   return {
@@ -617,7 +619,7 @@ function parseScenarioContract(value: unknown): Threadnote5ScenarioContractV1 {
     metricIds,
     metricMinimums,
     requiredAssertions: stringArray(scenario.requiredAssertions, 'scenario assertions'),
-    subsystems: stringArray(scenario.subsystems, 'scenario subsystems').map(value =>
+    subsystems: EffectArray.map(stringArray(scenario.subsystems, 'scenario subsystems'), value =>
       literal(value, THREADNOTE_5_RELEASE_SUBSYSTEMS, 'scenario subsystem'),
     ),
   };
@@ -661,20 +663,20 @@ function parseCaptureManifest(value: unknown): Threadnote5CaptureManifestV1 {
   ) {
     invalid('capture mode and adapter do not match');
   }
-  if (!Array.isArray(manifest.entries) || manifest.entries.length > THREADNOTE_5_RELEASE_SCENARIOS.length * 2) {
+  if (!EffectArray.isArray(manifest.entries) || manifest.entries.length > THREADNOTE_5_RELEASE_SCENARIOS.length * 2) {
     invalid('capture manifest entries must be a bounded array');
   }
-  const entries = manifest.entries.map(parseCaptureManifestEntry);
+  const entries = EffectArray.map(manifest.entries, parseCaptureManifestEntry);
   unique(
-    entries.map(entry => entry.observationId),
+    EffectArray.map(entries, entry => entry.observationId),
     'capture manifest observation ids',
   );
   unique(
-    entries.map(entry => entry.receiptHash),
+    EffectArray.map(entries, entry => entry.receiptHash),
     'capture manifest observation receipt hashes',
   );
   unique(
-    entries.flatMap(entry => entry.subsystemReceipts.map(receipt => receipt.digest)),
+    EffectArray.flatMap(entries, entry => EffectArray.map(entry.subsystemReceipts, receipt => receipt.digest)),
     'capture manifest subsystem receipt digests',
   );
   return {
@@ -689,13 +691,13 @@ function parseCaptureManifest(value: unknown): Threadnote5CaptureManifestV1 {
 function parseCaptureManifestEntry(value: unknown): Threadnote5CaptureManifestEntryV1 {
   const entry = record(value, 'capture manifest entry');
   exactKeys(entry, ['observationId', 'receiptHash', 'scenario', 'sourceHash', 'subsystemReceipts', 'transcriptDigest']);
-  if (!Array.isArray(entry.subsystemReceipts)) invalid('capture manifest subsystem receipts must be an array');
+  if (!EffectArray.isArray(entry.subsystemReceipts)) invalid('capture manifest subsystem receipts must be an array');
   return {
     observationId: matching(entry.observationId, /^obs_[0-9a-f]{32}$/u, 'manifest observation id'),
     receiptHash: hash(entry.receiptHash, 'manifest observation receipt hash'),
     scenario: literal(entry.scenario, THREADNOTE_5_RELEASE_SCENARIOS, 'manifest scenario'),
     sourceHash: hash(entry.sourceHash, 'manifest source hash'),
-    subsystemReceipts: entry.subsystemReceipts.map(parseSubsystemReceipt),
+    subsystemReceipts: EffectArray.map(entry.subsystemReceipts, parseSubsystemReceipt),
     transcriptDigest: hash(entry.transcriptDigest, 'manifest transcript digest'),
   };
 }
@@ -741,17 +743,18 @@ function parseObservations(
   source: Threadnote5SourceV1,
   fixture: Threadnote5ReleaseReadinessFixtureV1,
 ): readonly Threadnote5ObservationV1[] {
-  if (!Array.isArray(value) || value.length > fixture.scenarios.length) invalid('observations must be a bounded array');
-  const observations = value.map(item => parseObservation(item, source, fixture));
+  if (!EffectArray.isArray(value) || value.length > fixture.scenarios.length)
+    invalid('observations must be a bounded array');
+  const observations = EffectArray.map(value, item => parseObservation(item, source, fixture));
   unique(
-    observations.map(item => item.observationId),
+    EffectArray.map(observations, item => item.observationId),
     'observation ids',
   );
   unique(
-    observations.map(item => item.scenario),
+    EffectArray.map(observations, item => item.scenario),
     'observation scenarios',
   );
-  const order = new Map(fixture.scenarios.map((scenario, index) => [scenario.id, index]));
+  const order = new Map(EffectArray.map(fixture.scenarios, (scenario, index) => [scenario.id, index]));
   const sorted = observations.sort((left, right) => order.get(left.scenario)! - order.get(right.scenario)!);
   let previousTranscriptDigest: string | null = null;
   const subsystemDigests: string[] = [];
@@ -760,7 +763,7 @@ function parseObservations(
       invalid('observation transcript chain is incomplete or reordered');
     }
     previousTranscriptDigest = observation.attestation.transcriptDigest;
-    subsystemDigests.push(...observation.attestation.subsystemReceipts.map(receipt => receipt.digest));
+    subsystemDigests.push(...EffectArray.map(observation.attestation.subsystemReceipts, receipt => receipt.digest));
   }
   unique(subsystemDigests, 'subsystem receipt digests');
   return sorted;
@@ -783,7 +786,7 @@ function parseObservation(
   ]);
   if (observation.version !== 1) invalid('observation version must be 1');
   const scenario = literal(observation.scenario, THREADNOTE_5_RELEASE_SCENARIOS, 'observation scenario');
-  const contract = fixture.scenarios.find(item => item.id === scenario)!;
+  const contract = EffectOption.getOrUndefined(EffectArray.findFirst(fixture.scenarios, item => item.id === scenario))!;
   const sourceHash = hash(observation.sourceHash, 'observation source hash');
   if (sourceHash !== threadnote5SourceHash(source)) invalid('observation source hash does not match its source');
   const transcript = parseObservationTranscript(observation.transcript, contract, fixture);
@@ -809,15 +812,17 @@ function parseObservationTranscript(
   const transcript = record(value, 'observation transcript');
   exactKeys(transcript, ['assertionResults', 'measurements', 'outcome', 'reason']);
   const outcome = literal(transcript.outcome, ['failed', 'passed', 'unknown'] as const, 'observation outcome');
-  if (!Array.isArray(transcript.assertionResults)) invalid('transcript assertion results must be an array');
-  const assertionResults = transcript.assertionResults.map(parseAssertionResult);
-  if (canonicalJson(assertionResults.map(result => result.id)) !== canonicalJson(contract.requiredAssertions)) {
+  if (!EffectArray.isArray(transcript.assertionResults)) invalid('transcript assertion results must be an array');
+  const assertionResults = EffectArray.map(transcript.assertionResults, parseAssertionResult);
+  if (
+    canonicalJson(EffectArray.map(assertionResults, result => result.id)) !== canonicalJson(contract.requiredAssertions)
+  ) {
     invalid(`transcript assertions are mislabeled for ${contract.id}`);
   }
-  if (!Array.isArray(transcript.measurements)) invalid('transcript measurements must be an array');
-  const measurements = transcript.measurements.map(item => parseMeasurement(item, fixture));
+  if (!EffectArray.isArray(transcript.measurements)) invalid('transcript measurements must be an array');
+  const measurements = EffectArray.map(transcript.measurements, item => parseMeasurement(item, fixture));
   unique(
-    measurements.map(item => item.id),
+    EffectArray.map(measurements, item => item.id),
     'transcript metric ids',
   );
   const reason =
@@ -829,14 +834,14 @@ function parseObservationTranscript(
           'observation reason',
         );
   if (outcome === 'passed') {
-    if (reason !== null || assertionResults.some(result => !result.observed)) {
+    if (reason !== null || EffectArray.some(assertionResults, result => !result.observed)) {
       invalid('passed transcript requires every assertion and no failure reason');
     }
-    if (canonicalJson(measurements.map(item => item.id)) !== canonicalJson(contract.metricIds)) {
+    if (canonicalJson(EffectArray.map(measurements, item => item.id)) !== canonicalJson(contract.metricIds)) {
       invalid(`passed ${contract.id} transcript metrics are mislabeled or incomplete`);
     }
   } else {
-    if (assertionResults.some(result => result.observed) || measurements.length > 0) {
+    if (EffectArray.some(assertionResults, result => result.observed) || measurements.length > 0) {
       invalid('non-passed transcript cannot claim assertions or measurements');
     }
     if (outcome === 'failed' ? reason !== 'contract-failed' : reason === null || reason === 'contract-failed') {
@@ -869,13 +874,15 @@ function parseObservationAttestation(
   ]);
   const preRuntime = parseRuntimeIdentity(attestation.preRuntime, source, 'pre-run runtime');
   const postRuntime = parseRuntimeIdentity(attestation.postRuntime, source, 'post-run runtime');
-  if (!Array.isArray(attestation.subsystemReceipts)) invalid('subsystem receipts must be an array');
-  const subsystemReceipts = attestation.subsystemReceipts.map(parseSubsystemReceipt);
-  if (canonicalJson(subsystemReceipts.map(receipt => receipt.kind)) !== canonicalJson(contract.subsystems)) {
+  if (!EffectArray.isArray(attestation.subsystemReceipts)) invalid('subsystem receipts must be an array');
+  const subsystemReceipts = EffectArray.map(attestation.subsystemReceipts, parseSubsystemReceipt);
+  if (
+    canonicalJson(EffectArray.map(subsystemReceipts, receipt => receipt.kind)) !== canonicalJson(contract.subsystems)
+  ) {
     invalid(`subsystem receipts are mislabeled for ${contract.id}`);
   }
   unique(
-    subsystemReceipts.map(receipt => receipt.digest),
+    EffectArray.map(subsystemReceipts, receipt => receipt.digest),
     'observation subsystem receipt digests',
   );
   const transcriptDigest = hash(attestation.transcriptDigest, 'transcript digest');
@@ -923,7 +930,7 @@ function parseSubsystemReceipt(value: unknown): Threadnote5SubsystemReceiptV1 {
 function parseMeasurement(value: unknown, fixture: Threadnote5ReleaseReadinessFixtureV1): Threadnote5MeasurementV1 {
   const measurement = record(value, 'measurement');
   const id = literal(measurement.id, THREADNOTE_5_RELEASE_METRICS, 'measurement id');
-  const definition = fixture.metrics.find(item => item.id === id)!;
+  const definition = EffectOption.getOrUndefined(EffectArray.findFirst(fixture.metrics, item => item.id === id))!;
   if (definition.kind === 'mean') {
     exactKeys(measurement, ['id', 'sampleCount', 'total']);
     return {
@@ -944,19 +951,19 @@ function compareObservationIdentity(left: Threadnote5ObservationV1, right: Threa
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (!Predicate.isObject(value) || Array.isArray(value)) invalid(`${label} must be an object`);
+  if (!Predicate.isObject(value) || EffectArray.isArray(value)) invalid(`${label} must be an object`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const expected = [...keys].sort();
   if (canonicalJson(actual) !== canonicalJson(expected)) invalid('object has unsupported or missing fields');
 }
 
 function stringArray(value: unknown, label: string): string[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
-  return value.map(item => matching(item, /^[a-z0-9][a-z0-9-]{0,63}$/u, label));
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
+  return EffectArray.map(value, item => matching(item, /^[a-z0-9][a-z0-9-]{0,63}$/u, label));
 }
 
 function literal<const Values extends readonly string[]>(

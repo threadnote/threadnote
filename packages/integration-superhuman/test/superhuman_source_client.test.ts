@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Redacted} from 'effect';
 import {makeSuperhumanClientBudget, readSuperhumanDocument, SuperhumanClientError} from '../src/client.js';
 import {renderSuperhumanDocument, splitUtf8, SuperhumanPageTooLarge, SuperhumanSecretBlocked} from '../src/render.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {status, headers: {'content-type': 'application/json', ...headers}});
@@ -20,11 +23,11 @@ const line = {id: 'line_one', type: 'line', itemContent: {style: 'p', format: 'p
 function fixtureFetch(log: URL[], repeated = false) {
   return async (url: URL) => {
     log.push(url);
-    if (url.pathname.endsWith('/content')) {
+    if (Effect.pipe(url.pathname, EffectString.endsWith('/content'))) {
       if (url.searchParams.has('pageToken')) return json({items: [line]});
       return json({items: [], nextPageToken: 'opaque_cursor'});
     }
-    if (url.pathname.endsWith('/pages/page_one')) return json(page);
+    if (Effect.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))) return json(page);
     if (url.searchParams.has('pageToken'))
       return json({items: repeated ? [] : [page], ...(repeated ? {nextPageToken: 'same_cursor'} : {})});
     return json({items: [], nextPageToken: repeated ? 'same_cursor' : 'inventory_cursor'});
@@ -40,9 +43,12 @@ describe('Superhuman read client', () => {
     });
     expect(result.pages).toHaveLength(1);
     expect(result.pages[0]?.lines[0]?.id).toBe('line_one');
-    for (const url of calls.filter(url => url.searchParams.has('pageToken')))
+    for (const url of EffectArray.filter(
+      calls,
+      (url, __effectArrayIndex) => __effectArrayIndex in calls && url.searchParams.has('pageToken'),
+    ))
       expect([...url.searchParams.keys()]).toEqual(['pageToken']);
-    expect(calls.every(url => url.origin === 'https://docs.superhuman.com')).toBe(true);
+    expect(EffectArray.every(calls, url => url.origin === 'https://docs.superhuman.com')).toBe(true);
   });
 
   it('rejects repeated cursors without publishing a partial snapshot', async () => {
@@ -58,7 +64,7 @@ describe('Superhuman read client', () => {
     let pageReads = 0;
     const calls: URL[] = [];
     const fetch = async (url: URL) => {
-      if (url.pathname.endsWith('/pages/page_one')) {
+      if (Effect.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))) {
         pageReads++;
         return json({...page, updatedAt: pageReads > 1 ? '2026-10-08T11:00:00Z' : page.updatedAt});
       }
@@ -109,9 +115,9 @@ describe('Superhuman read client', () => {
     ];
     for (const example of cases) {
       const fetch = async (url: URL) =>
-        url.pathname.endsWith('/content')
+        Effect.pipe(url.pathname, EffectString.endsWith('/content'))
           ? json({items: example.lines})
-          : url.pathname.endsWith('/pages/page_one')
+          : Effect.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))
             ? json(example.metadata)
             : json({items: [example.metadata]});
       const error = await readSuperhumanDocument(Redacted.make(credential), 'doc_one', undefined, false, {fetch}).catch(
@@ -143,9 +149,9 @@ describe('Superhuman read client', () => {
                 },
               ];
       const fetch = async (url: URL) =>
-        url.pathname.endsWith('/content')
+        Effect.pipe(url.pathname, EffectString.endsWith('/content'))
           ? json({items: lines})
-          : url.pathname.endsWith('/pages/page_one')
+          : Effect.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))
             ? json(metadata)
             : json({items: [metadata]});
       const error = await readSuperhumanDocument(Redacted.make(credential), 'doc_one', undefined, false, {fetch}).catch(
@@ -160,7 +166,7 @@ describe('Superhuman read client', () => {
     const revisionless = {...page, updatedAt: undefined};
     let observations = 0;
     const fetch = async (url: URL) => {
-      if (url.pathname.endsWith('/content')) {
+      if (Effect.pipe(url.pathname, EffectString.endsWith('/content'))) {
         if (url.searchParams.has('pageToken'))
           return json({
             items: [
@@ -174,7 +180,9 @@ describe('Superhuman read client', () => {
         observations++;
         return json({items: [line], nextPageToken: `cursor_${observations}`});
       }
-      return url.pathname.endsWith('/pages/page_one') ? json(revisionless) : json({items: [revisionless]});
+      return Effect.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))
+        ? json(revisionless)
+        : json({items: [revisionless]});
     };
     await expect(
       readSuperhumanDocument(Redacted.make('synthetic-token'), 'doc_one', undefined, false, {fetch}),
@@ -223,7 +231,7 @@ describe('Superhuman deterministic rendering', () => {
   });
 
   it('rejects a page too large for external-resource access', () => {
-    const selected = snapshot('a'.repeat(481 * 1024));
+    const selected = snapshot(Effect.pipe('a', EffectString.repeat(481 * 1024)));
     expect(() => renderSuperhumanDocument(selected)).toThrow(SuperhumanPageTooLarge);
   });
 
@@ -231,8 +239,8 @@ describe('Superhuman deterministic rendering', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 300}), text => {
         const pieces = splitUtf8(text, 11);
-        expect(pieces.join('')).toBe(text);
-        expect(pieces.every(piece => Buffer.byteLength(piece) <= 11)).toBe(true);
+        expect(EffectArray.join(pieces, '')).toBe(text);
+        expect(EffectArray.every(pieces, piece => Buffer.byteLength(piece) <= 11)).toBe(true);
       }),
       {numRuns: 80},
     );
@@ -246,13 +254,15 @@ describe('Superhuman deterministic rendering', () => {
   });
 
   it('renders one complete page from ordered lines, including content beyond the old 16 KiB split', () => {
-    const selected = snapshot('a'.repeat(20 * 1024));
+    const selected = snapshot(Effect.pipe('a', EffectString.repeat(20 * 1024)));
     selected.pages[0].lines.push({id: 'line_two', style: 'h2', content: 'Section'});
     selected.pages[0].lines.push({id: 'line_three', style: 'p', content: 'Last paragraph'});
     const chunks = renderSuperhumanDocument(selected);
     expect(chunks).toHaveLength(1);
     expect(chunks[0]?.chunkId).toBe('page');
-    expect(chunks[0]?.body).toBe(`# Notes\n\n${'a'.repeat(20 * 1024)}\n\n## Section\n\nLast paragraph`);
+    expect(chunks[0]?.body).toBe(
+      `# Notes\n\n${Effect.pipe('a', EffectString.repeat(20 * 1024))}\n\n## Section\n\nLast paragraph`,
+    );
   });
 
   it('preserves ordered paragraph text in a single stable page resource', () => {
@@ -260,7 +270,7 @@ describe('Superhuman deterministic rendering', () => {
       fc.property(fc.array(fc.integer({min: 0, max: 9999}), {minLength: 1, maxLength: 30}), numbers => {
         const selected = snapshot(`line-${numbers[0]}`);
         selected.pages[0].lines.push(
-          ...numbers.slice(1).map((number, index) => ({
+          ...EffectArray.map(numbers.slice(1), (number, index) => ({
             id: `line_${index + 2}`,
             style: 'p',
             content: `line-${number}`,
@@ -268,7 +278,12 @@ describe('Superhuman deterministic rendering', () => {
         );
         const result = renderSuperhumanDocument(selected);
         expect(result).toHaveLength(1);
-        expect(result[0]?.body).toBe(`# Notes\n\n${numbers.map(number => `line-${number}`).join('\n\n')}`);
+        expect(result[0]?.body).toBe(
+          `# Notes\n\n${EffectArray.join(
+            EffectArray.map(numbers, number => `line-${number}`),
+            '\n\n',
+          )}`,
+        );
       }),
       {numRuns: 60},
     );
@@ -289,9 +304,13 @@ describe('Superhuman deterministic rendering', () => {
         expect(renderSuperhumanDocument(input)).toEqual(first);
         expect(first).toHaveLength(1);
         expect(
-          first.every(chunk =>
-            [...chunk.body].every(character => {
-              const code = character.charCodeAt(0);
+          EffectArray.every(first, chunk =>
+            EffectArray.every([...chunk.body], character => {
+              const code = Effect.pipe(
+                character,
+                EffectString.charCodeAt(0),
+                Effect.Option.getOrElse(() => NaN),
+              );
               return (code >= 32 || code === 10 || code === 9) && (code < 127 || code > 159);
             }),
           ),

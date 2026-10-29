@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {CODE_GRAPH_CACHE_TRANSACTION_LIMITS} from '@threadnote/graph/cache_capacity';
@@ -12,9 +13,9 @@ describe('code graph cache write page properties', () => {
 
         expect(pages.flat()).toEqual(rows);
         expect(pages).toHaveLength(Math.ceil(rows.length / CODE_GRAPH_CACHE_TRANSACTION_LIMITS.rows));
-        expect(pages.every(page => page.length > 0 && page.length <= CODE_GRAPH_CACHE_TRANSACTION_LIMITS.rows)).toBe(
-          true,
-        );
+        expect(
+          EffectArray.every(pages, page => page.length > 0 && page.length <= CODE_GRAPH_CACHE_TRANSACTION_LIMITS.rows),
+        ).toBe(true);
         expect(rows).toEqual(before);
       }),
       {numRuns: 150},

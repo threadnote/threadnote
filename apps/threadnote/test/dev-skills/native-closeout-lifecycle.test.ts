@@ -2,6 +2,7 @@ import {it as effectIt} from '@effect/vitest';
 import {
   Array as EffectArray,
   String as EffectString,
+  Option as EffectOption,
   Deferred,
   Effect,
   Fiber,
@@ -12,6 +13,7 @@ import {
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
+import {isJsonObject} from '@threadnote/platform/json';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {decodeNativeCyclePlan} from '@threadnote/workflow-automations/cycle';
 import {
@@ -33,13 +35,32 @@ import {decodeWorkflowJournalStorageImage} from '../../src/workflow_memory/journ
 import {decodeBoundedWorkflowJson} from '../../src/workflow_memory/journal_codec.js';
 import {nativeCloseoutFixture} from './native-closeout-fixture.js';
 import {runCloseout} from './native-closeout-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as Effect2 from 'effect';
 
 type Fixture = ReturnType<typeof nativeCloseoutFixture> extends Effect.Effect<infer A, infer _E, infer _R> ? A : never;
 
 const object = (value: unknown): Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) throw new Error('Expected an object response.');
-  return value as Record<string, unknown>;
+  if (!isJsonObject(value)) throw new Error('Expected an object response.');
+  return value;
 };
+const objectArray = (value: unknown): Record<string, unknown>[] => {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an object array.');
+  return EffectArray.map(value, object);
+};
+const stringArray = (value: unknown): string[] => {
+  if (!EffectArray.isArray(value)) throw new Error('Expected a string array.');
+  return EffectArray.map(value, item => {
+    if (typeof item !== 'string') throw new Error('Expected a string.');
+    return item;
+  });
+};
+const artifactReferences = (value: unknown) =>
+  EffectRecord.map(object(value), reference => ({
+    memoryId: stringField(object(reference), 'memoryId'),
+    revision: stringField(object(reference), 'revision'),
+    uri: stringField(object(reference), 'uri'),
+  }));
 const stringField = (value: Record<string, unknown>, key: string): string => {
   const field = value[key];
   if (typeof field !== 'string') throw new Error(`Expected string field ${key}.`);
@@ -48,9 +69,15 @@ const stringField = (value: Record<string, unknown>, key: string): string => {
 const validationShape = (value: unknown) => {
   const result = object(value);
   return {
-    phases: result.phases as readonly {id: string; acceptanceCriteria: readonly string[]}[],
-    scenarios: result.scenarios as readonly {id: string}[],
-    decisions: result.decisions as readonly {id: string; selected: string}[],
+    phases: EffectArray.map(objectArray(result.phases), phase => ({
+      id: stringField(phase, 'id'),
+      acceptanceCriteria: stringArray(phase.acceptanceCriteria),
+    })),
+    scenarios: EffectArray.map(objectArray(result.scenarios), scenario => ({id: stringField(scenario, 'id')})),
+    decisions: EffectArray.map(objectArray(result.decisions), decision => ({
+      id: stringField(decision, 'id'),
+      selected: stringField(decision, 'selected'),
+    })),
   };
 };
 const proposalFor = (value: unknown, includeCodeRefs = true) => {
@@ -70,16 +97,19 @@ const proposalFor = (value: unknown, includeCodeRefs = true) => {
     combinedChecks: [
       {command: 'private combined fixture check', result: 'passed' as const, evidence: 'All fixture checks passed.'},
     ],
-    phaseEvidence: input.phases.map(phase => ({
+    phaseEvidence: EffectArray.map(input.phases, phase => ({
       id: phase.id,
-      acceptance: phase.acceptanceCriteria.map(criterion => ({criterion, evidence: 'Observed ' + criterion})),
+      acceptance: EffectArray.map(phase.acceptanceCriteria, criterion => ({
+        criterion,
+        evidence: 'Observed ' + criterion,
+      })),
     })),
-    scenarios: input.scenarios.map(scenario => ({
+    scenarios: EffectArray.map(input.scenarios, scenario => ({
       id: scenario.id,
       evidence: 'Observed complete scenario ' + scenario.id,
     })),
     ...(input.scenarios.length > 0 ? {behaviorVerification: 'Verified each approved behavior scenario.'} : {}),
-    decisions: input.decisions.map(item => ({
+    decisions: EffectArray.map(input.decisions, item => ({
       id: item.id,
       implemented: item.selected,
       rationale: 'Applied the approved choice and preserved its complete rationale: ' + item.id,
@@ -111,17 +141,16 @@ const relationTargets = (f: Fixture, uri: string, revision?: string) =>
     if (!controller) throw new Error('Expected controller run.');
     const bytes = yield* f.fs.readFileString(f.journalPath(controller.state.bindingId));
     const logical = yield* Effect.promise(() => decodeWorkflowJournal(bytes));
-    const journal = decodeWorkflowJournalStorageImage(JSON.parse(logical)) as {
-      operations: Record<
-        string,
-        {artifact: {canonicalUri: string; revision: string}; relations: readonly {uri: string}[]}
-      >;
-    };
-    const operation = Object.values(journal.operations).find(
-      item => item.artifact.canonicalUri === uri && (revision === undefined || item.artifact.revision === revision),
+    const journal = object(decodeWorkflowJournalStorageImage(JSON.parse(logical)));
+    const operations = EffectArray.map(EffectRecord.values(object(journal.operations)), object);
+    const operation = EffectOption.getOrUndefined(
+      EffectArray.findFirst(operations, item => {
+        const artifact = object(item.artifact);
+        return artifact.canonicalUri === uri && (revision === undefined || artifact.revision === revision);
+      }),
     );
     if (!operation) throw new Error('Expected a verified operation for the readback artifact.');
-    return operation.relations.map(relation => relation.uri);
+    return EffectArray.map(objectArray(operation.relations), relation => stringField(relation, 'uri'));
   });
 const prepare = (f: Fixture) =>
   Effect.gen(function* () {
@@ -138,10 +167,11 @@ const journalImage = (f: Fixture) =>
     const state = yield* readNativeWorkflowState(f.config, f.controllerRunId);
     if (!state) throw new Error('Expected controller run.');
     const file = f.statePath(f.controllerRunId) + '.closeout.json';
-    return JSON.parse(yield* f.fs.readFileString(file)) as {
-      archives: Record<string, {uri: string; memoryId: string; revision: string}>;
-      outputs: Record<string, {uri: string; memoryId: string; revision: string}>;
-      status: string;
+    const image = object(JSON.parse(yield* f.fs.readFileString(file)));
+    return {
+      archives: artifactReferences(image.archives),
+      outputs: artifactReferences(image.outputs),
+      status: stringField(image, 'status'),
     };
   });
 // P0 Windows allowance for seven full native closeout fixtures beyond 30s; revisit with performance data.
@@ -513,7 +543,7 @@ describe('native closeout lifecycle', () => {
         expect(Result.isFailure(yield* commandResult(f.closeout('finish')))).toBe(true);
         const stale = yield* commandResult(f.closeout('prepare', {proposal}));
         expect(Result.isFailure(stale)).toBe(true);
-        if (Result.isFailure(stale)) expect((stale.failure as {code?: string}).code).toBe('closeout-acceptance-stale');
+        if (Result.isFailure(stale)) expect(object(stale.failure).code).toBe('closeout-acceptance-stale');
         const before = yield* readNativeWorkflowState(f.config, f.controllerRunId);
         if (!before?.state.cycle) throw new Error('Expected controller cycle.');
         const cycle = (command: string, fields: Record<string, unknown> = {}) =>
@@ -640,7 +670,7 @@ describe('native closeout lifecycle', () => {
         const conflictingIntent = yield* commandResult(f.closeout('prepare', {proposal: changedProposal}));
         expect(Result.isFailure(conflictingIntent)).toBe(true);
         if (Result.isFailure(conflictingIntent))
-          expect((conflictingIntent.failure as {code?: string}).code).toBe('closeout-intent-conflict');
+          expect(object(conflictingIntent.failure).code).toBe('closeout-intent-conflict');
         const recoveredAdmission = object(yield* f.closeout('recover'));
         expect(recoveredAdmission.closeout).toMatchObject({state: 'superseded', retainedAdmissions: 1});
         const fencedAdmission = yield* readNativeCloseoutJournal(f.config, f.controllerRunId, decodeJournal);
@@ -657,8 +687,7 @@ describe('native closeout lifecycle', () => {
         yield* runCommandEffect('git', ['-C', f.repo, 'commit', '-m', 'Drift private source']);
         const staleSource = yield* commandResult(f.closeout('prepare', {proposal: changedProposal}));
         expect(Result.isFailure(staleSource)).toBe(true);
-        if (Result.isFailure(staleSource))
-          expect((staleSource.failure as {code?: string}).code).toBe('closeout-acceptance-stale');
+        if (Result.isFailure(staleSource)) expect(object(staleSource.failure).code).toBe('closeout-acceptance-stale');
         yield* runCommandEffect('git', ['-C', f.repo, 'reset', '--hard', newHead]);
         yield* mutateCycle('extend-reviews', {
           phaseId: 'one',
@@ -667,8 +696,7 @@ describe('native closeout lifecycle', () => {
         });
         const staleCycle = yield* commandResult(f.closeout('prepare', {proposal: changedProposal}));
         expect(Result.isFailure(staleCycle)).toBe(true);
-        if (Result.isFailure(staleCycle))
-          expect((staleCycle.failure as {code?: string}).code).toBe('closeout-acceptance-stale');
+        if (Result.isFailure(staleCycle)) expect(object(staleCycle.failure).code).toBe('closeout-acceptance-stale');
         const drifted = yield* readNativeWorkflowState(f.config, f.controllerRunId);
         if (!drifted || !qualified?.state.cycle) throw new Error('Expected drifted public cycle runtime.');
         yield* withNativeWorkflowLock(
@@ -757,7 +785,7 @@ describe('native closeout lifecycle', () => {
         const storedJournal = yield* f.fs.readFileString(controllerJournal);
         const logicalJournal = yield* Effect.promise(() => decodeWorkflowJournal(storedJournal));
         expect(JSON.parse(logicalJournal).journalStorage).toBe('threadnote-workflow-journal-shared-values-v1');
-        expect(Object.keys(image.archives)).toHaveLength(loaded.owned.length);
+        expect(EffectRecord.keys(image.archives)).toHaveLength(loaded.owned.length);
         for (const item of loaded.owned) {
           const archived = image.archives[item.uri];
           expect(archived).toBeDefined();
@@ -794,7 +822,7 @@ describe('native closeout lifecycle', () => {
         const replay = object(yield* f.closeout('finish'));
         expect(replay.closeout).toMatchObject({
           state: 'complete',
-          revision: (finished.closeout as Record<string, unknown>).revision,
+          revision: object(finished.closeout).revision,
           archived: loaded.owned.length,
         });
         expect(yield* f.fs.readFileString(receiptFile)).toBe(bytes);
@@ -809,7 +837,7 @@ describe('native closeout lifecycle', () => {
       const loaded = yield* f.load();
       expect(loaded.spec?.kind).toBe('spec');
       const {validation} = yield* prepare(f);
-      expect(validationShape(validation).scenarios.map(item => item.id)).toEqual(['read']);
+      expect(EffectArray.map(validationShape(validation).scenarios, item => item.id)).toEqual(['read']);
       const finished = object(yield* f.closeout('finish'));
       expect(finished.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       const image = yield* journalImage(f);
@@ -834,7 +862,7 @@ describe('native closeout lifecycle', () => {
       const proposal = proposalFor(validation);
       const missing = {
         ...proposal,
-        phaseEvidence: proposal.phaseEvidence.map(phase => ({...phase, acceptance: []})),
+        phaseEvidence: EffectArray.map(proposal.phaseEvidence, phase => ({...phase, acceptance: []})),
       };
       const rejected = yield* commandResult(f.closeout('prepare', {proposal: missing}));
       expect(Result.isFailure(rejected)).toBe(true);
@@ -856,7 +884,7 @@ describe('native closeout lifecycle', () => {
       const f = yield* nativeCloseoutFixture(false);
       const loaded = yield* f.load();
       const {proposal} = yield* prepare(f);
-      const selected = loaded.owned.find(item => item.role === 'authoring-child');
+      const selected = EffectOption.getOrUndefined(EffectArray.findFirst(loaded.owned, item => item.role === 'authoring-child'));
       if (!selected) throw new Error('Expected an owned authoring child.');
       const before = yield* f.store.read(f.location, selected.uri);
       const fingerprint = yield* f.store.fingerprint(before);
@@ -867,7 +895,7 @@ describe('native closeout lifecycle', () => {
       const finish = yield* commandResult(f.closeout('finish'));
       expect(Result.isFailure(finish)).toBe(true);
       const image = yield* journalImage(f);
-      expect(Object.keys(image.archives)).toHaveLength(0);
+      expect(EffectRecord.keys(image.archives)).toHaveLength(0);
       for (const item of loaded.owned) {
         const observed = yield* commandResult(f.call({...f.base('read', item.runId), uri: item.uri}));
         if (!Result.isSuccess(observed)) throw new Error('Expected owned draft readback to remain available.');
@@ -928,7 +956,7 @@ describe('native closeout lifecycle', () => {
       const resumed = object(yield* f.closeout('finish'));
       expect(resumed.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       const complete = yield* journalImage(f);
-      expect(Object.keys(complete.archives)).toHaveLength(loaded.owned.length);
+      expect(EffectRecord.keys(complete.archives)).toHaveLength(loaded.owned.length);
       for (const item of loaded.owned) {
         const archive = complete.archives[item.uri];
         expect(archive).toBeDefined();
@@ -989,7 +1017,7 @@ describe('native closeout lifecycle', () => {
       expect(resumed.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       const complete = yield* journalImage(f);
       expect(complete.status).toBe('complete');
-      expect(Object.keys(complete.archives)).toHaveLength(loaded.owned.length);
+      expect(EffectRecord.keys(complete.archives)).toHaveLength(loaded.owned.length);
       for (const item of loaded.owned) {
         const archive = complete.archives[item.uri];
         expect(archive).toBeDefined();
@@ -1045,37 +1073,29 @@ describe('native closeout lifecycle', () => {
               const decodeReceipt = (bytes: Uint8Array) =>
                 Effect.promise(async () => {
                   const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
-                  return JSON.parse(
-                    text.includes('threadnote-native-closeout-state-gzip-v1')
+                  const value: unknown = JSON.parse(
+                    Effect2.pipe(text, EffectString.includes('threadnote-native-closeout-state-gzip-v1'))
                       ? await decodeBoundedWorkflowJson(text, 'threadnote-native-closeout-state-gzip-v1')
                       : text,
-                  ) as {
-                    outputs?: {behavior?: {revision?: string}};
-                  };
+                  );
+                  return object(value);
                 });
               const previous = yield* decodeReceipt(yield* filesystem.readFile(receiptFile));
               const proposed = yield* decodeReceipt(yield* filesystem.readFile(from));
               const workflow = yield* readNativeWorkflowState(f.config, f.controllerRunId);
               finalWriteVerified =
-                workflow?.state.operations.some(
-                  operation =>
-                    operation.intent.operationId.endsWith('-behavior-final') && operation.status === 'verified',
-                ) ?? false;
+                 EffectOption.getOrUndefined(EffectOption.map(EffectOption.fromNullishOr(workflow?.state.operations), __effectArrayReceiver => EffectArray.some(__effectArrayReceiver, (__effectArrayValue) => !!((operation =>
+                    Effect2.pipe(operation.intent.operationId, EffectString.endsWith('-behavior-final')) && operation.status === 'verified')(__effectArrayValue)))))  ?? false;
               observedOperationSuffixes =
-                workflow?.state.operations
-                  .map(
-                    operation => `${operation.intent.operationId.split('-').slice(-2).join('-')}:${operation.status}`,
-                  )
-                  .join(',') ?? '';
-              behaviorRevisionChanged = Boolean(
-                proposed.outputs?.behavior?.revision &&
-                proposed.outputs.behavior.revision !== previous.outputs?.behavior?.revision,
-              );
-              if (
-                finalWriteVerified &&
-                proposed.outputs?.behavior?.revision &&
-                proposed.outputs.behavior.revision !== previous.outputs?.behavior?.revision
-              ) {
+                 EffectOption.getOrUndefined(EffectOption.map(EffectOption.fromNullishOr(EffectOption.getOrUndefined(EffectOption.map(EffectOption.fromNullishOr(workflow?.state.operations), __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, operation => `${EffectArray.join(Effect2.pipe(operation.intent.operationId, EffectString.split('-')).slice(-2), '-')}:${operation.status}`)))), __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, ','))) ?? '';
+              const proposedOutputs = proposed.outputs === undefined ? undefined : object(proposed.outputs);
+              const previousOutputs = previous.outputs === undefined ? undefined : object(previous.outputs);
+              const proposedBehavior = proposedOutputs?.behavior === undefined ? undefined : object(proposedOutputs.behavior);
+              const previousBehavior = previousOutputs?.behavior === undefined ? undefined : object(previousOutputs.behavior);
+              const changedBehaviorRevision =
+                typeof proposedBehavior?.revision === 'string' && proposedBehavior.revision !== previousBehavior?.revision;
+              behaviorRevisionChanged = changedBehaviorRevision;
+              if (finalWriteVerified && changedBehaviorRevision) {
                 lost = true;
                 return yield* PlatformError.systemError({
                   _tag: 'Unknown',
@@ -1110,7 +1130,7 @@ describe('native closeout lifecycle', () => {
       const resumed = object(retry.success);
       expect(resumed.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       const complete = yield* journalImage(f);
-      expect(Object.keys(complete.archives)).toHaveLength(loaded.owned.length);
+      expect(EffectRecord.keys(complete.archives)).toHaveLength(loaded.owned.length);
       for (const item of loaded.owned) {
         const archive = complete.archives[item.uri];
         expect(archive).toBeDefined();
@@ -1153,7 +1173,7 @@ describe('native closeout lifecycle', () => {
         expect(Result.isFailure(pendingFinish)).toBe(true);
         yield* assertOwnedState(f, loaded.owned, 'active');
         const image = yield* journalImage(f);
-        expect(Object.keys(image.archives)).toHaveLength(0);
+        expect(EffectRecord.keys(image.archives)).toHaveLength(0);
         expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
       }).pipe(runCloseout),
       windowsCloseoutTimeout,

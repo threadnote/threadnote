@@ -1,11 +1,16 @@
+import {Array as EffectArray} from 'effect';
 import {privacySafeExternalControlPath, privacySafeExternalControlQuery} from './public-controls.js';
 import {
   RELEASE_EVIDENCE_HARNESS_DELTA_PATHS,
   releaseEvidenceVersionForRef,
   validateExternalRepositoryEvidence,
 } from './external-evidence.js';
-import type {BenchmarkArtifactV1} from './benchmark.js';
+import {isJsonObject} from '@threadnote/platform/json';
 import {trimBoundaryCharacters} from '@threadnote/platform/string-boundaries';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import * as Schema from 'effect/Schema';
 
 export const performanceControlLanguages = ['java', 'kotlin', 'typescript', 'bazel'] as const;
 
@@ -227,6 +232,47 @@ export type RetainedPerformanceHarnessArtifact = Readonly<{
 
 export type RetainedPerformancePayload = RetainedPerformanceHarnessArtifact;
 
+const RetainedPerformancePayloadSchema = Schema.Struct({
+  createdAt: Schema.String,
+  environment: Schema.Struct({
+    architecture: Schema.String,
+    commit: Schema.String,
+    cpu: Schema.String,
+    dirty: Schema.Literal(false),
+    fixtureHash: Schema.String,
+    memoryBytes: Schema.Finite,
+    model: Schema.optionalKey(Schema.Struct({backend: Schema.String, id: Schema.String, revision: Schema.String})),
+    node: Schema.String,
+    operatingSystem: Schema.String,
+    packageManager: Schema.String,
+    runner: Schema.Literal('threadnote-code-graph-e2e'),
+    runnerVersion: Schema.Literal('1'),
+  }),
+  measurements: Schema.Array(
+    Schema.Struct({
+      maximum: Schema.Finite,
+      mean: Schema.Finite,
+      minimum: Schema.Finite,
+      name: Schema.String,
+      p50: Schema.Finite,
+      p95: Schema.Finite,
+      p99: Schema.Finite,
+      samples: Schema.Finite,
+      unit: Schema.Literals(['bytes', 'count', 'milliseconds', 'operations_per_second', 'percent']),
+    }),
+  ),
+  metadata: Schema.Record(Schema.String, Schema.Union([Schema.Boolean, Schema.Finite, Schema.String])),
+  suite: Schema.Literal('code-graph-external-repository-v1'),
+  version: Schema.Literal(1),
+  warmups: Schema.Finite,
+});
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const decodeJsonRecord = Schema.decodeUnknownSync(JsonRecordSchema);
+const decodeRetainedPerformancePayload = Schema.decodeUnknownSync(RetainedPerformancePayloadSchema, {
+  errors: 'all',
+  onExcessProperty: 'error',
+});
+
 export type PerformanceEvidence =
   | Readonly<{
       state: 'pending';
@@ -264,7 +310,7 @@ export function retainedPerformanceObjectiveResults(
       artifact.phases.incremental.postCommittedScanMilliseconds,
     ],
   ]);
-  return [...retainedPerformanceTargetMilliseconds].map(([measurement, targetMilliseconds]) => {
+  return EffectArray.map([...retainedPerformanceTargetMilliseconds], ([measurement, targetMilliseconds]) => {
     const observed = observedMilliseconds.get(measurement);
     const label = retainedPerformanceTargetLabels.get(measurement);
     if (observed === undefined || label === undefined) {
@@ -418,14 +464,24 @@ export const retainedPerformanceArtifactFieldPaths = [
 const sha40Pattern = /^[a-f0-9]{40}$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 
+function rejectUnexpectedFields(value: unknown, path: string, keys: readonly string[]): void {
+  if (!isJsonObject(value)) return;
+  if (EffectArray.some(EffectRecord.keys(value), key => !keys.includes(key))) {
+    throw new Error(`Performance evidence ${path} has unexpected or missing fields.`);
+  }
+}
+
 function recordAt(value: unknown, path: string, keys: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!value || typeof value !== 'object' || EffectArray.isArray(value)) {
     throw new Error(`Performance evidence ${path} must be an object.`);
   }
-  const record = value as Record<string, unknown>;
-  const actualKeys = Object.keys(record).sort();
+  const record = decodeJsonRecord(value);
+  const actualKeys = EffectRecord.keys(record).sort();
   const expectedKeys = [...keys].sort();
-  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) {
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    EffectArray.some(actualKeys, (key, index) => key !== expectedKeys[index])
+  ) {
     throw new Error(`Performance evidence ${path} has unexpected or missing fields.`);
   }
   return record;
@@ -433,7 +489,7 @@ function recordAt(value: unknown, path: string, keys: readonly string[]): Record
 
 function stringAt(record: Record<string, unknown>, key: string, path: string): string {
   const value = record[key];
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (typeof value !== 'string' || Effect.pipe(value, EffectString.trim).length === 0) {
     throw new Error(`Performance evidence ${path}.${key} must be a non-empty string.`);
   }
   return value;
@@ -453,6 +509,17 @@ function positiveNumberAt(record: Record<string, unknown>, key: string, path: st
     throw new Error(`Performance evidence ${path}.${key} must be greater than zero.`);
   }
   return value;
+}
+
+function literalValueAt<T extends string | number | boolean>(
+  record: Record<string, unknown>,
+  key: string,
+  expected: T,
+): T {
+  if (record[key] !== expected) {
+    throw new Error(`Performance evidence ${key} must be ${JSON.stringify(expected)}.`);
+  }
+  return expected;
 }
 
 function literalAt(
@@ -478,12 +545,12 @@ function httpsUrlAt(record: Record<string, unknown>, key: string, path: string):
 
 function sitePathAt(record: Record<string, unknown>, key: string, path: string): void {
   const value = stringAt(record, key, path);
-  const parts = value.split('/').filter(Boolean);
+  const parts = EffectArray.filter(Effect.pipe(value, EffectString.split('/')), Boolean);
   const directories = parts.slice(0, -1);
   if (
-    !value.startsWith('/') ||
+    !Effect.pipe(value, EffectString.startsWith('/')) ||
     parts.at(-1) !== 'performance-evidence.json' ||
-    directories.some(part => part === '.' || part === '..' || !/^[A-Za-z0-9._~-]+$/.test(part))
+    EffectArray.some(directories, part => part === '.' || part === '..' || !/^[A-Za-z0-9._~-]+$/.test(part))
   ) {
     throw new Error(`Performance evidence ${path}.${key} must be a root-relative site artifact path.`);
   }
@@ -504,7 +571,7 @@ function validateLanguageRecord(
   for (const language of performanceControlLanguages) validate(record, language);
 }
 
-function validateVerifiedArtifact(input: unknown): RetainedPerformanceArtifact {
+export function assertRetainedPerformanceArtifact(input: unknown): asserts input is RetainedPerformanceArtifact {
   const root = recordAt(input, 'root', [
     'schemaVersion',
     'status',
@@ -638,7 +705,7 @@ function validateVerifiedArtifact(input: unknown): RetainedPerformanceArtifact {
     'lookupKeys',
     'lexicalPostings',
   ]);
-  for (const key of Object.keys(graph)) positiveNumberAt(graph, key, 'graph', true);
+  for (const key of EffectRecord.keys(graph)) positiveNumberAt(graph, key, 'graph', true);
 
   const phases = recordAt(root.phases, 'phases', ['cold', 'incremental', 'independentRebuild']);
   const cold = recordAt(phases.cold, 'phases.cold', [
@@ -649,7 +716,7 @@ function validateVerifiedArtifact(input: unknown): RetainedPerformanceArtifact {
     'resolutionMilliseconds',
     'activationMilliseconds',
   ]);
-  for (const key of Object.keys(cold)) positiveNumberAt(cold, key, 'phases.cold');
+  for (const key of EffectRecord.keys(cold)) positiveNumberAt(cold, key, 'phases.cold');
   const incremental = recordAt(phases.incremental, 'phases.incremental', [
     'totalMilliseconds',
     'registrationMilliseconds',
@@ -683,7 +750,8 @@ function validateVerifiedArtifact(input: unknown): RetainedPerformanceArtifact {
   literalAt(incremental, 'changedFiles', 'phases.incremental', 1);
   if (
     totalFiles > 1 &&
-    [inventoryFilesInspected, attributionContextFiles, baseFactsLoaded, probedDependencyPaths].some(
+    EffectArray.some(
+      [inventoryFilesInspected, attributionContextFiles, baseFactsLoaded, probedDependencyPaths],
       value => value >= totalFiles,
     )
   ) {
@@ -822,8 +890,6 @@ function validateVerifiedArtifact(input: unknown): RetainedPerformanceArtifact {
   literalAt(concurrency, 'indexedFiles', 'concurrency', retainedWorktreeIsolationIndexedFiles);
   literalAt(concurrency, 'topology', 'concurrency', retainedWorktreeIsolationTopology);
   literalAt(concurrency, 'isolationPassed', 'concurrency', true);
-
-  return input as RetainedPerformanceArtifact;
 }
 
 type HarnessMeasurement = RetainedPerformanceHarnessArtifact['measurements'][number];
@@ -836,10 +902,10 @@ const harnessLanguageControls = [
 ] as const satisfies readonly {display: PerformanceControlLanguage; harness: string}[];
 
 function openRecordAt(value: unknown, path: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!value || typeof value !== 'object' || EffectArray.isArray(value)) {
     throw new Error(`Performance evidence ${path} must be an object.`);
   }
-  return value as Record<string, unknown>;
+  return decodeJsonRecord(value);
 }
 
 function metadataString(metadata: Record<string, unknown>, key: string): string {
@@ -886,24 +952,28 @@ function parseHarnessControls(metadata: Record<string, unknown>): LanguageRecord
     throw new Error('Performance harness metadata.externalControlEvidence must be valid JSON.');
   }
   const controls = recordAt(input, 'harness.metadata.externalControlEvidence', performanceControlLanguages);
-  return Object.fromEntries(
-    performanceControlLanguages.map(language => {
-      const control = recordAt(controls[language], `harness.controls.${language}`, ['query', 'path', 'stableNodeId']);
-      const query = stringAt(control, 'query', `harness.controls.${language}`);
-      const path = stringAt(control, 'path', `harness.controls.${language}`);
-      const stableNodeId = stringAt(control, 'stableNodeId', `harness.controls.${language}`);
-      if (privacySafeExternalControlQuery(query) !== query) {
-        throw new Error(`Performance harness controls.${language}.query is not canonical privacy-safe evidence.`);
-      }
-      if (privacySafeExternalControlPath(path) !== path) {
-        throw new Error(`Performance harness controls.${language}.path is not canonical privacy-safe evidence.`);
-      }
-      if (!/^cgs_[a-f0-9]{32,64}$/.test(stableNodeId)) {
-        throw new Error(`Performance harness controls.${language}.stableNodeId is invalid.`);
-      }
-      return [language, {path, query, stableNodeId}];
-    }),
-  ) as LanguageRecord<{query: string; path: string; stableNodeId: string}>;
+  const entries = EffectArray.map(performanceControlLanguages, language => {
+    const control = recordAt(controls[language], `harness.controls.${language}`, ['query', 'path', 'stableNodeId']);
+    const query = stringAt(control, 'query', `harness.controls.${language}`);
+    const path = stringAt(control, 'path', `harness.controls.${language}`);
+    const stableNodeId = stringAt(control, 'stableNodeId', `harness.controls.${language}`);
+    if (privacySafeExternalControlQuery(query) !== query) {
+      throw new Error(`Performance harness controls.${language}.query is not canonical privacy-safe evidence.`);
+    }
+    if (privacySafeExternalControlPath(path) !== path) {
+      throw new Error(`Performance harness controls.${language}.path is not canonical privacy-safe evidence.`);
+    }
+    if (!/^cgs_[a-f0-9]{32,64}$/.test(stableNodeId)) {
+      throw new Error(`Performance harness controls.${language}.stableNodeId is invalid.`);
+    }
+    return {language, value: {path, query, stableNodeId}};
+  });
+  return {
+    bazel: entries[3].value,
+    java: entries[0].value,
+    kotlin: entries[1].value,
+    typescript: entries[2].value,
+  };
 }
 
 function validateHarnessRuntimeProvenance(
@@ -945,12 +1015,15 @@ function validateHarnessRuntimeProvenance(
   }
   const managedRuntime = metadataString(metadata, 'benchmarkValidatedManagedRuntime');
   const environmentRuntime = stringAt(environment, 'node', 'harness.environment');
-  if (!environmentRuntime.startsWith('bun/') || managedRuntime !== `bun-${environmentRuntime.slice(4)}`) {
+  if (
+    !Effect.pipe(environmentRuntime, EffectString.startsWith('bun/')) ||
+    managedRuntime !== `bun-${Effect.pipe(environmentRuntime, EffectString.slice(4))}`
+  ) {
     throw new Error('Performance harness managed runtime does not match the measured Bun runtime.');
   }
   const target = metadataString(metadata, 'benchmarkValidatedManagedTarget');
   const architecture = stringAt(environment, 'architecture', 'harness.environment');
-  if (!target.endsWith(`-${architecture}`)) {
+  if (!Effect.pipe(target, EffectString.endsWith(`-${architecture}`))) {
     throw new Error('Performance harness managed target does not match the measured architecture.');
   }
 }
@@ -1048,7 +1121,7 @@ function validateHarnessMeasurements(
  * The site derives every displayed measurement and provenance field from this one artifact.
  */
 export function validateRetainedPerformancePayload(input: unknown): RetainedPerformancePayload {
-  const payload = recordAt(input, 'harness', [
+  rejectUnexpectedFields(input, 'harness', [
     'createdAt',
     'environment',
     'measurements',
@@ -1057,6 +1130,8 @@ export function validateRetainedPerformancePayload(input: unknown): RetainedPerf
     'version',
     'warmups',
   ]);
+  const payload = decodeRetainedPerformancePayload(input);
+  recordAt(payload, 'harness', ['createdAt', 'environment', 'measurements', 'metadata', 'suite', 'version', 'warmups']);
   literalAt(payload, 'suite', 'harness', 'code-graph-external-repository-v1');
   literalAt(payload, 'version', 'harness', 1);
   numberAt(payload, 'warmups', 'harness', true);
@@ -1092,7 +1167,7 @@ export function validateRetainedPerformancePayload(input: unknown): RetainedPerf
     for (const key of ['backend', 'id', 'revision']) stringAt(model, key, 'harness.environment.model');
   }
 
-  if (!Array.isArray(payload.measurements) || payload.measurements.length === 0) {
+  if (!EffectArray.isArray(payload.measurements) || payload.measurements.length === 0) {
     throw new Error('Performance harness measurements must be a non-empty array.');
   }
   for (const [index, inputMeasurement] of payload.measurements.entries()) {
@@ -1124,7 +1199,7 @@ export function validateRetainedPerformancePayload(input: unknown): RetainedPerf
   }
 
   const metadata = openRecordAt(payload.metadata, 'harness.metadata');
-  for (const [key, value] of Object.entries(metadata)) {
+  for (const [key, value] of EffectRecord.toEntries(metadata)) {
     if (
       !['boolean', 'number', 'string'].includes(typeof value) ||
       (typeof value === 'number' && !Number.isFinite(value))
@@ -1155,7 +1230,7 @@ export function validateRetainedPerformancePayload(input: unknown): RetainedPerf
     if (
       parsed.protocol !== 'https:' ||
       parsed.hostname !== 'github.com' ||
-      parsed.pathname.replace(/\.git$/, '') !== expectedPath
+      Effect.pipe(parsed.pathname, EffectString.replace(/\.git$/, '')) !== expectedPath
     ) {
       throw new Error('mismatch');
     }
@@ -1168,7 +1243,7 @@ export function validateRetainedPerformancePayload(input: unknown): RetainedPerf
   let releaseEvidenceHarnessDeltaPaths: readonly string[] = [];
   try {
     const parsed = JSON.parse(metadataString(metadata, 'releaseEvidenceHarnessDeltaPaths'));
-    if (Array.isArray(parsed) && parsed.every(path => typeof path === 'string')) {
+    if (EffectArray.isArray(parsed) && EffectArray.every(parsed, path => typeof path === 'string')) {
       releaseEvidenceHarnessDeltaPaths = parsed;
     }
   } catch {
@@ -1177,8 +1252,8 @@ export function validateRetainedPerformancePayload(input: unknown): RetainedPerf
   const canonicalHarnessDelta =
     releaseEvidenceHarnessDeltaPaths.length > 0 &&
     new Set(releaseEvidenceHarnessDeltaPaths).size === releaseEvidenceHarnessDeltaPaths.length &&
-    releaseEvidenceHarnessDeltaPaths.every(path =>
-      (RELEASE_EVIDENCE_HARNESS_DELTA_PATHS as readonly string[]).includes(path),
+    EffectArray.every(releaseEvidenceHarnessDeltaPaths, path =>
+      new Set<string>(RELEASE_EVIDENCE_HARNESS_DELTA_PATHS).has(path),
     ) &&
     JSON.stringify([...releaseEvidenceHarnessDeltaPaths].sort()) === JSON.stringify(releaseEvidenceHarnessDeltaPaths);
   if (
@@ -1231,14 +1306,14 @@ export function validateRetainedPerformancePayload(input: unknown): RetainedPerf
     throw new Error('Performance harness SQLite version is invalid.');
   }
   parseHarnessControls(metadata);
-  validateHarnessMeasurements(input as RetainedPerformanceHarnessArtifact, metadata);
-  validateExternalRepositoryEvidence(input as BenchmarkArtifactV1, {
-    expectedControlLanguages: harnessLanguageControls.map(control => control.harness),
+  validateHarnessMeasurements(payload, metadata);
+  validateExternalRepositoryEvidence(payload, {
+    expectedControlLanguages: EffectArray.map(harnessLanguageControls, control => control.harness),
     managerEdgeBudget: retainedManagerEdgeBudget,
     managerNodeBudget: retainedManagerNodeBudget,
     releaseBound: true,
   });
-  return input as RetainedPerformancePayload;
+  return payload;
 }
 
 export function retainedPerformanceArtifactFromHarness(
@@ -1252,7 +1327,7 @@ export function retainedPerformanceArtifactFromHarness(
   }>,
 ): RetainedPerformanceArtifact {
   const harness = validateRetainedPerformancePayload(input);
-  const metadata = harness.metadata as Record<string, unknown>;
+  const metadata: Record<string, unknown> = harness.metadata;
   if (binding.generatedAt !== harness.createdAt) {
     throw new Error('Performance binding timestamp does not match the retained harness artifact.');
   }
@@ -1271,20 +1346,24 @@ export function retainedPerformanceArtifactFromHarness(
   const duration = (name: string) => measurement(name, 'milliseconds').maximum;
   const bytes = (name: string, positive = true) => measurement(name, 'bytes', positive).maximum;
   const controlsInput = parseHarnessControls(metadata);
-  const controls = Object.fromEntries(
-    harnessLanguageControls.map(({display, harness: language}) => [
-      display,
-      {
-        ...controlsInput[display],
-        milliseconds: duration(`external-query-cold-${language}-duration`),
-        passed: true,
-      },
-    ]),
-  ) as RetainedPerformanceArtifact['controls'];
+  const controlAt = (
+    display: PerformanceControlLanguage,
+    language: string,
+  ): RetainedPerformanceArtifact['controls'][PerformanceControlLanguage] => ({
+    ...controlsInput[display],
+    milliseconds: duration(`external-query-cold-${language}-duration`),
+    passed: true,
+  });
+  const controls: RetainedPerformanceArtifact['controls'] = {
+    bazel: controlAt('bazel', 'bazel-build'),
+    java: controlAt('java', 'java'),
+    kotlin: controlAt('kotlin', 'kotlin'),
+    typescript: controlAt('typescript', 'typescript'),
+  };
   const query = measurement('hot-exact-lexical-query', 'milliseconds');
   const managerQuery = measurement('manager-bounded-query', 'milliseconds');
 
-  return validateVerifiedArtifact({
+  const artifact: RetainedPerformanceArtifact = {
     schemaVersion: 1,
     status: 'verified',
     artifact: {
@@ -1304,10 +1383,11 @@ export function retainedPerformanceArtifactFromHarness(
         url: metadataString(metadata, 'externalRepositoryUrl'),
         commit: metadataString(metadata, 'externalRepositoryCommit'),
         checkout: 'clean',
-        publicVerification: metadataString(
+        publicVerification: literalValueAt(
           metadata,
           'externalRepositoryPublicVerification',
-        ) as 'anonymous-https-exact-commit-fetch',
+          'anonymous-https-exact-commit-fetch',
+        ),
       },
     },
     runner: {
@@ -1320,7 +1400,7 @@ export function retainedPerformanceArtifactFromHarness(
       logicalCpuCount: metadataNumber(metadata, 'benchmarkLogicalCpuCount', true),
       runtime: {
         name: 'Bun',
-        version: harness.environment.node.slice(4),
+        version: Effect.pipe(harness.environment.node, EffectString.slice(4)),
         target: metadataString(metadata, 'benchmarkValidatedManagedTarget'),
         executionMode: 'local-source-application-layer',
         managedPayloadValidation: 'exact-head-not-executed',
@@ -1342,12 +1422,12 @@ export function retainedPerformanceArtifactFromHarness(
       eligibleFiles: metadataNumber(metadata, 'benchmarkInventoryEligibleFiles', true),
       indexedFiles: count('cold-materialized-file-rows'),
       excludedFiles: metadataNumber(metadata, 'benchmarkInventoryExcludedFiles', true),
-      languages: Object.fromEntries(
-        harnessLanguageControls.map(({display, harness: language}) => [
-          display,
-          count(`cold-materialized-file-rows-language-${language}`),
-        ]),
-      ),
+      languages: {
+        bazel: count('cold-materialized-file-rows-language-bazel-build'),
+        java: count('cold-materialized-file-rows-language-java'),
+        kotlin: count('cold-materialized-file-rows-language-kotlin'),
+        typescript: count('cold-materialized-file-rows-language-typescript'),
+      },
     },
     graph: {
       symbols: count('cold-materialized-symbol-rows'),
@@ -1440,10 +1520,13 @@ export function retainedPerformanceArtifactFromHarness(
       topology: retainedWorktreeIsolationTopology,
       isolationPassed: true,
     },
-  });
+  };
+  assertRetainedPerformanceArtifact(artifact);
+  return artifact;
 }
 
 export function pendingPerformanceEvidence(reason: string): PerformanceEvidence {
-  if (reason.trim().length === 0) throw new Error('Pending performance evidence requires a reason.');
+  if (Effect.pipe(reason, EffectString.trim).length === 0)
+    throw new Error('Pending performance evidence requires a reason.');
   return {state: 'pending', reason};
 }

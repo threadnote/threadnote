@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {MAX_MEMORY_CODE_CITATIONS} from '../code/citation.js';
 import {parseRemoteShareAddress} from './address.js';
@@ -23,5 +24,8 @@ export function normalizeRemoteCitationSources(
     }
     sources.set(`${source.uri}\n${source.citationId}`, {uri: source.uri, citationId: source.citationId});
   }
-  return [...sources.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, source]) => source);
+  return EffectArray.map(
+    [...sources.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    ([, source]) => source,
+  );
 }

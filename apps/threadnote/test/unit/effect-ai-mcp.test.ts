@@ -1,14 +1,15 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Deferred, Effect, Exit, Fiber, Option, Schema} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber, Option, Queue, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {McpProtocol, McpSchema} from 'effect/ai';
-import {RpcServer} from 'effect/rpc';
+import {RpcServer, RpcSerialization} from 'effect/rpc';
 import {describe, expect, it, vi} from 'vitest';
 import {
   admitMcpProgressToken,
-  type EffectMcpServer,
+  type EffectMcpProgressBridgeServer,
   installCallToolProgressBridge,
   makeMcpCancellationCompatibleProtocol,
   mcpCallToolResultWithTelemetryMetadata,
@@ -37,6 +38,13 @@ import {
   readAnonymousTelemetryDiagnostic,
   readAnonymousTelemetryReportedOutcome,
 } from '@threadnote/threadnote/telemetry/diagnostic';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function outputText(value: string | Uint8Array | undefined): string {
+  if (value === undefined) throw new Error('Expected serialized MCP output.');
+  return typeof value === 'string' ? value : new TextDecoder().decode(value);
+}
 
 const initializeResponse = JSON.stringify({
   id: 1,
@@ -113,7 +121,11 @@ describe('Effect MCP initialization instructions', () => {
     const transform = makeInitializeInstructionsTransform('Use Threadnote context.');
     const parse = vi.spyOn(JSON, 'parse');
     const initialized = transform(initializeResponse);
-    const largeFrame = JSON.stringify({id: 2, jsonrpc: '2.0', result: {content: 'x'.repeat(2 * 1_024 * 1_024)}});
+    const largeFrame = JSON.stringify({
+      id: 2,
+      jsonrpc: '2.0',
+      result: {content: Effect2.pipe('x', EffectString.repeat(2 * 1_024 * 1_024))},
+    });
     const passedThrough = transform(largeFrame);
     const parseCalls = parse.mock.calls.length;
     parse.mockRestore();
@@ -121,7 +133,7 @@ describe('Effect MCP initialization instructions', () => {
     expect(parseCalls).toBe(1);
     expect(passedThrough).toBe(largeFrame);
     expect(typeof initialized).toBe('string');
-    expect(JSON.parse(initialized as string)).toEqual(repairedInitializeResponse);
+    expect(JSON.parse(outputText(initialized))).toEqual(repairedInitializeResponse);
   });
 
   it('preserves Uint8Array output and identity for later large frames', () => {
@@ -129,7 +141,11 @@ describe('Effect MCP initialization instructions', () => {
     const transform = makeInitializeInstructionsTransform('Use Threadnote context.');
     const initialized = transform(encoder.encode(initializeResponse));
     const largeFrame = encoder.encode(
-      JSON.stringify({id: 2, jsonrpc: '2.0', result: {content: 'x'.repeat(2 * 1_024 * 1_024)}}),
+      JSON.stringify({
+        id: 2,
+        jsonrpc: '2.0',
+        result: {content: Effect2.pipe('x', EffectString.repeat(2 * 1_024 * 1_024))},
+      }),
     );
     const parse = vi.spyOn(JSON, 'parse');
     const passedThrough = transform(largeFrame);
@@ -139,7 +155,7 @@ describe('Effect MCP initialization instructions', () => {
     expect(parseCalls).toBe(0);
     expect(passedThrough).toBe(largeFrame);
     expect(initialized).toBeInstanceOf(Uint8Array);
-    expect(JSON.parse(new TextDecoder().decode(initialized as Uint8Array))).toEqual(repairedInitializeResponse);
+    expect(JSON.parse(outputText(initialized))).toEqual(repairedInitializeResponse);
   });
 
   it('unwraps only Effect RPC envelopes carrying recognized MCP protocol errors', () => {
@@ -211,17 +227,17 @@ describe('Effect MCP initialization instructions', () => {
       jsonrpc: '2.0',
     });
 
-    expect(JSON.parse(transform(invalidParams) as string)).toEqual({
+    expect(JSON.parse(outputText(transform(invalidParams)))).toEqual({
       error: {code: -32602, message: 'Expected a canonical threadnote:// URI.'},
       id: 2,
       jsonrpc: '2.0',
     });
-    expect(JSON.parse(transform(resourceNotFound) as string)).toEqual({
+    expect(JSON.parse(outputText(transform(resourceNotFound)))).toEqual({
       error: {code: -32002, message: 'Threadnote resource was not found.'},
       id: 3,
       jsonrpc: '2.0',
     });
-    expect(JSON.parse(transform(resourceNotFoundWithRecovery) as string)).toEqual({
+    expect(JSON.parse(outputText(transform(resourceNotFoundWithRecovery)))).toEqual({
       error: {code: -32002, data: recovery, message: 'Threadnote resource was not found.'},
       id: 4,
       jsonrpc: '2.0',
@@ -234,7 +250,7 @@ describe('Effect MCP initialization instructions', () => {
     fc.assert(
       fc.property(fc.jsonValue(), fc.integer({max: 10_000, min: 1}), (generated, id) => {
         const candidate =
-          typeof generated === 'object' && generated !== null && !Array.isArray(generated)
+          typeof generated === 'object' && generated !== null && !EffectArray.isArray(generated)
             ? {...generated, unexpected: 'reject-candidate'}
             : generated;
         const frame = encodedResourceNotFoundCause(candidate, id);
@@ -410,7 +426,7 @@ describe('Effect MCP stdio protocol revisions', () => {
         {id: 2, jsonrpc: '2.0', method: 'tools/list', params: {}},
         {id: 3, jsonrpc: '2.0', method: 'tools/list', params: {}},
       ]),
-    ) as readonly {readonly id?: unknown; readonly tag?: unknown}[];
+    );
 
     expect(initialized).toEqual([
       expect.objectContaining({id: 1, payload: expect.objectContaining({protocolVersion}), tag: 'initialize'}),
@@ -431,7 +447,7 @@ describe('Effect MCP stdio protocol revisions', () => {
     });
 
     expect(typeof encoded).toBe('string');
-    expect(JSON.parse(encoded as string)).toMatchObject({
+    expect(JSON.parse(outputText(encoded))).toMatchObject({
       error: {code: -32_600, message: 'JSON-RPC batches are not supported'},
       id: null,
       jsonrpc: '2.0',
@@ -480,7 +496,7 @@ describe('Effect MCP stdio protocol revisions', () => {
       requestId: null,
     });
 
-    expect(JSON.parse(encoded as string)).toMatchObject({
+    expect(JSON.parse(outputText(encoded))).toMatchObject({
       error: {code: -32_600, message: 'Unrelated null-id failure'},
       jsonrpc: '2.0',
     });
@@ -643,14 +659,23 @@ describe('Effect MCP tool progress', () => {
       const sent: Sent[] = [];
       const stampedProgress: Sent[] = [];
       let receive: Receive | undefined;
-      const baseProtocol = {
+      const disconnects = yield* Queue.unbounded<number>();
+      const baseProtocol = RpcServer.Protocol.of({
         end: () => Effect.void,
         run: (handle: Receive) =>
           Effect.sync(() => {
             receive = handle;
           }).pipe(Effect.andThen(Deferred.succeed(ready, undefined)), Effect.andThen(Effect.never)),
         send: (_clientId: number, response: Sent) => Effect.sync(() => sent.push(response)),
-      } as unknown as ProtocolService;
+        disconnects,
+        clientIds: Effect.succeed(new Set<number>()),
+        initialMessage: Effect.succeedNone,
+        supportsAck: false,
+        supportsTransferables: false,
+        supportsSpanPropagation: false,
+        supportsNotifications: false,
+        codecFor: RpcSerialization.json.codecFor,
+      });
       const protocol = makeMcpCancellationCompatibleProtocol(baseProtocol);
       const fiber = yield* protocol
         .run((_clientId, incoming) => {
@@ -670,7 +695,7 @@ describe('Effect MCP tool progress', () => {
                   id: 0,
                   payload: notification,
                   tag: 'notifications/progress',
-                } as unknown as Sent),
+                } satisfies Sent),
               ),
             ),
             Effect.asVoid,
@@ -678,7 +703,8 @@ describe('Effect MCP tool progress', () => {
         })
         .pipe(Effect.forkChild);
       yield* Deferred.await(ready);
-      const dispatch = receive as Receive;
+      if (!receive) throw TestError.make({message: 'Protocol handler was not installed.'});
+      const dispatch = receive;
       const request = {
         _tag: 'Request' as const,
         headers: [],
@@ -704,12 +730,12 @@ describe('Effect MCP tool progress', () => {
         id: 0,
         payload: {progressToken: 9},
         tag: 'notifications/progress',
-      } as unknown as Sent;
+      } satisfies Sent;
       const exit = {
         _tag: 'Exit',
         exit: {_tag: 'Failure', cause: [{_tag: 'Interrupt', fiberId: 1}]},
         requestId: normalizedRequest.id,
-      } as Sent;
+      } satisfies Sent;
 
       yield* protocol.send(7, unrelatedProgress);
       yield* protocol.send(7, oldProgress);
@@ -761,20 +787,30 @@ describe('Effect MCP tool progress', () => {
       const received: Received[] = [];
       const sent: Sent[] = [];
       let receive: Receive | undefined;
-      const baseProtocol = {
+      const disconnects = yield* Queue.unbounded<number>();
+      const baseProtocol = RpcServer.Protocol.of({
         end: () => Effect.void,
         run: (handle: Receive) =>
           Effect.sync(() => {
             receive = handle;
           }).pipe(Effect.andThen(Deferred.succeed(ready, undefined)), Effect.andThen(Effect.never)),
         send: (_clientId: number, response: Sent) => Effect.sync(() => sent.push(response)),
-      } as unknown as ProtocolService;
+        disconnects,
+        clientIds: Effect.succeed(new Set<number>()),
+        initialMessage: Effect.succeedNone,
+        supportsAck: false,
+        supportsTransferables: false,
+        supportsSpanPropagation: false,
+        supportsNotifications: false,
+        codecFor: RpcSerialization.json.codecFor,
+      });
       const protocol = makeMcpCancellationCompatibleProtocol(baseProtocol);
       const fiber = yield* protocol
         .run((_clientId, request) => Effect.sync(() => received.push(request)))
         .pipe(Effect.forkChild);
       yield* Deferred.await(ready);
-      const dispatch = receive as Receive;
+      if (!receive) throw TestError.make({message: 'Protocol handler was not installed.'});
+      const dispatch = receive;
       const numericRequest = {
         _tag: 'Request' as const,
         headers: [],
@@ -818,27 +854,27 @@ describe('Effect MCP tool progress', () => {
         id: 0,
         payload: {progressToken: 'numeric-token'},
         tag: 'notifications/progress',
-      } as unknown as Sent;
+      } satisfies Sent;
       const stringProgress = {
         ...numericProgress,
         payload: {progressToken: 'string-token'},
-      } as unknown as Sent;
+      } satisfies Sent;
       yield* protocol.send(7, numericProgress);
       yield* protocol.send(7, stringProgress);
       yield* protocol.send(7, {
         _tag: 'Exit',
-        exit: {_tag: 'Success', value: 'string'},
+        exit: {_tag: 'Success', value: 'success'},
         requestId: normalizedString.id,
       });
       yield* protocol.send(7, {
         _tag: 'Exit',
-        exit: {_tag: 'Success', value: 'numeric'},
+        exit: {_tag: 'Success', value: 'success'},
         requestId: normalizedNumeric.id,
       });
       expect(sent).toEqual([
         {_tag: 'Chunk', requestId: 9, values: ['numeric']},
         stringProgress,
-        {_tag: 'Exit', exit: {_tag: 'Success', value: 'string'}, requestId: '9'},
+        {_tag: 'Exit', exit: {_tag: 'Success', value: 'success'}, requestId: '9'},
       ]);
 
       yield* Fiber.interrupt(fiber);
@@ -893,7 +929,7 @@ describe('Effect MCP tool progress', () => {
     [Schema.Int, Schema.String],
     ([clientId, progressToken]) =>
       Effect.gen(function* () {
-        const server: EffectMcpServer = {
+        const server: EffectMcpProgressBridgeServer = {
           ...fakeEffectMcpServer(),
           callTool: () =>
             Effect.gen(function* () {
@@ -981,8 +1017,8 @@ describe('Effect MCP tool progress', () => {
     // lifetime, even after deletion; Effect separately routes each notification
     // using the request context captured when it was enqueued.
     initializedClients.add(22);
-    const deliveries = queued.flatMap(notification =>
-      [...initializedClients].map(clientId => ({clientId, notification})),
+    const deliveries = EffectArray.flatMap(queued, notification =>
+      EffectArray.map([...initializedClients], clientId => ({clientId, notification})),
     );
 
     expect(deliveries).toEqual([{clientId: 11, notification: {progressToken: 'client-11-token'}}]);
@@ -1055,7 +1091,7 @@ describe('Effect MCP tool progress', () => {
         yield* Effect.yieldNow;
       }
       expect(phaseInvocations).toBe(1);
-      expect(notifications.map(notification => notification.progress)).toEqual([1, 2, 3, 4]);
+      expect(EffectArray.map(notifications, notification => notification.progress)).toEqual([1, 2, 3, 4]);
 
       yield* Fiber.interrupt(fiber);
       const exit = yield* Fiber.await(fiber);
@@ -1124,8 +1160,13 @@ describe('Effect MCP tool progress', () => {
             MCP_PROGRESS_MESSAGE_MAX_BYTES,
           );
           expect(
-            [...notification.message].some(character => {
-              const codePoint = character.codePointAt(0) ?? 0;
+            EffectArray.some([...notification.message], character => {
+              const codePoint =
+                Effect2.pipe(
+                  character,
+                  EffectString.codePointAt(0),
+                  Effect2.Option.getOrElse(() => undefined),
+                ) ?? 0;
               return codePoint <= 31 || codePoint === 127;
             }),
           ).toBe(false);
@@ -1156,24 +1197,25 @@ describe('Effect MCP tool progress', () => {
       expect(notifications).toHaveLength(256);
       for (let index = 0; index < 128; index += 1) {
         expect(
-          notifications
-            .filter(notification => notification.progressToken === `token-${index}`)
-            .map(notification => notification.progress),
+          EffectArray.map(
+            EffectArray.filter(notifications, notification => notification.progressToken === `token-${index}`),
+            notification => notification.progress,
+          ),
         ).toEqual([1, 2]);
       }
     }),
   );
 });
 
-function fakeEffectMcpServer(): EffectMcpServer {
-  const server = {
+function fakeEffectMcpServer(): EffectMcpProgressBridgeServer & {readonly marker: string} {
+  const server: EffectMcpProgressBridgeServer & {readonly marker: string} = {
     marker: 'receiver-preserved',
     notifications: {'notifications/progress': () => Effect.void},
-    callTool(this: {readonly marker: string}) {
+    callTool(this: {readonly marker: string}, _request) {
       return Effect.succeed(McpSchema.CallToolResult.make({content: [{type: 'text', text: this.marker}]}));
     },
   };
-  return server as unknown as EffectMcpServer;
+  return server;
 }
 
 function fixtureMcpServerClient(clientId: number): McpSchema.McpServerClient['Service'] {
@@ -1182,7 +1224,11 @@ function fixtureMcpServerClient(clientId: number): McpSchema.McpServerClient['Se
     clientId,
     clientInfo: {name: 'effect-ai-mcp-test', version: '1.0.0'},
     getClient: Effect.never,
-    initializePayload: {} as McpSchema.McpServerClient['Service']['initializePayload'],
+    initializePayload: McpSchema.Initialize.payloadSchema.make({
+      capabilities: {},
+      clientInfo: {name: 'effect-ai-mcp-test', version: '1.0.0'},
+      protocolVersion: '2025-06-18',
+    }),
     protocolVersion: '2025-06-18',
   });
 }

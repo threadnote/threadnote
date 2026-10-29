@@ -44,6 +44,7 @@ export function registerActivationProofTool(server: EffectMcpServerAdapter, conf
 }
 
 function required(value: string | undefined, name: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining narrows `value` for the return below.
   if (!value?.trim()) throw new Error(`complete_activation_retrieval_proof requires ${name}.`);
   return value;
 }

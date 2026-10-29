@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -8,6 +9,8 @@ import {
   benchmarkMeasurement,
   type BenchmarkArtifactV1,
 } from '@threadnote/evidence/benchmark';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const NonNegativeFinite = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveFinite = Schema.Finite.check(Schema.isGreaterThan(0));
@@ -187,15 +190,18 @@ describe('hosted Windows native cold-tail calibration', () => {
   it('rederives the historical context and the prospective single-observation fuses', () => {
     const candidate = requiredObservation(calibration.observations[0]);
     const prior = calibration.observations.slice(1);
-    const priorColdIndex = prior.map(observation => observation.measurements.coldIndexMilliseconds);
-    const priorMaterialization = prior.map(observation => observation.measurements.coldMaterializationMilliseconds);
+    const priorColdIndex = EffectArray.map(prior, observation => observation.measurements.coldIndexMilliseconds);
+    const priorMaterialization = EffectArray.map(
+      prior,
+      observation => observation.measurements.coldMaterializationMilliseconds,
+    );
 
     expect(calibration.observations).toHaveLength(32);
     expect(prior).toHaveLength(calibration.derivation.priorObservationCount);
-    expect(new Set(calibration.observations.map(observation => observation.runId)).size).toBe(32);
-    expect(new Set(calibration.observations.map(observation => observation.artifactId)).size).toBe(32);
-    expect(new Set(calibration.observations.map(observation => observation.rawJsonSha256)).size).toBe(32);
-    expect(calibration.candidateBudgetMeasurements.map(measurement => measurement.name)).toEqual(
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.runId)).size).toBe(32);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.artifactId)).size).toBe(32);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.rawJsonSha256)).size).toBe(32);
+    expect(EffectArray.map(calibration.candidateBudgetMeasurements, measurement => measurement.name)).toEqual(
       candidateBudgetMeasurementNames,
     );
     expect(calibration.candidateWorkflow).toMatchObject({
@@ -206,14 +212,19 @@ describe('hosted Windows native cold-tail calibration', () => {
       runId: candidate.runId,
     });
     expect(
-      calibration.observations.every(
-        (observation, index, observations) =>
-          index === 0 ||
-          Date.parse(requiredObservation(observations[index - 1]).createdAt) >= Date.parse(observation.createdAt),
+      Effect.pipe(calibration.observations, __effectNativeArray =>
+        EffectArray.every(
+          __effectNativeArray,
+          (observation, index) =>
+            index === 0 ||
+            Date.parse(requiredObservation(__effectNativeArray[index - 1]).createdAt) >=
+              Date.parse(observation.createdAt),
+        ),
       ),
     ).toBe(true);
     expect(
-      calibration.observations.every(
+      EffectArray.every(
+        calibration.observations,
         observation => observation.digests.incremental === observation.digests.sameOverlayReference,
       ),
     ).toBe(true);
@@ -252,7 +263,12 @@ describe('hosted Windows native cold-tail calibration', () => {
   it('binds the candidate tail to wall/storage delay rather than increased graph CPU work', () => {
     const candidate = requiredObservation(calibration.observations[0]);
     const predecessor = requiredObservation(
-      calibration.observations.find(observation => observation.headSha === '4cf4c966cf272a3cb066db29750a415766ec5954'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          calibration.observations,
+          observation => observation.headSha === '4cf4c966cf272a3cb066db29750a415766ec5954',
+        ),
+      ),
     );
 
     expect(candidate.artifactId).toBe(9_778_600_223);
@@ -505,7 +521,7 @@ function summary(values: readonly number[], previousMaximum: number) {
   const nearestRank = (percentile: number) =>
     requiredObservation(sorted[Math.max(0, Math.ceil(percentile * sorted.length) - 1)]);
   return {
-    breaches: sorted.filter(value => value > previousMaximum).length,
+    breaches: EffectArray.filter(sorted, value => value > previousMaximum).length,
     maximum: requiredObservation(sorted.at(-1)),
     minimum: requiredObservation(sorted[0]),
     p50: nearestRank(0.5),
@@ -535,7 +551,7 @@ function hostedCandidateArtifact(
   return {
     ...artifact,
     environment: {...artifact.environment, architecture: overrides.architecture ?? artifact.environment.architecture},
-    measurements: artifact.measurements.map(measurement =>
+    measurements: EffectArray.map(artifact.measurements, measurement =>
       measurement.name === 'hot-exact-lexical-query' || measurement.name === 'hot-query-process-cpu'
         ? {...measurement, samples}
         : measurement,
@@ -551,8 +567,8 @@ function budgetFailures(artifact: BenchmarkArtifactV1, budgets: typeof budgetFil
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     const prefix = 'Code graph performance budget failed: ';
-    if (!error.message.startsWith(prefix)) throw error;
-    return error.message.slice(prefix.length).split('; ');
+    if (!Effect.pipe(error.message, EffectString.startsWith(prefix))) throw error;
+    return Effect.pipe(error.message, EffectString.slice(prefix.length), EffectString.split('; '));
   }
 }
 
@@ -573,10 +589,14 @@ function replaceMeasurement(
   name: string,
   update: (measurement: BenchmarkArtifactV1['measurements'][number]) => BenchmarkArtifactV1['measurements'][number],
 ): BenchmarkArtifactV1 {
-  const measurement = artifact.measurements.find(candidate => candidate.name === name);
+  const measurement = EffectOption.getOrUndefined(
+    EffectArray.findFirst(artifact.measurements, candidate => candidate.name === name),
+  );
   if (measurement === undefined) throw new Error(`Candidate budget measurement ${name} is missing.`);
   return {
     ...artifact,
-    measurements: artifact.measurements.map(candidate => (candidate.name === name ? update(measurement) : candidate)),
+    measurements: EffectArray.map(artifact.measurements, candidate =>
+      candidate.name === name ? update(measurement) : candidate,
+    ),
   };
 }

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect, Path} from 'effect';
@@ -13,6 +14,8 @@ import {
 } from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-receipts';
 import {atomicWrite, hasScriptHelpFlag, printJson, readJsonFile, scriptArguments} from './effect/script.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_FIXTURE = new URL(
   '../apps/threadnote/test/evaluation/fixtures/threadnote-5-task-loop-v1/fixture.json',
@@ -108,19 +111,27 @@ function parseArguments(args: readonly string[]): {
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
 
 function usage(): string {
-  return [
-    'Usage: bun run verify:threadnote-5-release-readiness-receipts -- [options]',
-    '',
-    'Verifies local subsystem receipts against Threadnote 5 release-readiness evidence.',
-    'Required: --evidence <json> --retained-subsystem-receipts <json>',
-    'Optional: --fixture <json> --output <json>',
-    'Authority verification: --authority-manifest <json> --authority-manifest-sha256 <64-hex>',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Usage: bun run verify:threadnote-5-release-readiness-receipts -- [options]',
+      '',
+      'Verifies local subsystem receipts against Threadnote 5 release-readiness evidence.',
+      'Required: --evidence <json> --retained-subsystem-receipts <json>',
+      'Optional: --fixture <json> --output <json>',
+      'Authority verification: --authority-manifest <json> --authority-manifest-sha256 <64-hex>',
+    ],
+    '\n',
+  );
 }
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(program, ApplicationLayer));

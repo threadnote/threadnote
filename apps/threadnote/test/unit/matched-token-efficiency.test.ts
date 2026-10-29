@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -30,6 +31,9 @@ import {
 } from '@threadnote/threadnote/evaluation/matched-token-efficiency';
 import {createMatchedEvaluationVerificationReceiptV1} from '@threadnote/threadnote/evaluation/matched-verification';
 import {projectMatchedEvaluationAdapterTaskV1} from '../../../../scripts/run-matched-evaluation.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('matched token-efficiency claim evaluation', () => {
   it('reports blocked actions without changing verification or safety gates', async () => {
@@ -47,14 +51,14 @@ describe('matched token-efficiency claim evaluation', () => {
           safety: {...metrics.safety, blockedActions: blockedCount},
         }));
         const blockedReport = evaluateMatchedTokenEfficiencyV1({corpus, manifest, outcomes: blocked, study});
-        expect(blockedReport.arms.map(arm => arm.verifiedCompletions)).toEqual(
-          baselineReport.arms.map(arm => arm.verifiedCompletions),
+        expect(EffectArray.map(blockedReport.arms, arm => arm.verifiedCompletions)).toEqual(
+          EffectArray.map(baselineReport.arms, arm => arm.verifiedCompletions),
         );
-        expect(blockedReport.comparisons.map(comparison => comparison.status)).toEqual(
-          baselineReport.comparisons.map(comparison => comparison.status),
+        expect(EffectArray.map(blockedReport.comparisons, comparison => comparison.status)).toEqual(
+          EffectArray.map(baselineReport.comparisons, comparison => comparison.status),
         );
-        expect(blockedReport.arms.map(arm => arm.blockedActions)).toEqual(
-          baselineReport.arms.map(arm => arm.assigned * blockedCount),
+        expect(EffectArray.map(blockedReport.arms, arm => arm.blockedActions)).toEqual(
+          EffectArray.map(baselineReport.arms, arm => arm.assigned * blockedCount),
         );
       }),
       {numRuns: 8},
@@ -67,8 +71,8 @@ describe('matched token-efficiency claim evaluation', () => {
         fc.tuple(
           fc
             .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 40, maxLength: 40})
-            .map(characters => characters.join('')),
-          fc.constantFrom('', '-direct', `-full-${'f'.repeat(16)}`),
+            .map(characters => EffectArray.join(characters, '')),
+          fc.constantFrom('', '-direct', `-full-${Effect.pipe('f', EffectString.repeat(16))}`),
         ),
         ([value, suffix]) => {
           const snapshotId = `cgsn_${value}${suffix}`;
@@ -87,25 +91,25 @@ describe('matched token-efficiency claim evaluation', () => {
       ),
       {numRuns: 40},
     );
-    expect(() => matchedTokenEfficiencyGraphSnapshotHashV1(`cgsn_${'a'.repeat(40)}-full-short`)).toThrow(
-      'ready graph snapshot id is invalid',
-    );
+    expect(() =>
+      matchedTokenEfficiencyGraphSnapshotHashV1(`cgsn_${Effect.pipe('a', EffectString.repeat(40))}-full-short`),
+    ).toThrow('ready graph snapshot id is invalid');
   });
 
   it('admits a memory-free prepared source context for continuation studies', async () => {
     const context = createMatchedTokenEfficiencyTaskContextV1({
       asIssuedContext: {
-        assessmentHash: '1'.repeat(64),
+        assessmentHash: Effect.pipe('1', EffectString.repeat(64)),
         contentHash: null,
         sufficiency: 'none',
         suppliedBytes: 0,
       },
       clusterId: 'cluster_1234567890abcdef',
-      graphContentHash: '2'.repeat(64),
-      graphSnapshotHash: '3'.repeat(64),
+      graphContentHash: Effect.pipe('2', EffectString.repeat(64)),
+      graphSnapshotHash: Effect.pipe('3', EffectString.repeat(64)),
       linkReceipts: [],
-      memoryFixtureHash: '4'.repeat(64),
-      repositoryFixtureHash: '5'.repeat(64),
+      memoryFixtureHash: Effect.pipe('4', EffectString.repeat(64)),
+      repositoryFixtureHash: Effect.pipe('5', EffectString.repeat(64)),
       taskId: 'tsk_1234567890abcdef',
     });
 
@@ -115,7 +119,7 @@ describe('matched token-efficiency claim evaluation', () => {
     const sourceCorpus = await fixture();
     const corpus = parseMatchedEvaluationCorpusV1({
       ...sourceCorpus,
-      tasks: sourceCorpus.tasks.map(task => ({...task, memoryFixtures: []})),
+      tasks: EffectArray.map(sourceCorpus.tasks, task => ({...task, memoryFixtures: []})),
     });
     const manifest = createManifest(corpus);
     const study = createStudy(corpus, manifest);
@@ -160,18 +164,20 @@ describe('matched token-efficiency claim evaluation', () => {
     expect(report.comparisons[1].tokenReductionPercent).toBeCloseTo(30);
     expect(report.comparisons[2].tokenReductionPercent).toBeCloseTo(40);
     expect(report.comparisons[3].tokenReductionPercent).toBeCloseTo(17.65, 1);
-    expect(report.comparisons[3].contextStrata.map(stratum => stratum.sufficiency)).toEqual([
+    expect(EffectArray.map(report.comparisons[3].contextStrata, stratum => stratum.sufficiency)).toEqual([
       'none',
       'lacking',
       'sufficient',
       'excessive',
     ]);
-    expect(report.arms.find(arm => arm.arm === 'files')).toMatchObject({
+    expect(EffectOption.getOrUndefined(EffectArray.findFirst(report.arms, arm => arm.arm === 'files'))).toMatchObject({
       onlineTokensPerVerifiedCompletion: 1_000,
       providerTokens: {totalTokens: 30_000},
       verifiedCompletions: 30,
     });
-    expect(report.arms.find(arm => arm.arm === 'threadnote-source')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(report.arms, arm => arm.arm === 'threadnote-source')),
+    ).toMatchObject({
       lifecycleTokensPerVerifiedCompletion: 700,
       onlineTokensPerVerifiedCompletion: 600,
       providerTokens: {totalTokens: 18_000},
@@ -200,7 +206,9 @@ describe('matched token-efficiency claim evaluation', () => {
     );
 
     const report = evaluateMatchedTokenEfficiencyV1({corpus, manifest, outcomes, study});
-    const compact = report.arms.find(arm => arm.arm === 'threadnote-compact');
+    const compact = EffectOption.getOrUndefined(
+      EffectArray.findFirst(report.arms, arm => arm.arm === 'threadnote-compact'),
+    );
 
     expect(compact).toMatchObject({providerTokens: {totalTokens: 21_000}, verifiedCompletions: 29});
     expect(compact?.onlineTokensPerVerifiedCompletion).toBeCloseTo(21_000 / 29);
@@ -217,7 +225,9 @@ describe('matched token-efficiency claim evaluation', () => {
     );
 
     const report = evaluateMatchedTokenEfficiencyV1({corpus, manifest, outcomes, study});
-    const compact = required(report.arms.find(arm => arm.arm === 'threadnote-compact'));
+    const compact = required(
+      EffectOption.getOrUndefined(EffectArray.findFirst(report.arms, arm => arm.arm === 'threadnote-compact')),
+    );
 
     expect(compact).toMatchObject({
       hybridVerifiedCompletions: 29,
@@ -235,7 +245,10 @@ describe('matched token-efficiency claim evaluation', () => {
     const study = createStudy(corpus, manifest);
     const mismatched = await outcomesFor(corpus, manifest, study, (arm, runOrder, metrics) =>
       arm === 'threadnote-source' && runOrder === firstRunOrder(manifest, arm)
-        ? {...metrics, context: {...required(metrics.context), graphSnapshotHash: 'f'.repeat(64)}}
+        ? {
+            ...metrics,
+            context: {...required(metrics.context), graphSnapshotHash: Effect.pipe('f', EffectString.repeat(64))},
+          }
         : metrics,
     );
     expect(() => evaluateMatchedTokenEfficiencyV1({corpus, manifest, outcomes: mismatched, study})).toThrow(
@@ -248,7 +261,11 @@ describe('matched token-efficiency claim evaluation', () => {
         : metrics,
     );
     const report = evaluateMatchedTokenEfficiencyV1({corpus, manifest, outcomes: missingUsage, study});
-    expect(report.comparisons.find(comparison => comparison.targetArm === 'threadnote-compact')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(report.comparisons, comparison => comparison.targetArm === 'threadnote-compact'),
+      ),
+    ).toMatchObject({
       status: 'inconclusive',
       insufficiencies: ['threadnote-compact has 1 completed trials without provider token usage'],
     });
@@ -324,15 +341,19 @@ function createManifest(corpus: MatchedEvaluationCorpusV1): MatchedEvaluationMan
   return createMatchedEvaluationManifestV1({
     arms: armDefinitions(),
     corpus,
-    model: {model: 'test-model', parametersHash: 'b'.repeat(64), provider: 'provider-neutral'},
+    model: {
+      model: 'test-model',
+      parametersHash: Effect.pipe('b', EffectString.repeat(64)),
+      provider: 'provider-neutral',
+    },
     repetitions: 5,
     repository: {
       dirty: false,
-      fixtureHash: 'c'.repeat(64),
-      identityHash: 'd'.repeat(64),
+      fixtureHash: Effect.pipe('c', EffectString.repeat(64)),
+      identityHash: Effect.pipe('d', EffectString.repeat(64)),
       revision: 'fixture-revision-v1',
     },
-    scheduleSeed: 'a'.repeat(64),
+    scheduleSeed: Effect.pipe('a', EffectString.repeat(64)),
   });
 }
 
@@ -345,14 +366,14 @@ function studyInput(
   manifest: MatchedEvaluationManifestV1,
 ): Omit<MatchedTokenEfficiencyStudyV1, 'studyHash' | 'version'> {
   return {
-    bootstrap: {confidenceLevelBasisPoints: 9_500, iterations: 500, seed: '1'.repeat(64)},
-    clusters: manifest.tasks.map((task, index) => ({
-      clusterId: `cluster_${(index + 1).toString(16).repeat(16)}`,
+    bootstrap: {confidenceLevelBasisPoints: 9_500, iterations: 500, seed: Effect.pipe('1', EffectString.repeat(64))},
+    clusters: EffectArray.map(manifest.tasks, (task, index) => ({
+      clusterId: `cluster_${Effect.pipe((index + 1).toString(16), EffectString.repeat(16))}`,
       heldOut: true,
       repositoryFixtureHash: task.repositoryFixtureHash,
-      repositoryIdentityHash: ((index + 11) % 16).toString(16).repeat(64),
+      repositoryIdentityHash: Effect.pipe(((index + 11) % 16).toString(16), EffectString.repeat(64)),
       repositoryUrl: `https://example.invalid/held-out-repository-${index + 1}.git`,
-      revision: (index + 1).toString(16).repeat(40),
+      revision: Effect.pipe((index + 1).toString(16), EffectString.repeat(40)),
       taskIds: [task.taskId],
     })),
     gates: {
@@ -365,9 +386,9 @@ function studyInput(
       minimumMemoryTokenReductionBasisPoints: 1_000,
       minimumTokenReductionBasisPoints: 2_000,
     },
-    lifecycle: MATCHED_EVALUATION_ARMS.map(arm => ({
+    lifecycle: EffectArray.map(MATCHED_EVALUATION_ARMS, arm => ({
       arm,
-      setupMilliseconds: arm.startsWith('threadnote-') ? 60_000 : 0,
+      setupMilliseconds: Effect.pipe(arm, EffectString.startsWith('threadnote-')) ? 60_000 : 0,
       setupUsage: {
         graphPreparation: providerTokens(
           arm === 'threadnote-graph' || arm === 'threadnote-compact' ? 1_500 : arm === 'threadnote-source' ? 1_800 : 0,
@@ -380,32 +401,43 @@ function studyInput(
     promptPolicy: 'identical-as-issued',
     studyId: 'held-out-local-test-v1',
     targetArms: ['threadnote-compact', 'threadnote-source'],
-    taskContexts: manifest.tasks.map((manifestTask, index) => {
-      const corpusTask = required(corpus.tasks.find(task => task.taskId === manifestTask.taskId));
-      const memory = corpusTask.memoryFixtures.find(
-        candidate => candidate.status === 'active' && candidate.source !== null,
+    taskContexts: EffectArray.map(manifest.tasks, (manifestTask, index) => {
+      const corpusTask = required(
+        EffectOption.getOrUndefined(EffectArray.findFirst(corpus.tasks, task => task.taskId === manifestTask.taskId)),
+      );
+      const memory = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          corpusTask.memoryFixtures,
+          candidate => candidate.status === 'active' && candidate.source !== null,
+        ),
       );
       const sufficiency = (['none', 'lacking', 'sufficient', 'excessive', 'lacking', 'sufficient'] as const)[index];
       return createMatchedTokenEfficiencyTaskContextV1({
         asIssuedContext: {
-          assessmentHash: (index + 3).toString(16).repeat(64),
-          contentHash: sufficiency === 'none' ? null : (index + 4).toString(16).repeat(64),
+          assessmentHash: Effect.pipe((index + 3).toString(16), EffectString.repeat(64)),
+          contentHash: sufficiency === 'none' ? null : Effect.pipe((index + 4).toString(16), EffectString.repeat(64)),
           sufficiency,
           suppliedBytes: sufficiency === 'none' ? 0 : (index + 1) * 100,
         },
-        clusterId: `cluster_${(index + 1).toString(16).repeat(16)}`,
-        graphContentHash: (index + 1).toString(16).repeat(64),
-        graphSnapshotHash: (index + 7).toString(16).repeat(64),
+        clusterId: `cluster_${Effect.pipe((index + 1).toString(16), EffectString.repeat(16))}`,
+        graphContentHash: Effect.pipe((index + 1).toString(16), EffectString.repeat(64)),
+        graphSnapshotHash: Effect.pipe((index + 7).toString(16), EffectString.repeat(64)),
         linkReceipts:
           memory === undefined
             ? []
-            : [{citationHash: (index + 9).toString(16).repeat(64), memoryId: memory.memoryId, status: 'exact'}],
+            : [
+                {
+                  citationHash: Effect.pipe((index + 9).toString(16), EffectString.repeat(64)),
+                  memoryId: memory.memoryId,
+                  status: 'exact',
+                },
+              ],
         memoryFixtureHash: manifestTask.memoryFixtureHash,
         repositoryFixtureHash: manifestTask.repositoryFixtureHash,
         taskId: manifestTask.taskId,
       });
     }),
-    verificationPlanHash: 'f'.repeat(64),
+    verificationPlanHash: Effect.pipe('f', EffectString.repeat(64)),
   };
 }
 
@@ -423,7 +455,11 @@ async function outcomesFor(
     availability: async () => ({available: true as const}),
     corpus,
     execute: async request => {
-      const taskContext = required(study.taskContexts.find(context => context.taskId === request.task.taskId));
+      const taskContext = required(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(study.taskContexts, context => context.taskId === request.task.taskId),
+        ),
+      );
       const metrics = metricsFor(request.arm, study, taskContext, request.schedule.runOrder);
       return observation(request.schedule.runOrder, transform(request.arm, request.schedule.runOrder, metrics));
     },
@@ -494,18 +530,18 @@ function metricsFor(
     },
     validity: {failureCount: 0, valid: true},
     verification: createMatchedEvaluationVerificationReceiptV1({
-      artifactHash: runOrder.toString(16).padStart(64, '0'),
-      diagnosticHash: '1'.repeat(64),
+      artifactHash: Effect.pipe(runOrder.toString(16), EffectString.padStart(64, '0')),
+      diagnosticHash: Effect.pipe('1', EffectString.repeat(64)),
       durationMilliseconds: 10,
-      environmentHash: '2'.repeat(64),
+      environmentHash: Effect.pipe('2', EffectString.repeat(64)),
       exitCode: 0,
-      interpreterHash: '3'.repeat(64),
+      interpreterHash: Effect.pipe('3', EffectString.repeat(64)),
       planHash: study.verificationPlanHash,
-      runnerHash: '4'.repeat(64),
-      sandboxExecutableHash: '5'.repeat(64),
+      runnerHash: Effect.pipe('4', EffectString.repeat(64)),
+      sandboxExecutableHash: Effect.pipe('5', EffectString.repeat(64)),
       status: 'passed',
       taskId: taskContext.taskId,
-      verificationId: '6'.repeat(64),
+      verificationId: Effect.pipe('6', EffectString.repeat(64)),
     }),
   };
 }
@@ -526,7 +562,7 @@ function failedVerification(
 ): NonNullable<MatchedEvaluationMetricsV1['verification']> {
   return createMatchedEvaluationVerificationReceiptV1({
     artifactHash: receipt.artifactHash,
-    diagnosticHash: 'a'.repeat(64),
+    diagnosticHash: Effect.pipe('a', EffectString.repeat(64)),
     durationMilliseconds: receipt.durationMilliseconds,
     environmentHash: receipt.environmentHash,
     exitCode: 1,
@@ -542,34 +578,36 @@ function failedVerification(
 
 function observation(runOrder: number, metrics: MatchedEvaluationMetricsV1): MatchedEvaluationObservationV1 {
   return {
-    artifactHash: runOrder.toString(16).padStart(64, '0'),
+    artifactHash: Effect.pipe(runOrder.toString(16), EffectString.padStart(64, '0')),
     metrics,
-    transcriptHash: (runOrder + 1).toString(16).padStart(64, '0'),
+    transcriptHash: Effect.pipe((runOrder + 1).toString(16), EffectString.padStart(64, '0')),
     version: 5,
   };
 }
 
 function armDefinitions(): readonly MatchedEvaluationArmDefinitionV1[] {
-  return MATCHED_EVALUATION_ARMS.map((arm, index) => ({
-    adapterArtifactHash: String(index + 1).repeat(64),
-    adapterConfigurationHash: (index + 6).toString(16).repeat(64),
+  return EffectArray.map(MATCHED_EVALUATION_ARMS, (arm, index) => ({
+    adapterArtifactHash: Effect.pipe(String(index + 1), EffectString.repeat(64)),
+    adapterConfigurationHash: Effect.pipe((index + 6).toString(16), EffectString.repeat(64)),
     adapterProtocol: 'matched-evaluation-adapter-v5',
     arm,
     environmentPolicyHash:
-      arm === 'reference-scope' ? matchedEvaluationReferenceEnvironmentPolicyHashV1() : 'e'.repeat(64),
+      arm === 'reference-scope'
+        ? matchedEvaluationReferenceEnvironmentPolicyHashV1()
+        : Effect.pipe('e', EffectString.repeat(64)),
     tool:
       arm === 'files'
         ? {artifactHash: null, lockIdentityHash: null, name: 'repository-files', version: 'builtin-v1'}
         : arm === 'reference-scope'
           ? {
-              artifactHash: '9'.repeat(64),
-              lockIdentityHash: '8'.repeat(64),
+              artifactHash: Effect.pipe('9', EffectString.repeat(64)),
+              lockIdentityHash: Effect.pipe('8', EffectString.repeat(64)),
               name: 'reference-context-tool',
               version: 'pinned-v1',
             }
           : {
-              artifactHash: '7'.repeat(64),
-              lockIdentityHash: '6'.repeat(64),
+              artifactHash: Effect.pipe('7', EffectString.repeat(64)),
+              lockIdentityHash: Effect.pipe('6', EffectString.repeat(64)),
               name: 'threadnote',
               version: '5.0.4',
             },
@@ -577,8 +615,13 @@ function armDefinitions(): readonly MatchedEvaluationArmDefinitionV1[] {
 }
 
 function firstRunOrder(manifest: MatchedEvaluationManifestV1, arm: MatchedEvaluationArm): number {
-  const label = Object.entries(manifest.blindAssignment).find(([, candidate]) => candidate === arm)?.[0];
-  return required(manifest.schedule.find(entry => entry.blindLabel === label)?.runOrder);
+  const label = EffectOption.getOrUndefined(
+    EffectArray.findFirst(EffectRecord.toEntries(manifest.blindAssignment), ([, candidate]) => candidate === arm),
+  )?.[0];
+  return required(
+    EffectOption.getOrUndefined(EffectArray.findFirst(manifest.schedule, entry => entry.blindLabel === label))
+      ?.runOrder,
+  );
 }
 
 function required<T>(value: T | undefined | null): T {

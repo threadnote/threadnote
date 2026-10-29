@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -16,14 +17,15 @@ import {
   type OperationsEvidence,
   type OperationsReceipt,
 } from './operations/contract.js';
+import * as EffectRecord from 'effect/Record';
 
 export function buildOperationsManifest(raw: unknown): OperationsManifest {
   const draft = parseOperations(OperationsDraftSchema, raw);
-  requireValid(new Set([draft.deploymentId, ...Object.values(draft.owners)]).size === 4);
-  requireValid(draft.alerts.every(alert => new Set(Object.values(alert.owners)).size === 3));
+  requireValid(new Set([draft.deploymentId, ...EffectRecord.values(draft.owners)]).size === 4);
+  requireValid(EffectArray.every(draft.alerts, alert => new Set(EffectRecord.values(alert.owners)).size === 3));
   requireValid(draft.backup.retentionSeconds >= draft.backup.scheduleSeconds + draft.backup.rtoSeconds);
   requireValid(draft.backup.retentionSeconds >= draft.backup.rpoSeconds);
-  requireValid(new Set(draft.alerts.map(alert => alert.kind)).size === OPERATIONS_ALERTS.length);
+  requireValid(new Set(EffectArray.map(draft.alerts, alert => alert.kind)).size === OPERATIONS_ALERTS.length);
   const normalized = {...draft, alerts: [...draft.alerts].sort((a, b) => (a.kind < b.kind ? -1 : 1))};
   return {...normalized, manifestDigest: digest(normalized)};
 }
@@ -49,7 +51,7 @@ export function operationsEvidenceTemplate(
     manifestDigest: manifest.manifestDigest,
     drillId,
     isolatedTargetId,
-    checks: OPERATIONS_CHECKS.map(check => ({check, status: 'pending'})),
+    checks: EffectArray.map(OPERATIONS_CHECKS, check => ({check, status: 'pending'})),
   };
 }
 
@@ -64,18 +66,21 @@ export function verifyOperationsEvidence(
   const now = Date.parse(checkedAt);
   const plannedAt = Date.parse(manifest.plannedAt);
   const manifestFresh = now >= plannedAt && now - plannedAt <= manifest.maxEvidenceAgeSeconds * 1000;
-  const checks = evidence.checks.map(entry => {
+  const checks = EffectArray.map(evidence.checks, entry => {
     if (!manifestFresh) return {check: entry.check, status: 'blocked' as const};
     if (entry.status === 'pending') return {check: entry.check, status: 'pending' as const};
     const time = Date.parse(entry.observedAt);
     const timely = time >= plannedAt && time <= now && now - time <= manifest.maxEvidenceAgeSeconds * 1000;
     const valid =
-      timely && Object.values(entry.facts).every(Boolean) && metricsPass(entry, manifest) && orderPass(entry, evidence);
+      timely &&
+      EffectArray.every(EffectRecord.values(entry.facts), Boolean) &&
+      metricsPass(entry, manifest) &&
+      orderPass(entry, evidence);
     return {check: entry.check, status: valid ? ('verified' as const) : ('blocked' as const)};
   });
-  const status: OperationsReceipt['status'] = checks.some(check => check.status === 'blocked')
+  const status: OperationsReceipt['status'] = EffectArray.some(checks, check => check.status === 'blocked')
     ? 'blocked'
-    : checks.some(check => check.status === 'pending')
+    : EffectArray.some(checks, check => check.status === 'pending')
       ? 'pending'
       : 'verified';
   const unsigned = {
@@ -114,14 +119,19 @@ function parseEvidence(raw: unknown, manifest: OperationsManifest): OperationsEv
   requireValid(
     evidence.manifestDigest === manifest.manifestDigest && evidence.isolatedTargetId !== manifest.deploymentId,
   );
-  requireValid(new Set(evidence.checks.map(check => check.check)).size === OPERATIONS_CHECKS.length);
+  requireValid(new Set(EffectArray.map(evidence.checks, check => check.check)).size === OPERATIONS_CHECKS.length);
   for (const entry of evidence.checks) {
     if (entry.status === 'pending') continue;
     const specification = OPERATIONS_CHECK_SPECIFICATIONS[entry.check];
     requireValid(exactKeys(entry.facts, specification.facts) && exactKeys(entry.metrics, specification.metrics));
     requireValid(entry.observerId === manifest.owners.operator);
   }
-  return {...evidence, checks: OPERATIONS_CHECKS.map(check => evidence.checks.find(entry => entry.check === check)!)};
+  return {
+    ...evidence,
+    checks: EffectArray.map(OPERATIONS_CHECKS, check =>
+      EffectOption.getOrUndefined(EffectArray.findFirst(evidence.checks, entry => entry.check === check))!,
+    ),
+  };
 }
 
 type Observation = Extract<OperationsEvidence['checks'][number], {status: 'observed'}>;
@@ -147,7 +157,7 @@ function metricsPass(entry: Observation, manifest: OperationsManifest): boolean 
   if (entry.check === 'restore-reconciliation' || entry.check === 'post-rollback-reconciliation') {
     return (
       metrics.verifiedRecords === manifest.baseline.expectedRecords &&
-      Object.entries(metrics).every(([key, value]) => key === 'verifiedRecords' || value === 0)
+      EffectArray.every(EffectRecord.toEntries(metrics), ([key, value]) => key === 'verifiedRecords' || value === 0)
     );
   }
   return true;
@@ -168,13 +178,15 @@ const PREDECESSORS: Partial<Record<OperationsCheck, OperationsCheck>> = {
 function orderPass(entry: Observation, evidence: OperationsEvidence): boolean {
   const predecessor = PREDECESSORS[entry.check];
   if (!predecessor) return true;
-  const previous = evidence.checks.find(check => check.check === predecessor);
+  const previous = EffectOption.getOrUndefined(
+    EffectArray.findFirst(evidence.checks, check => check.check === predecessor),
+  );
   return previous?.status === 'observed' && Date.parse(previous.observedAt) < Date.parse(entry.observedAt);
 }
 
 function exactKeys(value: object, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && keys.every(key => expected.includes(key));
+  const keys = EffectRecord.keys(value);
+  return keys.length === expected.length && EffectArray.every(keys, key => expected.includes(key));
 }
 function requireValid(valid: boolean): asserts valid {
   if (!valid) throw new Error('Invalid operations input.');

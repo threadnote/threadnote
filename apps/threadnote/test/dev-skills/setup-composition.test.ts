@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
@@ -17,8 +18,12 @@ import {applyDevSkills, statusDevSkills, withDevSkillsMutationLease} from '../..
 import {fixture, devSkillsTestLayer, snapshot} from './service-fixture.js';
 import {runSetupWith, SetupOperationError, type SetupOperationOutcome} from '../../src/setup/index.js';
 import {setupRepositorySourceHash} from '../../src/setup/runtime.js';
+import {parseSetupReceiptV1} from '../../src/setup/contract.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {workflowPropertyDiagnostics} from './workflow-property-diagnostics.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 effectIt.effect(
   'public agents install composes current core, explicit opt-out and persistent disabled enrollment',
@@ -39,14 +44,23 @@ effectIt.effect(
       };
       yield* f.run(runAgentCliAction(f.config, adapter, 'install', true, undefined, true));
       let status = yield* f.run(statusDevSkills(f.config, {agent: 'codex'}));
-      expect(status.targets[0]).toMatchObject({enabled: false, enrolled: false});
+      expect(status.targets[0]).toMatchObject({
+        enabled: false,
+        enrolled: false,
+      });
       yield* f.run(runAgentCliAction(f.config, adapter, 'install', true));
       status = yield* f.run(statusDevSkills(f.config, {agent: 'codex'}));
-      expect(status.targets[0]).toMatchObject({enabled: false, enrolled: false});
+      expect(status.targets[0]).toMatchObject({
+        enabled: false,
+        enrolled: false,
+      });
       expect(coreCalls).toBe(2);
       yield* f.run(applyDevSkills(f.config, 'install', {agent: 'codex'}));
       status = yield* f.run(statusDevSkills(f.config, {agent: 'codex'}));
-      expect(status.targets[0]).toMatchObject({enabled: true, enrolled: true});
+      expect(status.targets[0]).toMatchObject({
+        enabled: true,
+        enrolled: true,
+      });
     }).pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer)),
 );
 
@@ -91,7 +105,10 @@ fcEffectProp(
         diagnostics.phase('status');
         const status = yield* f.run(statusDevSkills(f.config, {agent: 'codex'}));
         diagnostics.phase('assertion');
-        expect(status.targets[0]).toMatchObject({enabled: false, enrolled: false});
+        expect(status.targets[0]).toMatchObject({
+          enabled: false,
+          enrolled: false,
+        });
       }).pipe(
         Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))),
         TestClock.withLive,
@@ -110,13 +127,19 @@ const setupCheckpointRoundtrip = (legacy: boolean, interrupted = false) =>
     let coreCalls = 0;
     let briefCalls = 0;
     const current = () =>
-      Effect.succeed({ownership: 'preexisting', status: 'already-current'} satisfies SetupOperationOutcome);
+      Effect.succeed({
+        ownership: 'preexisting',
+        status: 'already-current',
+      } satisfies SetupOperationOutcome);
     const dependencies = {
       workflowSetup: true,
       ensureCore: () =>
         Effect.sync(() => {
           coreCalls++;
-          return {ownership: 'preexisting', status: 'already-current'} satisfies SetupOperationOutcome;
+          return {
+            ownership: 'preexisting',
+            status: 'already-current',
+          } satisfies SetupOperationOutcome;
         }),
       ensureManifest: current,
       ensureSurface: current,
@@ -126,16 +149,22 @@ const setupCheckpointRoundtrip = (legacy: boolean, interrupted = false) =>
       inspectReversible: current,
       removeSurface: current,
       removeHooks: current,
-      doctor: () => Effect.succeed({status: 'verified', ownership: 'preexisting'} satisfies SetupOperationOutcome),
+      doctor: () =>
+        Effect.succeed({
+          status: 'verified',
+          ownership: 'preexisting',
+        } satisfies SetupOperationOutcome),
       contextBrief: () =>
         Effect.gen(function* () {
           if (interrupted && briefCalls++ === 0)
-            return yield* SetupOperationError.make({message: 'Interrupted legacy setup'});
+            return yield* SetupOperationError.make({
+              message: 'Interrupted legacy setup',
+            });
           return {
             status: 'verified',
             ownership: 'preexisting',
             verification: {
-              contextBriefHash: 'a'.repeat(64),
+              contextBriefHash: Effect2.pipe('a', EffectString.repeat(64)),
               durationMilliseconds: 0,
               freshness: 'fresh',
               graphCards: 1,
@@ -152,19 +181,41 @@ const setupCheckpointRoundtrip = (legacy: boolean, interrupted = false) =>
     const attempt = yield* f
       .run(runSetupWith(f.config, adapter, {apply: true, cwd: repo}, {...dependencies, workflowSetup: !legacy}))
       .pipe(Effect.result);
-    const receiptFiles = (yield* f.fs.readDirectory(f.path.join(f.home, 'setup'))).filter(
-      file => file.endsWith('.json') && !file.endsWith('.workflows.json'),
+    const receiptFiles = EffectArray.filter(
+      yield* f.fs.readDirectory(f.path.join(f.home, 'setup')),
+      __effectArrayValue =>
+        !!(file =>
+          Effect2.pipe(file, EffectString.endsWith('.json')) &&
+          !Effect2.pipe(file, EffectString.endsWith('.workflows.json')))(__effectArrayValue),
     );
-    const first = JSON.parse(
-      yield* f.fs.readFileString(f.path.join(f.home, 'setup', receiptFiles[0])),
-    ) as import('../../src/setup/contract.js').SetupReceiptV1;
+    const firstReceiptFile = receiptFiles[0];
+    if (firstReceiptFile === undefined) throw new Error('Expected a setup receipt file');
+    const first = parseSetupReceiptV1(
+      JSON.parse(yield* f.fs.readFileString(f.path.join(f.home, 'setup', firstReceiptFile))),
+    );
     expect(attempt._tag).toBe(interrupted ? 'Failure' : 'Success');
-    expect(first?.operations.some(operation => operation.kind === 'dev-skills.ensure')).toBe(!legacy);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(first?.operations), __effectOptionalArrayReceiver =>
+          EffectArray.some(__effectOptionalArrayReceiver, operation => operation.kind === 'dev-skills.ensure'),
+        ),
+      ),
+    ).toBe(!legacy);
     const repeated = yield* f.run(runSetupWith(f.config, adapter, {apply: true, cwd: repo}, dependencies));
     if (legacy) {
       expect(repeated?.planHash).toBe(first?.planHash);
-      expect(repeated?.operations.map(({id, kind, inputHash}) => ({id, kind, inputHash}))).toEqual(
-        first.operations.map(({id, kind, inputHash}) => ({id, kind, inputHash})),
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(repeated?.operations), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, ({id, kind, inputHash}) => ({id, kind, inputHash})),
+          ),
+        ),
+      ).toEqual(
+        EffectArray.map(first.operations, ({id, kind, inputHash}) => ({
+          id,
+          kind,
+          inputHash,
+        })),
       );
       if (!interrupted) expect(repeated?.operations).toEqual(first.operations);
     }

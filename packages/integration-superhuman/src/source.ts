@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {readDocumentCursor, writeDocumentCursor} from './work-state.js';
 import {
   SourceCoordinator,
@@ -63,6 +64,9 @@ import {
   storeSuperhumanCredential,
   validSuperhumanApiToken,
 } from './credentials.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface SuperhumanSourceAddOptions {
   readonly id: string;
@@ -108,15 +112,40 @@ export interface SuperhumanSyncResult {
   readonly syncedDocuments: readonly string[];
   readonly warnings: readonly string[];
 }
+function isSuperhumanSyncResult(value: unknown): value is SuperhumanSyncResult {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'sourceId' in value &&
+    typeof value.sourceId === 'string' &&
+    'syncedDocuments' in value &&
+    EffectArray.isArray(value.syncedDocuments) &&
+    EffectArray.every(value.syncedDocuments, (item): item is string => typeof item === 'string') &&
+    'warnings' in value &&
+    EffectArray.isArray(value.warnings) &&
+    EffectArray.every(value.warnings, (item): item is string => typeof item === 'string') &&
+    (!('progress' in value) ||
+      value.progress === undefined ||
+      (typeof value.progress === 'object' &&
+        value.progress !== null &&
+        'completed' in value.progress &&
+        typeof value.progress.completed === 'number' &&
+        'total' in value.progress &&
+        typeof value.progress.total === 'number'))
+  );
+}
 
-class SuperhumanSourceError extends Schema.TaggedError<SuperhumanSourceError>()('SuperhumanSourceError', {
-  message: Schema.String,
-}) {}
-
-export class SuperhumanSourceConflictError extends Schema.TaggedError<SuperhumanSourceConflictError>()(
-  'SuperhumanSourceConflictError',
-  {},
+class SuperhumanSourceError extends Schema.TaggedError<SuperhumanSourceError, {readonly brand: unique symbol}>()(
+  'SuperhumanSourceError',
+  {
+    message: Schema.String,
+  },
 ) {}
+
+export class SuperhumanSourceConflictError extends Schema.TaggedError<
+  SuperhumanSourceConflictError,
+  {readonly brand: unique symbol}
+>()('SuperhumanSourceConflictError', {}) {}
 
 function location(config: RuntimeConfig) {
   return {account: config.account, home: config.agentContextHome, user: config.user};
@@ -136,7 +165,9 @@ const configFence = Effect.fn('superhuman.configFence')(function* (
   fingerprint: string,
   requireEnabled = true,
 ) {
-  const source = (yield* readSourceConfiguration(config)).sources.find(item => item.id === sourceId);
+  const source = Option.getOrUndefined(
+    EffectArray.findFirst((yield* readSourceConfiguration(config)).sources, item => item.id === sourceId),
+  );
   if (
     !source ||
     !isSuperhumanSource(source) ||
@@ -158,15 +189,17 @@ const fetchDocument = Effect.fn('superhuman.fetchDocument')(function* (
   return yield* fromPromiseInterruptible(
     signal =>
       readSuperhumanDocument(token, document.id, document.pages, source.includeHidden, {...options, fetch, signal}),
-    error => (error instanceof SuperhumanClientError ? error : safeError('Superhuman provider refresh failed.')),
+    error => (Schema.is(SuperhumanClientError)(error) ? error : safeError('Superhuman provider refresh failed.')),
   );
 });
 
 function containsCredential(value: unknown, token: string): boolean {
-  if (typeof value === 'string') return value.includes(token);
-  if (Array.isArray(value)) return value.some(item => containsCredential(item, token));
+  if (typeof value === 'string') return Effect2.pipe(value, EffectString.includes(token));
+  if (EffectArray.isArray(value)) return EffectArray.some(value, item => containsCredential(item, token));
   return (
-    typeof value === 'object' && value !== null && Object.values(value).some(item => containsCredential(item, token))
+    typeof value === 'object' &&
+    value !== null &&
+    EffectArray.some(EffectRecord.values(value), item => containsCredential(item, token))
   );
 }
 
@@ -180,15 +213,15 @@ const checkCredentialReflection = Effect.fn('superhuman.checkCredentialReflectio
 
 function isDenied(error: unknown): boolean {
   return (
-    error instanceof SuperhumanClientError &&
+    Schema.is(SuperhumanClientError)(error) &&
     (error.code === 'authentication-rejected' || error.code === 'access-rejected' || error.code === 'not-found')
   );
 }
 
 function warningCode(error: unknown): string {
-  if (error instanceof SuperhumanClientError) return error.code;
-  if (error instanceof SuperhumanSecretBlocked) return 'credential-like content';
-  if (error instanceof SuperhumanPageTooLarge) return 'page too large';
+  if (Schema.is(SuperhumanClientError)(error)) return error.code;
+  if (Schema.is(SuperhumanSecretBlocked)(error)) return 'credential-like content';
+  if (Schema.is(SuperhumanPageTooLarge)(error)) return 'page too large';
   return 'refresh unavailable';
 }
 
@@ -201,10 +234,14 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
     yield* checkCredentialReflection({...options, apiToken: undefined}, options.apiToken);
   }
   const id = validateSourceIdentifier(options.id, 'source id');
-  const documents = [...new Set(options.documents.map(validateSuperhumanDocumentId))];
+  const documents = [...new Set(EffectArray.map(options.documents, validateSuperhumanDocumentId))];
   if (documents.length === 0) return yield* safeError('Superhuman sources require at least one document ID.');
   if (documents.length > 64) return yield* safeError('Superhuman sources support at most 64 documents.');
-  const pages = options.pages?.map(validateSuperhumanPageId);
+  const pages = Option.getOrUndefined(
+    Option.map(Option.fromNullishOr(options.pages), __effectArrayReceiver =>
+      EffectArray.map(__effectArrayReceiver, validateSuperhumanPageId),
+    ),
+  );
   if (pages && pages.length > 256) return yield* safeError('Superhuman sources support at most 256 selected pages.');
   if (pages?.length && documents.length !== 1)
     return yield* safeError('Selected page IDs require exactly one selected document.');
@@ -212,11 +249,14 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
     return yield* safeError('Choose document selections or legacy page IDs.');
   const selection =
     options.documentSelection ??
-    documents.map(documentId => ({id: documentId, ...(pages?.length ? {pages: [...new Set(pages)]} : {})}));
+    EffectArray.map(documents, documentId => ({
+      id: documentId,
+      ...(pages?.length ? {pages: [...new Set(pages)]} : {}),
+    }));
   if (
     selection.length !== documents.length ||
-    new Set(selection.map(document => document.id)).size !== documents.length ||
-    selection.some(document => !documents.includes(document.id))
+    new Set(EffectArray.map(selection, document => document.id)).size !== documents.length ||
+    EffectArray.some(selection, document => !documents.includes(document.id))
   )
     return yield* safeError('Document selections must match the selected document IDs.');
   if (options.credentialEnv !== undefined && !/^[A-Z_][A-Z0-9_]{0,127}$/.test(options.credentialEnv))
@@ -283,7 +323,7 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
     if (token !== undefined) yield* checkCredentialReflection(source, token);
   });
   const initialConfiguration = yield* readSourceConfiguration(config);
-  const initial = initialConfiguration.sources.find(item => item.id === id);
+  const initial = Option.getOrUndefined(EffectArray.findFirst(initialConfiguration.sources, item => item.id === id));
   const previewReuse =
     initial === undefined && options.apiToken === undefined && options.credentialEnv === undefined
       ? yield* reusableExternalCredential(config, initialConfiguration.sources, 'superhuman', id)
@@ -313,7 +353,9 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
     id,
     Effect.gen(function* () {
       const currentConfiguration = yield* readSourceConfiguration(config);
-      const existing = currentConfiguration.sources.find(item => item.id === id);
+      const existing = Option.getOrUndefined(
+        EffectArray.findFirst(currentConfiguration.sources, item => item.id === id),
+      );
       yield* Effect.try({
         try: () => checkExpectedConfiguration(existing),
         catch: () => SuperhumanSourceConflictError.make({}),
@@ -349,7 +391,7 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
         yield* storeSuperhumanCredential(config, id, reuse.token);
       else if (source.credentialStorage !== 'local') yield* removeSuperhumanCredential(config, id);
       yield* mutateSourceConfiguration(config, current => {
-        const latest = current.sources.find(item => item.id === id);
+        const latest = Option.getOrUndefined(EffectArray.findFirst(current.sources, item => item.id === id));
         if (
           (latest ? sourceConfigurationFingerprint(requireSuperhumanSource(current, id)) : undefined) !==
           previousFingerprint
@@ -405,7 +447,7 @@ export const runSuperhumanSourceInventory = Effect.fn('superhuman.inventory')(fu
             ? 'stale'
             : manifest.status
         : 'missing',
-      chunks: manifest ? Object.keys(manifest.chunks).length : 0,
+      chunks: manifest ? EffectRecord.keys(manifest.chunks).length : 0,
       ...(manifest?.nextAttemptAt === undefined ? {} : {nextAttemptAt: manifest.nextAttemptAt}),
     });
   }
@@ -420,7 +462,10 @@ export const runSuperhumanSourceStatus = Effect.fn('superhuman.status')(function
   yield* Console.log(
     `Superhuman source "${inventory.source.id}" · ${inventory.source.enabled ? 'enabled' : 'disabled'}`,
   );
-  for (const entry of inventory.entries.filter(entry => entry.nextAttemptAt))
+  for (const entry of EffectArray.filter(
+    inventory.entries,
+    (entry, __effectArrayIndex) => __effectArrayIndex in inventory.entries && Boolean(entry.nextAttemptAt),
+  ))
     yield* Console.log(
       `${entry.documentId}: retry after ${DateTime.formatIso(DateTime.makeUnsafe(entry.nextAttemptAt!))}`,
     );
@@ -445,7 +490,9 @@ export const runSuperhumanSourceSync = Effect.fn('superhuman.sync')(function* (
     const reply = yield* coordinator.value.sync(config, source.id);
     if (reply.value === undefined)
       return yield* SourceCoordinatorError.make({message: 'Source sync reply expired. Retry the source sync.'});
-    coordinatedResult = reply.value as SuperhumanSyncResult;
+    if (!isSuperhumanSyncResult(reply.value))
+      return yield* SourceCoordinatorError.make({message: 'Source sync reply was invalid. Retry the source sync.'});
+    coordinatedResult = reply.value;
   }
   const result: SuperhumanSyncResult =
     coordinatedResult ??
@@ -484,7 +531,8 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
       const warnings: string[] = [];
       const now = yield* Clock.currentTimeMillis;
       let attempted = 0;
-      for (const document of source.documents.filter(
+      for (const document of EffectArray.filter(
+        source.documents,
         document => documentId === undefined || document.id === documentId,
       )) {
         attempted++;
@@ -508,18 +556,18 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
         const result = yield* fetchDocument(config, source, document, options).pipe(Effect.result);
         if (Result.isFailure(result)) {
           const error = result.failure;
-          if (isDenied(error) || (error instanceof SuperhumanClientError && error.code === 'credential-reflected')) {
+          if (isDenied(error) || (Schema.is(SuperhumanClientError)(error) && error.code === 'credential-reflected')) {
             const targets =
-              error instanceof SuperhumanClientError && error.code === 'authentication-rejected'
+              Schema.is(SuperhumanClientError)(error) && error.code === 'authentication-rejected'
                 ? source.documents
                 : [document];
-            if (error instanceof SuperhumanClientError && error.code === 'authentication-rejected')
+            if (Schema.is(SuperhumanClientError)(error) && error.code === 'authentication-rejected')
               yield* denySource(config, source, 'authentication-rejected', fingerprint);
             for (const target of targets) {
               yield* quarantineDocument(config, source, target.id, fingerprint);
             }
           }
-          if (error instanceof SuperhumanClientError && error.code === 'quota-rejected') {
+          if (Schema.is(SuperhumanClientError)(error) && error.code === 'quota-rejected') {
             const jitter = yield* Random.next;
             const delay = Math.max(error.retryAfterMilliseconds ?? 0, 60_000) + Math.floor(jitter * 10_000);
             const retryAt = Math.min(8_640_000_000_000_000 - 1, (yield* Clock.currentTimeMillis) + delay);
@@ -527,14 +575,14 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
               yield* deferRetry(config, source, target.id, fingerprint, retryAt, 'quota');
           } else if (
             !isDenied(error) &&
-            !(error instanceof SuperhumanClientError && error.code === 'credential-reflected')
+            !(Schema.is(SuperhumanClientError)(error) && error.code === 'credential-reflected')
           ) {
             const retryAt = (yield* Clock.currentTimeMillis) + 60_000 + Math.floor((yield* Random.next) * 10_000);
             yield* deferRetry(config, source, document.id, fingerprint, retryAt, 'transient');
           }
           warnings.push(`Superhuman document ${document.id}: ${warningCode(error)}.`);
           if (
-            error instanceof SuperhumanClientError &&
+            Schema.is(SuperhumanClientError)(error) &&
             [
               'authentication-rejected',
               'quota-rejected',
@@ -550,24 +598,28 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
           Effect.try({
             try: () => renderSuperhumanDocument(result.success),
             catch: error =>
-              error instanceof SuperhumanSecretBlocked || error instanceof SuperhumanPageTooLarge
+              Schema.is(SuperhumanSecretBlocked)(error) || Schema.is(SuperhumanPageTooLarge)(error)
                 ? error
                 : safeError('Superhuman rendering failed.'),
           }),
         );
         if (Result.isFailure(rendered)) {
           const error = rendered.failure;
-          if (error instanceof SuperhumanSecretBlocked || error instanceof SuperhumanPageTooLarge)
+          if (Schema.is(SuperhumanSecretBlocked)(error) || Schema.is(SuperhumanPageTooLarge)(error))
             yield* quarantineDocument(config, source, document.id, fingerprint);
           warnings.push(`Superhuman document ${document.id}: ${warningCode(error)}.`);
           continue;
         }
         const chunks = rendered.success;
-        const unsupportedPages = result.success.excluded.filter(page => page.reason === 'unsupported').length;
-        const hiddenPages = result.success.excluded.filter(page => page.reason === 'hidden').length;
-        const withoutText = result.success.pages.reduce(
-          (count, page) => count + page.lines.filter(line => line.content === undefined).length,
+        const unsupportedPages = EffectArray.filter(
+          result.success.excluded,
+          page => page.reason === 'unsupported',
+        ).length;
+        const hiddenPages = EffectArray.filter(result.success.excluded, page => page.reason === 'hidden').length;
+        const withoutText = EffectArray.reduce(
+          result.success.pages,
           0,
+          (count, page) => count + EffectArray.filter(page.lines, line => line.content === undefined).length,
         );
         if (unsupportedPages > 0)
           warnings.push(`Superhuman document ${document.id}: ${unsupportedPages} unsupported page(s) excluded.`);
@@ -583,8 +635,8 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
           warnings.push(`Superhuman document ${document.id}: selected content exceeds the chunk inventory limit.`);
           continue;
         }
-        const files = Object.fromEntries(
-          chunks.map(chunk => {
+        const files = EffectRecord.fromEntries(
+          EffectArray.map(chunks, chunk => {
             const uri = externalResourceUri({
               sourceId: source.id,
               documentId: document.id,
@@ -618,14 +670,16 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
           configFingerprint: fingerprint,
           fetchedAt,
           maxStaleMilliseconds: source.maxStaleHours * 3_600_000,
-          chunks: Object.fromEntries(Object.entries(files).map(([uri, file]) => [uri, file.hash])),
+          chunks: EffectRecord.fromEntries(
+            EffectArray.map(EffectRecord.toEntries(files), ([uri, file]) => [uri, file.hash]),
+          ),
           status: 'pending',
           ...(sourceReceipt?.accessEpoch === undefined ? {} : {accessEpoch: sourceReceipt.accessEpoch}),
         };
         const receipt = externalDocumentManifestUri(source.id, document.id);
         const fence = configFence(config, source.id, fingerprint);
         const changedFiles: Array<[string, {content: string; hash: string}]> = [];
-        for (const [uri, file] of Object.entries(files)) {
+        for (const [uri, file] of EffectRecord.toEntries(files)) {
           if (
             previous?.status === 'active' &&
             previous.configFingerprint === fingerprint &&
@@ -636,7 +690,7 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
           }
           changedFiles.push([uri, file]);
         }
-        const obsoleteUris = Object.keys(previous?.chunks ?? {}).filter(uri => !(uri in files));
+        const obsoleteUris = EffectArray.filter(EffectRecord.keys(previous?.chunks ?? {}), uri => !(uri in files));
         if (changedFiles.length === 0 && obsoleteUris.length === 0 && previous?.status === 'active') {
           yield* store.mutateChecked(
             location(config),
@@ -670,7 +724,7 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
         );
         yield* store.mutateChecked(
           location(config),
-          obsoleteUris.map(uri => ({type: 'remove' as const, uri, ignoreMissing: true})),
+          EffectArray.map(obsoleteUris, uri => ({type: 'remove' as const, uri, ignoreMissing: true})),
           fence,
         );
         yield* store.mutateChecked(
@@ -686,7 +740,7 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
           fence,
         );
         const mutations: ResourceStoreMutation[] = [
-          ...changedFiles.map(([uri, file]) => ({
+          ...EffectArray.map(changedFiles, ([uri, file]) => ({
             type: 'write' as const,
             uri,
             content: file.content,
@@ -764,7 +818,7 @@ const denySource = Effect.fn('superhuman.denySource')(function* (
   const fence =
     fingerprint === undefined
       ? Effect.gen(function* () {
-          if ((yield* readSourceConfiguration(config)).sources.some(item => item.id === source.id))
+          if (EffectArray.some((yield* readSourceConfiguration(config)).sources, item => item.id === source.id))
             return yield* safeError('Superhuman source configuration changed before creation.');
         })
       : configFence(config, source.id, fingerprint, false);
@@ -829,7 +883,7 @@ const quarantineDocument = Effect.fn('superhuman.quarantine')(function* (
     ],
     configFence(config, source.id, fingerprint, false),
   );
-  const removals = Object.keys(previous?.chunks ?? {}).map(uri => ({
+  const removals = EffectArray.map(EffectRecord.keys(previous?.chunks ?? {}), uri => ({
     type: 'remove' as const,
     uri,
     ignoreMissing: true,
@@ -873,7 +927,7 @@ export const runSuperhumanSourceRemove = Effect.fn('superhuman.remove')(function
         return {
           version: 2,
           projections: configuration.projections,
-          sources: configuration.sources.filter(item => item.id !== source.id),
+          sources: EffectArray.filter(configuration.sources, item => item.id !== source.id),
         };
       });
       yield* removeSourceEvidencePins(location(config), 'superhuman', source.id);
@@ -932,7 +986,12 @@ export const syncSuperhumanSourcesBeforeRecall = Effect.fn('superhuman.syncBefor
     else {
       if (result.success.syncedDocuments.length) syncedSources.push(source.id);
       warnings.push(...result.success.warnings);
-      if (result.success.warnings.some(warning => warning.includes('quota-rejected'))) break;
+      if (
+        EffectArray.some(result.success.warnings, warning =>
+          Effect2.pipe(warning, EffectString.includes('quota-rejected')),
+        )
+      )
+        break;
     }
   }
   return {syncedSources, warnings};
@@ -942,7 +1001,8 @@ export const superhumanSourceWork = {
   provider: 'superhuman',
   admission: {limit: 16, windowMs: 20000},
   list: Effect.fn('superhuman.workDescriptors')(function* (config: RuntimeConfig) {
-    const sources = (yield* readSourceConfiguration(config)).sources.filter(
+    const sources = EffectArray.filter(
+      (yield* readSourceConfiguration(config)).sources,
       (source): source is SuperhumanSourceConfig => isSuperhumanSource(source) && source.enabled,
     );
     return yield* Effect.forEach(sources, source =>
@@ -1000,7 +1060,7 @@ export const superhumanSourceWork = {
         const inventory = yield* runSuperhumanSourceInventory(config, sourceId);
         const more = index + 1 < source.documents.length;
         const now = yield* Clock.currentTimeMillis;
-        const retryTimes = inventory.entries.flatMap(entry =>
+        const retryTimes = EffectArray.flatMap(inventory.entries, entry =>
           entry.nextAttemptAt !== undefined && entry.nextAttemptAt > now ? [entry.nextAttemptAt] : [],
         );
         const nextAttemptAt =

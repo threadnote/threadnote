@@ -11,14 +11,19 @@ import {parseResourceId} from '@threadnote/store/resource-id';
 import type {OAuthPrincipalClaims} from './oauth.js';
 import {remoteMemoryError} from './errors.js';
 import type {RemoteMemoryRequestExecution} from './request_execution.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-export type RemoteMemoryScope =
-  | 'memory:admin'
-  | 'memory:propose:durable'
-  | 'memory:read'
-  | 'memory:review:durable'
-  | 'memory:write:durable'
-  | 'memory:write:handoff';
+export const REMOTE_MEMORY_SCOPES = [
+  'memory:admin',
+  'memory:propose:durable',
+  'memory:read',
+  'memory:review:durable',
+  'memory:write:durable',
+  'memory:write:handoff',
+] as const;
+
+export type RemoteMemoryScope = (typeof REMOTE_MEMORY_SCOPES)[number];
 
 export const REMOTE_MEMORY_FEATURE_FLAGS = [
   'remote_memory_read',
@@ -94,8 +99,12 @@ export function requireAuthorizedProject(principal: AuthorizedRemotePrincipal, p
 
 export function requestedRemoteShare(request: Request): string | undefined {
   const requestUrl = new URL(request.url);
-  const fromHeader = request.headers.get('threadnote-share-id')?.trim();
-  const fromQuery = requestUrl.searchParams.get('share')?.trim();
+  const fromHeader = Effect.pipe(request.headers.get('threadnote-share-id'), effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
+  const fromQuery = Effect.pipe(requestUrl.searchParams.get('share'), effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if (fromHeader && fromQuery && fromHeader !== fromQuery) {
     throw remoteMemoryError('invalid_request', 'The requested share identifiers do not match.');
   }

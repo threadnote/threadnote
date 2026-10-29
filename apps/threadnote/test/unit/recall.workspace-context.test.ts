@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -77,18 +78,21 @@ effectIt.effect(
       const manifestPath = join(root, 'seed-manifest.yaml');
       writeFileSync(
         manifestPath,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: declared-member',
-          '    path: /synthetic/declared-member',
-          '    uri: threadnote://resources/repos/declared-member',
-          '    seed: []',
-          'worksets:',
-          '  - name: selected',
-          '    projects: [declared-member]',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: declared-member',
+            '    path: /synthetic/declared-member',
+            '    uri: threadnote://resources/repos/declared-member',
+            '    seed: []',
+            'worksets:',
+            '  - name: selected',
+            '    projects: [declared-member]',
+            '',
+          ],
+          '\n',
+        ),
       );
 
       const context = yield* resolveRecallWorkspaceContext(

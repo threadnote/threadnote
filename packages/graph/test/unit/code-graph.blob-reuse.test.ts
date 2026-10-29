@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {describe, expect, it} from '@effect/vitest';
@@ -10,6 +11,8 @@ import {
 } from '@threadnote/graph/languages/schemas/extractor';
 import {captureRationaleInputs} from '@threadnote/graph/rationale';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const extractionContext = {packageName: Option.none(), project: Option.none()};
 
@@ -42,11 +45,11 @@ describe('code graph Git blob extraction reuse', () => {
       const freshTargetFacts = captureRationaleInputs(target, extractStructuredSchemaFacts(target, extractionContext));
 
       expect(relocateStructuredSchemaFacts(target, donorFacts)).toEqual(freshTargetFacts);
-      expect(new Set(donorFacts.symbols.map(symbol => symbol.id))).not.toEqual(
-        new Set(freshTargetFacts.symbols.map(symbol => symbol.id)),
+      expect(new Set(EffectArray.map(donorFacts.symbols, symbol => symbol.id))).not.toEqual(
+        new Set(EffectArray.map(freshTargetFacts.symbols, symbol => symbol.id)),
       );
-      expect(donorFacts.symbols.every(symbol => symbol.path === donor.path)).toBe(true);
-      expect(freshTargetFacts.symbols.every(symbol => symbol.path === target.path)).toBe(true);
+      expect(EffectArray.every(donorFacts.symbols, symbol => symbol.path === donor.path)).toBe(true);
+      expect(EffectArray.every(freshTargetFacts.symbols, symbol => symbol.path === target.path)).toBe(true);
     }
   });
 
@@ -77,7 +80,11 @@ describe('code graph Git blob extraction reuse', () => {
 });
 
 function inventoryFile(path: string, content: string): CodeGraphInventoryFile {
-  const language = path.endsWith('.jsonc') ? 'jsonc' : path.endsWith('.yaml') ? 'yaml' : 'json';
+  const language = Effect.pipe(path, EffectString.endsWith('.jsonc'))
+    ? 'jsonc'
+    : Effect.pipe(path, EffectString.endsWith('.yaml'))
+      ? 'yaml'
+      : 'json';
   return {
     blobId: createHash('sha1').update(content).digest('hex'),
     content,

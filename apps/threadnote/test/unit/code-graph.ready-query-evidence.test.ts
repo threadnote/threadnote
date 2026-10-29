@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -28,9 +29,11 @@ import {
   readyQueryHostEvidence,
 } from '@threadnote/threadnote/evaluation/ready/query_host';
 import {CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const RESULT_DIGEST = 'a'.repeat(64);
-const SNAPSHOT_DIGEST = 'b'.repeat(64);
+const RESULT_DIGEST = Effect.pipe('a', EffectString.repeat(64));
+const SNAPSHOT_DIGEST = Effect.pipe('b', EffectString.repeat(64));
 const SAMPLES = 25;
 
 describe('large ready-query evidence', () => {
@@ -41,9 +44,11 @@ describe('large ready-query evidence', () => {
     artifact.measurements.exact.stages.reverse();
 
     expect(parseReadyQueryEvidenceV1(artifact)).toBe(artifact);
-    expect(READY_QUERY_CONTROLS.find(control => control.id === 'bazel-kotlinc-options')?.expectedLanguage).toBe(
-      'starlark',
-    );
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(READY_QUERY_CONTROLS, control => control.id === 'bazel-kotlinc-options'),
+      )?.expectedLanguage,
+    ).toBe('starlark');
   });
 
   it('accepts the legacy repository identity while preserving the immutable repository ID', () => {
@@ -136,7 +141,10 @@ describe('large ready-query evidence', () => {
     expect(() =>
       parseReadyQueryEvidenceV1({
         ...artifact,
-        source: {...artifact.source, github: {...artifact.source.github, workflowSha: 'e'.repeat(40)}},
+        source: {
+          ...artifact.source,
+          github: {...artifact.source.github, workflowSha: Effect.pipe('e', EffectString.repeat(40))},
+        },
       }),
     ).toThrow('canonical protected GitHub workflow run');
     expect(() =>
@@ -177,15 +185,54 @@ describe('large ready-query evidence', () => {
     expect(source).toContain("provenance.mode !== 'github-actions-clean-source'");
     expect(source).toContain('atomicWrite(prepared.output');
     expect(source).not.toContain('atomicWrite(options.output');
-    const exclusion = source.slice(source.indexOf('const withReadyQueryBuilderExclusion = Effect.fn'));
-    expect(exclusion.indexOf('withCodeGraphMaintenanceRegistration(')).toBeLessThan(
-      exclusion.indexOf('withCodeGraphMaintenanceIntent('),
+    const exclusion = Effect.pipe(
+      source,
+      EffectString.slice(
+        Effect.pipe(
+          source,
+          EffectString.indexOf('const withReadyQueryBuilderExclusion = Effect.fn'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
     );
-    expect(exclusion.indexOf('withCodeGraphMaintenanceIntent(')).toBeLessThan(
-      exclusion.indexOf('codeGraphRepositoryLockPath('),
+    expect(
+      Effect.pipe(
+        exclusion,
+        EffectString.indexOf('withCodeGraphMaintenanceRegistration('),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(
+        exclusion,
+        EffectString.indexOf('withCodeGraphMaintenanceIntent('),
+        Effect.Option.getOrElse(() => -1),
+      ),
     );
-    expect(exclusion.indexOf('codeGraphRepositoryLockPath(')).toBeLessThan(
-      exclusion.indexOf('awaitCodeGraphWorktreeBuilds('),
+    expect(
+      Effect.pipe(
+        exclusion,
+        EffectString.indexOf('withCodeGraphMaintenanceIntent('),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(
+        exclusion,
+        EffectString.indexOf('codeGraphRepositoryLockPath('),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    );
+    expect(
+      Effect.pipe(
+        exclusion,
+        EffectString.indexOf('codeGraphRepositoryLockPath('),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ).toBeLessThan(
+      Effect.pipe(
+        exclusion,
+        EffectString.indexOf('awaitCodeGraphWorktreeBuilds('),
+        Effect.Option.getOrElse(() => -1),
+      ),
     );
     expect(() =>
       parseReadyQueryEvidenceV1({
@@ -253,6 +300,78 @@ describe('large ready-query evidence', () => {
     expect(() => readyQueryHostEvidence([first, {...quiet, stealTicks: 9}], 8)).toThrow('Host contention invalidates');
   });
 
+  it('preserves CPU counters across horizontal separator runs', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom(' ', '\t'), {minLength: 1, maxLength: 512}),
+        fc.nat(1_000_000),
+        (separators, stealTicks) => {
+          const parsed = parseReadyQueryLinuxHostSample({
+            cpuPressure: 'some avg10=0.00 avg60=0.00 avg300=0.00 total=1000\n',
+            ioPressure: 'some avg10=0.00 avg60=0.00 avg300=0.00 total=2000\n',
+            memoryPressure: 'some avg10=0.00 avg60=0.00 avg300=0.00 total=3000\n',
+            load: '0.01 0.02 0.03 1/100 7\n',
+            observedAtMilliseconds: 1_000,
+            stat: 'cpu' + EffectArray.join(separators, '') + '1 2 3 4 5 6 7 ' + stealTicks + ' 0 0\n',
+            vmstat: 'pswpin 2\npswpout 3\n',
+          });
+          expect(parsed.stealTicks).toBe(stealTicks);
+          expect(parsed.runnableProcesses).toBe(1);
+        },
+      ),
+      {numRuns: 50},
+    );
+    expect(() =>
+      parseReadyQueryLinuxHostSample({
+        cpuPressure: 'some total=1000\n',
+        ioPressure: 'some total=2000\n',
+        memoryPressure: 'some total=3000\n',
+        load: '0.01 0.02 0.03 1/100 7\n',
+        observedAtMilliseconds: 1_000,
+        stat: 'cpu' + EffectString.repeat(32_768)('\t') + '\n',
+        vmstat: 'pswpin 2\npswpout 3\n',
+      }),
+    ).toThrow('Linux host contention counters are unavailable or malformed.');
+  });
+
+  it('preserves PSI totals across horizontal separators and rejects an empty pressure line', () => {
+    const input = {
+      cpuPressure: 'some total=1000\n',
+      ioPressure: 'some total=2000\n',
+      memoryPressure: 'some total=3000\n',
+      load: '0.01 0.02 0.03 1/100 7\n',
+      observedAtMilliseconds: 1_000,
+      stat: 'cpu 1 2 3 4 5 6 7 8 0 0\n',
+      vmstat: 'pswpin 2\npswpout 3\n',
+    };
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom(' ', '\t'), {minLength: 1, maxLength: 512}),
+        fc.nat(1_000_000),
+        (separators, total) => {
+          const pressure =
+            'some' + EffectArray.join(separators, '') + 'avg10=0.00 avg60=0.00 avg300=0.00 total=' + total + '\n';
+          const parsed = parseReadyQueryLinuxHostSample({
+            ...input,
+            cpuPressure: pressure,
+            ioPressure: pressure,
+            memoryPressure: pressure,
+          });
+          expect(parsed.cpuPressureTotalMicroseconds).toBe(total);
+          expect(parsed.ioPressureTotalMicroseconds).toBe(total);
+          expect(parsed.memoryPressureTotalMicroseconds).toBe(total);
+        },
+      ),
+      {numRuns: 50},
+    );
+    expect(() =>
+      parseReadyQueryLinuxHostSample({
+        ...input,
+        cpuPressure: 'some' + EffectString.repeat(32_768)('\t') + '\n',
+      }),
+    ).toThrow('Linux host contention counters are unavailable or malformed.');
+  });
+
   it('checks the exact 200k inventory boundary', () => {
     fc.assert(
       fc.property(fc.integer({min: READY_QUERY_MINIMUM_FILES - 3, max: READY_QUERY_MINIMUM_FILES + 3}), files => {
@@ -274,7 +393,7 @@ describe('large ready-query evidence', () => {
         (latency, order) => {
           const artifact = validArtifact();
           const multiset = [...Array.from({length: SAMPLES - 2}, () => latency - 1), latency, latency];
-          const values = order.map(index => multiset[index]);
+          const values = EffectArray.map(order, index => multiset[index]);
           artifact.measurements.deferred = timingSeries('deferred', values);
           if (latency <= 500) expect(() => parseReadyQueryEvidenceV1(artifact)).not.toThrow();
           else expect(() => parseReadyQueryEvidenceV1(artifact)).toThrow('Deferred ready-query p95 exceeds 500 ms');
@@ -288,9 +407,15 @@ describe('large ready-query evidence', () => {
     fc.assert(
       fc.property(permutation(READY_QUERY_CONTROLS.length), permutation(4), (controlOrder, stageOrder) => {
         const artifact = validArtifact();
-        artifact.controls = controlOrder.map(index => artifact.controls[index]);
-        artifact.measurements.deferred.stages = stageOrder.map(index => artifact.measurements.deferred.stages[index]);
-        artifact.measurements.exact.stages = stageOrder.map(index => artifact.measurements.exact.stages[index]);
+        artifact.controls = EffectArray.map(controlOrder, index => artifact.controls[index]);
+        artifact.measurements.deferred.stages = EffectArray.map(
+          stageOrder,
+          index => artifact.measurements.deferred.stages[index],
+        );
+        artifact.measurements.exact.stages = EffectArray.map(
+          stageOrder,
+          index => artifact.measurements.exact.stages[index],
+        );
         expect(() => parseReadyQueryEvidenceV1(artifact)).not.toThrow();
 
         artifact.controls = [...artifact.controls.slice(0, -1), artifact.controls[0]];
@@ -307,7 +432,7 @@ function permutation(length: number) {
 
 function validArtifact(): MutableReadyQueryEvidence {
   return {
-    controls: READY_QUERY_CONTROLS.map(control => ({
+    controls: EffectArray.map(READY_QUERY_CONTROLS, control => ({
       deferredDigest: RESULT_DIGEST,
       deferredFreshness: 'deferred',
       deferredStructuredResponseBytes: 1_000,
@@ -397,7 +522,7 @@ function validArtifact(): MutableReadyQueryEvidence {
     },
     source: {
       clean: true,
-      commit: 'd'.repeat(40),
+      commit: Effect.pipe('d', EffectString.repeat(40)),
       github: {
         environment: READY_QUERY_GITHUB_ENVIRONMENT,
         environmentAttestation: READY_QUERY_ENVIRONMENT_ATTESTATION,
@@ -413,12 +538,12 @@ function validArtifact(): MutableReadyQueryEvidence {
         runnerOs: 'Linux',
         runAttempt: '1',
         runId: '123',
-        sha: 'd'.repeat(40),
+        sha: Effect.pipe('d', EffectString.repeat(40)),
         workflowRef: READY_QUERY_GITHUB_WORKFLOW_REF,
-        workflowSha: 'd'.repeat(40),
+        workflowSha: Effect.pipe('d', EffectString.repeat(40)),
       },
-      lockfileSha256: 'e'.repeat(64),
-      packageManifestSha256: 'f'.repeat(64),
+      lockfileSha256: Effect.pipe('e', EffectString.repeat(64)),
+      packageManifestSha256: Effect.pipe('f', EffectString.repeat(64)),
       validationMode: 'github-actions-clean-source',
     },
     suite: 'code-graph-ready-query-large',
@@ -442,14 +567,14 @@ function timingSeries(kind: 'deferred' | 'exact', values: readonly number[]): Mu
     maxConcurrency: 1,
     mode: exact ? 'sequential' : 'fixed-rate',
     queueLatencyIncluded: true,
-    queueLatencyMilliseconds: values.map(() => 0),
-    resultDigests: values.map(() => RESULT_DIGEST),
+    queueLatencyMilliseconds: EffectArray.map(values, () => 0),
+    resultDigests: EffectArray.map(values, () => RESULT_DIGEST),
     serviceMilliseconds: [...values],
-    snapshotDigests: values.map(() => SNAPSHOT_DIGEST),
+    snapshotDigests: EffectArray.map(values, () => SNAPSHOT_DIGEST),
     stages,
-    structuredResponseBytes: values.map(() => 1_000),
-    textResponseBytes: values.map(() => 2_000),
-    unattributedMilliseconds: values.map(value => value - attributed),
+    structuredResponseBytes: EffectArray.map(values, () => 1_000),
+    textResponseBytes: EffectArray.map(values, () => 2_000),
+    unattributedMilliseconds: EffectArray.map(values, value => value - attributed),
     warmups: 5,
   };
 }
@@ -461,7 +586,7 @@ function stage(
   values: readonly number[],
   duration: number,
 ): MutableStageSeries {
-  return {disposition, durationMilliseconds: values.map(() => duration), phase, stage: name};
+  return {disposition, durationMilliseconds: EffectArray.map(values, () => duration), phase, stage: name};
 }
 
 type Mutable<T> = {-readonly [K in keyof T]: T[K] extends readonly (infer V)[] ? Mutable<V>[] : Mutable<T[K]>};

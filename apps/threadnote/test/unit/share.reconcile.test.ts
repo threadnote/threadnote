@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Result, Schema} from 'effect';
 import {Command} from 'effect/cli';
@@ -18,7 +19,9 @@ import {
   previewShareReconcile,
   runShareReconcile,
 } from '../../src/share/reconcile.js';
-import type {ShareReconcilePlan} from '../../src/share/reconcile.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const invalidated: string[] = [];
 const storeLayer = ResourceStore.layer.pipe(
@@ -43,31 +46,34 @@ const relativePath = 'durable/projects/example/lease.md';
 const citation = createMemoryCodeCitation({
   version: 1,
   extractorSet: 'test',
-  fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
   path: 'src/example.ts',
-  repositoryId: 'b'.repeat(64),
+  repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
   repositoryIdentityKind: 'remote',
-  sourceCommit: 'c'.repeat(40),
+  sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: 'cgsn_' + 'd'.repeat(40),
+  sourceSnapshotId: 'cgsn_' + Effect2.pipe('d', EffectString.repeat(40)),
   target: {kind: 'file'},
 });
 const document = (body: string) =>
-  [
-    'MEMORY',
-    'schema_version: 4',
-    'kind: durable',
-    'status: active',
-    'visibility: shared',
-    'project: example',
-    'topic: lease',
-    'memory_id: tn_lease',
-    'created_at: 2026-01-01T00:00:00.000Z',
-    'relation: depends_on threadnote://memory/tn_neighbor',
-    `code_citation: ${JSON.stringify(citation)}`,
-    '',
-    body,
-  ].join('\n');
+  EffectArray.join(
+    [
+      'MEMORY',
+      'schema_version: 4',
+      'kind: durable',
+      'status: active',
+      'visibility: shared',
+      'project: example',
+      'topic: lease',
+      'memory_id: tn_lease',
+      'created_at: 2026-01-01T00:00:00.000Z',
+      'relation: depends_on threadnote://memory/tn_neighbor',
+      `code_citation: ${JSON.stringify(citation)}`,
+      '',
+      body,
+    ],
+    '\n',
+  );
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -179,10 +185,14 @@ effectIt.effect('requires explicit apply, a saved plan and its exact approval di
       const f = yield* fixture;
       const before = yield* snapshot(f);
       const preview = yield* captureConsole(runShareReconcile(f.config, uri));
-      const plan = JSON.parse(preview.output) as ShareReconcilePlan;
+      const previewValue: unknown = JSON.parse(preview.output);
+      const previewHeader = yield* Schema.decodeUnknownEffect(Schema.Struct({approvalDigest: Schema.String}))(
+        previewValue,
+      );
+      const plan = parseShareReconcilePlan(previewValue, uri, previewHeader.approvalDigest);
       yield* reject(runShareReconcile(f.config, uri, {apply: true}));
       yield* reject(runShareReconcile(f.config, uri, {plan: 'missing'}));
-      yield* reject(applyShareReconcile(f.config, uri, plan, '0'.repeat(64)));
+      yield* reject(applyShareReconcile(f.config, uri, plan, Effect2.pipe('0', EffectString.repeat(64))));
       yield* reject(applyShareReconcile(f.config, neighbor, plan, plan.approvalDigest));
       const planFile = f.path.join(f.home, 'preview.json');
       yield* f.fs.writeFileString(planFile, JSON.stringify({...plan, body: 'untrusted instructions'}));
@@ -220,9 +230,13 @@ for (const drift of drifts)
         const f = yield* fixture;
         const plan = yield* previewShareReconcile(f.config, uri);
         if (drift === 'native-body') yield* f.fs.writeFileString(f.nativeFile, document('Concurrent edit.'));
-        if (drift === 'native-id') yield* f.fs.writeFileString(f.nativeFile, f.old.replace('tn_lease', 'tn_other'));
+        if (drift === 'native-id')
+          yield* f.fs.writeFileString(f.nativeFile, Effect2.pipe(f.old, EffectString.replace('tn_lease', 'tn_other')));
         if (drift === 'native-created')
-          yield* f.fs.writeFileString(f.nativeFile, f.old.replace('2026-01-01T', '2026-01-02T'));
+          yield* f.fs.writeFileString(
+            f.nativeFile,
+            Effect2.pipe(f.old, EffectString.replace('2026-01-01T', '2026-01-02T')),
+          );
         if (drift === 'team')
           yield* f.fs.writeFileString(f.teamsFile, JSON.stringify({...f.teams, defaultTeam: 'other'}));
         if (drift === 'git-config') yield* f.git(['config', 'test.changed', 'true']);
@@ -260,7 +274,11 @@ for (const drift of ['native', 'native-id', 'git', 'dirty', 'config'] as const)
         const plan = yield* previewShareReconcile(f.config, uri);
         const inject = Effect.gen(function* () {
           if (drift === 'native') yield* f.fs.writeFileString(f.nativeFile, document('Edit under account lock.'));
-          if (drift === 'native-id') yield* f.fs.writeFileString(f.nativeFile, f.old.replace('tn_lease', 'tn_other'));
+          if (drift === 'native-id')
+            yield* f.fs.writeFileString(
+              f.nativeFile,
+              Effect2.pipe(f.old, EffectString.replace('tn_lease', 'tn_other')),
+            );
           if (drift === 'dirty') yield* f.fs.writeFileString(f.file, document('Dirty at guard.'));
           if (drift === 'git') yield* f.git(['commit', '--allow-empty', '-m', 'head under account lock']);
           if (drift === 'config')
@@ -287,7 +305,7 @@ for (const drift of ['native', 'native-id', 'git', 'dirty', 'config'] as const)
           drift === 'native'
             ? document('Edit under account lock.')
             : drift === 'native-id'
-              ? f.old.replace('tn_lease', 'tn_other')
+              ? Effect2.pipe(f.old, EffectString.replace('tn_lease', 'tn_other'))
               : f.old,
         );
         expect(yield* f.store.read(f.location, neighbor)).toBe('Unrelated resource bytes.');
@@ -296,24 +314,34 @@ for (const drift of ['native', 'native-id', 'git', 'dirty', 'config'] as const)
   );
 
 const invalidSources = [
-  (s: string) => s.replace('created_at: 2026-01-01T00:00:00.000Z', 'created_at: invalid'),
-  (s: string) => s.replace('project: example', 'project: other'),
-  (s: string) => s.replace('memory_id: tn_lease', 'memory_id: tn_lease\nmemory_id: tn_other'),
-  (s: string) => s.replace('status: active', 'status: archived'),
-  (s: string) => s.replace('visibility: shared', 'visibility: personal'),
-  (s: string) => s.replace('memory_id: tn_lease', 'memory_id: invalid'),
-  (s: string) => s.replace('memory_id: tn_lease', 'memory_id: tn_other'),
-  (s: string) => s.replace('created_at: 2026-01-01', 'created_at: 2026-01-02'),
-  (s: string) => s.replace('created_at: 2026-01-01T00:00:00.000Z\n', ''),
-  (s: string) => s.replace('schema_version: 4', 'schema_version: 999'),
-  (s: string) => s.replace(`code_citation: ${JSON.stringify(citation)}`, 'code_citation: pending'),
+  (s: string) => Effect2.pipe(s, EffectString.replace('created_at: 2026-01-01T00:00:00.000Z', 'created_at: invalid')),
+  (s: string) => Effect2.pipe(s, EffectString.replace('project: example', 'project: other')),
   (s: string) =>
-    s.replace(
-      'relation: depends_on threadnote://memory/tn_neighbor',
-      'relation: depends_on threadnote://user/other/memories/private.md',
+    Effect2.pipe(s, EffectString.replace('memory_id: tn_lease', 'memory_id: tn_lease\nmemory_id: tn_other')),
+  (s: string) => Effect2.pipe(s, EffectString.replace('status: active', 'status: archived')),
+  (s: string) => Effect2.pipe(s, EffectString.replace('visibility: shared', 'visibility: personal')),
+  (s: string) => Effect2.pipe(s, EffectString.replace('memory_id: tn_lease', 'memory_id: invalid')),
+  (s: string) => Effect2.pipe(s, EffectString.replace('memory_id: tn_lease', 'memory_id: tn_other')),
+  (s: string) => Effect2.pipe(s, EffectString.replace('created_at: 2026-01-01', 'created_at: 2026-01-02')),
+  (s: string) => Effect2.pipe(s, EffectString.replace('created_at: 2026-01-01T00:00:00.000Z\n', '')),
+  (s: string) => Effect2.pipe(s, EffectString.replace('schema_version: 4', 'schema_version: 999')),
+  (s: string) =>
+    Effect2.pipe(s, EffectString.replace(`code_citation: ${JSON.stringify(citation)}`, 'code_citation: pending')),
+  (s: string) =>
+    Effect2.pipe(
+      s,
+      EffectString.replace(
+        'relation: depends_on threadnote://memory/tn_neighbor',
+        'relation: depends_on threadnote://user/other/memories/private.md',
+      ),
     ),
-  (s: string) => s.replace('relation: depends_on threadnote://memory/tn_neighbor', 'relation: invalid garbage'),
-  (s: string) => s.replace('\n\nApproved', '\nsource_session_id: private-session\n\nApproved'),
+  (s: string) =>
+    Effect2.pipe(
+      s,
+      EffectString.replace('relation: depends_on threadnote://memory/tn_neighbor', 'relation: invalid garbage'),
+    ),
+  (s: string) =>
+    Effect2.pipe(s, EffectString.replace('\n\nApproved', '\nsource_session_id: private-session\n\nApproved')),
 ];
 for (const [index, change] of invalidSources.entries())
   effectIt.effect(`preview and apply reject invalid committed metadata/projection ${index}`, () =>
@@ -338,9 +366,9 @@ effectIt.effect('rejects missing committed preimages, native preimages and nonca
       const f = yield* fixture;
       for (const target of [
         uri + '#anchor',
-        uri.replace('/shared/default/', '/'),
-        uri.replace('lease.md', '../lease.md'),
-        uri.replace('.md', ''),
+        Effect2.pipe(uri, EffectString.replace('/shared/default/', '/')),
+        Effect2.pipe(uri, EffectString.replace('lease.md', '../lease.md')),
+        Effect2.pipe(uri, EffectString.replace('.md', '')),
       ])
         yield* reject(previewShareReconcile(f.config, target));
       yield* f.fs.remove(f.file);
@@ -358,13 +386,13 @@ effectIt.effect('every required saved field is mandatory and digest-bound', () =
       const f = yield* fixture;
       const plan = yield* previewShareReconcile(f.config, uri);
       const before = yield* snapshot(f);
-      for (const key of Object.keys(plan)) {
+      for (const key of EffectRecord.keys(plan)) {
         const missing: Record<string, unknown> = {...plan};
         delete missing[key];
         yield* reject(applyShareReconcile(f.config, uri, missing, plan.approvalDigest));
         const changed = {
           ...plan,
-          [key]: typeof plan[key as keyof ShareReconcilePlan] === 'number' ? 2 : '0'.repeat(64),
+          [key]: typeof plan[key] === 'number' ? 2 : Effect2.pipe('0', EffectString.repeat(64)),
         };
         yield* reject(applyShareReconcile(f.config, uri, changed, plan.approvalDigest));
       }
@@ -426,7 +454,7 @@ effectIt.effect.prop(
         const f = yield* fixture;
         const plan = yield* previewShareReconcile(f.config, uri);
         const bad: Record<string, unknown> = {...plan};
-        const key = Object.keys(plan)[field];
+        const key = EffectRecord.keys(plan)[field];
         if (mode === 'missing') delete bad[key];
         else if (mode === 'altered') bad[key] = `changed:${text}`;
         else bad['instructions:' + text] = text;
@@ -445,14 +473,14 @@ effectIt.effect('Fast-check: any JSON key order roundtrips the exact reviewed pr
     Effect.gen(function* () {
       const f = yield* fixture;
       const plan = yield* previewShareReconcile(f.config, uri);
-      const entries = Object.entries(plan);
+      const entries = EffectRecord.toEntries(plan);
       const before = yield* snapshot(f);
       fc.assert(
         fc.property(
           fc.shuffledSubarray(entries, {minLength: entries.length, maxLength: entries.length}),
           fc.integer({min: 0, max: 8}),
           (ordered, indent) => {
-            const encoded = JSON.stringify(Object.fromEntries(ordered), undefined, indent);
+            const encoded = JSON.stringify(EffectRecord.fromEntries(ordered), undefined, indent);
             expect(parseShareReconcilePlan(JSON.parse(encoded), uri, plan.approvalDigest)).toEqual(plan);
           },
         ),
@@ -605,10 +633,24 @@ effectIt.effect('reconciliation command factory preserves parsing and public hel
       );
       const run = Command.runWith(command, {version: 'test'});
       yield* run([uri]);
-      yield* run([uri, '--apply', '--plan', 'reviewed-preview.json', '--approval-digest', 'a'.repeat(64)]);
+      yield* run([
+        uri,
+        '--apply',
+        '--plan',
+        'reviewed-preview.json',
+        '--approval-digest',
+        Effect2.pipe('a', EffectString.repeat(64)),
+      ]);
       expect(calls).toEqual([
         {target: uri, options: {apply: false, plan: undefined, approvalDigest: undefined}},
-        {target: uri, options: {apply: true, plan: 'reviewed-preview.json', approvalDigest: 'a'.repeat(64)}},
+        {
+          target: uri,
+          options: {
+            apply: true,
+            plan: 'reviewed-preview.json',
+            approvalDigest: Effect2.pipe('a', EffectString.repeat(64)),
+          },
+        },
       ]);
       const help = yield* captureConsole(run(['--help']));
       expect(help.output).toContain('Preview or apply one guarded committed shared memory import');

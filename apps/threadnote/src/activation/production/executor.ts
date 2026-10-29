@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, DateTime, Effect, FileSystem, Option, Path} from 'effect';
 import {agentAdapterStatus} from '../../agent_integration/adapter_actions.js';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
@@ -86,7 +87,9 @@ const executeProductionOperation = Effect.fn('activation.production.execute')(fu
   observation: ActivationProductionObservationV1,
   execution: ActivationOperationExecutionV1,
 ) {
-  const operation = execution.plan.operations.find(candidate => candidate.id === execution.operationId);
+  const operation = Option.getOrUndefined(
+    EffectArray.findFirst(execution.plan.operations, candidate => candidate.id === execution.operationId),
+  );
   if (operation === undefined) throw new Error(`Unknown activation operation ${execution.operationId}.`);
   switch (operation.kind) {
     case 'surface.primary.ensure':
@@ -278,7 +281,7 @@ const reviewActivationImports = Effect.fn('activation.production.reviewImports')
   yield* Console.log(
     JSON.stringify(
       {
-        importedReviewIds: reviews.map(review => review.reviewId),
+        importedReviewIds: EffectArray.map(reviews, review => review.reviewId),
         sourceSetHash: observation.imports.sourceSetHash,
       },
       null,
@@ -287,7 +290,7 @@ const reviewActivationImports = Effect.fn('activation.production.reviewImports')
   );
   const subsystemReceiptHash = activationImportedMemoriesEvidenceHashV1(
     observation.imports.sourceSetHash,
-    imported.map(decision => decision.review),
+    EffectArray.map(imported, decision => decision.review),
   );
   const created = ownership.includes('activation-created');
   return !created
@@ -379,10 +382,16 @@ const applyActivationCandidate = Effect.fn('activation.production.applyCandidate
           reviewId: review.reviewId,
           revision: review.revision,
         });
-        const text = result.content
-          .filter((item): item is {readonly text: string; readonly type: 'text'} => item.type === 'text')
-          .map(item => item.text)
-          .join('\n');
+        const text = EffectArray.join(
+          EffectArray.map(
+            EffectArray.filter(
+              result.content,
+              (item): item is {readonly text: string; readonly type: 'text'} => item.type === 'text',
+            ),
+            item => item.text,
+          ),
+          '\n',
+        );
         if (result.isError === true)
           throw new Error(text || `Activation candidate ${candidate.candidateId} apply failed.`);
         yield* Console.log(text);

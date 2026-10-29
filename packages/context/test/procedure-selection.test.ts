@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {fcProp} from '@threadnote/testing/fast-check-property';
@@ -13,6 +14,8 @@ import {
   selectVerifiedProcedures,
   type PublishedProcedureCandidate,
 } from '@threadnote/context/procedure/selection';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function candidate(
   id: string,
@@ -21,7 +24,19 @@ function candidate(
   overrides: Partial<ProcedureManifestV2> = {},
 ): PublishedProcedureCandidate {
   const manifest = parseProcedureManifest({
-    artifact: {id, semanticVersion, sha256: id.charCodeAt(0).toString(16).padStart(2, '0').repeat(32)},
+    artifact: {
+      id,
+      semanticVersion,
+      sha256: Effect.pipe(
+        Effect.pipe(
+          id,
+          EffectString.charCodeAt(0),
+          Effect.Option.getOrElse(() => NaN),
+        ).toString(16),
+        EffectString.padStart(2, '0'),
+        EffectString.repeat(32),
+      ),
+    },
     compatible: {capabilities: ['mcp', 'skills'], surfaceIds: ['codex', 'codex-cli']},
     dependencies,
     owner: 'platform-team',
@@ -55,13 +70,19 @@ describe('verified procedure Context Brief selection', () => {
     });
     const stale = candidate('b/stale', '1.0.0');
     const selected = selectVerifiedProcedures({
-      candidates: [previous, phased, {...stale, receipt: {...stale.receipt, manifestSha256: 'f'.repeat(64)}}],
+      candidates: [
+        previous,
+        phased,
+        {...stale, receipt: {...stale.receipt, manifestSha256: Effect.pipe('f', EffectString.repeat(64))}},
+      ],
       cohort: 'cohort-a',
       surface: 'codex',
       task: 'deploy the service',
     });
 
-    expect(selected.map(value => `${value.artifact.id}@${value.artifact.semanticVersion}`)).toEqual(['a/root@1.0.0']);
+    expect(EffectArray.map(selected, value => `${value.artifact.id}@${value.artifact.semanticVersion}`)).toEqual([
+      'a/root@1.0.0',
+    ]);
     expect(selected[0]?.provenance).toMatchObject({kind: 'verified-procedure-git-share', team: 'default'});
     expect(JSON.stringify(selected)).not.toContain('argv');
   });
@@ -82,12 +103,12 @@ describe('verified procedure Context Brief selection', () => {
         candidate('c/check', '1.0.0', [], {presentation: {summary: 'Check.', taskKeywords: ['check']}}),
       ];
       const selected = selectVerifiedProcedures({
-        candidates: order.map(index => values[index]),
+        candidates: EffectArray.map(order, index => values[index]),
         cohort: 'cohort-a',
         surface: 'codex-cli',
         task: 'deploy the service',
       });
-      expect(selected.map(value => value.artifact.id)).toEqual(['b/prepare', 'c/check', 'a/root']);
+      expect(EffectArray.map(selected, value => value.artifact.id)).toEqual(['b/prepare', 'c/check', 'a/root']);
     },
     {fastCheck: {numRuns: 40}},
   );
@@ -117,12 +138,15 @@ describe('verified procedure Context Brief selection', () => {
     });
 
     expect(
-      selectVerifiedProcedures({
-        candidates: [unrelated, relevant],
-        cohort: 'cohort-a',
-        surface: 'codex',
-        task: 'deploy the service',
-      }).map(value => value.artifact.semanticVersion),
+      EffectArray.map(
+        selectVerifiedProcedures({
+          candidates: [unrelated, relevant],
+          cohort: 'cohort-a',
+          surface: 'codex',
+          task: 'deploy the service',
+        }),
+        value => value.artifact.semanticVersion,
+      ),
     ).toEqual(['1.0.0']);
   });
 
@@ -149,8 +173,12 @@ describe('verified procedure Context Brief selection', () => {
   it('reports and excludes a valid procedure shadowed by tampered same-version evidence', () => {
     const valid = candidate('a/root', '1.0.0');
     for (const tampered of [
-      {...valid, artifactSha256: 'f'.repeat(64), team: 'artifact-tamper'},
-      {...valid, receipt: {...valid.receipt, manifestSha256: 'f'.repeat(64)}, team: 'receipt-tamper'},
+      {...valid, artifactSha256: Effect.pipe('f', EffectString.repeat(64)), team: 'artifact-tamper'},
+      {
+        ...valid,
+        receipt: {...valid.receipt, manifestSha256: Effect.pipe('f', EffectString.repeat(64))},
+        team: 'receipt-tamper',
+      },
     ]) {
       expect(
         selectVerifiedProcedureEvidence({

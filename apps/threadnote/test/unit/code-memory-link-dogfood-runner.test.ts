@@ -14,6 +14,9 @@ import {
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Code Memory Link dogfood runner checkout binding', () => {
   it('keeps the reviewed source anchors present in the migrated checkout', async () => {
@@ -46,7 +49,7 @@ describe('Code Memory Link dogfood runner checkout binding', () => {
         THREADNOTE_HOME: '/isolated/threadnote-home',
         TMPDIR: '/isolated/tmp',
       });
-      expect(Object.keys(environment).sort()).toEqual([
+      expect(EffectRecord.keys(environment).sort()).toEqual([
         'CI',
         'HOME',
         'LANG',
@@ -69,20 +72,28 @@ describe('Code Memory Link dogfood runner checkout binding', () => {
   it('projects an observed graph-status receipt and rejects a caller-supplied stale assertion', () => {
     expect(
       projectCodeMemoryLinkDogfoodGraphStatusV1({
-        readySnapshot: {commit: 'a'.repeat(40), dirty: false, id: `cgsn_${'b'.repeat(40)}`},
+        readySnapshot: {
+          commit: Effect2.pipe('a', EffectString.repeat(40)),
+          dirty: false,
+          id: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`,
+        },
         stale: true,
         type: 'code-graph-status',
         version: 2,
       }),
     ).toEqual({
-      readySnapshotCommit: 'a'.repeat(40),
+      readySnapshotCommit: Effect2.pipe('a', EffectString.repeat(40)),
       readySnapshotDirty: false,
-      readySnapshotId: `cgsn_${'b'.repeat(40)}`,
+      readySnapshotId: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`,
       stale: true,
     });
     expect(
       projectCodeMemoryLinkDogfoodGraphStatusV1({
-        readySnapshot: {commit: 'a'.repeat(40), dirty: false, id: `cgsn_${'b'.repeat(40)}`},
+        readySnapshot: {
+          commit: Effect2.pipe('a', EffectString.repeat(40)),
+          dirty: false,
+          id: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`,
+        },
         stale: true,
         type: 'code-graph-status',
         version: 3,
@@ -90,7 +101,11 @@ describe('Code Memory Link dogfood runner checkout binding', () => {
     ).toMatchObject({stale: true});
     expect(
       projectCodeMemoryLinkDogfoodGraphStatusV1({
-        readySnapshot: {commit: 'a'.repeat(40), dirty: false, id: `cgsn_${'b'.repeat(40)}`},
+        readySnapshot: {
+          commit: Effect2.pipe('a', EffectString.repeat(40)),
+          dirty: false,
+          id: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`,
+        },
         stale: true,
         type: 'code-graph-status',
         version: 5,
@@ -98,7 +113,11 @@ describe('Code Memory Link dogfood runner checkout binding', () => {
     ).toMatchObject({stale: true});
     expect(
       projectCodeMemoryLinkDogfoodGraphStatusV1({
-        readySnapshot: {commit: 'a'.repeat(40), dirty: false, id: `cgsn_${'b'.repeat(40)}`},
+        readySnapshot: {
+          commit: Effect2.pipe('a', EffectString.repeat(40)),
+          dirty: false,
+          id: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`,
+        },
         stale: true,
         type: 'code-graph-status',
         version: 4,
@@ -161,9 +180,10 @@ describe('Code Memory Link dogfood runner checkout binding', () => {
   });
 
   it('counts current routed and legacy deferred-anchor intent filenames through the production classifier', () => {
-    const legacy = `${'a'.repeat(64)}-tnca_${'b'.repeat(32)}.json`;
+    const legacy = `${Effect2.pipe('a', EffectString.repeat(64))}-tnca_${Effect2.pipe('b', EffectString.repeat(32))}.json`;
     const routed =
-      `${'c'.repeat(32)}-tnca_${'d'.repeat(32)}-r${'e'.repeat(32)}` + `-w${'f'.repeat(32)}-q-b${'0'.repeat(32)}.json`;
+      `${Effect2.pipe('c', EffectString.repeat(32))}-tnca_${Effect2.pipe('d', EffectString.repeat(32))}-r${Effect2.pipe('e', EffectString.repeat(32))}` +
+      `-w${Effect2.pipe('f', EffectString.repeat(32))}-q-b${Effect2.pipe('0', EffectString.repeat(32))}.json`;
 
     for (const name of [legacy, routed]) {
       const pendingIntentCountBefore = countDeferredAnchorIntentNames([name]);
@@ -184,7 +204,7 @@ describe('Code Memory Link dogfood runner checkout binding', () => {
         legacy,
         routed,
         '.0123456789abcdef01234567.tmp',
-        `${'a'.repeat(32)}-tnca_${'b'.repeat(32)}-rnot-a-route.json`,
+        `${Effect2.pipe('a', EffectString.repeat(32))}-tnca_${Effect2.pipe('b', EffectString.repeat(32))}-rnot-a-route.json`,
         'unrelated.json',
       ]),
     ).toBe(2);
@@ -355,7 +375,7 @@ const fixtureRepository = Effect.fn('codeMemoryLinkDogfoodRunnerTest.fixtureRepo
     `${JSON.stringify({
       agentAbEvidenceHashes: [],
       agentAbManifestHashes: [],
-      dogfoodEvidenceHashes: ['a'.repeat(64)],
+      dogfoodEvidenceHashes: [Effect2.pipe('a', EffectString.repeat(64))],
       version: 1,
     })}\n`,
   );
@@ -375,7 +395,7 @@ const commit = Effect.fn('codeMemoryLinkDogfoodRunnerTest.commit')(function* (ro
     '--message',
     message,
   ]);
-  return (yield* git(root, ['rev-parse', 'HEAD'])).stdout.trim();
+  return Effect2.pipe((yield* git(root, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
 });
 
 function git(cwd: string, args: readonly string[]) {

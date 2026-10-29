@@ -1,3 +1,8 @@
+import {
+  isSafeInteger as checkedIsSafeInteger,
+  isFiniteNumber as checkedIsFiniteNumber,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray, Predicate} from 'effect';
 import {Context, Effect, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import type {
@@ -8,6 +13,9 @@ import type {
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type Source = 'comments' | 'reviews' | 'threads' | 'checks' | 'statuses';
 export const NativeWatchProviderNow = Context.Reference<() => number>('threadnote/NativeWatchProviderNow', {
@@ -52,11 +60,11 @@ export interface NativeWatchProviderResult {
 const fail = (code: string, retryable = false) =>
   WorkflowAutomationError.make({code, message: 'GitHub watch source is unavailable: ' + code + '.', retryable});
 const object = (value: unknown): Record<string, unknown> => {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw fail('provider-shape');
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw fail('provider-shape');
+  return value;
 };
 const array = (value: unknown): unknown[] => {
-  if (!Array.isArray(value)) throw fail('provider-shape');
+  if (!EffectArray.isArray(value)) throw fail('provider-shape');
   return value;
 };
 const text = (value: unknown, maximum = 256): string => {
@@ -64,8 +72,12 @@ const text = (value: unknown, maximum = 256): string => {
     typeof value !== 'string' ||
     !value.length ||
     value.length > maximum ||
-    [...value].some(character => {
-      const code = character.charCodeAt(0);
+    EffectArray.some([...value], character => {
+      const code = Effect2.pipe(
+        character,
+        EffectString.charCodeAt(0),
+        Effect2.Option.getOrElse(() => NaN),
+      );
       return code < 32 || (code >= 127 && code <= 159);
     })
   )
@@ -85,8 +97,8 @@ const url = (value: unknown): string => {
   return result;
 };
 const number = (value: unknown): number => {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw fail('provider-shape');
-  return value as number;
+  if (!checkedIsSafeInteger(value) || value < 0) throw fail('provider-shape');
+  return value;
 };
 const fingerprint = (value: unknown) => sha256HexSync(stableJson(value));
 const entity = (
@@ -108,7 +120,7 @@ const entity = (
 /** This adapter never accepts a hostname, executable, API URL or credential from PR content. */
 export function nativeWatchPullRequest(pr: string) {
   const match = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)$/u.exec(pr);
-  if (!match || !Number.isSafeInteger(Number(match[3]))) throw fail('invalid-pr');
+  if (!match || !checkedIsSafeInteger(Number(match[3]))) throw fail('invalid-pr');
   return {owner: match[1], repo: match[2], number: Number(match[3])};
 }
 
@@ -116,15 +128,31 @@ export function nativeWatchPullRequest(pr: string) {
 export function nativeWatchHttpResponse(stdout: string) {
   const boundary = /\r?\n\r?\n/u.exec(stdout);
   if (!boundary) throw fail('provider-http');
-  const lines = stdout.slice(0, boundary.index).split(/\r?\n/u);
+  const lines = Effect2.pipe(stdout, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, boundary.index));
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split(/\r?\n/u));
+    return __effectPipeStage1;
+  });
   const status = /^HTTP\/[\d.]+\s+(\d{3})(?:\s|$)/u.exec(lines.shift() ?? '');
   if (!status) throw fail('provider-http');
   const headers = new Map<string, string>();
   for (const line of lines) {
-    const colon = line.indexOf(':');
-    if (colon > 0) headers.set(line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim());
+    const colon = Effect2.pipe(
+      line,
+      EffectString.indexOf(':'),
+      Effect2.Option.getOrElse(() => -1),
+    );
+    if (colon > 0)
+      headers.set(
+        Effect2.pipe(line, EffectString.slice(0, colon), EffectString.trim, EffectString.toLowerCase),
+        Effect2.pipe(line, EffectString.slice(colon + 1), EffectString.trim),
+      );
   }
-  return {status: Number(status[1]), headers, body: stdout.slice(boundary.index + boundary[0].length)};
+  return {
+    status: Number(status[1]),
+    headers,
+    body: Effect2.pipe(stdout, EffectString.slice(boundary.index + boundary[0].length)),
+  };
 }
 const restProjection = (source: Source, input: unknown, head: string): Projection => {
   const values =
@@ -135,7 +163,7 @@ const restProjection = (source: Source, input: unknown, head: string): Projectio
         : array(input);
   let pending = 0;
   let failed = 0;
-  const items = values.map(raw => {
+  const items = EffectArray.map(values, raw => {
     const value = object(raw);
     const id = source === 'statuses' ? text(value.context) : String(number(value.id));
     if (source === 'checks' || source === 'statuses') {
@@ -185,7 +213,8 @@ const restProjection = (source: Source, input: unknown, head: string): Projectio
 };
 const pullProjection = (input: unknown): Projection => {
   const value = object(input);
-  if (!['open', 'closed'].includes(String(value.state))) throw fail('provider-shape');
+  const state = value.state;
+  if (state !== 'open' && state !== 'closed') throw fail('provider-shape');
   if (value.mergeable !== undefined && value.mergeable !== null && typeof value.mergeable !== 'boolean')
     throw fail('provider-shape');
   return {
@@ -197,7 +226,7 @@ const pullProjection = (input: unknown): Projection => {
       head: sha(object(value.head).sha),
       ...(value.base === undefined ? {} : {base: sha(object(value.base).sha)}),
       mergeable: value.mergeable === undefined ? null : value.mergeable,
-      state: value.merged === true ? 'merged' : (value.state as 'open' | 'closed'),
+      state: value.merged === true ? 'merged' : state,
     },
   };
 };
@@ -228,7 +257,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
     graphqlCost: 0,
     providerMilliseconds: 0,
   };
-  const pages = new Map(previous.pages.map(page => [page.key, page]));
+  const pages = new Map(EffectArray.map(previous.pages, page => [page.key, page]));
   const used = new Set<string>();
   const blockers: {source: string; code: string; retryable: boolean}[] = [];
   let retryAt = started + 60_000;
@@ -280,7 +309,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
     const retry = response.headers.get('retry-after');
     if (retry !== undefined) {
       const until = /^\d+$/u.test(retry) ? at + Number(retry) * 1000 : Date.parse(retry);
-      if (Number.isFinite(until)) retryAt = Math.max(retryAt, until);
+      if (checkedIsFiniteNumber(until)) retryAt = Math.max(retryAt, until);
     }
     if (seconds('x-ratelimit-remaining') === 0) {
       blockedUntil = Math.max(at + 1000, (seconds('x-ratelimit-reset') ?? at / 1000 + 60) * 1000);
@@ -317,6 +346,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
     const old = pages.get(key);
     // Old pull projections need one unconditional refresh within this scheduled request.
     const refreshPull =
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
       key === 'pull' && old?.projection.pull !== undefined && !Object.hasOwn(old.projection.pull, 'mergeable');
     const result = yield* request(endpoint, undefined, refreshPull ? undefined : old);
     const projection =
@@ -337,7 +367,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
     const value = yield* Effect.try({try: () => object(result.value), catch: () => fail('provider-shape')});
     if (value.errors !== undefined) {
       const errors = array(value.errors);
-      const rateLimited = errors.some(error => object(error).type === 'RATE_LIMITED');
+      const rateLimited = EffectArray.some(errors, error => object(error).type === 'RATE_LIMITED');
       if (rateLimited) {
         blockedUntil = Math.max(retryAt, now() + 60_000);
         retryAt = blockedUntil;
@@ -349,7 +379,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
     metrics.graphqlCost += number(rate.cost);
     if (number(rate.remaining) === 0) {
       const reset = Date.parse(text(rate.resetAt));
-      if (!Number.isFinite(reset)) return yield* fail('provider-shape');
+      if (!checkedIsFiniteNumber(reset)) return yield* fail('provider-shape');
       blockedUntil = Math.max(now() + 1000, reset);
       retryAt = Math.max(retryAt, blockedUntil);
     }
@@ -403,7 +433,8 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         const oldKeys = new Set(used);
         for (let page = 1; page <= 101; page++) {
           if (page === 101) return yield* fail('provider-pagination-limit');
-          const query = endpoint + (endpoint.includes('?') ? '&' : '?') + `per_page=100&page=${page}`;
+          const query =
+            endpoint + (Effect2.pipe(endpoint, EffectString.includes('?')) ? '&' : '?') + `per_page=100&page=${page}`;
           const projection = yield* rest(
             source + ':' + (source === 'checks' || source === 'statuses' ? before.head + ':' : '') + page,
             query,
@@ -418,7 +449,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
           // Poll the next page even when a cached full page has no new Link header.
           if (projection.size < 100) break;
         }
-        if (items.length > 10_000 || new Set(items.map(item => item.id)).size !== items.length) {
+        if (items.length > 10_000 || new Set(EffectArray.map(items, item => item.id)).size !== items.length) {
           for (const key of used) if (!oldKeys.has(key)) used.delete(key);
           return yield* fail('provider-pagination-race', true);
         }
@@ -444,7 +475,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
           let connection = object(thread.comments);
           const commentCursors = new Set<string>();
           for (let nested = 0; nested < 100; nested++) {
-            comments.push(...array(connection.nodes).map(object));
+            comments.push(...EffectArray.map(array(connection.nodes), object));
             const info = object(connection.pageInfo);
             if (info.hasNextPage === false) break;
             const next = text(info.endCursor, 1024);
@@ -457,7 +488,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
           }
           const unresolved = !thread.isResolved;
           const link = comments[0]?.url;
-          const versions = comments.map(comment =>
+          const versions = EffectArray.map(comments, comment =>
             entity(
               text(comment.id),
               'review_comment',
@@ -480,7 +511,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
                 outdated: thread.isOutdated,
                 path: thread.path,
                 line: thread.line,
-                comments: versions.map(comment => [comment.id, comment.version]),
+                comments: EffectArray.map(versions, comment => [comment.id, comment.version]),
               },
               unresolved,
               link,
@@ -496,7 +527,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         cursors.add(next);
         after = next;
       }
-      if (new Set(items.map(item => item.id)).size !== items.length)
+      if (new Set(EffectArray.map(items, item => item.id)).size !== items.length)
         return yield* fail('provider-pagination-race', true);
       return items;
     }),
@@ -508,7 +539,7 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
   const verifiedSources =
     finalPull._tag === 'Success'
       ? sources
-      : sources.map(source =>
+      : EffectArray.map(sources, source =>
           source.source === 'checks' || source.source === 'statuses'
             ? {
                 source: source.source,
@@ -521,7 +552,9 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
   const at = now();
   metrics.providerMilliseconds = at - started;
   const complete =
-    verifiedSources.length === 5 && verifiedSources.every(source => source.complete) && before.head === after.head;
+    verifiedSources.length === 5 &&
+    EffectArray.every(verifiedSources, source => source.complete) &&
+    before.head === after.head;
   return {
     sweep: {
       head: after.head,
@@ -538,10 +571,12 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
         count: all.length,
         pending,
         failed,
-        version: fingerprint(all.map(item => [item.id, item.version]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+        version: fingerprint(
+          EffectArray.map(all, item => [item.id, item.version]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        ),
       },
     },
-    cache: {pages: [...pages.values()].filter(page => used.has(page.key)).slice(-402)},
+    cache: {pages: EffectArray.filter([...pages.values()], page => used.has(page.key)).slice(-402)},
     metrics,
     retryAt,
     blockers,

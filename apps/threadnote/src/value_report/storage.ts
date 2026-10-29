@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {
@@ -6,6 +7,8 @@ import {
   type RecallFeedbackStorageResultV1,
 } from '@threadnote/recall/feedback';
 import {clearLocalValueEvents, pruneLocalValueEvents, type LocalValueEventStorageResultV1} from './events.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const VALUE_REPORT_STORAGE_VERSION = 1 as const;
 export const VALUE_REPORT_STORAGE_DELETE_BATCH_SIZE = 10_000 as const;
@@ -87,7 +90,10 @@ const deleteValueReportExports = Effect.fn('valueReport.deleteExports')((agentCo
   const operation = Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const directory = path.join(agentContextHome, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'));
+    const directory = path.join(
+      agentContextHome,
+      ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')),
+    );
     if (!(yield* fs.exists(directory))) return 0;
     const names = selectValueReportExportNames(yield* fs.readDirectory(directory));
     if (apply) {
@@ -105,9 +111,12 @@ const deleteValueReportExports = Effect.fn('valueReport.deleteExports')((agentCo
 });
 
 export function selectValueReportExportNames(names: readonly string[]): readonly string[] {
-  return names
-    .filter(name => VALUE_REPORT_EXPORT_FILENAME.test(name) || VALUE_REPORT_STAGING_FILENAME.test(name))
-    .sort();
+  return EffectArray.filter(
+    names,
+    (name, __effectArrayIndex) =>
+      __effectArrayIndex in names &&
+      (VALUE_REPORT_EXPORT_FILENAME.test(name) || VALUE_REPORT_STAGING_FILENAME.test(name)),
+  ).sort();
 }
 
 export function withValueReportStorageLock<A, E, R>(home: string, operation: Effect.Effect<A, E, R>) {
@@ -134,7 +143,7 @@ export const removeStaleValueReportStaging = Effect.fn('valueReport.removeStaleS
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const directory = path.join(home, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'));
+  const directory = path.join(home, ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')));
   if (!(yield* fs.exists(directory))) return;
   const pattern = pilotOnly ? PILOT_REPORT_STAGING_FILENAME : VALUE_REPORT_STAGING_FILENAME;
   for (const name of yield* fs.readDirectory(directory)) {

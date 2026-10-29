@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Crypto, Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -27,7 +28,7 @@ export interface SourceConfigurationRegistry<
   readonly empty: () => SourceConfiguration<S, P>;
   readonly parse: (raw: string, path?: string) => SourceConfiguration<S, P>;
   readonly isConfigurationError: (cause: unknown) => cause is SourceConfigurationFailure;
-  render(value: SourceConfiguration): string;
+  render(value: SourceConfiguration<S, P>): string;
 }
 const CONFIGURATION_FILENAME = 'sources.yaml';
 const CONFIGURATION_LOCK_OPTIONS = {
@@ -59,28 +60,33 @@ export function makeSourceConfigurationRegistry<S extends SourceConfig, P extend
     codecs: ReadonlyMap<string, ConfigurationCodec<T>>,
   ): T => {
     if (!isJsonObject(value)) throw SourceConfigurationError.make({message: `${label} must be an object.`});
-    const allowed = [...codecs.values()].filter(codec => (codec.versions ?? [2]).includes(version));
-    const codec = allowed.find(candidate => candidate.type === value.type);
+    const allowed = EffectArray.filter([...codecs.values()], codec => (codec.versions ?? [2]).includes(version));
+    const codec = EffectOption.getOrUndefined(
+      EffectArray.findFirst(allowed, candidate => candidate.type === value.type),
+    );
     if (!codec) {
-      const types = allowed.map(candidate => `"${candidate.type}"`);
-      const list = types.length <= 2 ? types.join(' or ') : `${types.slice(0, -1).join(', ')}, or ${types.at(-1)}`;
+      const types = EffectArray.map(allowed, candidate => `"${candidate.type}"`);
+      const list =
+        types.length <= 2
+          ? EffectArray.join(types, ' or ')
+          : `${EffectArray.join(types.slice(0, -1), ', ')}, or ${types.at(-1)}`;
       throw SourceConfigurationError.make({message: `${label}.type must be ${list}.`});
     }
     return codec.parse(value, label);
   };
   const serializeEntry = <T extends SourceConfig | ProjectionConfig>(
-    value: SourceConfig | ProjectionConfig,
+    value: T,
     codecs: ReadonlyMap<string, ConfigurationCodec<T>>,
   ) => {
     const codec = codecs.get(value.type);
     if (!codec) throw SourceConfigurationError.make({message: `Unsupported configuration type "${value.type}".`});
-    return codec.serialize(value as T);
+    return codec.serialize(value);
   };
-  const errorGuards = [...sources.values(), ...projections.values()].flatMap(codec =>
+  const errorGuards = EffectArray.flatMap([...sources.values(), ...projections.values()], codec =>
     codec.isConfigurationError ? [codec.isConfigurationError] : [],
   );
   const isConfigurationError = (cause: unknown): cause is SourceConfigurationFailure =>
-    Schema.is(SourceConfigurationError)(cause) || errorGuards.some(isError => isError(cause));
+    Schema.is(SourceConfigurationError)(cause) || EffectArray.some(errorGuards, isError => isError(cause));
   return {
     isConfigurationError,
     empty: () => ({version: 1, sources: [], projections: []}),
@@ -97,15 +103,15 @@ export function makeSourceConfigurationRegistry<S extends SourceConfig, P extend
         throw SourceConfigurationError.make({
           message: `Unsupported source configuration version in ${path}. Expected 1 or 2.`,
         });
-      if (!Array.isArray(loaded.sources) || !Array.isArray(loaded.projections))
+      if (!EffectArray.isArray(loaded.sources) || !EffectArray.isArray(loaded.projections))
         throw SourceConfigurationError.make({
           message: `Source configuration requires sources and projections arrays: ${path}`,
         });
       const version = loaded.version;
-      const parsedSources = loaded.sources.map((value, index) =>
+      const parsedSources = EffectArray.map(loaded.sources, (value, index) =>
         parseEntry(value, `${path} sources[${index}]`, version, sources),
       );
-      const parsedProjections = loaded.projections.map((value, index) =>
+      const parsedProjections = EffectArray.map(loaded.projections, (value, index) =>
         parseEntry(value, `${path} projections[${index}]`, version, projections),
       );
       for (const [kind, entries] of [
@@ -125,8 +131,8 @@ export function makeSourceConfigurationRegistry<S extends SourceConfig, P extend
       yaml.dump(
         {
           version: value.version,
-          sources: value.sources.map(source => serializeEntry(source, sources)),
-          projections: value.projections.map(projection => serializeEntry(projection, projections)),
+          sources: EffectArray.map(value.sources, source => serializeEntry<S>(source, sources)),
+          projections: EffectArray.map(value.projections, projection => serializeEntry<P>(projection, projections)),
         },
         {lineWidth: 100, noRefs: true, sortKeys: false},
       ),
@@ -137,7 +143,10 @@ export const sourceConfigurationPath = Effect.fn('obsidian.configurationPath')(f
   return (yield* Path.Path).join(config.agentContextHome, 'threadnote', CONFIGURATION_FILENAME);
 });
 
-export function makeSourceConfigurationStore(registry: SourceConfigurationRegistry) {
+export function makeSourceConfigurationStore<
+  S extends SourceConfig = SourceConfig,
+  P extends ProjectionConfig = ProjectionConfig,
+>(registry: SourceConfigurationRegistry<S, P>) {
   const readAt = Effect.fn('source.readConfigurationAt')(function* (path: string) {
     const fs = yield* FileSystem.FileSystem;
     if (!(yield* fs.exists(path))) return registry.empty();
@@ -165,7 +174,10 @@ export function makeSourceConfigurationStore(registry: SourceConfigurationRegist
     read: Effect.fn('source.readConfiguration')(function* (config: ConfigurationHome) {
       return yield* readAt(yield* sourceConfigurationPath(config));
     }),
-    write: Effect.fn('source.writeConfiguration')(function* (config: ConfigurationHome, value: SourceConfiguration) {
+    write: Effect.fn('source.writeConfiguration')(function* (
+      config: ConfigurationHome,
+      value: SourceConfiguration<S, P>,
+    ) {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* sourceConfigurationPath(config);
       const serialized = registry.render(value);
@@ -174,7 +186,7 @@ export function makeSourceConfigurationStore(registry: SourceConfigurationRegist
     }),
     mutate: Effect.fn('source.mutateConfiguration')(function* (
       config: ConfigurationHome,
-      update: (current: SourceConfiguration) => SourceConfiguration,
+      update: (current: SourceConfiguration<S, P>) => SourceConfiguration<S, P>,
     ) {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* sourceConfigurationPath(config);

@@ -7,6 +7,8 @@ import {codeGraphMaintenanceIntentPath} from '@threadnote/graph/layout';
 import {codeGraphMaintenanceIntentActive} from '@threadnote/graph/maintenance/gate';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const replacementToken = FC.stringMatching(/^[A-Za-z0-9_-]{1,80}$/).map(value => `replacement:${value}`);
 
@@ -46,7 +48,7 @@ describe('code graph maintenance-gate properties', () => {
           );
 
           expect(active).toBe(false);
-          expect((yield* fs.readFileString(intent)).trim()).toBe(replacementToken);
+          expect(Effect2.pipe(yield* fs.readFileString(intent), EffectString.trim)).toBe(replacementToken);
         }),
       ).pipe(provideTestLayer(ApplicationLayer)),
     {fastCheck: {numRuns: 50}},

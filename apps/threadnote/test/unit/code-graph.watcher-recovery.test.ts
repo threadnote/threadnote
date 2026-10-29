@@ -29,15 +29,17 @@ import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixt
 import {completeCodeGraphReadyReadRefresh} from '@threadnote/threadnote/mcp/server/code_graph/ready_read';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const identity = {
   caseMode: 'sensitive' as const,
-  checkoutId: 'a'.repeat(64),
-  worktreeId: 'b'.repeat(64),
-  repositoryId: 'c'.repeat(64),
+  checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+  worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+  repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
   displayName: 'fixture',
   gitCommonDirectory: '/fixture/.git',
-  headCommit: 'd'.repeat(40),
+  headCommit: Effect2.pipe('d', EffectString.repeat(40)),
   objectFormat: 'sha1' as const,
   repoRoot: '/fixture',
 };
@@ -48,12 +50,12 @@ const persistedDriverFixture = Effect.gen(function* () {
   const home = yield* fs.makeTempDirectoryScoped();
   const demandIdentity = {checkoutId: identity.checkoutId, worktreeId: identity.worktreeId, threadnoteHome: home};
   const target: CodeGraphPreparedRefreshDemand['target'] = {
-    admissionFingerprint: 'e'.repeat(64),
+    admissionFingerprint: Effect2.pipe('e', EffectString.repeat(64)),
     demandIdentity,
     identity,
     layout: codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId),
     overlay: {dirty: false},
-    requestKey: '1'.repeat(64),
+    requestKey: Effect2.pipe('1', EffectString.repeat(64)),
   };
   const sidecar = codeGraphRefreshDemandPath(path, home, identity.checkoutId, identity.worktreeId);
   return {fs, home, target, readState: fs.readFileString(sidecar).pipe(Effect.map(raw => JSON.parse(raw)))};
@@ -189,7 +191,7 @@ describe('watcher admitted-attempt recovery', () => {
       yield* watcher.refresh({...options, refreshDemandPrepared: {registration: first, target}});
       yield* Deferred.await(deferred);
       yield* TestClock.adjust(0);
-      latest = {...target, requestKey: '2'.repeat(64)};
+      latest = {...target, requestKey: Effect2.pipe('2', EffectString.repeat(64))};
       const newer = yield* registerCodeGraphBackgroundDemand(latest.demandIdentity, latest.requestKey);
       expect(newer.type).toBe('claimed');
       yield* watcher.refresh({...options, refreshDemandPrepared: {registration: newer, target: latest}});

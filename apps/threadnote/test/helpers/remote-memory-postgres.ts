@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import postgres, {type Sql} from 'postgres';
 import {migrateRemoteMemoryDatabase} from '@threadnote/remote-memory/migrations';
 import {randomUuidV4} from '@threadnote/threadnote/crypto/uuid';
 import {createRemoteMemorySql} from '@threadnote/remote-memory/postgres/control_plane';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface RemoteMemoryPostgresFixture {
   readonly databaseName: string;
@@ -19,12 +22,12 @@ export interface RemoteMemoryPostgresFixture {
  * table privileges required by the deployed control plane and data plane.
  */
 export async function createRemoteMemoryPostgresFixture(databaseUrl: string): Promise<RemoteMemoryPostgresFixture> {
-  const suffix = randomUuidV4().replaceAll('-', '').slice(0, 24);
+  const suffix = Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''), EffectString.slice(0, 24));
   const databaseName = `tn_remote_${suffix}`;
   const migratorRoleName = `tn_remote_migrator_${suffix}`;
-  const migratorRolePassword = randomUuidV4().replaceAll('-', '');
+  const migratorRolePassword = Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''));
   const runtimeRoleName = `tn_remote_runtime_${suffix}`;
-  const runtimeRolePassword = randomUuidV4().replaceAll('-', '');
+  const runtimeRolePassword = Effect.pipe(randomUuidV4(), EffectString.replaceAll('-', ''));
   const maintenanceSql = postgres(databaseUrl, {max: 1, onnotice: () => undefined});
   let migratorSql: Sql | undefined;
   let sql: Sql | undefined;
@@ -160,7 +163,10 @@ async function grantRuntimePrivileges(migratorSql: Sql, databaseName: string, ru
     },
   ] as const;
   for (const grant of tablePrivileges) {
-    const tables = grant.tables.map(table => `remote_memory.${quoteIdentifier(table)}`).join(', ');
+    const tables = EffectArray.join(
+      EffectArray.map(grant.tables, table => `remote_memory.${quoteIdentifier(table)}`),
+      ', ',
+    );
     await migratorSql.unsafe(`GRANT ${grant.privileges} ON TABLE ${tables} TO ${runtimeRole}`);
   }
   const selectGrants = [
@@ -169,7 +175,7 @@ async function grantRuntimePrivileges(migratorSql: Sql, databaseName: string, ru
     {columns: ['tenant_id', 'issuer', 'subject', 'client_id', 'principal_id'], table: 'external_identities'},
   ] as const;
   for (const grant of selectGrants) {
-    const columns = grant.columns.map(quoteIdentifier).join(', ');
+    const columns = EffectArray.join(EffectArray.map(grant.columns, quoteIdentifier), ', ');
     await migratorSql.unsafe(
       `GRANT SELECT (${columns}) ON TABLE remote_memory.${quoteIdentifier(grant.table)} TO ${runtimeRole}`,
     );
@@ -269,7 +275,7 @@ async function grantRuntimePrivileges(migratorSql: Sql, databaseName: string, ru
     },
   ] as const;
   for (const grant of updateGrants) {
-    const columns = grant.columns.map(quoteIdentifier).join(', ');
+    const columns = EffectArray.join(EffectArray.map(grant.columns, quoteIdentifier), ', ');
     await migratorSql.unsafe(
       `GRANT UPDATE (${columns}) ON TABLE remote_memory.${quoteIdentifier(grant.table)} TO ${runtimeRole}`,
     );

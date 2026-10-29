@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   assessReplacementSafety,
   replacementSafetyReviewRequiredWarning,
@@ -5,10 +6,13 @@ import {
   type CandidateRecommendation,
   type CandidateReview,
   type CandidateReviewState,
+  type LegacyMemoryCandidate,
   type MemoryCandidate,
   type ReplacementSafetyAssessmentV1,
   type StructuredCloseoutV1,
 } from './candidate.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const KNOWLEDGE_DELTA_V1_MAX_ITEMS = 3;
 
@@ -56,7 +60,7 @@ export interface KnowledgeDeltaItemV1 {
   readonly confidence: number;
   readonly mutationPreview: KnowledgeDeltaMutationPreviewV1;
   readonly proposedDestination: {
-    readonly kind: MemoryCandidate['kind'];
+    readonly kind: MemoryCandidate['kind'] | undefined;
     readonly project: string;
     readonly targetUri?: string;
     readonly topic: string;
@@ -90,22 +94,24 @@ export function projectKnowledgeDeltaV1(
         `Candidate review revision changed: expected ${editedPreview.revision}, current ${review.revision}.`,
       );
     }
-    if (!review.candidates.some(candidate => candidate.candidateId === editedPreview.candidateId)) {
+    if (!EffectArray.some(review.candidates, candidate => candidate.candidateId === editedPreview.candidateId)) {
       throw new Error(`Candidate ${editedPreview.candidateId} is not part of ${review.reviewId}.`);
     }
   }
-  const items = [...review.candidates]
-    .sort((left, right) => left.candidateId.localeCompare(right.candidateId))
-    .slice(0, KNOWLEDGE_DELTA_V1_MAX_ITEMS)
-    .map(candidate =>
+  const items = EffectArray.map(
+    [...review.candidates]
+      .sort((left, right) => Effect.pipe(left.candidateId, EffectString.localeCompare(right.candidateId)))
+      .slice(0, KNOWLEDGE_DELTA_V1_MAX_ITEMS),
+    candidate =>
       projectKnowledgeDeltaItemV1(
+        review,
         candidate,
         editedPreview?.candidateId === candidate.candidateId ? editedPreview.bodyText : undefined,
       ),
-    );
+  );
   return {
     items,
-    noAction: items.every(item => item.recommendation === 'no_action'),
+    noAction: EffectArray.every(items, item => item.recommendation === 'no_action'),
     reviewId: review.reviewId,
     revision: review.revision,
     ...(review.structuredCloseout ? {structuredCloseout: projectStructuredCloseout(review.structuredCloseout)} : {}),
@@ -119,22 +125,27 @@ function projectStructuredCloseout(value: StructuredCloseoutV1): StructuredClose
     type: 'structured-closeout',
     version: 1,
     rationale: boundedText(value.rationale).text,
-    constraints: value.constraints.slice(0, 32).map(item => boundedText(item).text),
-    verificationPerformed: value.verificationPerformed.slice(0, 32).map(item => boundedText(item).text),
-    knowledgeInvalidated: value.knowledgeInvalidated.slice(0, 32).map(item => boundedText(item).text),
-    unresolvedRisks: value.unresolvedRisks.slice(0, 32).map(item => boundedText(item).text),
+    constraints: EffectArray.map(value.constraints.slice(0, 32), item => boundedText(item).text),
+    verificationPerformed: EffectArray.map(value.verificationPerformed.slice(0, 32), item => boundedText(item).text),
+    knowledgeInvalidated: EffectArray.map(value.knowledgeInvalidated.slice(0, 32), item => boundedText(item).text),
+    unresolvedRisks: EffectArray.map(value.unresolvedRisks.slice(0, 32), item => boundedText(item).text),
   };
 }
 
-function projectKnowledgeDeltaItemV1(candidate: MemoryCandidate, previewBodyText?: string): KnowledgeDeltaItemV1 {
+function projectKnowledgeDeltaItemV1(
+  review: CandidateReview,
+  candidate: MemoryCandidate | LegacyMemoryCandidate,
+  previewBodyText?: string,
+): KnowledgeDeltaItemV1 {
   const candidateId = boundedText(candidate.candidateId);
   const bodyText = boundedText(previewBodyText ?? candidate.applyBodyText ?? candidate.proposedText);
   const comparisonReason = boundedText(candidate.reason);
-  const project = boundedText(candidate.project);
+  const project = boundedText(candidate.project ?? review.project);
   const targetContentHash = candidate.targetContentHash ? boundedText(candidate.targetContentHash) : undefined;
   const targetUri = candidate.targetUri ? boundedText(candidate.targetUri) : undefined;
-  const topic = boundedText(candidate.topic);
-  const sourceEvidence = candidate.evidence.slice(0, KNOWLEDGE_DELTA_V1_MAX_SOURCE_EVIDENCE).map(boundedText);
+  const topic = boundedText(candidate.topic ?? review.topic);
+  const evidence = candidate.evidence ?? [];
+  const sourceEvidence = EffectArray.map(evidence.slice(0, KNOWLEDGE_DELTA_V1_MAX_SOURCE_EVIDENCE), boundedText);
   const replacementSafety = candidate.replacementSafetyBaseline
     ? projectReplacementSafety(candidate, candidate.replacementSafetyBaseline, bodyText.text)
     : replacementSafetyRequiresFreshReview(candidate)
@@ -166,7 +177,7 @@ function projectKnowledgeDeltaItemV1(candidate: MemoryCandidate, previewBodyText
       topic: topic.text,
     },
     recommendation: candidate.recommendation,
-    sourceEvidence: sourceEvidence.map(evidence => evidence.text),
+    sourceEvidence: EffectArray.map(sourceEvidence, evidence => evidence.text),
     state: candidate.state,
     truncated:
       candidateId.truncated ||
@@ -176,14 +187,14 @@ function projectKnowledgeDeltaItemV1(candidate: MemoryCandidate, previewBodyText
       (targetUri?.truncated ?? false) ||
       topic.truncated ||
       bodyText.truncated ||
-      candidate.evidence.length > KNOWLEDGE_DELTA_V1_MAX_SOURCE_EVIDENCE ||
-      sourceEvidence.some(evidence => evidence.truncated),
+      evidence.length > KNOWLEDGE_DELTA_V1_MAX_SOURCE_EVIDENCE ||
+      EffectArray.some(sourceEvidence, evidence => evidence.truncated),
     type: knowledgeDeltaItemType(candidate),
   };
 }
 
 function projectReplacementSafety(
-  candidate: MemoryCandidate,
+  candidate: MemoryCandidate | LegacyMemoryCandidate,
   baseline: NonNullable<MemoryCandidate['replacementSafetyBaseline']>,
   bodyText: string,
 ): KnowledgeDeltaReplacementSafetyV1 {
@@ -203,7 +214,7 @@ export function replacementSafetyWarning(assessment: ReplacementSafetyAssessment
   const missingSections =
     assessment.missingSections.length === 0
       ? ''
-      : ` Missing current sections: ${assessment.missingSections.join(', ')}.`;
+      : ` Missing current sections: ${EffectArray.join(assessment.missingSections, ', ')}.`;
   return (
     `Destructive replacement risk: proposed body has ${assessment.proposedBodyCharacters} characters and ` +
     `${assessment.proposedNonEmptyLines} non-empty lines; the current target has ` +
@@ -213,7 +224,9 @@ export function replacementSafetyWarning(assessment: ReplacementSafetyAssessment
   );
 }
 
-function replacementSafetyRequiresFreshReview(candidate: MemoryCandidate): boolean {
+function replacementSafetyRequiresFreshReview(
+  candidate: Pick<MemoryCandidate, 'recommendation' | 'targetContentHash' | 'targetUri'>,
+): boolean {
   return (
     candidate.recommendation !== 'no_action' &&
     candidate.targetContentHash !== undefined &&
@@ -221,7 +234,9 @@ function replacementSafetyRequiresFreshReview(candidate: MemoryCandidate): boole
   );
 }
 
-function knowledgeDeltaItemType(candidate: MemoryCandidate): KnowledgeDeltaItemType {
+function knowledgeDeltaItemType(
+  candidate: Pick<MemoryCandidate, 'comparison' | 'categories' | 'recommendation'>,
+): KnowledgeDeltaItemType {
   if (candidate.comparison !== 'new' || candidate.recommendation === 'no_action') {
     return 'context-repair-or-retirement';
   }
@@ -234,7 +249,9 @@ function knowledgeDeltaItemType(candidate: MemoryCandidate): KnowledgeDeltaItemT
   return 'preference';
 }
 
-function mutationOperation(candidate: MemoryCandidate): KnowledgeDeltaMutationPreviewV1['operation'] {
+function mutationOperation(
+  candidate: Pick<MemoryCandidate, 'recommendation'>,
+): KnowledgeDeltaMutationPreviewV1['operation'] {
   switch (candidate.recommendation) {
     case 'create':
       return 'create';
@@ -250,5 +267,5 @@ function mutationOperation(candidate: MemoryCandidate): KnowledgeDeltaMutationPr
 function boundedText(text: string): {readonly text: string; readonly truncated: boolean} {
   return text.length <= KNOWLEDGE_DELTA_V1_MAX_TEXT_CHARACTERS
     ? {text, truncated: false}
-    : {text: text.slice(0, KNOWLEDGE_DELTA_V1_MAX_TEXT_CHARACTERS), truncated: true};
+    : {text: Effect.pipe(text, EffectString.slice(0, KNOWLEDGE_DELTA_V1_MAX_TEXT_CHARACTERS)), truncated: true};
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -6,10 +7,12 @@ import {LibraryExplorer} from '../../src/library_explorer.js';
 import {useLibrarySearch} from '../../src/library_search.js';
 import type {LibraryScope} from '../../src/library_model.js';
 import type {TreeNode} from '../../src/ui/contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const base = 'threadnote://user/test/memories';
 const node = (path: string, children?: readonly TreeNode[]): TreeNode => ({
-  name: path.split('/').at(-1)!,
+  name: Effect.pipe(path, EffectString.split('/')).at(-1)!,
   uri: `${base}/${path}`,
   relativePath: path,
   isDir: children !== undefined,
@@ -63,9 +66,11 @@ it('reveals a recalled memory through every collapsed ancestor while folder sele
     );
   await act(async () => render(''));
   const folders = [...host.querySelectorAll<HTMLDetailsElement>('details')];
-  expect(folders.some(folder => !folder.open)).toBe(true);
+  expect(EffectArray.some(folders, folder => !folder.open)).toBe(true);
   await act(async () => render('different meaning', [match.uri]));
-  expect([...host.querySelectorAll<HTMLDetailsElement>('details')].every(folder => folder.open)).toBe(true);
+  expect(EffectArray.every([...host.querySelectorAll<HTMLDetailsElement>('details')], folder => folder.open)).toBe(
+    true,
+  );
   expect(host.querySelectorAll('.tree-file')).toHaveLength(1);
   await act(async () => host.querySelector<HTMLButtonElement>('.tree-file')!.click());
   expect(selected).toHaveBeenCalledWith(match.uri);
@@ -80,11 +85,15 @@ it('reveals a recalled memory through every collapsed ancestor while folder sele
   });
   expect(collapsed.open).toBe(false);
   await act(async () => render('another meaning', [hidden.uri]));
-  expect([...host.querySelectorAll<HTMLDetailsElement>('details')].every(folder => folder.open)).toBe(true);
+  expect(EffectArray.every([...host.querySelectorAll<HTMLDetailsElement>('details')], folder => folder.open)).toBe(
+    true,
+  );
   expect(host.querySelector('.tree-file')?.getAttribute('title')).toBe(hidden.uri);
   await act(async () => render(''));
   expect(host.querySelectorAll('.tree-file')).toHaveLength(3);
-  expect([...host.querySelectorAll<HTMLDetailsElement>('details')].some(folder => !folder.open)).toBe(true);
+  expect(EffectArray.some([...host.querySelectorAll<HTMLDetailsElement>('details')], folder => !folder.open)).toBe(
+    true,
+  );
 });
 
 it('debounces semantic recall, isolates scopes, ignores stale responses and clears old matches immediately', async () => {

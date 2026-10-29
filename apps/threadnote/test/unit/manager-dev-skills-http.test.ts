@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {BunHttpServer} from '@effect/platform-bun';
 import {Context, Effect, Layer, Schema, Scope} from 'effect';
@@ -5,15 +6,17 @@ import {HttpClient, HttpClientRequest, HttpServer} from 'effect/http';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {TestError} from '@threadnote/testing/test-error';
-import type {
-  ManagerDevSkillsApplyResponse,
-  ManagerDevSkillsCatalog,
-  ManagerDevSkillsPlan,
-  ManagerDevSkillsProjects,
-  ManagerDevSkillsSelector,
-  ManagerDevSkillsStatus,
-} from '@threadnote/manager/dev-skills/contracts';
+import type {ManagerDevSkillsPlan, ManagerDevSkillsSelector} from '@threadnote/manager/dev-skills/contracts';
 import {createManagerServer} from '../../src/manager/server.js';
+import type {ApiResponseGuard} from '@threadnote/manager/api/response-guard';
+import {requireApiResponse} from '@threadnote/manager/api/response-guard';
+import {
+  isManagerDevSkillsApplyResponse,
+  isManagerDevSkillsCatalog,
+  isManagerDevSkillsPlan,
+  isManagerDevSkillsProjects,
+  isManagerDevSkillsStatus,
+} from '@threadnote/manager/api/response-guards';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {
   applyDevSkills,
@@ -27,6 +30,9 @@ import {
 import {fixture, snapshot, devSkillsReleaseFixture} from '../dev-skills/service-fixture.js';
 import {receiptPath} from '../../src/dev_skills/registry.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const token = 'isolated-workflow-http-token';
 type Fixture = Effect.Success<ReturnType<typeof fixture>>;
@@ -42,7 +48,7 @@ const serve = Effect.fn('test.managerDevSkills.serve')(function* (f: Fixture, ru
   if (server.address._tag === 'UnixPathAddress')
     return yield* TestError.make({message: 'Expected an isolated TCP server'});
   const origin = `http://127.0.0.1:${server.address.port}`;
-  const request = <A = Record<string, unknown>>(route: string, body?: unknown, authenticated = true) =>
+  const request = (route: string, body?: unknown, authenticated = true) =>
     Effect.gen(function* () {
       const client = yield* HttpClient.HttpClient;
       const outgoing =
@@ -52,21 +58,41 @@ const serve = Effect.fn('test.managerDevSkills.serve')(function* (f: Fixture, ru
       const response = yield* client.execute(
         outgoing.pipe(HttpClientRequest.setHeaders(authenticated ? {Authorization: `Bearer ${token}`} : {})),
       );
-      return {status: response.status, body: (yield* response.json) as A};
+      const responseBody: unknown = yield* response.json;
+      return {status: response.status, body: responseBody};
     });
+  const requestValidated = <A>(
+    route: string,
+    body: unknown | undefined,
+    authenticated: boolean,
+    guard: ApiResponseGuard<A>,
+  ) =>
+    request(route, body, authenticated).pipe(
+      Effect.map(response => ({...response, body: requireApiResponse(response.body, guard)})),
+    );
+  const previewResponse = (action: 'install' | 'update' | 'remove', selector: ManagerDevSkillsSelector) =>
+    request('/api/dev-skills/preview', {action, selector});
+  const applyResponse = (plan: ManagerDevSkillsPlan, selector: ManagerDevSkillsSelector) =>
+    request('/api/dev-skills/apply', {action: plan.action, selector, previewDigest: plan.previewDigest, confirm: true});
   const preview = (action: 'install' | 'update' | 'remove', selector: ManagerDevSkillsSelector) =>
-    request<ManagerDevSkillsPlan>('/api/dev-skills/preview', {action, selector});
+    requestValidated('/api/dev-skills/preview', {action, selector}, true, isManagerDevSkillsPlan);
   const apply = (plan: ManagerDevSkillsPlan, selector: ManagerDevSkillsSelector) =>
-    request<ManagerDevSkillsApplyResponse>('/api/dev-skills/apply', {
-      action: plan.action,
-      selector,
-      previewDigest: plan.previewDigest,
-      confirm: true,
-    });
-  return {request, preview, apply};
+    requestValidated(
+      '/api/dev-skills/apply',
+      {
+        action: plan.action,
+        selector,
+        previewDigest: plan.previewDigest,
+        confirm: true,
+      },
+      true,
+      isManagerDevSkillsApplyResponse,
+    );
+  return {request, requestValidated, preview, previewResponse, apply, applyResponse};
 });
 const statusPath = (selector: ManagerDevSkillsSelector) =>
-  `/api/dev-skills/status?${new URLSearchParams(Object.entries(selector).filter((pair): pair is [string, string] => pair[1] !== undefined))}`;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+  `/api/dev-skills/status?${new URLSearchParams(EffectArray.filter(Object.entries(selector), (pair): pair is [string, string] => pair[1] !== undefined))}`;
 const register = (f: Fixture, paths: readonly string[]) =>
   Effect.gen(function* () {
     yield* f.fs.makeDirectory(f.home, {recursive: true});
@@ -74,7 +100,7 @@ const register = (f: Fixture, paths: readonly string[]) =>
       f.config.manifestPath,
       JSON.stringify({
         version: 1,
-        projects: paths.map((path, index) => ({
+        projects: EffectArray.map(paths, (path, index) => ({
           name: `project-${index}`,
           path,
           uri: `threadnote://resources/project-${index}`,
@@ -95,10 +121,19 @@ describe('authenticated Manager development workflows HTTP', () => {
         const server = yield* serve(f);
         const selector = {agent};
         const before = yield* snapshot(f.root);
-        const catalog = yield* server.request<ManagerDevSkillsCatalog>('/api/dev-skills/catalog');
+        const catalog = yield* server.requestValidated(
+          '/api/dev-skills/catalog',
+          undefined,
+          true,
+          isManagerDevSkillsCatalog,
+        );
         expect(catalog.status).toBe(200);
         expect(catalog.body.platform).toBe(f.system.platform);
-        expect(catalog.body.surfaces.find(item => item.surfaceId === 'codex-cloud')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(catalog.body.surfaces, item => item.surfaceId === 'codex-cloud'),
+          ),
+        ).toMatchObject({
           profile: 'codex-cloud-personal',
           platforms: ['linux'],
         });
@@ -161,7 +196,12 @@ describe('authenticated Manager development workflows HTTP', () => {
         expect(
           (yield* server.request(
             '/api/dev-skills/apply',
-            {action: 'install', selector: {agent: 'codex'}, previewDigest: 'a'.repeat(64), confirm: true},
+            {
+              action: 'install',
+              selector: {agent: 'codex'},
+              previewDigest: Effect2.pipe('a', EffectString.repeat(64)),
+              confirm: true,
+            },
             false,
           )).status,
         ).toBe(401);
@@ -176,9 +216,14 @@ describe('authenticated Manager development workflows HTTP', () => {
           expect((yield* server.request('/api/dev-skills/preview', body)).status).toBe(400);
         for (const body of [
           {action: 'install', selector: {agent: 'codex'}, confirm: true},
-          {action: 'install', selector: {agent: 'codex'}, previewDigest: 'a'.repeat(64)},
+          {action: 'install', selector: {agent: 'codex'}, previewDigest: Effect2.pipe('a', EffectString.repeat(64))},
           {action: 'install', selector: {agent: 'codex'}, previewDigest: 'not-a-digest', confirm: true},
-          {action: 'install', selector: {agent: 'codex'}, previewDigest: 'a'.repeat(64), confirm: 'true'},
+          {
+            action: 'install',
+            selector: {agent: 'codex'},
+            previewDigest: Effect2.pipe('a', EffectString.repeat(64)),
+            confirm: 'true',
+          },
         ])
           expect((yield* server.request('/api/dev-skills/apply', body)).status).toBe(400);
         for (const route of [
@@ -216,7 +261,7 @@ describe('authenticated Manager development workflows HTTP', () => {
       const initial = (yield* server.preview('install', selector)).body;
       f.environment.PI_CODING_AGENT_DIR = f.path.join(f.root, 'changed-host');
       const movedBefore = yield* snapshot(f.root);
-      expect(yield* server.apply(initial, selector)).toMatchObject({
+      expect(yield* server.applyResponse(initial, selector)).toMatchObject({
         status: 409,
         body: {code: 'stale-preview', recovery: 'preview'},
       });
@@ -227,7 +272,7 @@ describe('authenticated Manager development workflows HTTP', () => {
       const update = (yield* server.preview('update', selector)).body;
       yield* f.fs.writeFileString(f.path.join(update.target.skillRoot, 'dev-plan/SKILL.md'), 'concurrent edit');
       const editedBefore = yield* snapshot(f.root);
-      expect((yield* server.apply(update, selector)).status).toBe(409);
+      expect((yield* server.applyResponse(update, selector)).status).toBe(409);
       expect(yield* snapshot(f.root)).toEqual(editedBefore);
     }).pipe(provide),
   );
@@ -242,9 +287,9 @@ describe('authenticated Manager development workflows HTTP', () => {
         const server = yield* serve(f);
         const selector = {agent: 'opencode', scope: 'project', cwd: project} as const;
         const before = yield* snapshot(f.root);
-        expect((yield* server.preview('install', {agent: 'roo'})).status).toBe(400);
+        expect((yield* server.previewResponse('install', {agent: 'roo'})).status).toBe(400);
         expect(
-          (yield* server.preview('install', {...selector, cwd: f.path.join(f.root, 'unregistered')})).body,
+          (yield* server.previewResponse('install', {...selector, cwd: f.path.join(f.root, 'unregistered')})).body,
         ).toMatchObject({code: 'project-not-registered'});
         const preview = yield* server.preview('install', selector);
         expect(preview.status).toBe(200);
@@ -252,16 +297,22 @@ describe('authenticated Manager development workflows HTTP', () => {
         expect(yield* snapshot(f.root)).toEqual(before);
         expect((yield* server.apply(preview.body, selector)).status).toBe(200);
         yield* register(f, []);
-        expect((yield* server.request<ManagerDevSkillsStatus>(statusPath(selector))).body.targets[0].enrolled).toBe(
-          true,
-        );
+        expect(
+          (yield* server.requestValidated(statusPath(selector), undefined, true, isManagerDevSkillsStatus)).body
+            .targets[0].enrolled,
+        ).toBe(true);
         const removal = yield* server.preview('remove', selector);
         expect((yield* server.apply(removal.body, selector)).status).toBe(200);
-        expect((yield* server.request<ManagerDevSkillsStatus>(statusPath(selector))).body.targets[0]).toMatchObject({
+        expect(
+          (yield* server.requestValidated(statusPath(selector), undefined, true, isManagerDevSkillsStatus)).body
+            .targets[0],
+        ).toMatchObject({
           enrollmentState: 'removed',
           enabled: false,
         });
-        expect((yield* server.preview('install', selector)).body).toMatchObject({code: 'project-not-registered'});
+        expect((yield* server.previewResponse('install', selector)).body).toMatchObject({
+          code: 'project-not-registered',
+        });
       }).pipe(provide),
   );
   effectIt.effect(
@@ -278,17 +329,23 @@ describe('authenticated Manager development workflows HTTP', () => {
           ensureDevSkills(f.config, selector, {mode: 'setup', choice: 'disabled', operationId: 'manager-disabled'}),
         );
         const before = yield* snapshot(f.root);
-        const status = yield* server.request<ManagerDevSkillsStatus>(statusPath(selector));
+        const status = yield* server.requestValidated(statusPath(selector), undefined, true, isManagerDevSkillsStatus);
         expect(status.body.targets[0]).toMatchObject({enabled: false, enrolled: true, enrollmentState: 'enrolled'});
         expect(status.body.targets[0].consumers).toHaveLength(2);
         expect((yield* server.preview('install', selector)).body.canApply).toBe(true);
-        expect((yield* server.preview('install', {agent: 'opencode-native'})).status).toBe(400);
-        expect((yield* server.preview('install', {agent: 'codex', profile: 'cursor-cloud-personal'})).status).toBe(400);
-        const personal = yield* server.preview('install', {agent: 'codex-cloud', profile: 'codex-cloud-personal'});
+        expect((yield* server.previewResponse('install', {agent: 'opencode-native'})).status).toBe(400);
+        expect(
+          (yield* server.previewResponse('install', {agent: 'codex', profile: 'cursor-cloud-personal'})).status,
+        ).toBe(400);
+        const personal = yield* server.previewResponse('install', {
+          agent: 'codex-cloud',
+          profile: 'codex-cloud-personal',
+        });
         if (f.system.platform === 'linux') {
           expect(personal.status).toBe(200);
-          expect(personal.body.canApply).toBe(true);
-          expect(personal.body.readiness?.planning.state).toBe('blocked');
+          const plan = requireApiResponse(personal.body, isManagerDevSkillsPlan);
+          expect(plan.canApply).toBe(true);
+          expect(plan.readiness?.planning.state).toBe('blocked');
         } else expect(personal.status).toBe(400);
         expect(yield* snapshot(f.root)).toEqual(before);
       }).pipe(provide),
@@ -305,7 +362,12 @@ describe('authenticated Manager development workflows HTTP', () => {
       yield* release.activate;
       expect((yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId))).repairRequired).toBe(true);
       const server = yield* serve(f, release.run);
-      const pending = yield* server.request<ManagerDevSkillsStatus>(statusPath({agent: 'codex'}));
+      const pending = yield* server.requestValidated(
+        statusPath({agent: 'codex'}),
+        undefined,
+        true,
+        isManagerDevSkillsStatus,
+      );
       expect(pending.body.targets[0]).toMatchObject({
         installationState: 'modified',
         installed: {releaseVersion: '5.3.0-beta.4'},
@@ -313,14 +375,19 @@ describe('authenticated Manager development workflows HTTP', () => {
       });
       yield* f.fs.remove(receiptPath(f.path, second.target.skillRoot));
       const before = yield* snapshot(f.root);
-      const incomplete = yield* server.request<ManagerDevSkillsStatus>(statusPath({agent: 'claude-code'}));
+      const incomplete = yield* server.requestValidated(
+        statusPath({agent: 'claude-code'}),
+        undefined,
+        true,
+        isManagerDevSkillsStatus,
+      );
       expect(incomplete.status).toBe(200);
       expect(incomplete.body.targets[0]).toMatchObject({
         installationState: 'incomplete',
         lastRefresh: {state: 'current'},
       });
       expect(incomplete.body.targets[0].installed).toBeUndefined();
-      expect(incomplete.body.targets[0].issues.some(issue => issue.code === 'incomplete')).toBe(true);
+      expect(EffectArray.some(incomplete.body.targets[0].issues, issue => issue.code === 'incomplete')).toBe(true);
       expect(yield* snapshot(f.root)).toEqual(before);
     }).pipe(provide),
   );
@@ -335,12 +402,17 @@ describe('authenticated Manager development workflows HTTP', () => {
       const server = yield* serve(f);
       const selector = {agent: 'opencode', scope: 'project', cwd: sibling} as const;
       const before = yield* snapshot(f.root);
-      const projects = yield* server.request<ManagerDevSkillsProjects>('/api/dev-skills/projects');
+      const projects = yield* server.requestValidated(
+        '/api/dev-skills/projects',
+        undefined,
+        true,
+        isManagerDevSkillsProjects,
+      );
       expect(projects).toEqual({
         status: 200,
         body: {schemaVersion: 1, projects: [{name: 'project-0', path: registered}]},
       });
-      expect((yield* server.preview('install', selector)).body).toMatchObject({code: 'project-not-registered'});
+      expect((yield* server.previewResponse('install', selector)).body).toMatchObject({code: 'project-not-registered'});
       expect(yield* snapshot(f.root)).toEqual(before);
       const exact = {...selector, cwd: registered};
       const preview = yield* server.preview('install', exact);
@@ -367,12 +439,15 @@ describe('authenticated Manager development workflows HTTP', () => {
         yield* register(f, [`${alias}${suffix}`]);
         const server = yield* serve(f);
         const before = yield* snapshot(f.root);
-        expect((yield* server.request<ManagerDevSkillsProjects>('/api/dev-skills/projects')).body).toEqual({
+        expect(
+          (yield* server.requestValidated('/api/dev-skills/projects', undefined, true, isManagerDevSkillsProjects))
+            .body,
+        ).toEqual({
           schemaVersion: 1,
           projects: [],
         });
         expect(
-          (yield* server.preview('install', {agent: 'opencode', scope: 'project', cwd: alias})).body,
+          (yield* server.previewResponse('install', {agent: 'opencode', scope: 'project', cwd: alias})).body,
         ).toMatchObject({
           code: 'project-not-registered',
         });

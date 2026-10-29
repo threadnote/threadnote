@@ -27,10 +27,12 @@ import {
   validSourceEvidenceCitation,
   type SourceEvidenceInspection,
 } from '@threadnote/store/source-evidence';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const config = 'a'.repeat(64);
-const credential = 'b'.repeat(64);
-const epoch = 'c'.repeat(64);
+const config = Effect2.pipe('a', EffectString.repeat(64));
+const credential = Effect2.pipe('b', EffectString.repeat(64));
+const epoch = Effect2.pipe('c', EffectString.repeat(64));
 const credentialState = {value: credential};
 const policyState: {
   enabled: boolean;
@@ -111,7 +113,9 @@ const setup = Effect.fn('test.sourceEvidenceSetup')(function* (provider: 'pocket
       sourceId: 'fixture',
       accessEpoch: epoch,
       status: 'active',
-      ...(provider === 'github' ? {repositoryDenialGenerations: {'123': '1'.repeat(64)}} : {}),
+      ...(provider === 'github'
+        ? {repositoryDenialGenerations: {'123': Effect2.pipe('1', EffectString.repeat(64))}}
+        : {}),
     }),
     {mode: 'upsert'},
   );
@@ -189,7 +193,8 @@ describe('source evidence', () => {
                 ? Effect.gen(function* () {
                     triggered = true;
                     if (change === 'disabled') policyState.enabled = false;
-                    else if (change === 'credential') credentialState.value = 'd'.repeat(64);
+                    else if (change === 'credential')
+                      credentialState.value = Effect2.pipe('d', EffectString.repeat(64));
                     else if (change === 'epoch')
                       yield* fs.writeFileString(
                         resourceFile(receiptUri),
@@ -197,7 +202,7 @@ describe('source evidence', () => {
                           version: 1,
                           provider: 'pocket',
                           sourceId: 'fixture',
-                          accessEpoch: 'd'.repeat(64),
+                          accessEpoch: Effect2.pipe('d', EffectString.repeat(64)),
                           status: 'active',
                         }),
                         {mode: 0o600},
@@ -244,7 +249,10 @@ describe('source evidence', () => {
               ? fs
                   .writeFileString(
                     manifestPath,
-                    serializeExternalDocumentManifest({...manifest, chunks: {[uri]: 'd'.repeat(64)}}),
+                    serializeExternalDocumentManifest({
+                      ...manifest,
+                      chunks: {[uri]: Effect2.pipe('d', EffectString.repeat(64))},
+                    }),
                     {mode: 0o600},
                   )
                   .pipe(
@@ -355,7 +363,7 @@ describe('source evidence', () => {
         Effect.gen(function* () {
           credentialState.value = credential;
           policyState.enabled = true;
-          const body = '"\n'.repeat(190_000);
+          const body = Effect2.pipe('"\n', EffectString.repeat(190_000));
           const fixture = yield* setup('pocket', body);
           const {fs, path, location, inspected, pinDirectory} = fixture;
           const parent = path.join(yield* fs.realPath(location.home), 'threadnote');
@@ -405,7 +413,7 @@ describe('source evidence', () => {
                 ),
               ),
             ).toBe(true);
-          for (const fragment of ['', 'x'.repeat(8193), 'absent'])
+          for (const fragment of ['', Effect2.pipe('x', EffectString.repeat(8193)), 'absent'])
             expect(
               Result.isFailure(
                 yield* captureSourceEvidence(location, captureInput(inspected, fragment)).pipe(Effect.result),
@@ -435,7 +443,7 @@ describe('source evidence', () => {
           const first = yield* captureSourceEvidence(location, captureInput(inspected, 'tiny'));
           const prefix = 'THREADNOTE SOURCE EVIDENCE/1\n';
           const cloned = (index: number, expiresAt = first.expiresAt) => {
-            const pinId = `${index.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
+            const pinId = `${Effect2.pipe(index.toString(16), EffectString.padStart(8, '0'))}-0000-4000-8000-000000000000`;
             const citation = {...first, pinId, expiresAt};
             return {pinId, content: `${prefix}${serializeSourceEvidenceCitation(citation)}\ntiny body`};
           };
@@ -504,11 +512,11 @@ describe('source evidence', () => {
           yield* writeManifest('quarantined');
           expect(yield* readSourceEvidence(location, citation)).toMatchObject({historical: 'revoked'});
           yield* writeManifest('active');
-          yield* writeReceipt('authentication-rejected', '1'.repeat(64));
+          yield* writeReceipt('authentication-rejected', Effect2.pipe('1', EffectString.repeat(64)));
           expect(yield* readSourceEvidence(location, citation)).toMatchObject({historical: 'revoked'});
-          yield* writeReceipt('active', '2'.repeat(64));
+          yield* writeReceipt('active', Effect2.pipe('2', EffectString.repeat(64)));
           expect(yield* readSourceEvidence(location, citation)).toMatchObject({historical: 'revoked'});
-          yield* writeReceipt('active', '2'.repeat(64), true);
+          yield* writeReceipt('active', Effect2.pipe('2', EffectString.repeat(64)), true);
           expect(yield* readSourceEvidence(location, citation)).toMatchObject({historical: 'revoked'});
           expect(Result.isFailure(yield* inspectSourceEvidence(location, uri).pipe(Effect.result))).toBe(true);
           policyState.enabled = false;
@@ -540,7 +548,9 @@ describe('source evidence', () => {
           yield* fs.makeDirectory(pin);
           expect(yield* readSourceEvidence(location, citation)).toMatchObject({historical: 'corrupt'});
           yield* fs.remove(pin, {recursive: true});
-          yield* fs.writeFileString(pin, 'x'.repeat(512 * 1024 + 4096 + 128), {mode: 0o600});
+          yield* fs.writeFileString(pin, Effect2.pipe('x', EffectString.repeat(512 * 1024 + 4096 + 128)), {
+            mode: 0o600,
+          });
           expect(yield* readSourceEvidence(location, citation)).toMatchObject({historical: 'corrupt'});
           yield* fs.writeFileString(pin, original, {mode: 0o644});
           if (runtimePlatform !== 'win32') {
@@ -635,7 +645,7 @@ describe('source evidence', () => {
             currentRevision: 'same',
             fragment: '💡 exact fragment',
           });
-          credentialState.value = 'e'.repeat(64);
+          credentialState.value = Effect2.pipe('e', EffectString.repeat(64));
           expect(yield* readSourceEvidence(location, citation)).toMatchObject({historical: 'revoked'});
           credentialState.value = credential;
           yield* store.remove(location, externalDocumentManifestUri('fixture', 'item1', 'pocket'));
@@ -668,7 +678,7 @@ describe('source evidence', () => {
               version: 1,
               provider: 'pocket',
               sourceId: 'fixture',
-              accessEpoch: 'd'.repeat(64),
+              accessEpoch: Effect2.pipe('d', EffectString.repeat(64)),
               status: 'active',
             }),
             {mode: 'upsert'},

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   acceptsRepositoryPath,
@@ -17,9 +18,11 @@ import {CORPUS_EXTRACTION_SOURCE_BYTES_LIMIT} from '@threadnote/graph/languages/
 describe('native code graph inventory policy', () => {
   it('packs up to 512 small blobs into one Git cat-file process without weakening the byte ceiling', () => {
     const entries = Array.from({length: 513}, (_, index) => ({index, size: 1}));
-    expect(codeGraphCatFileBatches(entries.slice(0, 512)).map(batch => batch.length)).toEqual([512]);
-    expect(codeGraphCatFileBatches(entries).map(batch => batch.length)).toEqual([512, 1]);
-    expect(codeGraphCatFileBatches([{size: 16 * 1_048_576}, {size: 1}]).map(batch => batch.length)).toEqual([1, 1]);
+    expect(EffectArray.map(codeGraphCatFileBatches(entries.slice(0, 512)), batch => batch.length)).toEqual([512]);
+    expect(EffectArray.map(codeGraphCatFileBatches(entries), batch => batch.length)).toEqual([512, 1]);
+    expect(
+      EffectArray.map(codeGraphCatFileBatches([{size: 16 * 1_048_576}, {size: 1}]), batch => batch.length),
+    ).toEqual([1, 1]);
   });
 
   it('excludes SVG and low-meaning JSON at the reviewed pre-hydration boundaries', () => {
@@ -139,12 +142,15 @@ describe('native code graph inventory policy', () => {
   });
 
   it('accepts only ordinary blob records and handles byte-safe rename/delete overlays', () => {
-    const tree = [
-      '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 42\tsrc/a.ts',
-      '120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 12\tsrc/link.ts',
-      '160000 commit cccccccccccccccccccccccccccccccccccccccc -\tvendor/submodule',
-      '',
-    ].join('\0');
+    const tree = EffectArray.join(
+      [
+        '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 42\tsrc/a.ts',
+        '120000 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 12\tsrc/link.ts',
+        '160000 commit cccccccccccccccccccccccccccccccccccccccc -\tvendor/submodule',
+        '',
+      ],
+      '\0',
+    );
     expect(parseGitTree(tree)).toEqual([
       {
         blobId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -155,7 +161,10 @@ describe('native code graph inventory policy', () => {
     ]);
 
     const status = parseNameStatus(
-      ['R100', 'src/old.ts', 'src/new.ts', 'D', 'src/deleted.ts', 'M', 'src/a.ts', 'A', 'src/added.ts', ''].join('\0'),
+      EffectArray.join(
+        ['R100', 'src/old.ts', 'src/new.ts', 'D', 'src/deleted.ts', 'M', 'src/a.ts', 'A', 'src/added.ts', ''],
+        '\0',
+      ),
     );
     expect([...status.added].sort()).toEqual(['src/added.ts', 'src/new.ts']);
     expect([...status.changed].sort()).toEqual(['src/a.ts', 'src/added.ts', 'src/new.ts']);
@@ -163,14 +172,17 @@ describe('native code graph inventory policy', () => {
   });
 
   it('preserves literal POSIX backslashes instead of collapsing distinct Git paths', () => {
-    const tree = [
-      '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 42\tsrc/a.ts',
-      '100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 43\tsrc\\\\a.ts',
-      '',
-    ].join('\0');
+    const tree = EffectArray.join(
+      [
+        '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 42\tsrc/a.ts',
+        '100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 43\tsrc\\\\a.ts',
+        '',
+      ],
+      '\0',
+    );
 
-    expect(parseGitTree(tree).map(entry => entry.path)).toEqual(['src/a.ts', 'src\\\\a.ts']);
-    expect(parseNameStatus(['M', 'src\\\\a.ts', ''].join('\0')).changed).toEqual(new Set(['src\\\\a.ts']));
+    expect(EffectArray.map(parseGitTree(tree), entry => entry.path)).toEqual(['src/a.ts', 'src\\\\a.ts']);
+    expect(parseNameStatus(EffectArray.join(['M', 'src\\\\a.ts', ''], '\0')).changed).toEqual(new Set(['src\\\\a.ts']));
   });
 
   it('does not reject eligible source paths based on individual file size', () => {
@@ -249,16 +261,21 @@ describe('native code graph inventory policy', () => {
 
     const preview = summarizeCodeGraphInventoryPreview(entries, {threadnoteIgnore: 'src/ignored.ts\n'});
     const group = (reason: string, language: string) =>
-      preview.groups.find(candidate => candidate.reason === reason && candidate.language === language);
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          preview.groups,
+          candidate => candidate.reason === reason && candidate.language === language,
+        ),
+      );
 
     expect(preview.totals).toEqual({
       eligible: {bytes: 100, files: 4},
       repository: {
-        bytes: entries.reduce((total, entry) => total + entry.size, 0),
+        bytes: EffectArray.reduce(entries, 0, (total, entry) => total + entry.size),
         files: entries.length,
       },
       skipped: {
-        bytes: entries.reduce((total, entry) => total + entry.size, 0) - 100,
+        bytes: EffectArray.reduce(entries, 0, (total, entry) => total + entry.size) - 100,
         files: 6,
       },
     });
@@ -304,7 +321,13 @@ describe('native code graph inventory policy', () => {
     const groupFiles = (
       options: {readonly threadnoteIgnore?: string; readonly threadnoteIgnoreLocal?: string},
       reason: string,
-    ) => summarizeCodeGraphInventoryPreview(entries, options).groups.find(group => group.reason === reason)?.files ?? 0;
+    ) =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          summarizeCodeGraphInventoryPreview(entries, options).groups,
+          group => group.reason === reason,
+        ),
+      )?.files ?? 0;
 
     expect(groupFiles({threadnoteIgnore: 'src/a.ts\n'}, 'threadnote-ignore')).toBe(1);
     expect(groupFiles({threadnoteIgnoreLocal: 'src/b.ts\n'}, 'threadnote-ignore')).toBe(1);
@@ -313,10 +336,15 @@ describe('native code graph inventory policy', () => {
     );
     expect(groupFiles({}, 'threadnote-ignore')).toBe(0);
     expect(
-      summarizeCodeGraphInventoryPreview(entries, {
-        threadnoteIgnore: 'src/a.ts\n',
-        threadnoteIgnoreLocal: 'src/b.ts\n',
-      }).groups.find(group => group.reason === 'admitted' && group.language === 'typescript'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          summarizeCodeGraphInventoryPreview(entries, {
+            threadnoteIgnore: 'src/a.ts\n',
+            threadnoteIgnoreLocal: 'src/b.ts\n',
+          }).groups,
+          group => group.reason === 'admitted' && group.language === 'typescript',
+        ),
+      ),
     ).toMatchObject({files: 1});
   });
 });

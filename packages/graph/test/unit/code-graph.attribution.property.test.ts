@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -5,6 +6,8 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {createCachedCodeGraphFactsAttributor} from '@threadnote/graph/indexer';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {discoverManifestWorkspace} from '@threadnote/graph/workspace';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const attributionCase = FC.record({
   batchWidth: FC.integer({max: 5, min: 1}),
@@ -42,10 +45,15 @@ describe('code graph repository-attribution properties', () => {
       for (let index = 0; index < scenario.packageCount; index += 1) {
         const prefix = `packages/p${index}/`;
         expect(
-          streamed
-            .filter(file => file.path.startsWith(prefix))
-            .flatMap(file => file.symbols)
-            .every(symbol => symbol.packageName === `package-${index}`),
+          EffectArray.every(
+            EffectArray.flatMap(
+              EffectArray.filter<CodeGraphFileFacts>(streamed, file =>
+                Effect.pipe(file.path, EffectString.startsWith(prefix)),
+              ),
+              file => file.symbols,
+            ),
+            symbol => symbol.packageName === `package-${index}`,
+          ),
         ).toBe(true);
       }
     },
@@ -67,14 +75,20 @@ describe('code graph repository-attribution properties', () => {
       for (let index = 0; index < reordered.length; index += scenario.batchWidth) {
         rawBatches.push(reordered.slice(index, index + scenario.batchWidth));
       }
-      const canonicalBatches = rawBatches.map(batch => attributeBatch(batch));
+      const canonicalBatches = EffectArray.map(rawBatches, batch => attributeBatch(batch));
       const expected = canonicalBatches.flat();
       const hitPaths = new Set(
-        expected.filter((_, index) => scenario.hitMask[index % scenario.hitMask.length]).map(file => file.path),
+        EffectArray.map(
+          EffectArray.filter(
+            expected,
+            (_, index) => index in expected && scenario.hitMask[index % scenario.hitMask.length],
+          ),
+          file => file.path,
+        ),
       );
-      const merged = rawBatches.flatMap((batch, index) => {
+      const merged = EffectArray.flatMap(rawBatches, (batch, index) => {
         const canonical = canonicalBatches[index];
-        return canonical.every(file => hitPaths.has(file.path)) ? canonical : attributeBatch(batch);
+        return EffectArray.every(canonical, file => hitPaths.has(file.path)) ? canonical : attributeBatch(batch);
       });
 
       expect(normalizeFacts(merged)).toEqual(normalizeFacts(expected));
@@ -106,7 +120,7 @@ function sourceFile(path: string, content: string): CodeGraphInventoryFile {
     blobId: contentHash,
     content,
     contentHash,
-    language: path.endsWith('.ts') ? 'typescript' : 'json',
+    language: Effect.pipe(path, EffectString.endsWith('.ts')) ? 'typescript' : 'json',
     mode: '100644',
     path,
     size: new TextEncoder().encode(content).byteLength,
@@ -115,9 +129,11 @@ function sourceFile(path: string, content: string): CodeGraphInventoryFile {
 }
 
 function syntheticFacts(files: readonly CodeGraphInventoryFile[]): readonly CodeGraphFileFacts[] {
-  const sourceFiles = files.filter(file => file.path.endsWith('.ts'));
-  return sourceFiles.map((file, index) => {
-    const symbolName = file.path.includes('/consumer.ts')
+  const sourceFiles = EffectArray.filter<CodeGraphInventoryFile>(files, file =>
+    Effect.pipe(file.path, EffectString.endsWith('.ts')),
+  );
+  return EffectArray.map(sourceFiles, (file, index) => {
+    const symbolName = Effect.pipe(file.path, EffectString.includes('/consumer.ts'))
       ? `consumer${Math.floor(index / 2)}`
       : `value${Math.floor(index / 2)}`;
     const targetName = `value${(Math.floor(index / 2) + 1) % Math.max(1, sourceFiles.length / 2)}`;
@@ -174,5 +190,5 @@ function syntheticFacts(files: readonly CodeGraphInventoryFile[]): readonly Code
 }
 
 function normalizeFacts(facts: readonly CodeGraphFileFacts[]): readonly CodeGraphFileFacts[] {
-  return [...facts].sort((left, right) => left.path.localeCompare(right.path));
+  return [...facts].sort((left, right) => Effect.pipe(left.path, EffectString.localeCompare(right.path)));
 }

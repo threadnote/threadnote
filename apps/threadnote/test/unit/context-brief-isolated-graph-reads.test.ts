@@ -14,11 +14,14 @@ import {
   withIsolatedContextBriefGraphReads,
   CONTEXT_BRIEF_GRAPH_ISOLATED_READ_TIMEOUT_MILLISECONDS,
 } from '@threadnote/context/graph/isolated_inspect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
-const REPOSITORY_ID = 'a'.repeat(64);
-const COMMIT = 'b'.repeat(40);
-const SNAPSHOT_ID = `cgsn_${'c'.repeat(40)}`;
-const WORKTREE_ID = 'd'.repeat(64);
+const REPOSITORY_ID = Effect2.pipe('a', EffectString.repeat(64));
+const COMMIT = Effect2.pipe('b', EffectString.repeat(40));
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`;
+const WORKTREE_ID = Effect2.pipe('d', EffectString.repeat(64));
 
 const projectScope: CodeGraphQueryScope = {
   project: {
@@ -135,7 +138,7 @@ describe('context brief isolated graph reads', () => {
       const actual = yield* service.inspect({
         cwd: '/workspace/repository',
         edgeLimit: 40,
-        nodeId: `cgs_${'e'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('e', EffectString.repeat(32))}`,
         nodeLimit: 20,
         operation: 'neighbors',
         project: 'web',
@@ -150,7 +153,7 @@ describe('context brief isolated graph reads', () => {
       const request = decodeImpactQueryRequest(new TextDecoder().decode(seen.input));
       expect(request).toMatchObject({
         borrowedSnapshotId: SNAPSHOT_ID,
-        nodeId: `cgs_${'e'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('e', EffectString.repeat(32))}`,
         operation: 'neighbors',
         overlay: {dirty: false},
         project: 'web',
@@ -163,7 +166,7 @@ describe('context brief isolated graph reads', () => {
         negativeProof: 'unavailable',
         project: 'web',
       });
-      expect(actual.warnings.join('\n')).toContain('Results cover the selected project graph (web)');
+      expect(EffectArray.join(actual.warnings, '\n')).toContain('Results cover the selected project graph (web)');
     }),
   );
 
@@ -243,9 +246,9 @@ describe('context brief isolated graph reads', () => {
         nodes: [
           {
             arity: 0,
-            contentHash: 'h'.repeat(64),
+            contentHash: Effect2.pipe('h', EffectString.repeat(64)),
             exported: false,
-            id: `cgs_${'f'.repeat(32)}`,
+            id: `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`,
             kind: 'function',
             language: 'typescript',
             name: 'elsewhere',
@@ -412,7 +415,7 @@ describe('context brief isolated graph reads', () => {
         cwd: '/workspace/repository',
         edgeLimit: 40,
         interlock: {},
-        nodeId: `cgs_${'e'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('e', EffectString.repeat(32))}`,
         nodeLimit: 20,
         operation: 'neighbors',
         refresh: false,
@@ -427,7 +430,7 @@ describe('context brief isolated graph reads', () => {
       const progressed = yield* progressive.inspect({
         cwd: '/workspace/repository',
         edgeLimit: 40,
-        nodeId: `cgs_${'e'.repeat(32)}`,
+        nodeId: `cgs_${Effect2.pipe('e', EffectString.repeat(32))}`,
         nodeLimit: 20,
         onProgress: () => Effect.void,
         operation: 'neighbors',

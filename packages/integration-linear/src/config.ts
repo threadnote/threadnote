@@ -1,4 +1,6 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import type {ProjectionConfig} from '@threadnote/integration-core/config';
 
 export interface LinearSourceConfig {
   readonly type: 'linear';
@@ -26,8 +28,8 @@ export function linearUuid(value: unknown): string {
   return value;
 }
 function ids(value: unknown, maximum: number, empty = true): readonly string[] {
-  if (!Array.isArray(value) || value.length > maximum || (!empty && value.length === 0)) return invalid();
-  const result = value.map(linearUuid).sort();
+  if (!EffectArray.isArray(value) || value.length > maximum || (!empty && value.length === 0)) return invalid();
+  const result = EffectArray.map(value, linearUuid).sort();
   if (new Set(result).size !== result.length) return invalid();
   return result;
 }
@@ -95,24 +97,27 @@ import {
   type SourceConfig,
   type SourceConfiguration,
 } from '@threadnote/integration-core/config';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export {validateSourceIdentifier} from '@threadnote/integration-core/config';
-export function upsertLinearSource(
-  configuration: SourceConfiguration,
+export function upsertLinearSource<S extends SourceConfig, P extends ProjectionConfig>(
+  configuration: SourceConfiguration<S, P>,
   source: LinearSourceConfig,
-): SourceConfiguration {
+): SourceConfiguration<S | LinearSourceConfig, P> {
   const checked = validateLinearSourceConfig(source);
-  if (configuration.sources.some(item => item.id === checked.id && item.type !== checked.type))
+  if (EffectArray.some(configuration.sources, item => item.id === checked.id && item.type !== checked.type))
     throw SourceConfigurationError.make({message: `Source "${checked.id}" already has another type.`});
   return {
     version: 2,
     projections: configuration.projections,
-    sources: [...configuration.sources.filter(item => item.id !== checked.id), checked].sort((a, b) =>
-      a.id.localeCompare(b.id),
+    sources: [...EffectArray.filter(configuration.sources, item => item.id !== checked.id), checked].sort((a, b) =>
+      Effect.pipe(a.id, EffectString.localeCompare(b.id)),
     ),
   };
 }
 export function requireLinearSource(configuration: SourceConfiguration, id: string): LinearSourceConfig {
-  const source = configuration.sources.find(item => item.id === id);
+  const source = EffectOption.getOrUndefined(EffectArray.findFirst(configuration.sources, item => item.id === id));
   if (!source || !isLinearSource(source))
     throw SourceConfigurationError.make({message: `No Linear source named "${id}".`});
   return source;

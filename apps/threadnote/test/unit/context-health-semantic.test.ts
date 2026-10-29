@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {buildContextHealthReport} from '@threadnote/context/health';
@@ -10,6 +11,8 @@ import {
   type ContextHealthSelectorV1,
 } from '@threadnote/threadnote/memory/context/health_selector';
 import type {MemoryMetadata, MemoryRecord} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const now = new Date('2026-09-18T08:00:00.000Z');
 
@@ -46,7 +49,7 @@ describe('context health semantic contradictions', () => {
     const right = record('right', '# Production\nTimeout is 60 seconds.');
     const report = buildContextHealthReport({now, project: 'threadnote', records: [left, right]});
     expect(report.findings).toHaveLength(2);
-    expect(new Set(report.findings.map(finding => finding.id)).size).toBe(2);
+    expect(new Set(EffectArray.map(report.findings, finding => finding.id)).size).toBe(2);
     for (const finding of report.findings) {
       expect(finding.summary).toBe('Conflicting timeout values require review. Applicability needs context.');
       expect(finding.summary).not.toMatch(/tnclaim_|incompatible-values|uncertain-comparison/u);
@@ -126,13 +129,15 @@ describe('context health semantic contradictions', () => {
     const exact = selectedReport(records, exactSelector);
     expect(exact).toMatchObject({omittedFindings: 1_679, recordsScanned: 1_779, remainingFindings: 1_679});
     expect(exact.findings).toHaveLength(100);
-    expect(exact.findings.every(finding => finding.category === 'validity-expired')).toBe(true);
+    expect(EffectArray.every(exact.findings, finding => finding.category === 'validity-expired')).toBe(true);
     const second = selectedReport(records, {...exactSelector, after: exact.nextCursor});
     expect(second.findings).toHaveLength(100);
-    expect(new Set(second.findings.map(finding => finding.id))).not.toEqual(
-      new Set(exact.findings.map(finding => finding.id)),
+    expect(new Set(EffectArray.map(second.findings, finding => finding.id))).not.toEqual(
+      new Set(EffectArray.map(exact.findings, finding => finding.id)),
     );
-    expect(second.findings.some(finding => exact.findings.some(first => first.id === finding.id))).toBe(false);
+    expect(
+      EffectArray.some(second.findings, finding => EffectArray.some(exact.findings, first => first.id === finding.id)),
+    ).toBe(false);
     expect(second.omittedFindings).toBe(1_679);
     expect(second.remainingFindings).toBe(1_579);
     expect(second.findings.length + second.omittedFindings).toBe(1_779);
@@ -140,15 +145,15 @@ describe('context health semantic contradictions', () => {
     const reversed = selectedReport([...records].reverse(), exactSelector);
     expect(reversed.nextCursor).toBe(exact.nextCursor);
     expect(reversed.findings).toEqual(exact.findings);
-    expect(() => selectedReport(records, {...exactSelector, after: `hcx1_2s_${'0'.repeat(40)}`})).toThrow(
-      'invalid or stale',
-    );
-    const changed = records.map((item, index) =>
+    expect(() =>
+      selectedReport(records, {...exactSelector, after: `hcx1_2s_${Effect.pipe('0', EffectString.repeat(40))}`}),
+    ).toThrow('invalid or stale');
+    const changed = EffectArray.map(records, (item, index) =>
       index === 400 ? {...item, content: `${item.content}\nchanged`} : item,
     );
     expect(() => selectedReport(changed, {...exactSelector, after: exact.nextCursor})).toThrow('invalid or stale');
 
-    const seen = new Set(exact.findings.map(finding => finding.id));
+    const seen = new Set(EffectArray.map(exact.findings, finding => finding.id));
     let page = second;
     for (;;) {
       for (const finding of page.findings) {
@@ -185,7 +190,7 @@ describe('context health semantic contradictions', () => {
       'Maintenance progress: threadnote context maintain --action status --project threadnote',
     );
     expect(rendered).toContain(`threadnote context health --project threadnote --after ${report.nextCursor}`);
-    expect(rendered.split('\n').length).toBeLessThan(20);
+    expect(Effect.pipe(rendered, EffectString.split('\n')).length).toBeLessThan(20);
   });
 
   it('admits project-global evidence only when the exact selected URI owns it or category alone selects it', () => {
@@ -212,7 +217,7 @@ describe('context health semantic contradictions', () => {
       project: 'threadnote',
       records: [selected],
     });
-    expect(selectedOnly.findings.map(finding => finding.category)).toEqual(['validity-expired']);
+    expect(EffectArray.map(selectedOnly.findings, finding => finding.category)).toEqual(['validity-expired']);
 
     const categoryOnly = buildContextHealthReport({
       ...evidence,
@@ -287,7 +292,7 @@ describe('context health semantic contradictions', () => {
   it('keeps record-selected reports deterministic and non-mutating', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.stringMatching(/^[a-z]{3,12}$/u), {minLength: 1, maxLength: 24}), subjects => {
-        const records = subjects.map((subject, index) =>
+        const records = EffectArray.map(subjects, (subject, index) =>
           record(subject, 'Synthetic maintenance record.', {
             kind: index % 2 === 0 ? 'durable' : 'handoff',
             topic: index % 3 === 0 ? 'selected' : 'other',
@@ -335,26 +340,37 @@ function record(name: string, body: string, metadata: Partial<MemoryMetadata> = 
 function largeHealthFixture(): {readonly records: readonly MemoryRecord[]} {
   const durable = Array.from({length: 302}, (_, recordIndex) =>
     record(
-      `durable-${recordIndex.toString().padStart(4, '0')}`,
-      Array.from(
-        {length: 16},
-        (_, claimIndex) => `Synthetic policy ${recordIndex} claim ${claimIndex} retains bounded evidence.`,
-      ).join('\n'),
+      `durable-${Effect.pipe(recordIndex.toString(), EffectString.padStart(4, '0'))}`,
+      EffectArray.join(
+        Array.from(
+          {length: 16},
+          (_, claimIndex) => `Synthetic policy ${recordIndex} claim ${claimIndex} retains bounded evidence.`,
+        ),
+        '\n',
+      ),
       {topic: `durable-${recordIndex}`, validTo: '2026-09-16T00:00:00.000Z'},
     ),
   );
   const findingHandoffs = Array.from({length: 1_779}, (_, recordIndex) =>
-    record(`handoff-${recordIndex.toString().padStart(4, '0')}`, 'Synthetic handoff maintenance note.', {
-      kind: 'handoff',
-      topic: 'handoff-overflow',
-      validTo: '2026-09-16T00:00:00.000Z',
-    }),
+    record(
+      `handoff-${Effect.pipe(recordIndex.toString(), EffectString.padStart(4, '0'))}`,
+      'Synthetic handoff maintenance note.',
+      {
+        kind: 'handoff',
+        topic: 'handoff-overflow',
+        validTo: '2026-09-16T00:00:00.000Z',
+      },
+    ),
   );
   const cleanHandoffs = Array.from({length: 47}, (_, recordIndex) =>
-    record(`clean-${recordIndex.toString().padStart(4, '0')}`, `Synthetic clean non-durable note ${recordIndex}.`, {
-      kind: 'handoff',
-      topic: 'clean-handoff',
-    }),
+    record(
+      `clean-${Effect.pipe(recordIndex.toString(), EffectString.padStart(4, '0'))}`,
+      `Synthetic clean non-durable note ${recordIndex}.`,
+      {
+        kind: 'handoff',
+        topic: 'clean-handoff',
+      },
+    ),
   );
   return {records: [...durable, ...findingHandoffs, ...cleanHandoffs]};
 }
@@ -366,7 +382,7 @@ function selectedReport(records: readonly MemoryRecord[], selector: ContextHealt
     after: selector?.after,
     ...(selector?.findingCategory === undefined ? {} : {includeFindingCategories: [selector.findingCategory]}),
     ...(selector === undefined ? {} : {includeFindingCombination: 'all' as const}),
-    ...(hasRecordSelector ? {includeFindingUris: selected.map(item => item.uri)} : {}),
+    ...(hasRecordSelector ? {includeFindingUris: EffectArray.map(selected, item => item.uri)} : {}),
     now,
     project: 'threadnote',
     records: selected,

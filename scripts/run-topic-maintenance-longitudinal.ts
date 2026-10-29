@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import * as Schema from 'effect/Schema';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- The evaluation runner owns isolated process and filesystem boundaries. */
 
@@ -12,6 +14,7 @@ import {
   TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX,
   topicStudyPreconditionFailedV1,
   parseTopicStudyGateInputV1,
+  parseTopicStudyObservationV1,
   parseTopicStudyCorpusJsonV1,
   summarizeTopicStudyV1,
   topicStudyCanonicalJson,
@@ -40,6 +43,21 @@ import {
   topicStudySourceTreeHash,
   topicStudyExpectedSourceTreeHash,
 } from './topic-maintenance-longitudinal-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const BaselineSchema = Schema.StructWithRest(
+  Schema.Struct({
+    sourceFiles: Schema.Array(
+      Schema.StructWithRest(Schema.Struct({content: Schema.String, path: Schema.String}), [JsonRecordSchema]),
+    ),
+  }),
+  [JsonRecordSchema],
+);
+function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, input: unknown): S['Type'] {
+  return Schema.decodeUnknownSync(schema)(input);
+}
 
 interface Options {
   readonly corpus: string;
@@ -70,7 +88,7 @@ function optionsFromArgs(args: readonly string[]): Options {
       flags.set(key, 'true');
       continue;
     }
-    if (!key.startsWith('--') || flags.has(key) || args[index + 1] === undefined)
+    if (!Effect.pipe(key, EffectString.startsWith('--')) || flags.has(key) || args[index + 1] === undefined)
       throw new Error(`Invalid argument ${key}`);
     flags.set(key, args[++index]);
   }
@@ -91,7 +109,8 @@ function optionsFromArgs(args: readonly string[]): Options {
     '--execute',
     '--replay',
   ]);
-  if ([...flags.keys()].some(key => !known.has(key))) throw new Error('Unknown longitudinal runner option.');
+  if (EffectArray.some([...flags.keys()], key => !known.has(key)))
+    throw new Error('Unknown longitudinal runner option.');
   const repetitions = Number(flags.get('--repetitions') ?? '1');
   if (!Number.isSafeInteger(repetitions) || repetitions < 1 || repetitions > 10)
     throw new Error('Repetitions must be 1-10.');
@@ -153,8 +172,10 @@ async function prepareSandbox(
   for (const source of baseline.sourceFiles) {
     if (
       !/^[a-zA-Z0-9._/-]+$/u.test(source.path) ||
-      source.path.startsWith('/') ||
-      source.path.split('/').some(segment => ['', '.', '..', '.git'].includes(segment))
+      Effect.pipe(source.path, EffectString.startsWith('/')) ||
+      EffectArray.some(Effect.pipe(source.path, EffectString.split('/')), segment =>
+        ['', '.', '..', '.git'].includes(segment),
+      )
     )
       throw new Error('Unsafe baseline fixture source path.');
     const path = join(repo, source.path);
@@ -197,7 +218,7 @@ async function prepareSandbox(
     const result = await processResult(command, repo, topicStudyCommitEnvironment(env, 0));
     if (result.exitCode !== 0) throw new Error(`Sandbox Git setup failed: ${result.stderr}`);
   }
-  const commit = (await processResult(['git', 'rev-parse', 'HEAD'], repo, env)).stdout.trim();
+  const commit = Effect.pipe((await processResult(['git', 'rev-parse', 'HEAD'], repo, env)).stdout, EffectString.trim);
   return {repo, home, env, commit, manifest};
 }
 
@@ -232,8 +253,8 @@ async function main() {
   ]);
   const corpus = parseTopicStudyCorpusJsonV1(json);
   const canonicalSeal = sha256HexSync(topicStudyCanonicalJson(corpus));
-  if (canonicalSeal !== seal.trim()) throw new Error('Corpus seal mismatch; no arm may run.');
-  const baseline = JSON.parse(baselineJson) as {sourceFiles: readonly {path: string; content: string}[]};
+  if (canonicalSeal !== Effect.pipe(seal, EffectString.trim)) throw new Error('Corpus seal mismatch; no arm may run.');
+  const baseline = decodeJson(BaselineSchema, JSON.parse(baselineJson));
   if (sha256HexSync(baselineJson) !== corpus.initialFixtureHash) throw new Error('Baseline fixture hash mismatch.');
   const corpusHash = topicStudyCorpusHashV1(corpus);
   if (options.replay !== null) {
@@ -242,30 +263,22 @@ async function main() {
     const rows = assertTopicStudyLedgerV1(ledger, corpus);
     const originalSummary = await readFile(join(runDirectory, 'summary.json'), 'utf8');
     const originalExecutionStatus =
-      (JSON.parse(originalSummary) as {executionStatus?: unknown}).executionStatus ?? 'unspecified';
+      decodeJson(JsonRecordSchema, JSON.parse(originalSummary)).executionStatus ?? 'unspecified';
     const executionHeads = new Set<string>();
     const manifests = await Promise.all(
-      [...new Set(rows.map(row => `${row.arm}-${row.repetition}`))].map(async key => {
+      EffectArray.map([...new Set(EffectArray.map(rows, row => `${row.arm}-${row.repetition}`))], async key => {
         const raw = await readFile(join(runDirectory, `${key}-manifest.json`), 'utf8');
-        const manifest = JSON.parse(raw) as {
-          version?: unknown;
-          arm?: unknown;
-          repetition?: unknown;
-          runNonce?: unknown;
-          corpusHash?: unknown;
-          canonicalSeal?: unknown;
-          expectedHead?: unknown;
-          runtime?: {sourceHead?: unknown};
-        };
+        const manifest = decodeJson(JsonRecordSchema, JSON.parse(raw));
+        const runtime = manifest.runtime === undefined ? undefined : decodeJson(JsonRecordSchema, manifest.runtime);
         if (
           manifest.version !== 1 ||
           `${manifest.arm}-${manifest.repetition}` !== key ||
-          rows.some(row => `${row.arm}-${row.repetition}` === key && row.runNonce !== manifest.runNonce) ||
+          EffectArray.some(rows, row => `${row.arm}-${row.repetition}` === key && row.runNonce !== manifest.runNonce) ||
           manifest.corpusHash !== corpusHash ||
           manifest.canonicalSeal !== canonicalSeal ||
           typeof manifest.expectedHead !== 'string' ||
           !/^[0-9a-f]{40}$/u.test(manifest.expectedHead) ||
-          manifest.runtime?.sourceHead !== manifest.expectedHead
+          runtime?.sourceHead !== manifest.expectedHead
         )
           throw new Error('Replay manifest does not match the sealed execution.');
         executionHeads.add(manifest.expectedHead);
@@ -274,18 +287,12 @@ async function main() {
     );
     if (executionHeads.size !== 1) throw new Error('Replay requires one immutable execution HEAD.');
     const planJson = await readFile(join(runDirectory, 'plan.json'), 'utf8').catch(error => {
-      if ((error as {code?: string}).code === 'ENOENT') return null;
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
       throw error;
     });
     let plannedRepetitions: number | undefined;
     if (planJson !== null) {
-      const plan = JSON.parse(planJson) as {
-        version?: unknown;
-        expectedHead?: unknown;
-        corpusHash?: unknown;
-        canonicalSeal?: unknown;
-        repetitions?: unknown;
-      };
+      const plan = decodeJson(JsonRecordSchema, JSON.parse(planJson));
       if (
         plan.version !== 1 ||
         plan.expectedHead !== [...executionHeads][0] ||
@@ -302,7 +309,7 @@ async function main() {
     const sourceRoot = resolve(import.meta.dir, '..');
     const current = await processResult(['git', 'rev-parse', 'HEAD'], sourceRoot, topicStudyEnvironment(process.env));
     if (current.exitCode !== 0) throw new Error('Analysis HEAD is unavailable.');
-    const analysisRuntime = await captureTopicStudyRuntime(sourceRoot, current.stdout.trim());
+    const analysisRuntime = await captureTopicStudyRuntime(sourceRoot, Effect.pipe(current.stdout, EffectString.trim));
     const analysisCodeHash = sha256HexSync(
       await readFile(join(sourceRoot, 'apps/threadnote/src/evaluation/topic-maintenance-longitudinal.ts')),
     );
@@ -345,7 +352,7 @@ async function main() {
     return;
   }
   const output = resolve(options.output);
-  if (!output.includes('/.context/dev-cycle/phase-6/'))
+  if (!Effect.pipe(output, EffectString.includes('/.context/dev-cycle/phase-6/')))
     throw new Error('Raw evaluation output must remain inside ignored .context/dev-cycle/phase-6/.');
   await mkdir(output, {recursive: true, mode: 0o700});
   const runDirectory = await mkdtemp(join(output, 'longitudinal-'));
@@ -358,7 +365,9 @@ async function main() {
   const runtime = await captureTopicStudyRuntime(resolve(import.meta.dir, '..'), options.expectedHead);
   await assertTopicStudySourceAdapter(runtime.sourceRoot, adapter);
   const binaryHash = await topicStudyFileHash(binary);
-  const modelManifest = BUILTIN_MODEL_MANIFESTS.find(item => item.id === options.modelId && item.role === 'generation');
+  const modelManifest = EffectOption.getOrUndefined(
+    EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, item => item.id === options.modelId && item.role === 'generation'),
+  );
   if (!modelManifest || options.modelRoot === null)
     throw new Error('--execute requires a pinned generation --model-id and --model-root.');
   const verifiedModel = await prepareTopicStudyModel(
@@ -381,7 +390,9 @@ async function main() {
   );
   for (const arm of TOPIC_STUDY_ARMS) {
     for (let repetition = 1; repetition <= options.repetitions; repetition++) {
-      const expectedSourceFiles = new Map(baseline.sourceFiles.map(source => [source.path, source.content]));
+      const expectedSourceFiles = new Map(
+        EffectArray.map(baseline.sourceFiles, source => [source.path, source.content]),
+      );
       const runNonce = `run_${randomBytes(16).toString('hex')}`;
       const sandbox = await prepareSandbox(join(runDirectory, `${arm}-${repetition}`), baseline);
       if (arm !== 'maintained-alternate' || !options.alternatePermitted) {
@@ -396,7 +407,10 @@ async function main() {
         await symlink(dirname(verifiedModel.path), join(models, options.modelId), 'dir');
       }
       const binaryVersion = await processResult([binary, '--version'], sandbox.repo, sandbox.env);
-      if (binaryVersion.exitCode !== 0 || !binaryVersion.stdout.includes(`.g${options.expectedHead}`))
+      if (
+        binaryVersion.exitCode !== 0 ||
+        !Effect.pipe(binaryVersion.stdout, EffectString.includes(`.g${options.expectedHead}`))
+      )
         throw new Error('Installed Threadnote runtime does not match --expected-head.');
       const manifest = {
         version: 1,
@@ -408,7 +422,10 @@ async function main() {
         canonicalSeal,
         initialCommit: sandbox.commit,
         binary,
-        binaryVersion: binaryVersion?.stdout.trim() ?? null,
+        binaryVersion:
+          Effect.pipe(binaryVersion?.stdout, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ) ?? null,
         adapter,
         home: sandbox.home,
         repository: sandbox.repo,
@@ -437,7 +454,7 @@ async function main() {
             topicStudyCommitEnvironment(sandbox.env, event.index, postReview),
           );
           if (result.exitCode !== 0) throw new Error('Authored fixture Git transition failed.');
-          return result.stdout.trim();
+          return Effect.pipe(result.stdout, EffectString.trim);
         };
         const transition = async (changes: typeof event.changes, commit: boolean, label: string) => {
           const changed = await applyTopicStudySourceChanges(sandbox.repo, changes);
@@ -488,7 +505,7 @@ async function main() {
               () => processResult([process.execPath, adapter], sandbox.repo, sandbox.env, JSON.stringify(request)),
             );
             if (result.exitCode === 0) {
-              const candidate = JSON.parse(result.stdout) as TopicStudyObservationV1;
+              const candidate = parseTopicStudyObservationV1(JSON.parse(result.stdout), event);
               const proposed = topicStudyLedgerRowV1({
                 corpusHash,
                 runNonce,
@@ -499,7 +516,13 @@ async function main() {
                 observation: candidate,
                 previousHash,
               });
-              assertTopicStudyLedgerV1([...rows, proposed].map(row => JSON.stringify(row)).join('\n'), corpus);
+              assertTopicStudyLedgerV1(
+                EffectArray.join(
+                  EffectArray.map([...rows, proposed], row => JSON.stringify(row)),
+                  '\n',
+                ),
+                corpus,
+              );
               observation = candidate;
             } else
               observation = {

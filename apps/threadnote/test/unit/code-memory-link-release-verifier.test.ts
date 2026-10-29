@@ -48,28 +48,31 @@ import {
 } from '@threadnote/threadnote/evaluation/code-memory-link-scale-contract';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
-const MANIFEST_HASH = 'a'.repeat(64);
-const EXTERNAL_HASH = 'b'.repeat(64);
-const DOGFOOD_HASH = 'c'.repeat(64);
-const EXTRA_HASH = 'd'.repeat(64);
-const BUNDLE_HASH = 'e'.repeat(64);
-const BUNDLE_BLOB_HASH = 'f'.repeat(64);
+const MANIFEST_HASH = Effect2.pipe('a', EffectString.repeat(64));
+const EXTERNAL_HASH = Effect2.pipe('b', EffectString.repeat(64));
+const DOGFOOD_HASH = Effect2.pipe('c', EffectString.repeat(64));
+const EXTRA_HASH = Effect2.pipe('d', EffectString.repeat(64));
+const BUNDLE_HASH = Effect2.pipe('e', EffectString.repeat(64));
+const BUNDLE_BLOB_HASH = Effect2.pipe('f', EffectString.repeat(64));
 const BUNDLE_PATH = `${CODE_MEMORY_LINK_RETAINED_BUNDLE_ROOT}/${BUNDLE_HASH}/bundle.json`;
 const BUNDLE_PATHS = [BUNDLE_PATH, `${CODE_MEMORY_LINK_RETAINED_BUNDLE_ROOT}/${BUNDLE_HASH}/blobs/${BUNDLE_BLOB_HASH}`];
 const RELEASE_TAG = 'v4.6.0';
 const RELEASE_DESCRIPTOR_PATH = codeMemoryLinkReleaseDescriptorPath(RELEASE_TAG);
-const SCALE_ARTIFACT_HASH = '6'.repeat(64);
+const SCALE_ARTIFACT_HASH = Effect2.pipe('6', EffectString.repeat(64));
 const SCALE_ARTIFACT_PATH = codeMemoryLinkScaleArtifactPath(SCALE_ARTIFACT_HASH);
-const SCALE_BUILT_TARGET_HASH = '7'.repeat(64);
-const CANDIDATE_EXECUTABLE_HASH = '1'.repeat(64);
-const CANDIDATE_PAYLOAD_HASH = '2'.repeat(64);
-const CANDIDATE_RELEASE_METADATA_HASH = '3'.repeat(64);
-const CANDIDATE_LOCKFILE_HASH = '4'.repeat(64);
-const CANDIDATE_PACKAGE_HASH = '5'.repeat(64);
+const SCALE_BUILT_TARGET_HASH = Effect2.pipe('7', EffectString.repeat(64));
+const CANDIDATE_EXECUTABLE_HASH = Effect2.pipe('1', EffectString.repeat(64));
+const CANDIDATE_PAYLOAD_HASH = Effect2.pipe('2', EffectString.repeat(64));
+const CANDIDATE_RELEASE_METADATA_HASH = Effect2.pipe('3', EffectString.repeat(64));
+const CANDIDATE_LOCKFILE_HASH = Effect2.pipe('4', EffectString.repeat(64));
+const CANDIDATE_PACKAGE_HASH = Effect2.pipe('5', EffectString.repeat(64));
 const arbitraryHash = fc
   .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 64, maxLength: 64})
-  .map(characters => characters.join(''))
+  .map(characters => EffectArray.join(characters, ''))
   .filter(hash => hash !== EXTERNAL_HASH && hash !== DOGFOOD_HASH);
 const arbitraryMismatchedScaleHash = arbitraryHash.filter(hash => hash !== SCALE_ARTIFACT_HASH);
 const ScaleVerifierTestLayer = Layer.merge(
@@ -102,7 +105,11 @@ describe('Code Memory Link release governance verifier', () => {
       expect(String(malformedFailure)).toContain('Could not derive');
       yield* fs.writeFileString(
         manifest,
-        JSON.stringify({version: '4.6.0', packageManager: 'bun@1.4.2', padding: 'x'.repeat(128 * 1024)}),
+        JSON.stringify({
+          version: '4.6.0',
+          packageManager: 'bun@1.4.2',
+          padding: Effect2.pipe('x', EffectString.repeat(128 * 1024)),
+        }),
       );
       const oversized = yield* commit(root, 'oversized manifest');
       const oversizedFailure = yield* loadCodeMemoryLinkScaleCandidateBindingAtCommit(root, oversized).pipe(
@@ -118,20 +125,22 @@ describe('Code Memory Link release governance verifier', () => {
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-code-memory-retained-head-'});
       const bundle = createCodeMemoryLinkRetainedBundleV1({
         artifacts: retainedArtifacts(),
-        candidateCommit: '9'.repeat(40),
+        candidateCommit: Effect2.pipe('9', EffectString.repeat(40)),
         clients: [
           {
-            clientId: `cli_${'1'.repeat(16)}`,
+            clientId: `cli_${Effect2.pipe('1', EffectString.repeat(16))}`,
             configProjection: `${JSON.stringify({model: 'gpt-5.6-luna'})}\n`,
-            descriptor: `${JSON.stringify({hash: '1'.repeat(64)})}\n`,
+            descriptor: `${JSON.stringify({hash: Effect2.pipe('1', EffectString.repeat(64))})}\n`,
           },
           {
-            clientId: `cli_${'2'.repeat(16)}`,
+            clientId: `cli_${Effect2.pipe('2', EffectString.repeat(16))}`,
             configProjection: `${JSON.stringify({model: 'gpt-5.6-terra'})}\n`,
-            descriptor: `${JSON.stringify({hash: '2'.repeat(64)})}\n`,
+            descriptor: `${JSON.stringify({hash: Effect2.pipe('2', EffectString.repeat(64))})}\n`,
           },
         ],
-        sealedFiles: [{content: '{"version":1}\n', path: `tasks/tsk_${'3'.repeat(16)}/packet.json`}],
+        sealedFiles: [
+          {content: '{"version":1}\n', path: `tasks/tsk_${Effect2.pipe('3', EffectString.repeat(16))}/packet.json`},
+        ],
       });
       const repositoryPath = `${CODE_MEMORY_LINK_RETAINED_BUNDLE_ROOT}/${bundle.bundleHash}/bundle.json`;
       const bundleRoot = path.join(root, path.dirname(repositoryPath));
@@ -145,7 +154,7 @@ describe('Code Memory Link release governance verifier', () => {
 
       const loaded = yield* loadCodeMemoryLinkRetainedBundleAtHead(root, head, repositoryPath);
       expect(loaded.bundleHash).toBe(bundle.bundleHash);
-      expect(loaded.contents.index.candidateCommit).toBe('9'.repeat(40));
+      expect(loaded.contents.index.candidateCommit).toBe(Effect2.pipe('9', EffectString.repeat(40)));
       const pathFailure = yield* loadCodeMemoryLinkRetainedBundleAtHead(
         root,
         head,
@@ -160,7 +169,7 @@ describe('Code Memory Link release governance verifier', () => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-code-memory-scale-head-'});
-      const candidate = '9'.repeat(40);
+      const candidate = Effect2.pipe('9', EffectString.repeat(40));
       const artifact = releaseScaleArtifact(candidate, SCALE_BUILT_TARGET_HASH);
       const source = `${JSON.stringify(artifact, undefined, 2)}\n`;
       const artifactHash = sha256HexSync(source);
@@ -189,7 +198,7 @@ describe('Code Memory Link release governance verifier', () => {
         repositoryPath,
         artifactHash,
         candidate,
-        '0'.repeat(64),
+        Effect2.pipe('0', EffectString.repeat(64)),
         scaleCandidateBinding(candidate),
       ).pipe(Effect.flip);
       expect(String(digestFailure)).toContain('independently rebuilt target');
@@ -232,7 +241,7 @@ describe('Code Memory Link release governance verifier', () => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-code-memory-scale-mode-'});
-      const candidate = '9'.repeat(40);
+      const candidate = Effect2.pipe('9', EffectString.repeat(40));
       const source = `${JSON.stringify(releaseScaleArtifact(candidate, SCALE_BUILT_TARGET_HASH), undefined, 2)}\n`;
       const artifactHash = sha256HexSync(source);
       const repositoryPath = codeMemoryLinkScaleArtifactPath(artifactHash);
@@ -336,7 +345,7 @@ describe('Code Memory Link release governance verifier', () => {
 
   effectIt.effect('binds every field of the complete tested candidate payload evidence', () =>
     Effect.sync(() => {
-      const candidateCommit = '9'.repeat(40);
+      const candidateCommit = Effect2.pipe('9', EffectString.repeat(40));
       const descriptor = parseCodeMemoryLinkReleaseDescriptorV1({
         expectedReleaseTag: RELEASE_TAG,
         repositoryPath: RELEASE_DESCRIPTOR_PATH,
@@ -562,7 +571,7 @@ describe('Code Memory Link release governance verifier', () => {
             repositoryPath: RELEASE_DESCRIPTOR_PATH,
             source: releaseDescriptorJson({
               bundleHash: BUNDLE_HASH,
-              candidateCommit: '9'.repeat(40),
+              candidateCommit: Effect2.pipe('9', EffectString.repeat(40)),
               scaleArtifactHash,
             }),
           }),
@@ -706,7 +715,7 @@ function fixtureRepository(
     yield* fs.writeFileString(approvalsLoaderPath, 'export const APPROVALS_LOADER_VERSION = 1;\n');
     yield* fs.writeFileString(
       packagePath,
-      `${JSON.stringify({version: options.packageVersion ?? RELEASE_TAG.slice(1)}, undefined, 2)}\n`,
+      `${JSON.stringify({version: options.packageVersion ?? Effect2.pipe(RELEASE_TAG, EffectString.slice(1))}, undefined, 2)}\n`,
     );
     yield* fs.writeFileString(productPath, 'export const product = 1;\n');
     yield* git(root, ['init', '--quiet']);
@@ -810,7 +819,7 @@ function releaseDescriptorJson(input: {
         sourcePackageManifestSha256: CANDIDATE_PACKAGE_HASH,
         target: input.target ?? 'bun-darwin-arm64',
         testedCandidateExecutableSha256: CANDIDATE_EXECUTABLE_HASH,
-        version: `${RELEASE_TAG.slice(1)}-local.g${input.candidateCommit}`,
+        version: `${Effect2.pipe(RELEASE_TAG, EffectString.slice(1))}-local.g${input.candidateCommit}`,
       },
       releaseTag: RELEASE_TAG,
       retainedBundle: {path: BUNDLE_PATH, sha256: input.bundleHash},
@@ -840,7 +849,7 @@ function releaseScaleArtifact(candidateCommit: string, builtArtifactSha256: stri
     architecture: 'arm64',
     builtArtifactSha256,
     candidateCommit,
-    candidateVersion: RELEASE_TAG.slice(1),
+    candidateVersion: Effect2.pipe(RELEASE_TAG, EffectString.slice(1)),
     cpu: 'Apple M1',
     dirty: false,
     gitStatusObserved: true,
@@ -867,7 +876,7 @@ function releaseScaleArtifact(candidateCommit: string, builtArtifactSha256: stri
     runnerEnvironment: 'github-hosted',
     runnerOperatingSystem: 'macOS',
     runtime: 'bun/1.4.2',
-    sourceVersion: `threadnote-${RELEASE_TAG.slice(1)}`,
+    sourceVersion: `threadnote-${Effect2.pipe(RELEASE_TAG, EffectString.slice(1))}`,
   };
   return evaluateCodeMemoryLinkScaleCapture({
     budget: CODE_MEMORY_LINK_SCALE_APPROVED_BUDGET,
@@ -908,7 +917,7 @@ function releaseScaleArtifact(candidateCommit: string, builtArtifactSha256: stri
 function scaleCandidateBinding(candidateCommit: string) {
   return codeMemoryLinkScaleCandidateBindingV1(candidateCommit, {
     packageManager: 'bun@1.4.2',
-    version: RELEASE_TAG.slice(1),
+    version: Effect2.pipe(RELEASE_TAG, EffectString.slice(1)),
   });
 }
 
@@ -962,7 +971,7 @@ function candidateRuntimeEvidence(candidateCommit: string): DevelopmentRuntimeEv
     sourceLockfileSha256: CANDIDATE_LOCKFILE_HASH,
     sourcePackageManifestSha256: CANDIDATE_PACKAGE_HASH,
     target: 'bun-darwin-arm64',
-    version: `${RELEASE_TAG.slice(1)}-local.g${candidateCommit}`,
+    version: `${Effect2.pipe(RELEASE_TAG, EffectString.slice(1))}-local.g${candidateCommit}`,
   };
 }
 
@@ -972,15 +981,15 @@ function mutateRuntime(
 ): DevelopmentRuntimeEvidence {
   const replacements: Record<(typeof CANDIDATE_RUNTIME_FIELDS)[number], string | number> = {
     dependencyInstallation: 'bun install',
-    executableSha256: '0'.repeat(64),
+    executableSha256: Effect2.pipe('0', EffectString.repeat(64)),
     payloadBytes: runtime.payloadBytes + 1,
     payloadFileCount: runtime.payloadFileCount + 1,
-    payloadManifestSha256: '0'.repeat(64),
-    releaseMetadataSha256: '0'.repeat(64),
+    payloadManifestSha256: Effect2.pipe('0', EffectString.repeat(64)),
+    releaseMetadataSha256: Effect2.pipe('0', EffectString.repeat(64)),
     runtime: `${runtime.runtime}-changed`,
-    sourceCommit: '0'.repeat(40),
-    sourceLockfileSha256: '0'.repeat(64),
-    sourcePackageManifestSha256: '0'.repeat(64),
+    sourceCommit: Effect2.pipe('0', EffectString.repeat(40)),
+    sourceLockfileSha256: Effect2.pipe('0', EffectString.repeat(64)),
+    sourcePackageManifestSha256: Effect2.pipe('0', EffectString.repeat(64)),
     target: 'bun-darwin-x64',
     version: `${runtime.version}.changed`,
   };
@@ -1036,7 +1045,7 @@ const commit = Effect.fn('codeMemoryLinkReleaseVerifierTest.commit')(function* (
     '--message',
     message,
   ]);
-  return (yield* git(root, ['rev-parse', 'HEAD'])).stdout.trim();
+  return Effect2.pipe((yield* git(root, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
 });
 
 function git(cwd: string, args: readonly string[]) {

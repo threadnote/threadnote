@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {it as effectIt} from '@effect/vitest';
@@ -18,6 +19,10 @@ import {
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 describe('Windows Git Bash command launchers', () => {
   it('routes generic and legacy OAuth helpers through the standalone boundary', async () => {
@@ -121,7 +126,7 @@ describe('Windows Git Bash command launchers', () => {
         expect(files.cliPosix.content).toBe(yield* renderFor(testSystem, releaseRoot, 'cli', 'posix'));
         expect(files.mcpCmd.content).toBe(yield* renderFor(testSystem, releaseRoot, 'mcp', 'cmd'));
         expect(files.mcpPosix.content).toBe(yield* renderFor(testSystem, releaseRoot, 'mcp', 'posix'));
-        expect(files.cliPosix.content.startsWith('#!/usr/bin/env sh\n')).toBe(true);
+        expect(Effect2.pipe(files.cliPosix.content, EffectString.startsWith('#!/usr/bin/env sh\n'))).toBe(true);
         expect(files.cliPosix.content).toContain('THREADNOTE_CALLER_CWD="$PWD"');
         expect(files.cliPosix.content).toContain('export THREADNOTE_CALLER_CWD');
         expect(files.cliPosix.content).toContain('exec "$THREADNOTE_ENTRY" "$@"');
@@ -141,7 +146,7 @@ describe('Windows Git Bash command launchers', () => {
             expect(yield* FileSystem.FileSystem.pipe(Effect.flatMap(fs => fs.exists(launcher)))).toBe(false);
           }
         }
-        expect(files.cliCmd.content.startsWith('@echo off\r\n')).toBe(true);
+        expect(Effect2.pipe(files.cliCmd.content, EffectString.startsWith('@echo off\r\n'))).toBe(true);
         expect(files.cliCmd.content).toContain('%*');
 
         const repeat = yield* captureConsole(installCommandShim(false, releaseRoot)).pipe(
@@ -333,7 +338,10 @@ describe('Windows Git Bash command launchers', () => {
         );
         const original = yield* fs.readFileString(helper);
 
-        yield* fs.writeFileString(dockerConfig, JSON.stringify({padding: 'x'.repeat(65_536)}));
+        yield* fs.writeFileString(
+          dockerConfig,
+          JSON.stringify({padding: Effect2.pipe('x', EffectString.repeat(65_536))}),
+        );
         const oversized = yield* installCommandShim(false).pipe(
           Effect.provideService(SystemInfo, testSystem),
           Effect.flip,
@@ -400,14 +408,18 @@ describe('Windows Git Bash command launchers', () => {
         ),
         (control, docker) => {
           const selected = configuredLauncherModes(
-            {schemaVersion: 1, bindings: control.map(helper => ({helper}))},
-            {credHelpers: Object.fromEntries(docker.map((helper, index) => [String(index), helper]))},
+            {schemaVersion: 1, bindings: EffectArray.map(control, helper => ({helper}))},
+            {
+              credHelpers: EffectRecord.fromEntries(
+                EffectArray.map(docker, (helper, index) => [String(index), helper]),
+              ),
+            },
           );
           const reversed = configuredLauncherModes(
-            {schemaVersion: 1, bindings: [...control, ...control].reverse().map(helper => ({helper}))},
+            {schemaVersion: 1, bindings: EffectArray.map([...control, ...control].reverse(), helper => ({helper}))},
             {
-              credHelpers: Object.fromEntries(
-                [...docker, ...docker].reverse().map((helper, index) => [String(index), helper]),
+              credHelpers: EffectRecord.fromEntries(
+                EffectArray.map([...docker, ...docker].reverse(), (helper, index) => [String(index), helper]),
               ),
             },
           );
@@ -563,14 +575,14 @@ describe('Windows Git Bash command launchers', () => {
         ]).pipe(Effect.provideService(SystemInfo, testSystem));
         const posixEntry = posixEntryPath(posix);
         const cmdEntry = cmdEntryPath(cmd);
-        expect(cmd.includes('\r\n')).toBe(true);
-        expect(posix.includes('\r')).toBe(false);
-        expect(posix.includes('\\')).toBe(false);
-        expect(posix.startsWith('#!/usr/bin/env sh\n')).toBe(true);
+        expect(Effect2.pipe(cmd, EffectString.includes('\r\n'))).toBe(true);
+        expect(Effect2.pipe(posix, EffectString.includes('\r'))).toBe(false);
+        expect(Effect2.pipe(posix, EffectString.includes('\\'))).toBe(false);
+        expect(Effect2.pipe(posix, EffectString.startsWith('#!/usr/bin/env sh\n'))).toBe(true);
         expect(posix).toContain('THREADNOTE_CALLER_CWD="$PWD"');
-        expect(posixEntry).toBe(cmdEntry.replaceAll('\\', '/'));
+        expect(posixEntry).toBe(Effect2.pipe(cmdEntry, EffectString.replaceAll('\\', '/')));
         expect(posixEntry).toContain(`/${version}/threadnote.exe`);
-        expect(cmdEntry.replaceAll('\\', '/')).toContain(`/${version}/threadnote.exe`);
+        expect(Effect2.pipe(cmdEntry, EffectString.replaceAll('\\', '/'))).toContain(`/${version}/threadnote.exe`);
         if (variant === 'plain') {
           expect(posix).toContain(`THREADNOTE_ENTRY=C:/Threadnote/versions/${version}/threadnote.exe`);
         } else {
@@ -663,13 +675,25 @@ function posixEntryPath(posix: string): string {
   const match = /^THREADNOTE_ENTRY=(.*)$/m.exec(posix);
   expect(match?.[1]).toEqual(expect.any(String));
   const raw = match?.[1] ?? '';
-  return raw.startsWith("'") && raw.endsWith("'") ? raw.slice(1, -1).replaceAll("'\"'\"'", "'") : raw;
+  return Effect2.pipe(raw, EffectString.startsWith("'")) && Effect2.pipe(raw, EffectString.endsWith("'"))
+    ? Effect2.pipe(raw, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(1, -1));
+        const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replaceAll("'\"'\"'", "'"));
+        return __effectPipeStage1;
+      })
+    : raw;
 }
 
 function cmdEntryPath(cmd: string): string {
-  const line = cmd.split(/\r?\n/u).find(candidate => candidate.includes('threadnote.exe'));
+  const line = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      Effect2.pipe(cmd, EffectString.split(/\r?\n/u)),
+      __effectArrayValue =>
+        !!(candidate => Effect2.pipe(candidate, EffectString.includes('threadnote.exe')))(__effectArrayValue),
+    ),
+  );
   expect(line).toEqual(expect.any(String));
   const match = /^"([^"]*)"/u.exec(line ?? '');
   expect(match?.[1]).toEqual(expect.any(String));
-  return (match?.[1] ?? '').replaceAll('%%', '%').replaceAll('""', '"');
+  return Effect2.pipe(match?.[1] ?? '', EffectString.replaceAll('%%', '%'), EffectString.replaceAll('""', '"'));
 }

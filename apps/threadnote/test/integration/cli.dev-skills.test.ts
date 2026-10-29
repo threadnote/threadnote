@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {createHash} from '@threadnote/testing/node-crypto';
@@ -5,12 +6,15 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {afterEach, describe, expect, it} from 'vitest';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const exec = promisify(execFile);
 const roots: string[] = [];
 const entrypoint = join(process.cwd(), 'apps/threadnote/src/standalone.ts');
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 async function fixture() {
@@ -19,8 +23,13 @@ async function fixture() {
   const user = join(root, 'user');
   const home = join(root, 'data');
   const environment = {...process.env};
-  for (const key of Object.keys(environment)) {
-    if (key.startsWith('THREADNOTE_') || key.startsWith('CODEX_') || key.startsWith('CURSOR_')) delete environment[key];
+  for (const key of EffectRecord.keys(environment)) {
+    if (
+      Effect.pipe(key, EffectString.startsWith('THREADNOTE_')) ||
+      Effect.pipe(key, EffectString.startsWith('CODEX_')) ||
+      Effect.pipe(key, EffectString.startsWith('CURSOR_'))
+    )
+      delete environment[key];
   }
   Object.assign(environment, {
     HOME: user,
@@ -117,7 +126,12 @@ describe('development workflows CLI', () => {
     await expect(access(join(f.skillRoot, 'dev-plan/SKILL.md'))).rejects.toMatchObject({code: 'ENOENT'});
     const remaining = await snapshot(f.root);
     expect(
-      Object.keys(remaining).some(path => path.includes('generations') && path.endsWith(join('dev-plan', 'SKILL.md'))),
+      EffectArray.some(
+        EffectRecord.keys(remaining),
+        path =>
+          Effect.pipe(path, EffectString.includes('generations')) &&
+          Effect.pipe(path, EffectString.endsWith(join('dev-plan', 'SKILL.md'))),
+      ),
     ).toBe(true);
   }, 90_000);
 
@@ -140,8 +154,11 @@ describe('development workflows CLI', () => {
     const status = JSON.parse((await f.call(['dev-skills', 'status', '--json'], otherHome)).stdout);
     expect(status.targets.every((target: {enrolled: boolean}) => !target.enrolled)).toBe(true);
     expect(
-      Object.keys(await snapshot(f.root)).some(
-        path => path.includes('generations') && path.endsWith(join('dev-plan', 'SKILL.md')),
+      EffectArray.some(
+        EffectRecord.keys(await snapshot(f.root)),
+        path =>
+          Effect.pipe(path, EffectString.includes('generations')) &&
+          Effect.pipe(path, EffectString.endsWith(join('dev-plan', 'SKILL.md'))),
       ),
     ).toBe(true);
   }, 90_000);

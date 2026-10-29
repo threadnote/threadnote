@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Redacted, Result} from 'effect';
@@ -15,7 +16,12 @@ import {
 } from '@threadnote/integration-runtime/config';
 import {externalSourcePolicyLayer} from '@threadnote/integration-runtime/access-policy';
 import {makeSourceConfigurationStore} from '@threadnote/integration-runtime/config';
-import {SourceConfigurationStore, type ConfigurationServices} from '@threadnote/integration-core/config';
+import {
+  SourceConfigurationStore,
+  type ConfigurationServices,
+  type ProjectionConfig,
+  type SourceConfig,
+} from '@threadnote/integration-core/config';
 import {
   ExternalSourcePolicy,
   externalDocumentManifestUri,
@@ -26,7 +32,7 @@ import {
 } from '@threadnote/store/external-resource';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import {loadRecallIndexData} from '@threadnote/recall/index';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {
   mutateSourceConfiguration,
   readSourceConfiguration,
@@ -48,7 +54,16 @@ import {
   syncSuperhumanSourcesBeforeRecall,
 } from '../src/source.js';
 import {superhumanExternalSourcePolicy} from '../src/access-policy.js';
-const configurationRegistry = makeSourceConfigurationRegistry({sources: [superhumanSourceCodec], projections: []});
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
+import {Option as EffectOption} from 'effect';
+
+const configurationRegistry = makeSourceConfigurationRegistry<SourceConfig, ProjectionConfig>({
+  sources: [superhumanSourceCodec],
+  projections: [],
+});
 
 const baseServices = Layer.mergeAll(
   BunServices.layer,
@@ -88,13 +103,13 @@ const page = {
   updatedAt: '2026-10-08T10:00:00Z',
 };
 const safeFetch = async (url: URL) => {
-  if (url.pathname.endsWith('/content'))
+  if (Effect2.pipe(url.pathname, EffectString.endsWith('/content')))
     return response({
       items: [
         {id: 'line_one', type: 'line', itemContent: {style: 'p', format: 'plainText', content: 'needle evidence'}},
       ],
     });
-  if (url.pathname.endsWith('/pages/page_one')) return response(page);
+  if (Effect2.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))) return response(page);
   return response({items: [page]});
 };
 const interruption = (uri: string) =>
@@ -115,7 +130,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-evidence-policy-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runSuperhumanSourceAdd(config, {
         id: 'evidence',
         documents: ['doc_one'],
@@ -137,7 +152,9 @@ describe('Superhuman source sync', () => {
       expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'superhuman')).toBeUndefined();
       yield* mutateSourceConfiguration(config, configuration => ({
         ...configuration,
-        sources: configuration.sources.map(source => (source.id === 'evidence' ? {...source, enabled: false} : source)),
+        sources: EffectArray.map(configuration.sources, source =>
+          source.id === 'evidence' ? {...source, enabled: false} : source,
+        ),
       }));
       expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'superhuman')).toBeUndefined();
       yield* runSuperhumanSourceRemove(config, {id: 'evidence', apply: true});
@@ -147,9 +164,9 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-preconditions-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       const base = {id: 'concurrent', project: 'test', apply: true};
-      const attempts = [0, 1].map(index => ({
+      const attempts = EffectArray.map([0, 1], index => ({
         ...base,
         documents: [`doc_${index}`],
         apiToken: Redacted.make(`synthetic-concurrent-${index}`),
@@ -162,9 +179,9 @@ describe('Superhuman source sync', () => {
           concurrency: 2,
         },
       );
-      expect(results.filter(Result.isSuccess)).toHaveLength(1);
-      expect(results.filter(Result.isFailure)).toHaveLength(1);
-      const winner = results.findIndex(Result.isSuccess);
+      expect(EffectArray.filter(results, Result.isSuccess)).toHaveLength(1);
+      expect(EffectArray.filter(results, Result.isFailure)).toHaveLength(1);
+      const winner = EffectOption.getOrElse(EffectArray.findFirstIndex(results, Result.isSuccess), () => -1);
       const source = requireSuperhumanSource(yield* readSourceConfiguration(config), base.id);
       expect(source.documents).toEqual([{id: `doc_${winner}`}]);
       expect(Redacted.value(yield* resolveSuperhumanCredential(config, source))).toBe(`synthetic-concurrent-${winner}`);
@@ -192,13 +209,15 @@ describe('Superhuman source sync', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-credential-orphan-'});
-        const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+        const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
         const token = 'synthetic-interrupted-creation-token';
         const options = {id: 'orphan', documents: ['doc_one'], project: 'test', apply: true};
         const interrupted = FileSystem.FileSystem.of({
           ...fs,
           rename: (from, to) =>
-            to.endsWith('/sources.yaml') ? fs.rename(`${home}/missing-configuration`, to) : fs.rename(from, to),
+            Effect2.pipe(to, EffectString.endsWith('/sources.yaml'))
+              ? fs.rename(`${home}/missing-configuration`, to)
+              : fs.rename(from, to),
         });
         const configurationServices = yield* Effect.context<ConfigurationServices>();
         const rawStore = makeSourceConfigurationStore(configurationRegistry);
@@ -237,7 +256,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-credential-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       const token = 'synthetic-manager-token';
       const options = {
         id: 'managed',
@@ -280,7 +299,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-rotate-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       const options = {
         id: 'rotate',
         documents: ['doc_one'],
@@ -339,7 +358,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-reflection-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       const token = 'synthetic_private';
       const options = {
         id: 'managed',
@@ -379,7 +398,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-credential-remove-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runSuperhumanSourceAdd(config, {
         id: 'managed',
         documents: ['doc_one'],
@@ -407,7 +426,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-denial-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       const location = {home, account: 'local', user: 'tester'};
       yield* runSuperhumanSourceAdd(config, {
         id: 'multi',
@@ -417,7 +436,7 @@ describe('Superhuman source sync', () => {
         project: 'test',
       });
       yield* runSuperhumanSourceSync(config, {id: 'multi', apply: true, clientOptions: {fetch: safeFetch}});
-      const uris = ['doc_one', 'doc_two'].map(documentId =>
+      const uris = EffectArray.map(['doc_one', 'doc_two'], documentId =>
         externalResourceUri({
           sourceId: 'multi',
           documentId,
@@ -432,7 +451,10 @@ describe('Superhuman source sync', () => {
       const interruptedStore = ResourceStore.of({
         ...store,
         mutateChecked: (target, mutations, check) =>
-          mutations.some(mutation => mutation.type === 'remove' && mutation.uri.endsWith('.md'))
+          EffectArray.some(
+            mutations,
+            mutation => mutation.type === 'remove' && Effect2.pipe(mutation.uri, EffectString.endsWith('.md')),
+          )
             ? Effect.fail(interruption(uris[0]))
             : store.mutateChecked(target, mutations, check),
       });
@@ -455,7 +477,10 @@ describe('Superhuman source sync', () => {
         id: 'multi',
         apply: true,
         clientOptions: {
-          fetch: url => (url.pathname.includes('/doc_two/') ? Promise.resolve(response({}, 403)) : safeFetch(url)),
+          fetch: url =>
+            Effect2.pipe(url.pathname, EffectString.includes('/doc_two/'))
+              ? Promise.resolve(response({}, 403))
+              : safeFetch(url),
         },
       });
       expect(Result.isSuccess(yield* store.read(location, uris[0]).pipe(Effect.result))).toBe(true);
@@ -467,7 +492,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-rollover-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       const location = {home, account: 'local', user: 'tester'};
       yield* runSuperhumanSourceAdd(config, {
         id: 'rollover',
@@ -478,7 +503,7 @@ describe('Superhuman source sync', () => {
       });
       yield* runSuperhumanSourceSync(config, {id: 'rollover', apply: true, clientOptions: {fetch: safeFetch}});
       const active = (yield* readExternalDocumentManifest(location, 'rollover', 'doc_one'))!;
-      const oldUri = Object.keys(active.chunks)[0];
+      const oldUri = EffectRecord.keys(active.chunks)[0];
       const store = yield* ResourceStore;
       yield* store.write(
         location,
@@ -487,7 +512,7 @@ describe('Superhuman source sync', () => {
           ...active,
           chunks: {
             ...active.chunks,
-            ...Object.fromEntries(
+            ...EffectRecord.fromEntries(
               Array.from({length: 2047}, (_, i) => [
                 externalResourceUri({
                   sourceId: 'rollover',
@@ -495,7 +520,7 @@ describe('Superhuman source sync', () => {
                   pageId: 'page_one',
                   chunkId: `missing-${i}`,
                 }),
-                'a'.repeat(64),
+                Effect2.pipe('a', EffectString.repeat(64)),
               ]),
             ),
           },
@@ -503,15 +528,22 @@ describe('Superhuman source sync', () => {
         {mode: 'upsert'},
       );
       const replacementFetch = (ids: string[]) => async (url: URL) =>
-        url.pathname.endsWith('/content')
+        Effect2.pipe(url.pathname, EffectString.endsWith('/content'))
           ? response({
-              items: ids.map(id => ({id, type: 'line', itemContent: {style: 'p', format: 'plainText', content: id}})),
+              items: EffectArray.map(ids, id => ({
+                id,
+                type: 'line',
+                itemContent: {style: 'p', format: 'plainText', content: id},
+              })),
             })
           : safeFetch(url);
       const interruptedStore = ResourceStore.of({
         ...store,
         mutateChecked: (target, mutations, check) =>
-          mutations.some(mutation => mutation.type === 'write' && mutation.uri.endsWith('.md'))
+          EffectArray.some(
+            mutations,
+            mutation => mutation.type === 'write' && Effect2.pipe(mutation.uri, EffectString.endsWith('.md')),
+          )
             ? store
                 .mutateChecked(target, mutations.slice(0, 1), check)
                 .pipe(Effect.andThen(Effect.fail(interruption(oldUri))))
@@ -525,11 +557,13 @@ describe('Superhuman source sync', () => {
       expect(Result.isFailure(result)).toBe(true);
       const pending = yield* readExternalDocumentManifest(location, 'rollover', 'doc_one');
       expect(pending?.status).toBe('pending');
-      expect(Object.keys(pending?.chunks ?? {})).toEqual([oldUri]);
-      expect(yield* fs.exists(`${home}/data/local/resources/${oldUri.slice('threadnote://resources/'.length)}`)).toBe(
-        true,
-      );
-      for (const uri of Object.keys(pending!.chunks))
+      expect(EffectRecord.keys(pending?.chunks ?? {})).toEqual([oldUri]);
+      expect(
+        yield* fs.exists(
+          `${home}/data/local/resources/${Effect2.pipe(oldUri, EffectString.slice('threadnote://resources/'.length))}`,
+        ),
+      ).toBe(true);
+      for (const uri of EffectRecord.keys(pending!.chunks))
         expect(Result.isFailure(yield* store.read(location, uri).pipe(Effect.result))).toBe(true);
       yield* runSuperhumanSourceSync(config, {
         id: 'rollover',
@@ -538,7 +572,7 @@ describe('Superhuman source sync', () => {
       });
       const recovered = yield* readExternalDocumentManifest(location, 'rollover', 'doc_one');
       expect(recovered?.status).toBe('active');
-      expect(Object.keys(recovered?.chunks ?? {})).toHaveLength(1);
+      expect(EffectRecord.keys(recovered?.chunks ?? {})).toHaveLength(1);
       expect(yield* store.read(location, oldUri)).toContain('final_line');
     }).pipe(TestClock.withLive, provideLayer),
   );
@@ -548,7 +582,7 @@ describe('Superhuman source sync', () => {
       const fs = yield* FileSystem.FileSystem;
       for (const populated of [false, true]) {
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-outage-'});
-        const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+        const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
         const location = {home, account: 'local', user: 'tester'};
         yield* runSuperhumanSourceAdd(config, {
           id: 'outage',
@@ -574,9 +608,9 @@ describe('Superhuman source sync', () => {
         if (before) {
           expect(receipt?.fetchedAt).toBe(before.fetchedAt);
           const store = yield* ResourceStore;
-          expect(Result.isSuccess(yield* store.read(location, Object.keys(before.chunks)[0]).pipe(Effect.result))).toBe(
-            true,
-          );
+          expect(
+            Result.isSuccess(yield* store.read(location, EffectRecord.keys(before.chunks)[0]).pipe(Effect.result)),
+          ).toBe(true);
         }
         yield* syncSuperhumanSourcesBeforeRecall(config, {fetch});
         expect(calls).toBe(1);
@@ -592,7 +626,7 @@ describe('Superhuman source sync', () => {
       const fs = yield* FileSystem.FileSystem;
       for (const enabled of [true, false]) {
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-remove-'});
-        const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+        const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
         yield* runSuperhumanSourceAdd(config, {
           id: 'remove',
           apply: true,
@@ -605,13 +639,13 @@ describe('Superhuman source sync', () => {
           yield* mutateSourceConfiguration(config, current => ({
             projections: current.projections,
             version: 2,
-            sources: current.sources.map(source => ({...source, enabled: false})),
+            sources: EffectArray.map(current.sources, source => ({...source, enabled: false})),
           }));
         const store = yield* ResourceStore;
         const interruptedStore = ResourceStore.of({
           ...store,
           mutateChecked: (target, mutations, check) =>
-            mutations.some(mutation => mutation.type === 'remove')
+            EffectArray.some(mutations, mutation => mutation.type === 'remove')
               ? Effect.fail(interruption(mutations[0].uri))
               : store.mutateChecked(target, mutations, check),
         });
@@ -643,7 +677,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-reconfigure-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       const options = {
         id: 'reconfigure',
         apply: true,
@@ -657,7 +691,7 @@ describe('Superhuman source sync', () => {
       const interruptedStore = ResourceStore.of({
         ...store,
         mutateChecked: (target, mutations, check) =>
-          mutations.some(mutation => mutation.type === 'remove')
+          EffectArray.some(mutations, mutation => mutation.type === 'remove')
             ? Effect.fail(interruption(mutations[0].uri))
             : store.mutateChecked(target, mutations, check),
       });
@@ -695,7 +729,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-missing-credential-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runSuperhumanSourceAdd(config, {
         id: 'missing-credential',
         apply: true,
@@ -724,7 +758,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-page-sync-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runSuperhumanSourceAdd(config, {
         id: 'pages',
         apply: true,
@@ -732,23 +766,23 @@ describe('Superhuman source sync', () => {
         credentialEnv: 'SUPERHUMAN_DOCS_TEST_TOKEN',
         project: 'test',
       });
-      const firstParagraph = 'a'.repeat(20 * 1024);
+      const firstParagraph = Effect2.pipe('a', EffectString.repeat(20 * 1024));
       const fetch = async (url: URL) => {
-        if (url.pathname.endsWith('/content'))
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/content')))
           return response({
             items: [
               {id: 'line_one', type: 'line', itemContent: {style: 'p', format: 'plainText', content: firstParagraph}},
               {id: 'line_two', type: 'line', itemContent: {style: 'p', format: 'plainText', content: 'Final line'}},
             ],
           });
-        if (url.pathname.endsWith('/pages/page_one')) return response(page);
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))) return response(page);
         return response({items: [page]});
       };
       yield* runSuperhumanSourceSync(config, {id: 'pages', apply: true, clientOptions: {fetch}});
       const location = {home, account: 'local', user: 'tester'};
       const uri = externalResourceUri({sourceId: 'pages', documentId: 'doc_one', pageId: 'page_one', chunkId: 'page'});
       const manifest = yield* readExternalDocumentManifest(location, 'pages', 'doc_one');
-      expect(Object.keys(manifest?.chunks ?? {})).toEqual([uri]);
+      expect(EffectRecord.keys(manifest?.chunks ?? {})).toEqual([uri]);
       const content = yield* (yield* ResourceStore).read(location, uri);
       expect(content).toContain(`# Safe Notes\n\n${firstParagraph}\n\nFinal line`);
       expect(content).not.toContain('[Superhuman Docs line:');
@@ -759,7 +793,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-oversized-page-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runSuperhumanSourceAdd(config, {
         id: 'oversized',
         apply: true,
@@ -778,18 +812,22 @@ describe('Superhuman source sync', () => {
       const store = yield* ResourceStore;
       expect(yield* store.read(location, uri)).toContain('needle evidence');
       const fetch = async (url: URL) => {
-        if (url.pathname.endsWith('/content'))
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/content')))
           return response({
             items: [
               {
                 id: url.searchParams.has('pageToken') ? 'line_two' : 'line_one',
                 type: 'line',
-                itemContent: {style: 'p', format: 'plainText', content: 'a'.repeat(241 * 1024)},
+                itemContent: {
+                  style: 'p',
+                  format: 'plainText',
+                  content: Effect2.pipe('a', EffectString.repeat(241 * 1024)),
+                },
               },
             ],
             ...(url.searchParams.has('pageToken') ? {} : {nextPageToken: 'next'}),
           });
-        if (url.pathname.endsWith('/pages/page_one')) return response(page);
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))) return response(page);
         return response({items: [page]});
       };
       const result = yield* runSuperhumanSourceSync(config, {id: 'oversized', apply: true, clientOptions: {fetch}});
@@ -803,7 +841,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-sync-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runSuperhumanSourceAdd(config, {
         id: 'test',
         apply: true,
@@ -812,13 +850,13 @@ describe('Superhuman source sync', () => {
         project: 'test',
       });
       const fetch = async (url: URL) => {
-        if (url.pathname.endsWith('/content'))
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/content')))
           return response({
             items: [
               {id: 'line_one', type: 'line', itemContent: {style: 'p', format: 'plainText', content: 'safe text'}},
             ],
           });
-        if (url.pathname.endsWith('/pages/page_one')) return response(page);
+        if (Effect2.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))) return response(page);
         return response({items: [page]});
       };
       const first = yield* runSuperhumanSourceSync(config, {id: 'test', apply: true, clientOptions: {fetch}});
@@ -826,9 +864,9 @@ describe('Superhuman source sync', () => {
       const location = {home, account: 'local', user: 'tester'};
       const active = yield* readExternalDocumentManifest(location, 'test', 'doc_one');
       expect(active?.status).toBe('active');
-      expect(Object.keys(active?.chunks ?? {})).toHaveLength(1);
+      expect(EffectRecord.keys(active?.chunks ?? {})).toHaveLength(1);
       const store = yield* ResourceStore;
-      const legacyChunkId = `b-${sha256HexSync('line_one').slice(0, 24)}-0`;
+      const legacyChunkId = `b-${Effect2.pipe(sha256HexSync('line_one'), EffectString.slice(0, 24))}-0`;
       const orphanUri = externalResourceUri({
         sourceId: 'test',
         documentId: 'doc_one',
@@ -880,7 +918,7 @@ describe('Superhuman source sync', () => {
         apply: true,
         clientOptions: {
           fetch: async url => {
-            if (url.pathname.endsWith('/content'))
+            if (Effect2.pipe(url.pathname, EffectString.endsWith('/content')))
               return response({
                 items: [
                   {id: 'line_one', type: 'line', itemContent: {style: 'p', format: 'plainText', content: 'change'}},
@@ -888,7 +926,7 @@ describe('Superhuman source sync', () => {
                 nextPageToken: 'repeated',
               });
             if (url.searchParams.has('pageToken')) return response({items: [], nextPageToken: 'repeated'});
-            if (url.pathname.endsWith('/pages/page_one')) return response(page);
+            if (Effect2.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))) return response(page);
             return response({items: [page]});
           },
         },
@@ -908,7 +946,7 @@ describe('Superhuman source sync', () => {
         apply: true,
         clientOptions: {
           fetch: url =>
-            url.pathname.endsWith('/content')
+            Effect2.pipe(url.pathname, EffectString.endsWith('/content'))
               ? Promise.resolve(
                   response({
                     items: [
@@ -925,11 +963,13 @@ describe('Superhuman source sync', () => {
       });
       expect(reflected.warnings).toEqual(['Superhuman document doc_one: credential-reflected.']);
       expect((yield* readExternalDocumentManifest(location, 'test', 'doc_one'))?.status).toBe('quarantined');
-      for (const uri of Object.keys(active!.chunks)) {
+      for (const uri of EffectRecord.keys(active!.chunks)) {
         expect(Result.isFailure(yield* store.read(location, uri).pipe(Effect.result))).toBe(true);
-        expect(yield* fs.exists(`${home}/data/local/resources/${uri.slice('threadnote://resources/'.length)}`)).toBe(
-          false,
-        );
+        expect(
+          yield* fs.exists(
+            `${home}/data/local/resources/${Effect2.pipe(uri, EffectString.slice('threadnote://resources/'.length))}`,
+          ),
+        ).toBe(false);
       }
     }).pipe(TestClock.withLive, provideLayer),
   );
@@ -938,7 +978,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-quota-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runSuperhumanSourceAdd(config, {
         id: 'quota',
         apply: true,
@@ -979,7 +1019,7 @@ describe('Superhuman source sync', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-fence-'});
-      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'tester'});
       yield* runSuperhumanSourceAdd(config, {
         id: 'fence',
         apply: true,
@@ -1010,13 +1050,13 @@ describe('Superhuman source sync', () => {
               changed = true;
               await Bun.write(configPath, changedBytes);
             }
-            if (url.pathname.endsWith('/content'))
+            if (Effect2.pipe(url.pathname, EffectString.endsWith('/content')))
               return response({
                 items: [
                   {id: 'line_one', type: 'line', itemContent: {style: 'p', format: 'plainText', content: 'safe text'}},
                 ],
               });
-            if (url.pathname.endsWith('/pages/page_one')) return response(page);
+            if (Effect2.pipe(url.pathname, EffectString.endsWith('/pages/page_one'))) return response(page);
             return response({items: [page]});
           },
         },

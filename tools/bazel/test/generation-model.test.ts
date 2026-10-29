@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {mkdtempSync, mkdirSync, writeFileSync, rmSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -51,15 +52,17 @@ describe('buildGenerationModel', () => {
       const testPath = join(root, 'apps/threadnote/test/unit/freshness.test.ts');
       writeFileSync(testPath, 'import {it} from "vitest"; it("fresh", () => {});');
       const {createTargetSpecs} = await import('../target-specs.mjs');
-      const first = (await createTargetSpecs(root)).targetSpecs.flatMap(target => target.entries);
+      const first = EffectArray.flatMap((await createTargetSpecs(root)).targetSpecs, target => target.entries);
       expect(first).toContain('apps/threadnote/test/unit/freshness.test.ts');
       await Bun.write(join(root, 'tools/bazel/debug.log'), 'ignored');
       await Bun.write(join(root, 'apps/threadnote/test/unit/ignored.test.ts'), 'throw new Error("ignored");');
       const scratch = await createTargetSpecs(root);
-      expect(scratch.targetSpecs.flatMap(target => target.entries)).toEqual(first);
-      expect(scratch.staticTargets.flatMap(target => target.inputs)).not.toContain('tools/bazel/debug.log');
+      expect(EffectArray.flatMap(scratch.targetSpecs, target => target.entries)).toEqual(first);
+      expect(EffectArray.flatMap(scratch.staticTargets, target => target.inputs)).not.toContain(
+        'tools/bazel/debug.log',
+      );
       rmSync(testPath);
-      const second = (await createTargetSpecs(root)).targetSpecs.flatMap(target => target.entries);
+      const second = EffectArray.flatMap((await createTargetSpecs(root)).targetSpecs, target => target.entries);
       expect(second).not.toContain('apps/threadnote/test/unit/freshness.test.ts');
     } finally {
       rmSync(root, {recursive: true, force: true});
@@ -82,7 +85,10 @@ describe('buildGenerationModel', () => {
   it('models generated inventory inputs consistently in both BUILD rules and inventory on absent or corrupt prior bytes', async () => {
     const root = fixture();
     try {
-      const specs = ['tooling_test', 'format', 'lint', 'workspace_check'].map(name => ({...spec(name), data: []}));
+      const specs = EffectArray.map(['tooling_test', 'format', 'lint', 'workspace_check'], name => ({
+        ...spec(name),
+        data: [],
+      }));
       const buildAbsent = await runModel(root, specs, [
         {label: '//:bazel_validation', kind: 'ci', lane: 'bazel_validation', inputs: ['tools/bazel/targets.json']},
       ]);
@@ -92,7 +98,9 @@ describe('buildGenerationModel', () => {
       ]);
       expect([...buildDirty.output]).toEqual([...buildAbsent.output]);
       for (const label of ['//:tooling_test', '//:format', '//:lint', '//:workspace_check', '//:bazel_validation']) {
-        const target = buildDirty.inventory.find(item => item.label === label)!;
+        const target = EffectOption.getOrUndefined(
+          EffectArray.findFirst(buildDirty.inventory, item => item.label === label),
+        )!;
         expect(target.inputs).toContain('tools/bazel/targets.json');
         if (label !== '//:bazel_validation')
           expect(buildDirty.output.get('BUILD.bazel')).toContain('"//:tools/bazel/targets.json"');
@@ -109,10 +117,10 @@ describe('buildGenerationModel', () => {
         async names => {
           const root = fixture();
           try {
-            const specs = names.map(spec);
+            const specs = EffectArray.map(names, spec);
             const model = await runModel(root, specs);
-            expect(model.inventory.map(target => target.label)).toEqual(
-              [...model.inventory.map(target => target.label)].sort(),
+            expect(EffectArray.map(model.inventory, target => target.label)).toEqual(
+              [...EffectArray.map(model.inventory, target => target.label)].sort(),
             );
           } finally {
             rmSync(root, {recursive: true, force: true});
@@ -134,17 +142,22 @@ it('keeps generated inputs equal to independent source reachability, including c
           for (let node = 0; node < 6; node++) {
             await Bun.write(
               join(root, `apps/demo/${node}.ts`),
-              edges
-                .filter(([from]) => from === node)
-                .map(([, to]) => `import './${to}.js';`)
-                .join('\n'),
+              EffectArray.join(
+                EffectArray.map(
+                  EffectArray.filter(edges, ([from]) => from === node),
+                  ([, to]) => `import './${to}.js';`,
+                ),
+                '\n',
+              ),
             );
           }
           const specs = [{package: '', name: 'reachable', kind: 'library', entries: ['apps/demo/0.ts']}];
           const before = await runModel(root, specs);
           const reached = new Set([0]);
           for (let pass = 0; pass < 6; pass++) for (const [from, to] of edges) if (reached.has(from)) reached.add(to);
-          expect(before.inventory[0]?.inputs).toEqual([...reached].map(node => `apps/demo/${node}.ts`).sort());
+          expect(before.inventory[0]?.inputs).toEqual(
+            EffectArray.map([...reached], node => `apps/demo/${node}.ts`).sort(),
+          );
           await Bun.write(join(root, 'apps/demo/unrelated.ts'), 'export const unrelated = 1;');
           expect([...(await runModel(root, specs)).output]).toEqual([...before.output]);
         } finally {
@@ -247,7 +260,7 @@ it.each(['BUILD', 'BUILD.bazel'])(
       expect(factored.inventory).toEqual(flat.inventory);
       expect([...factored.output]).toEqual([...flat.output]);
       expect(factored.output.has('apps/demo/BUILD.bazel')).toBe(false);
-      expect([...factored.libraries.values()].some(value => value.package === 'apps/demo')).toBe(false);
+      expect(EffectArray.some([...factored.libraries.values()], value => value.package === 'apps/demo')).toBe(false);
       expect(factored.declarations.get('//:consumer')?.srcs).toContain('apps/demo/main.ts');
       expect(await Bun.file(join(root, 'apps/demo', buildName)).text()).toBe(authored);
       await expect(

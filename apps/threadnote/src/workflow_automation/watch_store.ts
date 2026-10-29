@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -12,6 +13,8 @@ import type {NativeWatchProviderCache} from './watch_provider.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeBoundedWorkflowJson, encodeBoundedWorkflowJson} from '../workflow_memory/journal_codec.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface NativeWatchEnvelope {
   format: 'threadnote-native-watch-runtime';
@@ -46,8 +49,12 @@ const text = (max: number) =>
     Schema.isMinLength(1),
     Schema.isMaxLength(max),
     Schema.makeFilter(value =>
-      [...value].some(character => {
-        const code = character.charCodeAt(0);
+      EffectArray.some([...value], character => {
+        const code = Effect2.pipe(
+          character,
+          EffectString.charCodeAt(0),
+          Effect2.Option.getOrElse(() => NaN),
+        );
         return code < 32 || (code >= 127 && code <= 159);
       })
         ? 'Text contains control characters.'
@@ -110,10 +117,10 @@ export function decodeNativeWatchEnvelope(value: unknown): NativeWatchEnvelope {
     const envelope = Schema.decodeUnknownSync(envelopeSchema, {onExcessProperty: 'error'})(value);
     const state = decodeNativeWatchState(envelope.state);
     checkRunId(state.watchId);
-    if (new Set(envelope.provider.pages.map(page => page.key)).size !== envelope.provider.pages.length)
+    if (new Set(EffectArray.map(envelope.provider.pages, page => page.key)).size !== envelope.provider.pages.length)
       throw new Error('Duplicate page');
-    const head = 'a'.repeat(40);
-    const pages = envelope.provider.pages.map(page => {
+    const head = Effect2.pipe('a', EffectString.repeat(40));
+    const pages = EffectArray.map(envelope.provider.pages, page => {
       const projection = page.projection;
       if (projection.size > 1_000_000 || projection.pending + projection.failed > projection.size)
         throw new Error('Counts');
@@ -123,7 +130,14 @@ export function decodeNativeWatchEnvelope(value: unknown): NativeWatchEnvelope {
         state: 'open',
         at: 0,
         sources: [{source: 'comments', complete: true, items: projection.items, at: 0}],
-        ci: {head, complete: true, count: 0, pending: 0, failed: 0, version: 'a'.repeat(64)},
+        ci: {
+          head,
+          complete: true,
+          count: 0,
+          pending: 0,
+          failed: 0,
+          version: Effect2.pipe('a', EffectString.repeat(64)),
+        },
       });
       const source = sweep.sources[0];
       if (!source.complete) throw new Error('Source');
@@ -139,7 +153,7 @@ const STATE_CODEC = 'threadnote-native-watch-runtime-gzip-v1';
 function checkRunId(runId: string): void {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) ||
-    runId.includes('..') ||
+    Effect2.pipe(runId, EffectString.includes('..')) ||
     /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(runId) ||
     ['constructor', 'prototype'].includes(runId)
   )
@@ -177,7 +191,13 @@ const statePath = Effect.fn('workflowAutomation.statePath')(function* (
   runId: string,
   create = false,
 ) {
-  yield* Effect.try({try: () => checkRunId(runId), catch: error => error as WorkflowAutomationError});
+  yield* Effect.try({
+    try: () => checkRunId(runId),
+    catch: error =>
+      Schema.is(WorkflowAutomationError)(error)
+        ? error
+        : issue('invalid-state', 'Could not validate native workflow state.'),
+  });
   const directory = yield* stateDirectory(config, create);
   return directory === undefined ? undefined : (yield* Path.Path).join(directory, runId + '.json');
 });
@@ -235,7 +255,10 @@ export const writeNativeWatch = Effect.fn('workflowAutomation.writeState')(funct
 ) {
   const validated = yield* Effect.try({
     try: () => decodeNativeWatchEnvelope(state),
-    catch: error => error as WorkflowAutomationError,
+    catch: error =>
+      Schema.is(WorkflowAutomationError)(error)
+        ? error
+        : issue('invalid-state', 'Could not validate native workflow state.'),
   });
   const serialized = yield* Effect.try({
     try: () => encodeBoundedWorkflowJson(stableJson(validated) + '\n', STATE_CODEC),

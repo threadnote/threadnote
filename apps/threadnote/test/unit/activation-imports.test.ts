@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
@@ -9,6 +10,8 @@ import {readBoundedContainedStableRegularFile} from '@threadnote/graph/inventory
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('guided activation imports', () => {
   effectIt.effect('collects selected catalog guidance and ADRs as deterministic review candidates', () =>
@@ -35,7 +38,7 @@ describe('guided activation imports', () => {
           expect.objectContaining({
             contentHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
             proposedText: 'Retain exact evidence.',
-            sourceIds: preview.sources.map(source => source.sourceId),
+            sourceIds: EffectArray.map(preview.sources, source => source.sourceId),
           }),
         ]);
         expect(preview.sources).toEqual([
@@ -131,7 +134,10 @@ describe('guided activation imports', () => {
         yield* fixture.fs.symlink(outside, fixture.path.join(fixture.root, 'linked.md'));
         yield* fixture.fs.writeFile(fixture.path.join(fixture.root, 'binary.md'), new Uint8Array([0xff, 0xfe]));
         yield* fixture.fs.writeFileString(fixture.path.join(fixture.root, 'nul.md'), 'before\u0000after');
-        yield* fixture.fs.writeFileString(fixture.path.join(fixture.root, 'large.md'), 'x'.repeat(60 * 1024 + 1));
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.root, 'large.md'),
+          Effect2.pipe('x', EffectString.repeat(60 * 1024 + 1)),
+        );
 
         for (const [path, message] of [
           ['linked.md', 'safely read'],

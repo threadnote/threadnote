@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdtempSync, mkdirSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
@@ -56,8 +57,8 @@ describe('code graph mixed corpus lifecycle', () => {
       );
       expect(indexed.snapshot.fileCount).toBe(1);
       expect(indexed.skippedFiles).toBeGreaterThanOrEqual(1);
-      expect(indexed.diagnostics.join('\n')).toContain('Deferred 1 opaque corpus asset');
-      expect(document.nodes.some(node => node.path === 'docs/operations.rst')).toBe(true);
+      expect(EffectArray.join(indexed.diagnostics, '\n')).toContain('Deferred 1 opaque corpus asset');
+      expect(EffectArray.some(document.nodes, node => node.path === 'docs/operations.rst')).toBe(true);
       expect(image.nodes).toEqual([]);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
@@ -124,7 +125,7 @@ describe('code graph mixed corpus lifecycle', () => {
         {concurrency: 1},
       );
       expect(indexed.snapshot.fileCount).toBe(4);
-      expect(office.nodes.some(node => node.path === 'docs/handoff.docx')).toBe(true);
+      expect(EffectArray.some(office.nodes, node => node.path === 'docs/handoff.docx')).toBe(true);
       expect(image.nodes).toEqual(expect.arrayContaining([expect.objectContaining({kind: 'asset'})]));
       expect(rationale.nodes).toEqual(
         expect.arrayContaining([expect.objectContaining({kind: 'rationale', path: 'src/retry.ts'})]),

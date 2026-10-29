@@ -1,15 +1,24 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Schema} from 'effect';
+import {Effect, Predicate, Schema} from 'effect';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {beforeEach, describe, expect, vi} from 'vitest';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {ManagerCitationRepairJobV1} from '@threadnote/manager/attention/contracts';
 import {ManagerLiveConsumerChangeHints} from '../../src/manager/live_consumer_observation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class StaleCursorTestError extends Schema.TaggedError<StaleCursorTestError>()('StaleCursorTestError', {
-  message: Schema.String,
-}) {}
+class StaleCursorTestError extends Schema.TaggedError<StaleCursorTestError, {readonly brand: unique symbol}>()(
+  'StaleCursorTestError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 const mocks = vi.hoisted(() => ({
   load: vi.fn(),
@@ -60,6 +69,47 @@ const config = {
   account: 'local',
   agentId: 'threadnote',
 } satisfies RuntimeConfig;
+function isCitationRepairJob(value: unknown): value is ManagerCitationRepairJobV1 {
+  if (!Predicate.isObject(value) || !Predicate.isObject(value.progress)) return false;
+  const {progress} = value;
+  return (
+    typeof value.createdAt === 'string' &&
+    (value.error === undefined || typeof value.error === 'string') &&
+    (value.finishedAt === undefined || typeof value.finishedAt === 'string') &&
+    typeof value.id === 'string' &&
+    typeof value.project === 'string' &&
+    (value.status === 'completed' || value.status === 'failed' || value.status === 'running') &&
+    (value.warning === undefined || typeof value.warning === 'string') &&
+    typeof progress.batch === 'number' &&
+    typeof progress.failedCount === 'number' &&
+    (progress.initialCitationCount === undefined || typeof progress.initialCitationCount === 'number') &&
+    typeof progress.message === 'string' &&
+    typeof progress.pagesScanned === 'number' &&
+    (progress.phase === 'applying' ||
+      progress.phase === 'completed' ||
+      progress.phase === 'failed' ||
+      progress.phase === 'rebuilding' ||
+      progress.phase === 'scanning' ||
+      progress.phase === 'starting') &&
+    typeof progress.repairableCount === 'number' &&
+    typeof progress.repairedCount === 'number' &&
+    typeof progress.unresolvedCount === 'number'
+  );
+}
+
+function citationRepairJob(body: unknown): ManagerCitationRepairJobV1 | null {
+  if (!Predicate.isObject(body) || !('job' in body)) throw new Error('Citation repair job response is invalid.');
+  if (body.job === null) return null;
+  if (!isCitationRepairJob(body.job)) throw new Error('Citation repair job response is invalid.');
+  return body.job;
+}
+
+function afterCursorArgument(call: readonly unknown[]): string | undefined {
+  const scope = call[3];
+  if (!Predicate.isObject(scope) || typeof scope.after !== 'string') return undefined;
+  return scope.after;
+}
+
 function request(route: string, body: Record<string, unknown>) {
   return handleManagerAttentionAction({
     config,
@@ -125,13 +175,21 @@ beforeEach(() => {
   mocks.records.mockReturnValue(Effect.succeed([]));
   mocks.preview.mockReturnValue(
     Effect.succeed({
-      proposals: [{findingId: 'finding-1', proposalId: `health-repair-${'a'.repeat(40)}`, revision: 'b'.repeat(64)}],
+      proposals: [
+        {
+          findingId: 'finding-1',
+          proposalId: `health-repair-${Effect2.pipe('a', EffectString.repeat(40))}`,
+          revision: Effect2.pipe('b', EffectString.repeat(64)),
+        },
+      ],
     }),
   );
   mocks.apply.mockReturnValue(Effect.succeed({status: 'applied'}));
   mocks.applyBatch.mockImplementation(
     (_config: RuntimeConfig, input: {readonly proposals: readonly {readonly findingId: string}[]}) =>
-      Effect.succeed(input.proposals.map(proposal => ({findingId: proposal.findingId, status: 'applied'}))),
+      Effect.succeed(
+        EffectArray.map(input.proposals, proposal => ({findingId: proposal.findingId, status: 'applied'})),
+      ),
   );
   mocks.indexGraph.mockReturnValue(Effect.succeed({output: 'Ready'}));
 });
@@ -146,7 +204,8 @@ describe('Manager reviewed action adapters', () => {
             if (resource.topic !== 'citation-repair-jobs') return;
             const response = yield* readCitationRepairJob(resource.project).pipe(Effect.orDie);
             if (!response) return;
-            const job = (response.body as {job: {status: string; progress: {phase: string}}}).job;
+            const job = citationRepairJob(response.body);
+            if (job === null) return;
             observed.push({project: resource.project, status: job.status, phase: job.progress.phase});
           }),
       });
@@ -159,13 +218,14 @@ describe('Manager reviewed action adapters', () => {
       expect((yield* start(successProject))?.status).toBe(202);
       for (
         let attempt = 0;
-        attempt < 50 && !observed.some(item => item.project === successProject && item.status === 'completed');
+        attempt < 50 &&
+        !EffectArray.some(observed, item => item.project === successProject && item.status === 'completed');
         attempt++
       )
         yield* Effect.yieldNow;
-      const success = observed.filter(item => item.project === successProject);
+      const success = EffectArray.filter(observed, item => item.project === successProject);
       expect(success[0]).toEqual({project: successProject, status: 'running', phase: 'starting'});
-      expect(success.some(item => item.status === 'running' && item.phase !== 'starting')).toBe(true);
+      expect(EffectArray.some(success, item => item.status === 'running' && item.phase !== 'starting')).toBe(true);
       expect(success.at(-1)?.status).toBe('completed');
 
       const failureProject = 'live-citation-failure';
@@ -173,15 +233,18 @@ describe('Manager reviewed action adapters', () => {
       expect((yield* start(failureProject))?.status).toBe(202);
       for (
         let attempt = 0;
-        attempt < 50 && !observed.some(item => item.project === failureProject && item.status === 'failed');
+        attempt < 50 &&
+        !EffectArray.some(observed, item => item.project === failureProject && item.status === 'failed');
         attempt++
       )
         yield* Effect.yieldNow;
-      const failure = observed.filter(item => item.project === failureProject);
+      const failure = EffectArray.filter(observed, item => item.project === failureProject);
       expect(failure[0]).toEqual({project: failureProject, status: 'running', phase: 'starting'});
-      expect(failure.some(item => item.status === 'running' && item.phase === 'rebuilding')).toBe(true);
+      expect(EffectArray.some(failure, item => item.status === 'running' && item.phase === 'rebuilding')).toBe(true);
       expect(failure.at(-1)?.status).toBe('failed');
-      expect(observed.every(item => item.project === successProject || item.project === failureProject)).toBe(true);
+      expect(
+        EffectArray.every(observed, item => item.project === successProject || item.project === failureProject),
+      ).toBe(true);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect('forwards spaced project names to maintenance, citation jobs and repair preview', () =>
@@ -428,20 +491,20 @@ describe('Manager reviewed action adapters', () => {
       expect(mocks.apply).not.toHaveBeenCalled();
       expect(
         (yield* request('/api/context-health/apply', {
-          proposalId: `health-repair-${'a'.repeat(40)}`,
-          revision: 'b'.repeat(64),
+          proposalId: `health-repair-${Effect2.pipe('a', EffectString.repeat(40))}`,
+          revision: Effect2.pipe('b', EffectString.repeat(64)),
         }))?.status,
       ).toBe(400);
       yield* request('/api/context-health/apply', {
-        proposalId: `health-repair-${'a'.repeat(40)}`,
-        revision: 'b'.repeat(64),
+        proposalId: `health-repair-${Effect2.pipe('a', EffectString.repeat(40))}`,
+        revision: Effect2.pipe('b', EffectString.repeat(64)),
         approved: true,
         findingCategory: 'relation-target-missing',
         topic: 'workflow',
       });
       expect(mocks.apply.mock.lastCall?.[1]).toMatchObject({
-        proposalId: `health-repair-${'a'.repeat(40)}`,
-        revision: 'b'.repeat(64),
+        proposalId: `health-repair-${Effect2.pipe('a', EffectString.repeat(40))}`,
+        revision: Effect2.pipe('b', EffectString.repeat(64)),
         approved: true,
         topic: 'workflow',
         cwd: '/project',
@@ -460,8 +523,8 @@ describe('Manager reviewed action adapters', () => {
       ).toBe(409);
       expect(
         (yield* request('/api/context-health/apply', {
-          proposalId: `health-repair-${'a'.repeat(40)}`,
-          revision: 'b'.repeat(64),
+          proposalId: `health-repair-${Effect2.pipe('a', EffectString.repeat(40))}`,
+          revision: Effect2.pipe('b', EffectString.repeat(64)),
           approved: true,
         }))?.status,
       ).toBe(409);
@@ -476,19 +539,19 @@ describe('Manager reviewed action adapters', () => {
         category: 'citation-changed',
         findingId: 'citation-finding',
         mutation: {
-          citationId: `tncc_${'1'.repeat(40)}`,
-          expectedResultContentHash: '2'.repeat(64),
+          citationId: `tncc_${Effect2.pipe('1', EffectString.repeat(40))}`,
+          expectedResultContentHash: Effect2.pipe('2', EffectString.repeat(64)),
           kind: 'replace-citation',
           replacement: {
-            id: `tncc_${'3'.repeat(40)}`,
+            id: `tncc_${Effect2.pipe('3', EffectString.repeat(40))}`,
             path: 'src/example.ts',
-            sourceCommit: '4'.repeat(40),
+            sourceCommit: Effect2.pipe('4', EffectString.repeat(40)),
             target: {kind: 'file'},
           },
           subjectUri: 'threadnote://user/tester/memories/durable/projects/threadnote/example.md',
         },
-        proposalId: `health-repair-${'5'.repeat(40)}`,
-        revision: '6'.repeat(64),
+        proposalId: `health-repair-${Effect2.pipe('5', EffectString.repeat(40))}`,
+        revision: Effect2.pipe('6', EffectString.repeat(64)),
       };
       mocks.preview.mockImplementation(
         (_config: RuntimeConfig, _project: string, _cwd: string, scope: {findingCategories?: readonly string[]}) =>
@@ -528,24 +591,24 @@ describe('Manager reviewed action adapters', () => {
   effectIt.effect('repairs every citation page in a background job that outlives the start request', () =>
     Effect.gen(function* () {
       const project = 'background-repair';
-      const cursor = `hcx1_2s_${'a'.repeat(40)}`;
+      const cursor = `hcx1_2s_${Effect2.pipe('a', EffectString.repeat(40))}`;
       const proposal = (suffix: string) => ({
         category: 'citation-changed' as const,
         findingId: `citation-finding-${suffix}`,
         mutation: {
-          citationId: `tncc_${suffix.repeat(40)}`,
+          citationId: `tncc_${Effect2.pipe(suffix, EffectString.repeat(40))}`,
           kind: 'replace-citation' as const,
           replacement: {
-            id: `tncc_${suffix === '1' ? '2'.repeat(40) : '4'.repeat(40)}`,
+            id: `tncc_${suffix === '1' ? Effect2.pipe('2', EffectString.repeat(40)) : Effect2.pipe('4', EffectString.repeat(40))}`,
             path: `src/example-${suffix}.ts`,
-            sourceCommit: '5'.repeat(40),
+            sourceCommit: Effect2.pipe('5', EffectString.repeat(40)),
             target: {kind: 'file' as const},
           },
           subjectUri: `threadnote://user/tester/memories/durable/projects/${project}/example-${suffix}.md`,
         },
         project,
-        proposalId: `health-repair-${suffix === '1' ? '6'.repeat(40) : '7'.repeat(40)}`,
-        revision: '8'.repeat(64),
+        proposalId: `health-repair-${suffix === '1' ? Effect2.pipe('6', EffectString.repeat(40)) : Effect2.pipe('7', EffectString.repeat(40))}`,
+        revision: Effect2.pipe('8', EffectString.repeat(64)),
       });
       let applied = false;
       let staleCursorFailures = 0;
@@ -571,22 +634,20 @@ describe('Manager reviewed action adapters', () => {
       mocks.applyBatch.mockImplementation(
         (_config: RuntimeConfig, input: {readonly proposals: readonly {readonly findingId: string}[]}) => {
           applied = true;
-          return Effect.succeed(input.proposals.map(item => ({findingId: item.findingId, status: 'applied'})));
+          return Effect.succeed(
+            EffectArray.map(input.proposals, item => ({findingId: item.findingId, status: 'applied'})),
+          );
         },
       );
 
       const started = yield* request('/api/context-health/citations/jobs', {project});
       expect(started?.status).toBe(202);
-      type JobSnapshot = {
-        readonly status?: string;
-        readonly progress?: {readonly repairedCount?: number};
-      } | null;
-      let job: JobSnapshot = null;
+      let job: ManagerCitationRepairJobV1 | null = null;
       for (let attempt = 0; attempt < 50; attempt += 1) {
         yield* Effect.yieldNow;
         const response = yield* readCitationRepairJob(project);
         if (response === undefined) continue;
-        job = (response.body as unknown as {readonly job: JobSnapshot}).job;
+        job = citationRepairJob(response.body);
         if (job?.status === 'completed') break;
       }
 
@@ -596,9 +657,15 @@ describe('Manager reviewed action adapters', () => {
       expect(mocks.applyBatch).toHaveBeenCalledTimes(1);
       expect(mocks.applyBatch.mock.calls[0]?.[1].proposals).toHaveLength(2);
       expect(
-        mocks.preview.mock.calls
-          .filter(call => call[1] === project)
-          .map(call => (call[3] as {readonly after?: string}).after),
+        EffectArray.map(
+          EffectArrayPipe(mocks.preview.mock.calls, __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (call, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && call[1] === project,
+            ),
+          ),
+          call => afterCursorArgument(call),
+        ),
       ).toEqual([undefined, cursor, undefined, cursor, undefined]);
     }),
   );
@@ -606,7 +673,7 @@ describe('Manager reviewed action adapters', () => {
   effectIt.effect('stops after bounded stale-cursor defect restarts', () =>
     Effect.gen(function* () {
       const project = 'stale-cursor-exhaustion';
-      const cursor = `hcx1_2s_${'b'.repeat(40)}`;
+      const cursor = `hcx1_2s_${Effect2.pipe('b', EffectString.repeat(40))}`;
       mocks.preview.mockImplementation(
         (_config: RuntimeConfig, selectedProject: string, _cwd: string, scope: {after?: string}) => {
           if (selectedProject !== project)
@@ -627,12 +694,11 @@ describe('Manager reviewed action adapters', () => {
       );
 
       expect((yield* request('/api/context-health/citations/jobs', {project}))?.status).toBe(202);
-      type FailedJobSnapshot = {readonly error?: string; readonly status?: string} | null;
-      let job: FailedJobSnapshot = null;
+      let job: ManagerCitationRepairJobV1 | null = null;
       for (let attempt = 0; attempt < 100; attempt += 1) {
         yield* Effect.yieldNow;
         const response = yield* readCitationRepairJob(project);
-        job = (response?.body as {readonly job: FailedJobSnapshot} | undefined)?.job ?? null;
+        job = response === undefined ? null : citationRepairJob(response.body);
         if (job?.status === 'failed') break;
       }
 
@@ -641,9 +707,15 @@ describe('Manager reviewed action adapters', () => {
         error: expect.stringContaining('Context-health continuation cursor is invalid or stale'),
       });
       expect(
-        mocks.preview.mock.calls
-          .filter(call => call[1] === project)
-          .map(call => (call[3] as {readonly after?: string}).after),
+        EffectArray.map(
+          EffectArrayPipe(mocks.preview.mock.calls, __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (call, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && call[1] === project,
+            ),
+          ),
+          call => afterCursorArgument(call),
+        ),
       ).toEqual([undefined, cursor, undefined, cursor, undefined, cursor, undefined, cursor]);
       expect(mocks.applyBatch).not.toHaveBeenCalled();
     }),
@@ -652,15 +724,21 @@ describe('Manager reviewed action adapters', () => {
   effectIt.effect('rescans without writing when the project graph changes after a citation scan', () =>
     Effect.gen(function* () {
       const project = 'source-race';
-      const scannedSnapshot = `cgsn_${'1'.repeat(40)}`;
-      const currentSnapshot = `cgsn_${'2'.repeat(40)}`;
+      const scannedSnapshot = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+      const currentSnapshot = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
       let scans = 0;
       mocks.indexGraph
         .mockReturnValueOnce(
-          Effect.succeed({output: 'Ready', snapshot: {commit: '3'.repeat(40), dirty: false, id: scannedSnapshot}}),
+          Effect.succeed({
+            output: 'Ready',
+            snapshot: {commit: Effect2.pipe('3', EffectString.repeat(40)), dirty: false, id: scannedSnapshot},
+          }),
         )
         .mockReturnValue(
-          Effect.succeed({output: 'Ready', snapshot: {commit: '4'.repeat(40), dirty: false, id: currentSnapshot}}),
+          Effect.succeed({
+            output: 'Ready',
+            snapshot: {commit: Effect2.pipe('4', EffectString.repeat(40)), dirty: false, id: currentSnapshot},
+          }),
         );
       mocks.preview.mockImplementation((_config: RuntimeConfig, selectedProject: string) => {
         if (selectedProject !== project || scans++ > 0)
@@ -671,20 +749,20 @@ describe('Manager reviewed action adapters', () => {
               category: 'citation-changed',
               findingId: 'source-race-finding',
               mutation: {
-                citationId: `tncc_${'5'.repeat(40)}`,
+                citationId: `tncc_${Effect2.pipe('5', EffectString.repeat(40))}`,
                 kind: 'replace-citation',
                 replacement: {
-                  id: `tncc_${'6'.repeat(40)}`,
+                  id: `tncc_${Effect2.pipe('6', EffectString.repeat(40))}`,
                   path: 'src/example.ts',
-                  sourceCommit: '3'.repeat(40),
+                  sourceCommit: Effect2.pipe('3', EffectString.repeat(40)),
                   sourceSnapshotId: scannedSnapshot,
                   target: {kind: 'file'},
                 },
                 subjectUri: `threadnote://user/tester/memories/durable/projects/${project}/example.md`,
               },
               project,
-              proposalId: `health-repair-${'7'.repeat(40)}`,
-              revision: '8'.repeat(64),
+              proposalId: `health-repair-${Effect2.pipe('7', EffectString.repeat(40))}`,
+              revision: Effect2.pipe('8', EffectString.repeat(64)),
             },
           ],
           omittedProposals: 0,
@@ -693,12 +771,11 @@ describe('Manager reviewed action adapters', () => {
       });
 
       expect((yield* request('/api/context-health/citations/jobs', {project}))?.status).toBe(202);
-      type JobSnapshot = {readonly status?: string; readonly progress?: {readonly repairedCount?: number}} | null;
-      let job: JobSnapshot = null;
+      let job: ManagerCitationRepairJobV1 | null = null;
       for (let attempt = 0; attempt < 50; attempt += 1) {
         yield* Effect.yieldNow;
         const response = yield* readCitationRepairJob(project);
-        job = (response?.body as {readonly job: JobSnapshot} | undefined)?.job ?? null;
+        job = response === undefined ? null : citationRepairJob(response.body);
         if (job?.status === 'completed') break;
       }
 
@@ -719,17 +796,23 @@ describe('Manager reviewed action adapters', () => {
       );
 
       expect((yield* request('/api/context-health/citations/jobs', {project}))?.status).toBe(202);
-      type FailedJobSnapshot = {readonly error?: string; readonly status?: string} | null;
-      let job: FailedJobSnapshot = null;
+      let job: ManagerCitationRepairJobV1 | null = null;
       for (let attempt = 0; attempt < 50; attempt += 1) {
         yield* Effect.yieldNow;
         const response = yield* readCitationRepairJob(project);
-        job = (response?.body as {readonly job: FailedJobSnapshot} | undefined)?.job ?? null;
+        job = response === undefined ? null : citationRepairJob(response.body);
         if (job?.status === 'failed') break;
       }
 
       expect(job).toMatchObject({status: 'failed', error: 'Unexpected citation scanner defect.'});
-      expect(mocks.preview.mock.calls.filter(call => call[1] === project)).toHaveLength(1);
+      expect(
+        EffectArrayPipe(mocks.preview.mock.calls, __effectFilterValues =>
+          EffectArray.filter(
+            __effectFilterValues,
+            (call, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && call[1] === project,
+          ),
+        ),
+      ).toHaveLength(1);
       expect(mocks.applyBatch).not.toHaveBeenCalled();
     }),
   );
@@ -740,21 +823,21 @@ describe('Manager reviewed action adapters', () => {
         category: 'citation-missing',
         findingId: 'citation-finding',
         mutation: {
-          citationId: `tncc_${'1'.repeat(40)}`,
+          citationId: `tncc_${Effect2.pipe('1', EffectString.repeat(40))}`,
           kind: 'replace-citation',
           replacement: {
-            id: `tncc_${'2'.repeat(40)}`,
+            id: `tncc_${Effect2.pipe('2', EffectString.repeat(40))}`,
             path: 'src/example.ts',
-            sourceCommit: '3'.repeat(40),
+            sourceCommit: Effect2.pipe('3', EffectString.repeat(40)),
             target: {kind: 'file'},
           },
           subjectUri: 'threadnote://user/tester/memories/durable/projects/threadnote/example.md',
         },
-        proposalId: `health-repair-${'4'.repeat(40)}`,
-        revision: '5'.repeat(64),
+        proposalId: `health-repair-${Effect2.pipe('4', EffectString.repeat(40))}`,
+        revision: Effect2.pipe('5', EffectString.repeat(64)),
       };
       mocks.preview.mockReturnValueOnce(
-        Effect.succeed({proposals: [proposal], nextCursor: `hcx1_2s_${'a'.repeat(40)}`}),
+        Effect.succeed({proposals: [proposal], nextCursor: `hcx1_2s_${Effect2.pipe('a', EffectString.repeat(40))}`}),
       );
 
       const result = yield* request('/api/context-health/citations/preview', {
@@ -762,7 +845,7 @@ describe('Manager reviewed action adapters', () => {
       });
 
       expect(result?.body).toMatchObject({
-        nextCursor: `hcx1_2s_${'a'.repeat(40)}`,
+        nextCursor: `hcx1_2s_${Effect2.pipe('a', EffectString.repeat(40))}`,
         repairableCount: 1,
       });
       expect(mocks.preview).toHaveBeenCalledTimes(1);
@@ -775,13 +858,13 @@ describe('Manager reviewed action adapters', () => {
         category: 'citation-changed',
         findingId: 'citation-finding',
         mutation: {
-          citationId: `tncc_${'1'.repeat(40)}`,
+          citationId: `tncc_${Effect2.pipe('1', EffectString.repeat(40))}`,
           kind: 'replace-citation',
-          replacement: {id: `tncc_${'2'.repeat(40)}`},
+          replacement: {id: `tncc_${Effect2.pipe('2', EffectString.repeat(40))}`},
           subjectUri: 'threadnote://user/tester/memories/durable/projects/threadnote/example.md',
         },
-        proposalId: `health-repair-${'3'.repeat(40)}`,
-        revision: '4'.repeat(64),
+        proposalId: `health-repair-${Effect2.pipe('3', EffectString.repeat(40))}`,
+        revision: Effect2.pipe('4', EffectString.repeat(64)),
       };
       mocks.preview.mockImplementation(() => Effect.succeed({proposals: [proposal]}));
 
@@ -792,9 +875,9 @@ describe('Manager reviewed action adapters', () => {
             category: 'citation-changed',
             citationId: proposal.mutation.citationId,
             findingId: proposal.findingId,
-            proposalId: `health-repair-${'5'.repeat(40)}`,
+            proposalId: `health-repair-${Effect2.pipe('5', EffectString.repeat(40))}`,
             replacementId: proposal.mutation.replacement.id,
-            revision: '6'.repeat(64),
+            revision: Effect2.pipe('6', EffectString.repeat(64)),
             subjectUri: proposal.mutation.subjectUri,
           },
         ],

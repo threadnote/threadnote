@@ -1,3 +1,5 @@
+import {Predicate} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
@@ -12,16 +14,18 @@ import {HttpService, type HttpServiceShape} from '@threadnote/platform/http';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 import {stopVerifiedLegacyLocalAi} from '@threadnote/threadnote/migration/legacy-runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const homes: string[] = [];
 const launchId = '2025ed4f-fdfa-4467-949a-fecd0411fccb';
 const model = 'legacy-model';
 const pid = 30_356;
 const port = 19_340;
-const token = 'a'.repeat(43);
+const token = Effect2.pipe('a', EffectString.repeat(43));
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('legacy local AI cleanup', () => {
@@ -49,7 +53,7 @@ describe('legacy local AI cleanup', () => {
         yield* Effect.promise(() =>
           readFile(join(legacyHome, 'local-ai-server.json'), 'utf8').then(
             () => undefined,
-            cause => (cause as NodeJS.ErrnoException).code,
+            cause => (Predicate.hasProperty(cause, 'code') ? cause.code : undefined),
           ),
         ),
       ).toBe('ENOENT');
@@ -146,9 +150,11 @@ function testServices(
           Effect.sync(() => {
             const challenge = new URL(url).searchParams.get('challenge') ?? '';
             const proof = options.invalidProof
-              ? '0'.repeat(64)
+              ? Effect2.pipe('0', EffectString.repeat(64))
               : createHash('sha256')
-                  .update([challenge, 'threadnote-local-ai', model, String(pid), launchId, token].join('\0'))
+                  .update(
+                    EffectArray.join([challenge, 'threadnote-local-ai', model, String(pid), launchId, token], '\0'),
+                  )
                   .digest('hex');
             return {
               body: {launchId, model, pid, proof, service: 'threadnote-local-ai', status: 'ok'},

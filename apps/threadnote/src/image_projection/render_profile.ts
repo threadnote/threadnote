@@ -1,5 +1,7 @@
 import {THREADNOTE_MCP_CLIENT_ENV} from '../constants.js';
 import type {AgentClient} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const IMAGE_PROJECTION_MODEL_ENVIRONMENT_KEY = 'THREADNOTE_IMAGE_PROJECTION_MODEL';
 export const MCP_CLIENT_ENVIRONMENT_KEY = THREADNOTE_MCP_CLIENT_ENV;
@@ -38,13 +40,21 @@ export function imageProjectionRenderOptions(model: string | undefined): ImagePr
 }
 
 function sanitizePxpipeModelId(value: string | undefined): string | undefined {
-  const model = value?.trim();
+  const model = Effect.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if (model === undefined || !IMAGE_PROJECTION_MODEL_ID_PATTERN.test(model)) return undefined;
   return model;
 }
 
 function parseMcpClient(value: string | undefined): AgentClient | undefined {
-  const client = value?.trim().toLowerCase();
+  const client: string | undefined = Effect.pipe(
+    value,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   if (client === 'claude' || client === 'codex' || client === 'copilot' || client === 'cursor' || client === 'omp') {
     return client;
   }

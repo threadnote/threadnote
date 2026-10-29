@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {agentAdapterStatus, runAgentAdapterAction} from '../../agent_integration/adapter_actions.js';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
@@ -64,13 +66,13 @@ export const runActivationProductionUndoV1 = Effect.fn('activation.production.un
       : resumeActivationProductionUndoPlanV1(plan, priorUndo);
   const executable = effective.operations;
   const completedBefore = new Set(priorUndo?.completedOperationIds ?? []);
-  const pending = executable.filter(operation => !completedBefore.has(operation.operationId));
+  const pending = EffectArray.filter(executable, operation => !completedBefore.has(operation.operationId));
   const retainedOperationIds = effective.retainedOperationIds;
   const approvalToken = effective.approvalToken;
   const preview = {
     activationId: plan.activationId,
     completedOperationIds: [...completedBefore],
-    operations: pending.map(operation => operation.operationId),
+    operations: EffectArray.map(pending, operation => operation.operationId),
     retainedOperationIds,
     undoPlanHash: approvalToken,
   };
@@ -86,7 +88,7 @@ export const runActivationProductionUndoV1 = Effect.fn('activation.production.un
     priorUndo ??
     (yield* initializeActivationUndoReceiptV1(config, {
       activationId: plan.activationId,
-      operationIds: executable.map(operation => operation.operationId),
+      operationIds: EffectArray.map(executable, operation => operation.operationId),
       publicationEvidenceHash: effective.publicationEvidenceHash,
       retainedOperationIds: preview.retainedOperationIds,
       undoPlanHash: approvalToken,
@@ -282,20 +284,24 @@ const establishActivationProductionUndoPlanV1 = Effect.fn('activation.production
   state: ActivationStateV1,
   plan: ActivationUndoPlan,
 ) {
-  const receiptPublished = state.receipt.operations.some(
+  const receiptPublished = EffectArray.some(
+    state.receipt.operations,
     operation =>
       (operation.kind === 'decision.publish' || operation.kind === 'decision.propose') &&
       operationIsComplete(operation.status),
   );
   const publication = yield* observeActivationPublicationForUndoV1(config, observation, state, receiptPublished);
   const published = receiptPublished || publication.published;
-  const operations = plan.operations.filter(operation =>
+  const operations = EffectArray.filter(plan.operations, operation =>
     published ? operation.operationId !== 'decision-apply' && operation.operationId !== 'team-share' : true,
   );
   const retainedOperationIds = [
     ...new Set([
       ...plan.retainedOperationIds,
-      ...plan.operations.filter(operation => !operations.includes(operation)).map(operation => operation.operationId),
+      ...EffectArray.map(
+        EffectArray.filter(plan.operations, operation => !operations.includes(operation)),
+        operation => operation.operationId,
+      ),
     ]),
   ].sort();
   return {
@@ -315,16 +321,23 @@ function resumeActivationProductionUndoPlanV1(
   plan: ActivationUndoPlan,
   receipt: ActivationUndoReceiptV1,
 ): EffectiveActivationProductionUndoPlanV1 {
-  const operationById = new Map(plan.operations.map(operation => [operation.operationId, operation]));
+  const operationById = new Map(EffectArray.map(plan.operations, operation => [operation.operationId, operation]));
   const selected = new Set(receipt.operationIds);
-  const operations = plan.operations.filter(operation => selected.has(operation.operationId));
-  const canonicalOperationIds = operations.map(operation => operation.operationId);
+  const operations = EffectArrayPipe(plan.operations, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (operation, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues && selected.has(operation.operationId),
+    ),
+  );
+  const canonicalOperationIds = EffectArray.map(operations, operation => operation.operationId);
   const canonicalRetainedOperationIds = [
     ...new Set([
       ...plan.retainedOperationIds,
-      ...plan.operations
-        .filter(operation => !selected.has(operation.operationId))
-        .map(operation => operation.operationId),
+      ...EffectArray.map(
+        EffectArray.filter(plan.operations, operation => !selected.has(operation.operationId)),
+        operation => operation.operationId,
+      ),
     ]),
   ].sort();
   const approvalToken = activationProductionUndoApprovalTokenV1({
@@ -334,8 +347,8 @@ function resumeActivationProductionUndoPlanV1(
     retainedOperationIds: canonicalRetainedOperationIds,
   });
   if (
-    receipt.operationIds.some(operationId => !operationById.has(operationId)) ||
-    receipt.operationIds.some(operationId => receipt.retainedOperationIds.includes(operationId)) ||
+    EffectArray.some(receipt.operationIds, operationId => !operationById.has(operationId)) ||
+    EffectArray.some(receipt.operationIds, operationId => receipt.retainedOperationIds.includes(operationId)) ||
     canonicalJson(receipt.operationIds) !== canonicalJson(canonicalOperationIds) ||
     canonicalJson(receipt.retainedOperationIds) !== canonicalJson(canonicalRetainedOperationIds) ||
     receipt.undoPlanHash !== approvalToken
@@ -356,8 +369,11 @@ const observeActivationPublicationForUndoV1 = Effect.fn('activation.production.u
   state: ActivationStateV1,
   receiptPublished: boolean,
 ) {
-  const publicationOperation = state.receipt.operations.find(
-    operation => operation.kind === 'decision.publish' || operation.kind === 'decision.propose',
+  const publicationOperation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      state.receipt.operations,
+      operation => operation.kind === 'decision.publish' || operation.kind === 'decision.propose',
+    ),
   );
   const receiptEvidence =
     publicationOperation === undefined
@@ -368,7 +384,8 @@ const observeActivationPublicationForUndoV1 = Effect.fn('activation.production.u
           status: publicationOperation.status,
           subsystemReceiptHash: publicationOperation.subsystemReceiptHash ?? null,
         };
-  const decisionApplied = state.receipt.operations.some(
+  const decisionApplied = EffectArray.some(
+    state.receipt.operations,
     operation => operation.kind === 'decision.apply' && operationIsComplete(operation.status),
   );
   if (!decisionApplied) {

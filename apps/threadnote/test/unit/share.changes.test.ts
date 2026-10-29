@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {mkdir, mkdtemp, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
@@ -6,6 +7,8 @@ import {listChangedFiles, mergeChanges} from '@threadnote/threadnote/share/index
 import type {ChangedFile} from '@threadnote/threadnote/share/index';
 import {runCommand as runCommandEffect} from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const runCommand = (...args: Parameters<typeof runCommandEffect>) => runEffect(runCommandEffect(...args));
 
@@ -41,16 +44,22 @@ describe('mergeChanges', () => {
     const current = [make('a.md', 'added'), make('c.md', 'added')];
     const out = mergeChanges(previous, current);
     expect(out).toHaveLength(3);
-    expect(out.find(c => c.relativePath === 'a.md')?.status).toBe('added');
-    expect(out.find(c => c.relativePath === 'b.md')?.status).toBe('removed');
-    expect(out.find(c => c.relativePath === 'c.md')?.status).toBe('added');
+    expect(EffectOption.getOrUndefined(EffectArray.findFirst(out, c => c.relativePath === 'a.md'))?.status).toBe(
+      'added',
+    );
+    expect(EffectOption.getOrUndefined(EffectArray.findFirst(out, c => c.relativePath === 'b.md'))?.status).toBe(
+      'removed',
+    );
+    expect(EffectOption.getOrUndefined(EffectArray.findFirst(out, c => c.relativePath === 'c.md'))?.status).toBe(
+      'added',
+    );
   });
 
   it('preserves order of first occurrence', () => {
     const previous = [make('z.md', 'modified'), make('a.md', 'modified')];
     const current = [make('a.md', 'added'), make('b.md', 'added')];
     const out = mergeChanges(previous, current);
-    expect(out.map(c => c.relativePath)).toEqual(['z.md', 'a.md', 'b.md']);
+    expect(EffectArray.map(out, c => c.relativePath)).toEqual(['z.md', 'a.md', 'b.md']);
   });
 });
 
@@ -61,12 +70,12 @@ describe('listChangedFiles', () => {
 
   async function gitOutput(args: readonly string[], cwd: string): Promise<string> {
     const result = await runCommand('git', args, {cwd});
-    return result.stdout.trim();
+    return Effect.pipe(result.stdout, EffectString.trim);
   }
 
   it('does not report symlink additions as ingestible files', async () => {
     const repo = await mkdtemp(join(tmpdir(), 'threadnote-share-changes-'));
-    const previousGitEnv = new Map(GIT_ENV_KEYS.map(key => [key, process.env[key]]));
+    const previousGitEnv = new Map(EffectArray.map(GIT_ENV_KEYS, key => [key, process.env[key]]));
     let secretPath: string | undefined;
     try {
       for (const key of GIT_ENV_KEYS) {

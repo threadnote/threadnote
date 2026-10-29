@@ -1,3 +1,6 @@
+import {isJsonObject, type JsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray} from 'effect';
+import {isReadonlyArray} from '@threadnote/platform/readonly-array';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {Clock, Effect, Schema} from 'effect';
 import type {ProjectManifest, ResolvedWorkset} from '@threadnote/workspace/config';
@@ -8,6 +11,10 @@ import {activeInstalledVersion} from '../../installations.js';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {attachAnonymousTelemetryDiagnostic, attachAnonymousTelemetryError} from '../../telemetry/diagnostic.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export {uriSegment};
 export interface RuntimeConfig {
   readonly account: string;
@@ -64,7 +71,10 @@ export type CheckedOptionalTextArray =
 // reconnect — otherwise they silently keep hitting stale code.
 let mcpStartupVersion: string | undefined;
 let staleNoticeCache: {readonly checkedAtMs: number; readonly notice: string | undefined} | undefined;
-export class McpServerOperationError extends Schema.TaggedError<McpServerOperationError>()('McpServerOperationError', {
+export class McpServerOperationError extends Schema.TaggedError<
+  McpServerOperationError,
+  {readonly brand: unique symbol}
+>()('McpServerOperationError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
@@ -125,7 +135,7 @@ export function worksetScopeUris(config: RuntimeConfig, workset: ResolvedWorkset
   for (const member of workset.projects) {
     scopes.push(`threadnote://user/${uriSegment(config.user)}/memories/durable/projects/${uriSegment(member.name)}`);
     const seeded = trimTrailingSlash(member.uri);
-    if (seeded.startsWith('threadnote://')) {
+    if (Effect2.pipe(seeded, EffectString.startsWith('threadnote://'))) {
       scopes.push(seeded);
     }
   }
@@ -158,7 +168,9 @@ export function projectMemoryScopeUris(
 }
 
 export function normalizeOptionalMetadata(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
+  const trimmed = Effect2.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   return trimmed ? trimmed : undefined;
 }
 
@@ -168,24 +180,29 @@ export function requiredText(
   fieldName: string,
   example: Record<string, string>,
 ): CheckedText {
-  const normalized = value?.trim();
+  const normalized = Effect2.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (normalized) {
     return {ok: true, value: normalized};
   }
   return {
     error: argumentError(
-      [
-        `Threadnote MCP tool "${toolName}" needs a non-empty "${fieldName}" argument.`,
-        'Pass JSON arguments to the tool call.',
-        `Example: ${toolName}(${JSON.stringify(example)})`,
-      ].join('\n'),
+      EffectArray.join(
+        [
+          `Threadnote MCP tool "${toolName}" needs a non-empty "${fieldName}" argument.`,
+          'Pass JSON arguments to the tool call.',
+          `Example: ${toolName}(${JSON.stringify(example)})`,
+        ],
+        '\n',
+      ),
     ),
     ok: false,
   };
 }
 
 export function rejectLeadingDash(value: string, toolName: string, fieldName: string): CheckedText {
-  if (!value.startsWith('-')) {
+  if (!Effect2.pipe(value, EffectString.startsWith('-'))) {
     return {ok: true, value};
   }
   return {
@@ -216,7 +233,9 @@ export function optionalResourceUri(
   toolName: string,
   fieldName = 'uri',
 ): CheckedOptionalText {
-  const normalized = value?.trim();
+  const normalized = Effect2.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!normalized) {
     return {ok: true, value: undefined};
   }
@@ -236,8 +255,11 @@ export function optionalResourceUriList(
   value: readonly string[] | string | undefined,
   toolName: string,
 ): CheckedOptionalTextArray {
-  const rawValues = Array.isArray(value) ? value : value === undefined ? [] : [value];
-  const uris = rawValues.map(uri => uri.trim()).filter(Boolean);
+  const rawValues = typeof value === 'string' ? [value] : isReadonlyArray(value) ? value : [];
+  const uris = EffectArray.filter(
+    EffectArray.map(rawValues, uri => EffectString.trim(uri)),
+    Boolean,
+  );
   if (uris.length === 0) {
     return {ok: true, value: undefined};
   }
@@ -263,16 +285,22 @@ export function requiredResourceUriList(
   exampleUri: string,
   options: {readonly personalMemoryUser?: string} = {},
 ): CheckedTextArray {
-  const rawValues = Array.isArray(value) ? value : value === undefined ? [] : [value];
-  const uris = rawValues.map(uri => uri.trim()).filter(Boolean);
+  const rawValues = typeof value === 'string' ? [value] : isReadonlyArray(value) ? value : [];
+  const uris = EffectArray.filter(
+    EffectArray.map(rawValues, uri => EffectString.trim(uri)),
+    Boolean,
+  );
   if (uris.length === 0) {
     return {
       error: argumentError(
-        [
-          `Threadnote MCP tool "${toolName}" needs a non-empty "uri" or "uris" argument.`,
-          'Pass JSON arguments to the tool call.',
-          `Example: ${toolName}(${JSON.stringify({uris: [exampleUri]})})`,
-        ].join('\n'),
+        EffectArray.join(
+          [
+            `Threadnote MCP tool "${toolName}" needs a non-empty "uri" or "uris" argument.`,
+            'Pass JSON arguments to the tool call.',
+            `Example: ${toolName}(${JSON.stringify({uris: [exampleUri]})})`,
+          ],
+          '\n',
+        ),
       ),
       ok: false,
     };
@@ -295,20 +323,26 @@ export function requiredResourceUriList(
 
 export function compactPersonalMemoryReferences(text: string, user: string, enabled = true): string {
   return enabled
-    ? text.replaceAll(/threadnote:\/\/[^\s`)\]}>"']+/gu, candidate => compactPersonalMemoryReference(candidate, user))
+    ? // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+      text.replaceAll(/threadnote:\/\/[^\s`)\]}>"']+/gu, candidate => compactPersonalMemoryReference(candidate, user))
     : text;
 }
 
 /** Recursively compacts current-user memory URIs in JSON-compatible MCP structured content without mutating the input. */
-export function compactPersonalMemoryStructuredReferences<T>(value: T, user: string): T {
-  if (typeof value === 'string') return compactPersonalMemoryReferences(value, user) as T;
-  if (Array.isArray(value)) {
-    return value.map(item => compactPersonalMemoryStructuredReferences(item, user)) as T;
+export function compactPersonalMemoryStructuredReferences(value: JsonObject, user: string): JsonObject;
+export function compactPersonalMemoryStructuredReferences(value: unknown, user: string): unknown;
+export function compactPersonalMemoryStructuredReferences(value: unknown, user: string): unknown {
+  if (typeof value === 'string') return compactPersonalMemoryReferences(value, user);
+  if (EffectArray.isArray(value)) {
+    return EffectArray.map(value, item => compactPersonalMemoryStructuredReferences(item, user));
   }
-  if (value === null || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, compactPersonalMemoryStructuredReferences(item, user)]),
-  ) as T;
+  if (!isJsonObject(value)) return value;
+  return EffectRecord.fromEntries(
+    EffectArray.map(EffectRecord.toEntries(value), ([key, item]) => [
+      key,
+      compactPersonalMemoryStructuredReferences(item, user),
+    ]),
+  );
 }
 
 function compactPersonalMemoryReference(candidate: string, user: string): string {
@@ -316,8 +350,8 @@ function compactPersonalMemoryReference(candidate: string, user: string): string
   while (trailingStart > 0 && isCompactReferenceTrailingPunctuation(candidate[trailingStart - 1])) {
     trailingStart -= 1;
   }
-  const trailingPunctuation = candidate.slice(trailingStart);
-  const uri = candidate.slice(0, trailingStart);
+  const trailingPunctuation = Effect2.pipe(candidate, EffectString.slice(trailingStart));
+  const uri = Effect2.pipe(candidate, EffectString.slice(0, trailingStart));
   try {
     const parsed = parseResourceId(uri);
     const currentUserSegment = uriSegment(user);
@@ -329,7 +363,7 @@ function compactPersonalMemoryReference(candidate: string, user: string): string
       return candidate;
     }
     const prefix = `threadnote://user/${encodeURIComponent(parsed.segments[0])}/`;
-    return `${parsed.canonicalUri.slice(prefix.length)}${trailingPunctuation}`;
+    return `${Effect2.pipe(parsed.canonicalUri, EffectString.slice(prefix.length))}${trailingPunctuation}`;
   } catch {
     return candidate;
   }
@@ -340,7 +374,9 @@ function isCompactReferenceTrailingPunctuation(value: string | undefined): boole
 }
 
 function expandPersonalMemoryReference(value: string, user: string | undefined): string {
-  return user !== undefined && value.startsWith('memories/') ? `threadnote://user/${uriSegment(user)}/${value}` : value;
+  return user !== undefined && Effect2.pipe(value, EffectString.startsWith('memories/'))
+    ? `threadnote://user/${uriSegment(user)}/${value}`
+    : value;
 }
 
 export function argumentError(text: string): CallToolResult {
@@ -366,6 +402,6 @@ export function normalizeStringOrStrings(value: string | readonly string[] | und
   return typeof value === 'string' ? [value] : (value ?? []);
 }
 export function commonCitationSourceCommit(citations: readonly {readonly sourceCommit: string}[]): string | undefined {
-  const commits = new Set(citations.map(citation => citation.sourceCommit));
+  const commits = new Set(EffectArray.map(citations, citation => citation.sourceCommit));
   return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
 }

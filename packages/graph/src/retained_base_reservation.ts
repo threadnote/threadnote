@@ -3,6 +3,8 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runtimeTextDirectoryNamePage} from '@threadnote/platform/system';
 import {codeGraphRetainedBaseReservationLockPath, codeGraphRetainedBaseReservationRoot} from './layout.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_RETAINED_BASE_HOME_MAXIMUM = 2;
 
@@ -67,7 +69,7 @@ export const reserveCodeGraphRetainedBase = Effect.fn('codeGraph.retainedBase.re
       const expiresAt = now + Math.max(1, Math.floor(options.durationMilliseconds));
       if (existing && existing.receipt.expiresAt >= expiresAt) return true;
       const receiptPath = path.join(root, `v1-${sha256HexSync(options.physicalSnapshotId)}.json`);
-      const temporaryPath = `${receiptPath}.${sha256HexSync(`${now}\0${expiresAt}`).slice(0, 16)}.tmp`;
+      const temporaryPath = `${receiptPath}.${Effect2.pipe(sha256HexSync(`${now}\0${expiresAt}`), EffectString.slice(0, 16))}.tmp`;
       const serialized = JSON.stringify({expiresAt, physicalSnapshotId: options.physicalSnapshotId, version: 1});
       yield* Effect.scoped(
         Effect.gen(function* () {

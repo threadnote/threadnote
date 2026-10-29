@@ -1,7 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Context, Effect, Layer, Logger, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 
-class CliOutputError extends Schema.TaggedError<CliOutputError>()('CliOutputError', {
+class CliOutputError extends Schema.TaggedError<CliOutputError, {readonly brand: unique symbol}>()('CliOutputError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
@@ -98,7 +99,10 @@ export function makeQueuedCliWriter(open: () => CliOutputSink, options: {readonl
 }
 
 const formatConsoleArguments = (arguments_: readonly unknown[]): string =>
-  arguments_.map(value => (typeof value === 'string' ? value : String(value))).join(' ');
+  EffectArray.join(
+    EffectArray.map(arguments_, value => (typeof value === 'string' ? value : String(value))),
+    ' ',
+  );
 
 export class CliOutput extends Context.Service<CliOutput, CliOutputShape>()(
   '@threadnote/threadnote/effect/cli/output/CliOutput',

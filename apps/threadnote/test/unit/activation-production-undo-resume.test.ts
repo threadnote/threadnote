@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Exit, FileSystem, Path} from 'effect';
 import {describe, expect} from 'vitest';
@@ -35,6 +36,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runCloseoutApply} from '@threadnote/threadnote/memory/closeout';
 import {runForget} from '@threadnote/threadnote/memory/index';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('activation production undo interruption recovery', () => {
   effectIt.effect('resumes when decision deletion completed before its receipt CAS', () =>
@@ -86,7 +89,7 @@ describe('activation production undo interruption recovery', () => {
         expect(fixture.undoReceipt.retainedOperationIds).toContain('team-share');
         yield* rewriteUndoReceipt(fixture.config, fixture.undoReceipt, {
           operationIds: ['team-share'],
-          retainedOperationIds: fixture.undoReceipt.retainedOperationIds.map(operationId =>
+          retainedOperationIds: EffectArray.map(fixture.undoReceipt.retainedOperationIds, operationId =>
             operationId === 'team-share' ? 'decision-apply' : operationId,
           ),
         });
@@ -189,10 +192,10 @@ const makeUndoFixture = Effect.fn('test.activation.undoFixture')(function* (
   const operationId = activationCandidateMutationOperationIdV1(review.reviewId, candidate.candidateId);
   const intent = yield* prepareActivationMutationIntentV1(config, {
     activationId: observation.plan.activationId,
-    beforeStateHash: 'a'.repeat(64),
+    beforeStateHash: Effect2.pipe('a', EffectString.repeat(64)),
     operationId,
     ownership: 'activation-created',
-    targetHash: 'b'.repeat(64),
+    targetHash: Effect2.pipe('b', EffectString.repeat(64)),
   });
   yield* completeActivationMutationIntentV1(config, {
     activationId: observation.plan.activationId,
@@ -211,8 +214,11 @@ const makeUndoFixture = Effect.fn('test.activation.undoFixture')(function* (
   expect(previewResult.operations).toEqual(
     options.includeTeamUndo === true ? ['decision-apply', 'team-share'] : ['decision-apply'],
   );
-  const publicationOperation = receipt.operations.find(
-    operation => operation.kind === 'decision.publish' || operation.kind === 'decision.propose',
+  const publicationOperation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      receipt.operations,
+      operation => operation.kind === 'decision.publish' || operation.kind === 'decision.propose',
+    ),
   );
   const publicationEvidenceHash = sha256HexSync(
     canonicalJson({
@@ -246,7 +252,7 @@ function receiptThroughDecisionApply(plan: ActivationPlanV1, decisionEvidenceHas
     const approval =
       operation.approvalKind === undefined
         ? undefined
-        : bindActivationApprovalV1(plan, receipt, operation.id, 'c'.repeat(64));
+        : bindActivationApprovalV1(plan, receipt, operation.id, Effect2.pipe('c', EffectString.repeat(64)));
     const undoEligible = operation.kind === 'decision.apply' || (includeTeamUndo && operation.id === 'team-share');
     const transition = recordActivationOutcomeV1({
       approval,
@@ -255,7 +261,8 @@ function receiptThroughDecisionApply(plan: ActivationPlanV1, decisionEvidenceHas
       outcome: {
         ownership: undoEligible ? 'activation-created' : 'preexisting',
         status: operation.expectedOutcome,
-        subsystemReceiptHash: operation.kind === 'decision.apply' ? decisionEvidenceHash : 'd'.repeat(64),
+        subsystemReceiptHash:
+          operation.kind === 'decision.apply' ? decisionEvidenceHash : Effect2.pipe('d', EffectString.repeat(64)),
         undoEligible,
       },
       plan,

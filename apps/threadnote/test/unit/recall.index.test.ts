@@ -1,4 +1,5 @@
-import {Database} from 'bun:sqlite';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
@@ -20,6 +21,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {join, mkdir, mkdtemp, rm, stat, symlink, utimes, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect as run} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('local recall index', () => {
   let directory: string;
@@ -33,7 +36,7 @@ describe('local recall index', () => {
   const queryDatabase = <Row extends object>(sql: string): readonly Row[] => {
     const database = new Database(databasePath());
     try {
-      return database.query(sql).all() as Row[];
+      return database.query<Row, SQLQueryBindings[]>(sql).all();
     } finally {
       database.close();
     }
@@ -94,37 +97,43 @@ describe('local recall index', () => {
     await writeFile(resourcePath, '# Alpha-42\n\nUse bounded retryPolicy.', 'utf8');
     await writeFile(
       activePath,
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        'topic: recall',
-        'source_agent_client: codex',
-        'timestamp: 2026-07-23T00:00:00.000Z',
-        '',
-        'Recall uses hybrid ranking.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: recall',
+          'source_agent_client: codex',
+          'timestamp: 2026-07-23T00:00:00.000Z',
+          '',
+          'Recall uses hybrid ranking.',
+        ],
+        '\n',
+      ),
       'utf8',
     );
     await writeFile(
       archivedPath,
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: archived',
-        'project: threadnote',
-        'source_agent_client: codex',
-        'timestamp: 2025-01-01T00:00:00.000Z',
-        '',
-        'Obsolete memory.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: archived',
+          'project: threadnote',
+          'source_agent_client: codex',
+          'timestamp: 2025-01-01T00:00:00.000Z',
+          '',
+          'Obsolete memory.',
+        ],
+        '\n',
+      ),
       'utf8',
     );
 
     const candidates = await run(loadRecallIndex(config(), {includeInactive: false}));
 
-    expect(candidates.map(candidate => candidate.uri).sort()).toEqual([
+    expect(EffectArray.map(candidates, candidate => candidate.uri).sort()).toEqual([
       'threadnote://resources/repos/threadnote/alpha.md',
       'threadnote://user/me/memories/durable/projects/threadnote/recall.md',
     ]);
@@ -136,14 +145,15 @@ describe('local recall index', () => {
     expect(
       queryDatabase<{posting_count: number}>('SELECT COUNT(*) AS posting_count FROM postings')[0]?.posting_count,
     ).toBeGreaterThan(0);
-    const candidateJson = queryDatabase<{candidate_json: string}>('SELECT candidate_json FROM documents').map(
+    const candidateJson = EffectArray.map(
+      queryDatabase<{candidate_json: string}>('SELECT candidate_json FROM documents'),
       row => row.candidate_json,
     );
-    expect(candidateJson.join('\n')).toContain('# Alpha-42');
-    expect(candidateJson.join('\n')).not.toContain('MEMORY\\nkind: durable');
+    expect(EffectArray.join(candidateJson, '\n')).toContain('# Alpha-42');
+    expect(EffectArray.join(candidateJson, '\n')).not.toContain('MEMORY\\nkind: durable');
 
     const withArchived = await run(loadRecallIndex(config(), {includeInactive: true}));
-    expect(withArchived.map(candidate => candidate.uri)).toContain(
+    expect(EffectArray.map(withArchived, candidate => candidate.uri)).toContain(
       'threadnote://user/me/memories/durable/archived/threadnote/old.md',
     );
     await expect(stat(databasePath(true))).resolves.toMatchObject({
@@ -164,25 +174,28 @@ describe('local recall index', () => {
         await Promise.all(
           Array.from({length: 525}, async (_, index) =>
             writeFile(
-              join(distractorRoot, `${String(index).padStart(4, '0')}.md`),
-              `# Outside ${index}\n\nprojectstarvationanchor `.repeat(8),
+              join(distractorRoot, `${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}.md`),
+              Effect2.pipe(`# Outside ${index}\n\nprojectstarvationanchor `, EffectString.repeat(8)),
               'utf8',
             ),
           ),
         );
         await writeFile(
           targetPath,
-          [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: eligibility-target',
-            'source_agent_client: codex',
-            'timestamp: 2026-08-20T00:00:00.000Z',
-            '',
-            'projectstarvationanchor is the selected project contract.',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: eligibility-target',
+              'source_agent_client: codex',
+              'timestamp: 2026-08-20T00:00:00.000Z',
+              '',
+              'projectstarvationanchor is the selected project contract.',
+            ],
+            '\n',
+          ),
           'utf8',
         );
         await writeFile(globalPath, '# Global\n\nprojectstarvationanchor applies to every project.', 'utf8');
@@ -219,21 +232,23 @@ describe('local recall index', () => {
         uriScopes: ['threadnote://resources', 'threadnote://user/me/memories'],
       });
 
-      expect(unrestricted.candidates.some(candidate => candidate.fields?.project === 'threadnote')).toBe(false);
-      expect(restricted.candidates.map(candidate => candidate.fields?.project)).toEqual(
+      expect(EffectArray.some(unrestricted.candidates, candidate => candidate.fields?.project === 'threadnote')).toBe(
+        false,
+      );
+      expect(EffectArray.map(restricted.candidates, candidate => candidate.fields?.project)).toEqual(
         expect.arrayContaining(['threadnote', undefined]),
       );
-      expect(restricted.candidates.every(candidate => candidate.fields?.project !== 'outside')).toBe(true);
-      expect(required.candidates.map(candidate => candidate.uri)).toEqual([
+      expect(EffectArray.every(restricted.candidates, candidate => candidate.fields?.project !== 'outside')).toBe(true);
+      expect(EffectArray.map(required.candidates, candidate => candidate.uri)).toEqual([
         'threadnote://user/me/memories/durable/projects/threadnote/zz-target.md',
       ]);
-      expect(exact.map(match => match.uri)).toEqual(
+      expect(EffectArray.map(exact, match => match.uri)).toEqual(
         expect.arrayContaining([
           'threadnote://user/me/memories/durable/global-guidance.md',
           'threadnote://user/me/memories/durable/projects/threadnote/zz-target.md',
         ]),
       );
-      expect(exact.some(match => match.uri.includes('/outside/'))).toBe(false);
+      expect(EffectArray.some(exact, match => Effect2.pipe(match.uri, EffectString.includes('/outside/')))).toBe(false);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -243,33 +258,39 @@ describe('local recall index', () => {
     await mkdir(join(uniquePath, '..'), {recursive: true});
     await writeFile(
       uniquePath,
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: unique',
+          'source_agent_client: codex',
+          'timestamp: 2026-08-19T00:00:00.000Z',
+          'memory_id: tn_unique',
+          '',
+          'Independent vocabulary anchor.',
+        ],
+        '\n',
+      ),
+      'utf8',
+    );
+    await utimes(uniquePath, new Date('2026-08-19T00:00:00.000Z'), new Date('2026-08-19T00:00:00.000Z'));
+    const body = EffectArray.join(
       [
         'MEMORY',
         'kind: durable',
         'status: active',
         'project: threadnote',
-        'topic: unique',
+        'topic: package-scope',
         'source_agent_client: codex',
-        'timestamp: 2026-08-19T00:00:00.000Z',
-        'memory_id: tn_unique',
+        'timestamp: 2026-08-20T00:00:00.000Z',
+        'memory_id: tn_package_scope',
         '',
-        'Independent vocabulary anchor.',
-      ].join('\n'),
-      'utf8',
+        'Package-local anchor uses the nearest manifest.',
+      ],
+      '\n',
     );
-    await utimes(uniquePath, new Date('2026-08-19T00:00:00.000Z'), new Date('2026-08-19T00:00:00.000Z'));
-    const body = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      'project: threadnote',
-      'topic: package-scope',
-      'source_agent_client: codex',
-      'timestamp: 2026-08-20T00:00:00.000Z',
-      'memory_id: tn_package_scope',
-      '',
-      'Package-local anchor uses the nearest manifest.',
-    ].join('\n');
     const pathForTeam = (team: string) =>
       join(sharedRoot, team, 'durable', 'projects', 'threadnote', 'package-scope.md');
     for (const team of ['alpha', 'beta']) {
@@ -314,21 +335,24 @@ describe('local recall index', () => {
     const sharedRoot = join(directory, 'data', 'local', 'user', 'me', 'memories', 'shared');
     await Promise.all([mkdir(projectRoot, {recursive: true}), mkdir(outsideRoot, {recursive: true})]);
     const memory = (topic: string, timestamp: string, body: string, memoryId?: string) =>
-      [
-        'MEMORY',
-        'kind: handoff',
-        'status: active',
-        `project: ${topic === 'outside-latest' ? 'outside' : 'threadnote'}`,
-        `topic: ${topic}`,
-        'source_agent_client: codex',
-        `timestamp: ${timestamp}`,
-        ...(memoryId ? [`memory_id: ${memoryId}`] : []),
-        '',
-        body,
-      ].join('\n');
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: handoff',
+          'status: active',
+          `project: ${topic === 'outside-latest' ? 'outside' : 'threadnote'}`,
+          `topic: ${topic}`,
+          'source_agent_client: codex',
+          `timestamp: ${timestamp}`,
+          ...(memoryId ? [`memory_id: ${memoryId}`] : []),
+          '',
+          body,
+        ],
+        '\n',
+      );
     await Promise.all(
       Array.from({length: 130}, async (_unused, index) => {
-        const path = join(projectRoot, `stale-${String(index).padStart(3, '0')}.md`);
+        const path = join(projectRoot, `stale-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`);
         await writeFile(
           path,
           memory(
@@ -341,7 +365,7 @@ describe('local recall index', () => {
         await utimes(path, new Date('2026-08-21T00:00:00.000Z'), new Date('2026-08-21T00:00:00.000Z'));
       }),
     );
-    const aliasBodies = ['a', 'b'].map(suffix =>
+    const aliasBodies = EffectArray.map(['a', 'b'], suffix =>
       memory(
         `alias-latest-release-${suffix}`,
         '2026-08-20T02:00:00.000Z',
@@ -350,11 +374,11 @@ describe('local recall index', () => {
       ),
     );
     await Promise.all(
-      aliasBodies.flatMap((aliasBody, aliasIndex) =>
+      EffectArray.flatMap(aliasBodies, (aliasBody, aliasIndex) =>
         Array.from({length: 40}, async (_unused, index) => {
           const path = join(
             sharedRoot,
-            `team-${String(index).padStart(2, '0')}`,
+            `team-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
             'handoffs',
             'active',
             'threadnote',
@@ -394,12 +418,32 @@ describe('local recall index', () => {
     const targetUri = 'threadnote://user/me/memories/handoffs/active/threadnote/zz-current-release.md';
 
     expect(selected.candidates).toHaveLength(100);
-    expect(selected.candidates.map(candidate => candidate.uri)).not.toContain(targetUri);
-    expect(selected.recentCandidates?.map(candidate => candidate.uri)).toContain(targetUri);
-    expect(selected.recentCandidates?.some(candidate => candidate.fields?.project === 'outside')).toBe(false);
+    expect(EffectArray.map(selected.candidates, candidate => candidate.uri)).not.toContain(targetUri);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(selected.recentCandidates), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, candidate => candidate.uri),
+        ),
+      ),
+    ).toContain(targetUri);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(selected.recentCandidates), __effectArrayReceiver =>
+          EffectArray.some(__effectArrayReceiver, candidate => candidate.fields?.project === 'outside'),
+        ),
+      ),
+    ).toBe(false);
     for (const suffix of ['a', 'b']) {
-      const aliases =
-        selected.recentCandidates?.filter(candidate => candidate.memoryId === `tn_latest_alias_${suffix}`) ?? [];
+      const recentCandidates = selected.recentCandidates;
+      const aliases = EffectOption.getOrElse(
+        EffectOption.map(EffectOption.fromNullishOr(recentCandidates), candidates =>
+          EffectArray.filter(
+            candidates,
+            (candidate, index) => index in candidates && candidate.memoryId === 'tn_latest_alias_' + suffix,
+          ),
+        ),
+        () => [],
+      );
       expect(aliases).toHaveLength(1);
       expect([aliases[0].uri, ...(aliases[0].equivalentUris ?? [])]).toHaveLength(40);
     }
@@ -413,7 +457,9 @@ describe('local recall index', () => {
         source_modified_at: '2026-07-01T00:00:00.000Z',
       },
     ]);
-    const plan = queryDatabase<{readonly detail: string}>(`
+    const plan = EffectArray.join(
+      EffectArray.map(
+        queryDatabase<{readonly detail: string}>(`
       EXPLAIN QUERY PLAN
       SELECT d.id, d.uri, d.candidate_json, d.logical_key, d.recorded_at
       FROM postings AS p
@@ -423,9 +469,11 @@ describe('local recall index', () => {
         AND (d.project IS NULL OR d.project IN ('threadnote'))
       ORDER BY d.recorded_at DESC, d.uri ASC
       LIMIT 64 OFFSET 0
-    `)
-      .map(row => row.detail)
-      .join('\n');
+    `),
+        row => row.detail,
+      ),
+      '\n',
+    );
     expect(plan).toContain('SEARCH p USING PRIMARY KEY (term=?)');
     expect(plan).toContain('SEARCH d USING INTEGER PRIMARY KEY (rowid=?)');
     expect(plan).not.toContain('SCAN p');
@@ -440,7 +488,13 @@ describe('local recall index', () => {
         recencyIntent: true,
       }),
     );
-    expect(hardScoped.recentCandidates?.map(candidate => candidate.uri)).toEqual([targetUri]);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(hardScoped.recentCandidates), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, candidate => candidate.uri),
+        ),
+      ),
+    ).toEqual([targetUri]);
   });
 
   it('collapses personal and shared aliases when only a generated hygiene-source trailer differs', async () => {
@@ -474,18 +528,21 @@ describe('local recall index', () => {
     const sharedUri = 'threadnote://user/me/memories/shared/platform/durable/projects/threadnote/hygiene-alias.md';
     const body = 'Hygiene trailer identity anchor stays stable.';
     const memory = (memoryBody: string) =>
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        'topic: hygiene-alias',
-        'source_agent_client: codex',
-        'timestamp: 2026-08-20T00:00:00.000Z',
-        'memory_id: tn_hygiene_alias',
-        '',
-        memoryBody,
-      ].join('\n');
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: hygiene-alias',
+          'source_agent_client: codex',
+          'timestamp: 2026-08-20T00:00:00.000Z',
+          'memory_id: tn_hygiene_alias',
+          '',
+          memoryBody,
+        ],
+        '\n',
+      );
     await mkdir(join(personalPath, '..'), {recursive: true});
     await mkdir(join(sharedPath, '..'), {recursive: true});
     await writeFile(
@@ -541,18 +598,21 @@ describe('local recall index', () => {
       await mkdir(join(path, '..'), {recursive: true});
       await writeFile(
         path,
-        [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          'project: threadnote',
-          'topic: credential-rotation',
-          'source_agent_client: codex',
-          'timestamp: 2026-08-20T00:00:00.000Z',
-          'memory_id: tn_credential_rotation',
-          '',
-          `Credential rotation uses api_key=${secret}.`,
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            'project: threadnote',
+            'topic: credential-rotation',
+            'source_agent_client: codex',
+            'timestamp: 2026-08-20T00:00:00.000Z',
+            'memory_id: tn_credential_rotation',
+            '',
+            `Credential rotation uses api_key=${secret}.`,
+          ],
+          '\n',
+        ),
         'utf8',
       );
     }
@@ -562,8 +622,12 @@ describe('local recall index', () => {
     );
 
     expect(recalled).toHaveLength(2);
-    expect(recalled.every(candidate => candidate.identityConflict)).toBe(true);
-    expect(recalled.every(candidate => candidate.text.includes('api_key=[REDACTED]'))).toBe(true);
+    expect(EffectArray.every(recalled, candidate => candidate.identityConflict === true)).toBe(true);
+    expect(
+      EffectArray.every(recalled, candidate =>
+        Effect2.pipe(candidate.text, EffectString.includes('api_key=[REDACTED]')),
+      ),
+    ).toBe(true);
   });
 
   it('marks a required candidate when its divergent memory id is beyond the bounded posting window', async () => {
@@ -573,25 +637,28 @@ describe('local recall index', () => {
     const targetUri = 'threadnote://user/me/memories/durable/projects/threadnote/selected-target.md';
     const divergentUri = 'threadnote://user/me/memories/durable/projects/threadnote/zz-divergent-alias.md';
     const memory = (topic: string, body: string, memoryId?: string) =>
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        `topic: ${topic}`,
-        'source_agent_client: codex',
-        'timestamp: 2026-08-20T00:00:00.000Z',
-        ...(memoryId ? [`memory_id: ${memoryId}`] : []),
-        '',
-        body,
-      ].join('\n');
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          `topic: ${topic}`,
+          'source_agent_client: codex',
+          'timestamp: 2026-08-20T00:00:00.000Z',
+          ...(memoryId ? [`memory_id: ${memoryId}`] : []),
+          '',
+          body,
+        ],
+        '\n',
+      );
     await mkdir(memoryRoot, {recursive: true});
     await Promise.all([
       writeFile(targetPath, memory('selected-target', 'Selected target contract.', 'tn_global_conflict'), 'utf8'),
       writeFile(divergentPath, memory('divergent-alias', 'crowdinganchor', 'tn_global_conflict'), 'utf8'),
       ...Array.from({length: 525}, (_unused, index) =>
         writeFile(
-          join(memoryRoot, `noise-${String(index).padStart(3, '0')}.md`),
+          join(memoryRoot, `noise-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`),
           memory(`crowdinganchor-${index}`, 'crowdinganchor crowdinganchor crowdinganchor'),
           'utf8',
         ),
@@ -612,8 +679,11 @@ describe('local recall index', () => {
     );
 
     expect(postingRows).toBe(500);
-    expect(recalled.map(candidate => candidate.uri)).not.toContain(divergentUri);
-    expect(recalled.find(candidate => candidate.uri === targetUri)?.identityConflict).toBe(true);
+    expect(EffectArray.map(recalled, candidate => candidate.uri)).not.toContain(divergentUri);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(recalled, candidate => candidate.uri === targetUri))
+        ?.identityConflict,
+    ).toBe(true);
     const identityPlan = queryDatabase<{readonly detail: string}>(`
       EXPLAIN QUERY PLAN
       SELECT json_extract(d.candidate_json, '$.memoryId') AS memory_id
@@ -631,7 +701,11 @@ describe('local recall index', () => {
       GROUP BY json_extract(d.candidate_json, '$.memoryId')
       HAVING COUNT(DISTINCT json_extract(d.candidate_json, '$.contentHash')) > 1
     `);
-    expect(identityPlan.some(row => row.detail.includes('documents_memory_identity'))).toBe(true);
+    expect(
+      EffectArray.some(identityPlan, row =>
+        Effect2.pipe(row.detail, EffectString.includes('documents_memory_identity')),
+      ),
+    ).toBe(true);
 
     const pinned = await run(
       loadRecallIndex(config(), {
@@ -650,7 +724,7 @@ describe('local recall index', () => {
     await mkdir(resourceRoot, {recursive: true});
     await writeFile(
       join(resourceRoot, 'ukrainian.md'),
-      `# Київська зустріч\n\nПам’ять про розмову: Ігор любить український борщ і план–2026.\napi_key=AIza${'A'.repeat(35)}`,
+      `# Київська зустріч\n\nПам’ять про розмову: Ігор любить український борщ і план–2026.\napi_key=AIza${Effect2.pipe('A', EffectString.repeat(35))}`,
       'utf8',
     );
     await writeFile(join(resourceRoot, 'other.md'), '# Інше\n\nСадівництво та грушеві дерева.', 'utf8');
@@ -662,16 +736,17 @@ describe('local recall index', () => {
       }),
     );
 
-    expect(candidates.map(candidate => candidate.uri)).toEqual([
+    expect(EffectArray.map(candidates, candidate => candidate.uri)).toEqual([
       'threadnote://resources/repos/threadnote/ukrainian.md',
     ]);
     expect(candidates[0]?.text).toContain('Пам’ять про розмову');
     expect(candidates[0]?.text).toContain('api_key=[REDACTED]');
-    expect(candidates[0]?.text).not.toContain(`AIza${'A'.repeat(35)}`);
+    expect(candidates[0]?.text).not.toContain(`AIza${Effect2.pipe('A', EffectString.repeat(35))}`);
     expect(
-      chunksForRecallCandidates(candidates)
-        .map(chunk => chunk.content)
-        .join('\n'),
+      EffectArray.join(
+        EffectArray.map(chunksForRecallCandidates(candidates), chunk => chunk.content),
+        '\n',
+      ),
     ).toContain('Ігор любить український борщ');
 
     const exact = await run(
@@ -693,7 +768,11 @@ describe('local recall index', () => {
     const root = join(directory, 'data', 'local', 'resources', 'repos', 'threadnote');
     await mkdir(root, {recursive: true});
     await writeFile(join(root, 'small.md'), '# Indexed\n\nSmall canonical document.', 'utf8');
-    await writeFile(join(root, 'oversized.md'), `# Oversized\n\n${'x'.repeat(512 * 1024)}`, 'utf8');
+    await writeFile(
+      join(root, 'oversized.md'),
+      `# Oversized\n\n${Effect2.pipe('x', EffectString.repeat(512 * 1024))}`,
+      'utf8',
+    );
 
     await run(loadRecallIndex(config(), {forceRefresh: true, includeInactive: false}));
     const status = await run(recallIndexStatus(config()));
@@ -776,25 +855,33 @@ describe('local recall index', () => {
     await writeFile(join(resourcesRoot, 'outside', 'outside.md'), '# Outside\n\nsample', 'utf8');
     await run(loadRecallIndex(config(), {includeInactive: false}));
 
-    const recentPlan = queryDatabase<{detail: string}>(
-      `EXPLAIN QUERY PLAN
+    const recentPlan = EffectArray.join(
+      EffectArray.map(
+        queryDatabase<{detail: string}>(
+          `EXPLAIN QUERY PLAN
        SELECT d.id, d.uri, d.candidate_json
        FROM documents AS d
        ORDER BY d.source_modified_at DESC, d.uri
        LIMIT 200`,
-    )
-      .map(row => row.detail)
-      .join('\n');
-    const projectPlan = queryDatabase<{detail: string}>(
-      `EXPLAIN QUERY PLAN
+        ),
+        row => row.detail,
+      ),
+      '\n',
+    );
+    const projectPlan = EffectArray.join(
+      EffectArray.map(
+        queryDatabase<{detail: string}>(
+          `EXPLAIN QUERY PLAN
        SELECT d.id, d.uri, d.candidate_json
        FROM documents AS d
        WHERE d.project = 'threadnote'
        ORDER BY d.source_modified_at DESC, d.uri
        LIMIT 200`,
-    )
-      .map(row => row.detail)
-      .join('\n');
+        ),
+        row => row.detail,
+      ),
+      '\n',
+    );
 
     expect(recentPlan).toContain('documents_modified_uri');
     expect(recentPlan).not.toContain('USE TEMP B-TREE');
@@ -822,18 +909,21 @@ describe('local recall index', () => {
     await mkdir(join(memoryPath, '..'), {recursive: true});
     await writeFile(
       memoryPath,
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: monorepo',
-        'topic: common-posting-anchor',
-        'workspace_scope: apps/search',
-        'source_agent_client: test',
-        'timestamp: 2026-08-20T00:00:00.000Z',
-        '',
-        'Common posting anchor.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: monorepo',
+          'topic: common-posting-anchor',
+          'workspace_scope: apps/search',
+          'source_agent_client: test',
+          'timestamp: 2026-08-20T00:00:00.000Z',
+          '',
+          'Common posting anchor.',
+        ],
+        '\n',
+      ),
       'utf8',
     );
     let postingStatements = 0;
@@ -850,7 +940,9 @@ describe('local recall index', () => {
         workspaceScopeMode: 'sibling',
       }),
     );
-    const plan = queryDatabase<{detail: string}>(`
+    const plan = EffectArray.join(
+      EffectArray.map(
+        queryDatabase<{detail: string}>(`
       EXPLAIN QUERY PLAN
       SELECT 1
       FROM documents AS d
@@ -858,10 +950,14 @@ describe('local recall index', () => {
         AND d.workspace_scope IS NOT NULL
         AND d.workspace_scope NOT IN ('apps', 'apps/search')
       LIMIT 1
-    `)
-      .map(row => row.detail)
-      .join('\n');
-    const postingPlan = queryDatabase<{detail: string}>(`
+    `),
+        row => row.detail,
+      ),
+      '\n',
+    );
+    const postingPlan = EffectArray.join(
+      EffectArray.map(
+        queryDatabase<{detail: string}>(`
       EXPLAIN QUERY PLAN
       WITH query_terms(term) AS (VALUES ('common'))
       SELECT p.term, p.document_id
@@ -871,9 +967,11 @@ describe('local recall index', () => {
       WHERE d.project = 'monorepo'
         AND d.workspace_scope IS NOT NULL
         AND d.workspace_scope NOT IN ('apps', 'apps/search')
-    `)
-      .map(row => row.detail)
-      .join('\n');
+    `),
+        row => row.detail,
+      ),
+      '\n',
+    );
 
     expect(selected.candidates).toEqual([]);
     expect(selected.queryExhaustive).toBe(true);
@@ -974,7 +1072,17 @@ describe('local recall index', () => {
       ),
     );
 
-    expect(results.every(candidates => candidates[0]?.uri.endsWith('/doc.md'))).toBe(true);
+    expect(
+      EffectArray.every(results, candidates =>
+        Boolean(
+          Effect2.pipe(candidates[0]?.uri, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.endsWith('/doc.md')),
+          ),
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('force-refreshes a same-size source even when its modification time is preserved', async () => {
@@ -1057,7 +1165,9 @@ describe('local recall index', () => {
         query: 'referential-cache-anchor',
       }),
     );
-    expect(rebuilt.map(candidate => candidate.uri)).toContain('threadnote://resources/repos/threadnote/doc.md');
+    expect(EffectArray.map(rebuilt, candidate => candidate.uri)).toContain(
+      'threadnote://resources/repos/threadnote/doc.md',
+    );
   });
 
   it('loads one corpus snapshot for multiple query and scope selections', async () => {
@@ -1078,12 +1188,20 @@ describe('local recall index', () => {
       }),
     );
 
-    expect(results[0]?.candidates.map(candidate => candidate.uri)).toEqual([
-      'threadnote://resources/repos/alpha/doc.md',
-    ]);
-    expect(results[1]?.candidates.map(candidate => candidate.uri)).toEqual([
-      'threadnote://resources/repos/beta/doc.md',
-    ]);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(results[0]?.candidates), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, candidate => candidate.uri),
+        ),
+      ),
+    ).toEqual(['threadnote://resources/repos/alpha/doc.md']);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(results[1]?.candidates), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, candidate => candidate.uri),
+        ),
+      ),
+    ).toEqual(['threadnote://resources/repos/beta/doc.md']);
   });
 
   it('rejects file escapes and directory cycles introduced through symlinks', async () => {
@@ -1097,7 +1215,9 @@ describe('local recall index', () => {
 
     const candidates = await run(loadRecallIndex(config(), {forceRefresh: true, includeInactive: false}));
 
-    expect(candidates.map(candidate => candidate.uri)).toEqual(['threadnote://resources/repos/threadnote/safe.md']);
+    expect(EffectArray.map(candidates, candidate => candidate.uri)).toEqual([
+      'threadnote://resources/repos/threadnote/safe.md',
+    ]);
     expect(candidates[0]?.text).not.toContain('escaped-scan-anchor');
   });
 
@@ -1140,7 +1260,7 @@ describe('local recall index', () => {
     await Promise.all(
       Array.from({length: 140}, (_unused, index) =>
         writeFile(
-          join(resourceRoot, `${String(index).padStart(3, '0')}.md`),
+          join(resourceRoot, `${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`),
           index === 139 ? '# Exact target\n\nalpha-42 rare anchor' : `# Common ${index}\n\ncommon retrieval term`,
           'utf8',
         ),
@@ -1156,7 +1276,7 @@ describe('local recall index', () => {
       }),
     );
 
-    expect(selected.candidates.map(candidate => candidate.uri)).toEqual([
+    expect(EffectArray.map(selected.candidates, candidate => candidate.uri)).toEqual([
       'threadnote://resources/repos/threadnote/000.md',
       'threadnote://resources/repos/threadnote/139.md',
     ]);
@@ -1182,19 +1302,22 @@ describe('local recall index', () => {
     await mkdir(join(memoryPath, '..'), {recursive: true});
     await writeFile(
       memoryPath,
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: orion-worker',
-        'topic: lease-renewal',
-        'source_agent_client: codex',
-        'timestamp: 2026-07-23T00:00:00.000Z',
-        'keywords: resume jobs after stalled heartbeat',
-        'keywords: worker lease renewal',
-        '',
-        'The coordinator reschedules work after a stalled heartbeat.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: orion-worker',
+          'topic: lease-renewal',
+          'source_agent_client: codex',
+          'timestamp: 2026-07-23T00:00:00.000Z',
+          'keywords: resume jobs after stalled heartbeat',
+          'keywords: worker lease renewal',
+          '',
+          'The coordinator reschedules work after a stalled heartbeat.',
+        ],
+        '\n',
+      ),
       'utf8',
     );
 
@@ -1205,7 +1328,7 @@ describe('local recall index', () => {
       }),
     );
 
-    expect(candidates.map(candidate => candidate.uri)).toContain(
+    expect(EffectArray.map(candidates, candidate => candidate.uri)).toContain(
       'threadnote://user/me/memories/durable/projects/orion-worker/lease-renewal.md',
     );
     expect(candidates[0]?.fields?.keywords).toEqual(['resume jobs after stalled heartbeat', 'worker lease renewal']);
@@ -1217,7 +1340,7 @@ describe('local recall index', () => {
     await Promise.all(
       Array.from({length: 700}, (_unused, index) =>
         writeFile(
-          join(resourceRoot, `${String(index).padStart(3, '0')}.md`),
+          join(resourceRoot, `${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`),
           index === 699 ? '# Rare target\n\ncommon rare-anchor-699' : `# Common ${index}\n\ncommon retrieval document`,
           'utf8',
         ),
@@ -1253,7 +1376,11 @@ describe('local recall index', () => {
     await mkdir(insideRoot, {recursive: true});
     await Promise.all(
       Array.from({length: 550}, (_unused, index) =>
-        writeFile(join(outsideRoot, `${String(index).padStart(3, '0')}.md`), '# scoped-anchor\n\noutside', 'utf8'),
+        writeFile(
+          join(outsideRoot, `${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.md`),
+          '# scoped-anchor\n\noutside',
+          'utf8',
+        ),
       ),
     );
     await writeFile(join(insideRoot, 'target.md'), '# In-scope target\n\nscoped-anchor', 'utf8');
@@ -1267,7 +1394,9 @@ describe('local recall index', () => {
       }),
     );
 
-    expect(selected.map(candidate => candidate.uri)).toEqual(['threadnote://resources/repos/threadnote/target.md']);
+    expect(EffectArray.map(selected, candidate => candidate.uri)).toEqual([
+      'threadnote://resources/repos/threadnote/target.md',
+    ]);
   });
 
   it('normalizes URI scope anchors and trailing slashes and fails closed for invalid restrictions', async () => {
@@ -1293,7 +1422,7 @@ describe('local recall index', () => {
       }),
     );
 
-    expect(selected.map(candidate => candidate.uri)).toEqual([`${scope}/target.md`]);
+    expect(EffectArray.map(selected, candidate => candidate.uri)).toEqual([`${scope}/target.md`]);
     expect(rejected).toEqual([]);
     expect(recallUriMatchesScopes(`${scope}/target.md#heading`, [`${scope}/#ignored`])).toBe(true);
     expect(recallUriMatchesScopes(`${scope}/target.md#heading`, [`${scope}/target.md/#ignored`])).toBe(true);
@@ -1307,8 +1436,10 @@ describe('local recall index', () => {
     await writeFile(resource, '# Target\n\nscope-plan-anchor', 'utf8');
     await run(loadRecallIndex(config(), {includeInactive: false}));
 
-    const plan = queryDatabase<{detail: string}>(
-      `EXPLAIN QUERY PLAN
+    const plan = EffectArray.join(
+      EffectArray.map(
+        queryDatabase<{detail: string}>(
+          `EXPLAIN QUERY PLAN
        SELECT d.id
        FROM documents AS d INDEXED BY documents_uri
        WHERE d.uri = 'threadnote://resources/repos/threadnote'
@@ -1316,9 +1447,11 @@ describe('local recall index', () => {
             d.uri >= 'threadnote://resources/repos/threadnote/'
             AND d.uri < 'threadnote://resources/repos/threadnote0'
           )`,
-    )
-      .map(row => row.detail)
-      .join('\n');
+        ),
+        row => row.detail,
+      ),
+      '\n',
+    );
 
     expect(plan).toContain('documents_uri');
     expect(plan).not.toContain('SCAN d');
@@ -1326,36 +1459,52 @@ describe('local recall index', () => {
 
   it('selects capped query terms by corpus IDF independently of query order', async () => {
     const resourceRoot = join(directory, 'data', 'local', 'resources', 'repos', 'threadnote');
-    const commonTerms = Array.from({length: 40}, (_unused, index) => `commonterm${String(index).padStart(2, '0')}`);
+    const commonTerms = Array.from(
+      {length: 40},
+      (_unused, index) => `commonterm${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+    );
     const rareTerm = 'rare-cap-9999';
     await mkdir(resourceRoot, {recursive: true});
     await Promise.all(
       Array.from({length: 40}, (_unused, index) =>
-        writeFile(join(resourceRoot, `common-${index}.md`), `# Common\n\n${commonTerms.join(' ')}`, 'utf8'),
+        writeFile(
+          join(resourceRoot, `common-${index}.md`),
+          `# Common\n\n${EffectArray.join(commonTerms, ' ')}`,
+          'utf8',
+        ),
       ),
     );
     await writeFile(join(resourceRoot, 'rare.md'), `# Rare\n\n${rareTerm}`, 'utf8');
 
     const recall = (query: string) => run(loadRecallIndex(config(), {includeInactive: false, limit: 50, query}));
-    const rareFirst = await recall([rareTerm, ...commonTerms].join(' '));
-    const rareLast = await recall([...commonTerms, rareTerm].join(' '));
+    const rareFirst = await recall(EffectArray.join([rareTerm, ...commonTerms], ' '));
+    const rareLast = await recall(EffectArray.join([...commonTerms, rareTerm], ' '));
 
-    expect(rareFirst.map(candidate => candidate.uri)).toContain('threadnote://resources/repos/threadnote/rare.md');
-    expect(rareLast.map(candidate => candidate.uri)).toEqual(rareFirst.map(candidate => candidate.uri));
+    expect(EffectArray.map(rareFirst, candidate => candidate.uri)).toContain(
+      'threadnote://resources/repos/threadnote/rare.md',
+    );
+    expect(EffectArray.map(rareLast, candidate => candidate.uri)).toEqual(
+      EffectArray.map(rareFirst, candidate => candidate.uri),
+    );
   });
 
   it('does not let globally rare out-of-scope terms consume a scoped query cap', async () => {
     const resourcesRoot = join(directory, 'data', 'local', 'resources', 'repos');
     const insideRoot = join(resourcesRoot, 'threadnote');
     const outsideRoot = join(resourcesRoot, 'outside');
-    const outsideTerms = Array.from({length: 40}, (_unused, index) => `outside-term-${String(index).padStart(2, '0')}`);
+    const outsideTerms = Array.from(
+      {length: 40},
+      (_unused, index) => `outside-term-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+    );
     await mkdir(insideRoot, {recursive: true});
     await mkdir(outsideRoot, {recursive: true});
     await Promise.all([
       ...Array.from({length: 40}, (_unused, index) =>
         writeFile(join(insideRoot, `common-${index}.md`), '# Common\n\ninside-anchor', 'utf8'),
       ),
-      ...outsideTerms.map((term, index) => writeFile(join(outsideRoot, `${index}.md`), `# Outside\n\n${term}`, 'utf8')),
+      ...EffectArray.map(outsideTerms, (term, index) =>
+        writeFile(join(outsideRoot, `${index}.md`), `# Outside\n\n${term}`, 'utf8'),
+      ),
     ]);
     await writeFile(join(insideRoot, 'target.md'), '# inside-anchor\n\nScoped target', 'utf8');
 
@@ -1364,7 +1513,7 @@ describe('local recall index', () => {
         allowedUriScopes: ['threadnote://resources/repos/threadnote'],
         includeInactive: false,
         limit: 1,
-        query: [...outsideTerms, 'inside-anchor'].join(' '),
+        query: EffectArray.join([...outsideTerms, 'inside-anchor'], ' '),
       }),
     );
 
@@ -1379,7 +1528,7 @@ describe('local recall index', () => {
     await run(loadRecallIndex(config(), {includeInactive: false, query: 'stable-anchor'}));
 
     for (let index = 1; index <= 40; index += 1) {
-      const updateTerm = `update-${String(index).padStart(3, '0')}`;
+      const updateTerm = `update-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}`;
       await writeFile(resourcePath, `# Target\n\nstable-anchor ${updateTerm}`, 'utf8');
       await run(expireRecallIndexValidation(directory, false));
       const updated = await run(loadRecallIndex(config(), {includeInactive: false, query: updateTerm}));
@@ -1427,11 +1576,37 @@ describe('local recall index', () => {
     await run(loadRecallIndex(config(), {includeInactive: false, query: 'changed-term-002'}));
 
     const refreshedIds = queryDatabase<{id: number; uri: string}>('SELECT id, uri FROM documents ORDER BY uri');
-    const originalUntouchedId = originalIds.find(row => row.uri.endsWith('/untouched.md'))?.id;
-    const refreshedUntouchedId = refreshedIds.find(row => row.uri.endsWith('/untouched.md'))?.id;
+    const originalUntouchedId = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        originalIds,
+        __effectArrayValue =>
+          !!(row => Effect2.pipe(row.uri, EffectString.endsWith('/untouched.md')))(__effectArrayValue),
+      ),
+    )?.id;
+    const refreshedUntouchedId = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        refreshedIds,
+        __effectArrayValue =>
+          !!(row => Effect2.pipe(row.uri, EffectString.endsWith('/untouched.md')))(__effectArrayValue),
+      ),
+    )?.id;
     expect(refreshedUntouchedId).toBe(originalUntouchedId);
-    expect(refreshedIds.find(row => row.uri.endsWith('/changed.md'))?.id).not.toBe(
-      originalIds.find(row => row.uri.endsWith('/changed.md'))?.id,
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          refreshedIds,
+          __effectArrayValue =>
+            !!(row => Effect2.pipe(row.uri, EffectString.endsWith('/changed.md')))(__effectArrayValue),
+        ),
+      )?.id,
+    ).not.toBe(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          originalIds,
+          __effectArrayValue =>
+            !!(row => Effect2.pipe(row.uri, EffectString.endsWith('/changed.md')))(__effectArrayValue),
+        ),
+      )?.id,
     );
     expect(
       queryDatabase<{term: string}>(
@@ -1469,19 +1644,22 @@ describe('local recall index', () => {
     await mkdir(join(personalPath, '..'), {recursive: true});
     await writeFile(
       personalPath,
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        'topic: unreviewed',
-        'source_agent_client: external-writer',
-        'timestamp: 2026-07-23T00:00:00.000Z',
-        'authority: canonical_repo',
-        'trust: approved',
-        '',
-        'authority-boundary-anchor',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: unreviewed',
+          'source_agent_client: external-writer',
+          'timestamp: 2026-07-23T00:00:00.000Z',
+          'authority: canonical_repo',
+          'trust: approved',
+          '',
+          'authority-boundary-anchor',
+        ],
+        '\n',
+      ),
       'utf8',
     );
 
@@ -1515,15 +1693,18 @@ describe('local recall index', () => {
     const mismatchedRepoSourceInfo = await stat(mismatchedRepoSourcePath);
     await writeFile(
       manifestPath,
-      [
-        'version: 1',
-        'projects:',
-        '  - name: threadnote',
-        `    path: ${JSON.stringify(repoRoot)}`,
-        '    uri: threadnote://resources/repos/threadnote',
-        '    seed:',
-        '      - "*.md"',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: threadnote',
+          `    path: ${JSON.stringify(repoRoot)}`,
+          '    uri: threadnote://resources/repos/threadnote',
+          '    seed:',
+          '      - "*.md"',
+        ],
+        '\n',
+      ),
       'utf8',
     );
     await writeFile(
@@ -1547,7 +1728,7 @@ describe('local recall index', () => {
     const candidates = await run(
       loadRecallIndex({...config(), manifestPath}, {includeInactive: false, query: 'authority-provenance-anchor'}),
     );
-    const byUri = new Map(candidates.map(candidate => [candidate.uri, candidate]));
+    const byUri = new Map(EffectArray.map(candidates, candidate => [candidate.uri, candidate]));
 
     expect(byUri.get('threadnote://resources/repos/threadnote/canonical.md')).toMatchObject({
       authority: 'canonical_repo',
@@ -1615,8 +1796,12 @@ describe('local recall index', () => {
     await writeState(targetInfo.mtimeMs, targetInfo.size);
     const recallConfig = {...config(), manifestPath};
     const initial = await run(loadRecallIndex(recallConfig, {includeInactive: false}));
-    const initialStable = initial.find(candidate => candidate.uri === stableUri);
-    const initialTarget = initial.find(candidate => candidate.uri === targetUri);
+    const initialStable = EffectOption.getOrUndefined(
+      EffectArray.findFirst(initial, candidate => candidate.uri === stableUri),
+    );
+    const initialTarget = EffectOption.getOrUndefined(
+      EffectArray.findFirst(initial, candidate => candidate.uri === targetUri),
+    );
 
     await writeFile(targetRepoPath, '# Target\n\nseed-target-v2', 'utf8');
     await writeFile(targetResourcePath, '# Target\n\nseed-target-v2', 'utf8');
@@ -1628,9 +1813,15 @@ describe('local recall index', () => {
     await run(expireRecallIndexValidation(directory, false, [targetUri]));
     const updated = await run(loadRecallIndex(recallConfig, {includeInactive: false}));
 
-    expect(updated.find(candidate => candidate.uri === stableUri)).toStrictEqual(initialStable);
-    expect(updated.find(candidate => candidate.uri === targetUri)).not.toStrictEqual(initialTarget);
-    expect(updated.find(candidate => candidate.uri === targetUri)?.text).toContain('seed-target-v2');
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(updated, candidate => candidate.uri === stableUri)),
+    ).toStrictEqual(initialStable);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(updated, candidate => candidate.uri === targetUri)),
+    ).not.toStrictEqual(initialTarget);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(updated, candidate => candidate.uri === targetUri))?.text,
+    ).toContain('seed-target-v2');
   });
 
   it('persists a fresh corpus generation after explicit invalidation', async () => {

@@ -25,15 +25,20 @@ describe('resolution-candidate precheck', () => {
         baseFileSetFingerprint: 'base',
         baseFiles: files,
         candidateReexports: [],
-        committedWorkspace: undefined as never,
+        // @ts-expect-error -- The bounded-size early return must not inspect either workspace dependency.
+        committedWorkspace: undefined,
         currentChangedFiles: [],
         currentFiles: files,
-        currentWorkspace: undefined as never,
+        // @ts-expect-error -- The bounded-size early return must not inspect either workspace dependency.
+        currentWorkspace: undefined,
         initialLookupKeys: [{key: 'typescript:path:src%2Fvalue.ts:name:value', resolutionDomain: 'typescript'}],
-        languagePacks: undefined as never,
-        layout: undefined as never,
+        // @ts-expect-error -- The bounded-size early return must not request language metadata.
+        languagePacks: undefined,
+        // @ts-expect-error -- The bounded-size early return must not read the graph database layout.
+        layout: undefined,
         projectCount: 1,
-        store: store as never,
+        // @ts-expect-error -- The oversized inventory must return without accessing any graph-store method.
+        store,
       });
 
       expect(result).toMatchObject({

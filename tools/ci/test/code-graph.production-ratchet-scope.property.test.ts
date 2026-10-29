@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {classifyCodeGraphProductionRatchetScope} from '../code-graph-production-ratchet-scope.js';
 import {privateReleaseEvidenceFamilies} from '../private-release-evidence-family.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const productCaptureFamily = privateReleaseEvidenceFamilies[0];
 const releaseCollectionFamily = privateReleaseEvidenceFamilies[1];
@@ -32,7 +35,10 @@ function shouldSkipBenchmark(
 }
 
 const serializedShard = '          bun --bun vitest run --no-file-parallelism --shard=${{ matrix.shard }}';
-const windowsDefaultShard = serializedShard.replace(' --shard=', ' --testTimeout=120000 --shard=');
+const windowsDefaultShard = Effect.pipe(
+  serializedShard,
+  EffectString.replace(' --shard=', ' --testTimeout=120000 --shard='),
+);
 const beforeCiWorkflow = `name: CI
 env:
   BUN_VERSION: 1.4.2
@@ -50,8 +56,11 @@ ${serializedShard}
   release:
     timeout-minutes: 45
 `;
-const afterCiWorkflow = beforeCiWorkflow.replace('    timeout-minutes: 30', '    timeout-minutes: 60');
-const afterWindowsDefault = beforeCiWorkflow.replace(serializedShard, windowsDefaultShard);
+const afterCiWorkflow = Effect.pipe(
+  beforeCiWorkflow,
+  EffectString.replace('    timeout-minutes: 30', '    timeout-minutes: 60'),
+);
+const afterWindowsDefault = Effect.pipe(beforeCiWorkflow, EffectString.replace(serializedShard, windowsDefaultShard));
 
 const ciTestPolicyPaths = [
   '.github/workflows/ci.yml',
@@ -84,17 +93,29 @@ describe('code graph production ratchet diff scope', () => {
     });
     expect(ciTestPolicyScope(ciTestPolicyPaths.slice(1)).runBenchmark).toBe(false);
     expect(ciTestPolicyScope(['.github/workflows/ci.yml']).runBenchmark).toBe(false);
-    const before20 = beforeCiWorkflow.replace(
-      'runs-on: windows-latest\n    timeout-minutes: 30',
-      'runs-on: windows-latest\n    timeout-minutes: 20',
+    const before20 = Effect.pipe(
+      beforeCiWorkflow,
+      EffectString.replace(
+        'runs-on: windows-latest\n    timeout-minutes: 30',
+        'runs-on: windows-latest\n    timeout-minutes: 20',
+      ),
     );
-    const after45 = before20.replace(
-      'runs-on: windows-latest\n    timeout-minutes: 20',
-      'runs-on: windows-latest\n    timeout-minutes: 45',
+    const after45 = Effect.pipe(
+      before20,
+      EffectString.replace(
+        'runs-on: windows-latest\n    timeout-minutes: 20',
+        'runs-on: windows-latest\n    timeout-minutes: 45',
+      ),
     );
     expect(ciTestPolicyScope(['.github/workflows/ci.yml'], after45, before20).runBenchmark).toBe(false);
-    const before359 = beforeCiWorkflow.replace('    timeout-minutes: 30', '    timeout-minutes: 359');
-    const after360 = before359.replace('    timeout-minutes: 359', '    timeout-minutes: 360');
+    const before359 = Effect.pipe(
+      beforeCiWorkflow,
+      EffectString.replace('    timeout-minutes: 30', '    timeout-minutes: 359'),
+    );
+    const after360 = Effect.pipe(
+      before359,
+      EffectString.replace('    timeout-minutes: 359', '    timeout-minutes: 360'),
+    );
     expect(ciTestPolicyScope(['.github/workflows/ci.yml'], after360, before359).runBenchmark).toBe(false);
   });
 
@@ -106,7 +127,7 @@ describe('code graph production ratchet diff scope', () => {
     expect(
       ciTestPolicyScope(
         ciTestPolicyPaths,
-        afterCiWorkflow.replace(serializedShard, windowsDefaultShard),
+        Effect.pipe(afterCiWorkflow, EffectString.replace(serializedShard, windowsDefaultShard)),
         beforeCiWorkflow,
       ).runBenchmark,
     ).toBe(false);
@@ -114,20 +135,41 @@ describe('code graph production ratchet diff scope', () => {
 
   it('runs for other Windows Vitest options, duplicate or invalid timers, and changes to workload or shard', () => {
     for (const after of [
-      beforeCiWorkflow.replace(serializedShard, serializedShard.replace(' --shard=', ' --testTimeout=30000 --shard=')),
-      beforeCiWorkflow.replace(
-        serializedShard,
-        windowsDefaultShard.replace(' --shard=', ' --testTimeout=120000 --shard='),
+      Effect.pipe(
+        beforeCiWorkflow,
+        EffectString.replace(
+          serializedShard,
+          Effect.pipe(serializedShard, EffectString.replace(' --shard=', ' --testTimeout=30000 --shard=')),
+        ),
       ),
-      beforeCiWorkflow.replace(
-        serializedShard,
-        windowsDefaultShard.replace('--testTimeout=120000', '--testTimeout 120000'),
+      Effect.pipe(
+        beforeCiWorkflow,
+        EffectString.replace(
+          serializedShard,
+          Effect.pipe(windowsDefaultShard, EffectString.replace(' --shard=', ' --testTimeout=120000 --shard=')),
+        ),
       ),
-      beforeCiWorkflow.replace(serializedShard, windowsDefaultShard.replace(' --shard=', ' --maxWorkers=2 --shard=')),
-      afterWindowsDefault.replace('--shard=${{ matrix.shard }}', '--shard=1/2'),
-      afterWindowsDefault.replace('apps/threadnote/test/dev-skills/', 'apps/threadnote/test/unit/'),
-      afterWindowsDefault.replace('bun run typecheck', 'bun run test'),
-      afterWindowsDefault.replace('BUN_VERSION: 1.4.2', 'BUN_VERSION: 1.4.3'),
+      Effect.pipe(
+        beforeCiWorkflow,
+        EffectString.replace(
+          serializedShard,
+          Effect.pipe(windowsDefaultShard, EffectString.replace('--testTimeout=120000', '--testTimeout 120000')),
+        ),
+      ),
+      Effect.pipe(
+        beforeCiWorkflow,
+        EffectString.replace(
+          serializedShard,
+          Effect.pipe(windowsDefaultShard, EffectString.replace(' --shard=', ' --maxWorkers=2 --shard=')),
+        ),
+      ),
+      Effect.pipe(afterWindowsDefault, EffectString.replace('--shard=${{ matrix.shard }}', '--shard=1/2')),
+      Effect.pipe(
+        afterWindowsDefault,
+        EffectString.replace('apps/threadnote/test/dev-skills/', 'apps/threadnote/test/unit/'),
+      ),
+      Effect.pipe(afterWindowsDefault, EffectString.replace('bun run typecheck', 'bun run test')),
+      Effect.pipe(afterWindowsDefault, EffectString.replace('BUN_VERSION: 1.4.2', 'BUN_VERSION: 1.4.3')),
     ]) {
       expect(ciTestPolicyScope(ciTestPolicyPaths, after, beforeCiWorkflow).runBenchmark).toBe(true);
     }
@@ -135,9 +177,12 @@ describe('code graph production ratchet diff scope', () => {
       fc.property(
         fc.oneof(fc.integer({min: 1, max: 119_999}), fc.integer({min: 120_001, max: 240_000})),
         milliseconds => {
-          const after = beforeCiWorkflow.replace(
-            serializedShard,
-            windowsDefaultShard.replace('120000', String(milliseconds)),
+          const after = Effect.pipe(
+            beforeCiWorkflow,
+            EffectString.replace(
+              serializedShard,
+              Effect.pipe(windowsDefaultShard, EffectString.replace('120000', String(milliseconds))),
+            ),
           );
           expect(ciTestPolicyScope(ciTestPolicyPaths, after, beforeCiWorkflow).runBenchmark).toBe(true);
         },
@@ -148,13 +193,13 @@ describe('code graph production ratchet diff scope', () => {
 
   it('runs when the CI workflow changes anything beyond the Windows job timeout', () => {
     for (const after of [
-      afterCiWorkflow.replace('BUN_VERSION: 1.4.2', 'BUN_VERSION: 1.4.3'),
-      afterCiWorkflow.replace('bun run typecheck', 'bun run test'),
-      afterCiWorkflow.replace('    timeout-minutes: 45', '    timeout-minutes: 60'),
-      afterCiWorkflow.replace('    timeout-minutes: 60', '    timeout-minutes: 361'),
-      afterCiWorkflow.replace('    timeout-minutes: 60', '    timeout-minutes: 0'),
-      afterCiWorkflow.replace('    timeout-minutes: 60', '    timeout-minutes: 060'),
-      afterCiWorkflow.replace('    timeout-minutes: 60', ''),
+      Effect.pipe(afterCiWorkflow, EffectString.replace('BUN_VERSION: 1.4.2', 'BUN_VERSION: 1.4.3')),
+      Effect.pipe(afterCiWorkflow, EffectString.replace('bun run typecheck', 'bun run test')),
+      Effect.pipe(afterCiWorkflow, EffectString.replace('    timeout-minutes: 45', '    timeout-minutes: 60')),
+      Effect.pipe(afterCiWorkflow, EffectString.replace('    timeout-minutes: 60', '    timeout-minutes: 361')),
+      Effect.pipe(afterCiWorkflow, EffectString.replace('    timeout-minutes: 60', '    timeout-minutes: 0')),
+      Effect.pipe(afterCiWorkflow, EffectString.replace('    timeout-minutes: 60', '    timeout-minutes: 060')),
+      Effect.pipe(afterCiWorkflow, EffectString.replace('    timeout-minutes: 60', '')),
       beforeCiWorkflow,
     ]) {
       expect(ciTestPolicyScope(ciTestPolicyPaths, after).runBenchmark).toBe(true);
@@ -162,14 +207,14 @@ describe('code graph production ratchet diff scope', () => {
     expect(
       classifyCodeGraphProductionRatchetScope({afterCiWorkflow, changedPaths: ciTestPolicyPaths}).runBenchmark,
     ).toBe(true);
-    const duplicateBudget = beforeCiWorkflow.replace(
-      '    timeout-minutes: 30',
-      '    timeout-minutes: 30\n    timeout-minutes: 30',
+    const duplicateBudget = Effect.pipe(
+      beforeCiWorkflow,
+      EffectString.replace('    timeout-minutes: 30', '    timeout-minutes: 30\n    timeout-minutes: 30'),
     );
     expect(
       ciTestPolicyScope(
         ['.github/workflows/ci.yml'],
-        duplicateBudget.replace('timeout-minutes: 30', 'timeout-minutes: 60'),
+        Effect.pipe(duplicateBudget, EffectString.replace('timeout-minutes: 30', 'timeout-minutes: 60')),
         duplicateBudget,
       ).runBenchmark,
     ).toBe(true);
@@ -177,14 +222,14 @@ describe('code graph production ratchet diff scope', () => {
       ciTestPolicyScope(
         ['.github/workflows/ci.yml'],
         afterCiWorkflow,
-        beforeCiWorkflow.replace('    timeout-minutes: 30', ''),
+        Effect.pipe(beforeCiWorkflow, EffectString.replace('    timeout-minutes: 30', '')),
       ).runBenchmark,
     ).toBe(true);
     expect(
       ciTestPolicyScope(
         ['.github/workflows/ci.yml'],
         afterCiWorkflow,
-        beforeCiWorkflow.replace('    timeout-minutes: 30', '    timeout-minutes: 0'),
+        Effect.pipe(beforeCiWorkflow, EffectString.replace('    timeout-minutes: 30', '    timeout-minutes: 0')),
       ).runBenchmark,
     ).toBe(true);
   });
@@ -329,12 +374,14 @@ describe('code graph production ratchet diff scope', () => {
     expect(shouldSkipBenchmark(['package.json'], manifest('4.3.7'), manifest('4.3.7'))).toBe(false);
     expect(
       classifyCodeGraphProductionRatchetScope({
-        changedPaths: [undefined] as unknown as Iterable<string>,
+        // @ts-expect-error Intentionally tests a non-string path at the runtime input boundary.
+        changedPaths: [undefined],
       }).runBenchmark,
     ).toBe(true);
     expect(
       classifyCodeGraphProductionRatchetScope({
-        changedPaths: undefined as unknown as Iterable<string>,
+        // @ts-expect-error Intentionally tests a missing iterable at the runtime input boundary.
+        changedPaths: undefined,
       }).runBenchmark,
     ).toBe(true);
   });
@@ -359,7 +406,7 @@ describe('code graph production ratchet diff scope', () => {
   it('is invariant to release-note order and duplicate paths', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[a-z0-9][a-z0-9.-]{0,24}$/u), {maxLength: 12}), versions => {
-        const paths = ['package.json', ...versions.map(version => `.github/release-notes/v${version}.md`)];
+        const paths = ['package.json', ...EffectArray.map(versions, version => `.github/release-notes/v${version}.md`)];
         expect(shouldSkipBenchmark(paths)).toBe(true);
         expect(shouldSkipBenchmark([...paths].reverse())).toBe(true);
         expect(shouldSkipBenchmark([...paths, ...paths])).toBe(true);

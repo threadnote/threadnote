@@ -20,6 +20,8 @@ import {fetchThreadnoteReleaseNotes, releaseForVersion, releasesBetween, type Re
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {managerFeatureError} from './feature_errors.js';
 import {ManagerLiveConsumerChangeHints} from './live_consumer_observation.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface UpdateRequest {
   readonly body: Effect.Effect<Record<string, unknown>, unknown>;
@@ -171,7 +173,7 @@ const routeUpdates = Effect.fn('managerUpdates.handleRequest')(function* (reques
               currentSession.job = {
                 status: 'completed',
                 message: 'Update finished. New Threadnote sessions will use the installed version.',
-                output: redactSensitiveText(result.output).slice(-16_000),
+                output: Effect2.pipe(redactSensitiveText(result.output), EffectString.slice(-16_000)),
               };
             }).pipe(Effect.andThen(updateHint)),
           onFailure: cause =>

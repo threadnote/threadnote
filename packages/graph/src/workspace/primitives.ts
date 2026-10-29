@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {
   CodeGraphBuildWorkspace,
@@ -10,6 +11,8 @@ import {compareCodeUnits} from '../ordering.js';
 import type {CodeGraphInventoryFile} from '../types.js';
 import type {CodeGraphExternalDependencyV1} from '../cross_repository/types.js';
 import type {CodeGraphSpan} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface ProjectCandidate {
   readonly aliases: readonly string[];
@@ -42,15 +45,19 @@ export interface WorkspaceFileIndex {
 }
 
 export function basename(path: string): string {
-  return path.split('/').at(-1) ?? path;
+  return Effect.pipe(path, EffectString.split('/')).at(-1) ?? path;
 }
 
 export function dirname(path: string): string {
-  return path.split('/').slice(0, -1).join('/');
+  return EffectArray.join(Effect.pipe(path, EffectString.split('/')).slice(0, -1), '/');
 }
 
 export function joinPath(...components: readonly string[]): string {
-  return components.filter(Boolean).join('/').replace(/\/+/g, '/').replace(/^\.\//, '');
+  return Effect.pipe(
+    EffectArray.join(EffectArray.filter(components, Boolean), '/'),
+    EffectString.replace(/\/+/g, '/'),
+    EffectString.replace(/^\.\//, ''),
+  );
 }
 
 export function materializeBuildWorkspaces(
@@ -89,8 +96,8 @@ export function messageOf(cause: unknown): string {
 }
 
 export function normalizeContainedPath(root: string, relative: string): string | undefined {
-  const output = root ? root.split('/') : [];
-  for (const segment of relative.replaceAll('\\', '/').split('/')) {
+  const output: string[] = root ? [...Effect.pipe(root, EffectString.split('/'))] : [];
+  for (const segment of Effect.pipe(relative, EffectString.replaceAll('\\', '/'), EffectString.split('/'))) {
     if (!segment || segment === '.') continue;
     if (segment === '..') {
       if (output.length === 0) return undefined;
@@ -99,13 +106,15 @@ export function normalizeContainedPath(root: string, relative: string): string |
       output.push(segment);
     }
   }
-  return output.join('/');
+  return EffectArray.join(output, '/');
 }
 
 export function relativeContainedPath(parent: string, child: string): string | undefined {
   if (parent === '') return child;
   if (child === parent) return '';
-  return child.startsWith(`${parent}/`) ? child.slice(parent.length + 1) : undefined;
+  return Effect.pipe(child, EffectString.startsWith(`${parent}/`))
+    ? Effect.pipe(child, EffectString.slice(parent.length + 1))
+    : undefined;
 }
 
 export function unique<T>(values: readonly T[]): T[] {
@@ -117,5 +126,5 @@ export function uniqueStrings(values: readonly string[]): string[] {
 }
 
 export function workspaceIdentity(buildSystem: CodeGraphWorkspaceBuildSystem, root: string): string {
-  return `cgw_${sha256HexSync(`workspace-v1\n${buildSystem}\n${root}`).slice(0, 32)}`;
+  return `cgw_${Effect.pipe(sha256HexSync(`workspace-v1\n${buildSystem}\n${root}`), EffectString.slice(0, 32))}`;
 }

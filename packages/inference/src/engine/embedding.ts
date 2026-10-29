@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Layer} from 'effect';
 import * as AiError from 'effect/ai/AiError';
 import * as EmbeddingModel from 'effect/ai/EmbeddingModel';
@@ -21,17 +22,18 @@ export const llamaEmbeddingModelLayer = (options: LlamaEmbeddingLayerOptions) =>
       return yield* EmbeddingModel.make({
         embedMany: ({inputs}) =>
           session.embedMany(inputs).pipe(
-            Effect.map(results => ({
-              results: results.map(vector => [...vector]),
-              usage: {inputTokens: undefined},
-            })),
-            Effect.mapError(error =>
-              AiError.make({
-                method: 'embedMany',
-                module: 'ThreadnoteNodeLlamaCpp',
-                reason: AiError.InternalProviderError.make({description: error.message}),
+            Effect.mapBoth({
+              onSuccess: results => ({
+                results: EffectArray.map(results, vector => [...vector]),
+                usage: {inputTokens: undefined},
               }),
-            ),
+              onFailure: error =>
+                AiError.make({
+                  method: 'embedMany',
+                  module: 'ThreadnoteNodeLlamaCpp',
+                  reason: AiError.InternalProviderError.make({description: error.message}),
+                }),
+            }),
           ),
       });
     }),

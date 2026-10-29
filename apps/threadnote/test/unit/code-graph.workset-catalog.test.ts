@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem} from 'effect';
@@ -45,14 +46,17 @@ import {
   type CodeGraphWorksetRoutingSymbolV1,
 } from '@threadnote/graph/workset_catalog/types';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {join, mkdir, mkdtemp, readFile, rm, stat, writeFile} from '../helpers/effect-filesystem.js';
+import {join, pathService, mkdir, mkdtemp, readFile, rm, stat, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 describe('code graph workset catalog', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('uses an independent private schema with indexed normalized routing surfaces', async () => {
@@ -77,23 +81,27 @@ describe('code graph workset catalog', () => {
     const database = new Database(databasePath, {readonly: true, strict: true});
     try {
       expect(database.query<{readonly page_size: number}, []>('PRAGMA page_size').get()?.page_size).toBe(4_096);
-      const symbolColumns = database
-        .query<{readonly name: string}, []>('PRAGMA table_info(routing_symbols)')
-        .all()
-        .map(row => row.name);
+      const symbolColumns = EffectArray.map(
+        database.query<{readonly name: string}, []>('PRAGMA table_info(routing_symbols)').all(),
+        row => row.name,
+      );
       expect(symbolColumns).not.toEqual(expect.arrayContaining(['documentation', 'signature', 'source']));
       expect(
-        database
-          .query<{readonly name: string}, []>('PRAGMA table_info(routing_lookup_keys)')
-          .all()
-          .map(row => row.name),
+        EffectArray.map(
+          database.query<{readonly name: string}, []>('PRAGMA table_info(routing_lookup_keys)').all(),
+          row => row.name,
+        ),
       ).toEqual(expect.arrayContaining(['lookup_key', 'node_id', 'projection_digest']));
       const exactPlan = database
         .query<{readonly detail: string}, [string]>(
           'EXPLAIN QUERY PLAN SELECT node_id FROM routing_lookup_keys WHERE lookup_key = ?',
         )
         .all('exact.lookup');
-      expect(exactPlan.some(row => row.detail.includes('routing_lookup_keys_exact'))).toBe(true);
+      expect(
+        EffectArray.some(exactPlan, row =>
+          Effect2.pipe(row.detail, EffectString.includes('routing_lookup_keys_exact')),
+        ),
+      ).toBe(true);
       expect(
         database
           .query<{readonly name: string}, []>(
@@ -221,7 +229,13 @@ describe('code graph workset catalog', () => {
       }),
     );
     const publishedFirst = await runEffect(readPublishedCodeGraphWorksetCatalogGeneration(home, 'engineering'));
-    expect(publishedFirst?.members.map(entry => entry.repositoryKey)).toEqual(['producer']);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(publishedFirst?.members), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, entry => entry.repositoryKey),
+        ),
+      ),
+    ).toEqual(['producer']);
 
     const second = generationInput('engineering', 'manifest-b', [member(2, 'consumer'), member(3, 'schema')]);
     const secondStage = await runEffect(stageCodeGraphWorksetCatalogGeneration(home, second));
@@ -237,7 +251,13 @@ describe('code graph workset catalog', () => {
     );
     const publishedSecond = await runEffect(readPublishedCodeGraphWorksetCatalogGeneration(home, 'engineering'));
     expect(publishedSecond).toMatchObject({id: secondStage.id, manifestDigest: digest('manifest-b')});
-    expect(publishedSecond?.members.map(entry => entry.repositoryKey)).toEqual(['consumer', 'schema']);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(publishedSecond?.members), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, entry => entry.repositoryKey),
+        ),
+      ),
+    ).toEqual(['consumer', 'schema']);
 
     const firstPage = await runEffect(
       readCodeGraphWorksetCatalogRoutingSymbols(home, {limit: 1, worksetName: 'engineering'}),
@@ -274,7 +294,7 @@ describe('code graph workset catalog', () => {
     expect(
       await runEffect(
         codeGraphWorksetCatalogProjectionContainsNode(home, {
-          nodeId: `cgs_${'f'.repeat(32)}`,
+          nodeId: `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`,
           projectionDigest: projection.projectionDigest,
         }),
       ),
@@ -364,7 +384,7 @@ describe('code graph workset catalog', () => {
         const staged = await runEffect(
           stageCodeGraphWorksetCatalogGenerationFromReceipts(propertyHome, {
             manifestDigest: input.manifestDigest,
-            members: input.members.map(entry => ({
+            members: EffectArray.map(input.members, entry => ({
               projectionDigest: entry.projection.projectionDigest,
               repositoryId: entry.projection.repositoryId,
               repositoryKey: entry.repositoryKey,
@@ -604,7 +624,7 @@ describe('code graph workset catalog', () => {
     const largeMembers = Array.from({length: 257}, (_, index) => ({
       projectionDigest: shared.projection.projectionDigest,
       repositoryId: shared.projection.repositoryId,
-      repositoryKey: `member-${String(index).padStart(3, '0')}`,
+      repositoryKey: `member-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}`,
       snapshotId: shared.projection.snapshotId,
     }));
     const large = await runEffect(
@@ -654,9 +674,21 @@ describe('code graph workset catalog', () => {
       symbols: [
         {
           ...base.symbols[0],
-          lookupKeys: Array.from({length: 64}, (_, index) => `lookup.${String(index).padStart(2, '0')}`),
-          path: `${Array.from({length: 96}, (_, index) => `segment-${String(index).padStart(2, '0')}`).join('/')}/symbol.ts`,
-          terms: Array.from({length: 64}, (_, index) => ({term: `term-${String(index).padStart(2, '0')}`, weight: 1})),
+          lookupKeys: Array.from(
+            {length: 64},
+            (_, index) => `lookup.${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+          ),
+          path: `${EffectArray.join(
+            Array.from(
+              {length: 96},
+              (_, index) => `segment-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+            ),
+            '/',
+          )}/symbol.ts`,
+          terms: Array.from({length: 64}, (_, index) => ({
+            term: `term-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+            weight: 1,
+          })),
         },
       ],
     });
@@ -698,7 +730,7 @@ describe('code graph workset catalog', () => {
   it('keeps generation identity and canonical repository order independent of input order', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 200}), {maxLength: 12}), seeds => {
-        const members = seeds.map(seed => member(seed, `repository-${seed}`));
+        const members = EffectArray.map(seeds, seed => member(seed, `repository-${seed}`));
         const forward = codeGraphWorksetCatalogGenerationIdentity(
           generationInput('property-workset', 'property-manifest', members),
         );
@@ -708,8 +740,8 @@ describe('code graph workset catalog', () => {
 
         expect(reversed.id).toBe(forward.id);
         expect(reversed.digest).toBe(forward.digest);
-        expect(reversed.members.map(entry => entry.repositoryKey)).toEqual(
-          [...forward.members.map(entry => entry.repositoryKey)].sort(compareText),
+        expect(EffectArray.map(reversed.members, entry => entry.repositoryKey)).toEqual(
+          [...EffectArray.map(forward.members, entry => entry.repositoryKey)].sort(compareText),
         );
       }),
       {numRuns: 100},
@@ -722,7 +754,7 @@ describe('code graph workset catalog', () => {
         fc.uniqueArray(fc.integer({min: 0, max: 500}), {maxLength: 32, minLength: 1}),
         fc.integer({min: 1, max: 16}),
         (seeds, pageSize) => {
-          const symbols = seeds.map(seed => projection(seed).symbols[0]);
+          const symbols = EffectArray.map(seeds, seed => projection(seed).symbols[0]);
           const full = codeGraphWorksetRoutingProjectionLogicalBytes(symbols);
           let streamed = 0;
           for (let offset = 0; offset < symbols.length; offset += pageSize) {
@@ -811,7 +843,7 @@ describe('code graph workset catalog', () => {
 });
 
 function calibratedProjectionSymbol(index: number): CodeGraphWorksetRoutingSymbolV1 {
-  const padded = index.toString().padStart(5, '0');
+  const padded = Effect2.pipe(index.toString(), EffectString.padStart(5, '0'));
   const lookupCount = index % 5 < 3 ? 3 : 2;
   const termCount = index % 100 < 46 ? 11 : 10;
   return {
@@ -820,13 +852,13 @@ function calibratedProjectionSymbol(index: number): CodeGraphWorksetRoutingSymbo
     language: 'typescript',
     lookupKeys: Array.from({length: lookupCount}, (_, key) => `workset.catalog.${padded}.lookup-${key}`),
     name: `prepareRoutingProjection${padded}`,
-    nodeId: `cgs_${digest(`calibrated-node-${index}`).slice(0, 32)}`,
+    nodeId: `cgs_${Effect2.pipe(digest(`calibrated-node-${index}`), EffectString.slice(0, 32))}`,
     packageName: 'threadnote',
     path: `src/workset/routing-${padded}.ts`,
     qualifiedName: `WorksetCatalog.prepareRoutingProjection${padded}`,
     span: {column: 1, endColumn: 48, endLine: index + 2, line: index + 1},
     terms: Array.from({length: termCount}, (_, term) => ({
-      term: `routing-projection-${padded}-term-${term.toString().padStart(2, '0')}`,
+      term: `routing-projection-${padded}-term-${Effect2.pipe(term.toString(), EffectString.padStart(2, '0'))}`,
       weight: 5 - (term % 5),
     })),
   };
@@ -875,13 +907,13 @@ function member(seed: number, repositoryKey: string): CodeGraphWorksetCatalogGen
 function projection(seed: number): CodeGraphWorksetRoutingProjectionV1 {
   return createCodeGraphWorksetRoutingProjection({
     checkoutId: digest(`checkout-${seed}`),
-    commitId: digest(`commit-${seed}`).slice(0, 40),
+    commitId: Effect2.pipe(digest(`commit-${seed}`), EffectString.slice(0, 40)),
     componentCount: seed % 3,
     extractorGeneration: 12,
     projectorVersion: CODE_GRAPH_WORKSET_CATALOG_PROJECTOR_VERSION,
     repositoryId: digest(`repository-${seed}`),
     snapshotDigest: digest(`snapshot-digest-${seed}`),
-    snapshotId: `cgsn_${digest(`snapshot-${seed}`).slice(0, 40)}`,
+    snapshotId: `cgsn_${Effect2.pipe(digest(`snapshot-${seed}`), EffectString.slice(0, 40))}`,
     symbols: [
       {
         exported: seed % 2 === 0,
@@ -889,7 +921,7 @@ function projection(seed: number): CodeGraphWorksetRoutingProjectionV1 {
         language: 'typescript',
         lookupKeys: [`symbol.${seed}`, `exact.symbol.${seed}`],
         name: `symbol${seed}`,
-        nodeId: `cgs_${digest(`node-${seed}`).slice(0, 40)}`,
+        nodeId: `cgs_${Effect2.pipe(digest(`node-${seed}`), EffectString.slice(0, 40))}`,
         packageName: `@fixture/repository-${seed}`,
         path: `src/symbol-${seed}.ts`,
         qualifiedName: `fixture.symbol${seed}`,
@@ -910,7 +942,7 @@ function projectionReceipt(projection: CodeGraphWorksetRoutingProjectionV1) {
 }
 
 function catalogPath(home: string): string {
-  return codeGraphWorksetCatalogDatabasePath({join} as never, home);
+  return codeGraphWorksetCatalogDatabasePath(pathService, home);
 }
 
 function digest(value: string): string {

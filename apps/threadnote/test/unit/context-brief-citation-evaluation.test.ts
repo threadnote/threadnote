@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -47,8 +48,14 @@ describe('Context Brief citation offline evaluation', () => {
         {expectedStatus: 'unknown', observed: {changed: 0, deleted: 0, exact: 0, relocated: 0, unknown: 3}},
       ]),
     );
-    expect(result.performance.map(profile => profile.id)).toEqual(['local-100k', 'workset-128', 'workset-50']);
-    expect(result.performance.find(profile => profile.id === 'local-100k')).toMatchObject({
+    expect(EffectArray.map(result.performance, profile => profile.id)).toEqual([
+      'local-100k',
+      'workset-128',
+      'workset-50',
+    ]);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.performance, profile => profile.id === 'local-100k')),
+    ).toMatchObject({
       addedPeakRssBytesMaximum: 32 * 1024 * 1024,
       coldBuilds: 0,
       estimatedTokensMaximum: 1_400,
@@ -69,7 +76,7 @@ describe('Context Brief citation offline evaluation', () => {
   it('blocks false-fresh observations', () => {
     const candidate = replaceScenario(FIXTURE, 'changed', scenario => ({
       ...scenario,
-      citations: scenario.citations.map(citation => ({...citation, observedStatus: 'exact'})),
+      citations: EffectArray.map(scenario.citations, citation => ({...citation, observedStatus: 'exact'})),
       observedFreshness: 'fresh',
       observedWarning: 'none',
     }));
@@ -86,7 +93,7 @@ describe('Context Brief citation offline evaluation', () => {
   it('never accepts deleted from incomplete coverage', () => {
     const candidate = replaceScenario(FIXTURE, 'unknown-incomplete', scenario => ({
       ...scenario,
-      citations: scenario.citations.map(citation => ({...citation, observedStatus: 'deleted'})),
+      citations: EffectArray.map(scenario.citations, citation => ({...citation, observedStatus: 'deleted'})),
       observedFreshness: 'stale',
       observedWarning: 'stale-evidence',
     }));
@@ -101,12 +108,12 @@ describe('Context Brief citation offline evaluation', () => {
   it('ratchets validation latency, total latency, RSS, tokens, database opens, and cold work', () => {
     const candidate: ContextBriefCitationEvaluationFixtureV1 = {
       ...FIXTURE,
-      performanceProfiles: FIXTURE.performanceProfiles.map(profile =>
+      performanceProfiles: EffectArray.map(FIXTURE.performanceProfiles, profile =>
         profile.id !== 'local-100k'
           ? profile
           : {
               ...profile,
-              samples: profile.samples.map(sample => ({
+              samples: EffectArray.map(profile.samples, sample => ({
                 ...sample,
                 addedPeakRssBytes: 64 * 1024 * 1024 + 1,
                 citationValidationMilliseconds: 251,
@@ -161,11 +168,11 @@ describe('Context Brief citation offline evaluation', () => {
         ({profileOffset, reverseSamples, scenarioOffset}) => {
           const reordered: ContextBriefCitationEvaluationFixtureV1 = {
             ...FIXTURE,
-            performanceProfiles: rotate(FIXTURE.performanceProfiles, profileOffset).map(profile => ({
+            performanceProfiles: EffectArray.map(rotate(FIXTURE.performanceProfiles, profileOffset), profile => ({
               ...profile,
               samples: reverseSamples ? [...profile.samples].reverse() : profile.samples,
             })),
-            scenarios: rotate(FIXTURE.scenarios, scenarioOffset).map(scenario => ({
+            scenarios: EffectArray.map(rotate(FIXTURE.scenarios, scenarioOffset), scenario => ({
               ...scenario,
               citations: [...scenario.citations].reverse(),
             })),
@@ -203,7 +210,7 @@ describe('Context Brief citation offline evaluation', () => {
         (snapshotState, observedStatus) => {
           const candidate = replaceScenario(FIXTURE, 'unknown-ambiguous-relocation', scenario => ({
             ...scenario,
-            citations: scenario.citations.map(citation => ({...citation, observedStatus})),
+            citations: EffectArray.map(scenario.citations, citation => ({...citation, observedStatus})),
             snapshotState,
           }));
           const result = evaluateContextBriefCitationFixture(candidate);
@@ -258,7 +265,7 @@ function performanceProfile(
   const shape = CONTEXT_BRIEF_CITATION_PERFORMANCE_CONTRACTS[id].shape;
   return {
     id,
-    samples: citationValidationMilliseconds.map((validation, index) => ({
+    samples: EffectArray.map(citationValidationMilliseconds, (validation, index) => ({
       addedPeakRssBytes: 32 * 1024 * 1024,
       cacheHits: index === 0 ? 0 : Math.floor(shape.citations / 2),
       captureMilliseconds: 20 + index,
@@ -411,7 +418,7 @@ function replaceScenario(
 ): ContextBriefCitationEvaluationFixtureV1 {
   return {
     ...fixture,
-    scenarios: fixture.scenarios.map(scenario => (scenario.id === id ? replace(scenario) : scenario)),
+    scenarios: EffectArray.map(fixture.scenarios, scenario => (scenario.id === id ? replace(scenario) : scenario)),
   };
 }
 

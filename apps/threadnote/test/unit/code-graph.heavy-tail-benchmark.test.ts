@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {join, mkdtemp, readFile, rm, writeFile} from '../helpers/effect-filesystem.js';
@@ -31,6 +32,9 @@ import {
   codeGraphHeavyTailTextlessSvg,
   parseCodeGraphHeavyTailProfile,
 } from '../../../../scripts/code-graph-heavy-tail-fixture.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const RELEASE_CAPTURE_START = Date.parse('2026-09-18T12:00:00.000Z');
 const RELEASE_OBSERVED_AT = '2026-09-18T12:00:01.000Z';
@@ -41,12 +45,10 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
   it('reports exactly one active request for non-overlapping fractional intervals without mutating them', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({min: 1, max: 99_999}), {minLength: 2, maxLength: 64}), durations => {
-        const intervals = durations
-          .map((duration, index) => ({
-            end: index * 1_000 + 0.123456 + duration / 1_000,
-            start: index * 1_000 + 0.123456,
-          }))
-          .reverse();
+        const intervals = EffectArray.map(durations, (duration, index) => ({
+          end: index * 1_000 + 0.123456 + duration / 1_000,
+          start: index * 1_000 + 0.123456,
+        })).reverse();
         const before = structuredClone(intervals);
         const utilization = heavyTailExtractionUtilization(intervals, 1);
         expect(utilization.averageConcurrency).toBe(1);
@@ -88,17 +90,9 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
   });
 
   it('keeps the checked profile synchronized with the reviewed workload shape', async () => {
-    const baseline = (await Bun.file(
-      'apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-profile.json',
-    ).json()) as {
-      readonly profile: unknown;
-      readonly reviewedShape: {
-        readonly eligibleFiles: number;
-        readonly latencyBudget: string;
-        readonly repositoryFiles: number;
-      };
-      readonly version: number;
-    };
+    const baseline = decodeReviewedProfileBaseline(
+      await Bun.file('apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-profile.json').json(),
+    );
 
     expect(baseline.version).toBe(1);
     expect(parseCodeGraphHeavyTailProfile(baseline.profile)).toEqual(CODE_GRAPH_HEAVY_TAIL_PROFILE);
@@ -110,7 +104,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
     expect(CODE_GRAPH_HEAVY_TAIL_PROFILE.lowSignalJsonBytes).toBe(25 * 1_048_576);
     expect(CODE_GRAPH_HEAVY_TAIL_PROFILE.textlessSvgFiles).toBeGreaterThanOrEqual(1_000);
     const jsonFixtures = codeGraphHeavyTailJsonFixtures(CODE_GRAPH_HEAVY_TAIL_PROFILE);
-    expect([...new Set(jsonFixtures.map(fixture => fixture.bytes))]).toEqual([
+    expect([...new Set(EffectArray.map(jsonFixtures, fixture => fixture.bytes))]).toEqual([
       64 * 1_024,
       Math.round(0.8 * 1_048_576),
       Math.round(5.7 * 1_048_576),
@@ -120,26 +114,13 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
   });
 
   it('retains the historical pre-admission observation without turning local latency into a portable gate', async () => {
-    const baseline = (await Bun.file(
-      'apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-development.json',
-    ).json()) as {
-      readonly assertions: Readonly<Record<string, boolean>>;
-      readonly interpretation: {readonly latency: string};
-      readonly profile: unknown;
-      readonly result: {
-        readonly cacheFactsBytes: number;
-        readonly graphDigest: string;
-        readonly lowSignalJsonFactsBytes: number;
-      };
-      readonly runs: {
-        readonly interrupted: {readonly cacheFiles: number};
-        readonly resumed: {readonly reusedFiles: number};
-      };
-    };
+    const baseline = decodeDevelopmentBaseline(
+      await Bun.file('apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-development.json').json(),
+    );
 
     expect(parseCodeGraphHeavyTailProfile(baseline.profile)).toEqual(CODE_GRAPH_HEAVY_TAIL_PROFILE);
-    expect(Object.values(baseline.assertions)).toEqual(expect.arrayContaining([true]));
-    expect(Object.values(baseline.assertions)).not.toContain(false);
+    expect(EffectRecord.values(baseline.assertions)).toEqual(expect.arrayContaining([true]));
+    expect(EffectRecord.values(baseline.assertions)).not.toContain(false);
     expect(baseline.result.graphDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(baseline.result.lowSignalJsonFactsBytes).toBeLessThanOrEqual(16 * 1_024);
     expect(baseline.result.cacheFactsBytes).toBeLessThan(CODE_GRAPH_HEAVY_TAIL_PROFILE.lowSignalJsonBytes);
@@ -160,9 +141,9 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
         const profile = {...CODE_GRAPH_HEAVY_TAIL_SMOKE_PROFILE, lowSignalJsonBytes};
         const fixtures = codeGraphHeavyTailJsonFixtures(profile);
         expect(fixtures).toHaveLength(4 * CODE_GRAPH_HEAVY_TAIL_JSON_DUPLICATES);
-        expect(new Set(fixtures.map(fixture => fixture.path))).toHaveLength(fixtures.length);
-        for (const bytes of new Set(fixtures.map(fixture => fixture.bytes))) {
-          expect(fixtures.filter(fixture => fixture.bytes === bytes)).toHaveLength(
+        expect(new Set(EffectArray.map(fixtures, fixture => fixture.path))).toHaveLength(fixtures.length);
+        for (const bytes of new Set(EffectArray.map(fixtures, fixture => fixture.bytes))) {
+          expect(EffectArray.filter(fixtures, fixture => fixture.bytes === bytes)).toHaveLength(
             CODE_GRAPH_HEAVY_TAIL_JSON_DUPLICATES,
           );
         }
@@ -189,7 +170,13 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
           expect(() => JSON.parse(json)).not.toThrow();
           expect(new TextEncoder().encode(generated)).toHaveLength(typescriptBytes);
           expect(generated).toContain('interface GeneratedSurfaceTail');
-          expect(callHeavy.match(/value \+= dependency\(/g)).toHaveLength(calls);
+          expect(
+            Effect.pipe(
+              callHeavy,
+              EffectString.match(/value \+= dependency\(/g),
+              Effect.Option.getOrElse(() => null),
+            ),
+          ).toHaveLength(calls);
           expect(callHeavy).toContain('interface PreservedTail001');
         },
       ),
@@ -201,7 +188,13 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
     const callHeavy = codeGraphHeavyTailPathologicalTypeScript(7, 12);
     const generated = codeGraphHeavyTailGeneratedTypeScript(8_192);
 
-    expect(callHeavy.match(/value \+= dependency\(/g)).toHaveLength(12);
+    expect(
+      Effect.pipe(
+        callHeavy,
+        EffectString.match(/value \+= dependency\(/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(12);
     expect(callHeavy).toContain('import {dependency}');
     expect(callHeavy).toContain('export {dependency as forwarded007}');
     expect(callHeavy).toContain('interface PreservedTail007');
@@ -272,7 +265,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
       parseCodeGraphHeavyTailBenchmarkArguments([
         '--governed',
         '--candidate-commit',
-        'a'.repeat(40),
+        Effect.pipe('a', EffectString.repeat(40)),
         '--output',
         '/tmp/a',
       ]),
@@ -291,9 +284,9 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
   it('independently ratchets every emitted scheduler, resource, language, resume, and graph measurement', () => {
     const artifacts = [heavyTailArtifact(0), heavyTailArtifact(10), heavyTailArtifact(20)];
     const ratchet = createCodeGraphHeavyTailRatchet(artifacts);
-    const names = artifacts[0].ratchetArtifact.measurements.map(measurement => measurement.name).sort();
+    const names = EffectArray.map(artifacts[0].ratchetArtifact.measurements, measurement => measurement.name).sort();
 
-    expect(Object.keys(ratchet.measurements).sort()).toEqual(names);
+    expect(EffectRecord.keys(ratchet.measurements).sort()).toEqual(names);
     expect(names).toHaveLength(254);
     expect(names).toEqual(expect.arrayContaining(['parallel-duration', 'parallel-peak-rss']));
     expect(names).toEqual(
@@ -316,7 +309,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
     expect(ratchet.measurements['resume-retained-cache-coverage']).toMatchObject({maximum: 100, minimum: 100});
     const reducedInterruptionOvershoot = {
       ...artifacts[0].ratchetArtifact,
-      measurements: artifacts[0].ratchetArtifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifacts[0].ratchetArtifact.measurements, measurement =>
         ['interrupted-cache-files', 'interrupted-interrupted-after-persisted-files', 'resumed-reused-files'].includes(
           measurement.name,
         )
@@ -327,7 +320,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
     expect(() => enforceCodeGraphBenchmarkRatchet(reducedInterruptionOvershoot, ratchet)).not.toThrow();
 
     const toleratedConcurrencyEpsilon = createCodeGraphHeavyTailRatchet(
-      [0, 10, 20].map(offset =>
+      EffectArray.map([0, 10, 20], offset =>
         heavyTailArtifactWithMeasurement(
           4.000_000_5,
           'interrupted-extraction-average-concurrency',
@@ -347,7 +340,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
     const durationLimit = ratchet.measurements['parallel-duration'].p95Maximum!;
     const regressed = {
       ...artifacts[0].ratchetArtifact,
-      measurements: artifacts[0].ratchetArtifact.measurements.map(measurement =>
+      measurements: EffectArray.map(artifacts[0].ratchetArtifact.measurements, measurement =>
         measurement.name === 'parallel-duration'
           ? {
               ...measurement,
@@ -378,7 +371,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
     expect(() => createCodeGraphHeavyTailRatchet([correctnessOnly, artifacts[1], artifacts[2]])).toThrow(
       /governed-performance/u,
     );
-    const weakened = artifacts.map(artifact => ({
+    const weakened = EffectArray.map(artifacts, artifact => ({
       ...artifact,
       ratchetArtifact: {
         ...artifact.ratchetArtifact,
@@ -468,10 +461,14 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
     expect(() => assertHeavyTailReleaseRatchet(artifacts, {...options, runnerIdentity: 'local'})).toThrow(
       /explicit runner identity/iu,
     );
-    const slower = artifacts.map((artifact, index) =>
+    const slower = EffectArray.map(artifacts, (artifact, index) =>
       heavyTailArtifactWithMeasurement(
-        artifact.ratchetArtifact.measurements.find(measurement => measurement.name === 'parallel-duration')!.p50 +
-          10_000,
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            artifact.ratchetArtifact.measurements,
+            measurement => measurement.name === 'parallel-duration',
+          ),
+        )!.p50 + 10_000,
         'parallel-duration',
         0,
         'parallel-language-mixed-request',
@@ -483,12 +480,11 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
 
   it('preserves the checked limit when accepted sub-millisecond samples derive excess noise headroom', () => {
     const measurement = 'eight-workers-language-npm-manifest-parse';
-    const artifacts = [0.817_125, 1.493_625, 0.876_333].map((value, index) =>
+    const artifacts = EffectArray.map([0.817_125, 1.493_625, 0.876_333], (value, index) =>
       heavyTailArtifactWithMeasurement(value, measurement, 0, 'parallel-language-mixed-request', index * 10),
     );
     const options = releaseOptions(artifacts);
-    const checkedRatchet = structuredClone(options.checkedRatchet) as Mutable<typeof options.checkedRatchet>;
-    checkedRatchet.measurements[measurement].p95Maximum = 6;
+    const checkedRatchet = checkedRatchetWithLimits(options.checkedRatchet, [{name: measurement, p95Maximum: 6}]);
 
     expect(createCodeGraphHeavyTailRatchet(artifacts).measurements[measurement].p95Maximum).toBe(7);
     for (const artifact of artifacts) {
@@ -513,16 +509,17 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
           minLength: 3,
         }),
         (upperValues, lowerValues) => {
-          const artifacts = upperValues.map((value, index) =>
+          const artifacts = EffectArray.map(upperValues, (value, index) =>
             heavyTailArtifactWithMeasurement(value, upperMeasurement, lowerValues[index], lowerMeasurement, index * 10),
           );
           const generated = createCodeGraphHeavyTailRatchet(artifacts);
           const options = releaseOptions(artifacts);
-          const checkedRatchet = structuredClone(options.checkedRatchet) as Mutable<typeof options.checkedRatchet>;
           const checkedUpper = Math.max(...upperValues);
           const checkedLower = Math.min(...lowerValues);
-          checkedRatchet.measurements[upperMeasurement].p95Maximum = checkedUpper;
-          checkedRatchet.measurements[lowerMeasurement].minimum = checkedLower;
+          const checkedRatchet = checkedRatchetWithLimits(options.checkedRatchet, [
+            {name: upperMeasurement, p95Maximum: checkedUpper},
+            {name: lowerMeasurement, minimum: checkedLower},
+          ]);
 
           const admitted = assertHeavyTailReleaseRatchet(artifacts, {...options, checkedRatchet});
           const admittedUpper = admitted.measurements[upperMeasurement].p95Maximum!;
@@ -558,12 +555,18 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
         ...value,
         environment: {
           ...value.environment,
-          provenance: {...value.environment.provenance!, executableSha256: undefined} as never,
+          provenance: {
+            ...value.environment.provenance!,
+            executableSha256: undefined,
+          },
         },
       }),
       (value: CodeGraphHeavyTailBenchmarkArtifact) => ({
         ...value,
-        assertions: {...value.assertions, resumeMatchesClean: false as never},
+        assertions: {
+          ...value.assertions,
+          resumeMatchesClean: false,
+        },
       }),
       (value: CodeGraphHeavyTailBenchmarkArtifact) => ({
         ...value,
@@ -578,7 +581,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
           ...value.runs,
           sixWorkers: {
             ...value.runs.sixWorkers,
-            graph: {...value.runs.sixWorkers.graph!, digest: '1'.repeat(64)},
+            graph: {...value.runs.sixWorkers.graph!, digest: Effect.pipe('1', EffectString.repeat(64))},
           },
         },
       }),
@@ -600,45 +603,68 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
     'bun-linux-arm64',
     'bun-linux-arm64-musl',
     'bun-linux-x64-baseline',
+    'bun-linux-x64-baseline-musl',
     'bun-linux-x64-musl-baseline',
     'bun-windows-arm64',
     'bun-windows-x64-baseline',
   ])('round-trips canonical managed runtime identity %s and rejects mismatches', target => {
-    const architecture = target.includes('-arm64') ? 'arm64' : 'x64';
-    const platform = target.startsWith('bun-windows-')
+    const architecture = Effect.pipe(target, EffectString.includes('-arm64')) ? 'arm64' : 'x64';
+    const platform = Effect.pipe(target, EffectString.startsWith('bun-windows-'))
       ? 'windows'
-      : target.startsWith('bun-darwin-')
+      : Effect.pipe(target, EffectString.startsWith('bun-darwin-'))
         ? 'darwin'
         : 'linux';
     fc.assert(
       fc.property(fc.tuple(fc.integer({min: 1, max: 9}), fc.nat(99), fc.nat(99)), ([major, minor, patch]) => {
         const version = `${major}.${minor}.${patch}`;
-        const artifact = structuredClone(heavyTailArtifact(0)) as Mutable<CodeGraphHeavyTailBenchmarkArtifact>;
-        artifact.environment.runtime = `bun/${version}`;
-        artifact.environment.architecture = architecture;
-        const provenance = artifact.environment.provenance!;
-        if (provenance.mode !== 'managed-exact-head') throw new Error('Expected managed fixture');
-        provenance.runtime = `bun-${version}`;
-        provenance.target = target;
-        const {ratchetArtifact: _previous, ...outer} = artifact;
+        const sourceArtifact = heavyTailArtifact(0);
+        const provenance = sourceArtifact.environment.provenance;
+        if (provenance?.mode !== 'managed-exact-head') throw new Error('Expected managed fixture');
+        const {ratchetArtifact: _previous, ...outer} = sourceArtifact;
+        const updatedProvenance = {...provenance, runtime: `bun-${version}`, target};
+        const outerWithIdentity = {
+          ...outer,
+          environment: {...outer.environment, runtime: `bun/${version}`, architecture, provenance: updatedProvenance},
+        };
         const complete = {
-          ...artifact,
-          ratchetArtifact: codeGraphHeavyTailRatchetArtifact(outer, platform === 'windows' ? 'win32' : platform, {
-            availableBytes: artifact.environment.availableBytes!,
-            minimumFreeBytes: artifact.environment.minimumFreeBytes!,
-            runtimeProvenance: provenance,
-            storage: artifact.environment.storage!,
-          }),
+          ...outerWithIdentity,
+          ratchetArtifact: codeGraphHeavyTailRatchetArtifact(
+            outerWithIdentity,
+            platform === 'windows' ? 'win32' : platform,
+            {
+              availableBytes: sourceArtifact.environment.availableBytes!,
+              minimumFreeBytes: sourceArtifact.environment.minimumFreeBytes!,
+              runtimeProvenance: updatedProvenance,
+              storage: sourceArtifact.environment.storage!,
+            },
+          ),
         };
         expect(parseCodeGraphHeavyTailReleaseEvidence(complete)).toEqual(complete);
 
-        provenance.runtime = `bun-${major}.${minor}.${patch + 1}`;
-        expect(() => parseCodeGraphHeavyTailReleaseEvidence(complete)).toThrow(/provenance/iu);
-        provenance.runtime = `bun-${version}`;
-        provenance.target = `${platform}-${architecture}`;
-        expect(() => parseCodeGraphHeavyTailReleaseEvidence(complete)).toThrow(/provenance/iu);
-        provenance.target = `bun-${platform}-${architecture === 'arm64' ? 'x64' : 'arm64'}`;
-        expect(() => parseCodeGraphHeavyTailReleaseEvidence(complete)).toThrow(/provenance/iu);
+        expect(() =>
+          parseCodeGraphHeavyTailReleaseEvidence(
+            withEnvironmentProvenance(complete, {
+              ...updatedProvenance,
+              runtime: `bun-${major}.${minor}.${patch + 1}`,
+            }),
+          ),
+        ).toThrow(/provenance/iu);
+        expect(() =>
+          parseCodeGraphHeavyTailReleaseEvidence(
+            withEnvironmentProvenance(complete, {
+              ...updatedProvenance,
+              target: `${platform}-${architecture}`,
+            }),
+          ),
+        ).toThrow(/provenance/iu);
+        expect(() =>
+          parseCodeGraphHeavyTailReleaseEvidence(
+            withEnvironmentProvenance(complete, {
+              ...updatedProvenance,
+              target: `bun-${platform}-${architecture === 'arm64' ? 'x64' : 'arm64'}`,
+            }),
+          ),
+        ).toThrow(/provenance/iu);
       }),
       {numRuns: 8},
     );
@@ -650,8 +676,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
         fc.constantFrom('factsBytes' as const, 'requestMilliseconds' as const),
         fc.integer({max: 1_000, min: 1}),
         (field, delta) => {
-          const mutated = structuredClone(heavyTailArtifact(0)) as Mutable<CodeGraphHeavyTailBenchmarkArtifact>;
-          mutated.runs.resumed.languages.typescript[field] += delta;
+          const mutated = withResumedLanguageTelemetryDelta(heavyTailArtifact(0), field, delta);
 
           expect(() => parseCodeGraphHeavyTailReleaseEvidence(mutated)).toThrow(/release evidence|inconsistent/iu);
         },
@@ -693,43 +718,29 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
   });
 
   it('keeps the checked scheduler ratchet and governed development evidence synchronized', async () => {
-    const ratchet = JSON.parse(
-      await readFile(
-        'apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-ratchet.json',
-        'utf8',
+    const ratchet = decodeCheckedHeavyTailRatchet(
+      JSON.parse(
+        await readFile(
+          'apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-ratchet.json',
+          'utf8',
+        ),
       ),
-    ) as {
-      readonly measurements: Readonly<Record<string, unknown>>;
-      readonly metadata: Readonly<Record<string, unknown>>;
-    };
-    const evidence = JSON.parse(
-      await readFile(
-        'apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-development.json',
-        'utf8',
+    );
+    const evidence = decodeSchedulerDevelopmentEvidence(
+      JSON.parse(
+        await readFile(
+          'apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-development.json',
+          'utf8',
+        ),
       ),
-    ) as {
-      readonly baseline: {
-        readonly artifactSha256: readonly string[];
-        readonly commit: string;
-        readonly samples: number;
-        readonly storage: {readonly filesystem: string; readonly location: string; readonly medium: string};
-      };
-      readonly graph: {
-        readonly digest: string;
-        readonly edges: number;
-        readonly files: number;
-        readonly symbols: number;
-      };
-      readonly interpretation: {readonly scope: string};
-      readonly ratchet: {readonly measurementCount: number};
-      readonly scheduler: {readonly automaticParserWorkers: number; readonly capacities: readonly number[]};
-    };
-    const emittedNames = heavyTailArtifact(0)
-      .ratchetArtifact.measurements.map(measurement => measurement.name)
-      .sort();
+    );
+    const emittedNames = EffectArray.map(
+      heavyTailArtifact(0).ratchetArtifact.measurements,
+      measurement => measurement.name,
+    ).sort();
 
     expect(() => validateCodeGraphBenchmarkRatchet(ratchet)).not.toThrow();
-    expect(Object.keys(ratchet.measurements).sort()).toEqual(emittedNames);
+    expect(EffectRecord.keys(ratchet.measurements).sort()).toEqual(emittedNames);
     expect(emittedNames).toHaveLength(254);
     expect(ratchet.metadata).toMatchObject({
       automaticParserWorkers: 4,
@@ -747,7 +758,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
       storage: {filesystem: 'apfs', location: 'internal', medium: 'solid-state'},
     });
     expect(evidence.baseline.artifactSha256).toHaveLength(3);
-    expect(evidence.baseline.artifactSha256.every(hash => /^[a-f0-9]{64}$/u.test(hash))).toBe(true);
+    expect(EffectArray.every(evidence.baseline.artifactSha256, hash => /^[a-f0-9]{64}$/u.test(hash))).toBe(true);
     expect(evidence.graph).toEqual({
       digest: '862c4f7e69cda68d59679d6b052cccfca01c35a2e13086333c631f2286b02c93',
       edges: 327,
@@ -760,7 +771,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
   it('rejects ratchet generation across different exact source commits', () => {
     const artifacts = [heavyTailArtifact(0), heavyTailArtifact(10), heavyTailArtifact(20)];
     const mixed = artifacts[2];
-    const differentCommit = 'e'.repeat(40);
+    const differentCommit = Effect.pipe('e', EffectString.repeat(40));
     artifacts[2] = {
       ...mixed,
       environment: {
@@ -784,7 +795,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
         process.cwd(),
         'apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-ratchet.json',
       );
-      const checkedRatchet = JSON.parse(await readFile(checkedRatchetPath, 'utf8')) as CheckedHeavyTailRatchet;
+      const checkedRatchet = decodeCheckedHeavyTailRatchet(JSON.parse(await readFile(checkedRatchetPath, 'utf8')));
       const artifactPaths: string[] = [];
       for (const [index, artifact] of [heavyTailArtifact(0), heavyTailArtifact(10), heavyTailArtifact(20)].entries()) {
         const artifactPath = join(root, `artifact-${index}.json`);
@@ -799,7 +810,7 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
           '--output',
           outputPath,
           '--candidate-commit',
-          'a'.repeat(40),
+          Effect.pipe('a', EffectString.repeat(40)),
           '--runner-class',
           RELEASE_RUNNER_CLASS,
           '--runner-identity',
@@ -829,33 +840,146 @@ describe('code graph large-monorepo heavy-tail benchmark', () => {
       expect(stderr).toBe('');
       expect(exitCode, stdout).toBe(0);
       expect(stdout).toContain('threadnote-code-graph-heavy-tail');
-      const ratchet = JSON.parse(await readFile(outputPath, 'utf8')) as {readonly measurements: object};
-      expect(Object.keys(ratchet.measurements)).toHaveLength(254);
+      const ratchet = decodeMeasurementsEnvelope(JSON.parse(await readFile(outputPath, 'utf8')));
+      expect(EffectRecord.keys(ratchet.measurements)).toHaveLength(254);
     } finally {
       await rm(root, {force: true, recursive: true});
     }
   });
 });
 
-interface CheckedHeavyTailRatchet {
-  readonly environment: Readonly<Record<string, boolean | number | string>>;
-  readonly measurements: Readonly<
-    Record<
-      string,
-      {
-        readonly maximum?: number;
-        readonly meanMaximum?: number;
-        readonly minimum?: number;
-        readonly p50Maximum?: number;
-        readonly p95Maximum?: number;
-        readonly p99Maximum?: number;
-      }
-    >
-  >;
-  readonly metadata: Readonly<Record<string, boolean | number | string>>;
-}
+const OpenFixtureObject = Schema.Record(Schema.String, Schema.Unknown);
+const CheckedHeavyTailLimitSchema = Schema.Struct({
+  maximum: Schema.optionalKey(Schema.Finite),
+  meanMaximum: Schema.optionalKey(Schema.Finite),
+  minimum: Schema.optionalKey(Schema.Finite),
+  p50Maximum: Schema.optionalKey(Schema.Finite),
+  p95Maximum: Schema.optionalKey(Schema.Finite),
+  p99Maximum: Schema.optionalKey(Schema.Finite),
+  samplesMinimum: Schema.Finite,
+  unit: Schema.Literals(['bytes', 'count', 'milliseconds', 'operations_per_second', 'percent']),
+});
+const CheckedHeavyTailRatchetSchema = Schema.Struct({
+  environment: Schema.Record(Schema.String, Schema.Union([Schema.Boolean, Schema.Finite, Schema.String])),
+  measurements: Schema.Record(Schema.String, CheckedHeavyTailLimitSchema),
+  metadata: Schema.Record(Schema.String, Schema.Union([Schema.Boolean, Schema.Finite, Schema.String])),
+  suite: Schema.Literal('threadnote-code-graph-heavy-tail'),
+  version: Schema.Literal(1),
+});
+type CheckedHeavyTailRatchet = typeof CheckedHeavyTailRatchetSchema.Type;
 
-type Mutable<T> = {-readonly [Key in keyof T]: Mutable<T[Key]>};
+type CheckedLimitOverride = {
+  readonly name: string;
+  readonly minimum?: number;
+  readonly p95Maximum?: number;
+};
+function checkedRatchetWithLimits(
+  checked: CheckedHeavyTailRatchet,
+  overrides: readonly CheckedLimitOverride[],
+): CheckedHeavyTailRatchet {
+  const measurements = {...checked.measurements};
+  for (const {name, ...limits} of overrides) {
+    const current = measurements[name];
+    if (current === undefined) throw new Error(`Missing checked heavy-tail measurement ${name}.`);
+    measurements[name] = {...current, ...limits};
+  }
+  return {...checked, measurements};
+}
+function withEnvironmentProvenance(
+  artifact: CodeGraphHeavyTailBenchmarkArtifact,
+  provenance: NonNullable<CodeGraphHeavyTailBenchmarkArtifact['environment']['provenance']>,
+): CodeGraphHeavyTailBenchmarkArtifact {
+  return {...artifact, environment: {...artifact.environment, provenance}};
+}
+function withResumedLanguageTelemetryDelta(
+  artifact: CodeGraphHeavyTailBenchmarkArtifact,
+  field: 'factsBytes' | 'requestMilliseconds',
+  delta: number,
+): CodeGraphHeavyTailBenchmarkArtifact {
+  const telemetry = artifact.runs.resumed.languages.typescript;
+  return {
+    ...artifact,
+    runs: {
+      ...artifact.runs,
+      resumed: {
+        ...artifact.runs.resumed,
+        languages: {
+          ...artifact.runs.resumed.languages,
+          typescript: {...telemetry, [field]: telemetry[field] + delta},
+        },
+      },
+    },
+  };
+}
+const decodeCheckedHeavyTailRatchet = Schema.decodeUnknownSync(CheckedHeavyTailRatchetSchema);
+const ReviewedProfileBaselineSchema = Schema.StructWithRest(
+  Schema.Struct({
+    profile: Schema.Unknown,
+    reviewedShape: Schema.StructWithRest(
+      Schema.Struct({eligibleFiles: Schema.Finite, latencyBudget: Schema.String, repositoryFiles: Schema.Finite}),
+      [OpenFixtureObject],
+    ),
+    version: Schema.Finite,
+  }),
+  [OpenFixtureObject],
+);
+const decodeReviewedProfileBaseline = Schema.decodeUnknownSync(ReviewedProfileBaselineSchema);
+const DevelopmentBaselineSchema = Schema.StructWithRest(
+  Schema.Struct({
+    assertions: Schema.Record(Schema.String, Schema.Boolean),
+    interpretation: Schema.StructWithRest(Schema.Struct({latency: Schema.String}), [OpenFixtureObject]),
+    profile: Schema.Unknown,
+    result: Schema.StructWithRest(
+      Schema.Struct({
+        cacheFactsBytes: Schema.Finite,
+        graphDigest: Schema.String,
+        lowSignalJsonFactsBytes: Schema.Finite,
+      }),
+      [OpenFixtureObject],
+    ),
+    runs: Schema.StructWithRest(
+      Schema.Struct({
+        interrupted: Schema.StructWithRest(Schema.Struct({cacheFiles: Schema.Finite}), [OpenFixtureObject]),
+        resumed: Schema.StructWithRest(Schema.Struct({reusedFiles: Schema.Finite}), [OpenFixtureObject]),
+      }),
+      [OpenFixtureObject],
+    ),
+  }),
+  [OpenFixtureObject],
+);
+const decodeDevelopmentBaseline = Schema.decodeUnknownSync(DevelopmentBaselineSchema);
+const SchedulerDevelopmentEvidenceSchema = Schema.StructWithRest(
+  Schema.Struct({
+    baseline: Schema.StructWithRest(
+      Schema.Struct({
+        artifactSha256: Schema.Array(Schema.String),
+        commit: Schema.String,
+        samples: Schema.Finite,
+        storage: Schema.StructWithRest(
+          Schema.Struct({filesystem: Schema.String, location: Schema.String, medium: Schema.String}),
+          [OpenFixtureObject],
+        ),
+      }),
+      [OpenFixtureObject],
+    ),
+    graph: Schema.StructWithRest(
+      Schema.Struct({digest: Schema.String, edges: Schema.Finite, files: Schema.Finite, symbols: Schema.Finite}),
+      [OpenFixtureObject],
+    ),
+    interpretation: Schema.StructWithRest(Schema.Struct({scope: Schema.String}), [OpenFixtureObject]),
+    ratchet: Schema.StructWithRest(Schema.Struct({measurementCount: Schema.Finite}), [OpenFixtureObject]),
+    scheduler: Schema.StructWithRest(
+      Schema.Struct({automaticParserWorkers: Schema.Finite, capacities: Schema.Array(Schema.Finite)}),
+      [OpenFixtureObject],
+    ),
+  }),
+  [OpenFixtureObject],
+);
+const decodeSchedulerDevelopmentEvidence = Schema.decodeUnknownSync(SchedulerDevelopmentEvidenceSchema);
+const MeasurementsEnvelopeSchema = Schema.StructWithRest(Schema.Struct({measurements: OpenFixtureObject}), [
+  OpenFixtureObject,
+]);
+const decodeMeasurementsEnvelope = Schema.decodeUnknownSync(MeasurementsEnvelopeSchema);
 
 interface ReleaseAdmissionRecord {
   readonly actualCandidate: string;
@@ -879,10 +1003,10 @@ interface ReleaseAdmissionRecord {
 
 const releaseCommitArbitrary = fc
   .array(fc.constantFrom(...'0123456789abcdef'), {maxLength: 40, minLength: 40})
-  .map(characters => characters.join(''));
+  .map(characters => EffectArray.join(characters, ''));
 const releaseRunnerArbitrary = fc
   .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789-'), {maxLength: 18, minLength: 3})
-  .map(characters => characters.join(''))
+  .map(characters => EffectArray.join(characters, ''))
   .filter(value => value !== 'local' && value !== 'local-unclassified');
 
 const validReleaseAdmissionRecordArbitrary = fc
@@ -991,21 +1115,24 @@ function releaseAdmissionCase(record: ReleaseAdmissionRecord) {
 }
 
 function releaseArtifacts(record: ReleaseAdmissionRecord): CodeGraphHeavyTailBenchmarkArtifact[] {
-  const artifacts = [heavyTailArtifact(0), heavyTailArtifact(10), heavyTailArtifact(20)].map((artifact, index) => {
-    const outer = {
-      ...artifact,
-      createdAt: new Date(record.timestamps[index]).toISOString(),
-      evidenceClass: record.evidenceClass,
-      environment: {
-        ...artifact.environment,
-        commit: record.actualCandidate,
-        provenance: {...artifact.environment.provenance!, sourceCommit: record.provenanceCommit},
-        runnerClass: record.runnerClass,
-        runnerIdentity: record.runnerIdentity,
-      },
-    };
-    return withRecomputedHeavyTailRatchet(outer);
-  });
+  const artifacts = EffectArray.map(
+    [heavyTailArtifact(0), heavyTailArtifact(10), heavyTailArtifact(20)],
+    (artifact, index) => {
+      const outer = {
+        ...artifact,
+        createdAt: new Date(record.timestamps[index]).toISOString(),
+        evidenceClass: record.evidenceClass,
+        environment: {
+          ...artifact.environment,
+          commit: record.actualCandidate,
+          provenance: {...artifact.environment.provenance!, sourceCommit: record.provenanceCommit},
+          runnerClass: record.runnerClass,
+          runnerIdentity: record.runnerIdentity,
+        },
+      };
+      return withRecomputedHeavyTailRatchet(outer);
+    },
+  );
   if (!record.outerEmbeddedConsistent) {
     const first = artifacts[0];
     artifacts[0] = {
@@ -1024,10 +1151,10 @@ function expectedReleaseAdmission(record: ReleaseAdmissionRecord): boolean {
   return (
     /^[0-9a-f]{40}$/u.test(record.candidateCommit) &&
     record.candidateCommit === record.actualCandidate &&
-    record.selectedRunnerClass.trim().length > 0 &&
+    Effect.pipe(record.selectedRunnerClass, EffectString.trim).length > 0 &&
     record.selectedRunnerClass !== 'local-unclassified' &&
     record.selectedRunnerClass === record.runnerClass &&
-    record.selectedRunnerIdentity.trim().length > 0 &&
+    Effect.pipe(record.selectedRunnerIdentity, EffectString.trim).length > 0 &&
     record.selectedRunnerIdentity !== 'local' &&
     record.selectedRunnerIdentity === record.runnerIdentity &&
     timestamps[0] < timestamps[1] &&
@@ -1035,7 +1162,8 @@ function expectedReleaseAdmission(record: ReleaseAdmissionRecord): boolean {
     freshness.notBefore <= freshness.observedAt &&
     freshness.maximumAgeMilliseconds > 0 &&
     freshness.maximumSpanMilliseconds > 0 &&
-    timestamps.every(
+    EffectArray.every(
+      timestamps,
       timestamp =>
         timestamp >= freshness.notBefore &&
         freshness.observedAt - timestamp <= freshness.maximumAgeMilliseconds &&
@@ -1049,7 +1177,7 @@ function expectedReleaseAdmission(record: ReleaseAdmissionRecord): boolean {
 }
 
 function differentCommit(commit: string): string {
-  return `${commit[0] === '0' ? '1' : '0'}${commit.slice(1)}`;
+  return `${commit[0] === '0' ? '1' : '0'}${Effect.pipe(commit, EffectString.slice(1))}`;
 }
 
 function withRecomputedHeavyTailRatchet(
@@ -1072,8 +1200,8 @@ function artifactMatchingCheckedRatchet(
   artifact: CodeGraphHeavyTailBenchmarkArtifact,
   checked: CheckedHeavyTailRatchet,
 ): CodeGraphHeavyTailBenchmarkArtifact {
-  const outer = structuredClone(artifact) as Mutable<CodeGraphHeavyTailBenchmarkArtifact>;
-  for (const [name, limit] of Object.entries(checked.measurements)) {
+  let updated = artifact;
+  for (const [name, limit] of EffectRecord.toEntries(checked.measurements)) {
     if (
       name === 'parallel-duration-reduction' ||
       name === 'parallel-active-wall-reduction' ||
@@ -1082,24 +1210,41 @@ function artifactMatchingCheckedRatchet(
       continue;
     }
     const value =
-      limit.minimum !== undefined && name.endsWith('-extraction-average-concurrency')
+      limit.minimum !== undefined && Effect.pipe(name, EffectString.endsWith('-extraction-average-concurrency'))
         ? limit.minimum / 0.9
         : (limit.minimum ?? 0);
-    setHeavyTailMeasurement(outer, name, value);
+    updated = setHeavyTailMeasurement(updated, name, value);
   }
-  outer.runs.single.durationMilliseconds = 100;
-  outer.runs.parallel.durationMilliseconds = 0;
-  outer.runs.single.extraction.activeWallMilliseconds = 100;
-  outer.runs.single.extraction.requestMilliseconds = 100;
-  outer.runs.parallel.extraction.activeWallMilliseconds = 0;
-  return withRecomputedHeavyTailRatchet(outer);
+  return withRecomputedHeavyTailRatchet({
+    ...updated,
+    runs: {
+      ...updated.runs,
+      single: {
+        ...updated.runs.single,
+        durationMilliseconds: 100,
+        extraction: {
+          ...updated.runs.single.extraction,
+          activeWallMilliseconds: 100,
+          requestMilliseconds: 100,
+        },
+      },
+      parallel: {
+        ...updated.runs.parallel,
+        durationMilliseconds: 0,
+        extraction: {
+          ...updated.runs.parallel.extraction,
+          activeWallMilliseconds: 0,
+        },
+      },
+    },
+  });
 }
 
 function setHeavyTailMeasurement(
-  artifact: Mutable<CodeGraphHeavyTailBenchmarkArtifact>,
+  artifact: CodeGraphHeavyTailBenchmarkArtifact,
   name: string,
   value: number,
-): void {
+): CodeGraphHeavyTailBenchmarkArtifact {
   const runPrefix = [
     ['eight-workers', 'eightWorkers'],
     ['six-workers', 'sixWorkers'],
@@ -1108,118 +1253,133 @@ function setHeavyTailMeasurement(
     ['resumed', 'resumed'],
     ['single', 'single'],
   ] as const;
-  const match = runPrefix.find(([prefix]) => name.startsWith(`${prefix}-`));
-  if (match === undefined) return;
-  const run = artifact.runs[match[1]];
-  const metric = name.slice(match[0].length + 1);
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runPrefix, ([prefix]) => Effect.pipe(name, EffectString.startsWith(`${prefix}-`))),
+  );
+  if (match === undefined) return artifact;
+  const [prefix, alias] = match;
+  const metric = Effect.pipe(name, EffectString.slice(prefix.length + 1));
+  const run = artifact.runs[alias];
+  let updatedRun: HeavyTailChildRun = run;
   switch (metric) {
     case 'duration':
-      run.durationMilliseconds = value;
-      return;
+      updatedRun = {...run, durationMilliseconds: value};
+      break;
     case 'cpu':
-      run.cpuMilliseconds = value;
-      return;
+      updatedRun = {...run, cpuMilliseconds: value};
+      break;
     case 'peak-rss':
-      run.peakRssBytes = value;
-      return;
+      updatedRun = {...run, peakRssBytes: value};
+      break;
     case 'reading':
-      run.readingMilliseconds = value;
-      return;
+      updatedRun = {...run, readingMilliseconds: value};
+      break;
     case 'extraction-active-wall':
-      run.extraction.activeWallMilliseconds = value;
-      return;
+      updatedRun = {...run, extraction: {...run.extraction, activeWallMilliseconds: value}};
+      break;
     case 'extraction-average-concurrency':
-      run.extraction.averageConcurrency = value;
-      return;
+      updatedRun = {...run, extraction: {...run.extraction, averageConcurrency: value}};
+      break;
     case 'extraction-peak-concurrency':
-      run.extraction.peakConcurrency = value;
-      return;
+      updatedRun = {...run, extraction: {...run.extraction, peakConcurrency: value}};
+      break;
     case 'extraction-request':
-      run.extraction.requestMilliseconds = value;
-      return;
+      updatedRun = {...run, extraction: {...run.extraction, requestMilliseconds: value}};
+      break;
     case 'cache-files':
-      run.cache.files = value;
-      return;
+      updatedRun = {...run, cache: {...run.cache, files: value}};
+      break;
     case 'cache-facts-bytes':
-      run.cache.factsBytes = value;
-      return;
+      updatedRun = {...run, cache: {...run.cache, factsBytes: value}};
+      break;
     case 'cache-low-signal-json-facts-bytes':
-      run.cache.lowSignalJsonFactsBytes = value;
-      return;
+      updatedRun = {...run, cache: {...run.cache, lowSignalJsonFactsBytes: value}};
+      break;
     case 'interrupted-after-persisted-files':
-      run.interruptedAfterPersistedFiles = value;
-      return;
+      updatedRun = {...run, interruptedAfterPersistedFiles: value};
+      break;
     case 'reused-files':
-      run.reusedFiles = value;
-      return;
-  }
-  if (metric.startsWith('graph-') && run.graph !== undefined) {
-    const graphMetric = metric.slice('graph-'.length);
-    switch (graphMetric) {
-      case 'edges':
-        run.graph.edges = value;
-        return;
-      case 'files':
-        run.graph.files = value;
-        return;
-      case 'generated-tail-preserved':
-        run.graph.generatedTypeScriptTailPreserved = value === 1;
-        return;
-      case 'low-signal-json-symbols':
-        run.graph.lowSignalJsonSymbols = value;
-        return;
-      case 'pathological-typescript-tails':
-        run.graph.pathologicalTypeScriptTails = value;
-        return;
-      case 'symbols':
-        run.graph.symbols = value;
-        return;
-      case 'textless-svg-symbols':
-        run.graph.textlessSvgSymbols = value;
-        return;
+      updatedRun = {...run, reusedFiles: value};
+      break;
+    default: {
+      if (Effect.pipe(metric, EffectString.startsWith('graph-')) && run.graph !== undefined) {
+        const graphMetric = Effect.pipe(metric, EffectString.slice('graph-'.length));
+        const graph = run.graph;
+        switch (graphMetric) {
+          case 'edges':
+            updatedRun = {...run, graph: {...graph, edges: value}};
+            break;
+          case 'files':
+            updatedRun = {...run, graph: {...graph, files: value}};
+            break;
+          case 'generated-tail-preserved':
+            updatedRun = {...run, graph: {...graph, generatedTypeScriptTailPreserved: value === 1}};
+            break;
+          case 'low-signal-json-symbols':
+            updatedRun = {...run, graph: {...graph, lowSignalJsonSymbols: value}};
+            break;
+          case 'pathological-typescript-tails':
+            updatedRun = {...run, graph: {...graph, pathologicalTypeScriptTails: value}};
+            break;
+          case 'symbols':
+            updatedRun = {...run, graph: {...graph, symbols: value}};
+            break;
+          case 'textless-svg-symbols':
+            updatedRun = {...run, graph: {...graph, textlessSvgSymbols: value}};
+            break;
+        }
+      }
+      for (const language of EffectRecord.keys(run.languages).sort((left, right) => right.length - left.length)) {
+        const languagePrefix = `language-${language}-`;
+        if (!Effect.pipe(metric, EffectString.startsWith(languagePrefix))) continue;
+        const telemetry = run.languages[language];
+        const languageMetric = Effect.pipe(metric, EffectString.slice(languagePrefix.length));
+        let updatedTelemetry = telemetry;
+        switch (languageMetric) {
+          case 'degraded-files':
+            updatedTelemetry = {...telemetry, degradedFiles: value};
+            break;
+          case 'facts-bytes':
+            updatedTelemetry = {...telemetry, factsBytes: value};
+            break;
+          case 'files':
+            updatedTelemetry = {...telemetry, files: value};
+            break;
+          case 'parse':
+            updatedTelemetry = {...telemetry, parseMilliseconds: value};
+            break;
+          case 'persistence':
+            updatedTelemetry = {...telemetry, persistenceMilliseconds: value};
+            break;
+          case 'request':
+            updatedTelemetry = {
+              ...telemetry,
+              requestMilliseconds: value,
+              ...(telemetry.parseMilliseconds > value ? {parseMilliseconds: value} : {}),
+            };
+            break;
+          case 'relations':
+            updatedTelemetry = {...telemetry, relations: value};
+            break;
+          case 'source-bytes':
+            updatedTelemetry = {...telemetry, sourceBytes: value};
+            break;
+          case 'symbols':
+            updatedTelemetry = {...telemetry, symbols: value};
+            break;
+        }
+        updatedRun = {...run, languages: {...run.languages, [language]: updatedTelemetry}};
+        break;
+      }
     }
   }
-  for (const language of Object.keys(run.languages).sort((left, right) => right.length - left.length)) {
-    const languagePrefix = `language-${language}-`;
-    if (!metric.startsWith(languagePrefix)) continue;
-    const telemetry = run.languages[language];
-    const languageMetric = metric.slice(languagePrefix.length);
-    switch (languageMetric) {
-      case 'degraded-files':
-        telemetry.degradedFiles = value;
-        return;
-      case 'facts-bytes':
-        telemetry.factsBytes = value;
-        return;
-      case 'files':
-        telemetry.files = value;
-        return;
-      case 'parse':
-        telemetry.parseMilliseconds = value;
-        return;
-      case 'persistence':
-        telemetry.persistenceMilliseconds = value;
-        return;
-      case 'request':
-        telemetry.requestMilliseconds = value;
-        if (telemetry.parseMilliseconds > value) telemetry.parseMilliseconds = value;
-        return;
-      case 'relations':
-        telemetry.relations = value;
-        return;
-      case 'source-bytes':
-        telemetry.sourceBytes = value;
-        return;
-      case 'symbols':
-        telemetry.symbols = value;
-        return;
-    }
-  }
+  if (updatedRun === run) return artifact;
+  return {...artifact, runs: {...artifact.runs, [alias]: updatedRun}};
 }
 
 function releaseOptions(artifacts: readonly CodeGraphHeavyTailBenchmarkArtifact[]) {
   return {
-    candidateCommit: 'a'.repeat(40),
+    candidateCommit: Effect.pipe('a', EffectString.repeat(40)),
     checkedRatchet: createCodeGraphHeavyTailRatchet(artifacts),
     freshness: {
       futureSkewMilliseconds: 1_000,
@@ -1239,17 +1399,17 @@ function heavyTailArtifact(offset: number): CodeGraphHeavyTailBenchmarkArtifact 
     minimumFreeBytes: 120 * 1_073_741_824,
     runtimeProvenance: {
       dependencyInstallation: 'bun install --frozen-lockfile',
-      executableSha256: 'd'.repeat(64),
+      executableSha256: Effect.pipe('d', EffectString.repeat(64)),
       mode: 'managed-exact-head',
       payloadBytes: 1,
       payloadFileCount: 1,
-      payloadManifestSha256: 'e'.repeat(64),
+      payloadManifestSha256: Effect.pipe('e', EffectString.repeat(64)),
       processLeaseInspection: 'complete',
-      releaseMetadataSha256: 'f'.repeat(64),
+      releaseMetadataSha256: Effect.pipe('f', EffectString.repeat(64)),
       runtime: 'bun-1.4.2',
-      sourceCommit: 'a'.repeat(40),
-      sourceLockfileSha256: 'b'.repeat(64),
-      sourcePackageManifestSha256: 'c'.repeat(64),
+      sourceCommit: Effect.pipe('a', EffectString.repeat(40)),
+      sourceLockfileSha256: Effect.pipe('b', EffectString.repeat(64)),
+      sourcePackageManifestSha256: Effect.pipe('c', EffectString.repeat(64)),
       target: 'bun-darwin-arm64',
       version: 'threadnote-test',
     },
@@ -1283,7 +1443,7 @@ function heavyTailArtifact(offset: number): CodeGraphHeavyTailBenchmarkArtifact 
     environment: {
       architecture: 'arm64',
       availableBytes: governance.availableBytes,
-      commit: 'a'.repeat(40),
+      commit: Effect.pipe('a', EffectString.repeat(40)),
       cpu: 'Apple M1 Max',
       dirty: false,
       memoryBytes: 64 * 1_073_741_824,
@@ -1310,10 +1470,10 @@ function heavyTailArtifactWithMeasurement(
   secondName: string,
   offset = 0,
 ): CodeGraphHeavyTailBenchmarkArtifact {
-  const artifact = structuredClone(heavyTailArtifact(offset)) as Mutable<CodeGraphHeavyTailBenchmarkArtifact>;
-  setHeavyTailMeasurement(artifact, name, value);
-  setHeavyTailMeasurement(artifact, secondName, secondValue);
-  return withRecomputedHeavyTailRatchet(artifact);
+  const artifact = heavyTailArtifact(offset);
+  return withRecomputedHeavyTailRatchet(
+    setHeavyTailMeasurement(setHeavyTailMeasurement(artifact, name, value), secondName, secondValue),
+  );
 }
 
 function completeRun(workerCount: number, durationMilliseconds: number, concurrency: number, offset: number) {

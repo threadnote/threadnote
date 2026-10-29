@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {parseCandidateReview} from '../../src/candidate.js';
 import {parseCandidateReview as parseLegacyCandidateReview} from '../fixtures/candidate-v2-reader.mjs';
 import {validateTopicMaintenanceObsidianCaptureIntent} from '../../src/topic-maintenance-draft.js';
@@ -36,6 +37,9 @@ import {
   validateTopicMaintenanceSourceAcceptancePreview,
   validateTopicMaintenanceObsidianAcceptancePreview,
 } from '../../src/topic-maintenance-acceptance.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md';
 const originText = 'Initial retained fragment.';
@@ -44,11 +48,11 @@ const origin: MemoryObsidianEvidenceV1 = {
   version: 1,
   sourceId: 'notes',
   sourceInstanceId: '11111111-1111-4111-8111-111111111111',
-  vaultHash: 'a'.repeat(64),
-  accessHash: 'b'.repeat(64),
+  vaultHash: Effect.pipe('a', EffectString.repeat(64)),
+  accessHash: Effect.pipe('b', EffectString.repeat(64)),
   noteId: '22222222-2222-4222-8222-222222222222',
   relativePath: 'Decision.md',
-  revisionHash: 'c'.repeat(64),
+  revisionHash: Effect.pipe('c', EffectString.repeat(64)),
   sanitizerVersion: 'scrubber-redact-v1',
   fragmentHash: consolidationRevision(originText),
   fragmentStart: 0,
@@ -59,7 +63,7 @@ const origin: MemoryObsidianEvidenceV1 = {
 const current: MemoryObsidianEvidenceV1 = {
   ...origin,
   relativePath: 'Renamed.md',
-  revisionHash: 'd'.repeat(64),
+  revisionHash: Effect.pipe('d', EffectString.repeat(64)),
   fragmentHash: consolidationRevision(currentText),
   fragmentEnd: currentText.length,
   pinId: '44444444-4444-4444-8444-444444444444',
@@ -92,9 +96,9 @@ function fixture() {
   });
   const record = parseMemoryDocument(
     uri,
-    formatMemoryDocument('MEMORY', {...original.metadata, topicMaintenance: manifest}, body).replace(
-      '\n\n',
-      '\nopaque_header: preserve exactly\n\n',
+    Effect.pipe(
+      formatMemoryDocument('MEMORY', {...original.metadata, topicMaintenance: manifest}, body),
+      EffectString.replace('\n\n', '\nopaque_header: preserve exactly\n\n'),
     ),
   )!;
   const basis: TopicMaintenanceObsidianDraftBasisV2 = {
@@ -102,12 +106,12 @@ function fixture() {
     sourceKind: 'obsidian',
     targetUri: uri,
     targetHash: consolidationRevision(canonicalMemoryDocumentContent(record.content)),
-    observationRevision: 'e'.repeat(64),
-    packetDigest: 'f'.repeat(64),
+    observationRevision: Effect.pipe('e', EffectString.repeat(64)),
+    packetDigest: Effect.pipe('f', EffectString.repeat(64)),
     body,
     paragraphs: manifest.paragraphs,
     additionalDependencies: [],
-    handles: (['historical', 'current'] as const).map(variant => ({
+    handles: EffectArray.map(['historical', 'current'] as const, variant => ({
       id: `${variant}:${originId}`,
       citationId: originId,
       variant,
@@ -141,7 +145,7 @@ function fixture() {
     sourceKind: 'obsidian',
     basis,
     proposal: parseTopicMaintenanceDraft(basis, JSON.stringify(draft)),
-    reviewEvidence: basis.handles.map(handle => ({
+    reviewEvidence: EffectArray.map(basis.handles, handle => ({
       sourceKind: 'obsidian',
       handleId: handle.id,
       content: handle.variant === 'historical' ? originText : currentText,
@@ -187,16 +191,31 @@ describe('closed imported topic maintenance contracts', () => {
 
   it('preserves CRLF header/protected prose bytes and refuses generic origin replacement', () => {
     const {record, review, draft} = fixture();
-    const crlf = parseMemoryDocument(uri, record.content.replaceAll('\n', '\r\n'))!;
+    const crlf = parseMemoryDocument(uri, Effect.pipe(record.content, EffectString.replaceAll('\n', '\r\n')))!;
     const basis = {...review.basis, targetHash: consolidationRevision(canonicalMemoryDocumentContent(crlf.content))};
     const proposal = parseTopicMaintenanceDraft(basis, JSON.stringify({...draft, targetHash: basis.targetHash}));
     const preview = prepareTopicMaintenanceObsidianAcceptance(crlf, {...review, basis, proposal}, options);
     expect(preview.content).toContain('\r\nopaque_header: preserve exactly\r\n');
-    expect(preview.content.slice(preview.content.indexOf('\r\n\r\n') + 4)).toBe(
-      'New descriptive claim.\r\n\r\nHistorical constraint.',
+    expect(
+      Effect.pipe(
+        preview.content,
+        EffectString.slice(
+          Effect.pipe(
+            preview.content,
+            EffectString.indexOf('\r\n\r\n'),
+            Effect.Option.getOrElse(() => -1),
+          ) + 4,
+        ),
+      ),
+    ).toBe('New descriptive claim.\r\n\r\nHistorical constraint.');
+    const originLine = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Effect.pipe(crlf.content, EffectString.split('\r\n')),
+        __effectArrayValue =>
+          !!(line => Effect.pipe(line, EffectString.startsWith('obsidian_evidence:')))(__effectArrayValue),
+      ),
     );
-    const originLine = crlf.content.split('\r\n').find(line => line.startsWith('obsidian_evidence:'));
-    expect(preview.content.split('\r\n')).toContain(originLine);
+    expect(Effect.pipe(preview.content, EffectString.split('\r\n'))).toContain(originLine);
     expect(
       topicMaintenanceReplacementError(record, {...record, metadata: {...record.metadata, obsidianEvidence: current}}),
     ).toMatch(/reviewed update/);
@@ -217,14 +236,14 @@ describe('closed imported topic maintenance contracts', () => {
       expect(() =>
         validateTopicMaintenanceReview({
           ...review,
-          reviewEvidence: review.reviewEvidence.map(item => ({...item, [key]: 'invented'})),
+          reviewEvidence: EffectArray.map(review.reviewEvidence, item => ({...item, [key]: 'invented'})),
         }),
       ).toThrow();
     expect(() => validateTopicMaintenanceReview({...review, reviewEvidence: review.reviewEvidence.slice(1)})).toThrow();
     expect(() =>
       validateTopicMaintenanceReview({
         ...review,
-        reviewEvidence: review.reviewEvidence.map(item => ({...item, content: 'Withheld or modified'})),
+        reviewEvidence: EffectArray.map(review.reviewEvidence, item => ({...item, content: 'Withheld or modified'})),
       }),
     ).toThrow();
   });
@@ -265,7 +284,10 @@ describe('closed imported topic maintenance contracts', () => {
       validateTopicMaintenanceManifest(
         {
           ...manifest,
-          paragraphs: [{...manifest.paragraphs[0], citationIds: [`tncc_${'a'.repeat(40)}`]}, manifest.paragraphs[1]],
+          paragraphs: [
+            {...manifest.paragraphs[0], citationIds: [`tncc_${Effect.pipe('a', EffectString.repeat(40))}`]},
+            manifest.paragraphs[1],
+          ],
         },
         record,
       ),
@@ -284,9 +306,15 @@ describe('closed imported topic maintenance contracts', () => {
     expect(() => legacy.assertMemoryRecordArchivable(parsed)).toThrow();
     expect(legacy.topicMaintenanceReplacementError(parsed, parsed)).toMatch(/malformed/);
     for (const content of [
-      record.content.replace('topic_maintenance:', ' topic_maintenance :'),
-      record.content.replace('\n\n', `\ntopic_maintenance: ${JSON.stringify(record.metadata.topicMaintenance)}\n\n`),
-      record.content.replace('"version":3,"sourceKind":"obsidian"', '"version":99,"sourceKind":"unknown"'),
+      Effect.pipe(record.content, EffectString.replace('topic_maintenance:', ' topic_maintenance :')),
+      Effect.pipe(
+        record.content,
+        EffectString.replace('\n\n', `\ntopic_maintenance: ${JSON.stringify(record.metadata.topicMaintenance)}\n\n`),
+      ),
+      Effect.pipe(
+        record.content,
+        EffectString.replace('"version":3,"sourceKind":"obsidian"', '"version":99,"sourceKind":"unknown"'),
+      ),
     ]) {
       expect(() => legacy.assertMemoryDocumentSchemaWritable(content)).toThrow();
       expect(() => legacy.formatMemoryDocumentWithKeywords(content, ['updated'])).toThrow();
@@ -297,7 +325,7 @@ describe('closed imported topic maintenance contracts', () => {
     fc.assert(
       fc.property(fc.array(fc.constantFrom('a', 'β', '🙂', ' '), {minLength: 1, maxLength: 80}), chars => {
         const {record, review, draft} = fixture();
-        const text = `Updated: ${chars.join('')}.`;
+        const text = `Updated: ${EffectArray.join(chars, '')}.`;
         const proposal = parseTopicMaintenanceDraft(
           review.basis,
           JSON.stringify({...draft, operations: [{...draft.operations[0], text}]}),
@@ -306,8 +334,8 @@ describe('closed imported topic maintenance contracts', () => {
         const parsed = parseMemoryDocument(uri, preview.content)!;
         expect(validateTopicMaintenanceManifest(preview.manifest, parsed)).toEqual(preview.manifest);
         expect(parsed.metadata.obsidianEvidence).toEqual(origin);
-        expect(preview.content.split('\n\n').slice(2).join('\n\n')).toBe(
-          record.content.split('\n\n').slice(2).join('\n\n'),
+        expect(EffectArray.join(Effect.pipe(preview.content, EffectString.split('\n\n')).slice(2), '\n\n')).toBe(
+          EffectArray.join(Effect.pipe(record.content, EffectString.split('\n\n')).slice(2), '\n\n'),
         );
         expect(preview.manifest.paragraphs[1]).toEqual(review.basis.paragraphs[1]);
         expect(preview.codeCitations).toEqual([]);
@@ -326,7 +354,7 @@ it('uses a closed v3 imported journal envelope that the actual old candidate rea
     targetUri: uri,
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
-    inspectionDigest: '9'.repeat(64),
+    inspectionDigest: Effect.pipe('9', EffectString.repeat(64)),
     citation: current,
     input: {
       sourceId: current.sourceId,

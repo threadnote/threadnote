@@ -54,6 +54,7 @@ export {
   sparseOverlayGraphContentIdentity,
   sparseOverlaySnapshotIdentity,
   type CodeGraphCacheContentCoalescer,
+  type CodeGraphCacheContentStore,
   type CodeGraphCacheExtractedRow,
   type DirectPersistentCapacityContext,
   type CodeGraphMaterializationReplayMetrics,

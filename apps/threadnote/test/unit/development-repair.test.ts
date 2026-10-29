@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import * as FC from 'fast-check';
@@ -30,9 +31,13 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const embeddingManifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === CORE_EMBEDDING_MODEL_ID)!;
-const version = '4.6.7-local.g' + 'a'.repeat(40);
+const embeddingManifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === CORE_EMBEDDING_MODEL_ID),
+)!;
+const version = '4.6.7-local.g' + Effect2.pipe('a', EffectString.repeat(40));
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -110,7 +115,7 @@ const fixture = Effect.gen(function* () {
         beforeEmbedding().pipe(
           Effect.provide(runtimeContext),
           Effect.orDie,
-          Effect.as(inputs.map(() => [1, ...new Array<number>((manifest.dimensions ?? 1) - 1).fill(0)])),
+          Effect.as(EffectArray.map(inputs, () => [1, ...new Array<number>((manifest.dimensions ?? 1) - 1).fill(0)])),
         ),
       generate: () => Effect.die(TestError.make({message: 'Unexpected generation'})),
       rerank: () => Effect.die(TestError.make({message: 'Unexpected reranking'})),
@@ -241,7 +246,7 @@ describe('development installer repair isolation', () => {
     'recognizes only the exact markerless legacy Copilot instructions',
     {
       extraKey: FC.array(FC.constantFrom(...'abcdefghijklmnopqrstuvwxyz'), {maxLength: 16, minLength: 1}).map(chars =>
-        chars.join(''),
+        EffectArray.join(chars, ''),
       ),
       lineEnding: FC.constantFrom('\n', '\r\n'),
       trailingNewlines: FC.integer({max: 3, min: 1}),
@@ -255,8 +260,9 @@ describe('development installer repair isolation', () => {
           'applyTo: "**"',
           '---',
         ];
-        const exact = `${legacyLines.join(lineEnding)}${lineEnding.repeat(trailingNewlines)}`;
-        const customized = [...legacyLines.slice(0, -1), `${extraKey}: keep-me`, '---'].join(lineEnding);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
+        const exact = `${EffectArray.join(legacyLines, lineEnding)}${lineEnding.repeat(trailingNewlines)}`;
+        const customized = EffectArray.join([...legacyLines.slice(0, -1), `${extraKey}: keep-me`, '---'], lineEnding);
 
         expect(isExactLegacyCopilotInstructionFrontmatter(exact)).toBe(true);
         expect(isExactLegacyCopilotInstructionFrontmatter(customized)).toBe(false);
@@ -396,17 +402,24 @@ describe('development installer repair isolation', () => {
         const expectedSkill = yield* f.fs.readFileString(skill);
         yield* f.fs.writeFileString(
           f.instruction,
-          [
-            '---',
-            'name: Threadnote',
-            'description: Shared local context and handoffs through Threadnote',
-            'applyTo: "**"',
-            '---',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              '---',
+              'name: Threadnote',
+              'description: Shared local context and handoffs through Threadnote',
+              'applyTo: "**"',
+              '---',
+              '',
+            ],
+            '\n',
+          ),
         );
-        yield* f.fs.writeFileString(skill, expectedSkill.replace('Current context skill.', 'Stale context skill.'));
-        const registry = JSON.parse(yield* f.fs.readFileString(f.registry)) as {surfaces?: Record<string, unknown>};
+        yield* f.fs.writeFileString(
+          skill,
+          Effect2.pipe(expectedSkill, EffectString.replace('Current context skill.', 'Stale context skill.')),
+        );
+        const registry: unknown = JSON.parse(yield* f.fs.readFileString(f.registry));
+        if (!Predicate.isObject(registry)) throw new Error('expected an agent integration registry object');
         registry.surfaces = {
           'historical-agent': {
             adapterVersion: 1,
@@ -417,7 +430,7 @@ describe('development installer repair isolation', () => {
             mcp: {
               createdContainer: false,
               createdFile: false,
-              hash: 'a'.repeat(64),
+              hash: Effect2.pipe('a', EffectString.repeat(64)),
               name: 'threadnote',
               path: f.path.join(f.user, '.historical-agent', 'mcp.json'),
               toolset: 'core',
@@ -454,15 +467,18 @@ describe('development installer repair isolation', () => {
             toolset: 'core',
           }),
         );
-        const customizedInstruction = [
-          '---',
-          'name: Threadnote',
-          'description: Shared local context and handoffs through Threadnote',
-          'applyTo: "**"',
-          'custom: keep-me',
-          '---',
-          '',
-        ].join('\n');
+        const customizedInstruction = EffectArray.join(
+          [
+            '---',
+            'name: Threadnote',
+            'description: Shared local context and handoffs through Threadnote',
+            'applyTo: "**"',
+            'custom: keep-me',
+            '---',
+            '',
+          ],
+          '\n',
+        );
         yield* f.fs.writeFileString(f.instruction, customizedInstruction);
 
         const error = yield* f.provide(runDevelopmentInstallIntegrationActivation(f.config, version)).pipe(Effect.flip);
@@ -499,17 +515,20 @@ describe('development installer repair isolation', () => {
 });
 
 function handoffDocument(body: string): string {
-  return [
-    'HANDOFF',
-    'kind: handoff',
-    'status: active',
-    'project: threadnote',
-    'topic: install-repair',
-    'source_agent_client: codex',
-    'timestamp: 2026-09-18T08:00:00.000Z',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'HANDOFF',
+      'kind: handoff',
+      'status: active',
+      'project: threadnote',
+      'topic: install-repair',
+      'source_agent_client: codex',
+      'timestamp: 2026-09-18T08:00:00.000Z',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }
 
 function writeAgentIntegrationPayload(fs: FileSystem.FileSystem, path: Path.Path, releaseRoot: string) {
@@ -522,17 +541,20 @@ function writeAgentIntegrationPayload(fs: FileSystem.FileSystem, path: Path.Path
       yield* fs.makeDirectory(skillRoot, {recursive: true});
       yield* fs.writeFileString(
         path.join(skillRoot, 'SKILL.md'),
-        [
-          '---',
-          `name: ${skill}`,
-          `description: Current ${skill} fixture.`,
-          '---',
-          '',
-          '<!-- BEGIN THREADNOTE USER INSTRUCTIONS -->',
-          skill === 'threadnote-context' ? 'Current context skill.' : `Current ${skill} skill.`,
-          '<!-- END THREADNOTE USER INSTRUCTIONS -->',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            '---',
+            `name: ${skill}`,
+            `description: Current ${skill} fixture.`,
+            '---',
+            '',
+            '<!-- BEGIN THREADNOTE USER INSTRUCTIONS -->',
+            skill === 'threadnote-context' ? 'Current context skill.' : `Current ${skill} skill.`,
+            '<!-- END THREADNOTE USER INSTRUCTIONS -->',
+            '',
+          ],
+          '\n',
+        ),
       );
     }
   });

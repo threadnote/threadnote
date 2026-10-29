@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, DateTime, Effect, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -33,16 +34,22 @@ import {
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readMemoryRecordsByUri} from '../../mcp/server/memory.js';
 import {readContextMaintenancePacket} from './maintenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
-export class TopicObsidianError extends Schema.TaggedError<TopicObsidianError>()('TopicObsidianError', {
-  message: Schema.String,
-}) {}
+export class TopicObsidianError extends Schema.TaggedError<TopicObsidianError, {readonly brand: unique symbol}>()(
+  'TopicObsidianError',
+  {
+    message: Schema.String,
+  },
+) {}
 const fail = (message: string) => TopicObsidianError.make({message});
 const readObsidianEvidence = (config: RuntimeConfig, pin: MemoryObsidianEvidenceV1) =>
   readProviderObsidianEvidence(config, pin, {preserveExpired: true});
 const hash = (value: unknown) => sha256HexSync(JSON.stringify(value));
 export const topicObsidianReviewId = (uri: string) =>
-  `review-${sha256HexSync(`topic-maintenance\0${uri}`).slice(0, 24)}`;
+  `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${uri}`), EffectString.slice(0, 24))}`;
 export const isObsidianTopic = (record: MemoryRecord) =>
   record.metadata.topicMaintenance?.version === 3 && record.metadata.topicMaintenance.sourceKind === 'obsidian';
 const importedManifest = (record: MemoryRecord) => {
@@ -186,7 +193,7 @@ export const inspectTopicObsidianOrigin = Effect.fn('topicObsidian.inspectOrigin
         if (isObsidianTopic(record)) importedManifest(record);
         else
           buildTopicMaintenanceObsidianManifest(record, {
-            paragraphs: consolidationSections(record.body).map(() => ({
+            paragraphs: EffectArray.map(consolidationSections(record.body), () => ({
               role: 'historical',
               support: 'direct',
               citationIds: [topicMaintenanceObsidianCitationId(origin)],
@@ -309,7 +316,7 @@ export const captureTopicObsidianEvidence = Effect.fn('topicObsidian.capture')(f
   if (
     input.approved !== true ||
     !/^health-case-[a-f0-9]{40}$/u.test(input.caseId) ||
-    ![input.expectedContentHash, input.observationRevision, input.inspectionDigest].every(value =>
+    !EffectArray.every([input.expectedContentHash, input.observationRevision, input.inspectionDigest], value =>
       /^[a-f0-9]{64}$/u.test(value),
     ) ||
     !Number.isSafeInteger(input.fragmentStart) ||
@@ -341,7 +348,11 @@ export const captureTopicObsidianEvidence = Effect.fn('topicObsidian.capture')(f
     Effect.gen(function* () {
       const prior = yield* loadCandidateReviewOptional(config.agentContextHome, reviewId);
       if (
-        prior?.candidates.some(item => item.state === 'applying' || item.state === 'conflict') ||
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(prior?.candidates), __effectArrayReceiver =>
+            EffectArray.some(__effectArrayReceiver, item => item.state === 'applying' || item.state === 'conflict'),
+          ),
+        ) ||
         (prior?.maintenanceApproval && prior.candidates[0]?.state === 'pending')
       )
         return yield* fail('Resolve the existing approval before capturing another fragment.');
@@ -356,7 +367,10 @@ export const captureTopicObsidianEvidence = Effect.fn('topicObsidian.capture')(f
         inspectDigest(current) !== input.inspectionDigest
       )
         return yield* fail('The inspected source or target changed before capture.');
-      const fragment = current.sanitizedContent.slice(input.fragmentStart, input.fragmentEnd);
+      const fragment = Effect2.pipe(
+        current.sanitizedContent,
+        EffectString.slice(input.fragmentStart, input.fragmentEnd),
+      );
       const days = input.retentionDays ?? 90;
       if (
         input.fragmentEnd > current.sanitizedContent.length ||
@@ -488,7 +502,7 @@ export function topicObsidianBasisFromPacket(
   const ids = [
     ...new Set([
       topicMaintenanceObsidianCitationId(origin.citation),
-      ...packet.paragraphs.flatMap(item => item.citationIds),
+      ...EffectArray.flatMap(packet.paragraphs, item => item.citationIds),
     ]),
   ].sort();
   const basis = validateTopicMaintenanceBasis({
@@ -501,8 +515,12 @@ export function topicObsidianBasisFromPacket(
     body: packet.body,
     paragraphs: packet.paragraphs,
     additionalDependencies: [],
-    handles: ids.flatMap(citationId =>
-      (['historical', 'current'] as const).map(variant => ({id: `${variant}:${citationId}`, citationId, variant})),
+    handles: EffectArray.flatMap(ids, citationId =>
+      EffectArray.map(['historical', 'current'] as const, variant => ({
+        id: `${variant}:${citationId}`,
+        citationId,
+        variant,
+      })),
     ),
     originEvidence: origin.citation,
     activeEvidence: active.citation,
@@ -516,7 +534,7 @@ export function topicObsidianReviewEvidenceFromPacket(packet: TopicMaintenanceOb
   const {origin, active, capture} = packet.obsidian;
   return validateTopicMaintenanceObsidianReviewEvidence(
     basis,
-    basis.handles.map(handle => {
+    EffectArray.map(basis.handles, handle => {
       const prior = handle.citationId === topicMaintenanceObsidianCitationId(basis.originEvidence) ? origin! : active!;
       const citation = handle.variant === 'historical' ? prior.citation : capture!.citation!;
       const content = handle.variant === 'historical' ? prior.fragment! : capture!.fragment!;
@@ -556,10 +574,11 @@ export const verifyTopicObsidianReviewSource = Effect.fn('topicObsidian.verifyRe
       (pin === review.basis.currentEvidence && evidence.currentRevision !== 'same')
     )
       return yield* fail('The reviewed retained fragment is unavailable.');
-    const entries = review.reviewEvidence.filter(
+    const entries = EffectArray.filter(
+      review.reviewEvidence,
       item => topicMaintenanceObsidianCitationId(item.citation) === topicMaintenanceObsidianCitationId(pin),
     );
-    if (entries.some(item => item.content !== evidence.fragment))
+    if (EffectArray.some(entries, item => item.content !== evidence.fragment))
       return yield* fail('The reviewed private fragment changed.');
   }
   const current = review.basis.currentEvidence;

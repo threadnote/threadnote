@@ -1,5 +1,8 @@
-import {Data, Effect, PlatformError} from 'effect';
-import type {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
+import {Array as EffectArray} from 'effect';
+import {Effect, PlatformError, Schema} from 'effect';
+import {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type Category = ContextMaintenanceSnapshotDiagnosticV1['category'];
 type Stage = ContextMaintenanceSnapshotDiagnosticV1['stage'];
@@ -42,20 +45,34 @@ const instructions: Readonly<Record<Category, readonly [string, string]>> = {
   ],
 };
 
-class MaintenanceSnapshotError extends Data.TaggedError('MaintenanceSnapshotError')<{
-  readonly diagnostic: ContextMaintenanceSnapshotDiagnosticV1;
-}> {}
+class MaintenanceSnapshotError extends Schema.TaggedError<MaintenanceSnapshotError, {readonly brand: unique symbol}>()(
+  'MaintenanceSnapshotError',
+  {diagnostic: ContextMaintenanceSnapshotDiagnosticV1},
+) {}
 
 export function maintenanceSnapshotFailure(category: Category, stage: Stage, memoryUri?: string) {
   const [summary, recovery] = instructions[category];
-  return new MaintenanceSnapshotError({
+  return MaintenanceSnapshotError.make({
     diagnostic: {
       version: 1,
       category,
       stage,
       ...(memoryUri !== undefined &&
-      memoryUri.length <= 2_048 &&
-      ![...memoryUri].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+      memoryUri.length <= 2048 &&
+      !EffectArray.some(
+        [...memoryUri],
+        character =>
+          Effect2.pipe(
+            character,
+            EffectString.charCodeAt(0),
+            Effect2.Option.getOrElse(() => NaN),
+          ) < 32 ||
+          Effect2.pipe(
+            character,
+            EffectString.charCodeAt(0),
+            Effect2.Option.getOrElse(() => NaN),
+          ) === 127,
+      )
         ? {memoryUri}
         : {}),
       summary,
@@ -66,7 +83,7 @@ export function maintenanceSnapshotFailure(category: Category, stage: Stage, mem
 }
 
 export function maintenanceSnapshotError(error: unknown, stage: Stage, memoryUri?: string) {
-  if (error instanceof MaintenanceSnapshotError) return error;
+  if (Schema.is(MaintenanceSnapshotError)(error)) return error;
   const reason = PlatformError.isPlatformError(error) ? error.reason._tag : undefined;
   const category =
     reason === 'PermissionDenied'

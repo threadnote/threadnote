@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {runBinaryCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {codeGraphCommittedContentHash, codeGraphFileContentHashMatchesBytes} from '../content_identity.js';
 import {inspectContainedStableRegularFile, materializeContainedStableRegularFile} from '../inventory/contained_file.js';
 import type {RepositoryIdentity} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CODE_GRAPH_CITATION_SOURCE_MAXIMUM_FILES = 256;
 const CODE_GRAPH_CITATION_SOURCE_MAXIMUM_FILE_BYTES = 64 * 1_048_576;
@@ -27,13 +30,13 @@ interface CommitBlobObservation extends CodeGraphCitationSourceRequest {
   readonly size: number;
 }
 
-export class CodeGraphCitationSourceError extends Schema.TaggedError<CodeGraphCitationSourceError>()(
-  'CodeGraphCitationSourceError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphCitationSourceError extends Schema.TaggedError<
+  CodeGraphCitationSourceError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCitationSourceError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export function codeGraphCitationSourceKey(
   source: Pick<CodeGraphCitationSourceRequest, 'expectedContentHash' | 'repositoryPath'>,
@@ -70,12 +73,16 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   const sources = deduplicateSources(input.sources);
   if (
     !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(input.sourceCommit) ||
-    sources.some(
+    EffectArray.some(
+      sources,
       source =>
         !source.repositoryPath ||
-        source.repositoryPath.startsWith('/') ||
+        Effect2.pipe(source.repositoryPath, EffectString.startsWith('/')) ||
         /[\0\r\n\\]/.test(source.repositoryPath) ||
-        source.repositoryPath.split('/').some(segment => !segment || segment === '.' || segment === '..'),
+        EffectArray.some(
+          Effect2.pipe(source.repositoryPath, EffectString.split('/')),
+          segment => !segment || segment === '.' || segment === '..',
+        ),
     )
   )
     return yield* CodeGraphCitationSourceError.make({message: 'Citation source identity or path is invalid.'});
@@ -159,7 +166,7 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   if (commitFallback.length === 0 || input.allowCommitFallback === false) return resolved;
 
   const system = yield* SystemInfo;
-  const expressions = commitFallback.map(source => `${input.sourceCommit}:${source.repositoryPath}`);
+  const expressions = EffectArray.map(commitFallback, source => `${input.sourceCommit}:${source.repositoryPath}`);
   const checkInput = nulTerminated(expressions);
   if (checkInput.byteLength > CODE_GRAPH_CITATION_SOURCE_BATCH_INPUT_BYTES) {
     return yield* CodeGraphCitationSourceError.make({message: 'Citation source batch input exceeds its byte bound.'});
@@ -207,8 +214,8 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   for (const batch of chunkCommitBlobs(blobsToRead)) {
     const result = yield* runBinaryCommandEffect('git', ['-C', input.repositoryRoot, 'cat-file', '--batch', '-z'], {
       env: environment,
-      input: nulTerminated(batch.map(observation => observation.blobId)),
-      maxOutputBytes: batch.reduce((total, observation) => total + observation.size + 256, 0),
+      input: nulTerminated(EffectArray.map(batch, observation => observation.blobId)),
+      maxOutputBytes: EffectArray.reduce(batch, 0, (total, observation) => total + observation.size + 256),
       timeoutMs: CODE_GRAPH_CITATION_SOURCE_COMMAND_TIMEOUT_MILLISECONDS,
     }).pipe(
       Effect.mapError(cause =>
@@ -252,7 +259,7 @@ function deduplicateSources(
 }
 
 function nulTerminated(values: readonly string[]): Uint8Array {
-  return new TextEncoder().encode(`${values.join('\0')}\0`);
+  return new TextEncoder().encode(`${EffectArray.join(values, '\0')}\0`);
 }
 
 function parseBatchCheck(
@@ -260,7 +267,7 @@ function parseBatchCheck(
   sources: readonly CodeGraphCitationSourceRequest[],
   objectFormat: RepositoryIdentity['objectFormat'],
 ): readonly CommitBlobObservation[] {
-  const lines = new TextDecoder('utf-8', {fatal: true}).decode(bytes).split('\n');
+  const lines = Effect2.pipe(new TextDecoder('utf-8', {fatal: true}).decode(bytes), EffectString.split('\n'));
   if (lines.at(-1) === '') lines.pop();
   if (lines.length !== sources.length) {
     throw CodeGraphCitationSourceError.make({

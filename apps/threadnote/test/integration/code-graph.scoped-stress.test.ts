@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Database, SQLiteError} from 'bun:sqlite';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
@@ -20,6 +21,8 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {dirname, join} from '@threadnote/testing/node-path';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const project = (name: string, roots = [`apps/${name}`]) => ({
   uri: `threadnote://resources/repos/${name}`,
@@ -29,7 +32,8 @@ const write = (root: string, path: string, content: string) => {
   mkdirSync(dirname(join(root, path)), {recursive: true});
   writeFileSync(join(root, path), content);
 };
-const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], {encoding: 'utf8'}).trim();
+const git = (root: string, ...args: string[]) =>
+  Effect2.pipe(execFileSync('git', ['-C', root, ...args], {encoding: 'utf8'}), EffectString.trim);
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -48,7 +52,11 @@ const fixture = Effect.gen(function* () {
     ['shared/b-only', {}],
     ...Array.from({length: 32}, (_, index) => [`apps/unrelated-${index}`, {}] as const),
   ] as const) {
-    write(root, `${path}/package.json`, JSON.stringify({name: `@fixture/${path.split('/')[1]}`, dependencies}));
+    write(
+      root,
+      `${path}/package.json`,
+      JSON.stringify({name: `@fixture/${Effect2.pipe(path, EffectString.split('/'))[1]}`, dependencies}),
+    );
     write(root, `${path}/index.ts`, `export const value = '${path}';\n`);
   }
   git(root, 'add', '.');
@@ -150,9 +158,9 @@ describe('scoped reuse under bounded monorepo churn', () => {
           Array.from({length: 3}, () => indexer.index(request)),
           {concurrency: 3},
         );
-        expect(new Set(results.map(result => result.snapshot.id)).size).toBe(1);
+        expect(new Set(EffectArray.map(results, result => result.snapshot.id)).size).toBe(1);
         expect(writers).toBeLessThanOrEqual(3);
-        expect(results.map(result => result.materialization?.stagedFiles).sort()).toEqual([0, 0, 7]);
+        expect(EffectArray.map(results, result => result.materialization?.stagedFiles).sort()).toEqual([0, 0, 7]);
         const linkedResult = yield* indexer.index({...request, cwd: linked});
         expect(linkedResult.snapshot.id).toBe(results[0].snapshot.id);
         expect(linkedResult.materialization).toMatchObject({mode: 'reused-snapshot', stagedFiles: 0});
@@ -252,7 +260,12 @@ describe('scoped reuse under bounded monorepo churn', () => {
         }
         const graph = yield* store.loadGraph(layout.databasePath, current.snapshot.id);
         expect(
-          graph.symbols.every(symbol => !symbol.path.startsWith('apps/b/') && !symbol.path.includes('unrelated-')),
+          EffectArray.every(
+            graph.symbols,
+            symbol =>
+              !Effect2.pipe(symbol.path, EffectString.startsWith('apps/b/')) &&
+              !Effect2.pipe(symbol.path, EffectString.includes('unrelated-')),
+          ),
         ).toBe(true);
         const counts = yield* storedCounts(layout.databasePath);
         expect(counts.full).toBe(0);
@@ -298,7 +311,7 @@ describe('scoped reuse under bounded monorepo churn', () => {
           totalFiles: 5,
           fallbackReason: 'workspace-changed',
         });
-        expect(inventory.files.map(file => file.path)).toEqual([
+        expect(EffectArray.map(inventory.files, file => file.path)).toEqual([
           'apps/a/index.ts',
           'apps/a/package.json',
           'package.json',

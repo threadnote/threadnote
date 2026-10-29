@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {McpSchema} from 'effect/ai';
 import {
@@ -44,7 +45,7 @@ export function readThreadnoteMcpResource(config: McpResourceConfig, uri: string
       scopeRoots ?? [canonicalResourceUri('user', [uriSegment(config.user), 'memories'])],
     );
     const canonicalUri = identity.canonicalUri;
-    if (scopeRoots && !scopeRoots.some(scopeRoot => resourceIdIsWithin(canonicalUri, scopeRoot))) {
+    if (scopeRoots && !EffectArray.some(scopeRoots, scopeRoot => resourceIdIsWithin(canonicalUri, scopeRoot))) {
       return yield* McpSchema.InvalidParams.make({
         data: MCP_RESOURCE_ERROR_DATA,
         message: 'The requested resource is outside the active Cursor Cloud memory scope.',
@@ -69,7 +70,10 @@ export function readThreadnoteMcpResource(config: McpResourceConfig, uri: string
             message: `Resource does not exist: ${canonicalUri}`,
             uri: canonicalUri,
           }));
-    if (scopeRoots && !scopeRoots.some(scopeRoot => resourceIdIsWithin(resolved.canonicalUri, scopeRoot))) {
+    if (
+      scopeRoots &&
+      !EffectArray.some(scopeRoots, scopeRoot => resourceIdIsWithin(resolved.canonicalUri, scopeRoot))
+    ) {
       return yield* McpSchema.InvalidParams.make({
         data: MCP_RESOURCE_ERROR_DATA,
         message: 'The relocated resource is outside the active Cursor Cloud memory scope.',
@@ -126,13 +130,13 @@ function mcpResourceReadError(
   if (Schema.is(McpSchema.InvalidParams)(error) || Schema.is(McpSchema.InternalError)(error)) {
     return error;
   }
-  if (error instanceof MemoryRelocationError) {
+  if (Schema.is(MemoryRelocationError)(error)) {
     return McpSchema.InternalError.make({
       data: MCP_RESOURCE_ERROR_DATA,
       message: 'Threadnote memory relocation could not be verified safely.',
     });
   }
-  if (error instanceof MemoryPointerNotFound) {
+  if (Schema.is(MemoryPointerNotFound)(error)) {
     const recovery = memoryReadRecoveryForError(config, error);
     return McpSchema.InvalidParams.make({
       data: recovery === undefined ? MCP_RESOURCE_NOT_FOUND_ERROR_DATA : mcpResourceNotFoundRecoveryErrorData(recovery),

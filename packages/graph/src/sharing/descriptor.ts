@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {canonicalJson} from '../checkpoint/canonical_json.js';
 import {
@@ -13,6 +14,9 @@ import {putCasBytes} from './cas.js';
 import {parseSha256Digest, sha256Digest, type Sha256Digest} from './digest.js';
 import {graphSharingFailure} from './errors.js';
 import {GRAPH_SHARE_HTTP_CAS_MAX_BYTES} from './oci.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const GRAPH_SHARE_OCI_EMPTY_CONFIG_BYTES = new TextEncoder().encode('{}');
 export const GRAPH_SHARE_OCI_EMPTY_CONFIG_DIGEST = sha256Digest(GRAPH_SHARE_OCI_EMPTY_CONFIG_BYTES);
@@ -94,7 +98,7 @@ export function parseGraphShareOciDescriptor(value: unknown): GraphShareOciDescr
   if (value.artifactType !== GRAPH_SHARE_FRONTIER_MEDIA_TYPE) {
     throw graphSharingFailure('OCI descriptor artifactType is not a graph frontier.');
   }
-  if (!Array.isArray(value.layers) || value.layers.length !== 3) {
+  if (!EffectArray.isArray(value.layers) || value.layers.length !== 3) {
     throw graphSharingFailure('OCI descriptor must list frontier, attestation, and checkpoint metadata layers.');
   }
   const descriptor: GraphShareOciDescriptorV1 = {
@@ -108,14 +112,14 @@ export function parseGraphShareOciDescriptor(value: unknown): GraphShareOciDescr
     mediaType: GRAPH_SHARE_OCI_IMAGE_MANIFEST_MEDIA_TYPE,
     schemaVersion: 2,
   };
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(descriptor).sort())) {
+  if (JSON.stringify(EffectRecord.keys(value).sort()) !== JSON.stringify(EffectRecord.keys(descriptor).sort())) {
     throw graphSharingFailure('OCI descriptor contains unsupported fields.');
   }
   return descriptor;
 }
 
 export function graphShareOciLayerMediaTypes(descriptor: GraphShareOciDescriptorV1): readonly string[] {
-  return [descriptor.config.mediaType, ...descriptor.layers.map(layer => layer.mediaType)];
+  return [descriptor.config.mediaType, ...EffectArray.map(descriptor.layers, layer => layer.mediaType)];
 }
 
 export function graphShareFrontierPointerFromOciDescriptor(descriptor: GraphShareOciDescriptorV1): {
@@ -201,7 +205,7 @@ function parseDescriptorEntry(value: unknown): GraphShareOciDescriptorEntryV1 {
     mediaType: requiredText(value.mediaType, 'mediaType'),
     size,
   };
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(entry).sort())) {
+  if (JSON.stringify(EffectRecord.keys(value).sort()) !== JSON.stringify(EffectRecord.keys(entry).sort())) {
     throw graphSharingFailure('OCI descriptor entry contains unsupported fields.');
   }
   return entry;
@@ -231,7 +235,7 @@ function requiredSize(value: unknown): number {
 }
 
 function requiredText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 256) {
+  if (typeof value !== 'string' || Effect2.pipe(value, EffectString.trim).length === 0 || value.length > 256) {
     throw graphSharingFailure(`OCI descriptor field ${label} is invalid.`);
   }
   return value;
@@ -250,10 +254,10 @@ function rejectForbiddenDescriptorFields(value: Record<string, unknown>) {
     'source',
     'sourceText',
   ] as const) {
-    if (Object.hasOwn(value, key)) throw graphSharingFailure('OCI descriptor must not carry source or Git objects.');
+    if (EffectRecord.has(value, key)) throw graphSharingFailure('OCI descriptor must not carry source or Git objects.');
   }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }

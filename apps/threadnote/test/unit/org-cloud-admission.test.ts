@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {orgCloudRepositorySetDigest} from '@threadnote/remote-memory/cloud_admission';
 import {buildOrgCloudHybridMcpConfig, type CursorCloudProfileV1} from '@threadnote/threadnote/cursor/cloud';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const profile: CursorCloudProfileV1 = {
   account: 'local',
@@ -44,7 +47,7 @@ describe('organization Cloud admission config', () => {
   it('canonicalizes sets independently of order, duplicates, and URL spelling without mutating inputs', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[a-z][a-z0-9]{0,15}$/), {minLength: 1, maxLength: 32}), names => {
-        const repositories = names.map(name => `github.com/example/${name}`);
+        const repositories = EffectArray.map(names, name => `github.com/example/${name}`);
         const before = [...repositories];
         const digest = orgCloudRepositorySetDigest('share', repositories);
         expect(orgCloudRepositorySetDigest('share', [...repositories].reverse())).toBe(digest);
@@ -52,7 +55,7 @@ describe('organization Cloud admission config', () => {
         expect(
           orgCloudRepositorySetDigest(
             'share',
-            repositories.map(repository => `https://${repository}.git`),
+            EffectArray.map(repositories, repository => `https://${repository}.git`),
           ),
         ).toBe(digest);
         expect(orgCloudRepositorySetDigest('other-share', repositories)).not.toBe(digest);
@@ -68,7 +71,7 @@ describe('organization Cloud admission config', () => {
       ['https://user:password@example.test/repo'],
       ['https://example.test/repo?token=secret'],
       ['../repo'],
-      [`github.com/example/${'segment/'.repeat(300)}repo`],
+      [`github.com/example/${Effect.pipe('segment/', EffectString.repeat(300))}repo`],
     ]) {
       expect(() => orgCloudRepositorySetDigest('share', repositories)).toThrow();
     }

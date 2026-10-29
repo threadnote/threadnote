@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -9,10 +9,27 @@ import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/docu
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
-import type {WorkflowReadResult, WorkflowRequest} from '../../src/workflow_memory/protocol.js';
+import type {WorkflowRequest} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const rootUri = 'threadnote://user/tester/memories';
+const WorkflowReadResultEvidenceSchema = Schema.StructWithRest(
+  Schema.Struct({
+    status: Schema.Literal('ok'),
+    canonicalUri: Schema.String,
+    memoryId: Schema.String,
+    revision: Schema.String,
+    body: Schema.String,
+    verifiedReadback: Schema.Literal(true),
+    relations: Schema.Array(Schema.Struct({type: Schema.String, uri: Schema.String})),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+const decodeWorkflowReadResult = Schema.decodeUnknownEffect(WorkflowReadResultEvidenceSchema);
+
 const fixture = Effect.fn('test.workflowEvidence.fixture')(function* (cloud = false) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -103,7 +120,7 @@ const fixture = Effect.fn('test.workflowEvidence.fixture')(function* (cloud = fa
     });
   const seedProjectMemory = (project: string) => {
     const uri = `${rootUri}/durable/projects/${project}/prior.md`;
-    const memoryId = `tn_${sha256HexSync(uri).slice(0, 20)}`;
+    const memoryId = `tn_${Effect2.pipe(sha256HexSync(uri), EffectString.slice(0, 20))}`;
     const body = `Context for ${project}.\n`;
     const content = formatMemoryDocument(
       'MEMORY',
@@ -133,26 +150,20 @@ describe('workflow admitted evidence references', () => {
       const f = yield* fixture();
       const first = yield* f.bind('source-run');
       if (!('binding' in first)) throw new Error('Expected source binding');
-      const handoff = (yield* f.create(
-        first.binding.bindingId,
-        'source-handoff',
-        'handoff',
-        'Prior handoff context.\n',
-      )) as WorkflowReadResult;
-      const prior = (yield* f.create(
-        first.binding.bindingId,
-        'source-durable',
-        'durable',
-        'Prior durable decision.\n',
-      )) as WorkflowReadResult;
+      const handoff = yield* decodeWorkflowReadResult(
+        yield* f.create(first.binding.bindingId, 'source-handoff', 'handoff', 'Prior handoff context.\n'),
+      );
+      const prior = yield* decodeWorkflowReadResult(
+        yield* f.create(first.binding.bindingId, 'source-durable', 'durable', 'Prior durable decision.\n'),
+      );
       const second = yield* f.bind('consumer-run');
       if (!('binding' in second)) throw new Error('Expected consumer binding');
       const originalSourceJournal = yield* f.journal(first.binding.bindingId);
       const sourceHandoff = yield* f.store.read(f.location, handoff.canonicalUri);
       const sourcePrior = yield* f.store.read(f.location, prior.canonicalUri);
       const refs = [
-        evidence(handoff.canonicalUri, handoff.memoryId!, handoff.revision),
-        evidence(prior.canonicalUri, prior.memoryId!, prior.revision),
+        evidence(handoff.canonicalUri, handoff.memoryId, handoff.revision),
+        evidence(prior.canonicalUri, prior.memoryId, prior.revision),
       ];
       const alias = `threadnote://memory/${handoff.memoryId}`;
       expect(
@@ -196,24 +207,26 @@ describe('workflow admitted evidence references', () => {
       });
       expect(preflight).toMatchObject({status: 'ok'});
       expect(yield* f.journal(second.binding.bindingId)).toBe(before);
-      const written = (yield* f.call({
-        protocolVersion: 1,
-        action: 'create',
-        bindingId: second.binding.bindingId,
-        operationId: 'draft',
-        artifactKey: 'draft',
-        sourceRunId: 'consumer',
-        role: 'root',
-        storageKind: 'durable',
-        body: 'Draft with checked evidence.\n',
-        bodySha256: sha256HexSync('Draft with checked evidence.\n'),
-        expectedRevision: null,
-        relations: [
-          {type: 'references', uri: handoff.canonicalUri},
-          {type: 'references', uri: `threadnote://memory/${prior.memoryId}`},
-        ],
-        evidenceRefs: refs,
-      })) as WorkflowReadResult;
+      const written = yield* decodeWorkflowReadResult(
+        yield* f.call({
+          protocolVersion: 1,
+          action: 'create',
+          bindingId: second.binding.bindingId,
+          operationId: 'draft',
+          artifactKey: 'draft',
+          sourceRunId: 'consumer',
+          role: 'root',
+          storageKind: 'durable',
+          body: 'Draft with checked evidence.\n',
+          bodySha256: sha256HexSync('Draft with checked evidence.\n'),
+          expectedRevision: null,
+          relations: [
+            {type: 'references', uri: handoff.canonicalUri},
+            {type: 'references', uri: `threadnote://memory/${prior.memoryId}`},
+          ],
+          evidenceRefs: refs,
+        }),
+      );
       expect(written).toMatchObject({
         status: 'ok',
         verifiedReadback: true,
@@ -245,18 +258,15 @@ describe('workflow admitted evidence references', () => {
         const f = yield* fixture();
         const sourceBinding = yield* f.bind('source-run');
         if (!('binding' in sourceBinding)) throw new Error('Expected source binding');
-        const prior = (yield* f.create(
-          sourceBinding.binding.bindingId,
-          'source',
-          'durable',
-          'Source evidence.\n',
-        )) as WorkflowReadResult;
+        const prior = yield* decodeWorkflowReadResult(
+          yield* f.create(sourceBinding.binding.bindingId, 'source', 'durable', 'Source evidence.\n'),
+        );
         const otherProject = yield* f.seedProjectMemory('other-project');
         const target = yield* f.bind('target-run');
         if (!('binding' in target)) throw new Error('Expected target binding');
         const journalBefore = yield* f.journal(target.binding.bindingId);
-        expect(Object.keys(JSON.parse(journalBefore).artifacts)).toEqual([]);
-        const valid = evidence(prior.canonicalUri, prior.memoryId!, prior.revision);
+        expect(EffectRecord.keys(JSON.parse(journalBefore).artifacts)).toEqual([]);
+        const valid = evidence(prior.canonicalUri, prior.memoryId, prior.revision);
         const base = {
           protocolVersion: 1 as const,
           action: 'read' as const,
@@ -264,11 +274,19 @@ describe('workflow admitted evidence references', () => {
           uri: prior.canonicalUri,
         };
         for (const bad of [
-          evidence(`threadnote://memory/${prior.memoryId}`, prior.memoryId!, prior.revision),
-          evidence(prior.canonicalUri.replace('/fixture/', '/fixture-extra/'), prior.memoryId!, prior.revision),
-          evidence(prior.canonicalUri.replace('user/tester', 'user/other'), prior.memoryId!, prior.revision),
+          evidence(`threadnote://memory/${prior.memoryId}`, prior.memoryId, prior.revision),
+          evidence(
+            Effect2.pipe(prior.canonicalUri, EffectString.replace('/fixture/', '/fixture-extra/')),
+            prior.memoryId,
+            prior.revision,
+          ),
+          evidence(
+            Effect2.pipe(prior.canonicalUri, EffectString.replace('user/tester', 'user/other')),
+            prior.memoryId,
+            prior.revision,
+          ),
           evidence(otherProject.uri, otherProject.memoryId, sha256HexSync(otherProject.content)),
-          evidence(prior.canonicalUri, prior.memoryId!, '0'.repeat(64)),
+          evidence(prior.canonicalUri, prior.memoryId, Effect2.pipe('0', EffectString.repeat(64))),
           evidence(prior.canonicalUri, 'tn_replacedmemoryid000000', prior.revision),
         ])
           expect(yield* failure(f.call({...base, evidenceRefs: [bad]}))).toMatchObject({_tag: 'Failure'});
@@ -286,7 +304,7 @@ describe('workflow admitted evidence references', () => {
           bodySha256: sha256HexSync(draftBody),
           expectedRevision: null,
           relations: [{type: 'references', uri: prior.canonicalUri}],
-          evidenceRefs: [evidence(prior.canonicalUri, prior.memoryId!, '0'.repeat(64))],
+          evidenceRefs: [evidence(prior.canonicalUri, prior.memoryId, Effect2.pipe('0', EffectString.repeat(64)))],
         };
         expect(yield* failure(f.call({...draft, action: 'preflight', mutation: 'create'}))).toMatchObject({
           _tag: 'Failure',
@@ -326,14 +344,14 @@ describe('workflow admitted evidence references', () => {
             status: 'archived',
             topic: 'prior-context',
             project: 'fixture',
-            memoryId: prior.memoryId!,
+            memoryId: prior.memoryId,
             sourceAgentClient: 'threadnote',
             timestamp: '2026-10-23T12:00:00.000Z',
           },
           'Archived original Threadnote memory.\n\nSource evidence.\n',
         );
         yield* f.store.write(f.location, prior.canonicalUri, archivedSource, {mode: 'replace'});
-        const archivedRef = evidence(prior.canonicalUri, prior.memoryId!, sha256HexSync(archivedSource));
+        const archivedRef = evidence(prior.canonicalUri, prior.memoryId, sha256HexSync(archivedSource));
         expect(yield* failure(f.call({...base, evidenceRefs: [archivedRef]}))).toMatchObject({_tag: 'Failure'});
         expect(yield* f.journal(target.binding.bindingId)).toBe(journalBefore);
         expect(yield* f.store.read(f.location, prior.canonicalUri)).toBe(archivedSource);
@@ -345,15 +363,12 @@ describe('workflow admitted evidence references', () => {
       const f = yield* fixture();
       const source = yield* f.bind('source-run');
       if (!('binding' in source)) throw new Error('Expected source binding');
-      const prior = (yield* f.create(
-        source.binding.bindingId,
-        'source',
-        'durable',
-        'Stable source.\n',
-      )) as WorkflowReadResult;
+      const prior = yield* decodeWorkflowReadResult(
+        yield* f.create(source.binding.bindingId, 'source', 'durable', 'Stable source.\n'),
+      );
       const target = yield* f.bind('target-run');
       if (!('binding' in target)) throw new Error('Expected target binding');
-      const refs = [evidence(prior.canonicalUri, prior.memoryId!, prior.revision)];
+      const refs = [evidence(prior.canonicalUri, prior.memoryId, prior.revision)];
       const request: WorkflowRequest = {
         protocolVersion: 1,
         action: 'create',
@@ -401,7 +416,7 @@ describe('workflow admitted evidence references', () => {
       expect(yield* failure(f.call(recover))).toMatchObject({_tag: 'Failure'});
       expect(yield* f.journal(target.binding.bindingId)).toBe(prepared);
       yield* f.store.write(f.location, prior.canonicalUri, sourceBytes, {mode: 'replace'});
-      const result = (yield* f.call(recover)) as WorkflowReadResult;
+      const result = yield* decodeWorkflowReadResult(yield* f.call(recover));
       expect(result).toMatchObject({status: 'ok', verifiedReadback: true, body: request.body});
       expect(yield* f.call(recover)).toEqual(result);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
@@ -472,12 +487,14 @@ describe('workflow admitted evidence references', () => {
       const draftUri = `${rootUri}/durable/projects/fixture/workflow-${target.binding.bindingId}-race-draft.md`;
       expect(yield* f.store.stat(f.location, draftUri).pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
       yield* f.store.write(f.location, prior.uri, sourceBytes, {mode: 'replace'});
-      const recovered = (yield* f.call({
-        protocolVersion: 1,
-        action: 'recover',
-        bindingId: target.binding.bindingId,
-        operationId: request.operationId,
-      })) as WorkflowReadResult;
+      const recovered = yield* decodeWorkflowReadResult(
+        yield* f.call({
+          protocolVersion: 1,
+          action: 'recover',
+          bindingId: target.binding.bindingId,
+          operationId: request.operationId,
+        }),
+      );
       expect(recovered).toMatchObject({status: 'ok', verifiedReadback: true, body});
       expect(
         yield* f.call({
@@ -584,12 +601,9 @@ describe('workflow admitted evidence references', () => {
         team: 'personal',
       });
       if (!('binding' in one)) throw new Error('Expected cloud binding');
-      const privateDoc = (yield* f.create(
-        one.binding.bindingId,
-        'private',
-        'handoff',
-        'Cloud private.\n',
-      )) as WorkflowReadResult;
+      const privateDoc = yield* decodeWorkflowReadResult(
+        yield* f.create(one.binding.bindingId, 'private', 'handoff', 'Cloud private.\n'),
+      );
       const two = yield* f.call({
         protocolVersion: 1,
         action: 'bind',
@@ -608,7 +622,7 @@ describe('workflow admitted evidence references', () => {
             action: 'read',
             bindingId: two.binding.bindingId,
             uri: privateDoc.canonicalUri,
-            evidenceRefs: [evidence(privateDoc.canonicalUri, privateDoc.memoryId!, privateDoc.revision)],
+            evidenceRefs: [evidence(privateDoc.canonicalUri, privateDoc.memoryId, privateDoc.revision)],
           }),
         ),
       ).toMatchObject({_tag: 'Failure'});

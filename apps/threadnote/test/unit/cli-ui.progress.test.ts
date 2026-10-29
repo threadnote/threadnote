@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -9,6 +10,8 @@ import {CliOutput, makeQueuedCliWriter, withCliOutputConsole} from '@threadnote/
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('CLI progress indicator', () => {
   effectIt.effect('keeps Effect diagnostics off machine-readable stdout', () =>
@@ -103,8 +106,8 @@ describe('CLI progress indicator', () => {
   );
 
   it.each(
-    (['EBADF', 'ENOTTY'] as const).flatMap(code =>
-      (['write', 'flush', 'end'] as const).map(failureStage => ({code, failureStage})),
+    EffectArray.flatMap(['EBADF', 'ENOTTY'] as const, code =>
+      EffectArray.map(['write', 'flush', 'end'] as const, failureStage => ({code, failureStage})),
     ),
   )('silently stops writing after $code on a non-TTY sink during $failureStage', async ({code, failureStage}) => {
     const events: string[] = [];
@@ -209,8 +212,14 @@ describe('CLI progress indicator', () => {
         Effect.provideService(Terminal.Terminal, terminal),
       );
 
-      expect(displays.some(display => display.includes('Building lexical recall index.'))).toBe(true);
-      expect(displays.some(display => display.includes('64/4,084 (1%)'))).toBe(true);
+      expect(
+        EffectArray.some(displays, display =>
+          Effect2.pipe(display, EffectString.includes('Building lexical recall index.')),
+        ),
+      ).toBe(true);
+      expect(EffectArray.some(displays, display => Effect2.pipe(display, EffectString.includes('64/4,084 (1%)')))).toBe(
+        true,
+      );
       expect(displays.at(-1)).toBe('\r\u001b[2K');
     }),
   );
@@ -253,15 +262,19 @@ describe('CLI progress indicator', () => {
         Effect.provideService(Terminal.Terminal, terminal),
       );
 
-      expect(displays.some(display => display.includes('\n'))).toBe(false);
-      expect(displays.some(display => display.includes('…'))).toBe(true);
-      expect(displays.every(display => !display.includes('must not wrap'))).toBe(true);
+      expect(EffectArray.some(displays, display => Effect2.pipe(display, EffectString.includes('\n')))).toBe(false);
+      expect(EffectArray.some(displays, display => Effect2.pipe(display, EffectString.includes('…')))).toBe(true);
+      expect(
+        EffectArray.every(displays, display => !Effect2.pipe(display, EffectString.includes('must not wrap'))),
+      ).toBe(true);
     }),
   );
 
   it('clips rewritten progress text to one terminal row', () => {
     expect(clipInteractiveProgressText('short', 80)).toBe('short');
-    expect(clipInteractiveProgressText('abcdefghijklmnopqrstuvwxyz', 20).endsWith('…')).toBe(true);
+    expect(
+      Effect2.pipe(clipInteractiveProgressText('abcdefghijklmnopqrstuvwxyz', 20), EffectString.endsWith('…')),
+    ).toBe(true);
     expect(Array.from(clipInteractiveProgressText('abcdefghijklmnopqrstuvwxyz', 20)).length).toBeLessThanOrEqual(16);
     expect(Array.from(clipInteractiveProgressText('abcdefghijklmnopqrstuvwxyz', 10)).length).toBeLessThanOrEqual(6);
     fc.assert(
@@ -272,7 +285,9 @@ describe('CLI progress indicator', () => {
         const rendered = Array.from(clipped);
         if (source.length <= budget) expect(clipped).toBe(text);
         else expect(rendered.length).toBeLessThanOrEqual(budget);
-        expect(clipped.includes('\n') || clipped.includes('\r')).toBe(false);
+        expect(
+          Effect2.pipe(clipped, EffectString.includes('\n')) || Effect2.pipe(clipped, EffectString.includes('\r')),
+        ).toBe(false);
       }),
       {numRuns: 40},
     );
@@ -363,7 +378,7 @@ describe('CLI progress indicator', () => {
         ),
       ).pipe(Effect.provideService(SystemInfo, lineSystem), provideTestLayer(ApplicationLayer));
 
-      expect(captured.output.split('\n')).toEqual([
+      expect(Effect2.pipe(captured.output, EffectString.split('\n'))).toEqual([
         'Scanning repository source from Git.',
         'Scanning · 0/100 files',
         'Scanning · 99/100 files',

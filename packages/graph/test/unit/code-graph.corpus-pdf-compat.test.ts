@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {beforeEach, describe, expect, test, vi} from 'vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {extractCorpusFile} from '@threadnote/graph/languages/corpus/extractor';
@@ -39,7 +40,10 @@ describe('PDF.js compatibility', () => {
     unpdf.getResolvedPDFJS.mockResolvedValue({getDocument});
 
     const facts = await extractCorpusFile(pdfFile('docs/compatibility.pdf'));
-    const evidence = facts.symbols.map(symbol => `${symbol.name}\n${symbol.documentation ?? ''}`).join('\n');
+    const evidence = EffectArray.join(
+      EffectArray.map(facts.symbols, symbol => `${symbol.name}\n${symbol.documentation ?? ''}`),
+      '\n',
+    );
 
     expect(evidence).toContain('first');
     expect(evidence).toContain('second');

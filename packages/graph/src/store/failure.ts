@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   CodeGraphStoreBusyError,
   CodeGraphStoreCorruptionError,
@@ -10,6 +11,8 @@ import {
   type CodeGraphStoreFailure,
   type CodeGraphStoreFailureCode,
 } from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface CodeGraphStoreAdditiveSchemaPreflight {
   readonly createsOnly: true;
@@ -94,12 +97,14 @@ function failureForCode(code: CodeGraphStoreFailureCode, operation: string): Cod
 
 /** Keep SQLite and filesystem diagnostics useful without exposing local paths or unbounded native output. */
 export function sanitizeCodeGraphStoreDiagnostic(value: string): string {
-  return value
-    .replace(/[\r\n\t]+/g, ' ')
-    .replace(/(?:[A-Za-z]:[\\/]|\\\\|\/)[^'"`<>\r\n]*/g, '<local-path>')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 300);
+  return Effect.pipe(
+    value,
+    EffectString.replace(/[\r\n\t]+/g, ' '),
+    EffectString.replace(/(?:[A-Za-z]:[\\/]|\\\\|\/)[^'"`<>\r\n]*/g, '<local-path>'),
+    EffectString.replace(/\s+/g, ' '),
+    EffectString.trim,
+    EffectString.slice(0, 300),
+  );
 }
 
 function classifiedFailureCode(evidence: FailureEvidence): CodeGraphStoreFailureCode {
@@ -174,7 +179,7 @@ function collectFailureEvidence(root: unknown): FailureEvidence {
     if (typeof value !== 'object' || value === null || seen.has(value)) continue;
     seen.add(value);
     visited += 1;
-    if (Array.isArray(value)) {
+    if (EffectArray.isArray(value)) {
       const maximum = Math.min(safeArrayLength(value), MAXIMUM_CAUSE_NODES - visited - pending.length);
       for (let index = 0; index < maximum; index += 1) {
         enqueue(safeArrayElement(value, index), current.depth + 1);
@@ -195,7 +200,14 @@ function collectFailureEvidence(root: unknown): FailureEvidence {
       sqlitePrimaryCodes.add(code & 0xff);
     }
     if (typeof errno === 'number' && Number.isSafeInteger(errno)) {
-      if (normalizedCode?.startsWith('SQLITE_') || name === 'SQLiteError') {
+      if (
+        Effect.pipe(normalizedCode, effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect.pipe(effectOptionalString, EffectString.startsWith('SQLITE_')),
+        ) ||
+        name === 'SQLiteError'
+      ) {
         sqlitePrimaryCodes.add(Math.abs(errno) & 0xff);
       } else osErrnos.add(Math.abs(errno));
     }
@@ -203,19 +215,19 @@ function collectFailureEvidence(root: unknown): FailureEvidence {
       enqueue(safeField(value, field), current.depth + 1);
     }
     const errors = safeField(value, 'errors');
-    if (Array.isArray(errors)) enqueue(errors, current.depth + 1);
+    if (EffectArray.isArray(errors)) enqueue(errors, current.depth + 1);
   }
   return {osErrnos, sqlitePrimaryCodes, tags, tokens};
 }
 
 function privacySafeOperation(operation: string): string {
-  const normalized = operation.trim().replaceAll(/\s+/gu, ' ');
+  const normalized = Effect.pipe(operation, EffectString.trim, EffectString.replaceAll(/\s+/gu, ' '));
   return normalized.length <= 120 && SAFE_OPERATION.test(normalized) ? normalized : GENERIC_OPERATION;
 }
 
 function stableToken(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const normalized = value.toUpperCase();
+  const normalized = Effect.pipe(value, EffectString.toUpperCase);
   return /^[A-Z][A-Z0-9_]{0,79}$/u.test(normalized) ? normalized : undefined;
 }
 
@@ -245,23 +257,23 @@ function safeArrayElement(value: readonly unknown[], index: number): unknown {
 
 function hasToken(evidence: FailureEvidence, base: string): boolean {
   for (const token of evidence.tokens) {
-    if (token === base || token.startsWith(`${base}_`)) return true;
+    if (token === base || Effect.pipe(token, EffectString.startsWith(`${base}_`))) return true;
   }
   return false;
 }
 
 function hasAnyToken(evidence: FailureEvidence, bases: readonly string[]): boolean {
-  return bases.some(base => hasToken(evidence, base));
+  return EffectArray.some(bases, base => hasToken(evidence, base));
 }
 
 function hasAnyExactToken(evidence: FailureEvidence, tokens: readonly string[]): boolean {
-  return tokens.some(token => evidence.tokens.has(token));
+  return EffectArray.some(tokens, token => evidence.tokens.has(token));
 }
 
 function hasAnyTag(evidence: FailureEvidence, tags: readonly string[]): boolean {
-  return tags.some(tag => evidence.tags.has(tag));
+  return EffectArray.some(tags, tag => evidence.tags.has(tag));
 }
 
 function hasAnyNumber(values: ReadonlySet<number>, candidates: readonly number[]): boolean {
-  return candidates.some(candidate => values.has(candidate));
+  return EffectArray.some(candidates, candidate => values.has(candidate));
 }

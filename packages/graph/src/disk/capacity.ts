@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {
   CODE_GRAPH_EXTRACTOR_SET_VERSION,
@@ -7,6 +8,8 @@ import {
   CodeGraphDiskCapacityObservationError,
   CodeGraphDiskCapacityPressureError,
 } from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export {CodeGraphDiskCapacityObservationError, CodeGraphDiskCapacityPressureError};
 
@@ -88,7 +91,7 @@ export function isCodeGraphCapacityFailureOperation(value: unknown): value is Co
   return (
     value === 'observe code graph storage capacity' ||
     value === 'protect code graph storage' ||
-    CODE_GRAPH_DISK_RESERVATION_OPERATIONS.some(operation => operation === value)
+    EffectArray.some(CODE_GRAPH_DISK_RESERVATION_OPERATIONS, operation => operation === value)
   );
 }
 
@@ -542,28 +545,31 @@ export function codeGraphDiskCapacityReservationProjection(
 
   const transientOnDurable = input.demand.transientFilesystem === 'durable';
   const recoveryOnDurable = (input.demand.recoveryFilesystem ?? input.demand.transientFilesystem) === 'durable';
-  const filesystems = [
-    {
-      bytes: saturatingCapacityAdd(
-        mainOnDurable ? externalMainBytes : 0,
-        transientOnDurable ? transientHighWaterBytes : 0,
-        recoveryOnDurable ? recoveryFloorBytes : 0,
-      ),
-      key: input.durableFilesystemKey,
-    },
-    ...(!mainOnDurable || !transientOnDurable || !recoveryOnDurable
-      ? [
-          {
-            bytes: saturatingCapacityAdd(
-              mainOnDurable ? 0 : externalMainBytes,
-              transientOnDurable ? 0 : transientHighWaterBytes,
-              recoveryOnDurable ? 0 : recoveryFloorBytes,
-            ),
-            key: input.temporaryFilesystemKey,
-          },
-        ]
-      : []),
-  ].filter(value => value.bytes > 0);
+  const filesystems = EffectArray.filter(
+    [
+      {
+        bytes: saturatingCapacityAdd(
+          mainOnDurable ? externalMainBytes : 0,
+          transientOnDurable ? transientHighWaterBytes : 0,
+          recoveryOnDurable ? recoveryFloorBytes : 0,
+        ),
+        key: input.durableFilesystemKey,
+      },
+      ...(!mainOnDurable || !transientOnDurable || !recoveryOnDurable
+        ? [
+            {
+              bytes: saturatingCapacityAdd(
+                mainOnDurable ? 0 : externalMainBytes,
+                transientOnDurable ? 0 : transientHighWaterBytes,
+                recoveryOnDurable ? 0 : recoveryFloorBytes,
+              ),
+              key: input.temporaryFilesystemKey,
+            },
+          ]
+        : []),
+    ],
+    value => value.bytes > 0,
+  );
   return {calibrationIdentity, filesystems, state: 'measured'};
 }
 
@@ -583,8 +589,8 @@ export function evaluateCodeGraphDiskCapacity(input: CodeGraphDiskCapacityInput)
   const temporaryAvailableBytes = availableCapacityBytes(input.temporaryAvailableBytes);
   const reservedDurableBytes = capacityBytes(input.reservedDurableBytes);
   const reservedTemporaryBytes = capacityBytes(input.reservedTemporaryBytes);
-  const durableKey = 'd'.repeat(64);
-  const temporaryKey = input.filesystemsShared ? durableKey : 'e'.repeat(64);
+  const durableKey = Effect.pipe('d', EffectString.repeat(64));
+  const temporaryKey = input.filesystemsShared ? durableKey : Effect.pipe('e', EffectString.repeat(64));
   const projection = codeGraphDiskCapacityReservationProjection({
     demand: input.demand,
     durableFilesystemKey: durableKey,
@@ -622,7 +628,7 @@ export function evaluateCodeGraphDiskCapacity(input: CodeGraphDiskCapacityInput)
   if (durableAvailableBytes === undefined) {
     return {calibrationIdentity, reason: 'available-space-unknown', state: 'unknown'};
   }
-  const ownerBytes = new Map(projection.filesystems.map(value => [value.key, value.bytes]));
+  const ownerBytes = new Map(EffectArray.map(projection.filesystems, value => [value.key, value.bytes]));
   const durableRequiredBytes = saturatingCapacityAdd(ownerBytes.get(durableKey) ?? 0, reservedDurableBytes);
   const temporaryRequiredBytes = saturatingCapacityAdd(ownerBytes.get(temporaryKey) ?? 0, reservedTemporaryBytes);
   if (temporaryRequiredBytes > 0 && temporaryAvailableBytes === undefined) {
@@ -647,7 +653,9 @@ export function evaluateCodeGraphDiskCapacity(input: CodeGraphDiskCapacityInput)
   return {
     calibrationIdentity,
     filesystems,
-    state: filesystems.every(value => value.availableBytes >= value.requiredBytes) ? 'healthy' : 'pressure',
+    state: EffectArray.every(filesystems, value => value.availableBytes >= value.requiredBytes)
+      ? 'healthy'
+      : 'pressure',
   };
 }
 
@@ -662,16 +670,17 @@ export function codeGraphDiskCapacityFailure(
     activeReservations:
       decision.state === 'unknown'
         ? []
-        : decision.filesystems
-            .filter(filesystem => filesystem.activeReservationBytes > 0)
-            .map(filesystem => ({bytes: filesystem.activeReservationBytes, role: filesystem.role})),
+        : EffectArray.map(
+            EffectArray.filter(decision.filesystems, filesystem => filesystem.activeReservationBytes > 0),
+            filesystem => ({bytes: filesystem.activeReservationBytes, role: filesystem.role}),
+          ),
     calibrationIdentity: decision.calibrationIdentity,
     decisionLayer: 'bounded-write-reservation',
     estimateBasis: 'final-fact-bytes-and-row-count',
     filesystems:
       decision.state === 'unknown'
         ? []
-        : decision.filesystems.map(({availableBytes, requiredBytes, role}) => ({
+        : EffectArray.map(decision.filesystems, ({availableBytes, requiredBytes, role}) => ({
             availableBytes,
             requiredBytes,
             role,
@@ -725,13 +734,13 @@ function saturatingCapacityRatioCeiling(value: number, numerator: number, denomi
 export function codeGraphUtf8ByteLength(value: string): number {
   let bytes = 0;
   for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
+    const codeUnit = value[index];
     let encodedBytes: number;
-    if (codeUnit <= 0x7f) encodedBytes = 1;
-    else if (codeUnit <= 0x7ff) encodedBytes = 2;
-    else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
+    if (codeUnit <= '\u007f') encodedBytes = 1;
+    else if (codeUnit <= '\u07ff') encodedBytes = 2;
+    else if (codeUnit >= '\ud800' && codeUnit <= '\udbff') {
+      const next = value[index + 1];
+      if (next !== undefined && next >= '\udc00' && next <= '\udfff') {
         encodedBytes = 4;
         index += 1;
       } else {

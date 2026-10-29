@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import React, {useState} from 'react';
 import {Check, CircleAlert, CircleCheck, Database, Plug, RefreshCw, Settings2} from 'lucide-react';
 
 import {RuntimeUpdatesPanel} from './runtime_updates_view.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface RuntimeCheck {
   readonly detail: string;
@@ -46,16 +49,21 @@ export function runtimeHealthGroups(checks: readonly RuntimeCheck[]) {
           : 3;
     groups[group].checks.push(check);
   }
-  return groups
-    .filter(group => group.checks.length)
-    .map(group => ({
+  return EffectArray.map(
+    EffectArray.filter(
+      groups,
+      (group: (typeof groups)[number], __effectArrayIndex) =>
+        __effectArrayIndex in groups && Boolean(group.checks.length),
+    ),
+    group => ({
       ...group,
-      status: group.checks.some(check => check.status === 'fail')
+      status: EffectArray.some(group.checks, check => check.status === 'fail')
         ? ('fail' as const)
-        : group.checks.some(check => check.status === 'warn')
+        : EffectArray.some(group.checks, check => check.status === 'warn')
           ? ('warn' as const)
           : ('ok' as const),
-    }));
+    }),
+  );
 }
 
 export function RuntimeHealthPanel(props: {
@@ -73,7 +81,7 @@ export function RuntimeHealthPanel(props: {
   return (
     <section className="panel health-panel is-active" aria-busy={!!props.busy}>
       <div className="workspace-tabs" role="tablist" aria-label="Runtime Health sections">
-        {(['diagnostics', 'repair', 'updates'] as const).map(value => (
+        {EffectArray.map(['diagnostics', 'repair', 'updates'] as const, value => (
           <button
             key={value}
             role="tab"
@@ -81,7 +89,15 @@ export function RuntimeHealthPanel(props: {
             className={tab === value ? 'is-active' : undefined}
             onClick={() => setTab(value)}
           >
-            {value.charAt(0).toUpperCase() + value.slice(1)}
+            {Effect.pipe(value, __effectPipeInput => {
+              const __effectPipeStage0 = Effect.pipe(
+                __effectPipeInput,
+                EffectString.charAt(0),
+                Effect.Option.getOrElse(() => ''),
+              );
+              const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.toUpperCase);
+              return __effectPipeStage1;
+            }) + Effect.pipe(value, EffectString.slice(1))}
           </button>
         ))}
       </div>
@@ -98,7 +114,7 @@ export function RuntimeHealthPanel(props: {
               <h3>Installation checks</h3>
             </header>
             {groups.length ? (
-              groups.map(group => (
+              EffectArray.map(groups, group => (
                 <details className="runtime-check-group" key={group.label}>
                   <summary className="workspace-row">
                     <group.icon aria-hidden="true" />
@@ -116,7 +132,7 @@ export function RuntimeHealthPanel(props: {
                     </span>
                   </summary>
                   <div className="runtime-check-details">
-                    {group.checks.map(check => (
+                    {EffectArray.map(group.checks, check => (
                       <div key={check.name}>
                         <span
                           className={`workspace-status ${check.status === 'ok' ? '' : check.status === 'warn' ? 'warn' : 'error'}`}
@@ -139,9 +155,13 @@ export function RuntimeHealthPanel(props: {
           <details className="health-technical">
             <summary>Technical diagnostic output</summary>
             <pre>
-              {props.checks
-                .map(check => `${check.status.toUpperCase()} · ${check.name}\n${check.detail}`)
-                .join('\n\n') || 'No diagnostic results yet.'}
+              {EffectArray.join(
+                EffectArray.map(
+                  props.checks,
+                  check => `${Effect.pipe(check.status, EffectString.toUpperCase)} · ${check.name}\n${check.detail}`,
+                ),
+                '\n\n',
+              ) || 'No diagnostic results yet.'}
             </pre>
             {props.output ? <pre>{props.output}</pre> : null}
             <button disabled={!!props.busy} onClick={props.onVerify}>

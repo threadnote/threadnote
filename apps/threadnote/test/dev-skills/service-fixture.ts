@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {DevSkillsSource, loadDevSkillsBundleAt, nativeRequirements} from '../../src/dev_skills/manifest.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const devSkillsTestLayer = Layer.mergeAll(
   BunServices.layer,
@@ -25,7 +29,7 @@ export const fixture = Effect.fn('test.devSkills.fixture')(function* () {
     workflowProtocol: 1,
     stateSchema: 1,
     minimumRuntime: '5.3.0-beta.4',
-    skills: ['dev-spec', 'dev-plan', 'dev-cycle', 'watch-pr'].map(id => ({
+    skills: EffectArray.map(['dev-spec', 'dev-plan', 'dev-cycle', 'watch-pr'], id => ({
       id,
       role: id === 'watch-pr' ? 'support' : 'primary',
       files: ['SKILL.md', 'scripts/helper.py', 'references/notes.md'],
@@ -88,7 +92,9 @@ export const snapshot = Effect.fn('test.devSkills.snapshot')(function* (root: st
       for (const child of yield* fs.readDirectory(absolute)) pending.push(relative ? `${relative}/${child}` : child);
     } else if (info.type === 'File') result[relative] = Buffer.from(yield* fs.readFile(absolute)).toString('base64');
   }
-  return Object.fromEntries(Object.entries(result).sort(([a], [b]) => a.localeCompare(b)));
+  return EffectRecord.fromEntries(
+    EffectRecord.toEntries(result).sort(([a], [b]) => Effect2.pipe(a, EffectString.localeCompare(b))),
+  );
 });
 /** Two-release updater fixtures use real enriched manifests and versioned metadata. */
 export const devSkillsReleaseFixture = Effect.fn('test.devSkills.release')(function* (
@@ -100,7 +106,7 @@ export const devSkillsReleaseFixture = Effect.fn('test.devSkills.release')(funct
   const releaseRoot = f.path.join(f.runtime, 'versions', version);
   const bundleRoot = staged ? f.path.join(f.runtime, 'versions', '.threadnote-update-fixture', 'release') : releaseRoot;
   const executableName = f.system.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
-  for (const [relative, content] of Object.entries(bundle.files)) {
+  for (const [relative, content] of EffectRecord.toEntries(bundle.files)) {
     const file = f.path.join(bundleRoot, 'config', 'agent-skills', relative);
     yield* f.fs.makeDirectory(f.path.dirname(file), {recursive: true});
     yield* f.fs.writeFile(file, Buffer.from(content, 'base64'));

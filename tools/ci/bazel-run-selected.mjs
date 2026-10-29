@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- CI artifact and Bazel subprocess boundary. */
 import {readPreparedInventory} from '../bazel/prepare.mjs';
 import {resolve} from 'node:path';
@@ -8,7 +9,7 @@ const selection = await Bun.file(resolve(root, process.argv[2] ?? '.context/baze
 if (!selection.generation) throw new Error('Selection is missing its prepared generation');
 const {inventory} = await readPreparedInventory({root, expectedGeneration: selection.generation});
 const allowed = new Set(inventory.targets.map(target => target.label));
-if (!Array.isArray(selection.targets) || selection.targets.some(label => !allowed.has(label)))
+if (!EffectArray.isArray(selection.targets) || selection.targets.some(label => !allowed.has(label)))
   throw new Error('Invalid modeled target selection');
 const executable = await bazelPath(root);
 for (const kind of ['test', 'action']) {

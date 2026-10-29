@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {Database} from 'bun:sqlite';
@@ -6,10 +7,12 @@ import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import * as FC from 'fast-check';
 import {CodeGraphStore, type CodeGraphViewObservationResult} from '@threadnote/graph/store';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const WORKTREE_ID = '1'.repeat(64);
-const EXPECTED = `cgsn_${'1'.repeat(40)}`;
-const OTHER = `cgsn_${'2'.repeat(40)}`;
+const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
+const EXPECTED = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+const OTHER = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
 
 const observationCase = FC.record({
   active: FC.constantFrom<string | undefined>(undefined, EXPECTED, OTHER),
@@ -45,9 +48,13 @@ describe('code graph view-removal observation properties', () => {
             expect(observed).toEqual(modelObservation(fixture));
             expect(yield* fs.readFile(databasePath)).toEqual(before);
             expect(readTableNames(databasePath)).toEqual(
-              [fixture.activeTable ? 'active_snapshots' : undefined, fixture.removedTable ? 'removed_views' : undefined]
-                .filter((name): name is string => name !== undefined)
-                .sort(),
+              EffectArray.filter(
+                [
+                  fixture.activeTable ? 'active_snapshots' : undefined,
+                  fixture.removedTable ? 'removed_views' : undefined,
+                ],
+                (name): name is string => name !== undefined,
+              ).sort(),
             );
             expect(yield* fs.exists(`${databasePath}-wal`)).toBe(false);
             expect(yield* fs.exists(`${databasePath}-shm`)).toBe(false);
@@ -137,10 +144,12 @@ function modelObservation(fixture: ObservationFixture): CodeGraphViewObservation
 function readTableNames(databasePath: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query<{readonly name: string}, []>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-      .all()
-      .map(row => row.name);
+    return EffectArray.map(
+      database
+        .query<{readonly name: string}, []>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .all(),
+      row => row.name,
+    );
   } finally {
     database.close(false);
   }

@@ -1,5 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as FC from 'fast-check';
@@ -7,6 +8,8 @@ import {
   codeGraphAnalysisEdgeAggregatePageStatement,
   codeGraphAnalysisSymbolAggregatePageStatement,
 } from '@threadnote/graph/store';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const BASE = 'base';
 const CURRENT = 'current';
@@ -43,7 +46,7 @@ describe('code graph analysis aggregate store', () => {
         try {
           const baseById = lastById(base);
           const currentById = lastById(current);
-          const deletions = new Set(deleted.map(rowId));
+          const deletions = new Set(EffectArray.map(deleted, rowId));
           insertSpecs(database, BASE, [...baseById.values()]);
           insertSpecs(database, CURRENT, [...currentById.values()]);
           insertDeletions(database, deletions);
@@ -73,13 +76,23 @@ describe('code graph analysis aggregate store', () => {
         codeGraphAnalysisSymbolAggregatePageStatement(CURRENT, BASE, 'row-000100', 257),
         codeGraphAnalysisEdgeAggregatePageStatement(CURRENT, BASE, 'row-000100', 257),
       ]) {
-        const plan = (
-          database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-            readonly detail: string;
-          }[]
-        ).map(row => row.detail);
-        expect(plan.filter(detail => detail.includes('PRIMARY KEY (snapshot_id=? AND id>?)'))).toHaveLength(2);
-        expect(plan.join('\n')).not.toMatch(/SCAN (?:current|base)_(?:symbols|edges)/u);
+        const plan = EffectArray.map(
+          database
+            .query<
+              {
+                readonly detail: string;
+              },
+              SQLQueryBindings[]
+            >(`EXPLAIN QUERY PLAN ${statement.text}`)
+            .all(...statement.parameters),
+          row => row.detail,
+        );
+        expect(
+          EffectArray.filter(plan, detail =>
+            Effect2.pipe(detail, EffectString.includes('PRIMARY KEY (snapshot_id=? AND id>?)')),
+          ),
+        ).toHaveLength(2);
+        expect(EffectArray.join(plan, '\n')).not.toMatch(/SCAN (?:current|base)_(?:symbols|edges)/u);
       }
     } finally {
       database.close(false);
@@ -169,12 +182,17 @@ function scanSymbolCounts(database: Database, pageSize: number): ReadonlyMap<str
   let cursor: string | undefined;
   while (true) {
     const statement = codeGraphAnalysisSymbolAggregatePageStatement(CURRENT, BASE, cursor, pageSize);
-    const rows = database.query(statement.text).all(...statement.parameters) as readonly {
-      readonly count: number;
-      readonly kind: string;
-      readonly language: string;
-      readonly last_id: string;
-    }[];
+    const rows = database
+      .query<
+        {
+          readonly count: number;
+          readonly kind: string;
+          readonly language: string;
+          readonly last_id: string;
+        },
+        SQLQueryBindings[]
+      >(statement.text)
+      .all(...statement.parameters);
     if (rows.length === 0) break;
     for (const row of rows) increment(counts, `${row.language}\0${row.kind}`, Number(row.count));
     cursor = maximumLastId(rows);
@@ -187,12 +205,17 @@ function scanEdgeCounts(database: Database, pageSize: number): ReadonlyMap<strin
   let cursor: string | undefined;
   while (true) {
     const statement = codeGraphAnalysisEdgeAggregatePageStatement(CURRENT, BASE, cursor, pageSize);
-    const rows = database.query(statement.text).all(...statement.parameters) as readonly {
-      readonly count: number;
-      readonly last_id: string;
-      readonly provenance: string;
-      readonly relation: string;
-    }[];
+    const rows = database
+      .query<
+        {
+          readonly count: number;
+          readonly last_id: string;
+          readonly provenance: string;
+          readonly relation: string;
+        },
+        SQLQueryBindings[]
+      >(statement.text)
+      .all(...statement.parameters);
     if (rows.length === 0) break;
     for (const row of rows) increment(counts, `${row.provenance}\0${row.relation}`, Number(row.count));
     cursor = maximumLastId(rows);
@@ -201,7 +224,7 @@ function scanEdgeCounts(database: Database, pageSize: number): ReadonlyMap<strin
 }
 
 function maximumLastId(rows: readonly {readonly last_id: string}[]): string {
-  return rows.reduce((maximum, row) => (row.last_id > maximum ? row.last_id : maximum), '');
+  return EffectArray.reduce(rows, '', (maximum, row) => (row.last_id > maximum ? row.last_id : maximum));
 }
 
 function groupedCounts<Value>(values: readonly Value[], key: (value: Value) => string): ReadonlyMap<string, number> {
@@ -215,7 +238,7 @@ function increment(counts: Map<string, number>, key: string, amount: number): vo
 }
 
 function totalCounts(counts: ReadonlyMap<string, number>): number {
-  return [...counts.values()].reduce((total, count) => total + count, 0);
+  return EffectArray.reduce([...counts.values()], 0, (total, count) => total + count);
 }
 
 function lastById(values: readonly AggregateSpec[]): ReadonlyMap<string, AggregateSpec> {
@@ -225,5 +248,5 @@ function lastById(values: readonly AggregateSpec[]): ReadonlyMap<string, Aggrega
 }
 
 function rowId(value: number): string {
-  return `row-${value.toString().padStart(6, '0')}`;
+  return `row-${Effect2.pipe(value.toString(), EffectString.padStart(6, '0'))}`;
 }

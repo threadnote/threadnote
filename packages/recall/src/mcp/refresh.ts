@@ -36,13 +36,13 @@ interface ActiveMcpRecallRefresh {
 
 const activeRefreshes = new Map<string, ActiveMcpRecallRefresh>();
 
-class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<McpRecallBackgroundRefreshBlocked>()(
-  'McpRecallBackgroundRefreshBlocked',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class McpRecallBackgroundRefreshBlocked extends Schema.TaggedError<
+  McpRecallBackgroundRefreshBlocked,
+  {readonly brand: unique symbol}
+>()('McpRecallBackgroundRefreshBlocked', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 /**
  * Start one process-local derived-index refresh without joining it to the MCP

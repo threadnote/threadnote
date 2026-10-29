@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Effect, Exit, Schema} from 'effect';
 import {expect, vi} from 'vitest';
 import {refreshDiagnostics, refreshPropertyDiagnostics} from './service-refresh-diagnostics.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const lifecycle = () => {
   const controller = new AbortController();
@@ -42,7 +45,12 @@ effectIt.effect('preserves values, failures, defects and interruption without re
       phase: 'between-evaluations',
     });
     expect(
-      report.recent.map(({ordinal, removed, outcome, interrupted}) => ({ordinal, removed, outcome, interrupted})),
+      EffectArray.map(report.recent, ({ordinal, removed, outcome, interrupted}) => ({
+        ordinal,
+        removed,
+        outcome,
+        interrupted,
+      })),
     ).toEqual([
       {ordinal: 1, removed: false, outcome: 'Success', interrupted: false},
       {ordinal: 2, removed: true, outcome: 'Failure', interrupted: false},
@@ -127,7 +135,9 @@ effectIt.effect('registers once per property context and captures abort before t
           test.controller.abort('private-abort-reason');
           expect(cleaned).toBe(false);
           expect(writes).toHaveLength(1);
-          expect(JSON.parse(writes[0].slice('SERVICE_REFRESH_DIAGNOSTICS '.length))).toMatchObject({
+          expect(
+            JSON.parse(Effect2.pipe(writes[0], EffectString.slice('SERVICE_REFRESH_DIAGNOSTICS '.length))),
+          ).toMatchObject({
             event: 'aborted',
             startedEvaluations: 1,
             completedEvaluations: 0,
@@ -143,7 +153,9 @@ effectIt.effect('registers once per property context and captures abort before t
     test.finish();
     expect(remove).toHaveBeenCalledTimes(1);
     expect(writes).toHaveLength(2);
-    expect(JSON.parse(writes[1].slice('SERVICE_REFRESH_DIAGNOSTICS '.length))).toMatchObject({
+    expect(
+      JSON.parse(Effect2.pipe(writes[1], EffectString.slice('SERVICE_REFRESH_DIAGNOSTICS '.length))),
+    ).toMatchObject({
       event: 'finished',
       startedEvaluations: 1,
       completedEvaluations: 1,
@@ -152,7 +164,7 @@ effectIt.effect('registers once per property context and captures abort before t
       phase: 'between-evaluations',
       recent: [{outcome: 'Failure', interrupted: true}],
     });
-    expect(writes.join('')).not.toContain('private-abort-reason');
+    expect(EffectArray.join(writes, '')).not.toContain('private-abort-reason');
   }),
 );
 
@@ -183,7 +195,9 @@ effectIt.effect('labels one unavailable-home evaluation without inventing a gene
     ).toBe(42);
     test.finish();
     expect(writes).toHaveLength(2);
-    const [aborted, finished] = writes.map(line => JSON.parse(line.slice('SERVICE_REFRESH_DIAGNOSTICS '.length)));
+    const [aborted, finished] = EffectArray.map(writes, line =>
+      JSON.parse(Effect2.pipe(line, EffectString.slice('SERVICE_REFRESH_DIAGNOSTICS '.length))),
+    );
     expect(aborted).toMatchObject({
       event: 'aborted',
       scope: 'dev-skills-refresh-unavailable-home',
@@ -204,7 +218,7 @@ effectIt.effect('labels one unavailable-home evaluation without inventing a gene
       recent: [{ordinal: 1, outcome: 'Success', interrupted: false}],
     });
     expect(finished.recent[0]).not.toHaveProperty('removed');
-    expect(writes.join('')).not.toContain('private-abort-reason');
+    expect(EffectArray.join(writes, '')).not.toContain('private-abort-reason');
   }),
 );
 
@@ -275,7 +289,9 @@ effectIt.effect(
       expect(Exit.hasInterrupts(result)).toBe(true);
       expect(cleaned).toBe(true);
       test.finish();
-      const [aborted, finished] = writes.map(line => JSON.parse(line.slice('SERVICE_REFRESH_DIAGNOSTICS '.length)));
+      const [aborted, finished] = EffectArray.map(writes, line =>
+        JSON.parse(Effect2.pipe(line, EffectString.slice('SERVICE_REFRESH_DIAGNOSTICS '.length))),
+      );
       expect(aborted).toMatchObject({
         event: 'aborted',
         scope: 'dev-skills-refresh-removal-recovery',
@@ -291,7 +307,7 @@ effectIt.effect(
         successfulEvaluations: 0,
         recent: [{ordinal: 1, boundary: 'home', shared: true, interrupted: true}],
       });
-      expect(writes.join('')).not.toContain('private-recovery-payload');
+      expect(EffectArray.join(writes, '')).not.toContain('private-recovery-payload');
     }),
 );
 
@@ -380,7 +396,7 @@ effectIt.effect.prop(
       const diagnostics = refreshDiagnostics(() => time);
       const initial = diagnostics.snapshot();
       const expectedPhases: string[] = [];
-      const frozen = Object.freeze(evaluations.map(value => Object.freeze({...value})));
+      const frozen = Object.freeze(EffectArray.map(evaluations, value => Object.freeze({...value})));
       const inputBefore = JSON.stringify(evaluations);
       let successes = 0;
       for (const [index, evaluation] of frozen.entries()) {
@@ -415,17 +431,14 @@ effectIt.effect.prop(
           phase: 'between-evaluations',
           activeEvaluation: null,
         });
-        expect(after.recent.map(({ordinal, removed, outcome}) => ({ordinal, removed, outcome}))).toEqual(
-          frozen
-            .slice(0, index + 1)
-            .map((entry, ordinal) => ({
-              ordinal: ordinal + 1,
-              removed: entry.removed,
-              outcome: entry.succeeds ? 'Success' : 'Failure',
-            }))
-            .slice(-16),
+        expect(EffectArray.map(after.recent, ({ordinal, removed, outcome}) => ({ordinal, removed, outcome}))).toEqual(
+          EffectArray.map(frozen.slice(0, index + 1), (entry, ordinal) => ({
+            ordinal: ordinal + 1,
+            removed: entry.removed,
+            outcome: entry.succeeds ? 'Success' : 'Failure',
+          })).slice(-16),
         );
-        expect(after.phases.map(entry => entry.phase)).toEqual(expectedPhases.slice(-16));
+        expect(EffectArray.map(after.phases, entry => entry.phase)).toEqual(expectedPhases.slice(-16));
         expect(after.recent.length).toBeLessThanOrEqual(16);
         expect(after.phases.length).toBeLessThanOrEqual(16);
         expect(JSON.stringify(before)).toBe(saved);

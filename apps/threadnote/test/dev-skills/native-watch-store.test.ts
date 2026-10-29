@@ -2,6 +2,7 @@ import fc from 'fast-check';
 import {describe, it, expect} from 'vitest';
 import {initializeNativeWatch} from '@threadnote/workflow-automations/watch';
 import {decodeNativeWatchEnvelope} from '../../src/workflow_automation/watch_store.js';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 const fixture = () => ({
   format: 'threadnote-native-watch-runtime',
   version: 1,
@@ -46,7 +47,12 @@ describe('native watch envelope', () => {
               size: 0,
               pending: 0,
               failed: 0,
-              pull: {head: 'a'.repeat(40), base: 'b'.repeat(40), mergeable, state: 'open'},
+              pull: {
+                head: Effect2.pipe('a', EffectString.repeat(40)),
+                base: Effect2.pipe('b', EffectString.repeat(40)),
+                mergeable,
+                state: 'open',
+              },
             },
           },
         ],
@@ -75,13 +81,16 @@ import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {readNativeWatch, writeNativeWatch} from '../../src/workflow_automation/watch_store.js';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 effectIt.effect('read does not create state; CAS preserves exact old bytes and corrupt state', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const home = yield* fs.makeTempDirectoryScoped({prefix: 'native-watch-store-'});
-    const config = {agentContextHome: home} as RuntimeConfig;
+    const config = runtimeConfigForTest({agentContextHome: home});
     expect(yield* readNativeWatch(config, 'watch-1')).toBeUndefined();
     expect(yield* fs.exists(path.join(home, 'workflow-automations'))).toBe(false);
     const envelope = decodeNativeWatchEnvelope(fixture());

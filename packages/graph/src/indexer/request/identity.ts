@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphVectorPolicy} from '../types.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {packDerivationIdentity, type CodeGraphLanguagePackRegistryShape} from '../../languages/registry.js';
@@ -15,28 +16,34 @@ export function codeGraphBuildRequestKey(
   environmentFingerprint: string,
   scope?: CodeGraphScopeIdentity,
 ): string {
-  const parserIdentities = languagePacks.cacheIdentities.join('\n');
-  const derivationIdentities = languagePacks.packs.map(packDerivationIdentity).sort(compareCodeUnits).join('\n');
+  const parserIdentities = EffectArray.join(languagePacks.cacheIdentities, '\n');
+  const derivationIdentities = EffectArray.join(
+    EffectArray.map(languagePacks.packs, packDerivationIdentity).sort(compareCodeUnits),
+    '\n',
+  );
   return sha256HexSync(
-    [
-      'code-graph-build-request-v5',
-      CODE_GRAPH_EXTRACTOR_SET_VERSION,
-      `lexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}`,
-      identity.repositoryId,
-      identity.checkoutId,
-      overlay.dirty ? identity.worktreeId : 'shared-commit',
-      identity.headCommit,
-      overlay.dirty ? (overlay.fingerprint ?? 'dirty-without-fingerprint') : 'clean',
-      overlay.dirty && incrementalOverlay === false ? 'direct-full' : 'default',
-      vectorPolicy === 'background'
-        ? 'vectors:background'
-        : vectorPolicy === true || vectorPolicy === 'wait'
-          ? 'vectors:required'
-          : 'vectors:structural-only',
-      'ignore-policy:3',
-      environmentFingerprint,
-      parserIdentities,
-      derivationIdentities,
-    ].join('\n') + codeGraphScopeIdentitySuffix(scope),
+    EffectArray.join(
+      [
+        'code-graph-build-request-v5',
+        CODE_GRAPH_EXTRACTOR_SET_VERSION,
+        `lexical-storage:${CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION}`,
+        identity.repositoryId,
+        identity.checkoutId,
+        overlay.dirty ? identity.worktreeId : 'shared-commit',
+        identity.headCommit,
+        overlay.dirty ? (overlay.fingerprint ?? 'dirty-without-fingerprint') : 'clean',
+        overlay.dirty && incrementalOverlay === false ? 'direct-full' : 'default',
+        vectorPolicy === 'background'
+          ? 'vectors:background'
+          : vectorPolicy === true || vectorPolicy === 'wait'
+            ? 'vectors:required'
+            : 'vectors:structural-only',
+        'ignore-policy:3',
+        environmentFingerprint,
+        parserIdentities,
+        derivationIdentities,
+      ],
+      '\n',
+    ) + codeGraphScopeIdentitySuffix(scope),
   );
 }

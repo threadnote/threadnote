@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {testHttpFetch} from '@threadnote/testing/http-fetch';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -9,7 +10,7 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Console, Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
+import {Console, Deferred, Effect, Fiber, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {
@@ -65,9 +66,19 @@ import {
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
+import {Option as EffectOption} from 'effect';
 
-const MANAGER_GRAPH_SNAPSHOT_ID = `cgsn_${'1'.repeat(40)}`;
-const MANAGER_GRAPH_REPLACEMENT_SNAPSHOT_ID = `cgsn_${'2'.repeat(40)}`;
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const TreeNodeJsonSchema = Schema.StructWithRest(Schema.Struct({uri: Schema.String}), [JsonRecordSchema]);
+function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown): S['Type'] {
+  return Schema.decodeUnknownSync(schema)(value);
+}
+
+const MANAGER_GRAPH_SNAPSHOT_ID = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+const MANAGER_GRAPH_REPLACEMENT_SNAPSHOT_ID = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
 
 vi.mock('@threadnote/threadnote/lifecycle', async importOriginal => {
   const actual = await importOriginal<typeof import('@threadnote/threadnote/lifecycle')>();
@@ -116,17 +127,20 @@ async function makeRuntime(): Promise<RuntimeConfig> {
   await mkdir(join(root, 'durable', 'projects', 'threadnote'), {recursive: true});
   await writeFile(
     join(root, 'durable', 'projects', 'threadnote', 'manager-ui.md'),
-    [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      'project: threadnote',
-      'topic: manager-ui',
-      'source_agent_client: codex',
-      'timestamp: 2026-06-05T00:00:00.000Z',
-      '',
-      'Manager UI feature notes.',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        'project: threadnote',
+        'topic: manager-ui',
+        'source_agent_client: codex',
+        'timestamp: 2026-06-05T00:00:00.000Z',
+        '',
+        'Manager UI feature notes.',
+      ],
+      '\n',
+    ),
   );
   await writeFile(join(root, 'durable', 'projects', 'threadnote', '.abstract.md'), 'generated');
   return {
@@ -222,13 +236,13 @@ async function makeSharedManagerRuntime(): Promise<{
 function managerCitedMemory(body: string, sourceDirty: boolean, repositoryIdentityKind: 'local' | 'remote'): string {
   const citation = createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
     path: 'apps/threadnote/src/manager/index.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind,
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
     sourceDirty,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });
@@ -250,21 +264,21 @@ function managerCitedMemory(body: string, sourceDirty: boolean, repositoryIdenti
 }
 
 async function seedManagerGraph(config: RuntimeConfig, snapshotId = MANAGER_GRAPH_SNAPSHOT_ID): Promise<string> {
-  const checkoutId = 'a'.repeat(64);
+  const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
     checkoutId,
     displayName: 'acme/platform',
     gitCommonDirectory: join(config.agentContextHome, 'repository', '.git'),
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     remoteIdentity: 'github.com/acme/platform',
     repoRoot: join(config.agentContextHome, 'repository'),
-    repositoryId: 'b'.repeat(64),
-    worktreeId: 'c'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
   };
   const generatedSymbols = Array.from({length: 520}, (_, index) => {
-    const suffix = index.toString().padStart(4, '0');
+    const suffix = Effect2.pipe(index.toString(), EffectString.padStart(4, '0'));
     return graphSymbol(
       `generated-${suffix}`,
       `generatedFunction${suffix}`,
@@ -278,7 +292,7 @@ async function seedManagerGraph(config: RuntimeConfig, snapshotId = MANAGER_GRAP
     graphFile('packages/app/src/index.ts', 'app-index'),
     graphFile('packages/app/src/view.ts', 'app-view'),
     graphFile('packages/core/src/api.ts', 'core-api'),
-    ...generatedSymbols.map(symbol => graphFile(symbol.path, symbol.id)),
+    ...EffectArray.map(generatedSymbols, symbol => graphFile(symbol.path, symbol.id)),
   ];
   const symbols: readonly CodeGraphSymbol[] = [
     graphSymbol('app', 'App', 'packages/app/src/index.ts', '@acme/app', 'class', 'cgp_app'),
@@ -378,18 +392,18 @@ async function seedManagerGraph(config: RuntimeConfig, snapshotId = MANAGER_GRAP
 }
 
 async function promoteManagerGraphReplacement(config: RuntimeConfig): Promise<string> {
-  const checkoutId = 'a'.repeat(64);
+  const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
     checkoutId,
     displayName: 'acme/platform',
     gitCommonDirectory: join(config.agentContextHome, 'repository', '.git'),
-    headCommit: '2'.repeat(40),
+    headCommit: Effect2.pipe('2', EffectString.repeat(40)),
     objectFormat: 'sha1',
     remoteIdentity: 'github.com/acme/platform',
     repoRoot: join(config.agentContextHome, 'repository'),
-    repositoryId: 'b'.repeat(64),
-    worktreeId: 'c'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
   };
   const symbol = graphSymbol('replacement', 'Replacement', 'src/replacement.ts', '@acme/new', 'class', 'cgp_new');
   const file = graphFile(symbol.path, symbol.id);
@@ -421,7 +435,7 @@ async function promoteManagerGraphReplacement(config: RuntimeConfig): Promise<st
 function graphFile(path: string, hash: string): CodeGraphInventoryFile {
   return {
     blobId: hash,
-    contentHash: hash.padEnd(64, '0'),
+    contentHash: Effect2.pipe(hash, EffectString.padEnd(64, '0')),
     language: 'typescript',
     mode: '100644',
     path,
@@ -439,7 +453,7 @@ function graphSymbol(
   resolutionScopeId: string,
 ): CodeGraphSymbol {
   return {
-    contentHash: id.padEnd(64, '0'),
+    contentHash: Effect2.pipe(id, EffectString.padEnd(64, '0')),
     documentation: `Documentation for ${name}.`,
     exported: true,
     id,
@@ -493,7 +507,16 @@ async function fetchManagerGraphActionWhenAvailable(url: string, init: RequestIn
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const response = await testHttpFetch(url, init);
     if (response.status !== 409) return response;
-    const body = (await response.clone().json()) as {readonly code?: string; readonly retryAfterMilliseconds?: number};
+    const body = decodeJson(
+      Schema.StructWithRest(
+        Schema.Struct({
+          code: Schema.optionalKey(Schema.String),
+          retryAfterMilliseconds: Schema.optionalKey(Schema.Finite),
+        }),
+        [JsonRecordSchema],
+      ),
+      await response.clone().json(),
+    );
     if (body.code !== 'graph-view-busy' || attempt === 2) return response;
     await new Promise(resolve => setTimeout(resolve, body.retryAfterMilliseconds ?? 1_000));
   }
@@ -521,14 +544,14 @@ function initializeGitRepository(root: string): void {
 }
 
 function differentGraphIdentity(value: string): string {
-  return `${value.startsWith('f') ? 'e' : 'f'}${value.slice(1)}`;
+  return `${Effect2.pipe(value, EffectString.startsWith('f')) ? 'e' : 'f'}${Effect2.pipe(value, EffectString.slice(1))}`;
 }
 
 describe('manager catalog', () => {
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
     vi.mocked(memory.runArchive).mockReset();
     vi.mocked(memory.runForget).mockReset();
     vi.mocked(memory.runRecall)
@@ -545,8 +568,18 @@ describe('manager catalog', () => {
     homes.push(config.agentContextHome);
 
     const tree = await runEffect(memoryTree(config));
-    const project = tree.children?.find(child => child.name === 'durable')?.children?.[0]?.children?.[0];
-    const leaf = project?.children?.find(child => child.name === 'manager-ui.md');
+    const project = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(tree.children), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, child => child.name === 'durable')),
+      ),
+    )?.children?.[0]?.children?.[0];
+    const leaf = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(project?.children), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, child => child.name === 'manager-ui.md'),
+        ),
+      ),
+    );
 
     expect(leaf?.uri).toBe('threadnote://user/denys/memories/durable/projects/threadnote/manager-ui.md');
     expect(leaf?.metadata?.project).toBe('threadnote');
@@ -561,10 +594,33 @@ describe('manager catalog', () => {
     await writeFile(join(root, 'agent-skills', 'codex-global', 'threadnote-abc123.md'), 'Skill body');
 
     const tree = await runEffect(resourcesTree(config));
-    const skill = tree.children
-      ?.find(child => child.name === 'agent-skills')
-      ?.children?.find(child => child.name === 'codex-global')
-      ?.children?.find(child => child.name === 'threadnote-abc123.md');
+    const skill = EffectOption.getOrUndefined(
+      EffectOption.map(
+        EffectOption.fromNullishOr(
+          EffectOption.getOrUndefined(
+            EffectOption.map(
+              EffectOption.fromNullishOr(
+                EffectOption.getOrUndefined(
+                  EffectOption.map(EffectOption.fromNullishOr(tree.children), __effectArrayReceiver =>
+                    EffectOption.getOrUndefined(
+                      EffectArray.findFirst(__effectArrayReceiver, child => child.name === 'agent-skills'),
+                    ),
+                  ),
+                )?.children,
+              ),
+              __effectArrayReceiver2 =>
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(__effectArrayReceiver2, child => child.name === 'codex-global'),
+                ),
+            ),
+          )?.children,
+        ),
+        __effectArrayReceiver3 =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(__effectArrayReceiver3, child => child.name === 'threadnote-abc123.md'),
+          ),
+      ),
+    );
 
     expect(tree.name).toBe('resources');
     expect(tree.uri).toBe('threadnote://resources');
@@ -578,7 +634,7 @@ describe('manager catalog', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-external-tree-'});
-        const config = {agentContextHome: home, account: 'local', user: 'denys'} as RuntimeConfig;
+        const config = runtimeConfigForTest({agentContextHome: home, account: 'local', user: 'denys'});
         const resources = path.join(home, 'data', 'local', 'resources');
         const source = path.join(resources, 'external', 'superhuman', 'selected');
         const page = path.join(source, 'docs', 'document', 'pages', 'canvas');
@@ -596,7 +652,10 @@ describe('manager catalog', () => {
         yield* fs.writeFileString(path.join(source, 'docs', 'document', '.manifest.json'), '{}');
         yield* fs.writeFileString(path.join(empty, '.manifest.json'), '{}');
         const tree = yield* resourcesTree(config);
-        const names = (node: typeof tree): readonly string[] => [node.name, ...(node.children ?? []).flatMap(names)];
+        const names = (node: typeof tree): readonly string[] => [
+          node.name,
+          ...EffectArray.flatMap(node.children ?? [], names),
+        ];
         expect(names(tree)).toContain('page.md');
         expect(names(tree)).toContain('article.md');
         expect(names(tree)).toContain('settings.json');
@@ -637,19 +696,22 @@ describe('manager catalog', () => {
     );
     await writeFile(
       canonicalPath,
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        'topic: manager-ui',
-        'source_agent_client: codex',
-        'timestamp: 2026-06-05T00:00:00.000Z',
-        'schema_version: 5',
-        'memory_id: tn_manager_ui',
-        '',
-        'Manager UI feature notes.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: manager-ui',
+          'source_agent_client: codex',
+          'timestamp: 2026-06-05T00:00:00.000Z',
+          'schema_version: 5',
+          'memory_id: tn_manager_ui',
+          '',
+          'Manager UI feature notes.',
+        ],
+        '\n',
+      ),
     );
 
     const result = await runEffect(readManagedMemory(config, 'threadnote://memory/tn_manager_ui'));
@@ -669,9 +731,19 @@ describe('manager catalog', () => {
     await symlink(secretPath, linkPath);
 
     const tree = await runEffect(memoryTree(config));
-    const project = tree.children?.find(child => child.name === 'durable')?.children?.[0]?.children?.[0];
+    const project = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(tree.children), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, child => child.name === 'durable')),
+      ),
+    )?.children?.[0]?.children?.[0];
 
-    expect(project?.children?.map(child => child.name)).not.toContain('leak.md');
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(project?.children), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, child => child.name),
+        ),
+      ),
+    ).not.toContain('leak.md');
     await expect(
       runEffect(readManagedMemory(config, 'threadnote://user/denys/memories/durable/projects/threadnote/leak.md')),
     ).rejects.toThrow(/regular memory files/);
@@ -772,7 +844,7 @@ describe('manager http API', () => {
   });
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('serves source Manager HTML and CSS from the package static directory', async () => {
@@ -808,7 +880,16 @@ describe('manager http API', () => {
       expect(rejected.status).toBe(401);
 
       const accepted = await testHttpFetch(`${server.url}/api/tree`, {headers: {authorization: 'Bearer secret'}});
-      const body = (await accepted.json()) as {readonly resourcesTree?: TreeNode; readonly tree?: TreeNode};
+      const body = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            resourcesTree: Schema.optionalKey(TreeNodeJsonSchema),
+            tree: Schema.optionalKey(TreeNodeJsonSchema),
+          }),
+          [JsonRecordSchema],
+        ),
+        await accepted.json(),
+      );
       expect(accepted.status).toBe(200);
       expect(body.tree?.uri).toBe('threadnote://user/denys/memories');
       expect(body.resourcesTree?.uri).toBe('threadnote://resources');
@@ -848,7 +929,10 @@ describe('manager http API', () => {
     const server = await startServer(config, 'secret');
     try {
       const response = await testHttpFetch(`${server.url}/api/tree`, {headers: {authorization: 'Bearer secret'}});
-      const body = (await response.json()) as {readonly tree?: TreeNode};
+      const body = decodeJson(
+        Schema.StructWithRest(Schema.Struct({tree: Schema.optionalKey(TreeNodeJsonSchema)}), [JsonRecordSchema]),
+        await response.json(),
+      );
 
       expect(response.status).toBe(200);
       expect(body.tree).toMatchObject({
@@ -885,17 +969,20 @@ describe('manager http API', () => {
             'manager-ui.md',
           );
           const original = yield* fs.readFileString(memoryPath);
-          const updated = [
-            'MEMORY',
-            'kind: durable',
-            'status: active',
-            'project: threadnote',
-            'topic: manager-ui',
-            'source_agent_client: manager',
-            'timestamp: 2026-08-20T00:00:00.000Z',
-            '',
-            'Serialized Manager edit.',
-          ].join('\n');
+          const updated = EffectArray.join(
+            [
+              'MEMORY',
+              'kind: durable',
+              'status: active',
+              'project: threadnote',
+              'topic: manager-ui',
+              'source_agent_client: manager',
+              'timestamp: 2026-08-20T00:00:00.000Z',
+              '',
+              'Serialized Manager edit.',
+            ],
+            '\n',
+          );
           const server = yield* Effect.promise(() => startServer(config, 'secret'));
           const acquired = yield* Deferred.make<void>();
           const release = yield* Deferred.make<void>();
@@ -956,8 +1043,8 @@ describe('manager http API', () => {
       'manager-ui.md',
     );
     const openedContent = await readFile(memoryPath, 'utf8');
-    const concurrent = openedContent.replace('feature notes', 'concurrent notes');
-    const stale = openedContent.replace('feature notes', 'stale notes');
+    const concurrent = Effect2.pipe(openedContent, EffectString.replace('feature notes', 'concurrent notes'));
+    const stale = Effect2.pipe(openedContent, EffectString.replace('feature notes', 'stale notes'));
     const server = await startServer(config, 'secret');
     try {
       await writeFile(memoryPath, concurrent);
@@ -1000,18 +1087,26 @@ describe('manager http API', () => {
         method: 'POST',
       });
     try {
-      const futureIncoming = original.replace('status: active', 'status: active\nschema_version: 999999999999');
+      const futureIncoming = Effect2.pipe(
+        original,
+        EffectString.replace('status: active', 'status: active\nschema_version: 999999999999'),
+      );
       const rejectedIncoming = await requestSave(futureIncoming);
       expect(rejectedIncoming.status).toBe(500);
       expect(await rejectedIncoming.json()).toMatchObject({error: expect.stringContaining('newer than supported')});
       expect(await readFile(memoryPath, 'utf8')).toBe(original);
 
-      const futureExisting = original.replace(
-        'status: active',
-        `status: active\nschema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+      const futureExisting = Effect2.pipe(
+        original,
+        EffectString.replace(
+          'status: active',
+          `status: active\nschema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+        ),
       );
       await writeFile(memoryPath, futureExisting);
-      const rejectedExisting = await requestSave(original.replace('feature notes', 'replacement notes'));
+      const rejectedExisting = await requestSave(
+        Effect2.pipe(original, EffectString.replace('feature notes', 'replacement notes')),
+      );
       expect(rejectedExisting.status).toBe(500);
       expect(await rejectedExisting.json()).toMatchObject({error: expect.stringContaining('newer than supported')});
       expect(await readFile(memoryPath, 'utf8')).toBe(futureExisting);
@@ -1040,8 +1135,11 @@ describe('manager http API', () => {
     const server = await startServer(config, 'secret');
     try {
       for (const newline of ['\r\n', '\r']) {
-        const original = originalLf.replaceAll('\n', newline);
-        const updated = original.replace('Manager UI feature notes.', 'Legacy Manager raw edit.');
+        const original = Effect2.pipe(originalLf, EffectString.replaceAll('\n', newline));
+        const updated = Effect2.pipe(
+          original,
+          EffectString.replace('Manager UI feature notes.', 'Legacy Manager raw edit.'),
+        );
         await writeFile(memoryPath, original);
         const response = await testHttpFetch(`${server.url}/api/memory/save`, {
           body: JSON.stringify({replaceUri: uri, text: updated}),
@@ -1206,7 +1304,10 @@ describe('manager http API', () => {
           );
           expect(storedUri).toBe(targetUri);
           const staged = yield* readManagedMemory(fixture.config, targetUri);
-          const concurrentTarget = staged.content.replace('Shared Manager original.', 'Concurrent target edit.');
+          const concurrentTarget = Effect2.pipe(
+            staged.content,
+            EffectString.replace('Shared Manager original.', 'Concurrent target edit.'),
+          );
           yield* fs.writeFileString(targetPath, concurrentTarget);
 
           const failure = yield* withSharedRepositoryLock(
@@ -1261,13 +1362,16 @@ describe('manager http API', () => {
       'shared-relocated.md',
     );
     const commitsBefore = Number.parseInt(
-      execFileSync(
-        'git',
-        ['-C', fixture.config.agentContextHome + '/share/worktrees/default', 'rev-list', '--count', 'HEAD'],
-        {
-          encoding: 'utf8',
-        },
-      ).trim(),
+      Effect2.pipe(
+        execFileSync(
+          'git',
+          ['-C', fixture.config.agentContextHome + '/share/worktrees/default', 'rev-list', '--count', 'HEAD'],
+          {
+            encoding: 'utf8',
+          },
+        ),
+        EffectString.trim,
+      ),
       10,
     );
     const server = await startServer(fixture.config, 'secret');
@@ -1301,11 +1405,14 @@ describe('manager http API', () => {
       expect(movedRecord?.metadata.visibility).toBe('shared');
       expect(
         Number.parseInt(
-          execFileSync(
-            'git',
-            ['-C', fixture.config.agentContextHome + '/share/worktrees/default', 'rev-list', '--count', 'HEAD'],
-            {encoding: 'utf8'},
-          ).trim(),
+          Effect2.pipe(
+            execFileSync(
+              'git',
+              ['-C', fixture.config.agentContextHome + '/share/worktrees/default', 'rev-list', '--count', 'HEAD'],
+              {encoding: 'utf8'},
+            ),
+            EffectString.trim,
+          ),
           10,
         ),
       ).toBe(commitsBefore + 1);
@@ -1653,7 +1760,10 @@ describe('manager http API', () => {
           'racing-target.md',
         );
         const original = `${managerCitedMemory('Original move body.', false, 'remote')}\n`;
-        const concurrent = original.replace('Original move body.', 'Concurrent source edit.');
+        const concurrent = Effect2.pipe(
+          original,
+          EffectString.replace('Original move body.', 'Concurrent source edit.'),
+        );
         yield* fs.writeFileString(sourcePath, original);
         const server = yield* Effect.promise(() => startServer(fixture.config, 'secret'));
         const repositoryLockAcquired = yield* Deferred.make<void>();
@@ -1735,7 +1845,10 @@ describe('manager http API', () => {
       const opened = await testHttpFetch(`${server.url}/api/memory?uri=${encodeURIComponent(fixture.uri)}`, {
         headers: {authorization: 'Bearer secret'},
       });
-      const openedMemory = (await opened.json()) as {readonly content: string};
+      const openedMemory = decodeJson(
+        Schema.StructWithRest(Schema.Struct({content: Schema.String}), [JsonRecordSchema]),
+        await opened.json(),
+      );
       expect(opened.status).toBe(200);
       expect(openedMemory).toMatchObject({content: fixture.content});
 
@@ -1755,9 +1868,15 @@ describe('manager http API', () => {
       const refreshed = await testHttpFetch(`${server.url}/api/memory?uri=${encodeURIComponent(fixture.uri)}`, {
         headers: {authorization: 'Bearer secret'},
       });
-      const refreshedMemory = (await refreshed.json()) as {readonly content: string};
-      const malformed = cleanUpdate.replace(/^code_citation: .*$/mu, '  code_citation: {not-json}');
-      const nearCanonical = cleanUpdate.replace(/^code_citation:/mu, 'code_citation :');
+      const refreshedMemory = decodeJson(
+        Schema.StructWithRest(Schema.Struct({content: Schema.String}), [JsonRecordSchema]),
+        await refreshed.json(),
+      );
+      const malformed = Effect2.pipe(
+        cleanUpdate,
+        EffectString.replace(/^code_citation: .*$/mu, '  code_citation: {not-json}'),
+      );
+      const nearCanonical = Effect2.pipe(cleanUpdate, EffectString.replace(/^code_citation:/mu, 'code_citation :'));
       const blocked = [
         {reason: 'dirty worktree cannot be shared', text: managerCitedMemory('Dirty update.', true, 'remote')},
         {
@@ -1780,7 +1899,7 @@ describe('manager http API', () => {
         },
         {
           reason: 'metadata must match its canonical shared URI',
-          text: cleanUpdate.replace('project: threadnote', 'project: other-project'),
+          text: Effect2.pipe(cleanUpdate, EffectString.replace('project: threadnote', 'project: other-project')),
         },
       ];
       for (const candidate of blocked) {
@@ -1818,7 +1937,7 @@ describe('manager http API', () => {
         body: JSON.stringify({
           confirm: true,
           processId: 123_456,
-          processRef: `tnp_${'a'.repeat(64)}`,
+          processRef: `tnp_${Effect2.pipe('a', EffectString.repeat(64))}`,
         }),
         headers: {'content-type': 'application/json'},
         method: 'POST',
@@ -1860,15 +1979,15 @@ describe('manager http API', () => {
         const path = yield* Path.Path;
         const identity: RepositoryIdentity = {
           caseMode: 'sensitive',
-          checkoutId: 'f'.repeat(64),
+          checkoutId: Effect2.pipe('f', EffectString.repeat(64)),
           displayName: 'acme/large-monorepo',
           gitCommonDirectory: join(config.agentContextHome, 'large-repository', '.git'),
-          headCommit: '1'.repeat(40),
+          headCommit: Effect2.pipe('1', EffectString.repeat(40)),
           objectFormat: 'sha1',
           remoteIdentity: 'github.com/acme/large-monorepo',
           repoRoot: join(config.agentContextHome, 'large-repository'),
-          repositoryId: 'd'.repeat(64),
-          worktreeId: 'e'.repeat(64),
+          repositoryId: Effect2.pipe('d', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
         };
         const layout = codeGraphLayout(path, config.agentContextHome, identity.checkoutId, identity.worktreeId);
         const reporter = yield* makeCodeGraphBuildReporter(identity, layout);
@@ -1880,11 +1999,17 @@ describe('manager http API', () => {
     try {
       const headers = {authorization: 'Bearer secret'};
       const statusResponse = await testHttpFetch(`${server.url}/api/graphs/status`, {headers});
-      const status = (await statusResponse.json()) as {
-        readonly builds: readonly {readonly state: string}[];
-        readonly catalogRevision?: string;
-        readonly queuedWorktreeIds: readonly string[];
-      };
+      const status = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            builds: Schema.Array(Schema.StructWithRest(Schema.Struct({state: Schema.String}), [JsonRecordSchema])),
+            catalogRevision: Schema.optionalKey(Schema.String),
+            queuedWorktreeIds: Schema.Array(Schema.String),
+          }),
+          [JsonRecordSchema],
+        ),
+        await statusResponse.json(),
+      );
       expect(statusResponse.status).toBe(200);
       expect(status.builds).toEqual([expect.objectContaining({state: 'queued'})]);
       expect(status.queuedWorktreeIds).toEqual([seeded.worktreeId]);
@@ -1892,11 +2017,17 @@ describe('manager http API', () => {
       expect(existsSync(seeded.databasePath)).toBe(false);
 
       const catalogResponse = await testHttpFetch(`${server.url}/api/graphs`, {headers});
-      const catalog = (await catalogResponse.json()) as {
-        readonly builds: readonly {readonly state: string}[];
-        readonly catalogRevision: string;
-        readonly repositories: readonly unknown[];
-      };
+      const catalog = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            builds: Schema.Array(Schema.StructWithRest(Schema.Struct({state: Schema.String}), [JsonRecordSchema])),
+            catalogRevision: Schema.String,
+            repositories: Schema.Array(Schema.Unknown),
+          }),
+          [JsonRecordSchema],
+        ),
+        await catalogResponse.json(),
+      );
       expect(catalog).toMatchObject({builds: [expect.objectContaining({state: 'queued'})], repositories: []});
       expect(catalog.catalogRevision).toMatch(/^[0-9a-f]{64}$/u);
       expect(existsSync(seeded.databasePath)).toBe(false);
@@ -1913,10 +2044,18 @@ describe('manager http API', () => {
     try {
       const headers = {authorization: 'Bearer secret'};
       const initialResponse = await testHttpFetch(`${server.url}/api/graphs`, {headers});
-      const initial = (await initialResponse.json()) as {
-        readonly catalogRevision: string;
-        readonly repositories: readonly {readonly views: readonly unknown[]}[];
-      };
+      const initial = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            catalogRevision: Schema.String,
+            repositories: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({views: Schema.Array(Schema.Unknown)}), [JsonRecordSchema]),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await initialResponse.json(),
+      );
       expect(initialResponse.status).toBe(200);
       expect(initial.repositories[0]?.views).toHaveLength(1);
 
@@ -1924,23 +2063,38 @@ describe('manager http API', () => {
         Effect.gen(function* () {
           const path = yield* Path.Path;
           const store = yield* CodeGraphStore;
-          const layout = codeGraphLayout(path, config.agentContextHome, checkoutId, 'c'.repeat(64));
-          return yield* store.removeView(layout.databasePath, 'c'.repeat(64), MANAGER_GRAPH_SNAPSHOT_ID);
+          const layout = codeGraphLayout(
+            path,
+            config.agentContextHome,
+            checkoutId,
+            Effect2.pipe('c', EffectString.repeat(64)),
+          );
+          return yield* store.removeView(
+            layout.databasePath,
+            Effect2.pipe('c', EffectString.repeat(64)),
+            MANAGER_GRAPH_SNAPSHOT_ID,
+          );
         }),
       );
       expect(removal.state).toBe('removed');
 
       const statusResponse = await testHttpFetch(`${server.url}/api/graphs/status`, {headers});
-      const status = (await statusResponse.json()) as {readonly catalogRevision?: string};
+      const status = decodeJson(
+        Schema.StructWithRest(Schema.Struct({catalogRevision: Schema.optionalKey(Schema.String)}), [JsonRecordSchema]),
+        await statusResponse.json(),
+      );
       expect(statusResponse.status).toBe(200);
       expect(status.catalogRevision).toMatch(/^[0-9a-f]{64}$/u);
       expect(status.catalogRevision).not.toBe(initial.catalogRevision);
 
       const refreshedResponse = await testHttpFetch(`${server.url}/api/graphs`, {headers});
-      const refreshed = (await refreshedResponse.json()) as {
-        readonly catalogRevision: string;
-        readonly repositories: readonly unknown[];
-      };
+      const refreshed = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({catalogRevision: Schema.String, repositories: Schema.Array(Schema.Unknown)}),
+          [JsonRecordSchema],
+        ),
+        await refreshedResponse.json(),
+      );
       expect(refreshedResponse.status).toBe(200);
       expect(refreshed.catalogRevision).toBe(status.catalogRevision);
       expect(refreshed.repositories).toEqual([]);
@@ -1957,29 +2111,53 @@ describe('manager http API', () => {
     try {
       const headers = {authorization: 'Bearer secret'};
       const catalogResponse = await testHttpFetch(`${server.url}/api/graphs`, {headers});
-      const catalog = (await catalogResponse.json()) as {
-        readonly repositories: readonly {
-          readonly defaultViewId: string;
-          readonly displayName: string;
-          readonly id: string;
-          readonly views: readonly {
-            readonly id: string;
-            readonly localAssociation: {readonly available: boolean; readonly state: string};
-            readonly projects: readonly {readonly id: string; readonly symbolCount: number}[];
-          }[];
-        }[];
-      };
+      const catalog = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            repositories: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  defaultViewId: Schema.String,
+                  displayName: Schema.String,
+                  id: Schema.String,
+                  views: Schema.Array(
+                    Schema.StructWithRest(
+                      Schema.Struct({
+                        id: Schema.String,
+                        localAssociation: Schema.StructWithRest(
+                          Schema.Struct({available: Schema.Boolean, state: Schema.String}),
+                          [JsonRecordSchema],
+                        ),
+                        projects: Schema.Array(
+                          Schema.StructWithRest(
+                            Schema.Struct({id: Schema.String, symbolCount: Schema.optionalKey(Schema.Finite)}),
+                            [JsonRecordSchema],
+                          ),
+                        ),
+                      }),
+                      [JsonRecordSchema],
+                    ),
+                  ),
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await catalogResponse.json(),
+      );
       expect(catalogResponse.status).toBe(200);
       expect(catalog.repositories).toHaveLength(1);
       expect(catalog.repositories[0]).toMatchObject({
-        defaultViewId: `${repositoryId}.${'c'.repeat(64)}`,
+        defaultViewId: `${repositoryId}.${Effect2.pipe('c', EffectString.repeat(64))}`,
         displayName: 'acme/platform',
-        id: 'b'.repeat(64),
+        id: Effect2.pipe('b', EffectString.repeat(64)),
       });
       expect(catalog.repositories[0]?.views[0]).toMatchObject({
         checkoutId: repositoryId,
         localAssociation: {available: false, state: 'legacy-unknown'},
-        worktreeId: 'c'.repeat(64),
+        worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
       });
       expect(catalog.repositories[0]?.views[0]?.projects).toEqual(
         expect.arrayContaining([expect.objectContaining({id: 'cgp_app'}), expect.objectContaining({id: 'cgp_core'})]),
@@ -1989,19 +2167,31 @@ describe('manager http API', () => {
         `${server.url}/api/graphs/page?repository=${repositoryId}&snapshot=${MANAGER_GRAPH_SNAPSHOT_ID}&offset=0&workspaceOffset=0&query=core`,
         {headers},
       );
-      const catalogPage = (await catalogPageResponse.json()) as {
-        readonly query: string;
-        readonly repository: {
-          readonly localAssociation: {readonly available: boolean; readonly state: string};
-          readonly projects: readonly {readonly id: string}[];
-          readonly snapshot: {readonly id: string};
-        };
-      };
+      const catalogPage = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            query: Schema.String,
+            repository: Schema.StructWithRest(
+              Schema.Struct({
+                localAssociation: Schema.StructWithRest(
+                  Schema.Struct({available: Schema.Boolean, state: Schema.String}),
+                  [JsonRecordSchema],
+                ),
+                projects: Schema.Array(Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema])),
+                snapshot: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema]),
+              }),
+              [JsonRecordSchema],
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await catalogPageResponse.json(),
+      );
       expect(catalogPageResponse.status).toBe(200);
       expect(catalogPage.query).toBe('core');
       expect(catalogPage.repository.localAssociation).toEqual({available: false, state: 'legacy-unknown'});
       expect(catalogPage.repository.snapshot.id).toBe(MANAGER_GRAPH_SNAPSHOT_ID);
-      expect(catalogPage.repository.projects.map(project => project.id)).toEqual(['cgp_core']);
+      expect(EffectArray.map(catalogPage.repository.projects, project => project.id)).toEqual(['cgp_core']);
 
       const viewsPageResponse = await testHttpFetch(
         `${server.url}/api/graphs/views?repository=${repositoryId}&offset=0`,
@@ -2009,18 +2199,39 @@ describe('manager http API', () => {
           headers,
         },
       );
-      const viewsPage = (await viewsPageResponse.json()) as {
-        readonly hasMore: boolean;
-        readonly repositories: readonly {
-          readonly views: readonly {
-            readonly id: string;
-            readonly localAssociation: {readonly available: boolean; readonly state: string};
-          }[];
-        }[];
-      };
+      const viewsPage = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            hasMore: Schema.Boolean,
+            repositories: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  views: Schema.Array(
+                    Schema.StructWithRest(
+                      Schema.Struct({
+                        id: Schema.String,
+                        localAssociation: Schema.StructWithRest(
+                          Schema.Struct({available: Schema.Boolean, state: Schema.String}),
+                          [JsonRecordSchema],
+                        ),
+                      }),
+                      [JsonRecordSchema],
+                    ),
+                  ),
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await viewsPageResponse.json(),
+      );
       expect(viewsPageResponse.status).toBe(200);
       expect(viewsPage.hasMore).toBe(false);
-      expect(viewsPage.repositories[0]?.views[0]?.id).toBe(`${repositoryId}.${'c'.repeat(64)}`);
+      expect(viewsPage.repositories[0]?.views[0]?.id).toBe(
+        `${repositoryId}.${Effect2.pipe('c', EffectString.repeat(64))}`,
+      );
       expect(viewsPage.repositories[0]?.views[0]?.localAssociation).toEqual({
         available: false,
         state: 'legacy-unknown',
@@ -2034,11 +2245,21 @@ describe('manager http API', () => {
       const overviewResponse = await testHttpFetch(`${server.url}/api/graph?repository=${repositoryId}&project=all`, {
         headers,
       });
-      const overview = (await overviewResponse.json()) as {
-        readonly edges: readonly {readonly count: number; readonly relation: string}[];
-        readonly mode: string;
-        readonly nodes: readonly {readonly id: string; readonly type: string}[];
-      };
+      const overview = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            edges: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({count: Schema.Finite, relation: Schema.String}), [JsonRecordSchema]),
+            ),
+            mode: Schema.String,
+            nodes: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({id: Schema.String, type: Schema.String}), [JsonRecordSchema]),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await overviewResponse.json(),
+      );
       expect(overviewResponse.status).toBe(200);
       expect(overview.mode).toBe('overview');
       expect(overview.nodes).toEqual(
@@ -2061,12 +2282,30 @@ describe('manager http API', () => {
       );
       const detailElapsedMilliseconds = performance.now() - detailStartedAt;
       const detailText = await detailResponse.text();
-      const detail = JSON.parse(detailText) as {
-        readonly edges: readonly {readonly relation: string; readonly sourceId: string; readonly targetId: string}[];
-        readonly mode: string;
-        readonly nodes: readonly {readonly degree: number; readonly id: string; readonly type: string}[];
-        readonly paging: {readonly edgeLimit: number; readonly hasMore: boolean; readonly nodeLimit: number};
-      };
+      const detail = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            edges: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({relation: Schema.String, sourceId: Schema.String, targetId: Schema.String}),
+                [JsonRecordSchema],
+              ),
+            ),
+            mode: Schema.String,
+            nodes: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({degree: Schema.Finite, id: Schema.String, type: Schema.String}), [
+                JsonRecordSchema,
+              ]),
+            ),
+            paging: Schema.StructWithRest(
+              Schema.Struct({edgeLimit: Schema.Finite, hasMore: Schema.Boolean, nodeLimit: Schema.Finite}),
+              [JsonRecordSchema],
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse(detailText),
+      );
       expect(detailResponse.status).toBe(200);
       expect(detail.mode).toBe('detail');
       expect(detail.nodes).toEqual(
@@ -2084,10 +2323,10 @@ describe('manager http API', () => {
       );
       expect(detail.nodes.length).toBeLessThanOrEqual(240);
       expect(detail.edges.length).toBeLessThanOrEqual(640);
-      const detailNodeIds = new Set(detail.nodes.map(node => node.id));
-      expect(detail.edges.every(edge => detailNodeIds.has(edge.sourceId) && detailNodeIds.has(edge.targetId))).toBe(
-        true,
-      );
+      const detailNodeIds = new Set(EffectArray.map(detail.nodes, node => node.id));
+      expect(
+        EffectArray.every(detail.edges, edge => detailNodeIds.has(edge.sourceId) && detailNodeIds.has(edge.targetId)),
+      ).toBe(true);
       expect(detail.paging).toEqual({edgeLimit: 640, hasMore: true, nodeLimit: 240});
       expect(new TextEncoder().encode(detailText).byteLength).toBeLessThan(500_000);
       expect(detailElapsedMilliseconds).toBeLessThan(1_500);
@@ -2099,11 +2338,19 @@ describe('manager http API', () => {
       );
       const expandedElapsedMilliseconds = performance.now() - expandedStartedAt;
       const expandedText = await expandedResponse.text();
-      const expanded = JSON.parse(expandedText) as {
-        readonly edges: readonly unknown[];
-        readonly nodes: readonly unknown[];
-        readonly paging: {readonly edgeLimit: number; readonly nodeLimit: number};
-      };
+      const expanded = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            edges: Schema.Array(Schema.Unknown),
+            nodes: Schema.Array(Schema.Unknown),
+            paging: Schema.StructWithRest(Schema.Struct({edgeLimit: Schema.Finite, nodeLimit: Schema.Finite}), [
+              JsonRecordSchema,
+            ]),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse(expandedText),
+      );
       expect(expandedResponse.status).toBe(200);
       expect(expanded.paging).toMatchObject({edgeLimit: 1_500, nodeLimit: 500});
       expect(expanded.nodes.length).toBeLessThanOrEqual(500);
@@ -2118,20 +2365,44 @@ describe('manager http API', () => {
       );
       const queryElapsedMilliseconds = performance.now() - queryStartedAt;
       const queryText = await queryResponse.text();
-      const query = JSON.parse(queryText) as {
-        readonly edges: readonly {readonly sourceId: string; readonly targetId: string}[];
-        readonly nodes: readonly {readonly id: string; readonly score?: number}[];
-        readonly paging: {readonly edgeLimit: number; readonly nodeLimit: number};
-        readonly query: {readonly matchedNodes: number; readonly state: string; readonly text: string};
-        readonly repository: {readonly snapshot: {readonly id: string}};
-      };
+      const query = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            edges: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({sourceId: Schema.String, targetId: Schema.String}), [
+                JsonRecordSchema,
+              ]),
+            ),
+            nodes: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({id: Schema.String, score: Schema.optionalKey(Schema.Finite)}), [
+                JsonRecordSchema,
+              ]),
+            ),
+            paging: Schema.StructWithRest(Schema.Struct({edgeLimit: Schema.Finite, nodeLimit: Schema.Finite}), [
+              JsonRecordSchema,
+            ]),
+            query: Schema.StructWithRest(
+              Schema.Struct({matchedNodes: Schema.Finite, state: Schema.String, text: Schema.String}),
+              [JsonRecordSchema],
+            ),
+            repository: Schema.StructWithRest(
+              Schema.Struct({snapshot: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema])}),
+              [JsonRecordSchema],
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse(queryText),
+      );
       expect(queryResponse.status).toBe(200);
       expect(query.query).toMatchObject({matchedNodes: query.nodes.length, state: 'ready', text: 'App'});
       expect(query.repository.snapshot.id).toBe(MANAGER_GRAPH_SNAPSHOT_ID);
       expect(query.nodes).toEqual(expect.arrayContaining([expect.objectContaining({id: 'app'})]));
-      expect(query.nodes.some(node => typeof node.score === 'number')).toBe(true);
-      const queryNodeIds = new Set(query.nodes.map(node => node.id));
-      expect(query.edges.every(edge => queryNodeIds.has(edge.sourceId) && queryNodeIds.has(edge.targetId))).toBe(true);
+      expect(EffectArray.some(query.nodes, node => typeof node.score === 'number')).toBe(true);
+      const queryNodeIds = new Set(EffectArray.map(query.nodes, node => node.id));
+      expect(
+        EffectArray.every(query.edges, edge => queryNodeIds.has(edge.sourceId) && queryNodeIds.has(edge.targetId)),
+      ).toBe(true);
       expect(query.paging).toMatchObject({edgeLimit: 500, nodeLimit: 200});
       expect(new TextEncoder().encode(queryText).byteLength).toBeLessThan(500_000);
       expect(queryElapsedMilliseconds).toBeLessThan(2_500);
@@ -2146,28 +2417,54 @@ describe('manager http API', () => {
         `${server.url}/api/graph/node?repository=${repositoryId}&node=${encodeURIComponent('app')}`,
         {headers},
       );
-      const node = (await nodeResponse.json()) as {
-        readonly node: {
-          readonly documentation?: string;
-          readonly path: string;
-          readonly span: {readonly column: number; readonly line: number};
-        };
-        readonly relationships: readonly {
-          readonly direction: string;
-          readonly evidencePath: string;
-          readonly provenance: string;
-          readonly related: {readonly id?: string; readonly label: string};
-          readonly relation: string;
-        }[];
-        readonly stats: {
-          readonly incoming: number;
-          readonly outgoing: number;
-          readonly relations: readonly {readonly count: number; readonly relation: string}[];
-          readonly sampledEdges: number;
-          readonly summaryTruncated: boolean;
-          readonly truncated: boolean;
-        };
-      };
+      const node = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            node: Schema.StructWithRest(
+              Schema.Struct({
+                documentation: Schema.optionalKey(Schema.String),
+                path: Schema.String,
+                span: Schema.StructWithRest(Schema.Struct({column: Schema.Finite, line: Schema.Finite}), [
+                  JsonRecordSchema,
+                ]),
+              }),
+              [JsonRecordSchema],
+            ),
+            relationships: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  direction: Schema.String,
+                  evidencePath: Schema.String,
+                  provenance: Schema.String,
+                  related: Schema.StructWithRest(
+                    Schema.Struct({id: Schema.optionalKey(Schema.String), label: Schema.String}),
+                    [JsonRecordSchema],
+                  ),
+                  relation: Schema.String,
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+            stats: Schema.StructWithRest(
+              Schema.Struct({
+                incoming: Schema.Finite,
+                outgoing: Schema.Finite,
+                relations: Schema.Array(
+                  Schema.StructWithRest(Schema.Struct({count: Schema.Finite, relation: Schema.String}), [
+                    JsonRecordSchema,
+                  ]),
+                ),
+                sampledEdges: Schema.Finite,
+                summaryTruncated: Schema.Boolean,
+                truncated: Schema.Boolean,
+              }),
+              [JsonRecordSchema],
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await nodeResponse.json(),
+      );
       expect(nodeResponse.status).toBe(200);
       expect(node.node).toMatchObject({
         documentation: 'Documentation for App.',
@@ -2202,13 +2499,19 @@ describe('manager http API', () => {
       const analysisResponse = await testHttpFetch(`${server.url}/api/graph/analysis?repository=${repositoryId}`, {
         headers,
       });
-      const analysis = (await analysisResponse.json()) as {
-        readonly statistics: {
-          readonly analyzedEdgeCount: number;
-          readonly analyzedNodeCount: number;
-        };
-        readonly trust: {readonly classification: string};
-      };
+      const analysis = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            statistics: Schema.StructWithRest(
+              Schema.Struct({analyzedEdgeCount: Schema.Finite, analyzedNodeCount: Schema.Finite}),
+              [JsonRecordSchema],
+            ),
+            trust: Schema.StructWithRest(Schema.Struct({classification: Schema.String}), [JsonRecordSchema]),
+          }),
+          [JsonRecordSchema],
+        ),
+        await analysisResponse.json(),
+      );
       expect(analysisResponse.status).toBe(200);
       expect(analysis.statistics).toMatchObject({analyzedEdgeCount: 1_602, analyzedNodeCount: 523});
       expect(analysis.trust.classification).toBe('untrusted-repository-data');
@@ -2230,7 +2533,7 @@ describe('manager http API', () => {
       edgeCount: 21,
       extractorSet: CODE_GRAPH_EXTRACTOR_SET_VERSION,
       fileCount: 12,
-      id: `cgsn_${'7'.repeat(40)}-context-recovery`,
+      id: `cgsn_${Effect2.pipe('7', EffectString.repeat(40))}-context-recovery`,
       repositoryId: identity.repositoryId,
       state: 'ready',
       symbolCount: 40,
@@ -2353,7 +2656,11 @@ describe('manager http API', () => {
         });
       }
       expect(isolatedIndex.runIsolatedCodeGraphIndexSnapshot).not.toHaveBeenCalled();
-      const stale = await post({...target, project: 'docs', expectedRevision: '0'.repeat(64)});
+      const stale = await post({
+        ...target,
+        project: 'docs',
+        expectedRevision: Effect2.pipe('0', EffectString.repeat(64)),
+      });
       expect(stale.status).toBe(409);
       const foreign = await post({...target, project: 'foreign', expectedRevision: sha256HexSync(manifest)});
       expect(foreign.status).not.toBe(200);
@@ -2364,7 +2671,7 @@ describe('manager http API', () => {
         fileCount: 1,
         symbolCount: 2,
         edgeCount: 0,
-        id: `cgsn_${'3'.repeat(40)}`,
+        id: `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`,
         repositoryId: identity.repositoryId,
         worktreeId: identity.worktreeId,
         state: 'ready',
@@ -2421,18 +2728,21 @@ describe('manager http API', () => {
     const identity = await runEffect(resolveRepositoryIdentity(repositoryRoot));
     const secondIdentity = await runEffect(resolveRepositoryIdentity(secondRepositoryRoot));
     const manifestFor = (projectPath: string): string =>
-      [
-        'version: 1',
-        'projects:',
-        '  - name: configured-project',
-        `    path: ${JSON.stringify(projectPath)}`,
-        '    uri: threadnote://resources/repos/configured-project',
-        '    seed: []',
-        '    graph:',
-        '      roots: [src]',
-        '      closure: dependencies',
-        '',
-      ].join('\n');
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: configured-project',
+          `    path: ${JSON.stringify(projectPath)}`,
+          '    uri: threadnote://resources/repos/configured-project',
+          '    seed: []',
+          '    graph:',
+          '      roots: [src]',
+          '      closure: dependencies',
+          '',
+        ],
+        '\n',
+      );
     await writeFile(config.manifestPath, manifestFor(repositoryRoot));
     const snapshot: CodeGraphSnapshot = {
       commit: identity.headCommit,
@@ -2441,7 +2751,7 @@ describe('manager http API', () => {
       edgeCount: 0,
       extractorSet: CODE_GRAPH_EXTRACTOR_SET_VERSION,
       fileCount: 1,
-      id: `cgsn_${'9'.repeat(40)}-direct`,
+      id: `cgsn_${Effect2.pipe('9', EffectString.repeat(40))}-direct`,
       repositoryId: identity.repositoryId,
       state: 'ready',
       symbolCount: 2,
@@ -2450,7 +2760,7 @@ describe('manager http API', () => {
     const secondSnapshot = {
       ...snapshot,
       commit: secondIdentity.headCommit,
-      id: `cgsn_${'8'.repeat(40)}-direct`,
+      id: `cgsn_${Effect2.pipe('8', EffectString.repeat(40))}-direct`,
       repositoryId: secondIdentity.repositoryId,
       worktreeId: secondIdentity.worktreeId,
     } satisfies CodeGraphSnapshot;
@@ -2462,16 +2772,27 @@ describe('manager http API', () => {
     try {
       const headers = {authorization: 'Bearer secret', 'content-type': 'application/json'};
       const response = await testHttpFetch(`${server.url}/api/graphs`, {headers});
-      const catalog = (await response.json()) as {
-        readonly configuredProjects: readonly {
-          readonly graphState: string;
-          readonly name: string;
-          readonly path: string;
-          readonly scopeId?: string;
-        }[];
-        readonly manifestRevision: string;
-        readonly repositories: readonly unknown[];
-      };
+      const catalog = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            configuredProjects: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  graphState: Schema.String,
+                  name: Schema.String,
+                  path: Schema.String,
+                  scopeId: Schema.optionalKey(Schema.String),
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+            manifestRevision: Schema.String,
+            repositories: Schema.Array(Schema.Unknown),
+          }),
+          [JsonRecordSchema],
+        ),
+        await response.json(),
+      );
       expect(response.status).toBe(200);
       expect(catalog.repositories).toEqual([]);
       expect(catalog.configuredProjects).toEqual([
@@ -2553,9 +2874,19 @@ describe('manager http API', () => {
         }),
       );
       const refreshedCatalogResponse = await testHttpFetch(`${server.url}/api/graphs`, {headers});
-      const refreshedCatalog = (await refreshedCatalogResponse.json()) as {
-        readonly configuredProjects: readonly {readonly graphState: string; readonly name: string}[];
-      };
+      const refreshedCatalog = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            configuredProjects: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({graphState: Schema.String, name: Schema.String}), [
+                JsonRecordSchema,
+              ]),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await refreshedCatalogResponse.json(),
+      );
       expect(refreshedCatalogResponse.status).toBe(200);
       expect(refreshedCatalog.configuredProjects).toEqual([
         expect.objectContaining({graphState: 'ready', name: 'configured-project'}),
@@ -2565,10 +2896,20 @@ describe('manager http API', () => {
       await symlink(secondRepositoryRoot, nestedSymlink, 'dir');
       await writeFile(config.manifestPath, manifestFor(nestedSymlink));
       const symlinkCatalogResponse = await testHttpFetch(`${server.url}/api/graphs`, {headers});
-      const symlinkCatalog = (await symlinkCatalogResponse.json()) as {
-        readonly configuredProjects: readonly {readonly graphState: string; readonly name: string}[];
-        readonly manifestRevision: string;
-      };
+      const symlinkCatalog = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            configuredProjects: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({graphState: Schema.String, name: Schema.String}), [
+                JsonRecordSchema,
+              ]),
+            ),
+            manifestRevision: Schema.String,
+          }),
+          [JsonRecordSchema],
+        ),
+        await symlinkCatalogResponse.json(),
+      );
       expect(symlinkCatalogResponse.status).toBe(200);
       expect(symlinkCatalog.configuredProjects).toEqual([
         expect.objectContaining({graphState: 'not-indexed', name: 'configured-project'}),
@@ -2604,7 +2945,7 @@ describe('manager http API', () => {
       const staleResponse = await testHttpFetch(`${server.url}/api/graphs/action`, {
         body: JSON.stringify({
           action: 'index-project',
-          expectedRevision: '0'.repeat(64),
+          expectedRevision: Effect2.pipe('0', EffectString.repeat(64)),
           project: 'configured-project',
         }),
         headers,
@@ -2715,22 +3056,48 @@ describe('manager http API', () => {
     const config = await makeRuntime();
     homes.push(config.agentContextHome);
     await seedManagerGraph(config);
-    const orphanedCheckoutId = 'd'.repeat(64);
+    const orphanedCheckoutId = Effect2.pipe('d', EffectString.repeat(64));
     const orphanedRoot = join(config.agentContextHome, 'indexes', 'code-graph', 'repositories', orphanedCheckoutId);
     const server = await startServer(config, 'secret');
     try {
       const headers = {authorization: 'Bearer secret', 'content-type': 'application/json'};
       const diagnosticsResponse = await testHttpFetch(`${server.url}/api/graphs/diagnostics?analyze=true`, {headers});
-      const diagnostics = (await diagnosticsResponse.json()) as {
-        readonly databases: readonly {
-          readonly health: {readonly integrity: string};
-          readonly views: readonly {readonly localAssociation: {readonly available: boolean; readonly state: string}}[];
-        }[];
-        readonly mode: {readonly analyze: boolean; readonly deep: boolean};
-        readonly summary: {readonly databaseCount: number; readonly readySnapshotCount: number};
-        readonly type: string;
-        readonly version: number;
-      };
+      const diagnostics = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            databases: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  health: Schema.StructWithRest(Schema.Struct({integrity: Schema.String}), [JsonRecordSchema]),
+                  views: Schema.Array(
+                    Schema.StructWithRest(
+                      Schema.Struct({
+                        localAssociation: Schema.StructWithRest(
+                          Schema.Struct({available: Schema.Boolean, state: Schema.String}),
+                          [JsonRecordSchema],
+                        ),
+                      }),
+                      [JsonRecordSchema],
+                    ),
+                  ),
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+            mode: Schema.StructWithRest(Schema.Struct({analyze: Schema.Boolean, deep: Schema.Boolean}), [
+              JsonRecordSchema,
+            ]),
+            summary: Schema.StructWithRest(
+              Schema.Struct({databaseCount: Schema.Finite, readySnapshotCount: Schema.Finite}),
+              [JsonRecordSchema],
+            ),
+            type: Schema.String,
+            version: Schema.Finite,
+          }),
+          [JsonRecordSchema],
+        ),
+        await diagnosticsResponse.json(),
+      );
       expect(diagnosticsResponse.status).toBe(200);
       expect(diagnostics).toMatchObject({
         mode: {analyze: true, deep: false},
@@ -2749,7 +3116,10 @@ describe('manager http API', () => {
         headers,
         method: 'POST',
       });
-      const repairOutput = (await repairPreview.json()) as {readonly output: string};
+      const repairOutput = decodeJson(
+        Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+        await repairPreview.json(),
+      );
       expect(repairPreview.status).toBe(200);
       expect(repairOutput.output).toContain('Would repair 1 native code graph database(s)');
 
@@ -2772,10 +3142,10 @@ describe('manager http API', () => {
       const relativeTarget = await testHttpFetch(`${server.url}/api/graphs/action`, {
         body: JSON.stringify({
           action: 'index',
-          checkoutId: 'a'.repeat(64),
+          checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
           cwd: '.',
-          repositoryId: 'b'.repeat(64),
-          worktreeId: 'c'.repeat(64),
+          repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
         }),
         headers,
         method: 'POST',
@@ -2786,9 +3156,9 @@ describe('manager http API', () => {
       const missingRepositoryIdentity = await testHttpFetch(`${server.url}/api/graphs/action`, {
         body: JSON.stringify({
           action: 'index',
-          checkoutId: 'a'.repeat(64),
+          checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
           cwd: config.agentContextHome,
-          worktreeId: 'c'.repeat(64),
+          worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
         }),
         headers,
         method: 'POST',
@@ -2805,7 +3175,7 @@ describe('manager http API', () => {
       });
       expect(targetedPreview.status).toBe(200);
       expect(await targetedPreview.json()).toMatchObject({
-        output: `Would remove derived code graph index for checkout ${orphanedCheckoutId.slice(0, 12)}.`,
+        output: `Would remove derived code graph index for checkout ${Effect2.pipe(orphanedCheckoutId, EffectString.slice(0, 12))}.`,
       });
       expect(existsSync(orphanedRoot)).toBe(true);
 
@@ -2824,7 +3194,7 @@ describe('manager http API', () => {
       });
       expect(targetedPurge.status).toBe(200);
       expect(await targetedPurge.json()).toMatchObject({
-        output: `Removed derived code graph index for checkout ${orphanedCheckoutId.slice(0, 12)}.`,
+        output: `Removed derived code graph index for checkout ${Effect2.pipe(orphanedCheckoutId, EffectString.slice(0, 12))}.`,
       });
       expect(existsSync(orphanedRoot)).toBe(false);
     } finally {
@@ -2874,9 +3244,9 @@ describe('manager http API', () => {
   it('previews and applies an exact authenticated graph view removal with an approval digest', async () => {
     const config = await makeRuntime();
     homes.push(config.agentContextHome);
-    const snapshotId = `cgsn_${'d'.repeat(40)}-direct`;
+    const snapshotId = `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`;
     const checkoutId = await seedManagerGraph(config, snapshotId);
-    const worktreeId = 'c'.repeat(64);
+    const worktreeId = Effect2.pipe('c', EffectString.repeat(64));
     const server = await startServer(config, 'secret');
     try {
       const headers = {authorization: 'Bearer secret', 'content-type': 'application/json'};
@@ -2895,16 +3265,25 @@ describe('manager http API', () => {
         headers,
         method: 'POST',
       });
-      const prepared = (await preview.json()) as {
-        readonly approvalDigest: string;
-        readonly output: string;
-        readonly result: {
-          readonly applied: boolean;
-          readonly state: string;
-          readonly type: string;
-          readonly version: number;
-        };
-      };
+      const prepared = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            approvalDigest: Schema.String,
+            output: Schema.String,
+            result: Schema.StructWithRest(
+              Schema.Struct({
+                applied: Schema.Boolean,
+                state: Schema.String,
+                type: Schema.String,
+                version: Schema.Finite,
+              }),
+              [JsonRecordSchema],
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await preview.json(),
+      );
       expect(preview.status).toBe(200);
       expect(prepared).toMatchObject({
         approvalDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
@@ -2928,11 +3307,19 @@ describe('manager http API', () => {
         headers,
         method: 'POST',
       });
-      const result = (await applied.json()) as {
-        readonly approvalDigest: string;
-        readonly output: string;
-        readonly result: {readonly applied: boolean; readonly state: string};
-      };
+      const result = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            approvalDigest: Schema.String,
+            output: Schema.String,
+            result: Schema.StructWithRest(Schema.Struct({applied: Schema.Boolean, state: Schema.String}), [
+              JsonRecordSchema,
+            ]),
+          }),
+          [JsonRecordSchema],
+        ),
+        await applied.json(),
+      );
       expect(applied.status).toBe(200);
       expect(result).toMatchObject({
         approvalDigest: prepared.approvalDigest,
@@ -2961,7 +3348,11 @@ describe('manager http API', () => {
       expect(await retried.json()).toMatchObject({result: {applied: true, state: 'already-removed'}});
 
       const stalePreview = await testHttpFetch(`${server.url}/api/graphs/action`, {
-        body: JSON.stringify({...target, dryRun: true, expectedSnapshotId: `cgsn_${'e'.repeat(40)}-direct`}),
+        body: JSON.stringify({
+          ...target,
+          dryRun: true,
+          expectedSnapshotId: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}-direct`,
+        }),
         headers,
         method: 'POST',
       });
@@ -2979,9 +3370,9 @@ describe('manager http API', () => {
       Effect.gen(function* () {
         const config = yield* Effect.promise(makeRuntime);
         homes.push(config.agentContextHome);
-        const snapshotId = `cgsn_${'f'.repeat(40)}-direct`;
+        const snapshotId = `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}-direct`;
         const checkoutId = yield* Effect.promise(() => seedManagerGraph(config, snapshotId));
-        const worktreeId = 'c'.repeat(64);
+        const worktreeId = Effect2.pipe('c', EffectString.repeat(64));
         const server = yield* Effect.promise(() => startServer(config, 'secret'));
         const acquired = yield* Deferred.make<void>();
         const release = yield* Deferred.make<void>();
@@ -3001,7 +3392,10 @@ describe('manager http API', () => {
               method: 'POST',
             }),
           );
-          const prepared = (yield* Effect.promise(() => preview.json())) as {readonly approvalDigest: string};
+          const prepared = decodeJson(
+            Schema.StructWithRest(Schema.Struct({approvalDigest: Schema.String}), [JsonRecordSchema]),
+            yield* Effect.promise(() => preview.json()),
+          );
           yield* Deferred.await(acquired);
           const response = yield* Effect.promise(() =>
             testHttpFetch(`${server.url}/api/graphs/action`, {
@@ -3161,12 +3555,31 @@ describe('manager http API', () => {
     const server = await startServer(config, 'secret');
     try {
       const headers = {authorization: 'Bearer secret'};
-      const catalog = (await (await testHttpFetch(`${server.url}/api/graphs`, {headers})).json()) as {
-        readonly repositories: readonly {
-          readonly defaultViewId: string;
-          readonly views: readonly {readonly id: string; readonly snapshot: {readonly id: string}}[];
-        }[];
-      };
+      const catalog = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            repositories: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  defaultViewId: Schema.String,
+                  views: Schema.Array(
+                    Schema.StructWithRest(
+                      Schema.Struct({
+                        id: Schema.String,
+                        snapshot: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema]),
+                      }),
+                      [JsonRecordSchema],
+                    ),
+                  ),
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await (await testHttpFetch(`${server.url}/api/graphs`, {headers})).json(),
+      );
       const view = catalog.repositories[0].views[0];
       const originalSnapshotId = view.snapshot.id;
       expect(originalSnapshotId).toBe(MANAGER_GRAPH_SNAPSHOT_ID);
@@ -3188,9 +3601,18 @@ describe('manager http API', () => {
         });
       }
 
-      const currentGraph = (await (
-        await testHttpFetch(`${server.url}/api/graph?repository=${checkoutId}&project=all`, {headers})
-      ).json()) as {readonly repository: {readonly snapshot: {readonly id: string}}};
+      const currentGraph = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            repository: Schema.StructWithRest(
+              Schema.Struct({snapshot: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema])}),
+              [JsonRecordSchema],
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await (await testHttpFetch(`${server.url}/api/graph?repository=${checkoutId}&project=all`, {headers})).json(),
+      );
       expect(currentGraph.repository.snapshot.id).toBe(replacementSnapshotId);
     } finally {
       await server.close();
@@ -3201,7 +3623,7 @@ describe('manager http API', () => {
     const config = await makeRuntime();
     homes.push(config.agentContextHome);
     vi.mocked(memory.runArchive).mockImplementation((_config, uri) => {
-      if (uri.endsWith('bad.md')) {
+      if (Effect2.pipe(uri, EffectString.endsWith('bad.md'))) {
         return Effect.fail(TestError.make({message: 'archive failed'}));
       }
       return Effect.void;
@@ -3220,11 +3642,21 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const body = (await response.json()) as {
-        readonly results: readonly {readonly ok: boolean; readonly error?: string}[];
-      };
+      const body = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            results: Schema.Array(
+              Schema.StructWithRest(Schema.Struct({ok: Schema.Boolean, error: Schema.optionalKey(Schema.String)}), [
+                JsonRecordSchema,
+              ]),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await response.json(),
+      );
       expect(response.status).toBe(200);
-      expect(body.results.map(item => item.ok)).toEqual([true, false]);
+      expect(EffectArray.map(body.results, item => item.ok)).toEqual([true, false]);
       expect(body.results[1]?.error).toContain('archive failed');
     } finally {
       await server.close();
@@ -3241,10 +3673,21 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const body = (await response.json()) as {
-        readonly content: string;
-        readonly localMemory?: {readonly node: {readonly uri: string}};
-      };
+      const body = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            content: Schema.String,
+            localMemory: Schema.optionalKey(
+              Schema.StructWithRest(
+                Schema.Struct({node: Schema.StructWithRest(Schema.Struct({uri: Schema.String}), [JsonRecordSchema])}),
+                [JsonRecordSchema],
+              ),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        await response.json(),
+      );
 
       expect(response.status).toBe(200);
       expect(body.content).toContain('Manager UI feature notes.');
@@ -3266,7 +3709,10 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const body = (await response.json()) as {readonly output: string};
+      const body = decodeJson(
+        Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+        await response.json(),
+      );
 
       expect(response.status).toBe(200);
       expect(body.output).toBe('recall result: manager context');
@@ -3290,7 +3736,10 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const body = (await response.json()) as {readonly output: string};
+      const body = decodeJson(
+        Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+        await response.json(),
+      );
 
       expect(response.status).toBe(200);
       expect(body.output).toContain('Scope summary:');
@@ -3322,17 +3771,20 @@ describe('manager http API', () => {
     await mkdir(join(sharedPath, '..'), {recursive: true});
     await writeFile(
       sharedPath,
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        'topic: manager-ui',
-        'source_agent_client: shared-test',
-        'timestamp: 2026-06-06T00:00:00.000Z',
-        '',
-        'Reviewed shared Manager UI notes.',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: manager-ui',
+          'source_agent_client: shared-test',
+          'timestamp: 2026-06-06T00:00:00.000Z',
+          '',
+          'Reviewed shared Manager UI notes.',
+        ],
+        '\n',
+      ),
     );
     const server = await startServer(config, 'secret');
     try {
@@ -3341,7 +3793,10 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const body = (await response.json()) as {readonly output: string};
+      const body = decodeJson(
+        Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+        await response.json(),
+      );
 
       expect(response.status).toBe(200);
       expect(body.output).toContain('Records scanned: 2');
@@ -3378,17 +3833,15 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const body = (await response.json()) as {readonly output: string};
+      const body = decodeJson(
+        Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+        await response.json(),
+      );
 
       expect(response.status).toBe(200);
       expect(body.output).toContain('Removed folder: threadnote://user/denys/memories/durable/projects/threadnote');
       expect(body.output).toContain('Forgot 2 files.');
-      expect(
-        vi
-          .mocked(memory.runForget)
-          .mock.calls.map(call => call[1])
-          .sort(),
-      ).toEqual([
+      expect(EffectArray.map(vi.mocked(memory.runForget).mock.calls, call => call[1]).sort()).toEqual([
         'threadnote://user/denys/memories/durable/projects/threadnote/.abstract.md',
         'threadnote://user/denys/memories/durable/projects/threadnote/manager-ui.md',
       ]);
@@ -3416,7 +3869,10 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const body = (await accepted.json()) as {readonly output: string};
+      const body = decodeJson(
+        Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+        await accepted.json(),
+      );
 
       expect(accepted.status).toBe(200);
       expect(body.output).toBe('repair applied');
@@ -3444,7 +3900,12 @@ describe('manager http API', () => {
           body: JSON.stringify(body),
           headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
           method: 'POST',
-        }).then(response => response.json() as Promise<{readonly output: string}>);
+        }).then(async response =>
+          decodeJson(
+            Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+            await response.json(),
+          ),
+        );
       const [dryRun, applied] = await Promise.all([
         request('/api/doctor/repair-dry-run', {}),
         request('/api/doctor/repair', {confirm: true}),
@@ -3467,7 +3928,10 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const seedBody = (await seedResponse.json()) as {readonly output: string};
+      const seedBody = decodeJson(
+        Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+        await seedResponse.json(),
+      );
       expect(seedResponse.status).toBe(200);
       expect(seedBody.output).toBe('seed applied');
       expect(vi.mocked(seeding.runSeed)).toHaveBeenCalledWith(config, {dryRun: false});
@@ -3477,7 +3941,10 @@ describe('manager http API', () => {
         headers: {authorization: 'Bearer secret', 'content-type': 'application/json'},
         method: 'POST',
       });
-      const skillsBody = (await skillsResponse.json()) as {readonly output: string};
+      const skillsBody = decodeJson(
+        Schema.StructWithRest(Schema.Struct({output: Schema.String}), [JsonRecordSchema]),
+        await skillsResponse.json(),
+      );
       expect(skillsResponse.status).toBe(200);
       expect(skillsBody.output).toBe('seed skills applied');
       expect(vi.mocked(seeding.runSeedSkills)).toHaveBeenCalledWith(config, {dryRun: false});
@@ -3490,13 +3957,16 @@ describe('manager http API', () => {
 describe('manager doctor output parsing', () => {
   it('parses plain and colored CLI doctor rows', () => {
     const checks = parseDoctorChecksFromOutput(
-      [
-        'OK  mode: read-only checks',
-        '\u001b[33mWARN\u001b[0m threadnote shim: /tmp/threadnote points elsewhere',
-        'FAIL manifest: missing manifest',
-        '',
-        'Summary: 1 failure(s), 1 warning(s)',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'OK  mode: read-only checks',
+          '\u001b[33mWARN\u001b[0m threadnote shim: /tmp/threadnote points elsewhere',
+          'FAIL manifest: missing manifest',
+          '',
+          'Summary: 1 failure(s), 1 warning(s)',
+        ],
+        '\n',
+      ),
     );
 
     expect(checks).toEqual([

@@ -1,10 +1,11 @@
-import type {TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import type {ISql} from 'postgres';
 import {deriveIndexedRecallCodeLinks, type RecallCodeLinkMatchKind} from '@threadnote/recall/code_links';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 
 /** Replace the current-head projection with opaque selectors for one canonical revision. */
 export async function replaceRemoteCodeLinkBacklinks(
-  transaction: TransactionSql,
+  transaction: ISql,
   input: {
     readonly citations: readonly MemoryCodeCitationV1[];
     readonly headId: string;
@@ -35,7 +36,8 @@ export function citationMatchesRemoteBacklink(
   selectorKind: RecallCodeLinkMatchKind,
   selectorDigest: string,
 ): boolean {
-  return deriveIndexedRecallCodeLinks([citation]).some(
+  return EffectArray.some(
+    deriveIndexedRecallCodeLinks([citation]),
     selector => selector.selectorKind === selectorKind && selector.selectorDigest === selectorDigest,
   );
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {it as effectIt} from '@effect/vitest';
 import {succeedUndefined} from '@threadnote/platform/optional';
@@ -8,6 +9,7 @@ import type {SystemInfoShape} from '@threadnote/platform/system';
 import {anonymousTelemetryTestLayer} from '@threadnote/threadnote/effect/telemetry';
 import type {McpBrokerFailureEvent} from '@threadnote/threadnote/mcp/broker';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
 
 interface CapturedSpan {
   readonly span: Tracer.NativeSpan;
@@ -28,8 +30,8 @@ describe('MCP broker anonymous telemetry', () => {
       yield* Effect.forEach(cases, emitMcpBrokerFailureEvent, {discard: true});
 
       expect(capture.spans).toHaveLength(cases.length);
-      expect(capture.spans.map(spanAttributes)).toEqual(
-        cases.map(event =>
+      expect(EffectArray.map(capture.spans, spanAttributes)).toEqual(
+        EffectArray.map(cases, event =>
           expect.objectContaining({
             'error.type': 'McpBrokerError',
             'threadnote.component': 'mcp',
@@ -39,7 +41,7 @@ describe('MCP broker anonymous telemetry', () => {
           }),
         ),
       );
-      const serialized = JSON.stringify(capture.spans.map(spanAttributes));
+      const serialized = JSON.stringify(EffectArray.map(capture.spans, spanAttributes));
       expect(serialized).not.toContain('/Users/private');
       expect(serialized).not.toContain('private-version');
       expect(serialized).not.toContain('98765');
@@ -61,15 +63,16 @@ describe('MCP broker anonymous telemetry', () => {
 
   effectIt.effect('maps an invalid runtime observation to unknown without reflecting its fields', () => {
     const capture = capturingTracer();
-    const invalid = {
+    const invalid: unknown = {
       area: 'child',
       error: new Error('private raw error'),
       path: '/Users/private/repository',
       processId: 98_765,
       reason: 'private-version',
-    } as unknown as McpBrokerFailureEvent;
+    };
 
     return Effect.gen(function* () {
+      // @ts-expect-error Deliberately exercise runtime rejection of an invalid broker event.
       yield* emitMcpBrokerFailureEvent(invalid);
 
       const attributes = spanAttributes(capture.spans[0]);
@@ -101,7 +104,7 @@ function capturingTracer(): {readonly spans: CapturedSpan[]; readonly tracer: Tr
 }
 
 function spanAttributes(captured: CapturedSpan): Record<string, unknown> {
-  return Object.fromEntries(captured.span.attributes);
+  return EffectRecord.fromEntries(captured.span.attributes);
 }
 
 function systemInfoStub(): SystemInfoShape {

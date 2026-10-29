@@ -1,10 +1,11 @@
-import {Console, Effect} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Console, Effect, Schema} from 'effect';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import {captureConsole} from '../../effect/console.js';
 import {commandShimCheck, installCommandShim} from '../../command-shim.js';
 import {isStandaloneThreadnoteBuild} from '@threadnote/workspace/runtime-version';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {graphSharingFailure} from '@threadnote/graph/sharing/errors';
+import {GraphSharingError, graphSharingFailure} from '@threadnote/graph/sharing/errors';
 import {
   configureGraphOAuthUser,
   configureRegistryOAuthUser,
@@ -41,6 +42,8 @@ import {
   type GraphPublisherProfilePromoteOptions,
   type GraphShareInitOptions,
 } from './publisher.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runGraphShareInitCommand = Effect.fn('codeGraph.sharing.initCommand')(function* (
   config: RuntimeConfig,
@@ -140,10 +143,15 @@ export const runGraphPublisherServeCommand = Effect.fn('codeGraph.sharing.publis
   config: RuntimeConfig,
   options: GraphPublisherBootstrapOptions,
 ) {
-  if (options.authorizationPolicy !== undefined && !options.listen?.trim()) {
+  if (
+    options.authorizationPolicy !== undefined &&
+    !Effect2.pipe(options.listen, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  ) {
     return yield* graphSharingFailure('Graph control authorization requires --listen.');
   }
-  if (options.listen !== undefined && options.listen.trim().length > 0) {
+  if (options.listen !== undefined && Effect2.pipe(options.listen, EffectString.trim).length > 0) {
     return yield* runGraphPublisherListen(config, {
       ...options,
       listen: options.listen,
@@ -269,6 +277,18 @@ function legacyAuth0Provider(issuer: string, audience: string) {
   };
 }
 
+function oauthClientIdClaim(value: unknown): 'azp' | 'client_id' | 'cid' | 'azp-or-client_id' | undefined {
+  switch (value) {
+    case 'azp':
+    case 'client_id':
+    case 'cid':
+    case 'azp-or-client_id':
+      return value;
+    default:
+      return undefined;
+  }
+}
+
 function explicitOAuthProvider(options: OAuthProviderOptions):
   | {
       readonly audienceParameter?: string;
@@ -285,20 +305,21 @@ function explicitOAuthProvider(options: OAuthProviderOptions):
     options.jwksUrl,
     options.tokenUrl,
   ];
-  if (values.every(value => value === undefined)) return undefined;
+  const clientIdClaim = oauthClientIdClaim(options.clientIdClaim);
+  if (EffectArray.every(values, value => value === undefined)) return undefined;
   if (
     options.clientIdClaim === undefined ||
     options.deviceAuthorizationUrl === undefined ||
     options.jwksUrl === undefined ||
     options.tokenUrl === undefined ||
-    !['azp', 'client_id', 'cid', 'azp-or-client_id'].includes(options.clientIdClaim)
+    clientIdClaim === undefined
   )
     throw graphSharingFailure(
       'Explicit OAuth setup requires --device-authorization-url, --token-url, --jwks-url, and --client-id-claim.',
     );
   return {
     ...(options.audienceParameter === undefined ? {} : {audienceParameter: options.audienceParameter}),
-    clientIdClaim: options.clientIdClaim as 'azp' | 'client_id' | 'cid' | 'azp-or-client_id',
+    clientIdClaim,
     deviceAuthorizationUrl: options.deviceAuthorizationUrl,
     jwksUrl: options.jwksUrl,
     tokenUrl: options.tokenUrl,
@@ -324,7 +345,10 @@ export const runGraphOAuthConfigureCommand = Effect.fn('codeGraph.sharing.oauthC
         provider: explicit ?? legacyAuth0Provider(options.issuer, options.audience),
       };
     },
-    catch: error => error as ReturnType<typeof graphSharingFailure>,
+    catch: error =>
+      Schema.is(GraphSharingError)(error)
+        ? error
+        : graphSharingFailure('OAuth provider configuration is invalid.', error),
   });
   const base = {
     audience: options.audience,
@@ -393,7 +417,10 @@ export const runRegistryOAuthConfigureCommand = Effect.fn('codeGraph.sharing.reg
         provider: explicit ?? legacyAuth0Provider(options.issuer, options.audience),
       };
     },
-    catch: error => error as ReturnType<typeof graphSharingFailure>,
+    catch: error =>
+      Schema.is(GraphSharingError)(error)
+        ? error
+        : graphSharingFailure('OAuth provider configuration is invalid.', error),
   });
   const legacy = {
     audience: options.audience,

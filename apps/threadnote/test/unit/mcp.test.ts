@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {runEffect} from '../helpers/effect-runtime.js';
@@ -12,7 +13,7 @@ import {
 } from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {delimiter, join} from '@threadnote/testing/node-path';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Predicate} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
@@ -28,6 +29,9 @@ import {mcpAdapterCommand, resolveMcpClients, runMcpInstall} from '@threadnote/t
 import {mcpToolCapabilities, parseMcpToolset} from '@threadnote/threadnote/mcp/toolset';
 import {runOmpHooksInstall} from '@threadnote/threadnote/omp_hooks';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function runtime(agentContextHome: string): RuntimeConfig {
   return {
@@ -72,7 +76,7 @@ async function agentLauncher(agent: 'claude' | 'codex', script: string): Promise
 const codexLauncher = (script: string) => agentLauncher('codex', script);
 
 function shellLiteral(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
+  return `'${Effect2.pipe(value, EffectString.replaceAll("'", `'"'"'`))}'`;
 }
 
 afterEach(async () => {
@@ -87,7 +91,7 @@ afterEach(async () => {
   } else {
     process.env.THREADNOTE_BIN_DIR = originalThreadnoteBinDirectory;
   }
-  await Promise.all(temporaryDirectories.splice(0).map(path => rm(path, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryDirectories.splice(0), path => rm(path, {force: true, recursive: true})));
 });
 
 describe('MCP toolsets', () => {
@@ -143,7 +147,7 @@ describe('MCP toolsets', () => {
         );
         const renderedBrokerLauncher =
           agent === 'cursor' || agent === 'copilot' || agent === 'omp'
-            ? JSON.stringify(brokerLauncher).slice(1, -1)
+            ? Effect2.pipe(JSON.stringify(brokerLauncher), EffectString.slice(1, -1))
             : brokerLauncher;
         expect(result.output, agent).toContain(renderedBrokerLauncher);
         expect(result.output, agent).not.toMatch(/\bthreadnote\s+mcp-server\b/);
@@ -893,7 +897,13 @@ describe('JSON MCP host configuration', () => {
 
         expect(result.output).toContain('No legacy agent integrations found.');
         expect(result.output).not.toContain('Migrated 1 legacy agent integration');
-        expect(result.output.match(/Wrote instructions:/g)).toHaveLength(1);
+        expect(
+          Effect2.pipe(
+            result.output,
+            EffectString.match(/Wrote instructions:/g),
+            Effect2.Option.getOrElse(() => null),
+          ),
+        ).toHaveLength(1);
         expect(yield* readAgentIntegrationRegistry(testRuntime)).toMatchObject({
           hosts: {cursor: {mcp: {name: 'threadnote', repair: true}, status: 'current'}},
           legacyInstructionsMigrated: true,
@@ -936,13 +946,18 @@ describe('JSON MCP host configuration', () => {
         ).pipe(TestClock.withLive);
 
         const registry = yield* readAgentIntegrationRegistry(testRuntime);
-        const cursorConfig = JSON.parse(yield* fs.readFileString(cursorPath)) as {
-          readonly mcpServers?: Record<string, unknown>;
-        };
+        const parsedCursorConfig: unknown = JSON.parse(yield* fs.readFileString(cursorPath));
+        if (!Predicate.isObject(parsedCursorConfig)) throw new Error('Cursor MCP configuration must be an object.');
+        const cursorConfig = parsedCursorConfig;
+        const configuredServers = cursorConfig.mcpServers;
+        if (configuredServers !== undefined && !Predicate.isObject(configuredServers))
+          throw new Error('Cursor MCP server entries must be an object.');
+        const mcpServers = configuredServers;
         const installed = registry?.hosts.cursor?.status === 'current';
-        expect(cursorConfig.mcpServers?.['team-memory'] !== undefined).toBe(installed);
+        expect(mcpServers?.['team-memory'] !== undefined).toBe(installed);
         expect(yield* fs.exists(rulePath)).toBe(installed);
         expect(yield* fs.exists(skillPath)).toBe(installed);
+        // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
         expect(registry === undefined || Object.keys(registry.hosts).length === 0).toBe(!installed);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -1063,21 +1078,24 @@ describe('MCP agent executable resolution', () => {
               enabled: true,
               transport: {args: [], command: broker, env: managedEnvironment, type: 'stdio'},
             })
-          : [
-              'threadnote:',
-              '  Scope: User config (available in all your projects)',
-              '  Status: ✘ Failed to connect',
-              '  Type: stdio',
-              `  Command: ${broker}`,
-              '  Args:',
-              '  Environment:',
-              ...Object.entries(managedEnvironment).map(([key, value]) => `    ${key}=${value}`),
-            ].join('\n');
+          : EffectArray.join(
+              [
+                'threadnote:',
+                '  Scope: User config (available in all your projects)',
+                '  Status: ✘ Failed to connect',
+                '  Type: stdio',
+                `  Command: ${broker}`,
+                '  Args:',
+                '  Environment:',
+                ...EffectArray.map(EffectRecord.toEntries(managedEnvironment), ([key, value]) => `    ${key}=${value}`),
+              ],
+              '\n',
+            );
       const launcher = await agentLauncher(
         agent,
         `if [ "$1" = "--version" ]; then printf '%s\\n' '${agent} 1'; exit 0; fi\nprintf '%s\\n' "$*" >> ${shellLiteral(callsPath)}\nprintf '%s\\n' ${shellLiteral(output)}`,
       );
-      process.env.PATH = [join(launcher, '..'), '/usr/bin', '/bin'].join(delimiter);
+      process.env.PATH = EffectArray.join([join(launcher, '..'), '/usr/bin', '/bin'], delimiter);
 
       await runEffect(
         runMcpInstall(testRuntime, agent, {apply: true}).pipe(Effect.provideService(SystemInfo, testSystem)),
@@ -1125,21 +1143,24 @@ describe('MCP agent executable resolution', () => {
               enabled: true,
               transport: {args: ['mcp-server'], command: legacyCommand, env: managedEnvironment, type: 'stdio'},
             })
-          : [
-              'threadnote:',
-              '  Scope: User config (available in all your projects)',
-              '  Status: ✘ Failed to connect',
-              '  Type: stdio',
-              `  Command: ${legacyCommand}`,
-              '  Args: mcp-server',
-              '  Environment:',
-              ...Object.entries(managedEnvironment).map(([key, value]) => `    ${key}=${value}`),
-            ].join('\n');
+          : EffectArray.join(
+              [
+                'threadnote:',
+                '  Scope: User config (available in all your projects)',
+                '  Status: ✘ Failed to connect',
+                '  Type: stdio',
+                `  Command: ${legacyCommand}`,
+                '  Args: mcp-server',
+                '  Environment:',
+                ...EffectArray.map(EffectRecord.toEntries(managedEnvironment), ([key, value]) => `    ${key}=${value}`),
+              ],
+              '\n',
+            );
       const launcher = await agentLauncher(
         agent,
         `if [ "$1" = "--version" ]; then printf '%s\\n' '${agent} 1'; exit 0; fi\nprintf '%s\\n' "$*" >> ${shellLiteral(callsPath)}\ncase "$*" in\n  "mcp get threadnote"*) printf '%s\\n' ${shellLiteral(output)} ;;\nesac`,
       );
-      process.env.PATH = [join(launcher, '..'), '/usr/bin', '/bin'].join(delimiter);
+      process.env.PATH = EffectArray.join([join(launcher, '..'), '/usr/bin', '/bin'], delimiter);
 
       await runEffect(
         runMcpInstall(testRuntime, agent, {apply: true}).pipe(Effect.provideService(SystemInfo, testSystem)),
@@ -1164,15 +1185,18 @@ describe('MCP agent executable resolution', () => {
     const callsPath = join(tmpdir(), `threadnote-claude-project-calls-${process.pid}-${Date.now()}`);
     const launcher = await agentLauncher(
       'claude',
-      [
-        'if [ "$1" = "--version" ]; then printf \'%s\\n\' \'claude 1\'; exit 0; fi',
-        `printf '%s|%s\\n' "$PWD" "$*" >> ${shellLiteral(callsPath)}`,
-        'if [ "$1 $2" = "mcp get" ]; then exit 1; fi',
-        'exit 0',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'if [ "$1" = "--version" ]; then printf \'%s\\n\' \'claude 1\'; exit 0; fi',
+          `printf '%s|%s\\n' "$PWD" "$*" >> ${shellLiteral(callsPath)}`,
+          'if [ "$1 $2" = "mcp get" ]; then exit 1; fi',
+          'exit 0',
+        ],
+        '\n',
+      ),
     );
     const system = await runEffect(SystemInfo);
-    const pathValue = [join(launcher, '..'), '/usr/bin', '/bin'].join(delimiter);
+    const pathValue = EffectArray.join([join(launcher, '..'), '/usr/bin', '/bin'], delimiter);
     const environment = {
       ...system.environment(),
       PATH: pathValue,
@@ -1237,7 +1261,7 @@ describe('MCP agent executable resolution', () => {
     const healthy = await codexLauncher(
       `if [ "$1" = "--version" ]; then printf '%s\\n' 'codex-cli 1.0.0'; exit 0; fi\nprintf '%s\\n' "$*" >> "${callsPath}"`,
     );
-    process.env.PATH = [join(broken, '..'), join(healthy, '..')].join(delimiter);
+    process.env.PATH = EffectArray.join([join(broken, '..'), join(healthy, '..')], delimiter);
 
     await runEffect(
       runMcpInstall(testRuntime, 'codex', {apply: true}).pipe(Effect.provideService(SystemInfo, testSystem)),
@@ -1251,7 +1275,7 @@ describe('MCP agent executable resolution', () => {
 
   posixIt('skips a broken Codex launcher during repair and gives explicit installs an actionable error', async () => {
     const broken = await codexLauncher("printf '%s\\n' 'missing native binary' >&2\nexit 1");
-    process.env.PATH = [join(broken, '..'), '/usr/bin', '/bin'].join(delimiter);
+    process.env.PATH = EffectArray.join([join(broken, '..'), '/usr/bin', '/bin'], delimiter);
 
     const resolution = await resolveMcpClients('codex', 'repair').pipe(captureConsole, runEffect);
     expect(resolution.value).toEqual([]);

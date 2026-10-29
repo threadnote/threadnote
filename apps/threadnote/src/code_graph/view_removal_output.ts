@@ -1,12 +1,15 @@
+import {Array as EffectArray} from 'effect';
 import {attachAnonymousTelemetryDiagnostic, attachAnonymousTelemetryReportedOutcome} from '../telemetry/diagnostic.js';
 import {CodeGraphViewRemovalError, type CodeGraphViewRemovalActionResult} from '@threadnote/graph/view_removal';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function serializeCodeGraphViewRemovalResult(result: CodeGraphViewRemovalActionResult): string {
   return JSON.stringify(result);
 }
 
 export function renderCodeGraphViewRemovalResult(result: CodeGraphViewRemovalActionResult): string {
-  const target = `checkout ${result.checkoutId.slice(0, 12)}, worktree ${result.worktreeId.slice(0, 12)}, snapshot ${result.snapshotId}`;
+  const target = `checkout ${Effect.pipe(result.checkoutId, EffectString.slice(0, 12))}, worktree ${Effect.pipe(result.worktreeId, EffectString.slice(0, 12))}, snapshot ${result.snapshotId}`;
   const headline =
     result.state === 'ready'
       ? `Would remove native code graph view for ${target}.`
@@ -27,11 +30,14 @@ export function renderCodeGraphViewRemovalResult(result: CodeGraphViewRemovalAct
       : result.applied && (result.state === 'removed' || result.state === 'already-removed')
         ? [`Derived cleanup: vector retirement queued; provenance ${result.cleanup.provenance?.state ?? 'not-run'}.`]
         : [];
-  return [
-    headline,
-    ...cleanup,
-    ...result.warnings.map(warning => `Warning [${warning.code}]: ${warning.message}`),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      headline,
+      ...cleanup,
+      ...EffectArray.map(result.warnings, warning => `Warning [${warning.code}]: ${warning.message}`),
+    ],
+    '\n',
+  );
 }
 
 export function codeGraphViewRemovalTargetFailure(result: CodeGraphViewRemovalActionResult): Error | undefined {

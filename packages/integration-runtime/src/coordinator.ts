@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Clock, Duration, Effect, FileSystem, Layer, Option, PartitionedSemaphore, Path, Schedule, Schema} from 'effect';
 import * as PersistedQueue from 'effect/persistence/PersistedQueue';
@@ -18,12 +19,39 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {runtimeLstat, SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fail = () =>
   SourceCoordinatorError.make({message: 'Integration coordinator is unavailable. Retry the operation.'});
 const MAX_SOURCES = 1_024;
 const MAX_REPLY_BYTES = 1_048_576;
 const RECEIPT_RETENTION_MS = 60 * 60_000;
+const SourceWorkDescriptorSchema = Schema.Struct({
+  accountKey: Schema.String,
+  credentialEnv: Schema.optional(Schema.String),
+  fingerprint: Schema.String,
+  provider: Schema.String,
+  refreshIntervalMs: Schema.Finite,
+  sourceId: Schema.String,
+});
+const CoordinatorConfigFieldsSchema = Schema.Struct({
+  account: Schema.String,
+  agentContextHome: Schema.String,
+  agentId: Schema.String,
+  manifestPath: Schema.String,
+  user: Schema.String,
+});
+const SourceWorkResultSchema = Schema.Struct({
+  more: Schema.optional(Schema.Boolean),
+  nextAttemptAt: Schema.optional(Schema.Finite),
+  output: Schema.optional(Schema.Array(Schema.String)),
+  sourceId: Schema.String,
+  syncedDocuments: Schema.Array(Schema.String),
+  value: Schema.optional(Schema.Unknown),
+  warnings: Schema.Array(Schema.String),
+});
 const Job = Schema.Struct({key: Schema.String, generation: Schema.Finite});
 type QueueJob = typeof Job.Type;
 
@@ -149,8 +177,8 @@ export const assertCoordinatorFile = Effect.fn('source.assertCoordinatorFile')(f
 });
 
 export function validatedSourceWorkDescriptor(value: unknown): SourceWorkDescriptor {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw fail();
-  const descriptor = value as SourceWorkDescriptor;
+  if (!Schema.is(SourceWorkDescriptorSchema)(value)) throw fail();
+  const descriptor: SourceWorkDescriptor = value;
   if (
     typeof descriptor.sourceId !== 'string' ||
     typeof descriptor.provider !== 'string' ||
@@ -178,12 +206,17 @@ export function validatedSourceWorkDescriptor(value: unknown): SourceWorkDescrip
   };
 }
 
+export function parseSourceWorkResult(value: string): SourceWorkResult {
+  const parsed: unknown = JSON.parse(value);
+  if (!Schema.is(SourceWorkResultSchema)(parsed)) throw fail();
+  return parsed;
+}
+
 export function decodeCoordinatorConfig(value: unknown, canonicalHome: string): RuntimeConfig {
-  if (typeof value !== 'object' || value === null) throw fail();
-  const data = value as Record<string, unknown>;
-  for (const key of ['account', 'agentContextHome', 'agentId', 'manifestPath', 'user']) {
-    if (typeof data[key] !== 'string' || data[key].length < 1 || data[key].length > 4_096 || /\p{Cc}/u.test(data[key]))
-      throw fail();
+  if (!Schema.is(CoordinatorConfigFieldsSchema)(value)) throw fail();
+  const data = value;
+  for (const item of [data.account, data.agentContextHome, data.agentId, data.manifestPath, data.user]) {
+    if (item.length < 1 || item.length > 4_096 || /\p{Cc}/u.test(item)) throw fail();
   }
   if (data.agentContextHome !== canonicalHome) throw fail();
   return {
@@ -195,9 +228,20 @@ export function decodeCoordinatorConfig(value: unknown, canonicalHome: string): 
   };
 }
 
+function decodeStoredConfig(value: unknown): RuntimeConfig {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('agentContextHome' in value) ||
+    typeof value.agentContextHome !== 'string'
+  )
+    throw fail();
+  return decodeCoordinatorConfig(value, value.agentContextHome);
+}
+
 function parseRow(row: JobRow) {
   return {
-    config: JSON.parse(row.config_json) as RuntimeConfig,
+    config: decodeStoredConfig(JSON.parse(row.config_json)),
     descriptor: validatedSourceWorkDescriptor(JSON.parse(row.descriptor_json)),
   };
 }
@@ -291,11 +335,14 @@ export const openCoordinatorStore = Effect.fn('source.openCoordinatorStore')(fun
       const now = yield* Clock.currentTimeMillis;
       const tickets: CoordinatorTicket[] = [];
       if (mode === 'automatic') {
-        const desired = new Set(descriptors.map(descriptor => sourceWorkKey(canonicalConfig, descriptor)));
+        const desired = new Set(EffectArray.map(descriptors, descriptor => sourceWorkKey(canonicalConfig, descriptor)));
         const existing = yield* sql<JobRow>`SELECT * FROM source_jobs`;
         for (const row of existing)
           if (
-            sameCoordinatorIdentity(JSON.parse(row.config_json) as RuntimeConfig, canonicalConfig) &&
+            sameCoordinatorIdentity(
+              decodeCoordinatorConfig(JSON.parse(row.config_json), canonicalConfig.agentContextHome),
+              canonicalConfig,
+            ) &&
             !desired.has(row.key)
           )
             yield* sql`DELETE FROM source_jobs WHERE key=${row.key}`;
@@ -359,12 +406,16 @@ export const openCoordinatorStore = Effect.fn('source.openCoordinatorStore')(fun
     enqueue,
     receipt: (ticket: CoordinatorTicket) =>
       sql<ReceiptRow>`SELECT result_json,failed FROM source_receipts WHERE key=${ticket.key} AND generation=${ticket.generation}`.pipe(
-        Effect.map(rows =>
-          rows[0]
-            ? {result: JSON.parse(rows[0].result_json) as SourceWorkResult, failed: rows[0].failed === 1}
-            : undefined,
-        ),
-        Effect.mapError(fail),
+        Effect.mapBoth({
+          onSuccess: rows =>
+            rows[0]
+              ? {
+                  result: parseSourceWorkResult(rows[0].result_json),
+                  failed: rows[0].failed === 1,
+                }
+              : undefined,
+          onFailure: fail,
+        }),
       ),
     pending:
       sql<JobRow>`SELECT * FROM source_jobs WHERE state<>'idle' ORDER BY last_run,requested_at,key LIMIT ${MAX_SOURCES}`.pipe(
@@ -417,7 +468,7 @@ const accountReadyAt = (
     }>`SELECT window_start,used,cooldown_until FROM source_admission WHERE key=${`provider:${descriptor.provider}`} OR key=${`account:${descriptor.provider}:${descriptor.accountKey}`}`;
     return Math.max(
       now,
-      ...rows.map(row =>
+      ...EffectArray.map(rows, row =>
         Math.max(
           row.cooldown_until,
           row.used >= limit && row.window_start + window > now ? row.window_start + window : now,
@@ -535,12 +586,13 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
   const clock = yield* Clock.Clock;
   const context = yield* Effect.context<R>();
   const policies = new Map(
-    options.registrations.flatMap(registration =>
+    EffectArray.flatMap(options.registrations, registration =>
       registration.admission ? [[registration.provider, registration.admission] as const] : [],
     ),
   );
   if (
-    [...policies.values()].some(
+    EffectArray.some(
+      [...policies.values()],
       policy =>
         !Number.isInteger(policy.limit) ||
         policy.limit < 1 ||
@@ -552,7 +604,9 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
   )
     return yield* fail();
   const admission = yield* makeSourceAdmission(store, policies);
-  const registrations = new Map(options.registrations.map(registration => [registration.provider, registration]));
+  const registrations = new Map(
+    EffectArray.map(options.registrations, registration => [registration.provider, registration]),
+  );
   if (registrations.size !== options.registrations.length) return yield* fail();
   const credentials = new Map<string, {values: Readonly<Record<string, string>>; at: number}>();
   const sourceCredentials = new Map<
@@ -586,10 +640,13 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
       (SELECT 1 FROM source_queue WHERE source_queue.id=source_jobs.key || ':' || source_jobs.generation AND source_queue.state='failed')`;
     const pending = [...(yield* store.pending)];
     const accountTurns = new Map(
-      (yield* sql<{
-        readonly key: string;
-        readonly last_turn: number;
-      }>`SELECT key,last_turn FROM source_account_turns`).map(row => [row.key, row.last_turn]),
+      EffectArray.map(
+        yield* sql<{
+          readonly key: string;
+          readonly last_turn: number;
+        }>`SELECT key,last_turn FROM source_account_turns`,
+        row => [row.key, row.last_turn],
+      ),
     );
     pending.sort((left, right) => {
       const a = parseRow(left).descriptor;
@@ -599,12 +656,12 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
           (accountTurns.get(`${b.provider}:${b.accountKey}`) ?? 0) ||
         left.last_run - right.last_run ||
         left.requested_at - right.requested_at ||
-        left.key.localeCompare(right.key)
+        Effect2.pipe(left.key, EffectString.localeCompare(right.key))
       );
     });
-    const occupied = [...active.values(), ...[...reserved.values()].map(value => value.descriptor)];
-    const accounts = new Set(occupied.map(value => `${value.provider}:${value.accountKey}`));
-    const sources = new Set(occupied.map(value => `${value.provider}:${value.sourceId}`));
+    const occupied = [...active.values(), ...EffectArray.map([...reserved.values()], value => value.descriptor)];
+    const accounts = new Set(EffectArray.map(occupied, value => `${value.provider}:${value.accountKey}`));
+    const sources = new Set(EffectArray.map(occupied, value => `${value.provider}:${value.sourceId}`));
     for (const row of pending) {
       if (active.size + reserved.size >= concurrency) break;
       if (row.state !== 'pending' || row.not_before > now || active.has(row.key) || reserved.has(row.key)) continue;
@@ -674,7 +731,7 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
               ? remembered.values
               : receivedSources.has(credentialKey)
                 ? {}
-                : Object.fromEntries(
+                : EffectRecord.fromEntries(
                     descriptor.credentialEnv && system.environment()[descriptor.credentialEnv] !== undefined
                       ? [[descriptor.credentialEnv, system.environment()[descriptor.credentialEnv]!]]
                       : [],
@@ -697,7 +754,8 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
             if (!registration) return yield* fail();
             const fresh = yield* registration.list(config);
             if (
-              !fresh.some(
+              !EffectArray.some(
+                fresh,
                 value =>
                   value.sourceId === descriptor.sourceId &&
                   value.fingerprint === descriptor.fingerprint &&
@@ -732,7 +790,9 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
           // Do not persist provider values, Console output, fetched text, or errors.
           const receipt: SourceWorkResult = {
             sourceId: descriptor.sourceId,
-            syncedDocuments: result.syncedDocuments.slice(0, 1_024).map(value => value.slice(0, 512)),
+            syncedDocuments: EffectArray.map(result.syncedDocuments.slice(0, 1_024), value =>
+              Effect2.pipe(value, EffectString.slice(0, 512)),
+            ),
             warnings: result.warnings.length ? [`Source refresh reported ${result.warnings.length} warning(s).`] : [],
             ...(result.nextAttemptAt !== undefined ? {nextAttemptAt: result.nextAttemptAt} : {}),
             ...(result.more ? {more: true} : {}),
@@ -764,7 +824,7 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
           credentials.delete(id(ticket));
           for (const [key, value] of results) if (value.at < now - 5 * 60_000) results.delete(key);
           for (const [key, value] of credentials) if (value.at < now - 5 * 60_000) credentials.delete(key);
-          const outstanding = new Set((yield* store.pending).map(value => value.key));
+          const outstanding = new Set(EffectArray.map(yield* store.pending, value => value.key));
           for (const [key, value] of sourceCredentials)
             if (!outstanding.has(value.sourceKey) && value.at < now - 5 * 60_000) sourceCredentials.delete(key);
         });

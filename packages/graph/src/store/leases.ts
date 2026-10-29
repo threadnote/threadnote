@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {withCodeGraphLeaseTiming, type CodeGraphLeaseTimingObserver} from './lease_timing.js';
 import {Clock, DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -44,6 +45,8 @@ import {
   CODE_GRAPH_RETENTION_ESTIMATED_BYTES_PER_EDGE,
   CODE_GRAPH_RETENTION_ESTIMATED_BYTES_PER_SYMBOL,
 } from '../snapshot/retention.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Fresh facts are written before the durable building snapshot owns its inventory. */
 
@@ -206,8 +209,8 @@ const reapExpiredSnapshotLeasesPage = Effect.fn('codeGraph.reapExpiredSnapshotLe
   if (rows.length === 0) {
     return {candidates: [], deleted: 0, remaining: false} satisfies RoutineExpiredLeasePage;
   }
-  const leases = rows.map(decodeSnapshotLeaseManifest);
-  if (leases.some(lease => lease === undefined)) {
+  const leases = EffectArray.map(rows, decodeSnapshotLeaseManifest);
+  if (EffectArray.some(leases, lease => lease === undefined)) {
     return yield* CodeGraphStoreError.of('Code graph snapshot lease manifest is invalid.');
   }
   const decodedLeases: SnapshotLeaseManifest[] = [];
@@ -218,7 +221,12 @@ const reapExpiredSnapshotLeasesPage = Effect.fn('codeGraph.reapExpiredSnapshotLe
   const successorIndexReady =
     (yield* codeGraphReconciliationIndexState(sql, CODE_GRAPH_RECONCILIATION_REQUIRED_INDEXES[2])) === 'ready';
   const flaggedSnapshotIds = [
-    ...new Set(decodedLeases.filter(lease => lease.retireWhenInactive === 1).map(lease => lease.snapshotId)),
+    ...new Set(
+      EffectArray.map(
+        EffectArray.filter(decodedLeases, lease => lease.retireWhenInactive === 1),
+        lease => lease.snapshotId,
+      ),
+    ),
   ];
   const candidates: string[] = [];
   const preservedTokens = new Set<string>();
@@ -245,7 +253,12 @@ const reapExpiredSnapshotLeasesPage = Effect.fn('codeGraph.reapExpiredSnapshotLe
       if (retirementAuthorityCurrent) {
         candidates.push(snapshotId);
       } else {
-        const carrier = decodedLeases.find(lease => lease.snapshotId === snapshotId && lease.retireWhenInactive === 1);
+        const carrier = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            decodedLeases,
+            lease => lease.snapshotId === snapshotId && lease.retireWhenInactive === 1,
+          ),
+        );
         if (carrier !== undefined) preservedTokens.add(carrier.token);
       }
       continue;
@@ -256,7 +269,10 @@ const reapExpiredSnapshotLeasesPage = Effect.fn('codeGraph.reapExpiredSnapshotLe
       WHERE token = ${successor.token}
     `;
   }
-  const tokens = decodedLeases.filter(lease => !preservedTokens.has(lease.token)).map(lease => lease.token);
+  const tokens = EffectArray.map(
+    EffectArray.filter(decodedLeases, lease => !preservedTokens.has(lease.token)),
+    lease => lease.token,
+  );
   if (tokens.length > 0) {
     yield* sql`DELETE FROM snapshot_leases WHERE ${sql.in('token', tokens)}`;
   }
@@ -317,7 +333,7 @@ const acquireSnapshotLease = Effect.fn('codeGraph.acquireSnapshotLease')(functio
           if (!ready[0]) {
             return yield* CodeGraphStoreError.of(`Ready snapshot ${snapshotId} is no longer available.`);
           }
-          if (token.startsWith('retained-base:')) {
+          if (Effect2.pipe(token, EffectString.startsWith('retained-base:'))) {
             const targets = yield* sql<{
               readonly estimated_bytes: number;
               readonly physical_id: string;
@@ -357,7 +373,8 @@ const acquireSnapshotLease = Effect.fn('codeGraph.acquireSnapshotLease')(functio
           GROUP BY snapshot.repository_id, snapshot.worktree_id, physical_id
         `;
             if (
-              retainedReservations.some(
+              EffectArray.some(
+                retainedReservations,
                 row =>
                   row.worktree_id === target.worktree_id &&
                   row.repository_id === target.repository_id &&
@@ -402,12 +419,20 @@ const acquireSnapshotLease = Effect.fn('codeGraph.acquireSnapshotLease')(functio
           GROUP BY snapshot.repository_id, physical_id
         `;
             const physical = new Map(
-              [...detachedReady, ...retainedReservations]
-                .filter(row => row.repository_id === target.repository_id)
-                .map(row => [row.physical_id, row] as const),
+              EffectArray.map(
+                EffectArray.filter(
+                  [...detachedReady, ...retainedReservations],
+                  row => row.repository_id === target.repository_id,
+                ),
+                row => [row.physical_id, row] as const,
+              ),
             );
             if (!physical.has(target.physical_id)) physical.set(target.physical_id, target);
-            const retainedBytes = [...physical.values()].reduce((total, row) => total + row.estimated_bytes, 0);
+            const retainedBytes = EffectArray.reduce(
+              [...physical.values()],
+              0,
+              (total, row) => total + row.estimated_bytes,
+            );
             if (
               physical.size > CODE_GRAPH_DETACHED_READY_COUNT_MAXIMUM ||
               retainedBytes > CODE_GRAPH_DETACHED_READY_ESTIMATED_BYTES_MAXIMUM

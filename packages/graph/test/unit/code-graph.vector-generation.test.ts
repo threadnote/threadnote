@@ -27,6 +27,8 @@ import {
   CODE_GRAPH_VECTOR_RETIREMENT_STATE_TABLE_SQL,
   CODE_GRAPH_VECTOR_RETIREMENTS_TABLE_SQL,
 } from '../../src/vector/retirement.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const fixture = Effect.gen(function* () {
   const context = yield* Layer.build(SqliteClient.layer({filename: ':memory:'}));
@@ -41,7 +43,7 @@ const fixture = Effect.gen(function* () {
   yield* initializeCodeGraphGenerationSchema(sql);
   yield* sql.unsafe(
     "INSERT INTO vector_generations VALUES ('target', 'snapshot', 'model', ?, 1, 1, 0, 'building', 'now')",
-    ['a'.repeat(64)],
+    [Effect2.pipe('a', EffectString.repeat(64))],
   );
   return sql;
 });
@@ -68,7 +70,7 @@ const retirementFixture = Effect.gen(function* () {
       generation,
       `snapshot-${generation}`,
       'model',
-      'a'.repeat(64),
+      Effect2.pipe('a', EffectString.repeat(64)),
       state,
       '2026-01-01T00:00:00.000Z',
     ]);
@@ -80,7 +82,7 @@ const retirementFixture = Effect.gen(function* () {
     new Uint8Array([7]),
   ]);
   yield* sql.unsafe("UPDATE vector_generations SET count = 1 WHERE generation = 'g0'");
-  yield* sql.unsafe('INSERT INTO vector_pointers VALUES (?, ?)', ['b'.repeat(64), 'g0']);
+  yield* sql.unsafe('INSERT INTO vector_pointers VALUES (?, ?)', [Effect2.pipe('b', EffectString.repeat(64)), 'g0']);
   yield* insert('g1', 'building');
   yield* claimCodeGraphGeneration(sql, {
     generation: 'g1',
@@ -137,7 +139,7 @@ describe('durable vector generation checkpoints', () => {
             expect(yield* sql.unsafe('SELECT generation FROM vector_pointers')).toEqual([{generation: 'g2'}]);
           } else {
             yield* deleteCodeGraphVectorPointerWithRetirementSql(sql, {
-              worktreeId: 'b'.repeat(64),
+              worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
               expectedSnapshotId: 'snapshot-g0',
             });
             expect(yield* sql.unsafe('SELECT generation FROM vector_pointers')).toEqual([]);

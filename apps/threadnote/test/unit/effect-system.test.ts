@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -61,6 +62,8 @@ import {
   type WindowsDiskCapacityWorkerProcess,
 } from '@threadnote/platform/system';
 import {serveWindowsDiskCapacityWorker, windowsAvailableDiskBytesFromNative} from '@threadnote/platform/windows_system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('SystemInfo structural path adapter', () => {
   it.each([
@@ -154,7 +157,7 @@ describe('SystemInfo structural path adapter', () => {
             yield* Effect.acquireUseRelease(
               Effect.sync(() => openSync(target, 'r')),
               fd =>
-                readOpenedFileSystemIdentity({fd} as unknown as FileSystem.File, withoutInode, 'File').pipe(
+                readOpenedFileSystemIdentity({fd}, withoutInode, 'File').pipe(
                   Effect.tap(identity => Effect.sync(() => expect(identity).toEqual(Option.some(expected)))),
                 ),
               fd => Effect.sync(() => closeSync(fd)),
@@ -163,22 +166,12 @@ describe('SystemInfo structural path adapter', () => {
             expect(yield* readPathFileSystemIdentity(join(root, 'missing'), withoutInode, 'File')).toEqual(
               Option.none(),
             );
-            expect(
-              yield* readOpenedFileSystemIdentity({fd: -1} as unknown as FileSystem.File, withoutInode, 'File'),
-            ).toEqual(Option.none());
-            expect(yield* readOpenedFileSystemIdentity({} as FileSystem.File, withoutInode, 'File')).toEqual(
+            expect(yield* readOpenedFileSystemIdentity({fd: -1}, withoutInode, 'File')).toEqual(Option.none());
+            expect(yield* readOpenedFileSystemIdentity({}, withoutInode, 'File')).toEqual(Option.none());
+            expect(yield* readOpenedFileSystemIdentity({fd: 0}, withoutInode, 'Directory')).toEqual(Option.none());
+            expect(yield* readOpenedFileSystemIdentity({fd: Number.MAX_SAFE_INTEGER}, withoutInode, 'File')).toEqual(
               Option.none(),
             );
-            expect(
-              yield* readOpenedFileSystemIdentity({fd: 0} as unknown as FileSystem.File, withoutInode, 'Directory'),
-            ).toEqual(Option.none());
-            expect(
-              yield* readOpenedFileSystemIdentity(
-                {fd: Number.MAX_SAFE_INTEGER} as unknown as FileSystem.File,
-                withoutInode,
-                'File',
-              ),
-            ).toEqual(Option.none());
           }),
         root => Effect.sync(() => rmSync(root, {force: true, recursive: true})),
       ),
@@ -187,7 +180,10 @@ describe('SystemInfo structural path adapter', () => {
 
   it('streams every UTF-8 directory name across native read buffers', async () => {
     const root = mkdtempSync(join(tmpdir(), 'threadnote-runtime-directory-stream-'));
-    const expected = Array.from({length: 97}, (_unused, index) => `entry-${String(index).padStart(3, '0')}-λ`);
+    const expected = Array.from(
+      {length: 97},
+      (_unused, index) => `entry-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}-λ`,
+    );
     try {
       for (const name of expected) writeFileSync(join(root, name), 'threadnote');
       const observed: string[] = [];
@@ -228,7 +224,7 @@ describe('SystemInfo structural path adapter', () => {
     },
     ({child, platform, prefix, segments, separator, trailing}) =>
       Effect.sync(() => {
-        const candidate = `${prefix}${segments.join(separator)}${trailing}`;
+        const candidate = `${prefix}${EffectArray.join(segments, separator)}${trailing}`;
         const actual = platformPathFor(platform);
         const expected = platform === 'win32' ? windowsPath : posixPath;
 
@@ -403,11 +399,14 @@ describe('SystemInfo disk capacity parsing', () => {
       yield* serveWindowsDiskCapacityWorker(
         {
           input: (async function* () {
-            yield [
-              JSON.stringify({id: '1', path: 'C:\\first', protocol: 1}),
-              JSON.stringify({id: '2', path: 'D:\\second', protocol: 1}),
-              '',
-            ].join('\n');
+            yield EffectArray.join(
+              [
+                JSON.stringify({id: '1', path: 'C:\\first', protocol: 1}),
+                JSON.stringify({id: '2', path: 'D:\\second', protocol: 1}),
+                '',
+              ],
+              '\n',
+            );
           })(),
           writeLine: line => {
             responses.push(line);
@@ -996,9 +995,9 @@ describe('SystemInfo disk capacity parsing', () => {
           );
 
           expect(capacities).toHaveLength(128);
-          expect(capacities.every(value => value !== undefined && Number.isSafeInteger(value) && value >= 0)).toBe(
-            true,
-          );
+          expect(
+            EffectArray.every(capacities, value => value !== undefined && Number.isSafeInteger(value) && value >= 0),
+          ).toBe(true);
           if (process.platform === 'darwin' && process.arch === 'x64') {
             expect(spies.spawn).toHaveBeenCalledTimes(128);
             for (const [options] of spies.spawn.mock.calls) {
@@ -1065,7 +1064,7 @@ function waitForRecordedProcessId(path: string, timeoutMilliseconds: number) {
     const deadline = (yield* Clock.currentTimeMillis) + timeoutMilliseconds;
     while ((yield* Clock.currentTimeMillis) < deadline) {
       if (existsSync(path)) {
-        const processId = Number(readFileSync(path, 'utf8').trim());
+        const processId = Number(Effect2.pipe(readFileSync(path, 'utf8'), EffectString.trim));
         if (Number.isSafeInteger(processId) && processId > 0) return processId;
       }
       yield* Effect.sleep(10);
@@ -1102,19 +1101,26 @@ describe('Linux cgroup effective memory', () => {
       segments: FC.array(FC.stringMatching(/^[a-z][a-z0-9:_-]{0,12}$/), {maxLength: 8, minLength: 1}),
     },
     ({segments}) => {
-      const relative = segments.join('/');
+      const relative = EffectArray.join(segments, '/');
       const files = linuxCgroupMemoryFiles(
         `0::/tenant/${relative}\n`,
         '29 23 0:26 /tenant /sys/fs/cgroup rw - cgroup2 cgroup rw\n',
       );
       const expected = Array.from({length: segments.length + 1}, (_, index) => {
-        const ancestor = segments.slice(0, segments.length - index).join('/');
+        const ancestor = EffectArray.join(segments.slice(0, segments.length - index), '/');
         return {path: `/sys/fs/cgroup/${ancestor ? `${ancestor}/` : ''}memory.max`, version: 2 as const};
       });
 
       expect(files).toEqual(expected);
-      expect(new Set(files.map(file => file.path)).size).toBe(files.length);
-      expect(files.every(file => file.path.startsWith('/sys/fs/cgroup/') && !file.path.includes('..'))).toBe(true);
+      expect(new Set(EffectArray.map(files, file => file.path)).size).toBe(files.length);
+      expect(
+        EffectArray.every(
+          files,
+          file =>
+            Effect2.pipe(file.path, EffectString.startsWith('/sys/fs/cgroup/')) &&
+            !Effect2.pipe(file.path, EffectString.includes('..')),
+        ),
+      ).toBe(true);
     },
     {fastCheck: {numRuns: 100}},
   );
@@ -1143,12 +1149,15 @@ describe('Linux cgroup effective memory', () => {
 
   it('resolves hybrid v1 and v2 memory hierarchies while ignoring unrelated mounts', () => {
     const files = linuxCgroupMemoryFiles(
-      ['0::/unified/work', '5:cpu,memory:/legacy/team/work', '7:cpu:/cpu-only/work'].join('\n'),
-      [
-        '20 18 0:20 /unified /sys/fs/cgroup/unified rw - cgroup2 cgroup rw',
-        '21 18 0:21 /legacy/team /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory',
-        '22 18 0:22 /cpu-only /sys/fs/cgroup/cpu rw - cgroup cgroup rw,cpu',
-      ].join('\n'),
+      EffectArray.join(['0::/unified/work', '5:cpu,memory:/legacy/team/work', '7:cpu:/cpu-only/work'], '\n'),
+      EffectArray.join(
+        [
+          '20 18 0:20 /unified /sys/fs/cgroup/unified rw - cgroup2 cgroup rw',
+          '21 18 0:21 /legacy/team /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory',
+          '22 18 0:22 /cpu-only /sys/fs/cgroup/cpu rw - cgroup cgroup rw,cpu',
+        ],
+        '\n',
+      ),
     );
 
     expect(files).toEqual([
@@ -1187,13 +1196,13 @@ describe('Linux cgroup effective memory', () => {
 describe('SystemInfo process identity', () => {
   it('parses Linux stat fields after a command name containing spaces and parentheses', () => {
     const fieldsThroughProcessStart = ['S', ...Array.from({length: 18}, (_, index) => String(index + 1)), '987654'];
-    expect(parseLinuxProcessStartIdentity(`123 (threadnote) worker) ${fieldsThroughProcessStart.join(' ')}\n`)).toBe(
-      'linux:987654',
-    );
+    expect(
+      parseLinuxProcessStartIdentity(`123 (threadnote) worker) ${EffectArray.join(fieldsThroughProcessStart, ' ')}\n`),
+    ).toBe('linux:987654');
     expect(parseLinuxProcessStartIdentity('malformed stat')).toBeUndefined();
     expect(
       parseLinuxProcessStartIdentity(
-        `123 (threadnote) ${['S', ...Array.from({length: 18}, () => '0'), 'not-a-tick'].join(' ')}`,
+        `123 (threadnote) ${EffectArray.join(['S', ...Array.from({length: 18}, () => '0'), 'not-a-tick'], ' ')}`,
       ),
     ).toBeUndefined();
   });
@@ -1231,7 +1240,7 @@ describe('SystemInfo process identity', () => {
       '\u001bSat Aug  8 23:04:27 2026',
       'Sat Aug 32 23:04:27 2026',
       'Sat Aug  8 24:04:27 2026',
-      `Sat Aug  8 23:04:27 ${'2'.repeat(64)}`,
+      `Sat Aug  8 23:04:27 ${Effect2.pipe('2', EffectString.repeat(64))}`,
     ]) {
       expect(parseCanonicalProcessStartIdentityOutput('darwin', output)).toBeUndefined();
     }
@@ -1240,7 +1249,7 @@ describe('SystemInfo process identity', () => {
       '638893834360000000/path',
       '638893834360000000\nextra',
       '\t638893834360000000',
-      '1'.repeat(21),
+      Effect2.pipe('1', EffectString.repeat(21)),
     ]) {
       expect(parseCanonicalProcessStartIdentityOutput('win32', output)).toBeUndefined();
     }
@@ -1259,8 +1268,12 @@ describe('SystemInfo process identity', () => {
 
       expect(identity.length).toBeLessThanOrEqual(34);
       expect(
-        Array.from(identity).every(character => {
-          const codePoint = character.codePointAt(0);
+        EffectArray.every(Array.from(identity), character => {
+          const codePoint = Effect2.pipe(
+            character,
+            EffectString.codePointAt(0),
+            Effect2.Option.getOrElse(() => undefined),
+          );
           return (
             character !== '/' && character !== '\\' && codePoint !== undefined && codePoint >= 32 && codePoint !== 127
           );
@@ -1648,10 +1661,12 @@ function waitForRecordedProcessIds(path: string, expectedCount: number, timeoutM
     const deadline = (yield* Clock.currentTimeMillis) + timeoutMilliseconds;
     while ((yield* Clock.currentTimeMillis) < deadline) {
       if (existsSync(path)) {
-        const processIds = readFileSync(path, 'utf8')
-          .split(/\r?\n/)
-          .map(value => Number(value.trim()))
-          .filter(processId => Number.isSafeInteger(processId) && processId > 0);
+        const processIds = EffectArray.filter(
+          EffectArray.map(Effect2.pipe(readFileSync(path, 'utf8'), EffectString.split(/\r?\n/)), value =>
+            Number(Effect2.pipe(value, EffectString.trim)),
+          ),
+          processId => Number.isSafeInteger(processId) && processId > 0,
+        );
         if (processIds.length >= expectedCount) return processIds.slice(0, expectedCount);
       }
       yield* Effect.sleep(10);
@@ -1675,11 +1690,11 @@ describe('SystemInfo benchmark metadata', () => {
     Effect.gen(function* () {
       const hardware = yield* (yield* SystemInfo).hardwareInfo;
 
-      expect(hardware.cpuModel.trim().length).toBeGreaterThan(0);
+      expect(Effect2.pipe(hardware.cpuModel, EffectString.trim).length).toBeGreaterThan(0);
       expect(hardware.memoryBytes).toBeGreaterThan(0);
       expect(hardware.effectiveMemoryBytes).toBeGreaterThan(0);
       expect(hardware.effectiveMemoryBytes).toBeLessThanOrEqual(hardware.memoryBytes);
-      expect(hardware.operatingSystem.trim().length).toBeGreaterThan(0);
+      expect(Effect2.pipe(hardware.operatingSystem, EffectString.trim).length).toBeGreaterThan(0);
     }).pipe(provideTestLayer(TestSystemInfoLayer)),
   );
 });

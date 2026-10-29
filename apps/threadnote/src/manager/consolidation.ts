@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, FileSystem, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -20,6 +21,8 @@ import {uriSegment} from '@threadnote/workspace/manifest';
 import {isInSharedNamespace} from '../share/index.js';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ReviewedConsolidationJob {
   readonly id: string;
@@ -34,7 +37,7 @@ const attempt = <A>(f: () => A) =>
     try: f,
     catch: error => MemoryOperationError.make({message: error instanceof Error ? error.message : String(error)}),
   });
-const identity = (id: string) => `tn_${sha256HexSync(`consolidation:${id}`).slice(0, 32)}`;
+const identity = (id: string) => `tn_${Effect2.pipe(sha256HexSync(`consolidation:${id}`), EffectString.slice(0, 32))}`;
 
 export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsolidation')(function* (
   config: RuntimeConfig,
@@ -166,7 +169,7 @@ export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsol
         if (candidate !== undefined) {
           const record = parseMemoryDocument(candidateUri, candidate);
           if (
-            candidate.trim() !== expected ||
+            Effect2.pipe(candidate, EffectString.trim) !== expected ||
             record?.metadata.memoryId !== identity(id) ||
             record.metadata.consolidation?.version !== 1 ||
             record.metadata.consolidation.requestHash !== reviewed.provenance.requestHash
@@ -189,7 +192,7 @@ export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsol
             createOnly: true,
             metadata,
             title: 'MEMORY',
-            expectedSourceContent: currentSources.filter(source => source !== undefined),
+            expectedSourceContent: EffectArray.filter(currentSources, source => source !== undefined),
           }),
         );
         uri = captured.value;
@@ -204,7 +207,7 @@ export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsol
         [savedUri],
         Effect.gen(function* () {
           const verified = yield* store.read(location, savedUri);
-          if (verified.trim() !== (savedContent ?? expected).trim())
+          if (Effect2.pipe(verified, EffectString.trim) !== Effect2.pipe(savedContent ?? expected, EffectString.trim))
             return yield* MemoryOperationError.make({
               message: `Saved consolidation ${savedUri} differs from the reviewed content/provenance. Source cleanup was refused.`,
             });
@@ -230,10 +233,11 @@ export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsol
               }
               // A selected active relation still needs its target. Derivation alone never creates this dependency.
               if (
-                reviewed.relations.some(
-                  relation =>
+                EffectArray.some(reviewed.relations, relation =>
+                  Boolean(
                     relation.uri === source.uri ||
                     (source.memoryId && relation.uri === `threadnote://memory/${source.memoryId}`),
+                  ),
                 )
               ) {
                 outputs.push(`Kept active dependency source: ${source.uri}`);
@@ -256,12 +260,15 @@ export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsol
               );
               outputs.push(captured.output);
             }
-          return outputs.join('\n');
+          return EffectArray.join(outputs, '\n');
         }),
       );
       return {
         resultUri: savedUri,
-        output: [output || `Verified saved consolidation: ${savedUri}`, cleanupOutput].filter(Boolean).join('\n'),
+        output: EffectArray.join(
+          EffectArray.filter([output || `Verified saved consolidation: ${savedUri}`, cleanupOutput], Boolean),
+          '\n',
+        ),
       };
     }),
   );

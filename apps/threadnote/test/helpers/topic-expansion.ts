@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
@@ -9,6 +10,7 @@ import {
   inspectTopicDependencyExpansion,
   previewTopicDependencyExpansion,
 } from '../../src/memory/maintenance/topic_expansion.js';
+import {Option as EffectOption} from 'effect';
 
 /** Real Git/graph/capsule fixture shared by application and Manager boundary tests. */
 export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')(function* (
@@ -101,7 +103,7 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
     ),
   )!;
   const enrolled = proposeTopicMaintenanceEnrollment(base, {
-    paragraphs: (['descriptive', 'normative', 'historical'] as const).map(role => ({
+    paragraphs: EffectArray.map(['descriptive', 'normative', 'historical'] as const, role => ({
       role,
       support: 'direct',
       citationIds: [origin.id],
@@ -135,7 +137,13 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
     project,
     input,
   });
-  const endpoint = choices.choices?.eligible.find(node => node.path === 'src/dependency.ts');
+  const endpoint = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(choices.choices?.eligible), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(__effectArrayReceiver, node => node.path === 'src/dependency.ts'),
+      ),
+    ),
+  );
   if (!endpoint) throw new Error('Fixture requires a resolved one-hop dependency.');
   const selectedInput = {...input, selectedNodeIds: [endpoint.id]};
   const preview = yield* previewTopicDependencyExpansion(config, {uri, callerCwd: repository, input: selectedInput});

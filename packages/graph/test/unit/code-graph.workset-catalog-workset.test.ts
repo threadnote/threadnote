@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -15,20 +16,22 @@ import {
   type RepositoryIdentity,
 } from '@threadnote/graph/types';
 import type {ResolvedWorkset} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph workset preparation and status', () => {
   it('binds graph definition drift while canonicalizing root and include order', () => {
     const base = resolvedWorkset(['app'], []);
     const scoped: ResolvedWorkset = {
       ...base,
-      projects: base.projects.map(project => ({
+      projects: EffectArray.map(base.projects, project => ({
         ...project,
         graph: {closure: 'dependencies', roots: ['apps/a', 'apps/b'], include: ['scripts', 'shared']},
       })),
     };
     const reordered: ResolvedWorkset = {
       ...scoped,
-      projects: scoped.projects.map(project => ({
+      projects: EffectArray.map(scoped.projects, project => ({
         ...project,
         graph: {...project.graph!, roots: ['apps/b', 'apps/a'], include: ['shared', 'scripts']},
       })),
@@ -64,14 +67,22 @@ describe('code graph workset preparation and status', () => {
     expect(
       classifyCodeGraphWorksetStatusMember(
         'api',
-        {identity: {...identity, checkoutId: 'b'.repeat(64)}, readySnapshot: snapshot, stale: false},
+        {
+          identity: {...identity, checkoutId: Effect.pipe('b', EffectString.repeat(64))},
+          readySnapshot: snapshot,
+          stale: false,
+        },
         published,
       ),
     ).toMatchObject({reason: 'checkout-drift', state: 'stale'});
     expect(
       classifyCodeGraphWorksetStatusMember(
         'api',
-        {identity: {...identity, worktreeId: 'c'.repeat(64)}, readySnapshot: snapshot, stale: false},
+        {
+          identity: {...identity, worktreeId: Effect.pipe('c', EffectString.repeat(64))},
+          readySnapshot: snapshot,
+          stale: false,
+        },
         published,
       ),
     ).toMatchObject({reason: 'worktree-drift', state: 'stale'});
@@ -126,8 +137,8 @@ describe('code graph workset preparation and status', () => {
     const webIdentity = repositoryIdentity('web');
     const web = {...publishedMember(webIdentity, readySnapshot(webIdentity, 'snapshot-web')), repositoryKey: 'web'};
     const generation = {
-      digest: 'd'.repeat(64),
-      id: `cgwg_${'e'.repeat(40)}`,
+      digest: Effect.pipe('d', EffectString.repeat(64)),
+      id: `cgwg_${Effect.pipe('e', EffectString.repeat(40))}`,
       manifestDigest,
       members: [api, web],
       worksetName: workset.name,
@@ -192,7 +203,7 @@ describe('code graph workset preparation and status', () => {
 function resolvedWorkset(names: readonly string[], unresolvedProjects: readonly string[]): ResolvedWorkset {
   return {
     name: 'engineering',
-    projects: names.map(name => ({
+    projects: EffectArray.map(names, name => ({
       name,
       path: `~/src/${name}`,
       seed: [],
@@ -203,16 +214,18 @@ function resolvedWorkset(names: readonly string[], unresolvedProjects: readonly 
 }
 
 function repositoryIdentity(seed: string): RepositoryIdentity {
-  const digest = seed
-    .padEnd(64, '0')
-    .slice(0, 64)
-    .replace(/[^a-f0-9]/gu, 'a');
+  const digest = Effect.pipe(
+    seed,
+    EffectString.padEnd(64, '0'),
+    EffectString.slice(0, 64),
+    EffectString.replace(/[^a-f0-9]/gu, 'a'),
+  );
   return {
     caseMode: 'sensitive',
     checkoutId: digest,
     displayName: seed,
     gitCommonDirectory: '.git',
-    headCommit: 'a'.repeat(40),
+    headCommit: Effect.pipe('a', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: '/repository',
     repositoryId: digest,
@@ -243,10 +256,10 @@ function publishedMember(
     checkoutId: identity.checkoutId,
     commitId: snapshot.commit,
     ordinal: 0,
-    projectionDigest: 'b'.repeat(64),
+    projectionDigest: Effect.pipe('b', EffectString.repeat(64)),
     repositoryId: identity.repositoryId,
     repositoryKey: 'api',
-    snapshotDigest: 'c'.repeat(64),
+    snapshotDigest: Effect.pipe('c', EffectString.repeat(64)),
     snapshotId: snapshot.id,
     symbolCount: snapshot.symbolCount,
     worktreeId: identity.worktreeId,

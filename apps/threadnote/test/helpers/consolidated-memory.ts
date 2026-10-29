@@ -1,6 +1,8 @@
 import {captureConsolidationSource, reviewConsolidation} from '@threadnote/memory/consolidation';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const privateRelation = 'threadnote://user/tester/memories/durable/projects/threadnote/private.md';
 export const stableRelation = 'threadnote://memory/tn_dependency';
@@ -10,12 +12,12 @@ export function consolidatedMemory(body = 'Approved conclusion.', active = true)
     createMemoryCodeCitation({
       version: 1,
       extractorSet: 'test',
-      repositoryId: 'a'.repeat(64),
+      repositoryId: Effect.pipe('a', EffectString.repeat(64)),
       repositoryIdentityKind: local ? 'local' : 'remote',
-      sourceCommit: 'b'.repeat(40),
-      sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+      sourceCommit: Effect.pipe('b', EffectString.repeat(40)),
+      sourceSnapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
       sourceDirty: local,
-      fileContentHash: {algorithm: 'sha256', value: 'd'.repeat(64)},
+      fileContentHash: {algorithm: 'sha256', value: Effect.pipe('d', EffectString.repeat(64))},
       path,
       target: {kind: 'file'},
     });
@@ -31,7 +33,7 @@ export function consolidatedMemory(body = 'Approved conclusion.', active = true)
     schemaVersion: 6,
   };
   const source = captureConsolidationSource({
-    uri: consolidatedUri.replace('result.md', 'private-input.md'),
+    uri: Effect.pipe(consolidatedUri, EffectString.replace('result.md', 'private-input.md')),
     content: formatMemoryDocument(
       'MEMORY',
       {

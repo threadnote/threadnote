@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {assertTopicMaintenanceAcceptanceCoverage} from '../../src/topic-maintenance-acceptance.js';
@@ -23,32 +24,37 @@ import {
   type TopicMaintenanceDraftBasisV1,
   type TopicMaintenanceDraftV1,
 } from '../../src/topic-maintenance-draft.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const citation = createMemoryCodeCitation({
   evidenceRetention: 'capsule-retained',
   extractorSet: 'test',
-  fileContentHash: {algorithm: 'sha256', value: '2'.repeat(64)},
+  fileContentHash: {
+    algorithm: 'sha256',
+    value: Effect.pipe('2', EffectString.repeat(64)),
+  },
   path: 'src/alpha.ts',
-  repositoryId: '3'.repeat(64),
+  repositoryId: Effect.pipe('3', EffectString.repeat(64)),
   repositoryIdentityKind: 'local',
-  sourceCommit: '1'.repeat(40),
+  sourceCommit: Effect.pipe('1', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'1'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect.pipe('1', EffectString.repeat(40))}`,
   target: {kind: 'file'},
   version: 1,
 });
 const citationId = citation.id;
 const currentHandle = `current:${citationId}`;
 const historicalHandle = `historical:${citationId}`;
-const hash = 'a'.repeat(64);
+const hash = Effect.pipe('a', EffectString.repeat(64));
 const basisFor = (body: string, roles?: readonly ('descriptive' | 'normative' | 'historical')[]) => ({
   version: 1 as const,
   targetUri: 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md',
   targetHash: hash,
-  observationRevision: 'b'.repeat(64),
-  packetDigest: 'c'.repeat(64),
+  observationRevision: Effect.pipe('b', EffectString.repeat(64)),
+  packetDigest: Effect.pipe('c', EffectString.repeat(64)),
   body,
-  paragraphs: consolidationSections(body).map((section, ordinal) => ({
+  paragraphs: EffectArray.map(consolidationSections(body), (section, ordinal) => ({
     ordinal,
     hash: consolidationRevision(section),
     role: roles?.[ordinal] ?? ('descriptive' as const),
@@ -91,15 +97,16 @@ describe('topic maintenance draft contract', () => {
     ...draftFor(basis),
     paragraphDispositions: {
       version: 1 as const,
-      entries: basis.paragraphs
-        .filter(item => item.role === 'descriptive' && item.support === 'direct')
-        .map(item => ({
+      entries: EffectArray.map(
+        EffectArray.filter(basis.paragraphs, item => item.role === 'descriptive' && item.support === 'direct'),
+        item => ({
           ordinal: item.ordinal,
           beforeHash: item.hash,
           disposition: item.ordinal === 0 ? ('update' as const) : ('revalidate' as const),
           supportHandles: [currentHandle],
           rationale: 'Current declared source supports this disposition.',
-        })),
+        }),
+      ),
     },
   });
 
@@ -108,7 +115,10 @@ describe('topic maintenance draft contract', () => {
       fc.property(fc.stringMatching(/^[a-z]{1,40}$/u), text => {
         const basis = basisFor(text);
         const original = accounted(basis);
-        const draft = {...original, operations: [{...original.operations[0], text}]};
+        const draft = {
+          ...original,
+          operations: [{...original.operations[0], text}],
+        };
         const before = JSON.stringify({basis, draft});
         expect(() => parse(basis, draft)).toThrow('paragraph 0 replacement repeats accepted text');
         expect(JSON.stringify({basis, draft})).toBe(before);
@@ -119,7 +129,12 @@ describe('topic maintenance draft contract', () => {
             operations: [],
             paragraphDispositions: {
               version: 1,
-              entries: [{...draft.paragraphDispositions.entries[0], disposition: 'revalidate'}],
+              entries: [
+                {
+                  ...draft.paragraphDispositions.entries[0],
+                  disposition: 'revalidate',
+                },
+              ],
             },
           }).body,
         ).toBe(text);
@@ -132,12 +147,17 @@ describe('topic maintenance draft contract', () => {
     const basis = basisFor('Draft cap is 32 KiB.\n\nOnly direct descriptive paragraphs are eligible.');
     const draft = accounted(basis);
     const required = (value: unknown) =>
-      parseTopicMaintenanceDraft(basis, JSON.stringify(value), {requireParagraphDispositions: true});
+      parseTopicMaintenanceDraft(basis, JSON.stringify(value), {
+        requireParagraphDispositions: true,
+      });
     expect(() => required(draftFor(basis))).toThrow(/disposition/);
     expect(() =>
       required({
         ...draft,
-        paragraphDispositions: {version: 1, entries: draft.paragraphDispositions.entries.slice(0, 1)},
+        paragraphDispositions: {
+          version: 1,
+          entries: draft.paragraphDispositions.entries.slice(0, 1),
+        },
       }),
     ).toThrow(/disposition/);
     expect(topicMaintenanceParagraphCoverage(basis, required(draft).draft)).toMatchObject({
@@ -151,7 +171,11 @@ describe('topic maintenance draft contract', () => {
         version: 1,
         entries: [
           draft.paragraphDispositions.entries[0],
-          {...draft.paragraphDispositions.entries[1], disposition: 'unresolved', supportHandles: []},
+          {
+            ...draft.paragraphDispositions.entries[1],
+            disposition: 'unresolved',
+            supportHandles: [],
+          },
         ],
       },
     };
@@ -196,7 +220,11 @@ describe('topic maintenance draft contract', () => {
       const proposal = parseTopicMaintenanceDraft(basis, JSON.stringify(draft), {requireParagraphDispositions: true});
       expect(proposal.body).toBe(basis.body);
       expect(proposal.changedOrdinals).toEqual([]);
-      expect(proposal.draft).toMatchObject({outcome, operations: [], reviewedHandles: []});
+      expect(proposal.draft).toMatchObject({
+        outcome,
+        operations: [],
+        reviewedHandles: [],
+      });
       expect(topicMaintenanceParagraphCoverage(basis, proposal.draft)).toMatchObject({
         status: 'incomplete',
         eligibleCount: 2,
@@ -232,29 +260,44 @@ describe('topic maintenance draft contract', () => {
     for (const entries of [
       [first, first],
       [first, {...second, ordinal: 9}],
-      [first, {...second, beforeHash: 'f'.repeat(64)}],
+      [first, {...second, beforeHash: Effect.pipe('f', EffectString.repeat(64))}],
       [first, {...second, ordinal: 2, beforeHash: basis.paragraphs[2].hash}],
       [{...first, disposition: 'revalidate'}, second],
       [{...first, disposition: 'unresolved', supportHandles: []}, second],
       [first, {...second, disposition: 'update'}],
       [first, {...second, supportHandles: [historicalHandle]}],
       [first, {...second, supportHandles: []}],
-      [first, {...second, supportHandles: ['current:tncc_' + 'f'.repeat(40)]}],
+      [
+        first,
+        {
+          ...second,
+          supportHandles: ['current:tncc_' + Effect.pipe('f', EffectString.repeat(40))],
+        },
+      ],
       [first, {...second, disposition: 'unresolved'}],
     ])
-      expect(() => parse(basis, {...draft, paragraphDispositions: {version: 1, entries}})).toThrow(/disposition/);
+      expect(() =>
+        parse(basis, {
+          ...draft,
+          paragraphDispositions: {version: 1, entries},
+        }),
+      ).toThrow(/disposition/);
   });
 
   it('binds support to each paragraph or explicit additional dependency and keeps empty selections incomplete', () => {
     const base = basisFor('Alpha.\n\nBeta.');
-    const otherId = `tncc_${'f'.repeat(40)}`;
+    const otherId = `tncc_${Effect.pipe('f', EffectString.repeat(40))}`;
     const otherHandle = `current:${otherId}`;
     const basis = validateTopicMaintenanceDraftBasis({
       ...base,
       paragraphs: [base.paragraphs[0], {...base.paragraphs[1], citationIds: [otherId]}],
       handles: [
         ...base.handles,
-        {id: `historical:${otherId}`, citationId: otherId, variant: 'historical'},
+        {
+          id: `historical:${otherId}`,
+          citationId: otherId,
+          variant: 'historical',
+        },
         {id: otherHandle, citationId: otherId, variant: 'current'},
       ],
     });
@@ -266,7 +309,10 @@ describe('topic maintenance draft contract', () => {
         version: 1 as const,
         entries: [
           draft.paragraphDispositions.entries[0],
-          {...draft.paragraphDispositions.entries[1], supportHandles: [otherHandle]},
+          {
+            ...draft.paragraphDispositions.entries[1],
+            supportHandles: [otherHandle],
+          },
         ],
       },
     };
@@ -275,28 +321,45 @@ describe('topic maintenance draft contract', () => {
       ...correct,
       paragraphDispositions: {
         version: 1 as const,
-        entries: correct.paragraphDispositions.entries.map(item => ({...item, supportHandles: []})),
+        entries: EffectArray.map(correct.paragraphDispositions.entries, item => ({...item, supportHandles: []})),
       },
     };
-    expect(topicMaintenanceParagraphCoverage(basis, empty)).toMatchObject({status: 'incomplete', resolvedCount: 0});
-    const dependent = {...basis, additionalDependencies: [{kind: 'dependency' as const, citationId: otherId}]};
+    expect(topicMaintenanceParagraphCoverage(basis, empty)).toMatchObject({
+      status: 'incomplete',
+      resolvedCount: 0,
+    });
+    const dependent = {
+      ...basis,
+      additionalDependencies: [{kind: 'dependency' as const, citationId: otherId}],
+    };
     const supportedByDependency = {
       ...correct,
       operations: [{...correct.operations[0], supportHandles: [otherHandle]}],
       paragraphDispositions: {
         version: 1,
-        entries: correct.paragraphDispositions.entries.map(item => ({...item, supportHandles: [otherHandle]})),
+        entries: EffectArray.map(correct.paragraphDispositions.entries, item => ({
+          ...item,
+          supportHandles: [otherHandle],
+        })),
       },
     };
     expect(parse(dependent, supportedByDependency).changedOrdinals).toEqual([0]);
     expect(() =>
-      parse(basis, {...correct, paragraphDispositions: {...correct.paragraphDispositions, version: 2}}),
+      parse(basis, {
+        ...correct,
+        paragraphDispositions: {...correct.paragraphDispositions, version: 2},
+      }),
     ).toThrow(/disposition/);
   });
 
   it('fits full paragraph accounting inside the unchanged draft output boundary and refuses oversized accounting', () => {
-    const basis = basisFor(Array.from({length: 64}, (_, i) => `Claim ${i}.`).join('\n\n'));
-    const entries = basis.paragraphs.map(item => ({
+    const basis = basisFor(
+      EffectArray.join(
+        Array.from({length: 64}, (_, i) => `Claim ${i}.`),
+        '\n\n',
+      ),
+    );
+    const entries = EffectArray.map(basis.paragraphs, item => ({
       ordinal: item.ordinal,
       beforeHash: item.hash,
       disposition: 'revalidate' as const,
@@ -311,10 +374,20 @@ describe('topic maintenance draft contract', () => {
     };
     const raw = JSON.stringify(draft);
     expect(new TextEncoder().encode(raw).byteLength).toBeLessThanOrEqual(32 * 1024);
-    expect(parseTopicMaintenanceDraft(basis, raw, {requireParagraphDispositions: true}).body).toBe(basis.body);
+    expect(
+      parseTopicMaintenanceDraft(basis, raw, {
+        requireParagraphDispositions: true,
+      }).body,
+    ).toBe(basis.body);
     const oversized = {
       ...draft,
-      paragraphDispositions: {version: 1, entries: entries.map(item => ({...item, rationale: 'x'.repeat(1024)}))},
+      paragraphDispositions: {
+        version: 1,
+        entries: EffectArray.map(entries, item => ({
+          ...item,
+          rationale: Effect.pipe('x', EffectString.repeat(1024)),
+        })),
+      },
     };
     expect(() => parse(basis, oversized)).toThrow(/oversized/);
   });
@@ -323,37 +396,50 @@ describe('topic maintenance draft contract', () => {
     fc.assert(
       fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 24}), roles => {
         const basis = basisFor(
-          roles.map((_, i) => `Claim ${i}.`).join('\n\n'),
-          roles.map(direct => (direct ? 'descriptive' : 'historical')),
+          EffectArray.join(
+            EffectArray.map(roles, (_, i) => `Claim ${i}.`),
+            '\n\n',
+          ),
+          EffectArray.map(roles, direct => (direct ? 'descriptive' : 'historical')),
         );
-        const entries = basis.paragraphs
-          .filter(item => item.role === 'descriptive')
-          .map(item => ({
+        const entries = EffectArray.map(
+          EffectArray.filter(basis.paragraphs, item => item.role === 'descriptive'),
+          item => ({
             ordinal: item.ordinal,
             beforeHash: item.hash,
             disposition: 'revalidate' as const,
             supportHandles: [currentHandle],
             rationale: 'Checked current evidence.',
-          }));
+          }),
+        );
         const draft = {
           ...draftFor(basis),
           outcome: 'propose-revalidation' as const,
           operations: [],
-          paragraphDispositions: {version: 1 as const, entries: [...entries].reverse()},
+          paragraphDispositions: {
+            version: 1 as const,
+            entries: [...entries].reverse(),
+          },
         };
         const before = JSON.stringify({basis, draft});
         const result = parseTopicMaintenanceDraft(basis, JSON.stringify(draft), {requireParagraphDispositions: true});
         expect(result.body).toBe(basis.body);
         expect(topicMaintenanceParagraphCoverage(basis, result.draft)).toMatchObject({
           status: 'complete',
-          eligibleCount: roles.filter(Boolean).length,
-          resolvedCount: roles.filter(Boolean).length,
+          eligibleCount: EffectArray.filter(roles, Boolean).length,
+          resolvedCount: EffectArray.filter(roles, Boolean).length,
         });
         if (entries.length)
           expect(() =>
             parseTopicMaintenanceDraft(
               basis,
-              JSON.stringify({...draft, paragraphDispositions: {version: 1, entries: entries.slice(1)}}),
+              JSON.stringify({
+                ...draft,
+                paragraphDispositions: {
+                  version: 1,
+                  entries: entries.slice(1),
+                },
+              }),
               {requireParagraphDispositions: true},
             ),
           ).toThrow(/disposition/);
@@ -372,7 +458,10 @@ describe('topic maintenance draft contract', () => {
     expect(proposal.body).toBe('  Updated claim.  \n \n\tBeta. \n');
     expect(proposal.finalBodyHash).toBe(consolidationRevision(proposal.body));
     expect(proposal.changedOrdinals).toEqual([0]);
-    expect(basis.paragraphs[0]).toMatchObject({scope: 'Only this repository', validity: 'As reviewed'});
+    expect(basis.paragraphs[0]).toMatchObject({
+      scope: 'Only this repository',
+      validity: 'As reviewed',
+    });
     expect(basis.paragraphs[1].role).toBe('historical');
   });
 
@@ -391,35 +480,64 @@ describe('topic maintenance draft contract', () => {
   });
 
   it('requires handles for additional declared dependencies without admitting undeclared sources', () => {
-    const dependencyId = `tncc_${'b'.repeat(40)}`;
+    const dependencyId = `tncc_${Effect.pipe('b', EffectString.repeat(40))}`;
     const base = basisFor('Alpha.');
     const dependent = {
       ...base,
       additionalDependencies: [{kind: 'configuration', citationId: dependencyId}],
       handles: [
         ...base.handles,
-        {id: `historical:${dependencyId}`, citationId: dependencyId, variant: 'historical'},
-        {id: `current:${dependencyId}`, citationId: dependencyId, variant: 'current'},
+        {
+          id: `historical:${dependencyId}`,
+          citationId: dependencyId,
+          variant: 'historical',
+        },
+        {
+          id: `current:${dependencyId}`,
+          citationId: dependencyId,
+          variant: 'current',
+        },
       ],
     };
     expect(validateTopicMaintenanceDraftBasis(dependent).additionalDependencies).toEqual(
       dependent.additionalDependencies,
     );
-    expect(() => validateTopicMaintenanceDraftBasis({...dependent, handles: base.handles})).toThrow(/handles/);
-    expect(() => validateTopicMaintenanceDraftBasis({...base, handles: dependent.handles})).toThrow(/handles/);
+    expect(() =>
+      validateTopicMaintenanceDraftBasis({
+        ...dependent,
+        handles: base.handles,
+      }),
+    ).toThrow(/handles/);
+    expect(() =>
+      validateTopicMaintenanceDraftBasis({
+        ...base,
+        handles: dependent.handles,
+      }),
+    ).toThrow(/handles/);
   });
 
   it('accepts enrolled multibyte scope and validity annotations within the canonical character limit', () => {
     const base = basisFor('Alpha.');
     const annotated = {
       ...base,
-      paragraphs: [{...base.paragraphs[0], scope: '界'.repeat(512), validity: '界'.repeat(512)}],
+      paragraphs: [
+        {
+          ...base.paragraphs[0],
+          scope: Effect.pipe('界', EffectString.repeat(512)),
+          validity: Effect.pipe('界', EffectString.repeat(512)),
+        },
+      ],
     };
     expect(validateTopicMaintenanceDraftBasis(annotated).paragraphs[0]).toEqual(annotated.paragraphs[0]);
     expect(() =>
       validateTopicMaintenanceDraftBasis({
         ...annotated,
-        paragraphs: [{...annotated.paragraphs[0], scope: '界'.repeat(513)}],
+        paragraphs: [
+          {
+            ...annotated.paragraphs[0],
+            scope: Effect.pipe('界', EffectString.repeat(513)),
+          },
+        ],
       }),
     ).toThrow(/paragraph/);
   });
@@ -430,21 +548,40 @@ describe('topic maintenance draft contract', () => {
     const original = JSON.stringify(basis);
     const first = draft.operations[0];
     const invalid = [
-      {...draft, targetHash: 'd'.repeat(64)},
+      {...draft, targetHash: Effect.pipe('d', EffectString.repeat(64))},
       {...draft, authority: 'verified'},
       {...draft, operations: [{...first, scope: 'all repositories'}]},
-      {...draft, operations: [{...first, beforeHash: 'f'.repeat(64)}]},
-      {...draft, operations: [{...first, supportHandles: ['current:tncc_' + 'f'.repeat(40)]}]},
-      {...draft, operations: [{...first, supportHandles: [historicalHandle]}]},
+      {
+        ...draft,
+        operations: [{...first, beforeHash: Effect.pipe('f', EffectString.repeat(64))}],
+      },
+      {
+        ...draft,
+        operations: [
+          {
+            ...first,
+            supportHandles: ['current:tncc_' + Effect.pipe('f', EffectString.repeat(40))],
+          },
+        ],
+      },
+      {
+        ...draft,
+        operations: [{...first, supportHandles: [historicalHandle]}],
+      },
       {...draft, operations: [{...first, text: 'One.\n\nTwo.'}]},
       {...draft, operations: [{...first, text: 'Alpha.'}]},
       {...draft, operations: [first, first]},
       {...draft, outcome: 'policy-conflict'},
-      {...draft, operations: [{...first, ordinal: 1, beforeHash: basis.paragraphs[1].hash}]},
+      {
+        ...draft,
+        operations: [{...first, ordinal: 1, beforeHash: basis.paragraphs[1].hash}],
+      },
     ];
     for (const modelOutput of invalid) expect(() => parse(basis, modelOutput)).toThrow();
     expect(() => parseTopicMaintenanceDraft(basis, '```json\n{}\n```')).toThrow(/closed JSON/);
-    expect(() => parseTopicMaintenanceDraft(basis, 'x'.repeat(32 * 1024 + 1))).toThrow(/oversized/);
+    expect(() => parseTopicMaintenanceDraft(basis, Effect.pipe('x', EffectString.repeat(32 * 1024 + 1)))).toThrow(
+      /oversized/,
+    );
     expect(JSON.stringify(basis)).toBe(original);
   });
 
@@ -463,11 +600,11 @@ describe('topic maintenance draft contract', () => {
   it('rejects incomplete or forged private review payload and unsupported versions through CandidateReview', () => {
     const basis = validateTopicMaintenanceDraftBasis(basisFor('Alpha.'));
     const proposal = parse(basis, draftFor(basis));
-    const reviewEvidence = [historicalHandle, currentHandle].map(handleId => ({
+    const reviewEvidence = EffectArray.map([historicalHandle, currentHandle], handleId => ({
       handleId,
       content: 'export const alpha = 1;',
       excerptHash: consolidationRevision('export const alpha = 1;'),
-      fileBytesHash: '4'.repeat(64),
+      fileBytesHash: Effect.pipe('4', EffectString.repeat(64)),
       startLine: 1,
       endLine: 1,
       provenance: handleId === historicalHandle ? ('historical-verified' as const) : ('current-verified' as const),
@@ -507,12 +644,23 @@ describe('topic maintenance draft contract', () => {
       attempts: 0,
       usage: {status: 'unavailable'},
     };
-    expect(validateTopicMaintenanceReviewPayload({...maintenance, generation: manual}).generation).toEqual(manual);
-    expect(() => validateTopicMaintenanceReviewPayload({...maintenance, generation: {...manual, attempts: 1}})).toThrow(
-      /manual/,
-    );
+    expect(
+      validateTopicMaintenanceReviewPayload({
+        ...maintenance,
+        generation: manual,
+      }).generation,
+    ).toEqual(manual);
     expect(() =>
-      validateTopicMaintenanceReviewPayload({...maintenance, generation: {...manual, modelVersion: 'fake'}}),
+      validateTopicMaintenanceReviewPayload({
+        ...maintenance,
+        generation: {...manual, attempts: 1},
+      }),
+    ).toThrow(/manual/);
+    expect(() =>
+      validateTopicMaintenanceReviewPayload({
+        ...maintenance,
+        generation: {...manual, modelVersion: 'fake'},
+      }),
     ).toThrow(/manual/);
     expect(
       validateTopicMaintenanceReviewPayload({
@@ -530,19 +678,36 @@ describe('topic maintenance draft contract', () => {
       version: 2,
       reviewId: 'review-1',
       revision: 1,
+      createdAt: '2026-10-28T00:00:00.000Z',
+      outcome: 'reviewed context requires approval',
+      project: 'threadnote',
+      sourceAgentClient: 'test',
+      task: 'validate the maintenance review envelope',
+      topic: 'topic-maintenance',
       candidates: [],
       codeCitations: [],
       maintenance,
     };
     expect(parseCandidateReview(review).maintenance).toEqual(maintenance);
-    expect(() => parseCandidateReview({...review, maintenance: {...maintenance, version: 2}})).toThrow();
+    expect(() =>
+      parseCandidateReview({
+        ...review,
+        maintenance: {...maintenance, version: 2},
+      }),
+    ).toThrow();
     expect(() => parseCandidateReview({...review, version: 1})).toThrow();
     expect(() => validateTopicMaintenanceReviewPayload({...maintenance, extra: true})).toThrow();
     expect(() =>
-      validateTopicMaintenanceReviewPayload({...maintenance, proposal: {...proposal, body: 'forged'}}),
+      validateTopicMaintenanceReviewPayload({
+        ...maintenance,
+        proposal: {...proposal, body: 'forged'},
+      }),
     ).toThrow();
     expect(() =>
-      validateTopicMaintenanceReviewPayload({...maintenance, reviewEvidence: reviewEvidence.slice(0, 1)}),
+      validateTopicMaintenanceReviewPayload({
+        ...maintenance,
+        reviewEvidence: reviewEvidence.slice(0, 1),
+      }),
     ).toThrow();
     for (const altered of [
       {endLine: 0},
@@ -562,7 +727,10 @@ describe('topic maintenance draft contract', () => {
       ).toThrow();
     }
     const {id: _id, ...foreignInput} = citation;
-    const foreign = createMemoryCodeCitation({...foreignInput, repositoryId: '5'.repeat(64)});
+    const foreign = createMemoryCodeCitation({
+      ...foreignInput,
+      repositoryId: Effect.pipe('5', EffectString.repeat(64)),
+    });
     expect(() =>
       validateTopicMaintenanceReviewPayload({
         ...maintenance,
@@ -570,7 +738,10 @@ describe('topic maintenance draft contract', () => {
           reviewEvidence[0],
           {
             ...reviewEvidence[1],
-            source: {...reviewEvidence[1].source, repositoryId: foreign.repositoryId},
+            source: {
+              ...reviewEvidence[1].source,
+              repositoryId: foreign.repositoryId,
+            },
             citation: foreign,
           },
         ],
@@ -580,19 +751,28 @@ describe('topic maintenance draft contract', () => {
       ...reviewEvidence[1],
       source: {
         ...reviewEvidence[1].source,
-        sourceCommit: 'f'.repeat(40),
-        sourceSnapshotId: `cgsn_${'f'.repeat(40)}`,
+        sourceCommit: Effect.pipe('f', EffectString.repeat(40)),
+        sourceSnapshotId: `cgsn_${Effect.pipe('f', EffectString.repeat(40))}`,
       },
     };
     expect(
-      validateTopicMaintenanceReviewPayload({...maintenance, reviewEvidence: [reviewEvidence[0], newerObservation]}),
-    ).toEqual({...maintenance, reviewEvidence: [reviewEvidence[0], newerObservation]});
+      validateTopicMaintenanceReviewPayload({
+        ...maintenance,
+        reviewEvidence: [reviewEvidence[0], newerObservation],
+      }),
+    ).toEqual({
+      ...maintenance,
+      reviewEvidence: [reviewEvidence[0], newerObservation],
+    });
     const {id: _currentId, ...currentInput} = citation;
     const changedCapture = createMemoryCodeCitation({
       ...currentInput,
-      fileContentHash: {algorithm: 'sha256', value: '6'.repeat(64)},
-      sourceCommit: 'e'.repeat(40),
-      sourceSnapshotId: `cgsn_${'e'.repeat(40)}`,
+      fileContentHash: {
+        algorithm: 'sha256',
+        value: Effect.pipe('6', EffectString.repeat(64)),
+      },
+      sourceCommit: Effect.pipe('e', EffectString.repeat(40)),
+      sourceSnapshotId: `cgsn_${Effect.pipe('e', EffectString.repeat(40))}`,
     });
     const changedCurrent = {
       ...newerObservation,
@@ -603,13 +783,25 @@ describe('topic maintenance draft contract', () => {
       },
     };
     expect(
-      validateTopicMaintenanceReviewPayload({...maintenance, reviewEvidence: [reviewEvidence[0], changedCurrent]}),
-    ).toEqual({...maintenance, reviewEvidence: [reviewEvidence[0], changedCurrent]});
+      validateTopicMaintenanceReviewPayload({
+        ...maintenance,
+        reviewEvidence: [reviewEvidence[0], changedCurrent],
+      }),
+    ).toEqual({
+      ...maintenance,
+      reviewEvidence: [reviewEvidence[0], changedCurrent],
+    });
     expect(() =>
       validateTopicMaintenanceReviewPayload({
         ...maintenance,
         reviewEvidence: [
-          {...reviewEvidence[0], source: {...reviewEvidence[0].source, sourceCommit: 'f'.repeat(40)}},
+          {
+            ...reviewEvidence[0],
+            source: {
+              ...reviewEvidence[0].source,
+              sourceCommit: Effect.pipe('f', EffectString.repeat(40)),
+            },
+          },
           reviewEvidence[1],
         ],
       }),
@@ -621,7 +813,10 @@ describe('topic maintenance draft contract', () => {
           reviewEvidence[0],
           {
             ...newerObservation,
-            source: {...newerObservation.source, fileContentHash: 'f'.repeat(64)},
+            source: {
+              ...newerObservation.source,
+              fileContentHash: Effect.pipe('f', EffectString.repeat(64)),
+            },
           },
         ],
       }),
@@ -629,7 +824,10 @@ describe('topic maintenance draft contract', () => {
     expect(() =>
       validateTopicMaintenanceReviewPayload({
         ...maintenance,
-        generation: {...maintenance.generation, usage: {status: 'measured', inputTokens: -1, outputTokens: 1}},
+        generation: {
+          ...maintenance.generation,
+          usage: {status: 'measured', inputTokens: -1, outputTokens: 1},
+        },
       }),
     ).toThrow();
   });
@@ -643,7 +841,7 @@ describe('topic maintenance draft contract', () => {
         word,
         (sections, separator, replacement) => {
           fc.pre(replacement !== sections[0] && `${replacement}x` !== sections.at(-1));
-          const body = ` \t${sections.join(separator)}  \n`;
+          const body = ` \t${EffectArray.join(sections, separator)}  \n`;
           const basis = validateTopicMaintenanceDraftBasis(basisFor(body));
           const draft = draftFor(basis);
           const operations = [
@@ -656,8 +854,11 @@ describe('topic maintenance draft contract', () => {
             },
           ];
           const first = parse(basis, {...draft, operations});
-          const reversed = parse(basis, {...draft, operations: [...operations].reverse()});
-          const expected = ` \t${[replacement, ...sections.slice(1, -1), `${replacement}x`].join(separator)}  \n`;
+          const reversed = parse(basis, {
+            ...draft,
+            operations: [...operations].reverse(),
+          });
+          const expected = ` \t${EffectArray.join([replacement, ...sections.slice(1, -1), `${replacement}x`], separator)}  \n`;
           expect(first.body).toBe(expected);
           expect(reversed.body).toBe(expected);
           expect(parse(basis, {...draft, operations})).toEqual(first);
@@ -675,12 +876,17 @@ function automaticProviderFixture(
   establishedOrdinal?: number,
 ) {
   const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/provider-topic.md';
-  const evidence = [0, 1].map(index => {
+  const evidence = EffectArray.map([0, 1], index => {
     const source = {
       kind: 'memory' as const,
-      uri: uri.replace('provider-topic.md', `source-${index}.md`),
+      uri: Effect.pipe(uri, EffectString.replace('provider-topic.md', `source-${index}.md`)),
       canonicalHash: consolidationRevision(`Source ${index}.`),
-      fragment: {ordinal: 0, hash: consolidationRevision(`Evidence ${index}.`), startOffset: 0, endOffset: 11},
+      fragment: {
+        ordinal: 0,
+        hash: consolidationRevision(`Evidence ${index}.`),
+        startOffset: 0,
+        endOffset: 11,
+      },
     };
     return {
       id: automaticMaintenanceEvidenceId(source),
@@ -690,24 +896,27 @@ function automaticProviderFixture(
       availability: 'available' as const,
     };
   });
-  const paragraphs: readonly AutomaticMaintenanceParagraphV1[] = consolidationSections(body).map((text, ordinal) => ({
-    ordinal,
-    hash: consolidationRevision(text),
-    role: roles[ordinal] ?? 'unknown',
-    roleAuthority: ordinal === establishedOrdinal ? 'legacy-approved' : 'provisional',
-    support: 'unresolved',
-    supportAuthority: ordinal === establishedOrdinal ? 'legacy-approved' : 'provisional',
-    historicalEvidenceIds: [],
-    acceptedEvidenceIds: [],
-    currentEvidenceIds: [],
-    currentSupport: 'unresolved',
-    currentSupportAuthority: 'provisional',
-  }));
+  const paragraphs: readonly AutomaticMaintenanceParagraphV1[] = EffectArray.map(
+    consolidationSections(body),
+    (text, ordinal) => ({
+      ordinal,
+      hash: consolidationRevision(text),
+      role: roles[ordinal] ?? 'unknown',
+      roleAuthority: ordinal === establishedOrdinal ? 'legacy-approved' : 'provisional',
+      support: 'unresolved',
+      supportAuthority: ordinal === establishedOrdinal ? 'legacy-approved' : 'provisional',
+      historicalEvidenceIds: [],
+      acceptedEvidenceIds: [],
+      currentEvidenceIds: [],
+      currentSupport: 'unresolved',
+      currentSupportAuthority: 'provisional',
+    }),
+  );
   const target = {
     uri,
     kind: 'durable' as const,
     status: 'active' as const,
-    canonicalHash: 'a'.repeat(64),
+    canonicalHash: Effect.pipe('a', EffectString.repeat(64)),
     bodyHash: consolidationRevision(body),
     paragraphCount: paragraphs.length,
     visibility: 'personal' as const,
@@ -726,7 +935,12 @@ function automaticProviderFixture(
     preparation:
       establishedOrdinal === undefined
         ? {version: 1, kind: 'derived'}
-        : {version: 1, kind: 'legacy-approved', manifestVersion: 1, manifestHash: 'f'.repeat(64)},
+        : {
+            version: 1,
+            kind: 'legacy-approved',
+            manifestVersion: 1,
+            manifestHash: Effect.pipe('f', EffectString.repeat(64)),
+          },
     target,
     paragraphs,
     evidence,
@@ -743,11 +957,15 @@ function automaticProviderFixture(
     assessment,
     paragraphs,
     reads: [],
-    observationRevision: 'b'.repeat(64),
-    packetDigest: 'c'.repeat(64),
-    scopeRevision: 'd'.repeat(64),
+    observationRevision: Effect.pipe('b', EffectString.repeat(64)),
+    packetDigest: Effect.pipe('c', EffectString.repeat(64)),
+    scopeRevision: Effect.pipe('d', EffectString.repeat(64)),
     additionalDependencies: [],
-    handles: evidence.map(item => ({id: `current:${item.id}`, citationId: item.id, variant: 'current'})),
+    handles: EffectArray.map(evidence, item => ({
+      id: `current:${item.id}`,
+      citationId: item.id,
+      variant: 'current',
+    })),
   });
   const operation = (ordinal: number, text: string) => ({
     ordinal,
@@ -765,7 +983,7 @@ function automaticProviderFixture(
     packetDigest: basis.packetDigest,
     outcome: 'propose-update',
     operations: [operation(0, 'Changed claim.')],
-    paragraphDecisions: paragraphs.map(p => ({
+    paragraphDecisions: EffectArray.map(paragraphs, p => ({
       ordinal: p.ordinal,
       beforeHash: p.hash,
       role: 'descriptive',
@@ -783,7 +1001,10 @@ function automaticProviderFixture(
 describe('automatic compact provider exact repeats', () => {
   it('projects only fully validated repeats while public parsing stays strict', () => {
     const {basis, draft, operation} = automaticProviderFixture();
-    const mixed = {...draft, operations: [...draft.operations, operation(1, 'Beta.')]};
+    const mixed = {
+      ...draft,
+      operations: [...draft.operations, operation(1, 'Beta.')],
+    };
     const original = JSON.stringify({basis, mixed});
     expect(() => parseAutomaticMaintenanceDraft(basis, JSON.stringify(mixed))).toThrow(/replacement/);
     const result = parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(mixed));
@@ -797,15 +1018,21 @@ describe('automatic compact provider exact repeats', () => {
     const {basis, draft, operation} = automaticProviderFixture();
     const repeat = operation(1, 'Beta.');
     const invalid = [
-      {...repeat, beforeHash: 'f'.repeat(64)},
+      {...repeat, beforeHash: Effect.pipe('f', EffectString.repeat(64))},
       {...repeat, ordinal: 9},
       {...repeat, supportHandles: []},
-      {...repeat, supportHandles: [...repeat.supportHandles, ...repeat.supportHandles]},
+      {
+        ...repeat,
+        supportHandles: [...repeat.supportHandles, ...repeat.supportHandles],
+      },
       {...repeat, supportHandles: [basis.handles[1].id]},
-      {...repeat, supportHandles: [basis.handles[0].id.replace('current:', 'accepted:')]},
+      {
+        ...repeat,
+        supportHandles: [Effect.pipe(basis.handles[0].id, EffectString.replace('current:', 'accepted:'))],
+      },
       {...repeat, authority: 'verified'},
       {...repeat, rationale: ''},
-      {...repeat, rationale: 'x'.repeat(1025)},
+      {...repeat, rationale: Effect.pipe('x', EffectString.repeat(1025))},
       {...repeat, text: ' Beta.'},
       {...repeat, text: 'Beta. '},
       {...repeat, text: 'Beta.\n\nExtra.'},
@@ -825,7 +1052,7 @@ describe('automatic compact provider exact repeats', () => {
           JSON.stringify({
             ...draft,
             operations: [...draft.operations, repeat],
-            paragraphDecisions: draft.paragraphDecisions.map((d, i) => (i === 1 ? {...d, role} : d)),
+            paragraphDecisions: EffectArray.map(draft.paragraphDecisions, (d, i) => (i === 1 ? {...d, role} : d)),
           }),
         ),
       ).toThrow();
@@ -836,8 +1063,14 @@ describe('automatic compact provider exact repeats', () => {
           JSON.stringify({
             ...draft,
             operations: [...draft.operations, repeat],
-            paragraphDecisions: draft.paragraphDecisions.map((d, i) =>
-              i === 1 ? {...d, support, evidenceIds: support === 'unresolved' ? [] : d.evidenceIds} : d,
+            paragraphDecisions: EffectArray.map(draft.paragraphDecisions, (d, i) =>
+              i === 1
+                ? {
+                    ...d,
+                    support,
+                    evidenceIds: support === 'unresolved' ? [] : d.evidenceIds,
+                  }
+                : d,
             ),
           }),
         ),
@@ -846,7 +1079,10 @@ describe('automatic compact provider exact repeats', () => {
     expect(() =>
       parseAutomaticMaintenanceProviderDraft(
         triple.basis,
-        JSON.stringify({...triple.draft, operations: [...triple.draft.operations, repeat, repeat]}),
+        JSON.stringify({
+          ...triple.draft,
+          operations: [...triple.draft.operations, repeat, repeat],
+        }),
       ),
     ).toThrow();
     expect(JSON.stringify({basis, draft})).toBe(original);
@@ -858,21 +1094,27 @@ describe('automatic compact provider exact repeats', () => {
       expect(() =>
         parseAutomaticMaintenanceProviderDraft(
           f.basis,
-          JSON.stringify({...f.draft, operations: [...f.draft.operations, f.operation(1, 'Beta.')]}),
+          JSON.stringify({
+            ...f.draft,
+            operations: [...f.draft.operations, f.operation(1, 'Beta.')],
+          }),
         ),
       ).toThrow(/protected|descriptive/);
     }
     const {basis, draft, operation} = automaticProviderFixture();
-    const mixed = {...draft, operations: [...draft.operations, operation(1, 'Beta.')]};
+    const mixed = {
+      ...draft,
+      operations: [...draft.operations, operation(1, 'Beta.')],
+    };
     for (const patch of [
-      {targetHash: 'f'.repeat(64)},
-      {observationRevision: 'f'.repeat(64)},
-      {packetDigest: 'f'.repeat(64)},
+      {targetHash: Effect.pipe('f', EffectString.repeat(64))},
+      {observationRevision: Effect.pipe('f', EffectString.repeat(64))},
+      {packetDigest: Effect.pipe('f', EffectString.repeat(64))},
       {authority: 'verified'},
-      {rationale: 'x'.repeat(32 * 1024)},
+      {rationale: Effect.pipe('x', EffectString.repeat(32 * 1024))},
       {paragraphDecisions: [...draft.paragraphDecisions].reverse()},
       {
-        paragraphDecisions: draft.paragraphDecisions.map(d => ({
+        paragraphDecisions: EffectArray.map(draft.paragraphDecisions, d => ({
           ...d,
           evidenceIds: [...d.evidenceIds, ...d.evidenceIds],
         })),
@@ -892,10 +1134,18 @@ describe('automatic compact provider exact repeats', () => {
       expect(() =>
         parseAutomaticMaintenanceProviderDraft(
           basis,
-          JSON.stringify({...draft, outcome, operations: [operation(1, 'Beta.')]}),
+          JSON.stringify({
+            ...draft,
+            outcome,
+            operations: [operation(1, 'Beta.')],
+          }),
         ),
       ).toThrow(/outcome/);
-    const revalidation = {...draft, outcome: 'propose-revalidation', operations: []};
+    const revalidation = {
+      ...draft,
+      outcome: 'propose-revalidation',
+      operations: [],
+    };
     expect(parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(revalidation))).toEqual(
       parseAutomaticMaintenanceDraft(basis, JSON.stringify(revalidation)),
     );
@@ -904,7 +1154,7 @@ describe('automatic compact provider exact repeats', () => {
       purpose: 'manual-edit',
       desiredBody: basis.body,
       operations: [],
-      paragraphDecisions: basis.paragraphs.map(p => ({
+      paragraphDecisions: EffectArray.map(basis.paragraphs, p => ({
         ordinal: p.ordinal,
         beforeHash: p.hash,
         role: 'unknown',
@@ -921,7 +1171,10 @@ describe('automatic compact provider exact repeats', () => {
     expect(
       parseAutomaticMaintenanceProviderDraft(
         spaced.basis,
-        JSON.stringify({...spaced.draft, operations: [...spaced.draft.operations, spaced.operation(1, 'Beta.')]}),
+        JSON.stringify({
+          ...spaced.draft,
+          operations: [...spaced.draft.operations, spaced.operation(1, 'Beta.')],
+        }),
       ).body,
     ).toBe('  Changed claim.  \n \n\tBeta. \n');
     const unicode = automaticProviderFixture('Alpha.\n\nCaf\u00e9.');
@@ -939,17 +1192,23 @@ describe('automatic compact provider exact repeats', () => {
   it('preserves independently expected body and decisions across mixed operation orders without mutation', () => {
     fc.assert(
       fc.property(
-        fc.array(fc.stringMatching(/^[a-z]{1,16}$/u), {minLength: 2, maxLength: 12}),
+        fc.array(fc.stringMatching(/^[a-z]{1,16}$/u), {
+          minLength: 2,
+          maxLength: 12,
+        }),
         fc.array(fc.boolean(), {minLength: 12, maxLength: 12}),
         (sections, selected) => {
-          const {basis, draft, operation} = automaticProviderFixture(sections.join('\n\n'));
-          const repeats = sections.flatMap((text, ordinal) =>
+          const {basis, draft, operation} = automaticProviderFixture(EffectArray.join(sections, '\n\n'));
+          const repeats = EffectArray.flatMap(sections, (text, ordinal) =>
             ordinal > 0 && selected[ordinal] ? [operation(ordinal, text)] : [],
           );
-          const mixed = {...draft, operations: [...draft.operations, ...repeats].reverse()};
+          const mixed = {
+            ...draft,
+            operations: [...draft.operations, ...repeats].reverse(),
+          };
           const original = JSON.stringify({basis, mixed});
           const result = parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(mixed));
-          expect(result.body).toBe(['Changed claim.', ...sections.slice(1)].join('\n\n'));
+          expect(result.body).toBe(EffectArray.join(['Changed claim.', ...sections.slice(1)], '\n\n'));
           expect(result.changedOrdinals).toEqual([0]);
           expect(result.draft).toEqual(draft);
           expect(parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(result.draft))).toEqual(result);

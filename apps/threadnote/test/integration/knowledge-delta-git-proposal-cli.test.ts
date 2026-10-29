@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   buildCandidateReview,
   candidateReviewWithState,
@@ -7,7 +8,7 @@ import {
 } from '@threadnote/memory/candidate';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalMemoryDocumentContent, formatMemoryDocument} from '@threadnote/memory/document';
-import {Effect} from 'effect';
+import {Effect, Schema} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -15,12 +16,46 @@ import {join} from '@threadnote/testing/node-path';
 import {runEffect as run} from '../helpers/effect-runtime.js';
 import {afterEach, describe, expect, it} from 'vitest';
 import {promisify} from 'node:util';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const GitProposalArtifactSchema = Schema.StructWithRest(
+  Schema.Struct({
+    base: Schema.StructWithRest(Schema.Struct({expectedCommit: Schema.String}), [JsonRecordSchema]),
+    files: Schema.Array(
+      Schema.StructWithRest(
+        Schema.Struct({
+          content: Schema.String,
+          memory: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema]),
+          operation: Schema.Literal('replace'),
+          path: Schema.String,
+          targetPrecondition: Schema.StructWithRest(
+            Schema.Struct({expectedMemoryId: Schema.String, state: Schema.Literal('present')}),
+            [JsonRecordSchema],
+          ),
+        }),
+        [JsonRecordSchema],
+      ),
+    ),
+    knowledgeDelta: Schema.StructWithRest(Schema.Struct({expectedRevision: Schema.Finite, reviewId: Schema.String}), [
+      JsonRecordSchema,
+    ]),
+    target: Schema.StructWithRest(Schema.Struct({repositoryId: Schema.String, team: Schema.String}), [
+      JsonRecordSchema,
+    ]),
+    type: Schema.Literal('knowledge-delta-git-proposal'),
+    version: Schema.Literal(1),
+  }),
+  [JsonRecordSchema],
+);
+const decodeGitProposalArtifact = Schema.decodeUnknownSync(GitProposalArtifactSchema);
 
 const execFilePromise = promisify(execFile);
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 describe('Knowledge Delta Git proposal CLI', () => {
@@ -131,13 +166,13 @@ describe('Knowledge Delta Git proposal CLI', () => {
       '--candidate-id',
       candidate.candidateId,
     ] as const;
-    const missingApproval = await runCli(args, home).catch(error => error as CliFailure);
+    const missingApproval = await runCli(args, home).catch(asCliFailure);
     expect(missingApproval).toMatchObject({code: 1});
     expect(missingApproval.stderr).toContain('requires --approved');
 
-    const artifact = JSON.parse((await runCli([...args, '--approved'], home)).stdout);
+    const artifact = decodeGitProposalArtifact(JSON.parse((await runCli([...args, '--approved'], home)).stdout));
     expect(artifact).toMatchObject({
-      base: {expectedCommit: baseCommit.trim()},
+      base: {expectedCommit: Effect2.pipe(baseCommit, EffectString.trim)},
       files: [
         {
           memory: {id: 'tn_existing_shared_identity'},
@@ -161,8 +196,10 @@ describe('Knowledge Delta Git proposal CLI', () => {
     const output = join(root, 'exports', 'proposal.json');
     await runCli([...args, '--approved', '--output', output], home);
     expect(JSON.parse(await readFile(output, 'utf8'))).toEqual(artifact);
-    expect((await git(worktree, ['rev-parse', 'HEAD'])).trim()).toBe(baseCommit.trim());
-    expect((await git(worktree, ['status', '--short'])).trim()).toBe('');
+    expect(Effect2.pipe(await git(worktree, ['rev-parse', 'HEAD']), EffectString.trim)).toBe(
+      Effect2.pipe(baseCommit, EffectString.trim),
+    );
+    expect(Effect2.pipe(await git(worktree, ['status', '--short']), EffectString.trim)).toBe('');
 
     const advancedReview = candidateReviewWithState(review, candidate.candidateId, 'rejected', {
       action: 'reject',
@@ -190,25 +227,29 @@ describe('Knowledge Delta Git proposal CLI', () => {
       ),
     );
     if (!racedExport) throw new Error('Expected a concurrent Git proposal export.');
-    const staleReview = await racedExport.catch(error => error as CliFailure);
+    const staleReview = await racedExport.catch(asCliFailure);
     expect(staleReview).toMatchObject({code: 1});
     expect(staleReview.stderr).toContain(
       `Candidate review revision changed: expected ${review.revision}, current ${advancedReview.revision}`,
     );
     await run(saveCandidateReview(home, review));
 
-    await writeFile(sourcePath, sourceContent.replace('Updated shared contract.', 'Changed after approval.'), 'utf8');
-    const changedSource = await runCli([...args, '--approved'], home).catch(error => error as CliFailure);
+    await writeFile(
+      sourcePath,
+      Effect2.pipe(sourceContent, EffectString.replace('Updated shared contract.', 'Changed after approval.')),
+      'utf8',
+    );
+    const changedSource = await runCli([...args, '--approved'], home).catch(asCliFailure);
     expect(changedSource).toMatchObject({code: 1});
     expect(changedSource.stderr).toContain('applied source changed after approval');
 
     await writeFile(sourcePath, sourceContent, 'utf8');
     const reviewWithoutApplyHash = {
       ...review,
-      candidates: review.candidates.map(({applyContentHash: _applyContentHash, ...item}) => item),
+      candidates: EffectArray.map(review.candidates, ({applyContentHash: _applyContentHash, ...item}) => item),
     };
     await run(saveCandidateReview(home, reviewWithoutApplyHash));
-    const missingApplyHash = await runCli([...args, '--approved'], home).catch(error => error as CliFailure);
+    const missingApplyHash = await runCli([...args, '--approved'], home).catch(asCliFailure);
     expect(missingApplyHash).toMatchObject({code: 1});
     expect(missingApplyHash.stderr).toContain('no approved apply content hash');
     await run(saveCandidateReview(home, review));
@@ -217,18 +258,34 @@ describe('Knowledge Delta Git proposal CLI', () => {
     await mkdir(pendingDirectory, {recursive: true, mode: 0o700});
     const pendingPath = join(pendingDirectory, `${sha256HexSync(sourceUri)}.json`);
     await writeFile(pendingPath, '{}\n', 'utf8');
-    const pendingCitations = await runCli([...args, '--approved'], home).catch(error => error as CliFailure);
+    const pendingCitations = await runCli([...args, '--approved'], home).catch(asCliFailure);
     expect(pendingCitations).toMatchObject({code: 1});
     expect(pendingCitations.stderr).toContain('code citations are still pending');
     expect(pendingCitations.stderr).toContain('finalize-code-refs');
-    expect((await git(worktree, ['rev-parse', 'HEAD'])).trim()).toBe(baseCommit.trim());
-    expect((await git(worktree, ['status', '--short'])).trim()).toBe('');
+    expect(Effect2.pipe(await git(worktree, ['rev-parse', 'HEAD']), EffectString.trim)).toBe(
+      Effect2.pipe(baseCommit, EffectString.trim),
+    );
+    expect(Effect2.pipe(await git(worktree, ['status', '--short']), EffectString.trim)).toBe('');
   });
 });
 
 interface CliFailure extends Error {
   readonly code?: number;
   readonly stderr: string;
+}
+
+function isCliFailure(error: unknown): error is CliFailure {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    typeof error.code === 'number' &&
+    'stderr' in error &&
+    typeof error.stderr === 'string'
+  );
+}
+function asCliFailure(error: unknown): CliFailure {
+  if (!isCliFailure(error)) throw error;
+  return error;
 }
 
 async function configureTeam(home: string, worktree: string): Promise<void> {

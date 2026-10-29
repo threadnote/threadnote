@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {execFile, type ChildProcess} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -5,8 +6,38 @@ import {join} from '@threadnote/testing/node-path';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Database} from 'bun:sqlite';
 import {describe, expect, it} from 'vitest';
+import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const fixture = 'apps/threadnote/test/integrations/coordinator-process-fixture.ts';
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const WorkerEventSchema = withRest(
+  Schema.Struct({
+    at: Schema.Finite,
+    credentialHash: Schema.optionalKey(Schema.String),
+    kind: Schema.Literals(['spawn', 'start', 'end', 'credential', 'list', 'hidden-endpoint']),
+    pid: Schema.Finite,
+  }),
+);
+const ClientReplySchema = withRest(
+  Schema.Struct({
+    elapsedMs: Schema.Finite,
+    result: Schema.optionalKey(
+      withRest(Schema.Struct({sourceId: Schema.String, syncedDocuments: Schema.Array(Schema.String)})),
+    ),
+  }),
+);
+const EndpointSchema = withRest(
+  Schema.Struct({
+    home: Schema.optionalKey(Schema.String),
+    pid: Schema.Finite,
+    port: Schema.Finite,
+    token: Schema.optionalKey(Schema.String),
+  }),
+);
 interface WorkerEvent {
   readonly kind: 'spawn' | 'start' | 'end' | 'credential' | 'list' | 'hidden-endpoint';
   readonly pid: number;
@@ -77,11 +108,10 @@ async function withProcesses<A>(
   const clients = new Set<ChildProcess>();
   const events = async (): Promise<readonly WorkerEvent[]> => {
     const content = await readFile(join(home, 'events.jsonl'), 'utf8').catch(() => '');
-    return content
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map(line => JSON.parse(line) as WorkerEvent);
+    return EffectArray.map(
+      EffectArray.filter(Effect.pipe(content, EffectString.trim, EffectString.split('\n')), Boolean),
+      line => Schema.decodeUnknownSync(WorkerEventSchema)(JSON.parse(line)),
+    );
   };
   await mkdir(home, {recursive: true});
   await symlink(home, alias, process.platform === 'win32' ? 'junction' : 'dir');
@@ -98,7 +128,7 @@ async function withProcesses<A>(
         (error, stdout, stderr) => {
           clients.delete(child);
           if (error) reject(new Error(`${action} client failed: ${stderr || error.message}`));
-          else resolve(JSON.parse(stdout.trim()) as ClientReply);
+          else resolve(Schema.decodeUnknownSync(ClientReplySchema)(JSON.parse(Effect.pipe(stdout, EffectString.trim))));
         },
       );
       clients.add(child);
@@ -115,7 +145,7 @@ async function withProcesses<A>(
         // A worker can complete its idle shutdown during cleanup.
       }
     }
-    await Promise.all([...clients].map(child => new Promise(resolve => child.once('exit', resolve))));
+    await Promise.all(EffectArray.map([...clients], child => new Promise(resolve => child.once('exit', resolve))));
     await rm(root, {force: true, recursive: true});
   }
 }
@@ -130,7 +160,7 @@ describe('integration coordinator process composition', () => {
       ]) {
         const failure = await client(action).then(
           () => undefined,
-          error => error as Error,
+          error => (error instanceof Error ? error : new Error(String(error))),
         );
         expect(failure?.message).toContain(message);
         expect(failure?.message).not.toContain('synthetic-private');
@@ -142,9 +172,12 @@ describe('integration coordinator process composition', () => {
   it('distinguishes a discoverable worker that rejects requests from a missing endpoint', async () => {
     await withProcesses(async ({home, client, events}) => {
       await client('refresh');
-      await until(async () => (await events()).find(event => event.kind === 'start'), 'Provider did not start');
+      await until(
+        async () => EffectOption.getOrUndefined(EffectArray.findFirst(await events(), event => event.kind === 'start')),
+        'Provider did not start',
+      );
       const endpointPath = join(home, 'threadnote', 'integration-coordinator', 'endpoint.json');
-      const original = JSON.parse(await readFile(endpointPath, 'utf8')) as {port: number; pid: number};
+      const original = Schema.decodeUnknownSync(EndpointSchema)(JSON.parse(await readFile(endpointPath, 'utf8')));
       const proxy = Bun.serve({hostname: '127.0.0.1', port: 0, fetch: () => new Response(null, {status: 409})});
       try {
         await writeFile(endpointPath, JSON.stringify({...original, port: proxy.port}));
@@ -162,25 +195,26 @@ describe('integration coordinator process composition', () => {
     await withProcesses(async ({home, alias, events, client}) => {
       await Promise.all([client('refresh'), client('refresh', alias)]);
       const start = await until(
-        async () => (await events()).find(event => event.kind === 'start'),
+        async () => EffectOption.getOrUndefined(EffectArray.findFirst(await events(), event => event.kind === 'start')),
         'Provider did not start',
       );
       const warm = await client('refresh', alias);
       expect(warm.elapsedMs).toBeLessThan(800);
       await until(
         async () =>
-          (await events())
-            .filter(event => event.kind === 'spawn' && event.pid !== start.pid)
-            .every(event => !alive(event.pid))
+          EffectArray.every(
+            EffectArray.filter(await events(), event => event.kind === 'spawn' && event.pid !== start.pid),
+            event => !alive(event.pid),
+          )
             ? true
             : undefined,
         'Cold-start contender did not exit promptly after discovering the healthy worker',
       );
-      expect((await events()).filter(event => event.kind === 'end')).toEqual([]);
+      expect(EffectArray.filter(await events(), event => event.kind === 'end')).toEqual([]);
       expect(await readFile(join(home, 'snapshot.txt'), 'utf8').catch(() => undefined)).toBeUndefined();
-      const endpoint = JSON.parse(
-        await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8'),
-      ) as {port: number; token: string};
+      const endpoint = Schema.decodeUnknownSync(EndpointSchema)(
+        JSON.parse(await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')),
+      );
       const url = `http://127.0.0.1:${endpoint.port}/v1/bindings`;
       const headers = {authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json'};
       expect(
@@ -215,9 +249,14 @@ describe('integration coordinator process composition', () => {
       const reply = await sync;
       expect(reply.result).toMatchObject({sourceId: 'slow', syncedDocuments: ['synthetic://slow/document']});
       expect(await readFile(join(home, 'snapshot.txt'), 'utf8')).toBe('usable synthetic snapshot');
-      expect(new Set((await events()).filter(event => event.kind === 'start').map(event => event.pid))).toEqual(
-        new Set([start.pid]),
-      );
+      expect(
+        new Set(
+          EffectArray.map(
+            EffectArray.filter(await events(), event => event.kind === 'start'),
+            event => event.pid,
+          ),
+        ),
+      ).toEqual(new Set([start.pid]));
       expectSequentialRuns(await events());
       await until(async () => (!alive(start.pid) ? true : undefined), 'Worker did not shut down when idle');
     });
@@ -227,7 +266,7 @@ describe('integration coordinator process composition', () => {
     await withProcesses(async ({home, events, client}) => {
       await client('refresh');
       const first = await until(
-        async () => (await events()).find(event => event.kind === 'start'),
+        async () => EffectOption.getOrUndefined(EffectArray.findFirst(await events(), event => event.kind === 'start')),
         'First worker did not start',
       );
       const original = persistedJob(home);
@@ -236,7 +275,10 @@ describe('integration coordinator process composition', () => {
       await until(async () => (!alive(first.pid) ? true : undefined), 'Killed worker remained alive');
       const sync = client('sync');
       const restarted = await until(
-        async () => (await events()).find(event => event.kind === 'start' && event.pid !== first.pid),
+        async () =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(await events(), event => event.kind === 'start' && event.pid !== first.pid),
+          ),
         'Pending source work did not restart',
       );
       expect(alive(first.pid)).toBe(false);
@@ -244,21 +286,27 @@ describe('integration coordinator process composition', () => {
       expect(persistedJob(home)).toEqual(original);
       await writeFile(join(home, 'release'), 'release restarted provider');
       expect((await sync).result?.syncedDocuments).toEqual(['synthetic://slow/document']);
-      expect((await events()).filter(event => event.kind === 'end').every(event => event.pid === restarted.pid)).toBe(
-        true,
-      );
-      expectSequentialRuns((await events()).filter(event => event.pid !== first.pid));
+      expect(
+        EffectArray.every(
+          EffectArray.filter(await events(), event => event.kind === 'end'),
+          event => event.pid === restarted.pid,
+        ),
+      ).toBe(true);
+      expectSequentialRuns(EffectArray.filter(await events(), event => event.pid !== first.pid));
     });
   });
 
   it('bounds explicit sync waiting while a provider is blocked', async () => {
     await withProcesses(async ({home, events, client}) => {
       await client('refresh');
-      await until(async () => (await events()).find(event => event.kind === 'start'), 'Provider did not start');
+      await until(
+        async () => EffectOption.getOrUndefined(EffectArray.findFirst(await events(), event => event.kind === 'start')),
+        'Provider did not start',
+      );
       const started = performance.now();
       await expect(client('deadline')).rejects.toThrow(/deadline|timed out|timeout/i);
       expect(performance.now() - started).toBeLessThan(3_000);
-      expect((await events()).some(event => event.kind === 'end')).toBe(false);
+      expect(EffectArray.some(await events(), event => event.kind === 'end')).toBe(false);
       await writeFile(join(home, 'release'), 'release after caller deadline');
       expect((await client('sync')).result?.syncedDocuments).toEqual(['synthetic://slow/document']);
     });
@@ -270,28 +318,31 @@ describe('integration coordinator process composition', () => {
       expect((await client('credential-sync', home, {[binding]: 'synthetic-token-a'})).result?.syncedDocuments).toEqual(
         ['synthetic://credential/document'],
       );
-      const initial = (await events()).find(event => event.kind === 'credential');
+      const initial = EffectOption.getOrUndefined(
+        EffectArray.findFirst(await events(), event => event.kind === 'credential'),
+      );
       expect(initial?.credentialHash).toBe(sha256HexSync('synthetic-token-a'));
       expect((await client('credential-sync', home, {[binding]: 'synthetic-token-b'})).result?.syncedDocuments).toEqual(
         ['synthetic://credential/document'],
       );
       await until(
         async () =>
-          (await events()).filter(event => event.credentialHash === sha256HexSync('synthetic-token-b')).length >= 2
+          EffectArray.filter(await events(), event => event.credentialHash === sha256HexSync('synthetic-token-b'))
+            .length >= 2
             ? true
             : undefined,
         'Rotated credential was not retained for autonomous continuation',
       );
       await expect(client('credential-sync', home, {[binding]: undefined})).rejects.toThrow(/failed/i);
-      const observations = (await events()).filter(event => event.kind === 'credential');
-      expect(observations.slice(0, 3).map(event => event.credentialHash)).toEqual([
+      const observations = EffectArray.filter(await events(), event => event.kind === 'credential');
+      expect(EffectArray.map(observations.slice(0, 3), event => event.credentialHash)).toEqual([
         sha256HexSync('synthetic-token-a'),
         sha256HexSync('synthetic-token-b'),
         sha256HexSync('synthetic-token-b'),
       ]);
       expect(observations.length).toBeGreaterThanOrEqual(4);
-      expect(observations.slice(3).every(event => event.credentialHash === 'missing')).toBe(true);
-      expect(new Set(observations.map(event => event.pid))).toEqual(new Set([initial?.pid]));
+      expect(EffectArray.every(observations.slice(3), event => event.credentialHash === 'missing')).toBe(true);
+      expect(new Set(EffectArray.map(observations, event => event.pid))).toEqual(new Set([initial?.pid]));
       for (const filename of ['jobs.sqlite', 'jobs.sqlite-wal', 'jobs.sqlite-shm']) {
         const bytes = await readFile(join(home, 'threadnote', 'integration-coordinator', filename)).catch(
           () => undefined,
@@ -306,7 +357,7 @@ describe('integration coordinator process composition', () => {
       const binding = 'THREADNOTE_SYNTHETIC_CREDENTIAL';
       await client('credential-sync', home, {[binding]: 'synthetic-token-a'});
       const endpointPath = join(home, 'threadnote', 'integration-coordinator', 'endpoint.json');
-      const original = JSON.parse(await readFile(endpointPath, 'utf8')) as {port: number; pid: number};
+      const original = Schema.decodeUnknownSync(EndpointSchema)(JSON.parse(await readFile(endpointPath, 'utf8')));
       let delayMs = 0;
       let bindingAttempts = 0;
       const proxy = Bun.serve({
@@ -332,7 +383,10 @@ describe('integration coordinator process composition', () => {
           expect(persistedJob(home)).toEqual([{generation: 1, state: 'idle'}]);
         }
         expect(
-          (await events()).filter(event => event.kind === 'credential').map(event => event.credentialHash),
+          EffectArray.map(
+            EffectArray.filter(await events(), event => event.kind === 'credential'),
+            event => event.credentialHash,
+          ),
         ).toEqual([sha256HexSync('synthetic-token-a')]);
       } finally {
         await writeFile(endpointPath, JSON.stringify(original));
@@ -345,18 +399,18 @@ describe('integration coordinator process composition', () => {
     await withProcesses(async ({home, events, client}) => {
       await client('race-refresh');
       const first = await until(
-        async () => (await events()).find(event => event.kind === 'start'),
+        async () => EffectOption.getOrUndefined(EffectArray.findFirst(await events(), event => event.kind === 'start')),
         'First worker did not start',
       );
       await writeFile(join(home, 'release'), 'finish initial source work');
       await until(
-        async () => (await events()).find(event => event.kind === 'end'),
+        async () => EffectOption.getOrUndefined(EffectArray.findFirst(await events(), event => event.kind === 'end')),
         'Initial source work did not finish',
       );
       await rm(join(home, 'release'));
       await writeFile(join(home, 'source-version'), 'changed-source-fingerprint');
       const endpointPath = join(home, 'threadnote', 'integration-coordinator', 'endpoint.json');
-      const original = JSON.parse(await readFile(endpointPath, 'utf8')) as {port: number; pid: number};
+      const original = Schema.decodeUnknownSync(EndpointSchema)(JSON.parse(await readFile(endpointPath, 'utf8')));
       let wakeAttempts = 0;
       const proxy = Bun.serve({
         hostname: '127.0.0.1',
@@ -371,19 +425,28 @@ describe('integration coordinator process composition', () => {
         await client('race-refresh');
         expect(wakeAttempts).toBeGreaterThan(0);
         const replacement = await until(
-          async () => (await events()).find(event => event.kind === 'spawn' && event.pid !== first.pid),
+          async () =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(await events(), event => event.kind === 'spawn' && event.pid !== first.pid),
+            ),
           'Accepted demand did not launch a replacement',
         );
         expect(alive(first.pid)).toBe(true);
         expect(alive(replacement.pid)).toBe(true);
         process.kill(first.pid, 'SIGKILL');
         await until(
-          async () => (await events()).find(event => event.kind === 'start' && event.pid === replacement.pid),
+          async () =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(await events(), event => event.kind === 'start' && event.pid === replacement.pid),
+            ),
           'Replacement did not consume accepted demand after the old lock was released',
         );
         await writeFile(join(home, 'release'), 'finish accepted source work');
         await until(
-          async () => (await events()).find(event => event.kind === 'end' && event.pid === replacement.pid),
+          async () =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(await events(), event => event.kind === 'end' && event.pid === replacement.pid),
+            ),
           'Accepted demand did not finish without another client call',
         );
         expect(persistedJob(home)).toEqual([{generation: 2, state: 'idle'}]);
@@ -396,10 +459,13 @@ describe('integration coordinator process composition', () => {
   it('accepts bounded many-source credential batches without enumerating providers in the handoff RPC', async () => {
     await withProcesses(async ({home, events, client}) => {
       await client('credential-sync', home, {THREADNOTE_SYNTHETIC_CREDENTIAL: 'synthetic-token-a'});
-      const endpoint = JSON.parse(
-        await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8'),
-      ) as {home: string; port: number; token: string; pid: number};
-      const before = (await events()).filter(event => event.kind === 'list' && event.pid === endpoint.pid).length;
+      const endpoint = Schema.decodeUnknownSync(EndpointSchema)(
+        JSON.parse(await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')),
+      );
+      const before = EffectArray.filter(
+        await events(),
+        event => event.kind === 'list' && event.pid === endpoint.pid,
+      ).length;
       const bindings = Array.from({length: 129}, (_, index) => ({
         descriptor: {
           sourceId: `credential-${index}`,
@@ -430,9 +496,9 @@ describe('integration coordinator process composition', () => {
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual({ok: true, accepted: batch.length});
       }
-      expect((await events()).filter(event => event.kind === 'list' && event.pid === endpoint.pid)).toHaveLength(
-        before,
-      );
+      expect(
+        EffectArray.filter(await events(), event => event.kind === 'list' && event.pid === endpoint.pid),
+      ).toHaveLength(before);
     });
   });
 
@@ -440,13 +506,16 @@ describe('integration coordinator process composition', () => {
     await withProcesses(async ({home, events, client}) => {
       const binding = 'THREADNOTE_SYNTHETIC_CREDENTIAL';
       await client('credential-sync', home, {[binding]: 'synthetic-token-a'});
-      const owner = (await events()).find(event => event.kind === 'credential');
+      const owner = EffectOption.getOrUndefined(
+        EffectArray.findFirst(await events(), event => event.kind === 'credential'),
+      );
       expect(owner?.credentialHash).toBe(sha256HexSync('synthetic-token-a'));
       await client('credential-cold-refresh', home, {[binding]: 'synthetic-token-b'});
-      expect((await events()).filter(event => event.kind === 'hidden-endpoint')).toHaveLength(1);
+      expect(EffectArray.filter(await events(), event => event.kind === 'hidden-endpoint')).toHaveLength(1);
       await until(
         async () =>
-          (await events()).some(
+          EffectArray.some(
+            await events(),
             event => event.kind === 'credential' && event.credentialHash === sha256HexSync('synthetic-token-b'),
           )
             ? true
@@ -454,7 +523,10 @@ describe('integration coordinator process composition', () => {
         'Accepted cold caller demand did not receive its own credential without another request',
       );
       const contender = await until(
-        async () => (await events()).find(event => event.kind === 'spawn' && event.pid !== owner?.pid),
+        async () =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(await events(), event => event.kind === 'spawn' && event.pid !== owner?.pid),
+          ),
         'Cold caller did not preserve its credential-carrying contender',
       );
       await until(
@@ -462,9 +534,14 @@ describe('integration coordinator process composition', () => {
         'Credential-carrying contender did not exit after forwarding to the elected worker',
       );
       expect(alive(owner!.pid)).toBe(true);
-      expect(new Set((await events()).filter(event => event.kind === 'credential').map(event => event.pid))).toEqual(
-        new Set([owner?.pid]),
-      );
+      expect(
+        new Set(
+          EffectArray.map(
+            EffectArray.filter(await events(), event => event.kind === 'credential'),
+            event => event.pid,
+          ),
+        ),
+      ).toEqual(new Set([owner?.pid]));
     });
   });
 });

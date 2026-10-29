@@ -1,6 +1,7 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {randomUuidV4} from '@threadnote/platform/uuid';
-import type {Sql, TransactionSql} from 'postgres';
+import type {Sql, ISql} from 'postgres';
 import type {AuthorizedRemotePrincipal} from './authorization.js';
 import {RemoteMemoryError} from './errors.js';
 import {rotateShares} from './indexer.js';
@@ -197,7 +198,7 @@ export class RemoteHandoffRetentionWorker {
     if (challenges.length > 0) {
       await this.sql`
         DELETE FROM remote_memory.challenge_directory
-        WHERE challenge_id = ANY(${this.sql.array(challenges.map(challenge => challenge.challenge_id))})
+        WHERE challenge_id = ANY(${this.sql.array(EffectArray.map(challenges, challenge => challenge.challenge_id))})
       `;
     }
   }
@@ -206,7 +207,7 @@ export class RemoteHandoffRetentionWorker {
     const rows = await this.sql<{tenant_id: string}[]>`
       SELECT DISTINCT tenant_id FROM remote_memory.share_directory ORDER BY tenant_id
     `;
-    return rows.map(row => row.tenant_id);
+    return EffectArray.map(rows, row => row.tenant_id);
   }
 
   private async candidates(limit: number, now: Date): Promise<readonly ExpiredHandoffRow[]> {
@@ -249,7 +250,10 @@ export class RemoteHandoffRetentionWorker {
       if (result.length >= limit) break;
     }
     if (lastScanned && shares.length > 0) {
-      const index = shares.findIndex(share => shareKey(share) === shareKey(lastScanned));
+      const index = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(shares, share => shareKey(share) === shareKey(lastScanned)),
+        () => -1,
+      );
       this.nextShareKey = shareKey(shares[(index + 1) % shares.length]);
     }
     return result;
@@ -266,7 +270,7 @@ export class RemoteHandoffRetentionWorker {
     `;
   }
 
-  private async withTenant<A>(tenantId: string, use: (transaction: TransactionSql) => Promise<A>): Promise<A> {
+  private async withTenant<A>(tenantId: string, use: (transaction: ISql) => Promise<A>): Promise<A> {
     return await this.sql.begin<Promise<A>>(async transaction => {
       await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
       await transaction`SELECT set_config('statement_timeout', '10000', true)`;
@@ -283,7 +287,10 @@ export function remoteHandoffExpiryOperationId(headId: string, revisionId: strin
 
 export function rotateTenantIds(tenantIds: readonly string[], cursor: string | undefined): readonly string[] {
   if (!cursor || tenantIds.length < 2) return tenantIds;
-  const index = tenantIds.findIndex(tenantId => tenantId >= cursor);
+  const index = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(tenantIds, tenantId => tenantId >= cursor),
+    () => -1,
+  );
   if (index <= 0) return index === 0 ? tenantIds : [...tenantIds];
   return [...tenantIds.slice(index), ...tenantIds.slice(0, index)];
 }

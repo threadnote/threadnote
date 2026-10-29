@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import {syncWritableFile} from '@threadnote/platform/file/durability';
 import {readBoundedPrivateBytes, writePrivateJsonFile} from '../atomic.js';
@@ -8,6 +9,7 @@ import {
   signedCandidateQueuePath,
   type GraphShareSignedCandidateV2,
 } from '../signed/candidate.js';
+import * as EffectRecord from 'effect/Record';
 
 const PAGE_ID = /^[0-9a-f]{64}$/u;
 const MAXIMUM_ATTEMPTS = 8;
@@ -107,8 +109,8 @@ const readCursor = Effect.fn('codeGraph.sharing.readWorkerCandidateScan')(functi
   if (
     typeof value !== 'object' ||
     value === null ||
-    Array.isArray(value) ||
-    Object.keys(value).sort().join(',') !== 'index,pageId,schemaVersion' ||
+    EffectArray.isArray(value) ||
+    EffectArray.join(EffectRecord.keys(value).sort(), ',') !== 'index,pageId,schemaVersion' ||
     !('schemaVersion' in value) ||
     value.schemaVersion !== 1 ||
     !('pageId' in value) ||
@@ -121,5 +123,5 @@ const readCursor = Effect.fn('codeGraph.sharing.readWorkerCandidateScan')(functi
     value.index >= 512
   )
     return yield* graphSharingFailure('Signed candidate scan cursor is invalid.');
-  return value as Cursor;
+  return {index: value.index, pageId: value.pageId, schemaVersion: value.schemaVersion};
 });

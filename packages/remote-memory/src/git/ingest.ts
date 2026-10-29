@@ -1,4 +1,5 @@
-import type {TransactionSql} from 'postgres';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import type {ISql} from 'postgres';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {randomUuidV4} from '@threadnote/platform/uuid';
 import {formatRemoteMemoryUri} from '@threadnote/memory/remote/address';
@@ -24,7 +25,7 @@ import {acquireRemoteRelationAdmissionTransactionLock} from '../relation_admissi
 import {replaceRemoteCodeLinkBacklinks} from '../code_link_backlinks.js';
 
 const CANDIDATE_LIMIT = 256;
-type WithTenant = <A>(use: (transaction: TransactionSql) => Promise<A>) => Promise<A>;
+type WithTenant = <A>(use: (transaction: ISql) => Promise<A>) => Promise<A>;
 type Path = GitCanonicalSnapshot['paths'][number];
 interface Head {
   readonly head_id: string;
@@ -80,8 +81,8 @@ export async function ingestGitShare(input: {
     `;
     for (const project of gitIngestProjectsToEnsure({
       allowedProjects: principal.allowedProjects,
-      gitProjects: snapshot.paths.map(path => path.project),
-      knownProjects: new Set(knownProjects.map(project => project.name)),
+      gitProjects: EffectArray.map(snapshot.paths, path => path.project),
+      knownProjects: new Set(EffectArray.map(knownProjects, project => project.name)),
     })) {
       await transaction`
         INSERT INTO remote_memory.projects(tenant_id, share_id, name, status)
@@ -100,7 +101,7 @@ export async function ingestGitShare(input: {
       SELECT name FROM remote_memory.projects
       WHERE tenant_id = ${principal.tenantId} AND share_id = ${principal.shareId} AND status = 'active'
     `;
-    return {heads, projects: new Set(projects.map(project => project.name))};
+    return {heads, projects: new Set(EffectArray.map(projects, project => project.name))};
   });
   const candidates = new Map<string, Candidate>();
   for (const path of snapshot.paths) candidates.set(path.gitPath, {...path, path});
@@ -124,12 +125,16 @@ export async function ingestGitShare(input: {
   const ordered = [...candidates.values()].sort((left, right) =>
     left.gitPath < right.gitPath ? -1 : left.gitPath > right.gitPath ? 1 : 0,
   );
-  const afterCursor = ordered.findIndex(
-    candidate => progress.git_ingest_cursor === null || candidate.gitPath > progress.git_ingest_cursor,
+  const afterCursor = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(
+      ordered,
+      candidate => progress.git_ingest_cursor === null || candidate.gitPath > progress.git_ingest_cursor,
+    ),
+    () => -1,
   );
   const rotated = afterCursor < 0 ? ordered : [...ordered.slice(afterCursor), ...ordered.slice(0, afterCursor)];
   const prioritized = rejectedPath
-    ? [candidates.get(rejectedPath)!, ...rotated.filter(candidate => candidate.gitPath !== rejectedPath)]
+    ? [candidates.get(rejectedPath)!, ...EffectArray.filter(rotated, candidate => candidate.gitPath !== rejectedPath)]
     : rotated;
   const blobCache = new Map<string, ReadonlyMap<string, string>>();
   const verifiedAncestors = new Set([snapshot.gitCommit]);

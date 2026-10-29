@@ -8,24 +8,26 @@ import type {
   RepositoryIdentity,
 } from '@threadnote/graph/types';
 import {runEffect} from './effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const databasePath = Bun.argv[2];
 if (!databasePath) throw TestError.make({message: 'Expected the code-graph database path as the first argument.'});
 
 const identity: RepositoryIdentity = {
   caseMode: 'sensitive',
-  checkoutId: 'c'.repeat(64),
+  checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
   displayName: 'materialization-kill-fixture',
   gitCommonDirectory: databasePath,
-  headCommit: '1'.repeat(40),
+  headCommit: Effect2.pipe('1', EffectString.repeat(40)),
   objectFormat: 'sha1',
   repoRoot: databasePath,
-  repositoryId: 'r'.repeat(64),
-  worktreeId: 'w'.repeat(64),
+  repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+  worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
 };
 const file: CodeGraphInventoryFile = {
-  blobId: 'b'.repeat(40),
-  contentHash: 'h'.repeat(64),
+  blobId: Effect2.pipe('b', EffectString.repeat(40)),
+  contentHash: Effect2.pipe('h', EffectString.repeat(64)),
   language: 'typescript',
   mode: '100644',
   path: 'src/materialization.ts',
@@ -34,7 +36,7 @@ const file: CodeGraphInventoryFile = {
 };
 const original = activationSymbol('original');
 const replacements = Array.from({length: 5_100}, (_, index) =>
-  activationSymbol(`replacement-${String(index).padStart(5, '0')}`),
+  activationSymbol(`replacement-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`),
 );
 const originalSnapshot = activationSnapshot(identity, 1);
 const interruptedSnapshot = activationSnapshot(identity, replacements.length);
@@ -88,7 +90,7 @@ function activationSnapshot(repository: RepositoryIdentity, symbolCount: number)
     edgeCount: 0,
     extractorSet: 'materialization-kill-test',
     fileCount: 1,
-    id: `cgsn_${'0'.repeat(40)}-full-${symbolCount.toString(16).padStart(16, '0')}`,
+    id: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}-full-${Effect2.pipe(symbolCount.toString(16), EffectString.padStart(16, '0'))}`,
     repositoryId: repository.repositoryId,
     state: 'ready',
     symbolCount,

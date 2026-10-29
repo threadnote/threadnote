@@ -1,3 +1,6 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Effect, Result, Schema} from 'effect';
@@ -25,13 +28,19 @@ import {
   topicDraftNativeJsonSchema,
 } from '../../src/manager/topic_draft_schema.js';
 import {compactAutomaticTopicDraftFixture, makeTopicDraftWireBasis} from '../helpers/topic-draft-wire.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function fixture(count = 3, sources = 2) {
   const uri = 'threadnote://user/tester/memories/durable/projects/fixture/topic.md';
-  const body = Array.from({length: count}, (_, index) => `Old fact ${index}.`).join('\n\n');
+  const body = EffectArray.join(
+    Array.from({length: count}, (_, index) => `Old fact ${index}.`),
+    '\n\n',
+  );
   const source = (index: number, variant: string): AutomaticMaintenanceSourceV1 => ({
     kind: 'memory',
-    uri: uri.replace('topic.md', `source-${index}.md`),
+    uri: Effect2.pipe(uri, EffectString.replace('topic.md', `source-${index}.md`)),
     canonicalHash: hash(variant + index),
     fragment: {ordinal: 0, hash: hash(variant + index), startOffset: 0, endOffset: 12},
   });
@@ -48,7 +57,7 @@ function fixture(count = 3, sources = 2) {
     readOnly: false,
     artifact: false,
   };
-  const paragraphs = body.split('\n\n').map((text, ordinal) => ({
+  const paragraphs = EffectArray.map(Effect2.pipe(body, EffectString.split('\n\n')), (text, ordinal) => ({
     ordinal,
     hash: hash(text),
     role: 'unknown' as const,
@@ -61,7 +70,7 @@ function fixture(count = 3, sources = 2) {
     currentSupport: 'unresolved' as const,
     currentSupportAuthority: 'provisional' as const,
   }));
-  const evidence = old.map(source => ({
+  const evidence = EffectArray.map(old, source => ({
     id: automaticMaintenanceEvidenceId(source),
     source,
     scope: 'personal' as const,
@@ -99,8 +108,8 @@ function fixture(count = 3, sources = 2) {
     scopeRevision: hash('scope'),
     additionalDependencies: [],
     handles: [
-      ...evidence.map(entry => ({id: `accepted:${entry.id}`, citationId: entry.id, variant: 'accepted'})),
-      ...current.map(id => ({id: `current:${id}`, citationId: id, variant: 'current'})),
+      ...EffectArray.map(evidence, entry => ({id: `accepted:${entry.id}`, citationId: entry.id, variant: 'accepted'})),
+      ...EffectArray.map(current, id => ({id: `current:${id}`, citationId: id, variant: 'current'})),
     ],
   });
   const selected = current[0];
@@ -112,7 +121,7 @@ function fixture(count = 3, sources = 2) {
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
     outcome: sources ? 'propose-update' : 'insufficient-evidence',
-    paragraphDecisions: paragraphs.map(p => ({
+    paragraphDecisions: EffectArray.map(paragraphs, p => ({
       ordinal: p.ordinal,
       beforeHash: p.hash,
       role: sources ? 'descriptive' : 'unknown',
@@ -149,7 +158,7 @@ describe('automatic model-only compact transport', () => {
         (count, selection, role, reverse) => {
           const {basis, wire} = fixture(count, 3);
           const ordinal = selection % count;
-          const paragraphs = basis.paragraphs.map(p => (p.ordinal === ordinal ? {...p, role} : p));
+          const paragraphs = EffectArray.map(basis.paragraphs, p => (p.ordinal === ordinal ? {...p, role} : p));
           const protectedBasis = validateAutomaticMaintenanceDraftBasis({
             ...basis,
             paragraphs,
@@ -160,7 +169,7 @@ describe('automatic model-only compact transport', () => {
             ...wire,
             outcome: 'insufficient-evidence',
             operations: [],
-            paragraphDecisions: wire.paragraphDecisions.map((p, i) =>
+            paragraphDecisions: EffectArray.map(wire.paragraphDecisions, (p, i) =>
               i === ordinal ? {...p, role, support: 'unresolved', evidenceIndices: []} : p,
             ),
           };
@@ -169,7 +178,9 @@ describe('automatic model-only compact transport', () => {
           expect(parseAutomaticMaintenanceDraft(protectedBasis, JSON.stringify(canonical)).body).toBe(basis.body);
           const changed = (decision: Record<string, unknown>) => ({
             ...safe,
-            paragraphDecisions: safe.paragraphDecisions.map((p, i) => (i === ordinal ? {...p, ...decision} : p)),
+            paragraphDecisions: EffectArray.map(safe.paragraphDecisions, (p, i) =>
+              i === ordinal ? {...p, ...decision} : p,
+            ),
           });
           for (const bad of [
             changed({role: 'descriptive'}),
@@ -191,7 +202,7 @@ describe('automatic model-only compact transport', () => {
   it('permits only the exact frozen current support mapping for a protected paragraph', () => {
     const {basis, wire} = fixture(1, 3);
     const id = basis.assessment.evidence[0].id;
-    const paragraphs = basis.paragraphs.map(p => ({
+    const paragraphs = EffectArray.map(basis.paragraphs, p => ({
       ...p,
       role: 'historical' as const,
       support: 'contextual' as const,
@@ -245,10 +256,16 @@ describe('automatic model-only compact transport', () => {
         (count, sources, reverse, selection, otherSupport) => {
           const {basis, draft: initial} = fixture(count, sources);
           const ordinal = selection % count;
-          const current = basis.handles.filter(handle => handle.variant === 'current');
+          const current = EffectArrayPipe(basis.handles, __effectFilterValues =>
+            EffectArray.filter(
+              __effectFilterValues,
+              (handle, __effectFilterIndex) =>
+                __effectFilterIndex in __effectFilterValues && handle.variant === 'current',
+            ),
+          );
           const draft: AutomaticMaintenanceDraftV2 = {
             ...initial,
-            paragraphDecisions: initial.paragraphDecisions.map((decision, index) => ({
+            paragraphDecisions: EffectArray.map(initial.paragraphDecisions, (decision, index) => ({
               ...decision,
               support: index === ordinal ? 'direct' : otherSupport,
               evidenceIds:
@@ -269,13 +286,23 @@ describe('automatic model-only compact transport', () => {
           const before = JSON.stringify({basis, wire});
           const tables = automaticTopicDraftIndexTables(basis);
           expect(tables.evidenceIds).toEqual(
-            [...new Set([...basis.assessment.evidence.map(e => e.id), ...basis.handles.map(h => h.citationId)])].sort(),
+            [
+              ...new Set([
+                ...EffectArray.map(basis.assessment.evidence, e => e.id),
+                ...EffectArray.map(basis.handles, h => h.citationId),
+              ]),
+            ].sort(),
           );
           expect(tables.currentHandles).toEqual(
-            basis.handles
-              .filter(h => h.variant === 'current')
-              .map(h => h.id)
-              .sort(),
+            EffectArray.map(
+              EffectArrayPipe(basis.handles, __effectFilterValues =>
+                EffectArray.filter(
+                  __effectFilterValues,
+                  (h, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && h.variant === 'current',
+                ),
+              ),
+              h => h.id,
+            ).sort(),
           );
           const permuted: AutomaticMaintenanceDraftBasisV3 = {
             ...basis,
@@ -286,10 +313,12 @@ describe('automatic model-only compact transport', () => {
           expect(decodeTopicDraftWire(permuted, wire)).toEqual(draft);
           expect(decodeTopicDraftProviderWire(basis, wire)).toEqual(wire);
           expect(parseAutomaticMaintenanceDraft(basis, JSON.stringify(draft)).body).toBe(
-            basis.body
-              .split('\n\n')
-              .map((text, index) => (index === ordinal ? 'New supported fact.' : text))
-              .join('\n\n'),
+            EffectArray.join(
+              EffectArray.map(Effect2.pipe(basis.body, EffectString.split('\n\n')), (text, index) =>
+                index === ordinal ? 'New supported fact.' : text,
+              ),
+              '\n\n',
+            ),
           );
           expect(JSON.stringify({basis, wire})).toBe(before);
         },
@@ -348,7 +377,7 @@ describe('automatic model-only compact transport', () => {
         const {basis} = fixture(count, sources);
         const native = topicDraftNativeJsonSchema(topicDraftModelSchema(basis), basis) as Field;
         const fields = native.properties!;
-        const order = Object.keys(fields);
+        const order = EffectRecord.keys(fields);
         expect(order.indexOf('rationale')).toBeLessThan(order.indexOf('unresolvedQuestions'));
         expect(order.indexOf('unresolvedQuestions')).toBeLessThan(order.indexOf('paragraphDecisions'));
         expect(order.indexOf('paragraphDecisions')).toBeLessThan(order.indexOf('outcome'));
@@ -356,7 +385,7 @@ describe('automatic model-only compact transport', () => {
         const decisions = fields.paragraphDecisions.items!;
         const variants = decisions.oneOf ?? [decisions];
         expect(variants).toHaveLength(count * (sources ? 3 : 1));
-        const tags = variants.map(variant => {
+        const tags = EffectArray.map(variants, variant => {
           const p = variant.properties!;
           const support = p.support.enum![0];
           expect(p.evidenceIndices.minItems ?? 0).toBe(support === 'unresolved' ? 0 : 1);
@@ -414,7 +443,10 @@ describe('automatic model-only compact transport', () => {
   it('never treats the admitted-evidence and current-source indices as one namespace', () => {
     const {basis, wire} = fixture(1, 3);
     const tables = automaticTopicDraftIndexTables(basis);
-    const index = tables.currentHandles.findIndex((handle, i) => handle !== `current:${tables.evidenceIds[i]}`);
+    const index = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(tables.currentHandles, (handle, i) => handle !== `current:${tables.evidenceIds[i]}`),
+      () => -1,
+    );
     expect(index).toBeGreaterThanOrEqual(0);
     const decoded = decodeTopicDraftWire(basis, {
       ...wire,
@@ -452,10 +484,18 @@ describe('automatic model-only compact transport', () => {
 
   it('retains the unchanged 32 KiB canonical preflight after compact hydration', () => {
     const {basis, draft} = fixture(64, 8);
-    const all = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.citationId);
+    const all = EffectArray.map(
+      EffectArrayPipe(basis.handles, __effectFilterValues =>
+        EffectArray.filter(
+          __effectFilterValues,
+          (handle, __effectFilterIndex) => __effectFilterIndex in __effectFilterValues && handle.variant === 'current',
+        ),
+      ),
+      handle => handle.citationId,
+    );
     const wire = compactAutomaticTopicDraftFixture(basis, {
       ...draft,
-      paragraphDecisions: draft.paragraphDecisions.map(decision => ({...decision, evidenceIds: all})),
+      paragraphDecisions: EffectArray.map(draft.paragraphDecisions, decision => ({...decision, evidenceIds: all})),
     });
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() => decodeTopicDraftProviderWire(basis, wire)).not.toThrow();
@@ -477,7 +517,7 @@ describe('automatic model-only compact transport', () => {
       {...wire, paragraphDecisions: [{...decisions[0], beforeHash: basis.paragraphs[0].hash}, ...decisions.slice(1)]},
       {...wire, operations: [...wire.operations, ...wire.operations]},
       {...wire, operations: [{...wire.operations[0], beforeHash: hash('invented')}]},
-      ...[-1, 0.5, 999, '0'].map(index => ({...wire, currentSourceIndices: [index]})),
+      ...EffectArray.map([-1, 0.5, 999, '0'], index => ({...wire, currentSourceIndices: [index]})),
     ])
       expect(() => decodeTopicDraftWire(basis, input)).toThrow();
     expect(() => decodeTopicDraftProviderWire(basis, draft)).toThrow();
@@ -486,12 +526,14 @@ describe('automatic model-only compact transport', () => {
 
   it('keeps unsafe text/bounds terminal and protected-role/application checks under the memory owner', () => {
     const {basis, wire} = fixture();
-    for (const text of ['\ud800', 'New.\n\nAnother.', 'x'.repeat(32 * 1024)]) {
+    for (const text of ['\ud800', 'New.\n\nAnother.', Effect2.pipe('x', EffectString.repeat(32 * 1024))]) {
       expect(() => decodeTopicDraftWire(basis, {...wire, operations: [{...wire.operations[0], text}]})).toThrow();
     }
-    expect(() => decodeTopicDraftWire(basis, {...wire, rationale: 'x'.repeat(2049)})).toThrow();
+    expect(() =>
+      decodeTopicDraftWire(basis, {...wire, rationale: Effect2.pipe('x', EffectString.repeat(2049))}),
+    ).toThrow();
     for (const role of ['normative', 'historical', 'unknown'] as const) {
-      const paragraphs = basis.paragraphs.map(p => ({...p, role}));
+      const paragraphs = EffectArray.map(basis.paragraphs, p => ({...p, role}));
       const protectedBasis = validateAutomaticMaintenanceDraftBasis({
         ...basis,
         paragraphs,
@@ -511,7 +553,7 @@ describe('automatic model-only compact transport', () => {
   });
   it('preserves established reviewed unknown roles during model hydration and application', () => {
     const {basis, wire} = fixture();
-    const paragraphs = basis.paragraphs.map(paragraph => ({
+    const paragraphs = EffectArray.map(basis.paragraphs, paragraph => ({
       ...paragraph,
       roleAuthority: 'reviewed',
       supportAuthority: 'reviewed',

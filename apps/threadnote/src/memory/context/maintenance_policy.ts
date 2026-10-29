@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -11,9 +13,12 @@ import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
   contextHealthCaseIdV2,
   contextHealthCitationCaseSlotV2,
+  migrateContextHealthCitationCaseSlotV2,
   resolveContextHealthRelationTargetV2,
 } from '@threadnote/context/health_maintenance';
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MAX_EVENTS = 8;
 
@@ -22,9 +27,10 @@ export function maintenanceContentHash(content: string) {
 }
 
 export function nextMaintenanceDeadline(record: MemoryRecord, now: string): string | undefined {
-  return [record.metadata.validTo, record.metadata.reviewAfter]
-    .filter((value): value is string => value !== undefined && Date.parse(value) > Date.parse(now))
-    .sort()[0];
+  return EffectArray.filter(
+    [record.metadata.validTo, record.metadata.reviewAfter],
+    (value): value is string => value !== undefined && Date.parse(value) > Date.parse(now),
+  ).sort()[0];
 }
 
 export function artifactOnlySharedRelationProposal(
@@ -37,8 +43,9 @@ export function artifactOnlySharedRelationProposal(
     item.reason === 'shared-canonical-relations-require-owner-review' &&
     item.slot === 'relations' &&
     isSharedMemoryUri(subject.uri) &&
-    subject.metadata.relations?.some(relation => isAgentArtifactUri(relation.uri)) === true &&
-    subject.metadata.relations.every(relation => {
+    subject.metadata.relations != null &&
+    Boolean(EffectArray.some(subject.metadata.relations, relation => isAgentArtifactUri(relation.uri))) &&
+    EffectArray.every(subject.metadata.relations, relation => {
       if (isAgentArtifactUri(relation.uri)) return true;
       const state = resolveRelationTarget(records, relation.uri).state;
       return state === 'active' || state === 'inactive';
@@ -51,15 +58,15 @@ export function duplicateArchiveSafe(subject: MemoryRecord, survivor: MemoryReco
     survivor === undefined ||
     survivor.uri === subject.uri ||
     isSharedMemoryUri(survivor.uri) ||
-    subject.body.trim() !== survivor.body.trim()
+    Effect.pipe(subject.body, EffectString.trim) !== Effect.pipe(survivor.body, EffectString.trim)
   )
     return false;
   if (subject.metadata.memoryId === undefined || survivor.metadata.memoryId === undefined) return false;
-  const relations = new Set((survivor.metadata.relations ?? []).map(item => `${item.type}:${item.uri}`));
-  const citations = new Set((survivor.metadata.codeCitations ?? []).map(item => item.id));
+  const relations = new Set(EffectArray.map(survivor.metadata.relations ?? [], item => `${item.type}:${item.uri}`));
+  const citations = new Set(EffectArray.map(survivor.metadata.codeCitations ?? [], item => item.id));
   return (
-    (subject.metadata.relations ?? []).every(item => relations.has(`${item.type}:${item.uri}`)) &&
-    (subject.metadata.codeCitations ?? []).every(item => citations.has(item.id))
+    EffectArray.every(subject.metadata.relations ?? [], item => relations.has(`${item.type}:${item.uri}`)) &&
+    EffectArray.every(subject.metadata.codeCitations ?? [], item => citations.has(item.id))
   );
 }
 
@@ -109,17 +116,20 @@ export function selectFairMaintenanceWork<T extends {readonly project: string}>(
 export function selectMaintenanceCitationCaseTask<
   T extends {readonly record: MemoryRecord; readonly project: string; readonly chunk: number},
 >(items: readonly T[], selected: ContextMaintenanceCaseV2): T | undefined {
-  const matches = items.filter(
-    item =>
+  const matches = EffectArray.filter(
+    items,
+    (item, __effectArrayIndex) =>
+      __effectArrayIndex in items &&
       item.project === selected.project &&
       (item.record.metadata.memoryId ?? item.record.uri) === selected.memoryId &&
       (selected.subjectUri === undefined || selected.subjectUri === item.record.uri) &&
       (selected.family === 'citation-coverage'
         ? String(item.chunk) === selected.slot
         : selected.family === 'citation' &&
-          currentMemoryCodeCitations(item.record)
-            .slice(item.chunk * 64, (item.chunk + 1) * 64)
-            .some(citation => contextHealthCitationCaseSlotV2(citation) === selected.slot)),
+          EffectArray.some(
+            currentMemoryCodeCitations(item.record).slice(item.chunk * 64, (item.chunk + 1) * 64),
+            citation => contextHealthCitationCaseSlotV2(citation) === selected.slot,
+          )),
   );
   return matches.length === 1 ? matches[0] : undefined;
 }
@@ -175,9 +185,15 @@ export function mergeMaintenanceCaseLineage(
         ? Math.max(left.attemptCount, right.attemptCount)
         : latest.attemptCount,
     events: [
-      ...new Map([...left.events, ...right.events].map(event => [`${event.at}:${event.reason}`, event])).values(),
+      ...new Map(
+        EffectArray.map([...left.events, ...right.events], event => [`${event.at}:${event.reason}`, event]),
+      ).values(),
     ]
-      .sort((a, b) => a.at.localeCompare(b.at) || a.reason.localeCompare(b.reason))
+      .sort(
+        (a, b) =>
+          Effect.pipe(a.at, EffectString.localeCompare(b.at)) ||
+          Effect.pipe(a.reason, EffectString.localeCompare(b.reason)),
+      )
       .slice(-MAX_EVENTS),
   };
 }
@@ -202,7 +218,9 @@ export function reconcileRepositoryRecoveryCases(cases: Map<string, ContextMaint
       family: 'repository-recovery',
       slot: 'repository',
     };
-    const revision = sha256HexSync(JSON.stringify(anchors.map(item => [item.caseId, item.evidenceRevision]).sort()));
+    const revision = sha256HexSync(
+      JSON.stringify(EffectArray.map(anchors, item => [item.caseId, item.evidenceRevision]).sort()),
+    );
     const previous = cases.get(contextHealthCaseIdV2(identity));
     const item =
       previous?.evidenceRevision === revision
@@ -225,19 +243,35 @@ export function reconcileRepositoryRecoveryCases(cases: Map<string, ContextMaint
     current.add(item.caseId);
     cases.set(item.caseId, {
       ...item,
-      sourceSnapshots: anchors
-        .flatMap(anchor =>
-          anchor.sourceSnapshot === undefined
-            ? []
-            : [{uri: anchor.subjectContentHashes?.[0]?.uri ?? '', ...anchor.sourceSnapshot}],
-        )
-        .filter((source, index, all) => all.findIndex(other => other.uri === source.uri) === index)
-        .sort((a, b) => a.uri.localeCompare(b.uri)),
+      sourceSnapshots: EffectArrayPipe(
+        EffectArray.flatMap(anchors, (anchor, effectFlatMapIndex) =>
+          effectFlatMapIndex in anchors
+            ? anchor.sourceSnapshot === undefined
+              ? []
+              : [{uri: anchor.subjectContentHashes?.[0]?.uri ?? '', ...anchor.sourceSnapshot}]
+            : [],
+        ),
+        __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (source, index) =>
+              index in __effectArrayValues &&
+              EffectOption.getOrElse(
+                EffectArray.findFirstIndex(__effectArrayValues, other => other.uri === source.uri),
+                () => -1,
+              ) === index,
+          ),
+      ).sort((a, b) => Effect.pipe(a.uri, EffectString.localeCompare(b.uri))),
       subjectContentHashes: [
         ...new Map(
-          anchors.flatMap(anchor => anchor.subjectContentHashes ?? []).map(subject => [subject.uri, subject]),
+          EffectArray.map(
+            EffectArray.flatMap(anchors, (anchor, __effectArrayIndex) =>
+              __effectArrayIndex in anchors ? (anchor.subjectContentHashes ?? []) : [],
+            ),
+            subject => [subject.uri, subject],
+          ),
         ).values(),
-      ].sort((a, b) => a.uri.localeCompare(b.uri)),
+      ].sort((a, b) => Effect.pipe(a.uri, EffectString.localeCompare(b.uri))),
     });
   }
   for (const [id, item] of cases)
@@ -294,9 +328,21 @@ export function resolveMaintenanceRelationPolicy(
   if (target.state === 'inactive' && relation.type !== 'depends_on')
     return {state: 'historical', target: target.record};
   if (!complete || isSharedMemoryUri(record.uri)) return {state: 'unknown'};
-  const personalRoot = record.uri.slice(0, record.uri.indexOf('/memories/') + '/memories/'.length);
+  const personalRoot = Effect.pipe(
+    record.uri,
+    EffectString.slice(
+      0,
+      Effect.pipe(
+        record.uri,
+        EffectString.indexOf('/memories/'),
+        Effect.Option.getOrElse(() => -1),
+      ) + '/memories/'.length,
+    ),
+  );
   const personal = (uri: string) =>
-    personalRoot.includes('/memories/') && uri.startsWith(personalRoot) && !isSharedMemoryUri(uri);
+    Effect.pipe(personalRoot, EffectString.includes('/memories/')) &&
+    Effect.pipe(uri, EffectString.startsWith(personalRoot)) &&
+    !isSharedMemoryUri(uri);
   if (target.record === undefined)
     return {
       state: personal(relation.uri) && memoryIdFromIdentityAlias(relation.uri) === undefined ? 'prunable' : 'unknown',
@@ -305,10 +351,14 @@ export function resolveMaintenanceRelationPolicy(
   const lineage: MemoryRecord[] = [target.record];
   let current = target.record;
   for (let hop = 0; hop < 64; hop++) {
-    const successors = corpus.filter(candidate =>
-      (candidate.metadata.relations ?? []).some(
-        link => link.type === 'supersedes' && resolveRelationTarget(corpus, link.uri).record?.uri === current.uri,
-      ),
+    const successors = EffectArray.filter(
+      corpus,
+      (candidate, __effectArrayIndex) =>
+        __effectArrayIndex in corpus &&
+        EffectArray.some(
+          candidate.metadata.relations ?? [],
+          link => link.type === 'supersedes' && resolveRelationTarget(corpus, link.uri).record?.uri === current.uri,
+        ),
     );
     if (successors.length > 1) return {state: 'ambiguous', target: target.record};
     const successor = successors[0];
@@ -319,10 +369,12 @@ export function resolveMaintenanceRelationPolicy(
       successor.metadata.memoryId === undefined ||
       resolveRelationTarget(corpus, `threadnote://memory/${successor.metadata.memoryId}`).record?.uri !==
         successor.uri ||
-      lineage.some(
+      EffectArray.some(
+        lineage,
         prior =>
           prior.uri === successor.uri ||
-          (prior.metadata.relations ?? []).some(
+          EffectArray.some(
+            prior.metadata.relations ?? [],
             link => link.type === 'supersedes' && resolveRelationTarget(corpus, link.uri).record?.uri === successor.uri,
           ),
       )
@@ -337,8 +389,13 @@ export function resolveMaintenanceRelationPolicy(
 }
 
 export function safeRelationRemoval(record: MemoryRecord, corpus: readonly MemoryRecord[]): readonly MemoryRelation[] {
-  return (record.metadata.relations ?? []).filter(
-    relation => resolveMaintenanceRelationPolicy(record, relation, corpus).state === 'prunable',
+  return EffectArrayPipe(record.metadata.relations ?? [], __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (relation, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues &&
+        resolveMaintenanceRelationPolicy(record, relation, corpus).state === 'prunable',
+    ),
   );
 }
 
@@ -349,8 +406,20 @@ export function maintenanceRelationPolicyMatches(left: MaintenanceRelationPolicy
     left.successor?.uri === right.successor?.uri &&
     left.target?.content === right.target?.content &&
     left.successor?.content === right.successor?.content &&
-    JSON.stringify(left.lineage?.map(record => [record.uri, sha256HexSync(record.content)])) ===
-      JSON.stringify(right.lineage?.map(record => [record.uri, sha256HexSync(record.content)]))
+    JSON.stringify(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(left.lineage), lineage =>
+          EffectArray.map(lineage, record => [record.uri, sha256HexSync(record.content)]),
+        ),
+      ),
+    ) ===
+      JSON.stringify(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(right.lineage), lineage =>
+            EffectArray.map(lineage, record => [record.uri, sha256HexSync(record.content)]),
+          ),
+        ),
+      )
   );
 }
 
@@ -359,11 +428,11 @@ export function reconcileAbsentMaintenanceAnchors(
   record: MemoryRecord,
   now: string,
 ) {
-  const anchors = new Set(currentMemoryCodeCitations(record).map(contextHealthCitationCaseSlotV2));
+  const anchors = new Set(EffectArray.map(currentMemoryCodeCitations(record), contextHealthCitationCaseSlotV2));
   const chunks = Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64));
   for (const [id, item] of cases) {
     if (!absentMaintenanceAnchorCase(item, record, anchors, chunks)) continue;
-    const unresolved = item.slot.startsWith('legacy-unresolved:');
+    const unresolved = Effect.pipe(item.slot, EffectString.startsWith('legacy-unresolved:'));
     cases.set(id, {
       ...item,
       disposition: 'resolved',
@@ -380,7 +449,7 @@ export function reconcileAbsentMaintenanceAnchors(
 }
 
 export function hasAbsentMaintenanceAnchors(cases: Iterable<ContextMaintenanceCaseV2>, record: MemoryRecord): boolean {
-  const anchors = new Set(currentMemoryCodeCitations(record).map(contextHealthCitationCaseSlotV2));
+  const anchors = new Set(EffectArray.map(currentMemoryCodeCitations(record), contextHealthCitationCaseSlotV2));
   const chunks = Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64));
   for (const item of cases) if (absentMaintenanceAnchorCase(item, record, anchors, chunks)) return true;
   return false;
@@ -412,9 +481,82 @@ export function maintenanceAnchorChunksComplete(
 ) {
   return (
     hash !== undefined &&
-    Array.from(
-      {length: Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64))},
-      (_, chunk) => checkpoints[`${record.metadata.memoryId ?? record.uri}:${chunk}`],
-    ).every(check => check?.inventoryComplete === true && check.memoryHash === hash)
+    EffectArray.every(
+      Array.from(
+        {length: Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64))},
+        (_, chunk) => checkpoints[`${record.metadata.memoryId ?? record.uri}:${chunk}`],
+      ),
+      check => check?.inventoryComplete === true && check.memoryHash === hash,
+    )
   );
+}
+
+export function migrateMaintenanceCases(
+  cases: readonly ContextMaintenanceCaseV2[],
+  records: readonly MemoryRecord[] = [],
+  hashes?: ReadonlyMap<string, string>,
+  inventoryComplete = false,
+): readonly ContextMaintenanceCaseV2[] {
+  const identities = new Map<string, ContextMaintenanceCaseV2>();
+  for (const item of cases) {
+    const subject = EffectOption.getOrUndefined(
+      EffectArray.findFirst(records, record => (record.metadata.memoryId ?? record.uri) === item.memoryId),
+    );
+    const citations = subject ? currentMemoryCodeCitations(subject) : [];
+    const ordinal = /^(?:anchor:)?(\d+)$/u.exec(item.slot);
+    const unchangedSubject =
+      subject !== undefined &&
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(item.subjectContentHashes), findArray =>
+          EffectArray.some(
+            findArray,
+            reference =>
+              reference.uri === subject.uri &&
+              reference.hash === (hashes?.get(subject.uri) ?? maintenanceContentHash(subject.content)),
+          ),
+        ),
+      );
+    const citationId =
+      item.citationId ?? (unchangedSubject && ordinal !== null ? citations[Number(ordinal[1])]?.id : undefined);
+    const slot =
+      item.family === 'citation'
+        ? records.length === 0 || Effect.pipe(item.slot, EffectString.startsWith('legacy-unresolved:'))
+          ? item.slot
+          : /^anchor:tncc_[0-9a-f]{40}$/u.test(item.slot) &&
+              !EffectArray.some(citations, citation => contextHealthCitationCaseSlotV2(citation) === item.slot)
+            ? item.slot
+            : (migrateContextHealthCitationCaseSlotV2({
+                slot: item.slot,
+                citationId,
+                citations,
+              }) ?? `legacy-unresolved:${item.caseId}`)
+        : item.family === 'relation'
+          ? Effect.pipe(
+              item.slot,
+              EffectString.replace(
+                /^(?:depends_on|references|related_to|supersedes|evidence_for):(?=threadnote:\/\/)/u,
+                '',
+              ),
+            )
+          : item.slot === item.family && item.family !== 'citation'
+            ? 'record'
+            : item.slot;
+    // Remove non-memory findings before a current checkpoint can skip record work.
+    if (item.family === 'relation' && isAgentArtifactUri(slot)) continue;
+    if (inventoryComplete && unchangedSubject && artifactOnlySharedRelationProposal(item, subject, records)) continue;
+    const canonicalSlot =
+      item.family === 'relation' ? (resolveRelationTarget(records, slot).record?.metadata.memoryId ?? slot) : slot;
+    const next = {
+      ...item,
+      slot: canonicalSlot,
+      disposition:
+        item.family === 'review-overdue' && item.disposition === 'deferred-policy'
+          ? ('needs-decision' as const)
+          : item.disposition,
+      caseId: contextHealthCaseIdV2({...item, slot: canonicalSlot}),
+    };
+    const prior = identities.get(next.caseId);
+    identities.set(next.caseId, prior === undefined ? next : mergeMaintenanceCaseLineage(prior, next));
+  }
+  return [...identities.values()];
 }

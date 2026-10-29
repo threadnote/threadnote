@@ -1,3 +1,5 @@
+import {Predicate} from 'effect';
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Private release engineering owns real CLI process groups and binary payloads. */
 import {createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
@@ -6,6 +8,8 @@ import {lstat, open, realpath} from 'node:fs/promises';
 import {constants, type BigIntStats} from 'node:fs';
 import {isAbsolute, resolve, sep} from 'node:path';
 import type {Threadnote5SourceV1} from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-contract';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const COLLECTION_MAX_BYTES = 8 * 1024 * 1024;
 const unsafeCleanupErrors = new WeakSet<Error>();
@@ -88,7 +92,12 @@ export function collectionCleanupIsUnsafe(error: unknown): boolean {
 }
 
 export function collectionEnvironment(root: string, home: string): Record<string, string> {
-  if (!isAbsolute(root) || resolve(root) !== root || resolve(home) !== home || !home.startsWith(`${root}${sep}`))
+  if (
+    !isAbsolute(root) ||
+    resolve(root) !== root ||
+    resolve(home) !== home ||
+    !Effect.pipe(home, EffectString.startsWith(`${root}${sep}`))
+  )
     throw new Error('THREADNOTE_HOME must be inside the fresh collection root.');
   return {
     HOME: home,
@@ -211,8 +220,11 @@ export function ownCollectionProcess(
     try {
       process.kill(-child.pid, 'SIGKILL');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
-      if ((error as NodeJS.ErrnoException).code === 'EPERM' && (await collectionGroupMembers(child.pid)).length === 0)
+      if ((Predicate.hasProperty(error, 'code') ? error.code : undefined) === 'ESRCH') return;
+      if (
+        (Predicate.hasProperty(error, 'code') ? error.code : undefined) === 'EPERM' &&
+        (await collectionGroupMembers(child.pid)).length === 0
+      )
         return;
       if (error instanceof Error) unsafeCleanupErrors.add(error);
       throw error;
@@ -309,19 +321,30 @@ export async function collectionGroupMembers(group: number): Promise<readonly nu
         reject(error);
         return;
       }
-      const members = Buffer.concat(chunks)
-        .toString('utf8')
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .map(line => line.trim().split(/\s+/u).map(Number));
-      if (members.some(pair => pair.length !== 2 || pair.some(value => !Number.isSafeInteger(value) || value < 0))) {
+      const members = EffectArray.map(
+        EffectArray.filter(
+          Effect.pipe(Buffer.concat(chunks).toString('utf8'), EffectString.trim, EffectString.split('\n')),
+          Boolean,
+        ),
+        line => EffectArray.map(Effect.pipe(line, EffectString.trim, EffectString.split(/\s+/u)), Number),
+      );
+      if (
+        EffectArray.some(
+          members,
+          pair => pair.length !== 2 || EffectArray.some(pair, value => !Number.isSafeInteger(value) || value < 0),
+        )
+      ) {
         const error = new Error('Invalid process-group observation.');
         unsafeCleanupErrors.add(error);
         reject(error);
         return;
       }
-      resolvePromise(members.filter(([, pgid]) => pgid === group).map(([pid]) => pid));
+      resolvePromise(
+        EffectArray.map(
+          EffectArray.filter(members, ([, pgid]) => pgid === group),
+          ([pid]) => pid,
+        ),
+      );
     });
   });
 }
@@ -405,7 +428,7 @@ export async function readCollectionPayloadIdentity(executable: string): Promise
     const after = await handle.stat({bigint: true});
     const current = await lstat(executable, {bigint: true});
     const stamp = (value: typeof before) =>
-      [value.dev, value.ino, value.size, value.mtimeNs, value.ctimeNs].map(String).join(':');
+      EffectArray.join(EffectArray.map([value.dev, value.ino, value.size, value.mtimeNs, value.ctimeNs], String), ':');
     if (stamp(before) !== stamp(after) || stamp(before) !== stamp(current))
       throw new Error('Candidate payload changed while hashing.');
     return {
@@ -437,9 +460,9 @@ export async function observeCollectionRuntime(
   const version = await runCollectionProcess(executable, ['--version'], cwd, env, 10_000);
   if (
     version.exitCode !== 0 ||
-    version.stderr.trim() ||
-    version.stdout.trim() !== `threadnote v${candidate.version}` ||
-    !candidate.version.endsWith(`local.g${candidate.commit}`)
+    Effect.pipe(version.stderr, EffectString.trim) ||
+    Effect.pipe(version.stdout, EffectString.trim) !== `threadnote v${candidate.version}` ||
+    !Effect.pipe(candidate.version, EffectString.endsWith(`local.g${candidate.commit}`))
   )
     throw new Error('Candidate version/commit drift.');
   if (JSON.stringify(await readCollectionPayloadIdentity(executable)) !== JSON.stringify(payload))

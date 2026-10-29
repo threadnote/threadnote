@@ -9,6 +9,7 @@ import {
   remoteShareUriIsWithin,
   resolveRemoteMemoryAlias,
 } from '@threadnote/memory/remote/address';
+import {Array as EffectArray} from 'effect';
 
 const segmentBoundaryArbitrary = FC.constantFrom('a', 'Z', '0', '-', '_', '+', 'é', '中', 'क', '😀');
 const segmentMiddleArbitrary = FC.constantFrom(
@@ -39,7 +40,7 @@ const segmentMiddleArbitrary = FC.constantFrom(
 const portableSegmentArbitrary = FC.oneof(
   FC.constantFrom('a', 'Z', '0', 'é', '中', 'क', '😀'),
   FC.tuple(FC.array(segmentMiddleArbitrary, {maxLength: 12}), segmentBoundaryArbitrary).map(
-    ([middle, finalCharacter]) => `seg-${middle.join('')}${finalCharacter}`,
+    ([middle, finalCharacter]) => `seg-${EffectArray.join(middle, '')}${finalCharacter}`,
   ),
 );
 

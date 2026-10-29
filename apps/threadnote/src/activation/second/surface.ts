@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isSharedMemoryUri} from '@threadnote/memory/document';
 import {isMemoryId} from '@threadnote/memory/identity-alias';
 import {parseResourceId} from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const SECOND_SURFACE_PROOF_VERSION = 1 as const;
 export const SECOND_SURFACE_PROOF_MAX_RESULTS = 32 as const;
@@ -356,7 +359,8 @@ function planDecodedRead(
   if (contextFailure !== undefined) return rejected(contextFailure);
   const observationFailure = validateObservation(context, recall);
   if (observationFailure !== undefined) return rejected(observationFailure);
-  if (recall.results.some(result => !isCanonicalUri(result.canonicalUri))) return rejected('input-invalid');
+  if (EffectArray.some(recall.results, result => !isCanonicalUri(result.canonicalUri)))
+    return rejected('input-invalid');
   if (recall.queryFingerprint !== context.queryFingerprint) return rejected('read-drift');
   if (!recall.complete) return rejected('recall-incomplete');
   if (
@@ -366,7 +370,8 @@ function planDecodedRead(
   ) {
     return rejected('recall-truncated');
   }
-  const related = recall.results.filter(
+  const related = EffectArray.filter(
+    recall.results,
     result => result.memoryId === context.decision.memoryId || result.canonicalUri === context.decision.canonicalUri,
   );
   if (related.length === 0) return rejected('wrong-memory');
@@ -420,6 +425,9 @@ export function completeSecondSurfaceProofV1(
   if (durationMilliseconds > SECOND_SURFACE_PROOF_MAX_DURATION_MILLISECONDS) return rejected('duration-exceeded');
   const primary = context.primary;
   const secondary = context.secondary;
+  if (primary.mcpCapability === 'unsupported' || secondary.mcpCapability === 'unsupported') {
+    return rejected('surface-unsupported');
+  }
   const body = {
     activationId: context.activationId,
     activationReceiptRevision: context.activationReceiptRevision,
@@ -433,7 +441,7 @@ export function completeSecondSurfaceProofV1(
     mcpServerFingerprint: secondary.mcpServerFingerprint!,
     primaryAccess: primary.access,
     primaryCapabilitiesFingerprint: primary.capabilitiesFingerprint,
-    primaryMcpCapability: primary.mcpCapability as Exclude<SecondSurfaceMcpCapability, 'unsupported'>,
+    primaryMcpCapability: primary.mcpCapability,
     primaryMcpConfigFingerprint: primary.mcpConfigFingerprint!,
     primaryMcpReceiptFingerprint: primary.mcpReceiptFingerprint!,
     primarySurfaceId: primary.surfaceId,
@@ -448,7 +456,7 @@ export function completeSecondSurfaceProofV1(
     repositoryState: context.repositoryState,
     secondaryAccess: secondary.access,
     secondaryCapabilitiesFingerprint: secondary.capabilitiesFingerprint,
-    secondaryMcpCapability: secondary.mcpCapability as Exclude<SecondSurfaceMcpCapability, 'unsupported'>,
+    secondaryMcpCapability: secondary.mcpCapability,
     secondaryMcpConfigFingerprint: secondary.mcpConfigFingerprint!,
     secondaryMcpReceiptFingerprint: secondary.mcpReceiptFingerprint!,
     secondarySurfaceId: secondary.surfaceId,
@@ -547,8 +555,11 @@ export function secondSurfaceProofMatchesContextV1(
 export function secondSurfaceProofHashV1(
   receipt: Omit<SecondSurfaceProofReceiptV1, 'proofHash'> | SecondSurfaceProofReceiptV1,
 ): string {
-  const {proofHash: _, ...body} = receipt as SecondSurfaceProofReceiptV1;
-  return sha256HexSync(canonicalJson(body));
+  if ('proofHash' in receipt) {
+    const {proofHash: _, ...body} = receipt;
+    return sha256HexSync(canonicalJson(body));
+  }
+  return sha256HexSync(canonicalJson(receipt));
 }
 
 function decodeContext(value: unknown): SecondSurfaceProofContextV1 | undefined {
@@ -704,7 +715,9 @@ function instantMilliseconds(value: string): number | undefined {
   const milliseconds = Date.parse(value);
   if (!Number.isFinite(milliseconds)) return undefined;
   const canonical = new Date(milliseconds).toISOString();
-  return canonical === value || (value.endsWith('Z') && canonical === value.replace(/Z$/u, '.000Z'))
+  return canonical === value ||
+    (Effect.pipe(value, EffectString.endsWith('Z')) &&
+      canonical === Effect.pipe(value, EffectString.replace(/Z$/u, '.000Z')))
     ? milliseconds
     : undefined;
 }

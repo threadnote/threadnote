@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {
@@ -12,13 +13,16 @@ import {
   parseGraphShareProfile,
   parseGraphShareProfilePointer,
 } from '@threadnote/graph/sharing/profile';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const PROFILE = defaultGraphShareProfile({
   branch: 'refs/heads/main',
   canonicalRemote: 'github.com/acme/monorepo',
   organization: 'acme',
-  publisherKeyFingerprint: `sha256:${'a'.repeat(64)}`,
-  repositoryId: 'b'.repeat(64),
+  publisherKeyFingerprint: `sha256:${Effect.pipe('a', EffectString.repeat(64))}`,
+  repositoryId: Effect.pipe('b', EffectString.repeat(64)),
 });
 
 describe('graph share enrollment and profile', () => {
@@ -41,14 +45,15 @@ describe('graph share enrollment and profile', () => {
     expect(() =>
       parseGraphShareEnrollment({
         ...enrollment,
-        profile: 'oci://user:token@registry.example/threadnote/profile@sha256:' + 'c'.repeat(64),
+        profile:
+          'oci://user:token@registry.example/threadnote/profile@sha256:' + Effect.pipe('c', EffectString.repeat(64)),
       }),
     ).toThrow(/invalid/i);
   });
 
   it('separates the OCI manifest pin from the canonical profile body digest', () => {
     const profileDigest = graphShareProfileDigest(PROFILE);
-    const manifestDigest = `sha256:${'c'.repeat(64)}` as const;
+    const manifestDigest = `sha256:${Effect.pipe('c', EffectString.repeat(64))}` as const;
     const profile = ociProfilePointer('oci://registry.example.test/acme/canonical', manifestDigest);
     const enrollment = parseGraphShareEnrollment({
       profile,
@@ -66,9 +71,18 @@ describe('graph share enrollment and profile', () => {
     for (const invalid of [
       {...enrollment, profileDigest: undefined},
       {...enrollment, profile: casProfilePointer(profileDigest)},
-      {...enrollment, profile: profile.replace('registry.example.test', 'user:secret@registry.example.test')},
-      {...enrollment, profile: profile.replace('registry.example.test', 'registry.example.test:443')},
-      {...enrollment, profile: profile.replace('acme/canonical', 'Acme/canonical')},
+      {
+        ...enrollment,
+        profile: Effect.pipe(
+          profile,
+          EffectString.replace('registry.example.test', 'user:secret@registry.example.test'),
+        ),
+      },
+      {
+        ...enrollment,
+        profile: Effect.pipe(profile, EffectString.replace('registry.example.test', 'registry.example.test:443')),
+      },
+      {...enrollment, profile: Effect.pipe(profile, EffectString.replace('acme/canonical', 'Acme/canonical'))},
       {...enrollment, extra: 'unexpected'},
       {...enrollment, schemaVersion: 1},
     ])
@@ -82,7 +96,9 @@ describe('graph share enrollment and profile', () => {
       repositoryId: PROFILE.repositoryId,
       schemaVersion: 1,
     });
-    expect(() => assertEnrollmentMatchesIdentity(enrollment, 'd'.repeat(64))).toThrow(/repositoryId/);
+    expect(() => assertEnrollmentMatchesIdentity(enrollment, Effect.pipe('d', EffectString.repeat(64)))).toThrow(
+      /repositoryId/,
+    );
     expect(() => assertEnrollmentMatchesIdentity(enrollment, PROFILE.repositoryId)).not.toThrow();
   });
 
@@ -106,11 +122,11 @@ describe('graph share enrollment and profile', () => {
 });
 
 function reorderKeys(value: unknown, reverse: boolean): unknown {
-  if (Array.isArray(value)) return value.map(item => reorderKeys(item, reverse));
+  if (EffectArray.isArray(value)) return EffectArray.map(value, item => reorderKeys(item, reverse));
   if (value !== null && typeof value === 'object') {
-    const keys = Object.keys(value);
+    const keys = EffectRecord.keys(value);
     const ordered = reverse ? keys.slice().reverse() : keys.slice().sort();
-    return Object.fromEntries(ordered.map(key => [key, reorderKeys((value as Record<string, unknown>)[key], reverse)]));
+    return EffectRecord.fromEntries(EffectArray.map(ordered, key => [key, reorderKeys(value[key], reverse)]));
   }
   return value;
 }

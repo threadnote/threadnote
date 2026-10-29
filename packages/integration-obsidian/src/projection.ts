@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -15,6 +16,7 @@ import {
 } from '@threadnote/memory/document';
 import {
   type ObsidianProjectionConfig,
+  type ObsidianSourceConfig,
   isObsidianSource,
   isObsidianProjection,
   mutateSourceConfiguration,
@@ -29,11 +31,17 @@ import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
 import {isDirectory, toPosixPath} from '@threadnote/integration-core/utils';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class ObsidianProjectionError extends Schema.TaggedError<ObsidianProjectionError>()('ObsidianProjectionError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ObsidianProjectionError extends Schema.TaggedError<ObsidianProjectionError, {readonly brand: unique symbol}>()(
+  'ObsidianProjectionError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export interface ObsidianProjectionAddOptions {
   /** Omit to preserve selection; null explicitly selects all matching memories. */
@@ -117,8 +125,11 @@ export const runObsidianProjectionAdd = Effect.fn('obsidian.projectionAdd')(func
   const vault = yield* canonicalDirectory(options.vault, 'Obsidian vault');
   const folder = normalizeProjectionFolder(options.folder);
   const current = yield* readObsidianConfiguration(config);
-  const existing = current.projections.find(
-    (projection): projection is ObsidianProjectionConfig => isObsidianProjection(projection) && projection.id === id,
+  const existing = Option.getOrUndefined(
+    EffectArray.findFirst(
+      current.projections,
+      (projection): projection is ObsidianProjectionConfig => isObsidianProjection(projection) && projection.id === id,
+    ),
   );
   const projection: ObsidianProjectionConfig = {
     enabled: existing?.enabled ?? true,
@@ -140,17 +151,31 @@ export const runObsidianProjectionAdd = Effect.fn('obsidian.projectionAdd')(func
   };
   const projectionExclude = `${folder}/**`;
   const withProjection = (configuration: typeof current) => {
-    const sources = configuration.sources.map(source =>
+    const sources = EffectArray.map(configuration.sources, source =>
       isObsidianSource(source) && source.vault === vault && !source.exclude.includes(projectionExclude)
         ? {...source, exclude: [...source.exclude, projectionExclude]}
         : source,
     );
     const next =
       configuration.version === 1
-        ? {version: 1 as const, sources: sources.filter(isObsidianSource), projections: configuration.projections}
+        ? {
+            version: 1 as const,
+            sources: EffectArray.filter(
+              sources,
+              (
+                __effectFilterValue: (typeof sources)[number],
+                __effectFilterIndex: number,
+              ): __effectFilterValue is ObsidianSourceConfig =>
+                __effectFilterIndex in sources && isObsidianSource(__effectFilterValue),
+            ),
+            projections: configuration.projections,
+          }
         : {version: 2 as const, sources, projections: configuration.projections};
-    const latest = configuration.projections.find(
-      (item): item is ObsidianProjectionConfig => isObsidianProjection(item) && item.id === id,
+    const latest = Option.getOrUndefined(
+      EffectArray.findFirst(
+        configuration.projections,
+        (item): item is ObsidianProjectionConfig => isObsidianProjection(item) && item.id === id,
+      ),
     );
     return upsertObsidianProjection(next, {
       ...projection,
@@ -162,7 +187,7 @@ export const runObsidianProjectionAdd = Effect.fn('obsidian.projectionAdd')(func
   if (options.apply !== true) {
     yield* Console.log(`Would configure Obsidian projection "${id}":`);
     yield* Console.log(projectionSummary(projection));
-    if (sources.some((source, index) => source !== current.sources[index])) {
+    if (EffectArray.some(sources, (source, index) => source !== current.sources[index])) {
       yield* Console.log(`Would exclude ${projectionExclude} from matching sources in the same vault.`);
     }
     yield* Console.log('Re-run with --apply to write the configuration.');
@@ -178,7 +203,14 @@ export const runObsidianProjectionList = Effect.fn('obsidian.projectionList')(fu
     yield* Console.log('No Obsidian projections configured.');
     return;
   }
-  for (const projection of configuration.projections.filter(isObsidianProjection)) {
+  for (const projection of EffectArray.filter(
+    configuration.projections,
+    (
+      __effectFilterValue: (typeof configuration.projections)[number],
+      __effectFilterIndex: number,
+    ): __effectFilterValue is ObsidianProjectionConfig =>
+      __effectFilterIndex in configuration.projections && isObsidianProjection(__effectFilterValue),
+  )) {
     yield* Console.log(projectionSummary(projection));
   }
 });
@@ -222,7 +254,8 @@ export const runObsidianProjectionSync = Effect.fn('obsidian.projectionSync')(fu
       }
       const nextFiles: Record<string, ObsidianProjectionFileState> = {...plan.state.files};
       const mutableEntries = [...plan.entries];
-      const writes = mutableEntries.filter(
+      const writes = EffectArray.filter(
+        mutableEntries,
         entry =>
           entry.action === 'add' ||
           entry.action === 'update' ||
@@ -241,13 +274,14 @@ export const runObsidianProjectionSync = Effect.fn('obsidian.projectionSync')(fu
           }),
         {concurrency: PROJECTION_WRITE_CONCURRENCY, discard: true},
       );
-      for (const entry of mutableEntries.filter(item => item.action === 'unchanged')) {
+      for (const entry of EffectArray.filter(mutableEntries, item => item.action === 'unchanged')) {
         const desired = plan.desired.get(entry.relativePath);
         if (desired) {
           nextFiles[entry.relativePath] = {contentHash: desired.contentHash, uri: desired.uri};
         }
       }
-      const removals = mutableEntries.filter(
+      const removals = EffectArray.filter(
+        mutableEntries,
         entry =>
           entry.action === 'remove' ||
           (entry.action === 'drift' && options.force === true && !plan.desired.has(entry.relativePath)),
@@ -294,16 +328,18 @@ export const runObsidianProjectionPublish = Effect.fn('obsidian.projectionPublis
   }
   const requestedUris = normalizeProjectionMemoryUris(config, options.uris);
   const selectedUris = [...new Set([...projection.selectedUris, ...requestedUris])].sort((left, right) =>
-    left.localeCompare(right),
+    Effect2.pipe(left, EffectString.localeCompare(right)),
   );
   const nextProjection = {...projection, selectedUris};
   const plan = yield* buildProjectionPlan(config, nextProjection);
-  const projectedUris = new Set([...plan.desired.values()].flatMap(file => (file.uri === undefined ? [] : [file.uri])));
-  const unavailable = requestedUris.filter(uri => !projectedUris.has(uri));
+  const projectedUris = new Set(
+    EffectArray.flatMap([...plan.desired.values()], file => (file.uri === undefined ? [] : [file.uri])),
+  );
+  const unavailable = EffectArray.filter(requestedUris, uri => !projectedUris.has(uri));
   if (unavailable.length > 0) {
     return yield* ObsidianProjectionError.make({
       message:
-        `Cannot publish ${unavailable.join(', ')}. Ensure each memory exists and matches projection ` +
+        `Cannot publish ${EffectArray.join(unavailable, ', ')}. Ensure each memory exists and matches projection ` +
         `"${projection.id}" kind, status, and shared-memory filters.`,
     });
   }
@@ -323,7 +359,7 @@ export const runObsidianProjectionPublish = Effect.fn('obsidian.projectionPublis
     return upsertObsidianProjection(latest, {
       ...currentProjection,
       selectedUris: [...new Set([...currentSelection, ...requestedUris])].sort((left, right) =>
-        left.localeCompare(right),
+        Effect2.pipe(left, EffectString.localeCompare(right)),
       ),
     });
   });
@@ -343,7 +379,7 @@ export const runObsidianProjectionRemove = Effect.fn('obsidian.projectionRemove'
   const projection = requireObsidianProjection(configuration, options.id);
   const plan = yield* buildProjectionPlan(config, projection, {empty: true});
   yield* printProjectionPlan(plan);
-  const drift = plan.entries.filter(entry => entry.action === 'drift');
+  const drift = EffectArray.filter(plan.entries, entry => entry.action === 'drift');
   if (!apply) {
     yield* Console.log('Would remove unchanged managed projection files and preserve the vault and memories.');
     yield* Console.log('Re-run with --apply to continue.');
@@ -364,7 +400,10 @@ export const runObsidianProjectionRemove = Effect.fn('obsidian.projectionRemove'
     `${statePath}.lock`,
     PROJECTION_LOCK_OPTIONS,
     Effect.gen(function* () {
-      for (const entry of plan.entries.filter(item => item.action === 'remove' || item.action === 'drift')) {
+      for (const entry of EffectArray.filter(
+        plan.entries,
+        item => item.action === 'remove' || item.action === 'drift',
+      )) {
         yield* fs.remove(yield* safeProjectionTarget(root, entry.relativePath), {force: true});
       }
       yield* fs.remove(statePath, {force: true});
@@ -381,13 +420,21 @@ export const resolveProjectedMemoryPath = Effect.fn('obsidian.resolveProjectedMe
   projectionId?: string,
 ) {
   const configuration = yield* readObsidianConfiguration(config);
-  const projections = configuration.projections
-    .filter(isObsidianProjection)
-    .filter(projection => projection.enabled && (projectionId === undefined || projection.id === projectionId));
+  const projections = EffectArray.filter(
+    EffectArray.filter(
+      configuration.projections,
+      (
+        __effectFilterValue: (typeof configuration.projections)[number],
+        __effectFilterIndex: number,
+      ): __effectFilterValue is ObsidianProjectionConfig =>
+        __effectFilterIndex in configuration.projections && isObsidianProjection(__effectFilterValue),
+    ),
+    projection => projection.enabled && (projectionId === undefined || projection.id === projectionId),
+  );
   const matches: Array<{path: string; projection: ObsidianProjectionConfig; relativePath: string}> = [];
   for (const projection of projections) {
     const state = yield* readProjectionState(yield* projectionStatePath(projection), projection.id);
-    for (const [relativePath, entry] of Object.entries(state.files)) {
+    for (const [relativePath, entry] of EffectRecord.toEntries(state.files)) {
       if (entry.uri === uri) {
         const root = yield* projectionRoot(projection);
         matches.push({
@@ -407,9 +454,10 @@ export const resolveProjectedMemoryPath = Effect.fn('obsidian.resolveProjectedMe
   }
   if (matches.length > 1) {
     return yield* ObsidianProjectionError.make({
-      message: `Memory ${uri} appears in multiple projections. Pass --projection with one of: ${matches
-        .map(match => match.projection.id)
-        .join(', ')}.`,
+      message: `Memory ${uri} appears in multiple projections. Pass --projection with one of: ${EffectArray.join(
+        EffectArray.map(matches, match => match.projection.id),
+        ', ',
+      )}.`,
     });
   }
   return matches[0];
@@ -449,7 +497,7 @@ const buildProjectionPlan = Effect.fn('obsidian.buildProjectionPlan')(function* 
       entries.push({action: 'update', relativePath, uri: file.uri});
     }
   }
-  for (const [relativePath, recorded] of Object.entries(state.files)) {
+  for (const [relativePath, recorded] of EffectRecord.toEntries(state.files)) {
     if (desired.has(relativePath)) {
       continue;
     }
@@ -466,7 +514,7 @@ const buildProjectionPlan = Effect.fn('obsidian.buildProjectionPlan')(function* 
   entries.sort(
     (left, right) =>
       projectionActionRank(left.action) - projectionActionRank(right.action) ||
-      left.relativePath.localeCompare(right.relativePath),
+      Effect2.pipe(left.relativePath, EffectString.localeCompare(right.relativePath)),
   );
   return {desired, entries, projection, state} satisfies ProjectionPlan;
 });
@@ -482,9 +530,14 @@ const readProjectionMemories = Effect.fn('obsidian.readProjectionMemories')(func
     (yield* store.list(location, `threadnote://user/${uriSegment(config.user)}/memories`, {recursive: true}).pipe(
       Effect.catchTag('ResourceNotFound', () => Effect.succeed([])),
       Effect.map(entries =>
-        entries
-          .filter(entry => entry.type === 'file' && entry.uri.toLowerCase().endsWith('.md'))
-          .map(entry => entry.uri),
+        EffectArray.map(
+          EffectArray.filter(
+            entries,
+            entry =>
+              entry.type === 'file' && Effect2.pipe(entry.uri, EffectString.toLowerCase, EffectString.endsWith('.md')),
+          ),
+          entry => entry.uri,
+        ),
       ),
     ));
   const records = yield* Effect.forEach(
@@ -508,7 +561,7 @@ const readProjectionMemories = Effect.fn('obsidian.readProjectionMemories')(func
       }),
     {concurrency: MEMORY_READ_CONCURRENCY},
   );
-  return records.filter((record): record is MemoryRecord => record !== undefined);
+  return EffectArray.filter(records, (record): record is MemoryRecord => record !== undefined);
 });
 
 const desiredProjectionFiles = Effect.fn('obsidian.desiredProjectionFiles')(function* (
@@ -519,13 +572,14 @@ const desiredProjectionFiles = Effect.fn('obsidian.desiredProjectionFiles')(func
     records,
     record =>
       Effect.gen(function* () {
-        const id = record.metadata.memoryId ?? `tn_${(yield* sha256Hex(record.uri)).slice(0, 20)}`;
+        const id =
+          record.metadata.memoryId ?? `tn_${Effect2.pipe(yield* sha256Hex(record.uri), EffectString.slice(0, 20))}`;
         const relativePath = projectionMemoryPath(record, id);
         return {id, record, relativePath};
       }),
     {concurrency: MEMORY_READ_CONCURRENCY},
   );
-  const projectedPathByUri = new Map(identities.map(item => [item.record.uri, item.relativePath]));
+  const projectedPathByUri = new Map(EffectArray.map(identities, item => [item.record.uri, item.relativePath]));
   const desired = new Map<string, DesiredProjectionFile>();
   for (const item of identities) {
     const rendered = yield* renderProjectionMemory(projection, item.record, item.id, projectedPathByUri);
@@ -577,39 +631,42 @@ const renderProjectionMemory = Effect.fn('obsidian.renderProjectionMemory')(func
     source_agent_client: record.metadata.sourceAgentClient,
     source_hash: sourceHash,
     ...(record.metadata.codeCitations && record.metadata.codeCitations.length > 0
-      ? {code_citations: record.metadata.codeCitations.map(formatMemoryCodeCitation)}
+      ? {code_citations: EffectArray.map(record.metadata.codeCitations, formatMemoryCodeCitation)}
       : {}),
     ...(record.metadata.citationErrors && record.metadata.citationErrors.length > 0
       ? {
-          code_citation_errors: record.metadata.citationErrors.map(error => ({
+          code_citation_errors: EffectArray.map(record.metadata.citationErrors, error => ({
             ...(error.index === undefined ? {} : {index: error.index}),
             reason: error.reason,
           })),
         }
       : {}),
-    relations: relations.map(relation => `${relation.type} ${relation.uri}`),
+    relations: EffectArray.map(relations, relation => `${relation.type} ${relation.uri}`),
     evidence: [...(record.metadata.evidence ?? [])],
   };
-  const relationLines = relations.map(relation => {
+  const relationLines = EffectArray.map(relations, relation => {
     const projected = projectedPathByUri.get(relation.uri);
     const target = projected
       ? `[[${projection.folder}/${withoutMarkdownExtension(projected)}]]`
       : `\`${relation.uri}\``;
-    return `- **${relation.type.replaceAll('_', ' ')}:** ${target}  \n  \`${relation.uri}\``;
+    return `- **${Effect2.pipe(relation.type, EffectString.replaceAll('_', ' '))}:** ${target}  \n  \`${relation.uri}\``;
   });
-  const rendered = [
-    '---',
-    yaml.dump(frontmatter, {lineWidth: 100, noRefs: true, sortKeys: false}).trimEnd(),
-    '---',
-    '',
-    `<!-- ${PROJECTION_MANAGED_MARKER}:${projection.id}; do not edit -->`,
-    '> [!warning] Generated view',
-    '> Threadnote is authoritative. Changes to this file are not imported.',
-    '',
-    record.body,
-    ...(relationLines.length > 0 ? ['', '## Relations', '', ...relationLines] : []),
-    '',
-  ].join('\n');
+  const rendered = EffectArray.join(
+    [
+      '---',
+      Effect2.pipe(yaml.dump(frontmatter, {lineWidth: 100, noRefs: true, sortKeys: false}), EffectString.trimEnd),
+      '---',
+      '',
+      `<!-- ${PROJECTION_MANAGED_MARKER}:${projection.id}; do not edit -->`,
+      '> [!warning] Generated view',
+      '> Threadnote is authoritative. Changes to this file are not imported.',
+      '',
+      record.body,
+      ...(relationLines.length > 0 ? ['', '## Relations', '', ...relationLines] : []),
+      '',
+    ],
+    '\n',
+  );
   const scrubbed = applyScrubber(rendered, {redact: true});
   if (scrubbed.blocker) {
     return undefined;
@@ -623,16 +680,19 @@ const generatedProjectionFiles = Effect.fn('obsidian.generatedProjectionFiles')(
   const files = [
     {
       relativePath: 'README.md',
-      content: [
-        `<!-- ${PROJECTION_MANAGED_MARKER}:${projection.id}; do not edit -->`,
-        '# Threadnote memory projection',
-        '',
-        'This folder is a generated, read-only view of authoritative Threadnote memory.',
-        'Use Threadnote to create, replace, archive, or publish memories.',
-        '',
-      ].join('\n'),
+      content: EffectArray.join(
+        [
+          `<!-- ${PROJECTION_MANAGED_MARKER}:${projection.id}; do not edit -->`,
+          '# Threadnote memory projection',
+          '',
+          'This folder is a generated, read-only view of authoritative Threadnote memory.',
+          'Use Threadnote to create, replace, archive, or publish memories.',
+          '',
+        ],
+        '\n',
+      ),
     },
-    ...projectionBaseDefinitions().map(view => ({
+    ...EffectArray.map(projectionBaseDefinitions(), view => ({
       relativePath: `Views/${view.filename}`,
       content: `# ${PROJECTION_MANAGED_MARKER}:${projection.id}\n${yaml.dump(view.definition, {
         lineWidth: 100,
@@ -686,20 +746,26 @@ function projectionBaseDefinitions(): ReadonlyArray<{
 function projectionMemoryPath(record: MemoryRecord, memoryId: string): string {
   const project = uriSegment(record.metadata.project ?? 'unscoped');
   const topic = uriSegment(record.metadata.topic ?? uriBasename(record.uri));
-  return `Memories/${project}/${record.metadata.kind}/${topic}--${memoryId.slice(-10)}.md`;
+  return `Memories/${project}/${record.metadata.kind}/${topic}--${Effect2.pipe(memoryId, EffectString.slice(-10))}.md`;
 }
 
 function memoryRelations(record: MemoryRecord): readonly MemoryRelation[] {
+  const evidence = record.metadata.evidence ?? [];
   const relations: MemoryRelation[] = [
     ...(record.metadata.relations ?? []),
-    ...(record.metadata.references ?? []).map(uri => ({type: 'references' as const, uri})),
-    ...(record.metadata.evidence ?? [])
-      .filter(value => value.startsWith('threadnote://'))
-      .map(uri => ({type: 'evidence_for' as const, uri})),
+    ...EffectArray.map(record.metadata.references ?? [], uri => ({type: 'references' as const, uri})),
+    ...EffectArray.map(
+      EffectArray.filter(
+        evidence,
+        (value, __effectArrayIndex) =>
+          __effectArrayIndex in evidence && Effect2.pipe(value, EffectString.startsWith('threadnote://')),
+      ),
+      uri => ({type: 'evidence_for' as const, uri}),
+    ),
     ...(record.metadata.supersedes ? [{type: 'supersedes' as const, uri: record.metadata.supersedes}] : []),
   ];
   const seen = new Set<string>();
-  return relations.filter(relation => {
+  return EffectArray.filter(relations, relation => {
     const key = `${relation.type}\n${relation.uri}`;
     if (seen.has(key)) {
       return false;
@@ -711,7 +777,7 @@ function memoryRelations(record: MemoryRecord): readonly MemoryRelation[] {
 
 const projectionRoot = Effect.fn('obsidian.projectionRoot')(function* (projection: ObsidianProjectionConfig) {
   const pathService = yield* Path.Path;
-  return pathService.join(projection.vault, ...projection.folder.split('/'));
+  return pathService.join(projection.vault, ...Effect2.pipe(projection.folder, EffectString.split('/')));
 });
 
 const projectionStatePath = Effect.fn('obsidian.projectionStatePath')(function* (projection: ObsidianProjectionConfig) {
@@ -770,6 +836,7 @@ function parseProjectionState(value: unknown, projectionId: string): ObsidianPro
     throw ObsidianProjectionError.make({message: `Invalid Obsidian projection state for "${projectionId}".`});
   }
   const files: Record<string, ObsidianProjectionFileState> = {};
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- Persisted state was parsed from untrusted JSON and is heterogeneous.
   for (const [relativePath, entry] of Object.entries(value.files)) {
     assertSafeProjectionRelativePath(relativePath);
     if (
@@ -817,9 +884,13 @@ const writeProjectionFile = Effect.fn('obsidian.writeProjectionFile')(function* 
 const safeProjectionTarget = Effect.fn('obsidian.safeProjectionTarget')(function* (root: string, relativePath: string) {
   assertSafeProjectionRelativePath(relativePath);
   const pathService = yield* Path.Path;
-  const target = pathService.resolve(root, ...relativePath.split('/'));
+  const target = pathService.resolve(root, ...Effect2.pipe(relativePath, EffectString.split('/')));
   const relative = pathService.relative(pathService.resolve(root), target);
-  if (relative === '..' || relative.startsWith(`..${pathService.sep}`) || pathService.isAbsolute(relative)) {
+  if (
+    relative === '..' ||
+    Effect2.pipe(relative, EffectString.startsWith(`..${pathService.sep}`)) ||
+    pathService.isAbsolute(relative)
+  ) {
     return yield* ObsidianProjectionError.make({
       message: `Projection path escapes its managed folder: ${relativePath}`,
     });
@@ -831,8 +902,11 @@ function assertSafeProjectionRelativePath(relativePath: string): void {
   const normalized = toPosixPath(relativePath);
   if (
     normalized.length === 0 ||
-    normalized.startsWith('/') ||
-    normalized.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect2.pipe(normalized, EffectString.startsWith('/')) ||
+    EffectArray.some(
+      Effect2.pipe(normalized, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw ObsidianProjectionError.make({message: `Unsafe projection state path: ${relativePath}`});
   }
@@ -869,10 +943,13 @@ const canonicalDirectory = Effect.fn('obsidian.projectionCanonicalDirectory')(fu
 });
 
 function normalizeProjectionFolder(value: string): string {
-  const normalized = toPosixPath(value).replace(/^\/+|\/+$/g, '');
+  const normalized = Effect2.pipe(toPosixPath(value), EffectString.replace(/^\/+|\/+$/g, ''));
   if (
     normalized.length === 0 ||
-    normalized.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect2.pipe(normalized, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw ObsidianProjectionError.make({message: 'Projection folder must be a safe vault-relative path.'});
   }
@@ -880,7 +957,7 @@ function normalizeProjectionFolder(value: string): string {
 }
 
 function normalizeIdentifier(value: string, label: string): string {
-  const normalized = value.trim().toLowerCase();
+  const normalized = Effect2.pipe(value, EffectString.trim, EffectString.toLowerCase);
   if (!/^[a-z0-9][a-z0-9._-]*$/.test(normalized)) {
     throw ObsidianProjectionError.make({
       message: `${label} must contain only lowercase letters, digits, dots, underscores, and hyphens.`,
@@ -890,13 +967,16 @@ function normalizeIdentifier(value: string, label: string): string {
 }
 
 function projectionSummary(projection: ObsidianProjectionConfig): string {
-  return [
-    `${projection.id} · ${projection.enabled ? 'enabled' : 'disabled'} · ${projection.vault}/${projection.folder}`,
-    `  selected memories: ${projection.selectedUris?.length ?? 'all matching (legacy)'}`,
-    `  kinds: ${projection.kinds.join(', ')}`,
-    `  statuses: ${projection.statuses.join(', ')}`,
-    `  shared: ${projection.includeShared ? 'included' : 'excluded'}`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `${projection.id} · ${projection.enabled ? 'enabled' : 'disabled'} · ${projection.vault}/${projection.folder}`,
+      `  selected memories: ${projection.selectedUris?.length ?? 'all matching (legacy)'}`,
+      `  kinds: ${EffectArray.join(projection.kinds, ', ')}`,
+      `  statuses: ${EffectArray.join(projection.statuses, ', ')}`,
+      `  shared: ${projection.includeShared ? 'included' : 'excluded'}`,
+    ],
+    '\n',
+  );
 }
 
 const printProjectionPlan = Effect.fn('obsidian.printProjectionPlan')(function* (plan: ProjectionPlan) {
@@ -906,7 +986,7 @@ const printProjectionPlan = Effect.fn('obsidian.printProjectionPlan')(function* 
   }
   for (const entry of plan.entries) {
     yield* Console.log(
-      `${entry.action.toUpperCase().padEnd(9)} ${entry.relativePath}${entry.detail ? ` (${entry.detail})` : ''}`,
+      `${Effect2.pipe(entry.action, EffectString.toUpperCase, EffectString.padEnd(9))} ${entry.relativePath}${entry.detail ? ` (${entry.detail})` : ''}`,
     );
   }
   const counts = projectionCounts(plan.entries);
@@ -936,8 +1016,21 @@ function projectionActionRank(action: ObsidianProjectionAction): number {
 }
 
 function uriBasename(uri: string): string {
-  const withoutAnchor = uri.replace(/#.*$/, '').replace(/\/+$/, '');
-  return withoutAnchor.slice(withoutAnchor.lastIndexOf('/') + 1).replace(/\.md$/i, '');
+  const withoutAnchor = Effect2.pipe(uri, EffectString.replace(/#.*$/, ''), EffectString.replace(/\/+$/, ''));
+  return Effect2.pipe(withoutAnchor, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(
+      __effectPipeInput,
+      EffectString.slice(
+        Effect2.pipe(
+          withoutAnchor,
+          EffectString.lastIndexOf('/'),
+          Effect2.Option.getOrElse(() => -1),
+        ) + 1,
+      ),
+    );
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace(/\.md$/i, ''));
+    return __effectPipeStage1;
+  });
 }
 
 function normalizeProjectionMemoryUris(
@@ -948,8 +1041,8 @@ function normalizeProjectionMemoryUris(
     throw ObsidianProjectionError.make({message: 'Provide at least one Threadnote memory URI with --uri.'});
   }
   const expectedUser = uriSegment(config.user);
-  return [...new Set(values.map(value => canonicalProjectionMemoryUri(value, expectedUser)))].sort((left, right) =>
-    left.localeCompare(right),
+  return [...new Set(EffectArray.map(values, value => canonicalProjectionMemoryUri(value, expectedUser)))].sort(
+    (left, right) => Effect2.pipe(left, EffectString.localeCompare(right)),
   );
 }
 
@@ -966,7 +1059,13 @@ function canonicalProjectionMemoryUri(value: string, expectedUser: string): stri
     canonical.segments[0] !== expectedUser ||
     canonical.segments[1] !== 'memories' ||
     canonical.segments.length < 3 ||
-    !canonical.segments.at(-1)?.toLowerCase().endsWith('.md')
+    !Effect2.pipe(
+      canonical.segments.at(-1),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    )
   ) {
     throw ObsidianProjectionError.make({
       message: `Obsidian projections accept only current-user Threadnote memory URIs: ${value}`,
@@ -976,7 +1075,7 @@ function canonicalProjectionMemoryUri(value: string, expectedUser: string): stri
 }
 
 function withoutMarkdownExtension(path: string): string {
-  return path.replace(/\.md$/i, '');
+  return Effect2.pipe(path, EffectString.replace(/\.md$/i, ''));
 }
 
 function resourceStoreLocation(config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>) {

@@ -1,7 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {legacyCodeGraphAuthorityStatements} from '@threadnote/graph/test/helpers/code-graph-legacy-authority';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Exit, Fiber, Option} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -27,11 +28,18 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
 import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 describe('code graph persistent schema migration', () => {
@@ -159,10 +167,10 @@ describe('code graph persistent schema migration', () => {
             {content_hash: fixture.file.contentHash, path: fixture.file.path},
           ]);
           expect(
-            database
-              .query<{readonly name: string}, []>('PRAGMA table_info(snapshot_files)')
-              .all()
-              .map(column => column.name),
+            EffectArray.map(
+              database.query<{readonly name: string}, []>('PRAGMA table_info(snapshot_files)').all(),
+              column => column.name,
+            ),
           ).not.toContain('raw_content_hash');
         } finally {
           database.close(false);
@@ -174,10 +182,10 @@ describe('code graph persistent schema migration', () => {
         const database = new Database(fixture.databasePath, {readonly: true, strict: true});
         try {
           return {
-            columns: database
-              .query<{readonly name: string}, []>('PRAGMA table_info(snapshot_files)')
-              .all()
-              .map(column => column.name),
+            columns: EffectArray.map(
+              database.query<{readonly name: string}, []>('PRAGMA table_info(snapshot_files)').all(),
+              column => column.name,
+            ),
             index: database
               .query<{readonly sql: string}, [string]>(
                 "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
@@ -232,14 +240,14 @@ describe('code graph persistent schema migration', () => {
                  content_hash, extractor_set, path_hint, blob_id, reuse_class, facts_json, created_at
                ) VALUES (?, 'revision-11-cache', ?, NULL, NULL, ?, '2026-08-22T00:00:00.000Z')`,
             )
-            .run('a'.repeat(40), 'src/valid.ts', JSON.stringify({path: 'src/valid.ts'}));
+            .run(Effect2.pipe('a', EffectString.repeat(40)), 'src/valid.ts', JSON.stringify({path: 'src/valid.ts'}));
           database
             .query(
               `INSERT INTO file_blobs (
                  content_hash, extractor_set, path_hint, blob_id, reuse_class, facts_json, created_at
                ) VALUES (?, 'revision-11-cache', ?, NULL, NULL, ?, '2026-08-22T00:00:00.000Z')`,
             )
-            .run('b'.repeat(40), 'src/invalid.ts', '{');
+            .run(Effect2.pipe('b', EffectString.repeat(40)), 'src/invalid.ts', '{');
         } finally {
           database.close(false);
         }
@@ -295,7 +303,11 @@ describe('code graph persistent schema migration', () => {
                  content_hash, extractor_set, path_hint, blob_id, reuse_class, facts_json, created_at
                ) VALUES (?, 'drifted-cache', ?, NULL, NULL, ?, '2026-08-22T00:00:00.000Z')`,
             )
-            .run('c'.repeat(40), 'src/drifted.ts', JSON.stringify({path: 'src/drifted.ts'}));
+            .run(
+              Effect2.pipe('c', EffectString.repeat(40)),
+              'src/drifted.ts',
+              JSON.stringify({path: 'src/drifted.ts'}),
+            );
           database.exec(`
             DROP TRIGGER file_blobs_authority_update;
             CREATE TRIGGER file_blobs_authority_update
@@ -396,7 +408,7 @@ describe('code graph persistent schema migration', () => {
       expect(migrated.currentDefinition).toMatch(/WHERE\s+target_id\s+IS\s+NOT\s+NULL/iu);
       expect(migrated.evidenceDefinition).toMatch(/edges\s*\(snapshot_id,\s*evidence_path\)/iu);
       expect(migrated.revision).toBe(String(CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION));
-      expect(incoming.map(candidate => candidate.id)).toEqual([edge.id]);
+      expect(EffectArray.map(incoming, candidate => candidate.id)).toEqual([edge.id]);
 
       yield* Effect.sync(() => {
         const database = new Database(fixture.databasePath, {strict: true});
@@ -468,25 +480,35 @@ describe('code graph persistent schema migration', () => {
       }),
     );
 
-    expect(result.legacySearch.map(symbol => symbol.id)).toEqual([preserved.id]);
-    expect(result.legacyGraph.symbols.map(symbol => symbol.id)).toEqual([preserved.id]);
+    expect(EffectArray.map(result.legacySearch, symbol => symbol.id)).toEqual([preserved.id]);
+    expect(EffectArray.map(result.legacyGraph.symbols, symbol => symbol.id)).toEqual([preserved.id]);
     expect(result.legacyActiveReady?.id).toBe(ready.id);
     expect(result.legacyReadyById?.id).toBe(ready.id);
     expect(result.legacyCurrentReadyById).toBeUndefined();
     expect(result.legacyReusableReceipt).toBeUndefined();
-    expect(result.compactSearch.map(symbol => symbol.id)).toEqual([compact.id]);
+    expect(EffectArray.map(result.compactSearch, symbol => symbol.id)).toEqual([compact.id]);
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
     try {
       const formats = database
-        .query('SELECT snapshot_id FROM lexical_storage_formats ORDER BY snapshot_id')
-        .all() as readonly {readonly snapshot_id: string}[];
-      const legacyRows = database
-        .query('SELECT COUNT(*) AS count FROM symbol_terms WHERE snapshot_id = ?')
-        .get(ready.id) as {readonly count: number};
-      const revision = database
-        .query("SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'")
-        .get() as {readonly value: string};
-      expect(formats.map(format => format.snapshot_id)).toEqual([replacement.id]);
+        .query<{readonly snapshot_id: string}, SQLQueryBindings[]>(
+          'SELECT snapshot_id FROM lexical_storage_formats ORDER BY snapshot_id',
+        )
+        .all();
+      const legacyRows = requiredRow(
+        database
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            'SELECT COUNT(*) AS count FROM symbol_terms WHERE snapshot_id = ?',
+          )
+          .get(ready.id),
+      );
+      const revision = requiredRow(
+        database
+          .query<{readonly value: string}, SQLQueryBindings[]>(
+            "SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'",
+          )
+          .get(),
+      );
+      expect(EffectArray.map(formats, format => format.snapshot_id)).toEqual([replacement.id]);
       expect(legacyRows.count).toBeGreaterThan(0);
       expect(revision.value).toBe(String(CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION));
       expect(database.query('PRAGMA foreign_key_check').all()).toEqual([]);
@@ -635,17 +657,23 @@ describe('code graph persistent schema migration', () => {
       expect(phases).toContain('retired-incompatible-ready');
       expect(database.query('SELECT state FROM snapshots WHERE id = ?').get(ready.id)).toEqual({state: 'retired'});
       expect(database.query('SELECT COUNT(*) AS count FROM active_snapshots').get()).toEqual({count: 0});
-      const indexes = database.query("PRAGMA index_list('lexical_compact_terms')").all() as readonly {
-        readonly name: string;
-        readonly unique: number;
-      }[];
-      const uniqueColumns = indexes
-        .filter(index => index.unique === 1)
-        .map(index =>
-          (database.query(`PRAGMA index_info('${index.name}')`).all() as readonly {readonly name: string}[]).map(
+      const indexes = database
+        .query<
+          {
+            readonly name: string;
+            readonly unique: number;
+          },
+          SQLQueryBindings[]
+        >("PRAGMA index_list('lexical_compact_terms')")
+        .all();
+      const uniqueColumns = EffectArray.map(
+        EffectArray.filter(indexes, index => index.unique === 1),
+        index =>
+          EffectArray.map(
+            database.query<{readonly name: string}, SQLQueryBindings[]>(`PRAGMA index_info('${index.name}')`).all(),
             column => column.name,
           ),
-        );
+      );
       expect(uniqueColumns).toContainEqual(['snapshot_key', 'term']);
       expect(database.query('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
@@ -684,9 +712,13 @@ describe('code graph persistent schema migration', () => {
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
     try {
-      const definition = database
-        .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'lexical_compact_postings'")
-        .get() as {readonly sql: string};
+      const definition = requiredRow(
+        database
+          .query<{readonly sql: string}, SQLQueryBindings[]>(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'lexical_compact_postings'",
+          )
+          .get(),
+      );
       expect(definition.sql).toMatch(/CHECK\s*\(\s*weight\s+BETWEEN\s+1\s+AND\s+5\s*\)/i);
       expect(database.query('PRAGMA foreign_key_check').all()).toEqual([]);
     } finally {
@@ -829,21 +861,34 @@ describe('code graph persistent schema migration', () => {
     );
 
     expect(result.preservedSnapshot?.state).toBe('ready');
-    expect(result.preservedGraph.symbols.map(symbol => symbol.id)).toEqual([preserved.id]);
+    expect(EffectArray.map(result.preservedGraph.symbols, symbol => symbol.id)).toEqual([preserved.id]);
     expect(Option.getOrThrow(result.preservedSummary)).toMatchObject({edgeCount: 0, symbolCount: 1, version: 1});
-    expect(result.replacementGraph.symbols.map(symbol => symbol.id)).toEqual([rebuilt.id]);
+    expect(EffectArray.map(result.replacementGraph.symbols, symbol => symbol.id)).toEqual([rebuilt.id]);
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
     try {
-      const interruptedState = database.query('SELECT state FROM snapshots WHERE id = ?').get(interrupted.id) as {
-        readonly state: string;
-      };
-      const columns = database.query('PRAGMA table_info(building_materialization_batches)').all() as readonly {
-        readonly name: string;
-      }[];
-      const extensionTableCount = database
-        .query(
-          `SELECT COUNT(*) AS count
+      const interruptedState = requiredRow(
+        database
+          .query<
+            {
+              readonly state: string;
+            },
+            SQLQueryBindings[]
+          >('SELECT state FROM snapshots WHERE id = ?')
+          .get(interrupted.id),
+      );
+      const columns = database
+        .query<
+          {
+            readonly name: string;
+          },
+          SQLQueryBindings[]
+        >('PRAGMA table_info(building_materialization_batches)')
+        .all();
+      const extensionTableCount = requiredRow(
+        database
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            `SELECT COUNT(*) AS count
            FROM sqlite_master
            WHERE type = 'table' AND name IN (
              'snapshot_build_owners',
@@ -857,21 +902,28 @@ describe('code graph persistent schema migration', () => {
              'building_materialization_batches',
              'building_materialization_spool_surfaces'
            )`,
-        )
-        .get() as {readonly count: number};
-      const removedIndexCount = database
-        .query(
-          `SELECT COUNT(*) AS count
+          )
+          .get(),
+      );
+      const removedIndexCount = requiredRow(
+        database
+          .query<{readonly count: number}, SQLQueryBindings[]>(
+            `SELECT COUNT(*) AS count
            FROM sqlite_master
            WHERE type = 'index' AND name IN ('terms_lookup', 'terms_symbol', 'snapshot_symbol_lookup_key')`,
-        )
-        .get() as {readonly count: number};
-      const revision = database
-        .query("SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'")
-        .get() as {readonly value: string};
+          )
+          .get(),
+      );
+      const revision = requiredRow(
+        database
+          .query<{readonly value: string}, SQLQueryBindings[]>(
+            "SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'",
+          )
+          .get(),
+      );
 
       expect(interruptedState.state).toBe('retired');
-      expect(columns.map(column => column.name)).toContain('batch_fingerprint');
+      expect(EffectArray.map(columns, column => column.name)).toContain('batch_fingerprint');
       expect(extensionTableCount.count).toBe(10);
       expect(removedIndexCount.count).toBe(0);
       expect(revision.value).toBe(String(CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION));
@@ -899,10 +951,15 @@ describe('code graph persistent schema migration', () => {
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
     try {
-      const ownerColumns = database.query('PRAGMA table_info(snapshot_build_owners)').all() as readonly {
-        readonly name: string;
-      }[];
-      expect(ownerColumns.map(column => column.name)).toEqual([
+      const ownerColumns = database
+        .query<
+          {
+            readonly name: string;
+          },
+          SQLQueryBindings[]
+        >('PRAGMA table_info(snapshot_build_owners)')
+        .all();
+      expect(EffectArray.map(ownerColumns, column => column.name)).toEqual([
         'snapshot_id',
         'owner_token',
         'claimed_at',
@@ -951,14 +1008,19 @@ describe('code graph persistent schema migration', () => {
 
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
     try {
-      const referenceColumns = database.query('PRAGMA table_info(building_references)').all() as readonly {
-        readonly name: string;
-      }[];
+      const referenceColumns = database
+        .query<
+          {
+            readonly name: string;
+          },
+          SQLQueryBindings[]
+        >('PRAGMA table_info(building_references)')
+        .all();
       expect(preserved.symbols).toHaveLength(1);
       expect(database.query('SELECT state FROM snapshots WHERE id = ?').get(interrupted.id)).toEqual({
         state: 'retired',
       });
-      expect(referenceColumns.map(column => column.name)).toEqual([
+      expect(EffectArray.map(referenceColumns, column => column.name)).toEqual([
         'snapshot_id',
         'edge_id',
         'resolution_domain',
@@ -1017,11 +1079,17 @@ describe('code graph persistent schema migration', () => {
         Effect.sync(() => new Database(fixture.databasePath, {readonly: true, strict: true})),
         database =>
           Effect.sync(() => ({
-            columns: (
-              database.query('PRAGMA table_info(building_references)').all() as readonly {
-                readonly name: string;
-              }[]
-            ).map(column => column.name),
+            columns: EffectArray.map(
+              database
+                .query<
+                  {
+                    readonly name: string;
+                  },
+                  SQLQueryBindings[]
+                >('PRAGMA table_info(building_references)')
+                .all(),
+              column => column.name,
+            ),
             interrupted: database.query('SELECT state FROM snapshots WHERE id = ?').get(interrupted.id),
             references: database.query('SELECT COUNT(*) AS count FROM building_references').get(),
             revision: database
@@ -1222,7 +1290,7 @@ describe('code graph persistent schema migration', () => {
       expect(healed.revision).toEqual({value: String(CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION)});
       expect(healed.sequence).toEqual({value: '0'});
       expect(healed.queueRows).toEqual({count: 0});
-      expect(healed.objects.map(object => object.name)).toEqual([
+      expect(EffectArray.map(healed.objects, object => object.name)).toEqual([
         'removed_view_cleanup_due',
         'removed_view_cleanup',
         'removed_views_cleanup_revoke_delete',
@@ -1373,10 +1441,19 @@ describe('code graph persistent schema migration', () => {
 
     const interruptedDatabase = new Database(fixture.databasePath, {readonly: true, strict: true});
     try {
-      const ownerColumns = interruptedDatabase.query('PRAGMA table_info(snapshot_build_owners)').all() as readonly {
-        readonly name: string;
-      }[];
-      expect(ownerColumns.map(column => column.name)).toEqual(['snapshot_id', 'owner_token', 'claimed_at']);
+      const ownerColumns = interruptedDatabase
+        .query<
+          {
+            readonly name: string;
+          },
+          SQLQueryBindings[]
+        >('PRAGMA table_info(snapshot_build_owners)')
+        .all();
+      expect(EffectArray.map(ownerColumns, column => column.name)).toEqual([
+        'snapshot_id',
+        'owner_token',
+        'claimed_at',
+      ]);
       expect(interruptedDatabase.query('SELECT state FROM snapshots WHERE id = ?').get(interrupted.id)).toEqual({
         state: 'building',
       });
@@ -1483,7 +1560,7 @@ describe('code graph persistent schema migration', () => {
       }),
     );
 
-    expect(preserved.symbols.map(symbol => symbol.id)).toEqual([`preserved-${drift.name}`]);
+    expect(EffectArray.map(preserved.symbols, symbol => symbol.id)).toEqual([`preserved-${drift.name}`]);
     const database = new Database(fixture.databasePath, {readonly: true, strict: true});
     try {
       expect(database.query('SELECT state FROM snapshots WHERE id = ?').get(ready.id)).toMatchObject({state: 'ready'});
@@ -1542,9 +1619,9 @@ describe('code graph persistent schema migration', () => {
           {state: 'building'},
         );
         const oldColumns = interruptedDatabase
-          .query('PRAGMA table_info(building_materialization_batches)')
-          .all() as readonly {readonly name: string}[];
-        expect(oldColumns.map(column => column.name)).not.toContain('batch_fingerprint');
+          .query<{readonly name: string}, SQLQueryBindings[]>('PRAGMA table_info(building_materialization_batches)')
+          .all();
+        expect(EffectArray.map(oldColumns, column => column.name)).not.toContain('batch_fingerprint');
         expect(
           interruptedDatabase
             .query("SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'")
@@ -1561,7 +1638,7 @@ describe('code graph persistent schema migration', () => {
           return yield* store.loadGraph(fixture.databasePath, ready.id);
         }),
       );
-      expect(healed.symbols.map(symbol => symbol.id)).toEqual([`preserved-${faultPhase}`]);
+      expect(EffectArray.map(healed.symbols, symbol => symbol.id)).toEqual([`preserved-${faultPhase}`]);
 
       const healedDatabase = new Database(fixture.databasePath, {readonly: true, strict: true});
       try {
@@ -1600,26 +1677,43 @@ function expectPersistentExtensionTableContract(
   table: string,
   expectedPrimaryKey: readonly string[],
 ) {
-  const definition = database.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as {
-    readonly sql: string;
-  };
-  const columns = database.query(`PRAGMA table_info("${table}")`).all() as readonly {
-    readonly name: string;
-    readonly pk: number;
-  }[];
-  const foreignKeys = database.query(`PRAGMA foreign_key_list("${table}")`).all() as readonly {
-    readonly from: string;
-    readonly on_delete: string;
-    readonly table: string;
-    readonly to: string;
-  }[];
+  const definition = requiredRow(
+    database
+      .query<
+        {
+          readonly sql: string;
+        },
+        SQLQueryBindings[]
+      >("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table),
+  );
+  const columns = database
+    .query<
+      {
+        readonly name: string;
+        readonly pk: number;
+      },
+      SQLQueryBindings[]
+    >(`PRAGMA table_info("${table}")`)
+    .all();
+  const foreignKeys = database
+    .query<
+      {
+        readonly from: string;
+        readonly on_delete: string;
+        readonly table: string;
+        readonly to: string;
+      },
+      SQLQueryBindings[]
+    >(`PRAGMA foreign_key_list("${table}")`)
+    .all();
 
   expect(definition.sql).toMatch(/\bWITHOUT\s+ROWID\b/i);
   expect(
-    columns
-      .filter(column => column.pk > 0)
-      .sort((left, right) => left.pk - right.pk)
-      .map(column => column.name),
+    EffectArray.map(
+      EffectArray.filter(columns, column => column.pk > 0).sort((left, right) => left.pk - right.pk),
+      column => column.name,
+    ),
   ).toEqual(expectedPrimaryKey);
   expect(foreignKeys).toEqual([
     expect.objectContaining({from: 'snapshot_id', on_delete: 'CASCADE', table: 'snapshots', to: 'id'}),
@@ -1710,8 +1804,10 @@ function seedReadyAndInterruptedMigrationEffect(
   ready: CodeGraphSnapshot,
   interrupted: CodeGraphSnapshot,
 ) {
-  const preserved = graphSymbol(`preserved-${ready.id.slice('ready-before-'.length)}`);
-  const partial = graphSymbol(`partial-${interrupted.id.slice('interrupted-before-'.length)}`);
+  const preserved = graphSymbol(`preserved-${Effect2.pipe(ready.id, EffectString.slice('ready-before-'.length))}`);
+  const partial = graphSymbol(
+    `partial-${Effect2.pipe(interrupted.id, EffectString.slice('interrupted-before-'.length))}`,
+  );
   return Effect.gen(function* () {
     const store = yield* CodeGraphStore;
     yield* store.withSession(
@@ -1884,9 +1980,13 @@ function downgradeLexicalExtensionToRevision4(databasePath: string, snapshotId: 
 function downgradeBuildOwnerPlanColumnOnly(databasePath: string, interruptedSnapshotId: string) {
   const database = new Database(databasePath, {strict: true});
   try {
-    const owner = database
-      .query('SELECT owner_token, claimed_at FROM snapshot_build_owners WHERE snapshot_id = ?')
-      .get(interruptedSnapshotId) as {readonly claimed_at: string; readonly owner_token: string};
+    const owner = requiredRow(
+      database
+        .query<{readonly claimed_at: string; readonly owner_token: string}, SQLQueryBindings[]>(
+          'SELECT owner_token, claimed_at FROM snapshot_build_owners WHERE snapshot_id = ?',
+        )
+        .get(interruptedSnapshotId),
+    );
     database.exec('PRAGMA foreign_keys = OFF');
     database.exec('BEGIN IMMEDIATE');
     removeRemovedViewCleanupRevision8(database);
@@ -2036,27 +2136,33 @@ function readRevision9IndexState(databasePath: string): {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     const legacy = database
-      .query(
+      .query<{readonly name: string}, SQLQueryBindings[]>(
         `SELECT name FROM sqlite_master
          WHERE type = 'index'
            AND name IN ('edges_target', 'symbols_name', 'symbols_resolution_scope')
          ORDER BY name`,
       )
-      .all() as readonly {readonly name: string}[];
+      .all();
     const current = database
-      .query("SELECT rootpage, sql FROM sqlite_master WHERE type = 'index' AND name = 'edges_target_resolved'")
-      .get() as {readonly rootpage: number; readonly sql: string} | null;
+      .query<{readonly rootpage: number; readonly sql: string} | null, SQLQueryBindings[]>(
+        "SELECT rootpage, sql FROM sqlite_master WHERE type = 'index' AND name = 'edges_target_resolved'",
+      )
+      .get();
     const evidence = database
-      .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'edges_evidence_path'")
-      .get() as {readonly sql: string} | null;
+      .query<{readonly sql: string} | null, SQLQueryBindings[]>(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'edges_evidence_path'",
+      )
+      .get();
     const revision = database
-      .query("SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'")
-      .get() as {readonly value: string} | null;
+      .query<{readonly value: string} | null, SQLQueryBindings[]>(
+        "SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'",
+      )
+      .get();
     return {
       currentDefinition: current?.sql,
       currentRootPage: current?.rootpage,
       evidenceDefinition: evidence?.sql,
-      legacyNames: legacy.map(index => index.name),
+      legacyNames: EffectArray.map(legacy, index => index.name),
       revision: revision?.value,
     };
   } finally {
@@ -2069,18 +2175,18 @@ async function migrationFixture() {
   temporaryRoots.push(root);
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'schema-migration-fixture',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
   const file: CodeGraphInventoryFile = {
-    blobId: 'b'.repeat(40),
-    contentHash: 'h'.repeat(64),
+    blobId: Effect2.pipe('b', EffectString.repeat(40)),
+    contentHash: Effect2.pipe('h', EffectString.repeat(64)),
     language: 'typescript',
     mode: '100644',
     path: 'src/schema-migration.ts',

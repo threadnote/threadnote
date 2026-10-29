@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Result} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -26,6 +27,16 @@ import {
   type WorkflowBinding,
   type WorkflowJournal,
 } from '../../src/workflow_memory/protocol.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
+
+function parseManifestUri(value: unknown): {manifestUri: string} {
+  if (typeof value !== 'object' || value === null || !('manifestUri' in value) || typeof value.manifestUri !== 'string')
+    throw new Error('Expected a workflow journal manifest URI');
+  return {manifestUri: value.manifestUri};
+}
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 
@@ -37,7 +48,11 @@ describe('native authoring request cache', () => {
       const journalFile = f.journalPath(initialized.bindingId);
       const nativeFile = f.statePath();
       const system = yield* SystemInfo;
-      const fixtureSystem = {...system, currentDirectory: () => f.repo, environment: () => ({})};
+      const fixtureSystem = {
+        ...system,
+        currentDirectory: () => f.repo,
+        environment: () => ({}),
+      };
       const readJournal = () =>
         inspectWorkflowJournal(f.config, initialized.bindingId).pipe(Effect.provideService(SystemInfo, fixtureSystem));
 
@@ -106,42 +121,65 @@ describe('native authoring request cache', () => {
       const journalFile = f.journalPath(initialized.bindingId);
       const originalState = yield* f.fs.readFileString(nativeFile);
       const originalJournal = yield* f.fs.readFileString(journalFile);
-      const journal = JSON.parse(originalJournal) as {manifestUri: string};
+      const journal = parseManifestUri(JSON.parse(originalJournal));
       const originalManifest = yield* f.store.read(f.location, journal.manifestUri);
 
       yield* withWorkflowReadCache(
         Effect.gen(function* () {
           const initial = yield* f.call(f.base('inspect'));
-          expect(initial).toMatchObject({status: 'ok', runId: 'native-run'});
+          expect(initial).toMatchObject({
+            status: 'ok',
+            runId: 'native-run',
+          });
 
           const corruptState = '{"format":"threadnote-native-workflow",';
           yield* f.fs.writeFileString(nativeFile, corruptState);
           const nativeFailure = yield* f.call(f.base('inspect')).pipe(Effect.result);
           expect(Result.isFailure(nativeFailure)).toBe(true);
-          if (Result.isFailure(nativeFailure)) expect(nativeFailure.failure).toMatchObject({code: 'invalid-state'});
+          if (Result.isFailure(nativeFailure))
+            expect(nativeFailure.failure).toMatchObject({
+              code: 'invalid-state',
+            });
           expect(yield* f.fs.readFileString(nativeFile)).toBe(corruptState);
           yield* f.fs.writeFileString(nativeFile, originalState);
-          expect(yield* f.call(f.base('inspect'))).toMatchObject({status: 'ok', runId: 'native-run'});
+          expect(yield* f.call(f.base('inspect'))).toMatchObject({
+            status: 'ok',
+            runId: 'native-run',
+          });
 
           const corruptJournal = '{"protocolVersion":1,';
           yield* f.fs.writeFileString(journalFile, corruptJournal);
           const journalFailure = yield* f.call(f.base('inspect')).pipe(Effect.result);
           expect(Result.isFailure(journalFailure)).toBe(true);
-          if (Result.isFailure(journalFailure)) expect(journalFailure.failure).toMatchObject({code: 'invalid-journal'});
+          if (Result.isFailure(journalFailure))
+            expect(journalFailure.failure).toMatchObject({
+              code: 'invalid-journal',
+            });
           expect(yield* f.fs.readFileString(journalFile)).toBe(corruptJournal);
           yield* f.fs.writeFileString(journalFile, originalJournal);
-          expect(yield* f.call(f.base('inspect'))).toMatchObject({status: 'ok', runId: 'native-run'});
+          expect(yield* f.call(f.base('inspect'))).toMatchObject({
+            status: 'ok',
+            runId: 'native-run',
+          });
 
-          const corruptManifest = originalManifest.replace('workflow-feature', 'workflow-fEature');
+          const corruptManifest = Effect2.pipe(
+            originalManifest,
+            EffectString.replace('workflow-feature', 'workflow-fEature'),
+          );
           expect(corruptManifest).not.toBe(originalManifest);
           yield* f.store.write(f.location, journal.manifestUri, corruptManifest, {mode: 'replace'});
           const manifestFailure = yield* f.call(f.base('inspect')).pipe(Effect.result);
           expect(Result.isFailure(manifestFailure)).toBe(true);
           if (Result.isFailure(manifestFailure))
-            expect(manifestFailure.failure).toMatchObject({code: 'task-state-lost'});
+            expect(manifestFailure.failure).toMatchObject({
+              code: 'task-state-lost',
+            });
           expect(yield* f.store.read(f.location, journal.manifestUri)).toBe(corruptManifest);
           yield* f.store.write(f.location, journal.manifestUri, originalManifest, {mode: 'replace'});
-          expect(yield* f.call(f.base('inspect'))).toMatchObject({status: 'ok', runId: 'native-run'});
+          expect(yield* f.call(f.base('inspect'))).toMatchObject({
+            status: 'ok',
+            runId: 'native-run',
+          });
         }),
       );
 
@@ -163,7 +201,11 @@ describe('native authoring request cache', () => {
       );
       const journalFile = f.journalPath(initialized.bindingId);
       const system = yield* SystemInfo;
-      const fixtureSystem = {...system, currentDirectory: () => f.repo, environment: () => ({})};
+      const fixtureSystem = {
+        ...system,
+        currentDirectory: () => f.repo,
+        environment: () => ({}),
+      };
       const readJournal = () =>
         inspectWorkflowJournal(f.config, initialized.bindingId).pipe(Effect.provideService(SystemInfo, fixtureSystem));
       const nativeBytes = yield* f.fs.readFileString(nativeFile);
@@ -180,13 +222,19 @@ describe('native authoring request cache', () => {
           expect(yield* readNativeWorkflowState(f.config, 'native-run')).toBeUndefined();
           const missingRun = yield* f.call(f.base('inspect')).pipe(Effect.result);
           expect(Result.isFailure(missingRun)).toBe(true);
-          if (Result.isFailure(missingRun)) expect(missingRun.failure).toMatchObject({code: 'run-not-found'});
+          if (Result.isFailure(missingRun))
+            expect(missingRun.failure).toMatchObject({
+              code: 'run-not-found',
+            });
           yield* f.fs.writeFileString(nativeFile, nativeBytes);
 
           yield* f.fs.remove(journalFile);
           const missingJournal = yield* readJournal().pipe(Effect.result);
           expect(Result.isFailure(missingJournal)).toBe(true);
-          if (Result.isFailure(missingJournal)) expect(missingJournal.failure).toMatchObject({code: 'task-state-lost'});
+          if (Result.isFailure(missingJournal))
+            expect(missingJournal.failure).toMatchObject({
+              code: 'task-state-lost',
+            });
           yield* f.fs.writeFileString(journalFile, journalBytes);
 
           const linkedFs = FileSystem.FileSystem.of({
@@ -206,7 +254,10 @@ describe('native authoring request cache', () => {
             Effect.result,
           );
           expect(Result.isFailure(linkedJournal)).toBe(true);
-          if (Result.isFailure(linkedJournal)) expect(linkedJournal.failure).toMatchObject({code: 'unsafe-journal'});
+          if (Result.isFailure(linkedJournal))
+            expect(linkedJournal.failure).toMatchObject({
+              code: 'unsafe-journal',
+            });
         }),
       );
       expect(yield* f.fs.readFileString(external)).toBe(nativeBytes);
@@ -220,7 +271,11 @@ describe('native authoring request cache', () => {
       const journalFile = f.journalPath(initialized.bindingId);
       const nativeFile = f.statePath();
       const system = yield* SystemInfo;
-      const fixtureSystem = {...system, currentDirectory: () => f.repo, environment: () => ({})};
+      const fixtureSystem = {
+        ...system,
+        currentDirectory: () => f.repo,
+        environment: () => ({}),
+      };
       const readJournal = () =>
         inspectWorkflowJournal(f.config, initialized.bindingId).pipe(Effect.provideService(SystemInfo, fixtureSystem));
       const nativeBefore = yield* f.fs.readFileString(nativeFile);
@@ -231,21 +286,40 @@ describe('native authoring request cache', () => {
           const initialState = yield* readNativeWorkflowState(f.config, 'native-run');
           const initialJournal = yield* readJournal();
           expect(initialState?.state.operations).toHaveLength(0);
-          expect(Object.keys(initialJournal.state.operations)).toHaveLength(0);
+          expect(EffectRecord.keys(initialJournal.state.operations)).toHaveLength(0);
 
           const write = f.write();
           const result = yield* f.call(write).pipe(Effect.result);
           expect(Result.isSuccess(result)).toBe(true);
           if (Result.isFailure(result)) return;
           if (!('artifact' in result.success)) throw new Error('Expected a verified artifact');
-          const artifact = result.success.artifact as {uri: string; body?: string};
+          const artifact = result.success.artifact;
+          if (
+            typeof artifact !== 'object' ||
+            artifact === null ||
+            !('uri' in artifact) ||
+            typeof artifact.uri !== 'string'
+          )
+            throw new Error('Expected a verified artifact URI');
 
           const writtenState = yield* readNativeWorkflowState(f.config, 'native-run');
           const writtenJournal = yield* readJournal();
-          expect(writtenState?.state.operations.map(operation => operation.intent.operationId)).toContain('write-1');
-          expect(Object.keys(writtenJournal.state.operations)).toContain('write-1');
-          const readback = yield* f.call({...f.base('read'), uri: artifact.uri});
-          expect(readback).toMatchObject({status: 'ok', artifact: {uri: artifact.uri, body: write.body}});
+          expect(
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(writtenState?.state.operations), __effectArrayReceiver =>
+                EffectArray.map(__effectArrayReceiver, operation => operation.intent.operationId),
+              ),
+            ),
+          ).toContain('write-1');
+          expect(EffectRecord.keys(writtenJournal.state.operations)).toContain('write-1');
+          const readback = yield* f.call({
+            ...f.base('read'),
+            uri: artifact.uri,
+          });
+          expect(readback).toMatchObject({
+            status: 'ok',
+            artifact: {uri: artifact.uri, body: write.body},
+          });
 
           expect(yield* f.fs.readFileString(nativeFile)).not.toBe(nativeBefore);
           expect(yield* f.fs.readFileString(journalFile)).not.toBe(journalBefore);
@@ -256,7 +330,10 @@ describe('native authoring request cache', () => {
 });
 
 it('deep-freezes descendants even when the image root was already shallow-frozen', () => {
-  const image = Object.freeze({nested: {leaf: {value: 'stable'}}, rows: [{value: 1}]});
+  const image = Object.freeze({
+    nested: {leaf: {value: 'stable'}},
+    rows: [{value: 1}],
+  });
   expect(immutableWorkflowImage(image)).toBe(image);
   expect(Object.isFrozen(image)).toBe(true);
   expect(Object.isFrozen(image.nested)).toBe(true);
@@ -301,7 +378,7 @@ function manifestCacheDocument(
       status: 'active',
       project: value.project,
       topic: workflowStateTopic(value),
-      memoryId: `tn_${value.bindingId.slice(0, 20)}`,
+      memoryId: `tn_${Effect2.pipe(value.bindingId, EffectString.slice(0, 20))}`,
       timestamp: stamp,
       sourceAgentClient: 'threadnote',
       sourceSessionId: value.workflowRunId,
@@ -319,13 +396,15 @@ const manifestCacheArtifact: WorkflowArtifact = {
     artifactKey: manifestCacheArtifactKey,
     storageKind: 'handoff',
   }),
-  memoryId: `tn_${sha256HexSync(`${manifestCacheBinding.bindingId}\nwriter\n${manifestCacheArtifactKey}`).slice(0, 20)}`,
-  revision: 'a'.repeat(64),
-  bodySha256: 'b'.repeat(64),
+  memoryId: `tn_${Effect2.pipe(sha256HexSync(`${manifestCacheBinding.bindingId}\nwriter\n${manifestCacheArtifactKey}`), EffectString.slice(0, 20))}`,
+  revision: Effect2.pipe('a', EffectString.repeat(64)),
+  bodySha256: Effect2.pipe('b', EffectString.repeat(64)),
   storageKind: 'handoff',
   state: 'active',
 };
-const manifestCacheArtifacts = {[manifestCacheArtifact.canonicalUri]: manifestCacheArtifact};
+const manifestCacheArtifacts = {
+  [manifestCacheArtifact.canonicalUri]: manifestCacheArtifact,
+};
 
 function manifestCacheState(
   value: WorkflowBinding = manifestCacheBinding,
@@ -374,7 +453,10 @@ describe('native authoring manifest cache', () => {
         expect(() => assertWorkflowJournalIntegrity(editedMap, editedMap.manifestContent, [], cache)).toThrow();
         expect(cache.manifests[0]).toBe(firstEntry);
 
-        const changedUri = {...original, manifestUri: `${original.manifestUri}.other`};
+        const changedUri = {
+          ...original,
+          manifestUri: `${original.manifestUri}.other`,
+        };
         expect(() => assertWorkflowJournalIntegrity(changedUri, changedUri.manifestContent, [], cache)).toThrow();
         expect(cache.manifests[0]).toBe(firstEntry);
 
@@ -459,8 +541,8 @@ describe('native authoring manifest cache', () => {
         };
         yield* Effect.sync(() => assertWorkflowJournalIntegrity(pending, previousContent, [], cache));
         expect(cache.manifests).toHaveLength(2);
-        expect(cache.manifests.map(entry => entry.content)).toContain(desiredContent);
-        expect(cache.manifests.map(entry => entry.content)).toContain(previousContent);
+        expect(EffectArray.map(cache.manifests, entry => entry.content)).toContain(desiredContent);
+        expect(EffectArray.map(cache.manifests, entry => entry.content)).toContain(previousContent);
         const entries = [...cache.manifests];
         yield* Effect.sync(() => assertWorkflowJournalIntegrity(pending, previousContent, [], cache));
         expect(cache.manifests).toEqual(entries);

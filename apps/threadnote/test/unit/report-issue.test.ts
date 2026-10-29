@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
@@ -10,6 +11,9 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {ReportIssueCreateFailed, ReportIssueInvalid, runReportIssue} from '@threadnote/threadnote/report_issue';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 describe('report issue', () => {
   effectIt.effect('previews an allowlisted log excerpt without invoking GitHub', () =>
@@ -18,18 +22,23 @@ describe('report issue', () => {
         const {config, fs, path} = yield* reportIssueTestHome('preview');
         yield* withProductionLogging(config.agentContextHome, {component: 'cli', operation: 'doctor'}, Effect.void);
         const logPath = path.join(config.agentContextHome, 'logs', 'threadnote.log');
-        const validEntry = JSON.parse((yield* fs.readFileString(logPath)).trim().split('\n')[0]) as Record<
-          string,
-          unknown
-        >;
+        const parsedEntry: unknown = JSON.parse(
+          Effect2.pipe(yield* fs.readFileString(logPath), EffectString.trim, EffectString.split('\n'))[0],
+        );
+        if (!Effect2.Predicate.isObject(parsedEntry))
+          throw new Error('Expected the production log entry to be an object.');
+        const validEntry: Record<string, unknown> = parsedEntry;
         yield* fs.writeFileString(
           logPath,
-          [
-            JSON.stringify({...validEntry, memoryBody: 'private-memory-content'}),
-            JSON.stringify({...validEntry, operation: 'sk-1234567890abcdefghijkl'}),
-            'not-json',
-            '',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              JSON.stringify({...validEntry, memoryBody: 'private-memory-content'}),
+              JSON.stringify({...validEntry, operation: 'sk-1234567890abcdefghijkl'}),
+              'not-json',
+              '',
+            ],
+            '\n',
+          ),
           {flag: 'a'},
         );
         let commandInvoked = false;
@@ -86,7 +95,7 @@ describe('report issue', () => {
               readonly requestPath: string;
             }
           | undefined;
-        let request: {readonly body?: unknown; readonly title?: unknown} | undefined;
+        let request: Record<string, unknown> | undefined;
         let requestMode: number | undefined;
         const command = CommandExecutor.of({
           execute: (executable, args, options) =>
@@ -94,10 +103,10 @@ describe('report issue', () => {
               const inputIndex = args.indexOf('--input');
               const requestPath = args[inputIndex + 1];
               invocation = {args, environment: options?.env, executable, requestPath};
-              request = JSON.parse(yield* fs.readFileString(requestPath)) as {
-                readonly body?: unknown;
-                readonly title?: unknown;
-              };
+              const parsedRequest: unknown = JSON.parse(yield* fs.readFileString(requestPath));
+              if (!Effect2.Predicate.isObject(parsedRequest))
+                throw new Error('Expected the issue request to be an object.');
+              request = parsedRequest;
               requestMode = (yield* fs.stat(requestPath)).mode;
               return {
                 exitCode: 0,
@@ -143,14 +152,27 @@ describe('report issue', () => {
           '.html_url',
         ]);
         expect(invocation?.environment?.GH_HOST).toBe('hostile.example');
-        expect(invocation?.args.join(' ')).not.toContain('Standalone command failure');
-        expect(invocation?.args.join(' ')).not.toContain('failed after installation');
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(invocation?.args), __effectArrayJoinReceiver =>
+              EffectArray.join(__effectArrayJoinReceiver, ' '),
+            ),
+          ),
+        ).not.toContain('Standalone command failure');
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(invocation?.args), __effectArrayJoinReceiver =>
+              EffectArray.join(__effectArrayJoinReceiver, ' '),
+            ),
+          ),
+        ).not.toContain('failed after installation');
         expect(request?.title).toBe('Standalone command failure');
         expect(request?.body).toContain('The standalone command failed after installation.');
         expect(request?.body).toContain('Production logs included: yes');
         expect(request?.body).toContain('"operation":"doctor"');
         expect((requestMode ?? 0) & 0o777).toBe(0o600);
-        expect(yield* fs.exists(invocation?.requestPath as string)).toBe(false);
+        if (invocation === undefined) throw new Error('Expected the GitHub CLI invocation to be captured.');
+        expect(yield* fs.exists(invocation.requestPath)).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -311,8 +333,8 @@ describe('report issue', () => {
 
 function approvalFrom(output: string): string {
   const approval = /Approval digest: (sha256:[a-f0-9]{64})/.exec(output)?.[1];
-  expect(approval).toBeDefined();
-  return approval as string;
+  if (approval === undefined) throw new Error('Expected an approval digest in the report preview.');
+  return approval;
 }
 
 function reportIssueTestHome(label: string) {

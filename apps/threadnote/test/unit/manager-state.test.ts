@@ -5,6 +5,9 @@ import {describe, expect, it} from 'vitest';
 import {HttpService} from '@threadnote/platform/http';
 import {fetchManagerLatestVersion, managerUpdateAvailable} from '@threadnote/threadnote/manager/state';
 import {managerUpdateIndicator} from '@threadnote/manager/update_indicator';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 describe('Manager runtime state', () => {
   it.each([
@@ -30,8 +33,14 @@ describe('Manager runtime state', () => {
     );
     fc.assert(
       fc.property(version, version, (current, latest) => {
-        const currentVersion = current.join('.');
-        const latestVersion = latest.join('.');
+        const currentVersion = EffectArray.join(
+          EffectArray.map(current, item => (item === null || item === undefined ? '' : String(item))),
+          '.',
+        );
+        const latestVersion = EffectArray.join(
+          EffectArray.map(latest, item => (item === null || item === undefined ? '' : String(item))),
+          '.',
+        );
         const expected =
           latest[0] > current[0] ||
           (latest[0] === current[0] && latest[1] > current[1]) ||
@@ -49,11 +58,22 @@ describe('Manager runtime state', () => {
     );
     const commit = fc
       .array(fc.constantFrom(...'0123456789abcdef'), {maxLength: 40, minLength: 40})
-      .map(characters => characters.join(''));
+      .map(characters => EffectArray.join(characters, ''));
     fc.assert(
       fc.property(version, version, commit, (current, latest, revision) => {
-        const currentVersion = `${current.join('.')}-local.g${revision}`;
-        expect(managerUpdateAvailable(currentVersion, latest.join('.'))).toBe(false);
+        const currentVersion = `${EffectArray.join(
+          EffectArray.map(current, item => (item === null || item === undefined ? '' : String(item))),
+          '.',
+        )}-local.g${revision}`;
+        expect(
+          managerUpdateAvailable(
+            currentVersion,
+            EffectArray.join(
+              EffectArray.map(latest, item => (item === null || item === undefined ? '' : String(item))),
+              '.',
+            ),
+          ),
+        ).toBe(false);
       }),
     );
   });
@@ -72,7 +92,7 @@ describe('Manager runtime state', () => {
         getText: () => Effect.die('not used'),
       });
       const latestVersion = yield* fetchManagerLatestVersion(
-        `4.4.2-local.g${'a'.repeat(40)}`,
+        `4.4.2-local.g${Effect2.pipe('a', EffectString.repeat(40))}`,
         'https://example.invalid/releases',
       ).pipe(Effect.provideService(HttpService, http));
 

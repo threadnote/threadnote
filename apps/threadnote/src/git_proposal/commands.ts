@@ -1,4 +1,5 @@
-import {Console, Crypto, Effect, FileSystem, Option, Path} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Console, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -39,6 +40,85 @@ import {
   buildReviewedTopicMaintenanceGitProposal,
   verifyTopicMaintenanceMaterialization,
 } from './topic_maintenance_commands.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const proposalFileSchema = Schema.Struct({
+  approval: Schema.Struct({
+    candidateId: Schema.String,
+    expectedSourceContentHash: Schema.String,
+    expectedSourceMemoryId: Schema.String,
+    reviewId: Schema.String,
+    revision: Schema.Int,
+    scope: Schema.Literal('shared'),
+  }),
+  content: Schema.String,
+  contentHash: Schema.String,
+  memory: Schema.Struct({
+    id: Schema.String,
+    relations: Schema.Array(
+      Schema.Struct({
+        type: Schema.Literals(['depends_on', 'evidence_for', 'references', 'related_to', 'supersedes']),
+        uri: Schema.String,
+      }),
+    ),
+    topic: Schema.String,
+  }),
+  operation: Schema.Literals(['create', 'replace']),
+  path: Schema.String,
+  targetPrecondition: Schema.Union([
+    Schema.Struct({state: Schema.Literal('absent')}),
+    Schema.Struct({
+      expectedContentHash: Schema.String,
+      expectedMemoryId: Schema.String,
+      state: Schema.Literal('present'),
+    }),
+  ]),
+});
+const proposalCommon = {
+  base: Schema.Struct({expectedCommit: Schema.String}),
+  branch: Schema.Struct({name: Schema.String}),
+  commit: Schema.Struct({message: Schema.String}),
+  files: Schema.Array(proposalFileSchema),
+  knowledgeDelta: Schema.Struct({expectedHash: Schema.String, expectedRevision: Schema.Int, reviewId: Schema.String}),
+  project: Schema.String,
+  proposalHash: Schema.String,
+  target: Schema.Struct({repositoryId: Schema.String, team: Schema.String}),
+  type: Schema.Literal('knowledge-delta-git-proposal'),
+};
+const maintenancePolicySchema = Schema.Struct({
+  version: Schema.Literal(1),
+  access: Schema.Literal('read-write'),
+  hash: Schema.String,
+});
+const maintenanceCommon = {
+  approvalDigest: Schema.String,
+  beforeCanonicalHash: Schema.String,
+  sourceVectorHash: Schema.String,
+  reviewHash: Schema.String,
+  baseBranch: Schema.NullOr(Schema.String),
+  policy: maintenancePolicySchema,
+};
+const gitProposalSchema = Schema.Union([
+  Schema.Struct({...proposalCommon, version: Schema.Literal(1)}),
+  Schema.Struct({...proposalCommon, version: Schema.Literal(2), maintenance: Schema.Struct(maintenanceCommon)}),
+  Schema.Struct({
+    ...proposalCommon,
+    version: Schema.Literal(3),
+    maintenance: Schema.Struct({
+      ...maintenanceCommon,
+      kind: Schema.Literal('automatic'),
+      supportDigest: Schema.String,
+      target: Schema.Struct({
+        kind: Schema.Literals(['durable', 'handoff', 'incident', 'preference', 'smoke']),
+        headerTitle: Schema.Literals(['MEMORY', 'HANDOFF']),
+        project: Schema.optionalKey(Schema.String),
+        topic: Schema.optionalKey(Schema.String),
+      }),
+    }),
+  }),
+]);
 
 const MAXIMUM_GIT_PROPOSAL_OUTPUT_BYTES = 256 * 1_024;
 
@@ -81,7 +161,11 @@ export const runKnowledgeDeltaGitProposalMaterialize = Effect.fn('gitProposal.ma
     .readFileString(options.proposal)
     .pipe(Effect.mapError(() => operationError('Git proposal file is unreadable.')));
   const proposal = yield* Effect.try({
-    try: () => JSON.parse(rawProposal) as GitProposal,
+    try: () => {
+      const value: unknown = JSON.parse(rawProposal);
+      if (!Schema.is(gitProposalSchema)(value)) throw new Error('invalid Git proposal shape');
+      return value;
+    },
     catch: () => operationError('Git proposal file is unreadable or invalid JSON.'),
   });
   yield* Effect.try({
@@ -139,14 +223,14 @@ const materializeProposal = Effect.fn('gitProposal.materializeDecoded')(function
     });
   const read: GitMaterializeRunner = (args, runOptions = {}) => run(['--no-optional-locks', ...args], runOptions);
   const status = yield* read(['status', '--porcelain=v1', '-z', '--untracked-files=normal']);
-  if (status.stdout.trim())
+  if (Effect2.pipe(status.stdout, EffectString.trim))
     return yield* operationError('Local shared Git worktree must be clean before materialization.');
   const base = proposal.base.expectedCommit;
   const readableBase = yield* read(['rev-parse', '--verify', '--quiet', `${base}^{commit}`], {allowFailure: true});
-  if (readableBase.exitCode !== 0 || readableBase.stdout.trim() !== base) {
+  if (readableBase.exitCode !== 0 || Effect2.pipe(readableBase.stdout, EffectString.trim) !== base) {
     return yield* operationError('Git proposal base commit is not readable in the configured shared repository.');
   }
-  const files = Object.fromEntries(
+  const files = EffectRecord.fromEntries(
     yield* Effect.forEach(proposal.files, file =>
       read(['show', `${base}:${file.path}`], {allowFailure: true}).pipe(
         Effect.map(result => [file.path, result.exitCode === 0 ? result.stdout : undefined] as const),
@@ -184,7 +268,7 @@ const materializeProposal = Effect.fn('gitProposal.materializeDecoded')(function
     yield* Console.log(
       JSON.stringify({
         branch: plan.branch,
-        files: plan.files.map(file => file.path),
+        files: EffectArray.map(plan.files, file => file.path),
         outcome: 'preview',
         proposalHash: plan.proposalHash,
       }),
@@ -209,7 +293,7 @@ const materializedBranchCommit = Effect.fn('gitProposal.materializedBranchCommit
   branchRef: string,
 ) {
   const result = yield* read(['rev-parse', '--verify', '--quiet', `${branchRef}^{commit}`], {allowFailure: true});
-  return result.exitCode === 0 ? result.stdout.trim() : undefined;
+  return result.exitCode === 0 ? Effect2.pipe(result.stdout, EffectString.trim) : undefined;
 });
 
 const verifyMaterializedBranch = Effect.fn('gitProposal.verifyMaterializedBranch')(function* (
@@ -219,26 +303,25 @@ const verifyMaterializedBranch = Effect.fn('gitProposal.verifyMaterializedBranch
   base: string,
   plan: KnowledgeDeltaGitMaterializationPlanV1,
 ) {
-  const parents = (yield* read(['rev-list', '--parents', '-n', '1', branchRef])).stdout.trim().split(/\s+/u);
-  const message = (yield* read(['show', '-s', '--format=%B', branchRef])).stdout.trimEnd();
-  const changed = (yield* read([
-    'diff-tree',
-    '--no-commit-id',
-    '--name-only',
-    '-r',
-    '--no-renames',
-    base,
-    commit,
-  ])).stdout
-    .split('\n')
-    .filter(Boolean)
-    .sort();
-  const planned = plan.files.map(file => file.path).sort();
+  const parents = Effect2.pipe(
+    (yield* read(['rev-list', '--parents', '-n', '1', branchRef])).stdout,
+    EffectString.trim,
+    EffectString.split(/\s+/u),
+  );
+  const message = Effect2.pipe((yield* read(['show', '-s', '--format=%B', branchRef])).stdout, EffectString.trimEnd);
+  const changed = EffectArray.filter(
+    Effect2.pipe(
+      (yield* read(['diff-tree', '--no-commit-id', '--name-only', '-r', '--no-renames', base, commit])).stdout,
+      EffectString.split('\n'),
+    ),
+    Boolean,
+  ).sort();
+  const planned = EffectArray.map(plan.files, file => file.path).sort();
   if (
     parents.length !== 2 ||
     parents[0] !== commit ||
     parents[1] !== base ||
-    message !== plan.commitMessage.trimEnd() ||
+    message !== Effect2.pipe(plan.commitMessage, EffectString.trimEnd) ||
     JSON.stringify(changed) !== JSON.stringify(planned)
   ) {
     return yield* operationError('Existing materialization branch conflicts with the Git proposal.');
@@ -246,7 +329,7 @@ const verifyMaterializedBranch = Effect.fn('gitProposal.verifyMaterializedBranch
   for (const file of plan.files) {
     const treeEntry = yield* read(['ls-tree', commit, '--', file.path]);
     const content = yield* read(['show', `${commit}:${file.path}`]);
-    if (!treeEntry.stdout.startsWith('100644 blob ') || content.stdout !== file.content) {
+    if (!Effect2.pipe(treeEntry.stdout, EffectString.startsWith('100644 blob ')) || content.stdout !== file.content) {
       return yield* operationError('Existing materialization branch conflicts with the Git proposal.');
     }
   }
@@ -267,14 +350,20 @@ const createMaterializedBranch = Effect.fn('gitProposal.createMaterializedBranch
       const indexFile = path.join(temporary, 'index');
       yield* run(['read-tree', base], {indexFile});
       for (const file of plan.files) {
-        const blob = (yield* run(['hash-object', '-w', '--stdin'], {
-          input: new TextEncoder().encode(file.content),
-        })).stdout.trim();
+        const blob = Effect2.pipe(
+          (yield* run(['hash-object', '-w', '--stdin'], {
+            input: new TextEncoder().encode(file.content),
+          })).stdout,
+          EffectString.trim,
+        );
         yield* run(['update-index', '--add', '--cacheinfo', '100644', blob, file.path], {indexFile});
       }
-      const tree = (yield* run(['write-tree'], {indexFile})).stdout.trim();
-      const commit = (yield* run(['commit-tree', tree, '-p', base, '-m', plan.commitMessage])).stdout.trim();
-      const objectFormat = (yield* read(['rev-parse', '--show-object-format'])).stdout.trim();
+      const tree = Effect2.pipe((yield* run(['write-tree'], {indexFile})).stdout, EffectString.trim);
+      const commit = Effect2.pipe(
+        (yield* run(['commit-tree', tree, '-p', base, '-m', plan.commitMessage])).stdout,
+        EffectString.trim,
+      );
+      const objectFormat = Effect2.pipe((yield* read(['rev-parse', '--show-object-format'])).stdout, EffectString.trim);
       const updated = yield* run(['update-ref', branchRef, commit, gitNullObjectId(objectFormat)], {
         allowFailure: true,
       });
@@ -291,8 +380,8 @@ const createMaterializedBranch = Effect.fn('gitProposal.createMaterializedBranch
 });
 
 export function gitNullObjectId(objectFormat: string): string {
-  if (objectFormat === 'sha1') return '0'.repeat(40);
-  if (objectFormat === 'sha256') return '0'.repeat(64);
+  if (objectFormat === 'sha1') return Effect2.pipe('0', EffectString.repeat(40));
+  if (objectFormat === 'sha256') return Effect2.pipe('0', EffectString.repeat(64));
   throw operationError(`Unsupported Git object format: ${objectFormat || 'unknown'}.`);
 }
 
@@ -300,15 +389,22 @@ export const buildReviewedKnowledgeDeltaGitProposal = Effect.fn('gitProposal.bui
   config: RuntimeConfig,
   options: Omit<KnowledgeDeltaGitProposalExportOptionsV1, 'output'>,
 ) {
-  const candidateIds = [...new Set(options.candidateIds.map(value => value.trim()).filter(Boolean))].sort();
+  const candidateIds = [
+    ...new Set(
+      EffectArray.filter(
+        EffectArray.map(options.candidateIds, value => Effect2.pipe(value, EffectString.trim)),
+        Boolean,
+      ),
+    ),
+  ].sort();
   if (candidateIds.length > 3) return yield* operationError('A Git proposal can contain at most three candidates.');
-  const reviewId = options.reviewId.trim();
+  const reviewId = Effect2.pipe(options.reviewId, EffectString.trim);
   return yield* withCandidateReviewLock(
     config.agentContextHome,
     reviewId,
     Effect.gen(function* () {
       const reviews = yield* listCandidateReviews(config.agentContextHome);
-      const review = reviews.find(item => item.reviewId === reviewId);
+      const review = Option.getOrUndefined(EffectArray.findFirst(reviews, item => item.reviewId === reviewId));
       if (!review) return yield* operationError(`Candidate review ${reviewId} was not found.`);
       if (review.revision !== options.revision) {
         return yield* operationError(
@@ -380,7 +476,7 @@ export const runKnowledgeDeltaGitProposalExport = Effect.fn('gitProposal.exportC
 ) {
   const built = yield* buildReviewedGitProposal(config, options);
   if (options.output === undefined) {
-    yield* Console.log(built.artifact.trimEnd());
+    yield* Console.log(Effect2.pipe(built.artifact, EffectString.trimEnd));
     return;
   }
   const system = yield* SystemInfo;
@@ -399,12 +495,14 @@ function reviewedMutation(
   baseCommit: string,
 ) {
   return Effect.gen(function* () {
-    const candidate = review.candidates.find(item => item.candidateId === candidateId);
+    const candidate = Option.getOrUndefined(
+      EffectArray.findFirst(review.candidates, item => item.candidateId === candidateId),
+    );
     if (!candidate) return yield* operationError(`Candidate ${candidateId} is not part of ${review.reviewId}.`);
     if (candidate.state !== 'applied' || !candidate.applyTargetUri) {
       return yield* operationError(`Candidate ${candidateId} must be applied before shared Git proposal export.`);
     }
-    const sources = records.filter(record => record.uri === candidate.applyTargetUri);
+    const sources = EffectArray.filter(records, record => record.uri === candidate.applyTargetUri);
     if (sources.length !== 1) {
       return yield* operationError(`Applied candidate source ${candidate.applyTargetUri} is not uniquely readable.`);
     }

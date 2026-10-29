@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {
   isExternalResourceUri,
   parseExternalResourceIdentity,
@@ -29,6 +31,8 @@ import {
   renderRecallOperationalWarning,
   type RecallOperationalWarning,
 } from '../warning.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const RECALL_MCP_RESPONSE_DEFAULT_ESTIMATED_TOKENS = 1_500 as const;
 export const RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS = 700 as const;
@@ -173,8 +177,10 @@ export function projectRecallMcpResponse(
   const notices = compactNotices(logical.notices ?? []);
   const warnings = mergeRecallOperationalWarnings(logical.warnings ?? []);
   const hasLogicalActionableConnection =
-    actionableMemoryConnectionUris(logical.memoryConnections, new Set(logical.results.map(result => result.uri)))
-      .length > 0;
+    actionableMemoryConnectionUris(
+      logical.memoryConnections,
+      new Set(EffectArray.map(logical.results, result => result.uri)),
+    ).length > 0;
   let selected:
     | {
         readonly measurement: AgentToolResponseMeasurement;
@@ -185,7 +191,7 @@ export function projectRecallMcpResponse(
   let minimumBytes = Number.POSITIVE_INFINITY;
 
   for (let count = 0; count <= logical.results.length; count += 1) {
-    const selectedUris = new Set(logical.results.slice(0, count).map(result => result.uri));
+    const selectedUris = new Set(EffectArray.map(logical.results.slice(0, count), result => result.uri));
     const receiptLimits = logical.memoryConnections
       ? memoryConnectionReceiptLimits(logical.memoryConnections, selectedUris)
       : [undefined];
@@ -287,20 +293,23 @@ export function renderRecallMcpText(response: RecallMcpStructuredContent, notice
       ? ` Verified one-hop navigation evidence omitted by the response budget. Retry recall_context with budgetTokens=${response.output.retryBudgetTokens} and the same inputs.`
       : ' Verified one-hop navigation evidence omitted by the response budget. Narrow the recall inputs and retry.'
     : '';
-  return [
-    `Recall returned ${count} unread pointer(s)${omitted}. Ranked pointers are not evidence.${next}${budgetRecovery}`,
-    ...(returnedResults > 0 ? ['Feedback: recall_feedback useful|wrong|pin|dismiss|applied.'] : []),
-    ...(response.memoryConnections
-      ? [
-          `Seeded one-hop coverage: ${response.memoryConnections.coverage.resultCount} result(s), ${response.memoryConnections.connections.length} verified connection receipt(s), ${response.memoryConnections.premises.length} premise receipt(s)${response.memoryConnections.coverage.truncated ? '; truncated' : ''}. Relations are navigation evidence, not entailment.`,
-        ]
-      : []),
-    ...(response.projectBoundary === undefined
-      ? []
-      : [`Project boundary: ${JSON.stringify(response.projectBoundary)}`]),
-    ...(response.warnings ?? []).map(renderRecallOperationalWarning),
-    ...notices,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Recall returned ${count} unread pointer(s)${omitted}. Ranked pointers are not evidence.${next}${budgetRecovery}`,
+      ...(returnedResults > 0 ? ['Feedback: recall_feedback useful|wrong|pin|dismiss|applied.'] : []),
+      ...(response.memoryConnections
+        ? [
+            `Seeded one-hop coverage: ${response.memoryConnections.coverage.resultCount} result(s), ${response.memoryConnections.connections.length} verified connection receipt(s), ${response.memoryConnections.premises.length} premise receipt(s)${response.memoryConnections.coverage.truncated ? '; truncated' : ''}. Relations are navigation evidence, not entailment.`,
+          ]
+        : []),
+      ...(response.projectBoundary === undefined
+        ? []
+        : [`Project boundary: ${JSON.stringify(response.projectBoundary)}`]),
+      ...EffectArray.map(response.warnings ?? [], renderRecallOperationalWarning),
+      ...notices,
+    ],
+    '\n',
+  );
 }
 
 /** A deterministic, text-only recall receipt optimized for direct agent reading.
@@ -311,24 +320,33 @@ export function renderRecallMcpAgentText(
   notices: readonly string[] = [],
 ): string {
   const scalar = (value: unknown) =>
-    (JSON.stringify(value) ?? 'null').replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
+    Effect.pipe(
+      JSON.stringify(value) ?? 'null',
+      EffectString.replaceAll('\u2028', '\\u2028'),
+      EffectString.replaceAll('\u2029', '\\u2029'),
+    );
   const oneLine = (value: string) => {
     let output = '';
     let replacingControl = false;
     for (const character of value) {
-      const codePoint = character.codePointAt(0) ?? 0;
+      const codePoint =
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        ) ?? 0;
       const control =
         codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) || codePoint === 0x2028 || codePoint === 0x2029;
       if (!control) output += character;
       else if (!replacingControl) output += ' ';
       replacingControl = control;
     }
-    return output.trim();
+    return Effect.pipe(output, EffectString.trim);
   };
   const lines = ['TN-RECALL/1', 'Ranked unread pointers; not evidence. Read useful URIs with read_context.'];
   if (response.confidence !== undefined) {
     lines.push(
-      `Confidence: ${response.confidence.level} ${roundedConfidence(response.confidence.score)} (${response.confidence.basis.replaceAll('-', ' ')}). ${oneLine(response.confidence.reason)}`,
+      `Confidence: ${response.confidence.level} ${roundedConfidence(response.confidence.score)} (${Effect.pipe(response.confidence.basis, EffectString.replaceAll('-', ' '))}). ${oneLine(response.confidence.reason)}`,
     );
   }
   if (response.projectBoundary !== undefined) lines.push(`Project boundary: ${scalar(response.projectBoundary)}`);
@@ -386,7 +404,7 @@ export function renderRecallMcpAgentText(
     }
     if (result.aliases !== undefined) {
       lines.push(
-        `   Aliases: ${result.aliases.map(oneLine).join(', ')}${result.omittedAliases ? `; ${result.omittedAliases} omitted` : ''}.`,
+        `   Aliases: ${EffectArray.join(EffectArray.map(result.aliases, oneLine), ', ')}${result.omittedAliases ? `; ${result.omittedAliases} omitted` : ''}.`,
       );
     }
     for (const warning of result.warnings ?? []) {
@@ -403,11 +421,20 @@ export function renderRecallMcpAgentText(
       );
     }
   }
-  const nextRanks = response.nextAction.uris.flatMap(uri => {
-    const index = response.results.findIndex(result => result.uri === uri);
+  const nextRanks = EffectArray.flatMap(response.nextAction.uris, uri => {
+    const index = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(response.results, result => result.uri === uri),
+      () => -1,
+    );
     return index < 0 ? [] : [index + 1];
   });
-  if (nextRanks.length > 0) lines.push(`Read first with read_context: ${nextRanks.join(', ')}.`);
+  if (nextRanks.length > 0)
+    lines.push(
+      `Read first with read_context: ${EffectArray.join(
+        EffectArray.map(nextRanks, item => (item === null || item === undefined ? '' : String(item))),
+        ', ',
+      )}.`,
+    );
   if (response.memoryConnections !== undefined) {
     const {coverage} = response.memoryConnections;
     lines.push(
@@ -421,7 +448,7 @@ export function renderRecallMcpAgentText(
     }
   }
   if (response.queryExpansions !== undefined)
-    lines.push(`Query expansions: ${response.queryExpansions.map(oneLine).join(', ')}.`);
+    lines.push(`Query expansions: ${EffectArray.join(EffectArray.map(response.queryExpansions, oneLine), ', ')}.`);
   for (const warning of response.warnings ?? []) lines.push(renderRecallOperationalWarning(warning));
   for (const notice of notices) lines.push(`Notice: ${oneLine(notice)}`);
   if (response.memoryConnections?.coverage.truncated === true) {
@@ -436,7 +463,7 @@ export function renderRecallMcpAgentText(
         : 'Recovery: increase budgetTokens or narrow recall inputs.',
     );
   }
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 function renderStructuredContent(
@@ -450,16 +477,20 @@ function renderStructuredContent(
   receiptLimits: MemoryConnectionReceiptLimits | undefined,
 ): RecallMcpStructuredContent {
   const selected = logical.results.slice(0, count);
-  const results = selected.map(hit => renderResult(hit, includeExplainDetails));
+  const results = EffectArray.map(selected, hit => renderResult(hit, includeExplainDetails));
   const memoryConnections = logical.memoryConnections
-    ? renderMemoryConnections(logical.memoryConnections, new Set(results.map(result => result.uri)), receiptLimits)
+    ? renderMemoryConnections(
+        logical.memoryConnections,
+        new Set(EffectArray.map(results, result => result.uri)),
+        receiptLimits,
+      )
     : undefined;
   const actionableConnectionUris = resolvedConnectionResultUris(memoryConnections, results);
   const hasUnprojectedActionableConnection = hasLogicalActionableConnection && actionableConnectionUris.length === 0;
-  const nextActionUris = uniqueStrings([...actionableConnectionUris, ...results.map(result => result.uri)]).slice(
-    0,
-    NEXT_ACTION_URI_LIMIT,
-  );
+  const nextActionUris = uniqueStrings([
+    ...actionableConnectionUris,
+    ...EffectArray.map(results, result => result.uri),
+  ]).slice(0, NEXT_ACTION_URI_LIMIT);
   const confidence = renderConfidence(
     logical.confidence,
     actionableConnectionUris.length > 0,
@@ -499,7 +530,7 @@ function resolvedConnectionResultUris(
   results: readonly RecallMcpResult[],
 ): readonly string[] {
   if (memoryConnections === undefined || results.length === 0) return [];
-  return actionableMemoryConnectionUris(memoryConnections, new Set(results.map(result => result.uri)));
+  return actionableMemoryConnectionUris(memoryConnections, new Set(EffectArray.map(results, result => result.uri)));
 }
 
 function renderConfidence(
@@ -546,7 +577,7 @@ function renderMemoryConnections(
     receiptLimits?.requiredPremiseIndex,
   );
   const selectedNeighborUris = new Set(
-    selectedConnections.flatMap(connection =>
+    EffectArray.flatMap(selectedConnections, connection =>
       connection.neighborUri !== undefined && selectedUris.has(connection.neighborUri) ? [connection.neighborUri] : [],
     ),
   );
@@ -609,10 +640,14 @@ function requiredMemoryConnectionBundle(
       connection.neighborUri !== undefined &&
       selectedUris.has(connection.neighborUri)
     ) {
-      const requiredPremiseIndex = connections.premises.findIndex(
-        premise =>
-          premise.requestedOrdinal === connection.requestedOrdinal &&
-          (premise.state === 'current' || premise.state === 'historical'),
+      const requiredPremiseIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(
+          connections.premises,
+          premise =>
+            premise.requestedOrdinal === connection.requestedOrdinal &&
+            (premise.state === 'current' || premise.state === 'historical'),
+        ),
+        () => -1,
       );
       if (requiredPremiseIndex >= 0) return {requiredConnectionIndex, requiredPremiseIndex};
     }
@@ -631,15 +666,27 @@ function selectableMemoryConnections(
   connections: RecallMemoryConnectionsResult,
   selectedUris: ReadonlySet<string>,
 ): readonly RecallMemoryConnectionReceiptV1[] {
-  return connections.connections.filter(
-    connection =>
-      connection.resolution === 'unresolved' ||
-      (connection.neighborUri !== undefined && selectedUris.has(connection.neighborUri)),
+  return EffectArrayPipe(connections.connections, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (connection, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues &&
+        (connection.resolution === 'unresolved' ||
+          (connection.neighborUri !== undefined && selectedUris.has(connection.neighborUri))),
+    ),
   );
 }
 
 function renderResult(hit: RecallHit, explain: boolean): RecallMcpResult {
-  const allAliases = [...new Set(hit.equivalentUris?.filter(uri => uri !== hit.uri) ?? [])];
+  const equivalentUris = hit.equivalentUris ?? [];
+  const allAliases = [
+    ...new Set(
+      EffectArray.filter(
+        equivalentUris,
+        (uri, __effectArrayIndex) => __effectArrayIndex in equivalentUris && uri !== hit.uri,
+      ),
+    ),
+  ];
   const aliases = allAliases.slice(0, RESULT_ALIAS_LIMIT);
   const omittedAliases = allAliases.length - aliases.length;
   const external = isExternalResourceUri(hit.uri);
@@ -695,31 +742,31 @@ function compactReason(hit: RecallHit): string {
   const reason =
     hit.rankReasons?.[0]?.detail ??
     (hit.exactTerms && hit.exactTerms.length > 0
-      ? `Matched ${hit.exactTerms.slice(0, 3).join(', ')}`
+      ? `Matched ${EffectArray.join(hit.exactTerms.slice(0, 3), ', ')}`
       : `${hit.contextType} match`);
-  return truncateUtf8(reason.replace(/\s+/gu, ' ').trim(), REASON_MAXIMUM_BYTES);
+  return truncateUtf8(Effect.pipe(reason, EffectString.replace(/\s+/gu, ' '), EffectString.trim), REASON_MAXIMUM_BYTES);
 }
 
 function compactNotices(notices: readonly string[]): readonly string[] {
   const seen = new Set<string>();
   const candidates: Array<{readonly index: number; readonly notice: string; readonly priority: number}> = [];
   for (const [index, notice] of notices.entries()) {
-    const normalized = notice.replace(/\s+/gu, ' ').trim();
+    const normalized = Effect.pipe(notice, EffectString.replace(/\s+/gu, ' '), EffectString.trim);
     if (!normalized || seen.has(normalized)) continue;
     seen.add(normalized);
     candidates.push({index, notice: normalized, priority: noticePriority(normalized)});
   }
-  return candidates
-    .sort((left, right) => left.priority - right.priority || left.index - right.index)
-    .slice(0, NOTICE_LIMIT)
-    .map(candidate => truncateUtf8(candidate.notice, NOTICE_MAXIMUM_BYTES));
+  return EffectArray.map(
+    candidates.sort((left, right) => left.priority - right.priority || left.index - right.index).slice(0, NOTICE_LIMIT),
+    candidate => truncateUtf8(candidate.notice, NOTICE_MAXIMUM_BYTES),
+  );
 }
 
 function noticePriority(notice: string): number {
   if (/\b(?:failed|unavailable|warning)\b/iu.test(notice)) return 0;
-  if (notice.startsWith('Memory hygiene hints:')) return 1;
-  if (notice.startsWith('Referenced context:')) return 2;
-  if (notice.startsWith('Auto-synced ')) return 3;
+  if (Effect.pipe(notice, EffectString.startsWith('Memory hygiene hints:'))) return 1;
+  if (Effect.pipe(notice, EffectString.startsWith('Referenced context:'))) return 2;
+  if (Effect.pipe(notice, EffectString.startsWith('Auto-synced '))) return 3;
   return 4;
 }
 

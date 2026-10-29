@@ -14,14 +14,16 @@ import {
   type CodeGraphVectorPointerCleanupResult,
 } from './vector/maintenance.js';
 import {CODE_GRAPH_SCHEMA_VERSION} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class CodeGraphViewRemovalError extends Schema.TaggedError<CodeGraphViewRemovalError>()(
-  'CodeGraphViewRemovalError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphViewRemovalError extends Schema.TaggedError<
+  CodeGraphViewRemovalError,
+  {readonly brand: unique symbol}
+>()('CodeGraphViewRemovalError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const HASH_ID = /^[0-9a-f]{64}$/;
 const SNAPSHOT_ID = /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/;
@@ -172,7 +174,7 @@ export const removeCodeGraphView = Effect.fn('codeGraph.removeViewAction')(funct
           retryable: true,
         });
       }
-      warnings.sort((left, right) => left.code.localeCompare(right.code));
+      warnings.sort((left, right) => Effect2.pipe(left.code, EffectString.localeCompare(right.code)));
       return actionResult(
         target,
         true,

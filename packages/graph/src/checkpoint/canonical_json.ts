@@ -1,4 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
+import * as EffectRecord from 'effect/Record';
 export type CanonicalJsonPrimitive = boolean | null | number | string;
 export interface CanonicalJsonObject {
   readonly [key: string]: CanonicalJsonValue;
@@ -19,10 +21,13 @@ export const DEFAULT_CANONICAL_JSON_LIMITS: CanonicalJsonLimits = {
   maximumStringCodeUnits: 8 * 1_048_576,
 };
 
-export class CanonicalJsonError extends Schema.TaggedError<CanonicalJsonError>()('CanonicalJsonError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+export class CanonicalJsonError extends Schema.TaggedError<CanonicalJsonError, {readonly brand: unique symbol}>()(
+  'CanonicalJsonError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 /**
  * RFC 8785 JSON Canonicalization Scheme serialization for the I-JSON data
@@ -67,7 +72,7 @@ export function canonicalJson(value: unknown, limits: Partial<CanonicalJsonLimit
     if (ancestors.has(current)) throw CanonicalJsonError.make({message: 'Canonical JSON cannot contain cycles.'});
     ancestors.add(current);
     try {
-      if (Array.isArray(current)) {
+      if (EffectArray.isArray(current)) {
         entries = checkedEntryTotal(entries, current.length, resolved.maximumContainerEntries);
         const ownKeys = Reflect.ownKeys(current);
         const expectedKeys = new Set<string>(['length']);
@@ -85,7 +90,7 @@ export function canonicalJson(value: unknown, limits: Partial<CanonicalJsonLimit
           }
           values.push(visit(descriptor.value, depth + 1));
         }
-        return `[${values.join(',')}]`;
+        return `[${EffectArray.join(values, ',')}]`;
       }
 
       const prototype = Object.getPrototypeOf(current);
@@ -93,10 +98,10 @@ export function canonicalJson(value: unknown, limits: Partial<CanonicalJsonLimit
         throw CanonicalJsonError.make({message: 'Canonical JSON objects must have a plain or null prototype.'});
       }
       const ownKeys = Reflect.ownKeys(current);
-      if (ownKeys.some(key => typeof key === 'symbol')) {
+      if (EffectArray.some(ownKeys, key => typeof key === 'symbol')) {
         throw CanonicalJsonError.make({message: 'Canonical JSON objects cannot contain symbol keys.'});
       }
-      const keys = ownKeys.filter((key): key is string => typeof key === 'string');
+      const keys = EffectArray.filter(ownKeys, (key): key is string => typeof key === 'string');
       entries = checkedEntryTotal(entries, keys.length, resolved.maximumContainerEntries);
       const properties: string[] = [];
       for (const key of keys.sort(compareCodeUnits)) {
@@ -108,7 +113,7 @@ export function canonicalJson(value: unknown, limits: Partial<CanonicalJsonLimit
         }
         properties.push(`${visitString(key, 'Canonical JSON property name')}:${visit(descriptor.value, depth + 1)}`);
       }
-      return `{${properties.join(',')}}`;
+      return `{${EffectArray.join(properties, ',')}}`;
     } finally {
       ancestors.delete(current);
     }
@@ -144,13 +149,15 @@ export function parseCanonicalJson(value: string, limits: Partial<CanonicalJsonL
 function isCanonicalJsonValue(value: unknown): value is CanonicalJsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
   if (typeof value === 'number') return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every(isCanonicalJsonValue);
-  return typeof value === 'object' && value !== null && Object.values(value).every(isCanonicalJsonValue);
+  if (EffectArray.isArray(value)) return EffectArray.every(value, isCanonicalJsonValue);
+  return (
+    typeof value === 'object' && value !== null && EffectArray.every(EffectRecord.values(value), isCanonicalJsonValue)
+  );
 }
 
 function resolveLimits(overrides: Partial<CanonicalJsonLimits>): CanonicalJsonLimits {
   const limits = {...DEFAULT_CANONICAL_JSON_LIMITS, ...overrides};
-  for (const [name, value] of Object.entries(limits)) {
+  for (const [name, value] of EffectRecord.toEntries(limits)) {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw CanonicalJsonError.make({message: `${name} must be a non-negative safe integer.`});
     }
@@ -165,18 +172,11 @@ function checkedEntryTotal(current: number, added: number, maximum: number): num
   return current + added;
 }
 
+const UNPAIRED_SURROGATE = /[\uD800-\uDFFF]/u;
+
 function ensureUnicodeScalarString(value: string, label: string): void {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      if (index + 1 >= value.length) throw CanonicalJsonError.make({message: `${label} contains a lone surrogate.`});
-      const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff)
-        throw CanonicalJsonError.make({message: `${label} contains a lone surrogate.`});
-      index += 1;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      throw CanonicalJsonError.make({message: `${label} contains a lone surrogate.`});
-    }
+  if (UNPAIRED_SURROGATE.test(value)) {
+    throw CanonicalJsonError.make({message: `${label} contains a lone surrogate.`});
   }
 }
 

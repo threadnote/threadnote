@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Effect's symlink API lacks the junction type required for unprivileged Windows fixtures.
@@ -18,6 +19,8 @@ import {
 } from '@threadnote/platform/command';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const utf8 = new TextEncoder();
 const rootLimit = 2 * 1_048_576;
@@ -38,7 +41,7 @@ describe('repository metadata batching', () => {
         minLength: 1,
         maxLength: 40,
       })
-      .map(characters => characters.join(''));
+      .map(characters => EffectArray.join(characters, ''));
     fc.assert(
       fc.property(
         segment,
@@ -51,10 +54,13 @@ describe('repository metadata batching', () => {
             commonDirectory: `/metadata/${admin}/common`,
             gitDirectory: `/metadata/${admin}/linked`,
             objectFormat: format,
-            headCommit: 'a'.repeat(format === 'sha1' ? 40 : 64),
+            headCommit: Effect2.pipe('a', EffectString.repeat(format === 'sha1' ? 40 : 64)),
             branch: detached
               ? {state: 'detached' as const}
-              : {state: 'current' as const, branch: `feature/${format}-${root.replaceAll(' ', '_')}`},
+              : {
+                  state: 'current' as const,
+                  branch: `feature/${format}-${Effect2.pipe(root, EffectString.replaceAll(' ', '_'))}`,
+                },
           };
           const bytes = frame(expected);
           const before = bytes.slice();
@@ -67,28 +73,42 @@ describe('repository metadata batching', () => {
   });
 
   it('declines malformed, partial, ambiguous, and format-mismatched frames', () => {
-    const base = ['/repo', '/common', '/git', 'sha1', 'a'.repeat(40), 'main'];
+    const base = ['/repo', '/common', '/git', 'sha1', Effect2.pipe('a', EffectString.repeat(40)), 'main'];
     const malformed = [
       '',
-      base.join('\n'),
-      `${base.join('\n')}\nextra\n`,
-      `${base.slice(0, -1).join('\n')}\n`,
-      `${base.map((value, index) => (index === 1 ? '' : value)).join('\n')}\n`,
-      `${base.join('\r\n')}\r\n`,
-      `${base.join('\n')}\n\0`,
-      `${[' /repo', ...base.slice(1)].join('\n')}\n`,
-      `${['/repo ', ...base.slice(1)].join('\n')}\n`,
-      `${['/repo', '/common\0suffix', ...base.slice(2)].join('\n')}\n`,
-      `${[...base.slice(0, 3), 'sha512', base[4], base[5]].join('\n')}\n`,
-      `${[...base.slice(0, 4), 'A'.repeat(40), base[5]].join('\n')}\n`,
-      `${[...base.slice(0, 3), 'sha256', base[4], base[5]].join('\n')}\n`,
-      `${[...base.slice(0, 4), 'HEAD', base[5]].join('\n')}\n`,
-      ...['', ' main', 'main ', 'a\tb', 'a\0b', 'a\nb', 'a\u007fb', 'a\u202eb', 'a'.repeat(branchLimit + 1)].map(
-        branch => `${[...base.slice(0, 5), branch].join('\n')}\n`,
+      EffectArray.join(base, '\n'),
+      `${EffectArray.join(base, '\n')}\nextra\n`,
+      `${EffectArray.join(base.slice(0, -1), '\n')}\n`,
+      `${EffectArray.join(
+        EffectArray.map(base, (value, index) => (index === 1 ? '' : value)),
+        '\n',
+      )}\n`,
+      `${EffectArray.join(base, '\r\n')}\r\n`,
+      `${EffectArray.join(base, '\n')}\n\0`,
+      `${EffectArray.join([' /repo', ...base.slice(1)], '\n')}\n`,
+      `${EffectArray.join(['/repo ', ...base.slice(1)], '\n')}\n`,
+      `${EffectArray.join(['/repo', '/common\0suffix', ...base.slice(2)], '\n')}\n`,
+      `${EffectArray.join([...base.slice(0, 3), 'sha512', base[4], base[5]], '\n')}\n`,
+      `${EffectArray.join([...base.slice(0, 4), Effect2.pipe('A', EffectString.repeat(40)), base[5]], '\n')}\n`,
+      `${EffectArray.join([...base.slice(0, 3), 'sha256', base[4], base[5]], '\n')}\n`,
+      `${EffectArray.join([...base.slice(0, 4), 'HEAD', base[5]], '\n')}\n`,
+      ...EffectArray.map(
+        [
+          '',
+          ' main',
+          'main ',
+          'a\tb',
+          'a\0b',
+          'a\nb',
+          'a\u007fb',
+          'a\u202eb',
+          Effect2.pipe('a', EffectString.repeat(branchLimit + 1)),
+        ],
+        branch => `${EffectArray.join([...base.slice(0, 5), branch], '\n')}\n`,
       ),
     ];
     for (const output of malformed) expect(parseRepositoryIdentityMetadata(utf8.encode(output))).toBeUndefined();
-    const invalidUtf8 = utf8.encode(`${base.join('\n')}\n`);
+    const invalidUtf8 = utf8.encode(`${EffectArray.join(base, '\n')}\n`);
     invalidUtf8[1] = 255;
     expect(parseRepositoryIdentityMetadata(invalidUtf8)).toBeUndefined();
   });
@@ -99,20 +119,24 @@ describe('repository metadata batching', () => {
       commonDirectory: '/common',
       gitDirectory: '/git',
       objectFormat: 'sha1' as const,
-      headCommit: 'a'.repeat(40),
+      headCommit: Effect2.pipe('a', EffectString.repeat(40)),
       branch: {state: 'current' as const, branch: 'main'},
     };
-    const exactRoot = {...base, repoRoot: '/' + 'r'.repeat(rootLimit - 2)};
+    const exactRoot = {...base, repoRoot: '/' + Effect2.pipe('r', EffectString.repeat(rootLimit - 2))};
     expect(parseRepositoryIdentityMetadata(frame(exactRoot))).toEqual(exactRoot);
     expect(parseRepositoryIdentityMetadata(frame({...exactRoot, repoRoot: exactRoot.repoRoot + 'r'}))).toBeUndefined();
-    const commonDirectory = '/' + '東'.repeat(2_000);
+    const commonDirectory = '/' + Effect2.pipe('東', EffectString.repeat(2_000));
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
     const gitDirectory = '/' + 'g'.repeat(directoryLimit - utf8.encode(commonDirectory).byteLength - 3);
     const exactDirectories = {...base, commonDirectory, gitDirectory};
     expect(parseRepositoryIdentityMetadata(frame(exactDirectories))).toEqual(exactDirectories);
     expect(
       parseRepositoryIdentityMetadata(frame({...exactDirectories, gitDirectory: gitDirectory + 'g'})),
     ).toBeUndefined();
-    const exactBranch = {...base, branch: {state: 'current' as const, branch: '東'.repeat(341) + 'a'}};
+    const exactBranch = {
+      ...base,
+      branch: {state: 'current' as const, branch: Effect2.pipe('東', EffectString.repeat(341)) + 'a'},
+    };
     expect(utf8.encode(exactBranch.branch.branch)).toHaveLength(branchLimit);
     expect(parseRepositoryIdentityMetadata(frame(exactBranch))).toEqual(exactBranch);
     expect(
@@ -135,7 +159,7 @@ describe('repository metadata batching', () => {
         yield* git(root, ['init', '-q', '--object-format=' + format, '-b', 'main']);
         const unborn = yield* compareDiscovery(root, command);
         expect(unborn.identity.branch).toBe('main');
-        expect(unborn.identity.headCommit).toBe('0'.repeat(format === 'sha1' ? 40 : 64));
+        expect(unborn.identity.headCommit).toBe(Effect2.pipe('0', EffectString.repeat(format === 'sha1' ? 40 : 64)));
         yield* git(root, ['config', 'commit.gpgsign', 'false']);
         yield* git(root, [
           '-c',
@@ -168,7 +192,7 @@ describe('repository metadata batching', () => {
           '--abbrev-ref=loose',
           'HEAD',
         ]);
-        expect(calls.slice(1).every(call => call.args[1] === initial.identity.repoRoot)).toBe(true);
+        expect(EffectArray.every(calls.slice(1), call => call.args[1] === initial.identity.repoRoot)).toBe(true);
         expect(initial.identity).not.toHaveProperty('gitDirectory');
         expect(initial.identity.caseMode).toBe('insensitive');
         expect(yield* compareDiscovery(nested, command)).toEqual(initial);
@@ -207,7 +231,7 @@ describe('repository metadata batching', () => {
       );
       expect(observed).toEqual(initial);
       expect(calls).toHaveLength(3);
-      expect(calls.slice(1).every(call => call.args[1] === initial.identity.repoRoot)).toBe(true);
+      expect(EffectArray.every(calls.slice(1), call => call.args[1] === initial.identity.repoRoot)).toBe(true);
     }).pipe(provideTestLayer(platformLayer), TestClock.withLive),
   );
 
@@ -243,7 +267,7 @@ describe('repository metadata batching', () => {
       expect(observed).toEqual(expected);
       expect(calls).toHaveLength(8);
       expect(calls[1]).toEqual({kind: 'text', args: ['-C', caller, 'rev-parse', '--show-toplevel']});
-      expect(calls.slice(2).every(call => call.args[1] === expected.identity.repoRoot)).toBe(true);
+      expect(EffectArray.every(calls.slice(2), call => call.args[1] === expected.identity.repoRoot)).toBe(true);
     }).pipe(provideTestLayer(platformLayer), TestClock.withLive),
   );
 
@@ -294,14 +318,17 @@ function frame(value: {
   readonly branch: {readonly state: 'current'; readonly branch: string} | {readonly state: 'detached'};
 }) {
   return utf8.encode(
-    [
-      value.repoRoot,
-      value.commonDirectory,
-      value.gitDirectory,
-      value.objectFormat,
-      value.headCommit,
-      value.branch.state === 'detached' ? 'HEAD' : value.branch.branch,
-    ].join('\n') + '\n',
+    EffectArray.join(
+      [
+        value.repoRoot,
+        value.commonDirectory,
+        value.gitDirectory,
+        value.objectFormat,
+        value.headCommit,
+        value.branch.state === 'detached' ? 'HEAD' : value.branch.branch,
+      ],
+      '\n',
+    ) + '\n',
   );
 }
 

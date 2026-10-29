@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This evaluation boundary observes Git and owns local artifact CAS writes. */
 
 import {createHash} from 'node:crypto';
@@ -5,6 +6,8 @@ import {constants as fsConstants} from 'node:fs';
 import {lstat, mkdir, open, readFile, realpath, rename, rm, writeFile} from 'node:fs/promises';
 import {isAbsolute, relative, resolve, sep} from 'node:path';
 import {captureCodeMemoryLinkProcessGroup} from './code-memory-link-process-boundary.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface MatchedEvaluationRepositoryObservationV1 {
   readonly dirty: boolean;
@@ -37,11 +40,19 @@ export async function observeMatchedEvaluationRepositoryV1(
     remoteResult.exitCode === 0
       ? normalizeCredentialFreeRemote(singleLine(remoteResult.stdout, 'origin remote'))
       : undefined;
-  const localIdentity = commonDirectory.replaceAll('\\', '/').replace(/\/+$/u, '');
+  const localIdentity = Effect.pipe(
+    commonDirectory,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/\/+$/u, ''),
+  );
   const repositorySource =
-    remoteIdentity ?? `local:${process.platform === 'win32' ? localIdentity.toLowerCase() : localIdentity}`;
+    remoteIdentity ??
+    `local:${process.platform === 'win32' ? Effect.pipe(localIdentity, EffectString.toLowerCase) : localIdentity}`;
   const revision = singleLine(initialRevision.stdout, 'repository revision');
-  const paths = nulRecords(pathsResult.stdout, 'repository file list').filter(path => !hasContextPathSegment(path));
+  const paths = EffectArray.filter(
+    nulRecords(pathsResult.stdout, 'repository file list'),
+    path => !hasContextPathSegment(path),
+  );
   const fixtureHash = await matchedEvaluationRepositoryFixtureHashV1(root, paths);
   const [finalRevision, finalStatus] = await Promise.all([
     captureGit(root, ['rev-parse', 'HEAD'], 16 * 1_024),
@@ -189,10 +200,16 @@ async function matchedEvaluationRepositoryFixtureHashV1(root: string, inputPaths
 }
 
 function containedRepositoryPath(root: string, path: string): string {
-  if (!path || path.includes('\0') || isAbsolute(path)) throw new Error('Repository fixture path is invalid.');
+  if (!path || Effect.pipe(path, EffectString.includes('\0')) || isAbsolute(path))
+    throw new Error('Repository fixture path is invalid.');
   const absolute = resolve(root, path);
   const fromRoot = relative(root, absolute);
-  if (!fromRoot || fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+  if (
+    !fromRoot ||
+    fromRoot === '..' ||
+    Effect.pipe(fromRoot, EffectString.startsWith(`..${sep}`)) ||
+    isAbsolute(fromRoot)
+  ) {
     throw new Error('Repository fixture path escapes the repository root.');
   }
   return absolute;
@@ -250,9 +267,11 @@ async function captureGit(
 }
 
 function normalizeCredentialFreeRemote(value: string): string | undefined {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.includes('\0') || /[\r\n]/u.test(trimmed)) return undefined;
-  const scp = trimmed.includes('://') ? undefined : /^(?:[^@/:]+@)?([^/:]+):(.+)$/u.exec(trimmed);
+  const trimmed = Effect.pipe(value, EffectString.trim);
+  if (!trimmed || Effect.pipe(trimmed, EffectString.includes('\0')) || /[\r\n]/u.test(trimmed)) return undefined;
+  const scp = Effect.pipe(trimmed, EffectString.includes('://'))
+    ? undefined
+    : /^(?:[^@/:]+@)?([^/:]+):(.+)$/u.exec(trimmed);
   if (scp && !/^[A-Za-z]:[\\/]/u.test(trimmed)) return normalizeRemoteParts(scp[1], scp[2]);
   try {
     const url = new URL(trimmed);
@@ -264,40 +283,59 @@ function normalizeCredentialFreeRemote(value: string): string | undefined {
 }
 
 function normalizeRemoteParts(host: string, pathname: string): string | undefined {
-  const safeHost = host
-    .trim()
-    .toLowerCase()
-    .replace(/^\[|\]$/gu, '');
-  const safePath = pathname
-    .replaceAll('\\', '/')
-    .replace(/^\/+/, '')
-    .replace(/\/+$/, '')
-    .replace(/\.git$/iu, '');
-  if (!safeHost || !safePath || safePath.includes('..')) return undefined;
+  const safeHost = Effect.pipe(
+    host,
+    EffectString.trim,
+    EffectString.toLowerCase,
+    EffectString.replace(/^\[|\]$/gu, ''),
+  );
+  const safePath = Effect.pipe(
+    pathname,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/^\/+/, ''),
+    EffectString.replace(/\/+$/, ''),
+    EffectString.replace(/\.git$/iu, ''),
+  );
+  if (!safeHost || !safePath || Effect.pipe(safePath, EffectString.includes('..'))) return undefined;
   return `${safeHost}/${safePath}`;
 }
 
 function nulRecords(value: string, label: string): readonly string[] {
   if (!value) return [];
-  if (!value.endsWith('\0')) throw new Error(`${label} is not NUL terminated.`);
-  const records = value.slice(0, -1).split('\0');
-  if (records.some(record => !record || record.includes('\r') || record.includes('\n'))) {
+  if (!Effect.pipe(value, EffectString.endsWith('\0'))) throw new Error(`${label} is not NUL terminated.`);
+  const records = Effect.pipe(value, __effectPipeInput => {
+    const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.slice(0, -1));
+    const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.split('\0'));
+    return __effectPipeStage1;
+  });
+  if (
+    EffectArray.some(
+      records,
+      record =>
+        !record || Effect.pipe(record, EffectString.includes('\r')) || Effect.pipe(record, EffectString.includes('\n')),
+    )
+  ) {
     throw new Error(`${label} contains an invalid path.`);
   }
   return records;
 }
 
 function singleLine(value: string, label: string): string {
-  if (!value.endsWith('\n')) throw new Error(`${label} is incomplete.`);
-  const line = value.slice(0, -1);
-  if (!line || line.includes('\n') || line.includes('\r') || line.includes('\0')) {
+  if (!Effect.pipe(value, EffectString.endsWith('\n'))) throw new Error(`${label} is incomplete.`);
+  const line = Effect.pipe(value, EffectString.slice(0, -1));
+  if (
+    !line ||
+    Effect.pipe(line, EffectString.includes('\n')) ||
+    Effect.pipe(line, EffectString.includes('\r')) ||
+    Effect.pipe(line, EffectString.includes('\0'))
+  ) {
     throw new Error(`${label} is invalid.`);
   }
   return line;
 }
 
 function hasContextPathSegment(path: string): boolean {
-  return path.split('/').includes('.context');
+  return Effect.pipe(path, EffectString.split('/')).includes('.context');
 }
 
 function sameFileObservation(

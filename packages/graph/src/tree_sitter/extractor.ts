@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import {type Node, type QueryMatch} from 'web-tree-sitter';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -15,6 +16,8 @@ import {CodeGraphLanguagePackError} from '../languages/types.js';
 import type {CodeGraphExtractionContext, VerifiedLanguageAsset} from '../languages/types.js';
 import {createSourceLineIndex, sourceSpan} from '../languages/source_line_index.js';
 import {TreeSitterRuntime} from './runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface TreeSitterImport {
   readonly alias: Option.Option<string>;
@@ -113,7 +116,7 @@ export function extractTreeSitterFacts(
           spanForNode,
         );
         const owners = createDeclarationOwnerIndex(declarations);
-        const symbols = [moduleSymbol, ...declarations.map(declaration => declaration.symbol)];
+        const symbols = [moduleSymbol, ...EffectArray.map(declarations, declaration => declaration.symbol)];
         const edges: CodeGraphEdge[] = [];
         const references: CodeGraphReference[] = [];
         for (const declaration of declarations) {
@@ -121,13 +124,24 @@ export function extractTreeSitterFacts(
           edges.push(resolvedEdge(parent, declaration.symbol, 'contains', declaration.node, file.path, spanForNode));
         }
         for (const match of queries[2].matches(parsed.root)) {
-          const capture = match.captures.find(candidate => candidate.name.startsWith('reference.'));
+          const capture = Option.getOrUndefined(
+            EffectArray.findFirst(
+              match.captures,
+              __effectArrayValue =>
+                !!(candidate => Effect2.pipe(candidate.name, EffectString.startsWith('reference.')))(
+                  __effectArrayValue,
+                ),
+            ),
+          );
           if (!capture) continue;
-          const targetName = (definition.referenceTarget?.(capture.name, capture.node) ?? capture.node.text).trim();
+          const targetName = Effect2.pipe(
+            definition.referenceTarget?.(capture.name, capture.node) ?? capture.node.text,
+            EffectString.trim,
+          );
           if (!targetName) continue;
           const relation =
             definition.referenceRelation?.(capture.name, capture.node) ??
-            relationForCapture(capture.name.replace(/^reference\./, ''));
+            relationForCapture(Effect2.pipe(capture.name, EffectString.replace(/^reference\./, '')));
           const owner = owners.find(capture.node)?.symbol ?? moduleSymbol;
           const arity = referenceArity(capture.node);
           const input: TreeSitterReferenceInput = {
@@ -193,14 +207,24 @@ function declarationMatches(
 ): readonly Declaration[] {
   const declarations: Declaration[] = [];
   for (const match of matches) {
-    const definition = match.captures.find(capture => capture.name.startsWith('definition.'));
-    const name = match.captures.find(capture => capture.name === 'name');
+    const definition = Option.getOrUndefined(
+      EffectArray.findFirst(
+        match.captures,
+        __effectArrayValue =>
+          !!(capture => Effect2.pipe(capture.name, EffectString.startsWith('definition.')))(__effectArrayValue),
+      ),
+    );
+    const name = Option.getOrUndefined(EffectArray.findFirst(match.captures, capture => capture.name === 'name'));
     if (!definition || !name) continue;
-    const value = (language.declarationName?.(definition.name, definition.node, name.node) ?? name.node.text).trim();
+    const value = Effect2.pipe(
+      language.declarationName?.(definition.name, definition.node, name.node) ?? name.node.text,
+      EffectString.trim,
+    );
     if (!value) continue;
     declarations.push({
       kind:
-        language.declarationKind?.(definition.name, definition.node) ?? definition.name.replace(/^definition\./, ''),
+        language.declarationKind?.(definition.name, definition.node) ??
+        Effect2.pipe(definition.name, EffectString.replace(/^definition\./, '')),
       name: value,
       node: definition.node,
     });
@@ -226,9 +250,24 @@ function materializeDeclarations(
     }
     const parent = open.at(-1);
     const namespace = Option.getOrUndefined(metadata.namespace);
-    const qualifiedName = [namespace, parent?.symbol.qualifiedName.replace(`${namespace}.`, ''), declaration.name]
-      .filter(Boolean)
-      .join('.');
+    const qualifiedName = EffectArray.join(
+      EffectArray.map(
+        EffectArray.filter(
+          [
+            namespace,
+            Effect2.pipe(parent?.symbol.qualifiedName, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect2.pipe(effectOptionalString, EffectString.replace(`${namespace}.`, '')),
+            ),
+            declaration.name,
+          ],
+          Boolean,
+        ),
+        item => (item === null || item === undefined ? '' : String(item)),
+      ),
+      '.',
+    );
     const arity = declarationArity(declaration.node, declaration.kind);
     const signature = boundedSignature(declaration.node.text);
     const lookupKeys = definition.lookupKeysForSymbol({
@@ -244,7 +283,7 @@ function materializeDeclarations(
       declaration.kind === 'constructor' ||
       declaration.kind === 'initializer' ||
       declaration.kind === 'subscript'
-        ? `${Option.getOrElse(arity, () => -1)}:${sha256HexSync(signature).slice(0, 12)}`
+        ? `${Option.getOrElse(arity, () => -1)}:${Effect2.pipe(sha256HexSync(signature), EffectString.slice(0, 12))}`
         : '';
     const identityKey = `${declaration.kind}\0${qualifiedName}\0${discriminator}`;
     const occurrence = identityOccurrences.get(identityKey) ?? 0;
@@ -354,8 +393,11 @@ function createDeclarationOwnerIndex(declarations: readonly MaterializedDeclarat
           node.endIndex,
         );
         if (groupIndex < 0) return undefined;
-        const owner = intervalGroups[groupIndex].declarations.find(
-          declaration => declaration.symbol.id !== excludedSymbolId,
+        const owner = Option.getOrUndefined(
+          EffectArray.findFirst(
+            intervalGroups[groupIndex].declarations,
+            declaration => declaration.symbol.id !== excludedSymbolId,
+          ),
         );
         if (owner) return owner;
         maximumGroupIndex = groupIndex - 1;
@@ -416,7 +458,7 @@ function declarationArity(node: Node, kind: string): Option.Option<number> {
   );
   if (!parameters) return Option.some(0);
   return Option.some(
-    parameters.namedChildren.filter(child =>
+    EffectArray.filter(parameters.namedChildren, child =>
       /^(?:class_parameter|formal_parameter|parameter|receiver_parameter|spread_parameter|variable_arity_parameter)$/.test(
         child.type,
       ),
@@ -429,7 +471,13 @@ function referenceArity(node: Node): Option.Option<number> {
     if (/^(?:argument_list|call_suffix|value_arguments)$/.test(current.type)) {
       const argumentsNode =
         current.type === 'call_suffix'
-          ? current.namedChildren.find(child => /^(?:argument_list|value_arguments)$/.test(child.type))
+          ? Option.getOrUndefined(
+              EffectArray.findFirst(
+                current.namedChildren,
+                __effectArrayValue =>
+                  !!(child => /^(?:argument_list|value_arguments)$/.test(child.type))(__effectArrayValue),
+              ),
+            )
           : current;
       return Option.some(argumentsNode?.namedChildren.length ?? 0);
     }
@@ -521,25 +569,28 @@ function relationForCapture(value: string): CodeGraphRelation {
 }
 
 function boundedSignature(value: string): string {
-  return (value.split(/[{\n]/, 1)[0] ?? '').trim().slice(0, 300);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  return Effect2.pipe(value.split(/[{\n]/, 1)[0] ?? '', EffectString.trim, EffectString.slice(0, 300));
 }
 
 function leadingDocumentation(node: Node): string | undefined {
   const comments: string[] = [];
   for (
     let previous = node.previousNamedSibling;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Keep native optional chaining so the loop body narrows `previous`.
     previous?.type.includes('comment');
     previous = previous.previousNamedSibling
   ) {
     if (node.startPosition.row - previous.endPosition.row > 2) break;
     comments.unshift(previous.text);
   }
-  const documentation = comments
-    .join('\n')
-    .replace(/^\/\*\*?|\*\/$/g, '')
-    .replace(/^\s*(?:\/\/\/?|#|\*)\s?/gm, '')
-    .trim();
-  return documentation ? documentation.slice(0, 1_024) : undefined;
+  const documentation = Effect2.pipe(
+    EffectArray.join(comments, '\n'),
+    EffectString.replace(/^\/\*\*?|\*\/$/g, ''),
+    EffectString.replace(/^\s*(?:\/\/\/?|#|\*)\s?/gm, ''),
+    EffectString.trim,
+  );
+  return documentation ? Effect2.pipe(documentation, EffectString.slice(0, 1_024)) : undefined;
 }
 
 function createNodeSpan(content: string): NodeSpan {
@@ -554,10 +605,7 @@ function treeSitterSymbolId(
   qualifiedName: string,
   discriminator: string,
 ): string {
-  return `cgs_${sha256HexSync(`symbol-v2\n${path}\n${language}\n${kind}\n${qualifiedName}\n${discriminator}`).slice(
-    0,
-    32,
-  )}`;
+  return `cgs_${Effect2.pipe(sha256HexSync(`symbol-v2\n${path}\n${language}\n${kind}\n${qualifiedName}\n${discriminator}`), EffectString.slice(0, 32))}`;
 }
 
 function allocatedTreeSitterSymbolId(
@@ -569,9 +617,12 @@ function allocatedTreeSitterSymbolId(
   occurrence: number,
 ): string {
   if (occurrence === 0) return treeSitterSymbolId(path, language, kind, qualifiedName, discriminator);
-  return `cgs_${sha256HexSync(
-    `symbol-v3\n${path}\n${language}\n${kind}\n${qualifiedName}\n${discriminator}\noccurrence:${occurrence}`,
-  ).slice(0, 32)}`;
+  return `cgs_${Effect2.pipe(
+    sha256HexSync(
+      `symbol-v3\n${path}\n${language}\n${kind}\n${qualifiedName}\n${discriminator}\noccurrence:${occurrence}`,
+    ),
+    EffectString.slice(0, 32),
+  )}`;
 }
 
 function treeSitterEdgeId(
@@ -584,11 +635,14 @@ function treeSitterEdgeId(
   path: string,
   discriminator?: string,
 ): string {
-  return `cge_${sha256HexSync(
-    `edge-v1\n${sourceId ?? sourceName}\n${relation}\n${targetId ?? targetName}\n${provenance}\n${path}${
-      discriminator === undefined ? '' : `\n${discriminator}`
-    }`,
-  ).slice(0, 32)}`;
+  return `cge_${Effect2.pipe(
+    sha256HexSync(
+      `edge-v1\n${sourceId ?? sourceName}\n${relation}\n${targetId ?? targetName}\n${provenance}\n${path}${
+        discriminator === undefined ? '' : `\n${discriminator}`
+      }`,
+    ),
+    EffectString.slice(0, 32),
+  )}`;
 }
 
 function languageError(message: string, cause?: unknown): CodeGraphLanguagePackError {

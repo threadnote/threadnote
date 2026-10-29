@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -7,12 +8,43 @@ import {buildCandidateReview, saveCandidateReview, type SessionCloseoutInput} fr
 import {runEffect as run} from '../helpers/effect-runtime.js';
 import {afterEach, describe, expect, it} from 'vitest';
 import {promisify} from 'node:util';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Schema} from 'effect';
+import {Option as EffectOption} from 'effect';
+
+const cliReportObjectRest = [Schema.Record(Schema.String, Schema.Unknown)] as const;
+const contextHealthReportSchema = Schema.StructWithRest(
+  Schema.Struct({
+    findings: Schema.Array(Schema.StructWithRest(Schema.Struct({category: Schema.String}), cliReportObjectRest)),
+    recordsScanned: Schema.Finite,
+  }),
+  cliReportObjectRest,
+);
+const valueReportSchema = Schema.StructWithRest(
+  Schema.Struct({
+    feedback: Schema.StructWithRest(
+      Schema.Struct({
+        applied: Schema.Finite,
+        pin: Schema.Finite,
+        total: Schema.Finite,
+        useful: Schema.Finite,
+        wrong: Schema.Finite,
+      }),
+      cliReportObjectRest,
+    ),
+    scope: Schema.String,
+    type: Schema.String,
+    version: Schema.Finite,
+  }),
+  cliReportObjectRest,
+);
 
 const execFilePromise = promisify(execFile);
 const homes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('context health and value report CLI', () => {
@@ -142,10 +174,7 @@ describe('context health and value report CLI', () => {
     const before = await readFile(projectAPath, 'utf8');
 
     const result = await runCli(['context', 'health', '--project', 'project-a', '--json'], home);
-    const report = JSON.parse(result.stdout) as {
-      readonly findings: readonly {readonly category: string}[];
-      readonly recordsScanned: number;
-    };
+    const report = Schema.decodeUnknownSync(contextHealthReportSchema)(JSON.parse(result.stdout));
 
     expect(report).toMatchObject({recordsScanned: 1});
     expect(report.findings).toEqual([expect.objectContaining({category: 'validity-expired'})]);
@@ -211,13 +240,13 @@ describe('context health and value report CLI', () => {
     const home = await makeHome();
     const paths = await Promise.all(
       Array.from({length: 125}, (_, index) =>
-        storedMemory(home, 'project-a', `overflow-${index.toString().padStart(3, '0')}.md`, {
+        storedMemory(home, 'project-a', `overflow-${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}.md`, {
           topic: 'overflow-topic',
           validTo: '2026-09-16T00:00:00.000Z',
         }),
       ),
     );
-    const bytesBeforePreview = await Promise.all(paths.map(path => readFile(path, 'utf8')));
+    const bytesBeforePreview = await Promise.all(EffectArray.map(paths, path => readFile(path, 'utf8')));
     const selector = [
       '--finding-category',
       'validity-expired',
@@ -259,7 +288,9 @@ describe('context health and value report CLI', () => {
     expect(second.remainingFindings).toBeUndefined();
     const selected = second.proposals.at(-1);
     expect(selected).toBeDefined();
-    const selectedPath = paths.find(path => memoryUriForPath(home, path) === selected.mutation.subjectUri);
+    const selectedPath = EffectOption.getOrUndefined(
+      EffectArray.findFirst(paths, path => memoryUriForPath(home, path) === selected.mutation.subjectUri),
+    );
     expect(selectedPath).toBeDefined();
     if (selectedPath === undefined) throw new Error('expected selected proposal path');
     expect(await readFile(selectedPath, 'utf8')).toBe(bytesBeforePreview[paths.indexOf(selectedPath)]);
@@ -304,13 +335,24 @@ describe('context health and value report CLI', () => {
       (await runCli(['context', 'repair', 'preview', '--project', 'project-a', ...selector, '--json'], home)).stdout,
     );
     const stale = current.proposals[0];
-    const stalePath = paths.find(path => memoryUriForPath(home, path) === stale.mutation.subjectUri);
+    const stalePath = EffectOption.getOrUndefined(
+      EffectArray.findFirst(paths, path => memoryUriForPath(home, path) === stale.mutation.subjectUri),
+    );
     expect(stalePath).toBeDefined();
     if (stalePath === undefined) throw new Error('expected stale proposal path');
     await storedMemory(
       home,
       'project-a',
-      stalePath.slice(stalePath.lastIndexOf('/') + 1),
+      Effect.pipe(
+        stalePath,
+        EffectString.slice(
+          Effect.pipe(
+            stalePath,
+            EffectString.lastIndexOf('/'),
+            Effect.Option.getOrElse(() => -1),
+          ) + 1,
+        ),
+      ),
       {topic: 'overflow-topic', validTo: '2026-09-16T00:00:00.000Z'},
       'Changed after preview.',
     );
@@ -362,7 +404,18 @@ describe('context health and value report CLI', () => {
       ).rejects.toThrow('contains control characters');
     }
     await expect(
-      runCli(['context', 'health', '--project', 'project-a', '--topic', '🙂'.repeat(65), '--json'], home),
+      runCli(
+        [
+          'context',
+          'health',
+          '--project',
+          'project-a',
+          '--topic',
+          Effect.pipe('🙂', EffectString.repeat(65)),
+          '--json',
+        ],
+        home,
+      ),
     ).rejects.toThrow('exceeds 256 UTF-8 bytes');
   });
 
@@ -557,28 +610,20 @@ describe('context health and value report CLI', () => {
   it('aggregates only selected-project local feedback and leaves it unchanged', async () => {
     const home = await makeHome();
     const feedbackPath = join(home, 'feedback', 'recall-events-v1.jsonl');
-    const content = [
-      feedback('applied', 'project-a'),
-      feedback('useful', 'project-a'),
-      feedback('wrong', 'project-b'),
-      feedback('pin', 'project-a'),
-    ].join('\n');
+    const content = EffectArray.join(
+      [
+        feedback('applied', 'project-a'),
+        feedback('useful', 'project-a'),
+        feedback('wrong', 'project-b'),
+        feedback('pin', 'project-a'),
+      ],
+      '\n',
+    );
     await mkdir(join(home, 'feedback'), {recursive: true});
     await writeFile(feedbackPath, `${content}\n`, 'utf8');
 
     const result = await runCli(['value', 'report', '--project', 'project-a', '--period', '365', '--json'], home);
-    const report = JSON.parse(result.stdout) as {
-      readonly feedback: {
-        readonly pin: number;
-        readonly applied: number;
-        readonly total: number;
-        readonly useful: number;
-        readonly wrong: number;
-      };
-      readonly scope: string;
-      readonly type: string;
-      readonly version: number;
-    };
+    const report = Schema.decodeUnknownSync(valueReportSchema)(JSON.parse(result.stdout));
 
     expect(report).toMatchObject({
       feedback: {applied: 1, pin: 1, total: 3, useful: 1, wrong: 0},
@@ -683,7 +728,7 @@ function feedback(action: 'applied' | 'pin' | 'useful' | 'wrong', project: strin
   return JSON.stringify({
     action,
     project,
-    queryFingerprint: 'a'.repeat(64),
+    queryFingerprint: Effect.pipe('a', EffectString.repeat(64)),
     rankerVersion: 'test',
     timestamp: '2026-09-16T12:00:00.000Z',
     uri: 'threadnote://user/local/memories/durable/projects/project-a/example.md',
@@ -732,7 +777,7 @@ async function storedMemoryAt(
 
 function memoryUriForPath(home: string, path: string): string {
   const root = join(home, 'data', 'local', 'user', 'local', 'memories');
-  return `threadnote://user/local/memories/${path.slice(root.length + 1)}`;
+  return `threadnote://user/local/memories/${Effect.pipe(path, EffectString.slice(root.length + 1))}`;
 }
 
 function runCli(args: readonly string[], home: string) {

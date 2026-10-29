@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -10,6 +11,7 @@ import {
   resolveWorkset as resolveWorksetEffect,
 } from '@threadnote/workspace/manifest';
 import {runEffect} from '../helpers/effect-runtime.js';
+import {Option as EffectOption} from 'effect';
 
 const inferProjectFromQuery = (...args: Parameters<typeof inferProjectFromQueryEffect>) =>
   runEffect(inferProjectFromQueryEffect(...args));
@@ -64,7 +66,13 @@ describe('seed manifest worksets', () => {
   it('resolves member names to project manifests and drops unknown names', async () => {
     const resolved = await resolveWorkset(manifestPath, 'storefront');
     expect(resolved?.name).toBe('storefront');
-    expect(resolved?.projects.map(project => project.name)).toEqual(['web-app', 'design-system']);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(resolved?.projects), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, project => project.name),
+        ),
+      ),
+    ).toEqual(['web-app', 'design-system']);
     expect(resolved?.unresolvedProjects).toEqual(['missing-repo']);
   });
 
@@ -102,19 +110,22 @@ worksets:
     const manifestPath = join(dir, 'worker.yaml');
     await writeFile(
       manifestPath,
-      [
-        'version: 1',
-        'projects:',
-        '  - name: threadnote',
-        '    path: ~/src/threadnote',
-        '    uri: threadnote://resources/repos/threadnote',
-        '    seed: []',
-        '  - name: orion-worker',
-        '    path: ~/src/orion-worker',
-        '    uri: threadnote://resources/repos/orion-worker',
-        '    seed: []',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: threadnote',
+          '    path: ~/src/threadnote',
+          '    uri: threadnote://resources/repos/threadnote',
+          '    seed: []',
+          '  - name: orion-worker',
+          '    path: ~/src/orion-worker',
+          '    uri: threadnote://resources/repos/orion-worker',
+          '    seed: []',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
 
@@ -126,19 +137,22 @@ worksets:
     const manifestPath = join(dir, 'ambiguous-worker.yaml');
     await writeFile(
       manifestPath,
-      [
-        'version: 1',
-        'projects:',
-        '  - name: orion-worker',
-        '    path: ~/src/orion-worker',
-        '    uri: threadnote://resources/repos/orion-worker',
-        '    seed: []',
-        '  - name: atlas-worker',
-        '    path: ~/src/atlas-worker',
-        '    uri: threadnote://resources/repos/atlas-worker',
-        '    seed: []',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: orion-worker',
+          '    path: ~/src/orion-worker',
+          '    uri: threadnote://resources/repos/orion-worker',
+          '    seed: []',
+          '  - name: atlas-worker',
+          '    path: ~/src/atlas-worker',
+          '    uri: threadnote://resources/repos/atlas-worker',
+          '    seed: []',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
 
@@ -149,23 +163,26 @@ worksets:
     const manifestPath = join(dir, 'exact-projects.yaml');
     await writeFile(
       manifestPath,
-      [
-        'version: 1',
-        'projects:',
-        '  - name: orion',
-        '    path: ~/src/orion',
-        '    uri: threadnote://resources/repos/orion',
-        '    seed: []',
-        '  - name: orion-worker',
-        '    path: ~/src/orion-worker',
-        '    uri: threadnote://resources/repos/orion-worker',
-        '    seed: []',
-        '  - name: atlas-cache',
-        '    path: ~/src/atlas-cache',
-        '    uri: threadnote://resources/repos/atlas-cache',
-        '    seed: []',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: orion',
+          '    path: ~/src/orion',
+          '    uri: threadnote://resources/repos/orion',
+          '    seed: []',
+          '  - name: orion-worker',
+          '    path: ~/src/orion-worker',
+          '    uri: threadnote://resources/repos/orion-worker',
+          '    seed: []',
+          '  - name: atlas-cache',
+          '    path: ~/src/atlas-cache',
+          '    uri: threadnote://resources/repos/atlas-cache',
+          '    seed: []',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
 
@@ -182,18 +199,21 @@ worksets:
 
   it('parses an optional project graph scope and rejects unsafe repository paths', () => {
     const manifest = parseSeedManifest(
-      [
-        'version: 1',
-        'projects:',
-        '  - name: web',
-        '    path: ~/src/web',
-        '    uri: threadnote://resources/repos/web',
-        '    seed: []',
-        '    graph:',
-        '      roots: [apps/web]',
-        '      closure: dependencies',
-        '      include: [tools/generated]',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'version: 1',
+          'projects:',
+          '  - name: web',
+          '    path: ~/src/web',
+          '    uri: threadnote://resources/repos/web',
+          '    seed: []',
+          '    graph:',
+          '      roots: [apps/web]',
+          '      closure: dependencies',
+          '      include: [tools/generated]',
+        ],
+        '\n',
+      ),
       'manifest.yaml',
     );
     expect(manifest.projects[0]?.graph).toEqual({

@@ -1,6 +1,11 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {benchmarkMeasurement, type BenchmarkMeasurementV1} from '@threadnote/evidence/benchmark';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_BENCH_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_BENCH_ID = 'code-memory-link-bench-v1' as const;
@@ -174,18 +179,22 @@ export function parseCodeMemoryLinkBenchFixtureV1(value: unknown): CodeMemoryLin
   if (fixture.version !== CODE_MEMORY_LINK_BENCH_VERSION) invalid('fixture version must be 1');
   if (fixture.id !== CODE_MEMORY_LINK_BENCH_ID) invalid(`fixture id must be ${CODE_MEMORY_LINK_BENCH_ID}`);
   const thresholds = parseThresholds(fixture.thresholds);
-  if (!Array.isArray(fixture.queries) || fixture.queries.length === 0) invalid('queries must be a non-empty array');
-  const queries = fixture.queries.map(parseQuery);
+  if (!EffectArray.isArray(fixture.queries) || fixture.queries.length === 0)
+    invalid('queries must be a non-empty array');
+  const queries = EffectArray.map(fixture.queries, parseQuery);
   assertUnique(
-    queries.map(query => query.id),
+    EffectArray.map(queries, query => query.id),
     'query ids',
   );
   for (const scenario of CODE_MEMORY_LINK_BENCH_SCENARIO_KINDS) {
-    if (!queries.some(query => query.scenario === scenario)) invalid(`missing reviewed scenario ${scenario}`);
+    if (!EffectArray.some(queries, query => query.scenario === scenario))
+      invalid(`missing reviewed scenario ${scenario}`);
   }
-  if (!queries.some(query => query.budgetClass === 'default')) invalid('a default-budget query is required');
-  if (!queries.some(query => query.budgetClass === 'worst-case')) invalid('a worst-case-budget query is required');
-  if (!queries.some(query => query.measureWarmIncrementalLatency)) {
+  if (!EffectArray.some(queries, query => query.budgetClass === 'default'))
+    invalid('a default-budget query is required');
+  if (!EffectArray.some(queries, query => query.budgetClass === 'worst-case'))
+    invalid('a worst-case-budget query is required');
+  if (!EffectArray.some(queries, query => query.measureWarmIncrementalLatency)) {
     invalid('a warm incremental latency query is required');
   }
   return {
@@ -206,16 +215,16 @@ export function parseCodeMemoryLinkBenchObservationBundleV1(
   exactKeys(bundle, ['fixtureId', 'observations', 'version']);
   if (bundle.version !== CODE_MEMORY_LINK_BENCH_VERSION) invalid('observation version must be 1');
   if (bundle.fixtureId !== fixture.id) invalid('observation fixture id does not match');
-  if (!Array.isArray(bundle.observations)) invalid('observations must be an array');
-  const observations = bundle.observations.map(parseObservation);
+  if (!EffectArray.isArray(bundle.observations)) invalid('observations must be an array');
+  const observations = EffectArray.map(bundle.observations, parseObservation);
   assertUnique(
-    observations.map(observation => observation.queryId),
+    EffectArray.map(observations, observation => observation.queryId),
     'observation query ids',
   );
-  const expectedIds = new Set(fixture.queries.map(query => query.id));
+  const expectedIds = new Set(EffectArray.map(fixture.queries, query => query.id));
   if (
     observations.length !== expectedIds.size ||
-    observations.some(observation => !expectedIds.has(observation.queryId))
+    EffectArray.some(observations, observation => !expectedIds.has(observation.queryId))
   ) {
     invalid('observations must contain every reviewed query exactly once');
   }
@@ -252,51 +261,79 @@ export function evaluateCodeMemoryLinkBench(
 ): CodeMemoryLinkBenchResultV1 {
   const fixture = parseCodeMemoryLinkBenchFixtureV1(fixtureInput);
   const bundle = parseCodeMemoryLinkBenchObservationBundleV1(observationsInput, fixture);
-  const observations = new Map(bundle.observations.map(observation => [observation.queryId, observation]));
-  const evaluated = fixture.queries.map(query => evaluateQuery(query, observations.get(query.id)!));
-  const exact = evaluated.filter(result => result.exactClean);
-  const relocationInclusive = evaluated.filter(result => result.relocationInclusive);
-  const warmObservations = fixture.queries
-    .filter(query => query.measureWarmIncrementalLatency)
-    .map(query => observations.get(query.id)!);
-  const warmSamples = warmObservations.flatMap(observation => observation.warmIncremental?.milliseconds ?? []);
+  const observations = new Map(EffectArray.map(bundle.observations, observation => [observation.queryId, observation]));
+  const evaluated = EffectArray.map(fixture.queries, query => evaluateQuery(query, observations.get(query.id)!));
+  const exact = EffectArray.filter(
+    evaluated,
+    (result, __effectArrayIndex) => __effectArrayIndex in evaluated && result.exactClean,
+  );
+  const relocationInclusive = EffectArray.filter(
+    evaluated,
+    (result, __effectArrayIndex) => __effectArrayIndex in evaluated && result.relocationInclusive,
+  );
+  const warmObservations = EffectArray.map(
+    EffectArrayPipe(fixture.queries, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (query, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues && query.measureWarmIncrementalLatency,
+      ),
+    ),
+    query => observations.get(query.id)!,
+  );
+  const warmSamples = EffectArray.flatMap(
+    warmObservations,
+    observation => observation.warmIncremental?.milliseconds ?? [],
+  );
   const warmIncrementalMilliseconds =
     warmSamples.length === 0
       ? null
       : benchmarkMeasurement('code-memory-link-warm-incremental', 'milliseconds', warmSamples);
-  const currentClaims = evaluated.reduce((total, result) => total + result.currentClaimCount, 0);
-  const falseCurrentCount = evaluated.reduce((total, result) => total + result.public.falseCurrentCount, 0);
-  const directCodeCitationPrecisionScores = evaluated.flatMap(result =>
+  const currentClaims = EffectArray.reduce(evaluated, 0, (total, result) => total + result.currentClaimCount);
+  const falseCurrentCount = EffectArray.reduce(
+    evaluated,
+    0,
+    (total, result) => total + result.public.falseCurrentCount,
+  );
+  const directCodeCitationPrecisionScores = EffectArray.flatMap(evaluated, result =>
     result.public.directCodeCitationPrecisionAt3 === null ? [] : [result.public.directCodeCitationPrecisionAt3],
   );
-  const directFirstScores = evaluated.flatMap(result =>
+  const directFirstScores = EffectArray.flatMap(evaluated, result =>
     result.public.directFirst === null ? [] : [result.public.directFirst ? 1 : 0],
   );
-  const codeCitationNoAnswerScores = evaluated.flatMap(result =>
+  const codeCitationNoAnswerScores = EffectArray.flatMap(evaluated, result =>
     result.public.codeCitationNoAnswerCorrect === null ? [] : [result.public.codeCitationNoAnswerCorrect ? 1 : 0],
   );
-  const defaults = fixture.queries
-    .filter(query => query.budgetClass === 'default')
-    .map(query => observations.get(query.id)!.estimatedTokens);
-  const worstCases = fixture.queries
-    .filter(query => query.budgetClass === 'worst-case')
-    .map(query => observations.get(query.id)!.estimatedTokens);
+  const defaults = EffectArray.map(
+    EffectArray.filter(fixture.queries, query => query.budgetClass === 'default'),
+    query => observations.get(query.id)!.estimatedTokens,
+  );
+  const worstCases = EffectArray.map(
+    EffectArray.filter(fixture.queries, query => query.budgetClass === 'worst-case'),
+    query => observations.get(query.id)!.estimatedTokens,
+  );
   const metrics: CodeMemoryLinkBenchMetricsV1 = {
     codeCitationNoAnswerAccuracy: mean(codeCitationNoAnswerScores),
-    coverageAccuracy: mean(evaluated.map(result => (result.public.coverageCorrect ? 1 : 0))),
+    coverageAccuracy: mean(EffectArray.map(evaluated, result => (result.public.coverageCorrect ? 1 : 0))),
     defaultEstimatedTokensMaximum: Math.max(...defaults),
-    duplicateResultCount: evaluated.reduce((total, result) => total + result.public.duplicateResultCount, 0),
+    duplicateResultCount: EffectArray.reduce(
+      evaluated,
+      0,
+      (total, result) => total + result.public.duplicateResultCount,
+    ),
     directCodeCitationPrecisionAt3: mean(directCodeCitationPrecisionScores),
     directCodeCitationPrecisionQueryCount: directCodeCitationPrecisionScores.length,
     directFirstRate: mean(directFirstScores),
-    exactCleanRecallAt3: mean(exact.map(result => result.public.recallAt3)),
+    exactCleanRecallAt3: mean(EffectArray.map(exact, result => result.public.recallAt3)),
     falseCurrentCount,
     falseCurrentRate: ratio(falseCurrentCount, currentClaims, 0),
-    meanNdcgAt3: mean(evaluated.map(result => result.public.ndcgAt3)),
-    relocationInclusiveRecallAt3: mean(relocationInclusive.map(result => result.public.recallAt3)),
-    responseBytesMaximum: Math.max(...bundle.observations.map(observation => observation.responseBytes)),
+    meanNdcgAt3: mean(EffectArray.map(evaluated, result => result.public.ndcgAt3)),
+    relocationInclusiveRecallAt3: mean(EffectArray.map(relocationInclusive, result => result.public.recallAt3)),
+    responseBytesMaximum: Math.max(...EffectArray.map(bundle.observations, observation => observation.responseBytes)),
     warmIncrementalMilliseconds,
-    warmupCountMinimum: Math.min(...warmObservations.map(observation => observation.warmIncremental?.warmups ?? 0)),
+    warmupCountMinimum: Math.min(
+      ...EffectArray.map(warmObservations, observation => observation.warmIncremental?.warmups ?? 0),
+    ),
     worstCaseEstimatedTokensMaximum: Math.max(...worstCases),
   };
   const failures = gateFailures(fixture.thresholds, metrics, warmSamples.length).sort(compareText);
@@ -304,7 +341,7 @@ export function evaluateCodeMemoryLinkBench(
     fixture: {hash: codeMemoryLinkBenchFixtureHash(fixture), id: fixture.id, queryCount: fixture.queries.length},
     gate: {failures, passed: failures.length === 0},
     metrics,
-    queries: evaluated.map(result => result.public),
+    queries: EffectArray.map(evaluated, result => result.public),
     version: CODE_MEMORY_LINK_BENCH_VERSION,
   };
 }
@@ -322,11 +359,12 @@ function evaluateQuery(
 ): EvaluatedQuery {
   const unique = uniqueRankedMemories(observation.rankedMemories);
   const visibleTop = unique.slice(0, CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS.k);
-  const codeCitationLane = unique.filter(memory => memory.selectionBasis === 'code-citation');
+  const codeCitationLane = EffectArray.filter(unique, memory => memory.selectionBasis === 'code-citation');
   const codeCitationTop = codeCitationLane.slice(0, CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS.k);
-  const judgments = new Map(query.judgments.map(judgment => [judgment.uri, judgment]));
-  const direct = query.judgments.filter(judgment => judgment.label === 'direct-current');
-  const codeCitationTruth = query.judgments.filter(
+  const judgments = new Map(EffectArray.map(query.judgments, judgment => [judgment.uri, judgment]));
+  const direct = EffectArray.filter(query.judgments, judgment => judgment.label === 'direct-current');
+  const codeCitationTruth = EffectArray.filter(
+    query.judgments,
     judgment => judgment.label === 'direct-current' || judgment.label === 'historical-warning',
   );
   const firstVisible = unique[0];
@@ -336,23 +374,27 @@ function evaluateQuery(
       : firstVisible !== undefined &&
         judgments.get(firstVisible.uri)?.label === 'direct-current' &&
         satisfiesJudgment(firstVisible, judgments.get(firstVisible.uri)!);
-  const falseCurrentCount = unique.filter(memory => {
+  const falseCurrentCount = EffectArray.filter(unique, memory => {
     const truth = judgments.get(memory.uri)?.label ?? 'irrelevant-harmful';
     return truth !== 'direct-current' && claimsCurrent(memory);
   }).length;
-  const currentClaimCount = unique.filter(claimsCurrent).length;
+  const currentClaimCount = EffectArray.filter(
+    unique,
+    (__effectFilterValue: (typeof unique)[number], __effectFilterIndex: number) =>
+      __effectFilterIndex in unique && claimsCurrent(__effectFilterValue),
+  ).length;
   return {
     currentClaimCount,
     exactClean: query.scenario === 'exact-file' || query.scenario === 'exact-symbol',
     public: {
-      codeCitationRankedUris: codeCitationLane.map(memory => memory.uri),
+      codeCitationRankedUris: EffectArray.map(codeCitationLane, memory => memory.uri),
       codeCitationNoAnswerCorrect: codeCitationTruth.length === 0 ? codeCitationLane.length === 0 : null,
       directCodeCitationPrecisionAt3:
         codeCitationTruth.length === 0
           ? null
           : codeCitationTop.length === 0
             ? 0
-            : codeCitationTop.filter(memory => {
+            : EffectArray.filter(codeCitationTop, memory => {
                 const judgment = judgments.get(memory.uri);
                 return (
                   judgment !== undefined &&
@@ -366,9 +408,9 @@ function evaluateQuery(
       falseCurrentCount,
       id: query.id,
       ndcgAt3: ndcgAt3(visibleTop, query.judgments),
-      rankedUris: unique.map(memory => memory.uri),
+      rankedUris: EffectArray.map(unique, memory => memory.uri),
       recallAt3: ratio(
-        codeCitationTop.filter(memory => {
+        EffectArray.filter(codeCitationTop, memory => {
           const judgment = judgments.get(memory.uri);
           return judgment?.label === 'direct-current' && satisfiesJudgment(memory, judgment);
         }).length,
@@ -444,8 +486,8 @@ function gateFailures(
 
 function parseThresholds(value: unknown): CodeMemoryLinkBenchThresholdsV1 {
   const thresholds = record(value, 'thresholds');
-  exactKeys(thresholds, Object.keys(CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS));
-  for (const [key, expected] of Object.entries(CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS)) {
+  exactKeys(thresholds, EffectRecord.keys(CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS));
+  for (const [key, expected] of EffectRecord.toEntries(CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS)) {
     if (thresholds[key] !== expected) invalid(`threshold ${key} must equal ${expected}`);
   }
   return CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS;
@@ -466,15 +508,15 @@ function parseQuery(value: unknown): CodeMemoryLinkBenchQueryV1 {
   const codeRefs = stringArray(query.codeRefs, 'query codeRefs');
   if (codeRefs.length === 0 || codeRefs.length > 8) invalid('query codeRefs must contain 1-8 values');
   assertUnique(codeRefs, 'query codeRefs');
-  if (!Array.isArray(query.judgments)) invalid('query judgments must be an array');
-  const judgments = query.judgments.map(parseJudgment);
+  if (!EffectArray.isArray(query.judgments)) invalid('query judgments must be an array');
+  const judgments = EffectArray.map(query.judgments, parseJudgment);
   assertUnique(
-    judgments.map(judgment => judgment.uri),
+    EffectArray.map(judgments, judgment => judgment.uri),
     'judgment uris',
   );
   const scenario = literal(query.scenario, CODE_MEMORY_LINK_BENCH_SCENARIO_KINDS, 'query scenario');
   if (scenario === 'exact-file' || scenario === 'exact-symbol' || scenario === 'relocated-symbol') {
-    if (!judgments.some(judgment => judgment.label === 'direct-current')) {
+    if (!EffectArray.some(judgments, judgment => judgment.label === 'direct-current')) {
       invalid(`scenario ${scenario} requires direct-current truth`);
     }
   }
@@ -482,7 +524,10 @@ function parseQuery(value: unknown): CodeMemoryLinkBenchQueryV1 {
   if (expectedCoverage.requested !== codeRefs.length) {
     invalid('expected coverage requested count must equal query codeRefs');
   }
-  if (expectedCoverage.matchedMemories > judgments.filter(judgment => judgment.label !== 'irrelevant-harmful').length) {
+  if (
+    expectedCoverage.matchedMemories >
+    EffectArray.filter(judgments, judgment => judgment.label !== 'irrelevant-harmful').length
+  ) {
     invalid('expected matched memories exceed judged useful memories');
   }
   return {
@@ -531,7 +576,7 @@ function parseObservation(value: unknown): CodeMemoryLinkBenchObservationV1 {
     ],
     ['coverage', 'elapsedMilliseconds', 'estimatedTokens', 'queryId', 'rankedMemories', 'responseBytes'],
   );
-  if (!Array.isArray(observation.rankedMemories)) invalid('rankedMemories must be an array');
+  if (!EffectArray.isArray(observation.rankedMemories)) invalid('rankedMemories must be an array');
   const warm =
     observation.warmIncremental === undefined ? undefined : parseWarmIncremental(observation.warmIncremental);
   return {
@@ -539,7 +584,7 @@ function parseObservation(value: unknown): CodeMemoryLinkBenchObservationV1 {
     elapsedMilliseconds: nonNegativeFinite(observation.elapsedMilliseconds, 'elapsed milliseconds'),
     estimatedTokens: nonNegativeInteger(observation.estimatedTokens, 'estimated tokens'),
     queryId: nonEmptyString(observation.queryId, 'observation query id'),
-    rankedMemories: observation.rankedMemories.map(parseRankedMemory),
+    rankedMemories: EffectArray.map(observation.rankedMemories, parseRankedMemory),
     responseBytes: nonNegativeInteger(observation.responseBytes, 'response bytes'),
     ...(warm === undefined ? {} : {warmIncremental: warm}),
   };
@@ -582,7 +627,8 @@ function parseCoverage(value: unknown): CodeMemoryLinkBenchCoverageV1 {
     invalid('coverage completeness must match resolution');
   if (
     unresolvedOrdinals !== undefined &&
-    (unresolvedOrdinals.some(
+    (EffectArray.some(
+      unresolvedOrdinals,
       (ordinal, index) => ordinal >= parsed.requested || ordinal <= (unresolvedOrdinals[index - 1] ?? -1),
     ) ||
       parsed.resolved + unresolvedOrdinals.length !== parsed.requested)
@@ -595,9 +641,11 @@ function parseCoverage(value: unknown): CodeMemoryLinkBenchCoverageV1 {
 function parseWarmIncremental(value: unknown): NonNullable<CodeMemoryLinkBenchObservationV1['warmIncremental']> {
   const warm = record(value, 'warm incremental measurement');
   exactKeys(warm, ['milliseconds', 'warmups']);
-  if (!Array.isArray(warm.milliseconds)) invalid('warm incremental milliseconds must be an array');
+  if (!EffectArray.isArray(warm.milliseconds)) invalid('warm incremental milliseconds must be an array');
   return {
-    milliseconds: warm.milliseconds.map(value => nonNegativeFinite(value, 'warm incremental milliseconds')),
+    milliseconds: EffectArray.map(warm.milliseconds, value =>
+      nonNegativeFinite(value, 'warm incremental milliseconds'),
+    ),
     warmups: nonNegativeInteger(warm.warmups, 'warmup count'),
   };
 }
@@ -606,7 +654,7 @@ function uniqueRankedMemories(
   memories: readonly CodeMemoryLinkBenchRankedMemoryV1[],
 ): readonly CodeMemoryLinkBenchRankedMemoryV1[] {
   const seen = new Set<string>();
-  return memories.filter(memory => !seen.has(memory.uri) && !!seen.add(memory.uri));
+  return EffectArray.filter(memories, memory => !seen.has(memory.uri) && !!seen.add(memory.uri));
 }
 
 function claimsCurrent(memory: CodeMemoryLinkBenchRankedMemoryV1): boolean {
@@ -625,15 +673,14 @@ function ndcgAt3(
   rankedMemories: readonly CodeMemoryLinkBenchRankedMemoryV1[],
   judgments: readonly CodeMemoryLinkBenchJudgmentV1[],
 ): number {
-  const byUri = new Map(judgments.map(judgment => [judgment.uri, judgment]));
+  const byUri = new Map(EffectArray.map(judgments, judgment => [judgment.uri, judgment]));
   const actual = dcg(
-    rankedMemories.map(memory => {
+    EffectArray.map(rankedMemories, memory => {
       const judgment = byUri.get(memory.uri);
       return judgment === undefined || !satisfiesJudgment(memory, judgment) ? 0 : relevanceGrade(judgment.label);
     }),
   );
-  const idealGrades = judgments
-    .map(judgment => relevanceGrade(judgment.label))
+  const idealGrades = EffectArray.map(judgments, judgment => relevanceGrade(judgment.label))
     .sort((left, right) => right - left)
     .slice(0, CODE_MEMORY_LINK_BENCH_APPROVED_THRESHOLDS.k);
   const ideal = dcg(idealGrades);
@@ -666,7 +713,7 @@ function satisfiesJudgment(
 }
 
 function dcg(grades: readonly number[]): number {
-  return grades.reduce((total, grade, index) => total + (2 ** grade - 1) / Math.log2(index + 2), 0);
+  return EffectArray.reduce(grades, 0, (total, grade, index) => total + (2 ** grade - 1) / Math.log2(index + 2));
 }
 
 function sameCoverage(left: CodeMemoryLinkBenchCoverageV1, right: CodeMemoryLinkBenchCoverageV1): boolean {
@@ -691,7 +738,7 @@ function ratio(numerator: number, denominator: number, empty: number): number {
 }
 
 function mean(values: readonly number[]): number {
-  return values.length === 0 ? 0 : values.reduce((total, value) => total + value, 0) / values.length;
+  return values.length === 0 ? 0 : EffectArray.reduce(values, 0, (total, value) => total + value) / values.length;
 }
 
 function format(value: number): string {
@@ -699,8 +746,8 @@ function format(value: number): string {
 }
 
 function stringArray(value: unknown, label: string): string[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
-  return value.map(item => nonEmptyString(item, label));
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
+  return EffectArray.map(value, item => nonEmptyString(item, label));
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -709,7 +756,10 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[], required = allowed): void {
-  if (Object.keys(value).some(key => !allowed.includes(key)) || required.some(key => !Object.hasOwn(value, key))) {
+  if (
+    EffectArray.some(EffectRecord.keys(value), key => !allowed.includes(key)) ||
+    EffectArray.some(required, key => !EffectRecord.has(value, key))
+  ) {
     invalid('object has unsupported or missing fields');
   }
 }
@@ -724,7 +774,8 @@ function literal<const Values extends readonly string[]>(
 }
 
 function nonEmptyString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value.trim()) invalid(`${label} must be a non-empty string`);
+  if (typeof value !== 'string' || !Effect.pipe(value, EffectString.trim))
+    invalid(`${label} must be a non-empty string`);
   return value;
 }
 
@@ -736,8 +787,8 @@ function nonNegativeInteger(value: unknown, label: string): number {
 }
 
 function nonNegativeIntegerArray(value: unknown, label: string): number[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
-  return value.map(item => nonNegativeInteger(item, label));
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
+  return EffectArray.map(value, item => nonNegativeInteger(item, label));
 }
 
 function nonNegativeFinite(value: unknown, label: string): number {

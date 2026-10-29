@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {escapeGraphMarkup, escapeHtmlText, normalizeCodeGraphText} from '@threadnote/graph/export';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const sourceTextArbitrary = FC.array(
   FC.constantFrom(
@@ -29,7 +32,7 @@ const sourceTextArbitrary = FC.array(
     '🙂',
   ),
   {maxLength: 160},
-).map(characters => characters.join(''));
+).map(characters => EffectArray.join(characters, ''));
 
 describe('code graph export markup properties', () => {
   fcProp(
@@ -40,7 +43,17 @@ describe('code graph export markup properties', () => {
       const normalized = normalizeCodeGraphText(value, maximum);
 
       expect(normalized.length).toBeLessThanOrEqual(maximum);
-      expect([...normalized].every(character => isXmlCharacter(character.codePointAt(0)!))).toBe(true);
+      expect(
+        EffectArray.every([...normalized], character =>
+          isXmlCharacter(
+            Effect.pipe(
+              character,
+              EffectString.codePointAt(0),
+              Effect.Option.getOrElse(() => undefined),
+            )!,
+          ),
+        ),
+      ).toBe(true);
       expect(hasUnpairedSurrogate(normalized)).toBe(false);
     },
     {fastCheck: {numRuns: 250}},
@@ -77,9 +90,17 @@ function isXmlCharacter(point: number): boolean {
 
 function hasUnpairedSurrogate(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
-    const current = value.charCodeAt(index);
+    const current = Effect.pipe(
+      value,
+      EffectString.charCodeAt(index),
+      Effect.Option.getOrElse(() => NaN),
+    );
     if (current >= 0xd800 && current <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
+      const next = Effect.pipe(
+        value,
+        EffectString.charCodeAt(index + 1),
+        Effect.Option.getOrElse(() => NaN),
+      );
       if (next < 0xdc00 || next > 0xdfff) return true;
       index += 1;
     } else if (current >= 0xdc00 && current <= 0xdfff) {
@@ -90,11 +111,13 @@ function hasUnpairedSurrogate(value: string): boolean {
 }
 
 function decodeEntities(value: string): string {
-  return value
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&apos;', "'")
-    .replaceAll('&#39;', "'")
-    .replaceAll('&amp;', '&');
+  return Effect.pipe(
+    value,
+    EffectString.replaceAll('&lt;', '<'),
+    EffectString.replaceAll('&gt;', '>'),
+    EffectString.replaceAll('&quot;', '"'),
+    EffectString.replaceAll('&apos;', "'"),
+    EffectString.replaceAll('&#39;', "'"),
+    EffectString.replaceAll('&amp;', '&'),
+  );
 }

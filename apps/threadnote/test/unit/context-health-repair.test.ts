@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -29,6 +30,8 @@ import {
 } from '@threadnote/memory/document';
 import type {ContextHealthFindingV1, ContextHealthReportV1} from '@threadnote/context/health';
 import {createMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PROJECT = 'threadnote';
 const NOW = '2026-09-17T12:00:00.000Z';
@@ -47,7 +50,11 @@ describe('context health repair proposals', () => {
     const bound = {
       ...oldProposal,
       preconditions: [
-        {uri: source.uri, expectedProject: PROJECT, expectedContentHash: sha256HexSync(source.content.trim())},
+        {
+          uri: source.uri,
+          expectedProject: PROJECT,
+          expectedContentHash: sha256HexSync(Effect2.pipe(source.content, EffectString.trim)),
+        },
       ],
     };
     const proposal = {...bound, revision: contextHealthRepairProposalRevisionV1(bound)};
@@ -99,7 +106,11 @@ describe('context health repair proposals', () => {
       const bound = {
         ...original,
         preconditions: [
-          {uri: source.uri, expectedProject: PROJECT, expectedContentHash: sha256HexSync(source.content.trim())},
+          {
+            uri: source.uri,
+            expectedProject: PROJECT,
+            expectedContentHash: sha256HexSync(Effect2.pipe(source.content, EffectString.trim)),
+          },
         ],
       };
       const proposal = {...bound, revision: contextHealthRepairProposalRevisionV1(bound)};
@@ -124,7 +135,11 @@ describe('context health repair proposals', () => {
     const bound = {
       ...oldProposal,
       preconditions: [
-        {uri: source.uri, expectedProject: PROJECT, expectedContentHash: sha256HexSync(source.content.trim())},
+        {
+          uri: source.uri,
+          expectedProject: PROJECT,
+          expectedContentHash: sha256HexSync(Effect2.pipe(source.content, EffectString.trim)),
+        },
       ],
     };
     const proposal = {...bound, revision: contextHealthRepairProposalRevisionV1(bound)};
@@ -177,15 +192,15 @@ describe('context health repair proposals', () => {
     expect(boundedPreview.proposals).toHaveLength(3);
     expect(boundedPreview.omittedProposals).toBe(1);
     expect(preview.sourceOmittedFindings).toBe(0);
-    expect(preview.proposals.every(proposal => /^[a-f0-9]{64}$/u.test(proposal.revision))).toBe(true);
-    expect(preview.proposals.flatMap(proposal => proposal.preconditions)).toEqual(
+    expect(EffectArray.every(preview.proposals, proposal => /^[a-f0-9]{64}$/u.test(proposal.revision))).toBe(true);
+    expect(EffectArray.flatMap(preview.proposals, proposal => proposal.preconditions)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({expectedProject: PROJECT, uri: expired.uri}),
         expect.objectContaining({expectedProject: PROJECT, uri: duplicate.uri}),
         expect.objectContaining({expectedProject: PROJECT, uri: survivor.uri}),
       ]),
     );
-    expect(preview.proposals.map(proposal => proposal.mutation.kind)).toEqual(
+    expect(EffectArray.map(preview.proposals, proposal => proposal.mutation.kind)).toEqual(
       expect.arrayContaining(['archive-memory', 'remove-relations', 'review-only']),
     );
     expect(report).toEqual(originalReport);
@@ -217,7 +232,9 @@ describe('context health repair proposals', () => {
 
     expect(applied.status).toBe('applied');
     if (applied.status !== 'applied') throw new Error('expected relation repair to apply');
-    const updated = applied.records.find(item => item.uri === source.uri);
+    const updated = EffectOption.getOrUndefined(
+      EffectArray.findFirst(applied.records, item => item.uri === source.uri),
+    );
     expect(updated).toMatchObject({
       body: source.body,
       metadata: {
@@ -226,7 +243,9 @@ describe('context health repair proposals', () => {
       },
     });
     expect(updated?.content).toContain('unknown_header: preserved');
-    expect(applied.records.find(item => item.uri === otherProject.uri)).toBe(otherProject);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(applied.records, item => item.uri === otherProject.uri)),
+    ).toBe(otherProject);
     expect([source, otherProject]).toEqual(original);
 
     const repeated = applyContextHealthRepairProposalV1({
@@ -322,9 +341,13 @@ describe('context health repair proposals', () => {
       [duplicate, survivor],
       {selector: {findingCategory: 'exact-duplicate', topic: 'selected-topic'}},
     ).proposals[0];
-    expect(duplicateProposal?.preconditions.map(precondition => precondition.uri)).toEqual(
-      [duplicate.uri, survivor.uri].sort(),
-    );
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(duplicateProposal?.preconditions), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, precondition => precondition.uri),
+        ),
+      ),
+    ).toEqual([duplicate.uri, survivor.uri].sort());
   });
 
   it('removes a proven-missing stable identity relation and blocks it when that identity exists', () => {
@@ -391,7 +414,7 @@ describe('context health repair proposals', () => {
       targetUri: alias,
     });
     const recordUris = [source.uri, target.uri].sort();
-    expect(proposal.preconditions.map(precondition => precondition.uri)).toEqual(recordUris);
+    expect(EffectArray.map(proposal.preconditions, precondition => precondition.uri)).toEqual(recordUris);
     expect(contextHealthRepairLockScopeV1(proposal)).toEqual({
       lockKeys: [...recordUris, 'threadnote-memory-identity:tn_inactive'],
       recordUris,
@@ -459,18 +482,18 @@ describe('context health repair proposals', () => {
     });
     const expected = memoryContentWithCitationReplacementsV1(
       source,
-      previous.map((citation, index) => ({citationId: citation.id, replacement: replacements[index]})),
+      EffectArray.map(previous, (citation, index) => ({citationId: citation.id, replacement: replacements[index]})),
     );
     expect(expected).toBeDefined();
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 2}), {minLength: 3, maxLength: 3}), order => {
         const content = memoryContentWithCitationReplacementsV1(
           source,
-          order.map(index => ({citationId: previous[index].id, replacement: replacements[index]})),
+          EffectArray.map(order, index => ({citationId: previous[index].id, replacement: replacements[index]})),
         );
         expect(content).toBe(expected);
         expect(parseMemoryDocument(source.uri, content ?? '')?.metadata.codeCitations).toEqual(
-          replacements.map((replacement, index) => ({...replacement, anchorId: previous[index].id})),
+          EffectArray.map(replacements, (replacement, index) => ({...replacement, anchorId: previous[index].id})),
         );
       }),
       {numRuns: 20},
@@ -554,7 +577,7 @@ describe('context health repair proposals', () => {
     ).toMatchObject({conflict: {code: 'project-mismatch'}, status: 'conflict'});
     expect(
       applyContextHealthRepairProposalV1({
-        expectedRevision: '0'.repeat(64),
+        expectedRevision: Effect2.pipe('0', EffectString.repeat(64)),
         proposal,
         records: [source],
       }),
@@ -571,7 +594,7 @@ describe('context health repair proposals', () => {
         proposal,
         receipt: {
           proposalId: proposal.proposalId,
-          resultHash: 'f'.repeat(64),
+          resultHash: Effect2.pipe('f', EffectString.repeat(64)),
           revision: proposal.revision,
           version: 1,
         },
@@ -642,11 +665,17 @@ describe('context health repair proposals', () => {
     const base = record('unsafe-archive', 'Do not rewrite blindly.', {validTo: '2026-09-16T00:00:00.000Z'});
     const unsupported = parseMemoryDocument(
       base.uri,
-      base.content.replace('unknown_header: preserved', 'schema_version: 999\nunknown_header: preserved'),
+      Effect2.pipe(
+        base.content,
+        EffectString.replace('unknown_header: preserved', 'schema_version: 999\nunknown_header: preserved'),
+      ),
     );
     const malformedCitation = parseMemoryDocument(
       base.uri,
-      base.content.replace('unknown_header: preserved', 'code_citation: {not-json}\nunknown_header: preserved'),
+      Effect2.pipe(
+        base.content,
+        EffectString.replace('unknown_header: preserved', 'code_citation: {not-json}\nunknown_header: preserved'),
+      ),
     );
     if (!unsupported || !malformedCitation) throw new Error('Expected unsafe memories to remain readable.');
 
@@ -684,7 +713,9 @@ describe('context health repair proposals', () => {
         supersededByUri: current.uri,
       },
     });
-    expect(proposal.preconditions.map(precondition => precondition.uri)).toEqual([current.uri, stale.uri].sort());
+    expect(EffectArray.map(proposal.preconditions, precondition => precondition.uri)).toEqual(
+      [current.uri, stale.uri].sort(),
+    );
     expect(plan.knowledgeDelta).toMatchObject({
       noAction: false,
       type: 'knowledge-delta',
@@ -705,8 +736,28 @@ describe('context health repair proposals', () => {
       type: 'context-repair-or-retirement',
     });
     expect(item?.mutationPreview.expectedTargetContentHash).toMatch(/^[0-9a-f]{64}$/u);
-    expect(item?.sourceEvidence.some(evidence => evidence.includes(proposal.proposalId))).toBe(true);
-    expect(item?.sourceEvidence.some(evidence => evidence.includes(proposal.revision))).toBe(true);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(item?.sourceEvidence), __effectOptionalArrayReceiver =>
+          EffectArray.some(
+            __effectOptionalArrayReceiver,
+            __effectArrayValue =>
+              !!(evidence => Effect2.pipe(evidence, EffectString.includes(proposal.proposalId)))(__effectArrayValue),
+          ),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(item?.sourceEvidence), __effectOptionalArrayReceiver =>
+          EffectArray.some(
+            __effectOptionalArrayReceiver,
+            __effectArrayValue =>
+              !!(evidence => Effect2.pipe(evidence, EffectString.includes(proposal.revision)))(__effectArrayValue),
+          ),
+        ),
+      ),
+    ).toBe(true);
     expect(
       applyContextHealthRepairProposalV1({
         expectedRevision: proposal.revision,
@@ -766,17 +817,20 @@ describe('context health repair proposals', () => {
     const direction = directionFor(report, stale.uri, current.uri);
     expect(() =>
       previewContextHealthRepairPlanV1(report, [stale, current], {
-        semanticDirection: {...direction, reportRevision: '0'.repeat(64)},
+        semanticDirection: {...direction, reportRevision: Effect2.pipe('0', EffectString.repeat(64))},
       }),
     ).toThrow(/another context-health report revision/u);
     expect(() =>
       previewContextHealthRepairPlanV1(report, [stale, current], {
-        semanticDirection: {...direction, contradictionId: 'f'.repeat(64)},
+        semanticDirection: {...direction, contradictionId: Effect2.pipe('f', EffectString.repeat(64))},
       }),
     ).toThrow(/exactly one analyzer contradiction/u);
     expect(() =>
       previewContextHealthRepairPlanV1(report, [stale, current], {
-        semanticDirection: {...direction, currentUri: current.uri.replace('/user/me/', '/user/other/')},
+        semanticDirection: {
+          ...direction,
+          currentUri: Effect2.pipe(current.uri, EffectString.replace('/user/me/', '/user/other/')),
+        },
       }),
     ).toThrow(/same personal scope/u);
   });
@@ -827,10 +881,10 @@ describe('context health repair proposals', () => {
   it('keeps proposal identity order-independent and revisions content-sensitive', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.stringMatching(/^[a-z]{1,12}$/u), {maxLength: 30}), values => {
-        const records = values.map((value, index) =>
+        const records = EffectArray.map(values, (value, index) =>
           record(`memory-${index}`, value, {validTo: '2026-09-16T00:00:00.000Z'}),
         );
-        const findings = records.map(item => finding('validity-expired', 'archive-memory', item.uri));
+        const findings = EffectArray.map(records, item => finding('validity-expired', 'archive-memory', item.uri));
         const report = healthReport(findings);
         const forward = previewContextHealthRepairPlanV1(report, records);
         const reverse = previewContextHealthRepairPlanV1(
@@ -838,7 +892,7 @@ describe('context health repair proposals', () => {
           [...records].reverse(),
         );
         expect(reverse).toEqual(forward);
-        expect(records.every((item, index) => item.body === values[index])).toBe(true);
+        expect(EffectArray.every(records, (item, index) => item.body === values[index])).toBe(true);
       }),
       {numRuns: 50},
     );
@@ -877,8 +931,8 @@ function onlyProposal(report: ContextHealthReportV1, records: readonly MemoryRec
 }
 
 function previewWithStorageAbsence(report: ContextHealthReportV1, records: readonly MemoryRecord[], limit?: number) {
-  const existingUris = new Set(records.map(record => record.uri));
-  const absentTargetUris = report.findings.flatMap(finding =>
+  const existingUris = new Set(EffectArray.map(records, record => record.uri));
+  const absentTargetUris = EffectArray.flatMap(report.findings, finding =>
     finding.category === 'relation-target-missing' &&
     finding.repair.targetUri !== undefined &&
     !existingUris.has(finding.repair.targetUri)
@@ -906,9 +960,9 @@ function record(
     topic,
     ...metadata,
   };
-  const content = formatMemoryDocument(complete.kind === 'handoff' ? 'HANDOFF' : 'MEMORY', complete, body).replace(
-    '\n\n',
-    '\nunknown_header: preserved\n\n',
+  const content = Effect2.pipe(
+    formatMemoryDocument(complete.kind === 'handoff' ? 'HANDOFF' : 'MEMORY', complete, body),
+    EffectString.replace('\n\n', '\nunknown_header: preserved\n\n'),
   );
   const parsed = parseMemoryDocument(uri, content);
   if (parsed === undefined) throw new Error('invalid test memory');
@@ -951,13 +1005,13 @@ function semanticFinding(staleUri: string, currentUri: string): ContextHealthFin
       summary: 'Review both durable claims and explicitly designate stale and current memories.',
     },
     semanticEvidence: {
-      basisFingerprint: 'b'.repeat(64),
-      contradictionId: 'c'.repeat(64),
+      basisFingerprint: Effect2.pipe('b', EffectString.repeat(64)),
+      contradictionId: Effect2.pipe('c', EffectString.repeat(64)),
       left: {
-        claimFingerprint: 'd'.repeat(64),
-        claimId: `tnclaim_${'e'.repeat(32)}`,
+        claimFingerprint: Effect2.pipe('d', EffectString.repeat(64)),
+        claimId: `tnclaim_${Effect2.pipe('e', EffectString.repeat(32))}`,
         recordUri: staleUri,
-        recordContentFingerprint: '1'.repeat(64),
+        recordContentFingerprint: Effect2.pipe('1', EffectString.repeat(64)),
         text: 'Deployments must not use signed artifacts.',
         span: {start: 0, end: 46},
         context: {headings: [], headingEvidence: []},
@@ -965,10 +1019,10 @@ function semanticFinding(staleUri: string, currentUri: string): ContextHealthFin
         extraction: 'explicit-polarity',
       },
       right: {
-        claimFingerprint: 'f'.repeat(64),
-        claimId: `tnclaim_${'a'.repeat(32)}`,
+        claimFingerprint: Effect2.pipe('f', EffectString.repeat(64)),
+        claimId: `tnclaim_${Effect2.pipe('a', EffectString.repeat(32))}`,
         recordUri: currentUri,
-        recordContentFingerprint: '2'.repeat(64),
+        recordContentFingerprint: Effect2.pipe('2', EffectString.repeat(64)),
         text: 'Deployments must use signed artifacts.',
         span: {start: 0, end: 42},
         context: {headings: [], headingEvidence: []},
@@ -1002,11 +1056,14 @@ function finding(
   subjectUri: string,
   targetUri?: string,
 ): ContextHealthFindingV1 {
-  const uris = [subjectUri, ...(targetUri === undefined || targetUri.includes('#') ? [] : [targetUri])].sort();
+  const uris = [
+    subjectUri,
+    ...(targetUri === undefined || Effect2.pipe(targetUri, EffectString.includes('#')) ? [] : [targetUri]),
+  ].sort();
   return {
     category,
     confidence: category === 'citation-changed' ? 'medium' : 'high',
-    id: [category, ...uris].join('\0'),
+    id: EffectArray.join([category, ...uris], '\0'),
     repair: {
       kind,
       subjectUri,
@@ -1023,13 +1080,13 @@ function finding(
 function fileCitation(path: string, hashSeed: string, commitSeed: string, snapshotSeed: string, repositorySeed = '1') {
   return createMemoryCodeCitation({
     extractorSet: 'typescript-v1',
-    fileContentHash: {algorithm: 'sha256', value: hashSeed.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe(hashSeed, EffectString.repeat(64))},
     path,
-    repositoryId: repositorySeed.repeat(64),
+    repositoryId: Effect2.pipe(repositorySeed, EffectString.repeat(64)),
     repositoryIdentityKind: 'local',
-    sourceCommit: commitSeed.repeat(40),
+    sourceCommit: Effect2.pipe(commitSeed, EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${snapshotSeed.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe(snapshotSeed, EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });
@@ -1041,7 +1098,7 @@ function replacementCitation(previous: MemoryCodeCitationV1): MemoryCodeCitation
     extractorSet: previous.extractorSet,
     repositoryId: previous.repositoryId,
     repositoryIdentityKind: previous.repositoryIdentityKind,
-    sourceCommit: 'e'.repeat(40),
+    sourceCommit: Effect2.pipe('e', EffectString.repeat(40)),
     sourceSnapshotId: previous.sourceSnapshotId,
     sourceDirty: false,
     fileContentHash: previous.fileContentHash,

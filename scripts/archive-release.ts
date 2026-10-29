@@ -7,6 +7,8 @@ import {Console, Effect, FileSystem, Layer, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ROOT_URL = new URL('..', import.meta.url);
 const ARCHIVE_TARGET_PATTERN = /^(darwin|linux|windows)-(arm64|x64)$/;
@@ -61,8 +63,14 @@ if (import.meta.main) {
     const root = yield* path.fromFileUrl(ROOT_URL);
     return yield* archiveRelease({
       root,
-      target: Bun.env.THREADNOTE_RELEASE_TARGET?.trim() ?? '',
-      artifactsRoot: Bun.env.THREADNOTE_ARTIFACTS_ROOT?.trim() || undefined,
+      target:
+        Effect2.pipe(Bun.env.THREADNOTE_RELEASE_TARGET, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) ?? '',
+      artifactsRoot:
+        Effect2.pipe(Bun.env.THREADNOTE_ARTIFACTS_ROOT, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) || undefined,
     });
   });
   BunRuntime.runMain(provideScriptLayer(main, archiveLayer));

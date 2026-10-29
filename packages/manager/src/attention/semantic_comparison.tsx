@@ -1,3 +1,5 @@
+import {isPreviewResponse, isResultResponse} from '../api/response_guards.js';
+import {Array as EffectArray} from 'effect';
 import {retainSemanticChoice, semanticEvidenceIdentity} from './semantic_recovery.js';
 import React, {useEffect, useId, useRef, useState} from 'react';
 import {Schema} from 'effect';
@@ -13,6 +15,8 @@ import {MemoryBody} from '../detail_modal.js';
 import {MemoryExcerpt, ReviewBadge} from '../review_presentation.js';
 import {memoryDocumentParts} from '../library_model.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type SemanticResolutionChoice = ManagerSemanticReviewInputV1['choice'];
 
@@ -58,7 +62,7 @@ export function SemanticComparisonEvidence(props: {
       ) : null}
       <div role={selection ? 'radiogroup' : undefined} aria-label={selection ? 'Which memory is correct?' : undefined}>
         <div className="semantic-memory-grid">
-          {[evidence.left, evidence.right].map((claim, index) => {
+          {EffectArray.map([evidence.left, evidence.right], (claim, index) => {
             const label = index === 0 ? 'A' : 'B';
             return (
               <article
@@ -81,7 +85,7 @@ export function SemanticComparisonEvidence(props: {
                 <dl className="semantic-memory-context">
                   <div>
                     <dt>Section</dt>
-                    <dd>{claim.context.headings.join(' / ') || 'Unknown'}</dd>
+                    <dd>{EffectArray.join(claim.context.headings, ' / ') || 'Unknown'}</dd>
                   </div>
                   <div>
                     <dt>Environment</dt>
@@ -129,7 +133,7 @@ export function SemanticComparisonEvidence(props: {
                   </p>
                   <p>
                     Project: {claim.context.project ?? 'Unknown'}. Body span: {claim.span.start}–{claim.span.end}.
-                    Extraction: {claim.extraction.replaceAll('-', ' ')}.
+                    Extraction: {Effect.pipe(claim.extraction, EffectString.replaceAll('-', ' '))}.
                   </p>
                   <p>
                     Claim: <code>{claim.claimId}</code>
@@ -182,8 +186,12 @@ export function SemanticComparisonEvidence(props: {
       <details className="semantic-source-details">
         <summary>Comparison details</summary>
         <p>
-          {evidence.reason.replaceAll('-', ' ')}; {evidence.classification.replaceAll('-', ' ')}
-          {evidence.uncertainty.length === 0 ? '' : `; ${evidence.uncertainty.join(', ').replaceAll('-', ' ')}`}.
+          {Effect.pipe(evidence.reason, EffectString.replaceAll('-', ' '))};{' '}
+          {Effect.pipe(evidence.classification, EffectString.replaceAll('-', ' '))}
+          {evidence.uncertainty.length === 0
+            ? ''
+            : `; ${Effect.pipe(EffectArray.join(evidence.uncertainty, ', '), EffectString.replaceAll('-', ' '))}`}
+          .
         </p>
       </details>
     </section>
@@ -290,6 +298,7 @@ export function SemanticResolutionReview(props: {
           choice,
         },
         {signal: controller.signal, timeoutMilliseconds: 30_000},
+        isPreviewResponse,
       );
       if (controller.signal.aborted) return;
       if (result.preview.choice !== choice)
@@ -318,6 +327,7 @@ export function SemanticResolutionReview(props: {
           approved: true,
         },
         {signal: controller.signal, timeoutMilliseconds: 30_000},
+        isResultResponse,
       );
       if (controller.signal.aborted) return;
       if (response.result?.status !== 'applied' && response.result?.status !== 'already-applied')
@@ -351,7 +361,7 @@ export function SemanticResolutionReview(props: {
             {preview.reason ? <p>{preview.reason}</p> : null}
             {preview.constraints?.length ? (
               <ul>
-                {preview.constraints.map(value => (
+                {EffectArray.map(preview.constraints, value => (
                   <li key={value}>{value}</li>
                 ))}
               </ul>

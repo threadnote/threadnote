@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Result, Sink, Stream} from 'effect';
@@ -13,6 +14,8 @@ import {
   normalizeCodexModelPage,
   selectConsolidationModel,
 } from '../../src/manager/consolidation_models.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = Layer.mergeAll(
   BunServices.layer,
@@ -128,9 +131,14 @@ describe('consolidation model choices', () => {
           const original = JSON.stringify(input);
           const page = normalizeCodexModelPage(input);
           expect(page).toEqual(normalizeCodexModelPage(input));
-          expect(new Set(page.models.map(m => m.id)).size).toBe(page.models.length);
+          expect(new Set(EffectArray.map(page.models, m => m.id)).size).toBe(page.models.length);
           expect(
-            page.models.every(m => m.id.trim().length > 0 && data.some(raw => raw.model === m.id && !raw.hidden)),
+            EffectArray.every(
+              page.models,
+              m =>
+                Effect2.pipe(m.id, EffectString.trim).length > 0 &&
+                EffectArray.some(data, raw => raw.model === m.id && !raw.hidden),
+            ),
           ).toBe(true);
           expect(JSON.stringify(input)).toBe(original);
         },
@@ -138,9 +146,12 @@ describe('consolidation model choices', () => {
       {numRuns: 80},
     );
   });
-  it.each([undefined, '', ' ', 'stale', 'x'.repeat(257)])('rejects missing or stale selected model %s', model => {
-    expect(() => selectConsolidationModel(model, [{id: 'current', label: 'Current', isDefault: true}])).toThrow();
-  });
+  it.each([undefined, '', ' ', 'stale', Effect2.pipe('x', EffectString.repeat(257))])(
+    'rejects missing or stale selected model %s',
+    model => {
+      expect(() => selectConsolidationModel(model, [{id: 'current', label: 'Current', isDefault: true}])).toThrow();
+    },
+  );
   it('returns the exact selected provider entry', () => {
     const model = {id: 'current', label: 'Current', isDefault: true, reasoningEffort: 'low'};
     expect(selectConsolidationModel('current', [model])).toBe(model);
@@ -162,7 +173,10 @@ describe('consolidation model choices', () => {
  *'"method":"model/list"'*) printf '%s\\n' 'diagnostic' >&2; printf '%s\\n' '{"id":2,"result":{"data":[{"model":"first","isDefault":true}],"nextCursor":"next-page"}}';;
  esac
  done`);
-      expect((yield* discoverConsolidationModels('codex', file)).map(model => model.id)).toEqual(['first', 'second']);
+      expect(EffectArray.map(yield* discoverConsolidationModels('codex', file), model => model.id)).toEqual([
+        'first',
+        'second',
+      ]);
     }).pipe(TestClock.withLive, provideTestLayer(layer)),
   );
   effectIt.effect.each([

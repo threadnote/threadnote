@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {admittedSourceFetch, cooldownSourceAccount} from '@threadnote/integration-core/source-coordinator';
 import {isGitHubSource} from './config.js';
 import {Clock, DateTime, Effect, Random, Result, Schema} from 'effect';
@@ -57,6 +58,7 @@ import {
   type GitHubIdMarker,
 } from './state.js';
 import type {GitHubSyncResult} from './source.js';
+import * as EffectRecord from 'effect/Record';
 
 const syncResult = (value: GitHubSyncResult): GitHubSyncResult => value;
 const loc = (config: RuntimeConfig) => ({account: config.account, home: config.agentContextHome, user: config.user});
@@ -71,7 +73,9 @@ const configFence = Effect.fn('github.syncConfigFence')(function* (
   fingerprint: string,
   epoch?: string,
 ) {
-  const source = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  const source = EffectOption.getOrUndefined(
+    EffectArray.findFirst((yield* readSourceConfiguration(config)).sources, item => item.id === id),
+  );
   if (!source || !isGitHubSource(source) || !source.enabled || sourceConfigurationFingerprint(source) !== fingerprint)
     return yield* syncError('GitHub source configuration changed during refresh.');
   if (epoch !== undefined) {
@@ -80,7 +84,10 @@ const configFence = Effect.fn('github.syncConfigFence')(function* (
       return yield* syncError('GitHub source access changed during refresh.');
   }
 });
-class GitHubSyncError extends Schema.TaggedError<GitHubSyncError>()('GitHubSyncError', {message: Schema.String}) {}
+class GitHubSyncError extends Schema.TaggedError<GitHubSyncError, {readonly brand: unique symbol}>()(
+  'GitHubSyncError',
+  {message: Schema.String},
+) {}
 const syncError = (message: string) => GitHubSyncError.make({message});
 const error = (message: string) => Effect.fail(syncError(message));
 const saveReceipt = Effect.fn('github.saveReceipt')(function* (
@@ -112,8 +119,8 @@ const writeDocument = Effect.fn('github.writeDocument')(function* (
   if (chunks.length > 2048) return yield* error('GitHub record exceeds the chunk inventory limit.');
   const fingerprint = sourceConfigurationFingerprint(source);
   const previous = yield* manifest(config, source.id, doc);
-  const files = Object.fromEntries(
-    chunks.map(chunk => {
+  const files = EffectRecord.fromEntries(
+    EffectArray.map(chunks, chunk => {
       const uri = externalResourceUri({
         provider: 'github',
         sourceId: source.id,
@@ -151,15 +158,15 @@ const writeDocument = Effect.fn('github.writeDocument')(function* (
     status: 'active',
     fetchedAt: yield* Clock.currentTimeMillis,
     maxStaleMilliseconds: source.maxStaleHours * 3_600_000,
-    chunks: Object.fromEntries(Object.entries(files).map(([uri, file]) => [uri, file.hash])),
+    chunks: EffectRecord.fromEntries(EffectArray.map(EffectRecord.toEntries(files), ([uri, file]) => [uri, file.hash])),
     accessEpoch: access.accessEpoch,
     inventoryGeneration: generation,
   };
   const store = yield* ResourceStore;
   const fence = configFence(config, source.id, fingerprint, access.accessEpoch);
-  const obsolete = Object.keys(previous?.chunks ?? {}).filter(uri => !(uri in files));
+  const obsolete = EffectArray.filter(EffectRecord.keys(previous?.chunks ?? {}), uri => !(uri in files));
   const changed: ResourceStoreMutation[] = [];
-  for (const [uri, file] of Object.entries(files)) {
+  for (const [uri, file] of EffectRecord.toEntries(files)) {
     if (previous?.chunks[uri] === file.hash) {
       const check = yield* Effect.result(store.read(loc(config), uri));
       if (Result.isSuccess(check) && sha256HexSync(check.success) === file.hash) continue;
@@ -181,7 +188,7 @@ const writeDocument = Effect.fn('github.writeDocument')(function* (
   if (obsolete.length)
     yield* store.mutateChecked(
       loc(config),
-      obsolete.map(uri => ({type: 'remove' as const, uri, ignoreMissing: true})),
+      EffectArray.map(obsolete, uri => ({type: 'remove' as const, uri, ignoreMissing: true})),
       fence,
     );
   yield* store.mutateChecked(
@@ -262,10 +269,14 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
       const loadedRepositories = yield* readGitHubRepositoryStates(config, id);
       const loaded = yield* readGitHubSyncState(config, id);
       if (loadedRepositories === null || loaded === null) return yield* syncError('GitHub sync state is invalid.');
-      let repositories: GitHubRepositoryState[] = loadedRepositories;
+      let repositories: GitHubRepositoryState[] = [...loadedRepositories];
       if (loaded && (loaded.fingerprint !== fingerprint || loaded.accessEpoch !== access.accessEpoch))
         return yield* syncError('GitHub sync state no longer matches source access.');
-      for (const repository of repositories.filter(r => r.parked && source.repositories.includes(r.name))) {
+      for (const repository of EffectArray.filter(
+        repositories,
+        (r, __effectArrayIndex) =>
+          __effectArrayIndex in repositories && Boolean(r.parked && source.repositories.includes(r.name)),
+      )) {
         const saved = yield* readGitHubRepositoryCheckpoint(
           config,
           id,
@@ -278,19 +289,29 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
       const pendingMarkers = yield* listGitHubIdMarkers(config, id);
       if (pendingMarkers === null) return yield* syncError('GitHub ID inventory is invalid.');
       const pendingDue =
-        pendingMarkers.some(m => m.pending && (m.nextAttemptAt === undefined || m.nextAttemptAt <= now)) ||
-        repositories.some(r => r.unresolvedNumbers?.some(item => item.nextAttemptAt <= now));
+        EffectArray.some(pendingMarkers, m => m.pending && (m.nextAttemptAt === undefined || m.nextAttemptAt <= now)) ||
+        EffectArray.some(repositories, r =>
+          Boolean(
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(r.unresolvedNumbers), __effectArrayReceiver =>
+                EffectArray.some(__effectArrayReceiver, item => item.nextAttemptAt <= now),
+              ),
+            ),
+          ),
+        );
       if (
         onlyDue &&
         !pendingDue &&
-        !repositories.some(r => r.status === 'pending' || !r.backfillComplete) &&
+        !EffectArray.some(repositories, r => r.status === 'pending' || !r.backfillComplete) &&
         !loaded &&
         access.completedAt !== undefined &&
         now - access.completedAt < source.refreshIntervalMinutes * 60_000
       )
         return syncResult({sourceId: id, syncedDocuments, warnings});
       const initial = Effect.fn('github.initialCheckpoint')(function* (index: number) {
-        const repository = repositories.find(r => r.name === source.repositories[index]);
+        const repository = EffectOption.getOrUndefined(
+          EffectArray.findFirst(repositories, r => r.name === source.repositories[index]),
+        );
         if (repository?.parked) {
           const saved = yield* readGitHubRepositoryCheckpoint(config, id, repository.id, index);
           if (!saved || saved.fingerprint !== fingerprint || saved.accessEpoch !== access.accessEpoch)
@@ -302,7 +323,9 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
           fingerprint,
           accessEpoch: access.accessEpoch,
           repositoryIndex: index,
-          phase: repositories.find(r => r.name === source.repositories[index])?.backfillComplete
+          phase: EffectOption.getOrUndefined(
+            EffectArray.findFirst(repositories, r => r.name === source.repositories[index]),
+          )?.backfillComplete
             ? 'issues'
             : 'backfill',
           page: 1,
@@ -319,7 +342,7 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
       const parkRepository = Effect.fn('github.parkRepository')(function* (repository?: GitHubRepositoryState) {
         if (repository) {
           yield* writeGitHubRepositoryCheckpoint(config, id, repository.id, state, fence);
-          repositories = repositories.map(r =>
+          repositories = EffectArray.map(repositories, r =>
             r.name === repository.name ? {...repository, status: 'pending' as const, parked: true} : r,
           );
           yield* saveRepositories();
@@ -328,7 +351,13 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
         yield* writeGitHubSyncState(config, id, state, fence);
       });
       const checkpoint = Effect.fn('github.checkpoint')(function* (completed = false) {
-        const parked = repositories.find(r => r.parked && source.repositories.includes(r.name));
+        const parked = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            repositories,
+            __effectArrayValue =>
+              !!(r => Boolean(r.parked && source.repositories.includes(r.name)))(__effectArrayValue),
+          ),
+        );
         if (completed && parked) {
           state = yield* initial(source.repositories.indexOf(parked.name));
           completed = false;
@@ -340,12 +369,15 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
           completedAt: completed ? yield* Clock.currentTimeMillis : access.completedAt,
           nextAttemptAt: retryAt,
         });
-        const times = repositories.map(r => r.lastReconciledAt).filter((t): t is number => t !== undefined);
+        const times = EffectArray.filter(
+          EffectArray.map(repositories, r => r.lastReconciledAt),
+          (t): t is number => t !== undefined,
+        );
         return syncResult({
           sourceId: id,
           syncedDocuments,
           warnings,
-          repositories: repositories.map(r => ({
+          repositories: EffectArray.map(repositories, r => ({
             repository: r.name,
             backfillComplete: r.backfillComplete,
             status: r.status,
@@ -374,7 +406,7 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
       const client = createGitHubClient(tokenResult.success, {...options, fetch});
       const call = <A>(run: () => Promise<A>) =>
         fromPromiseInterruptible(run, f =>
-          f instanceof GitHubClientError ? f : new GitHubClientError({code: 'transport-rejected'}),
+          Schema.is(GitHubClientError)(f) ? f : GitHubClientError.make({code: 'transport-rejected'}),
         ).pipe(Effect.result);
       const canRequest = () =>
         !client.expired &&
@@ -406,8 +438,8 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
       });
       const advanceDenial = Effect.fn('github.advanceDenial')(function* (repositoryIds: readonly string[]) {
         const deniedRepositoryIds = [...new Set([...(access.deniedRepositoryIds ?? []), ...repositoryIds])];
-        const generations = Object.fromEntries(
-          Object.entries(access.repositoryDenialGenerations ?? {}).filter(([repoId]) =>
+        const generations = EffectRecord.fromEntries(
+          EffectArray.filter(EffectRecord.toEntries(access.repositoryDenialGenerations ?? {}), ([repoId]) =>
             deniedRepositoryIds.includes(repoId),
           ),
         );
@@ -424,17 +456,24 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
       const denyRepository = Effect.fn('github.denyRepository')(function* (name: string) {
         yield* advanceDenial([
           ...new Set([
-            ...repositories.filter(r => r.name === name).map(r => r.id),
-            ...pendingMarkers.filter(m => m.repository === name).map(m => m.repositoryId),
+            ...EffectArray.map(
+              EffectArray.filter(repositories, r => r.name === name),
+              r => r.id,
+            ),
+            ...EffectArray.map(
+              EffectArray.filter(pendingMarkers, m => m.repository === name),
+              m => m.repositoryId,
+            ),
           ]),
         ]);
         state = {...state, revalidatingRepositoryId: undefined, revalidatingRepositoryGeneration: undefined};
         yield* writeGitHubSyncState(config, id, state, fence);
-        repositories = repositories.map(r => (r.name === name ? {...r, status: 'pending' as const} : r));
+        repositories = EffectArray.map(repositories, r => (r.name === name ? {...r, status: 'pending' as const} : r));
         yield* saveRepositories();
         const markers = yield* listGitHubIdMarkers(config, id);
         if (markers === null) return yield* syncError('GitHub ID inventory is invalid.');
-        for (const m of markers.filter(m => m.repository === name)) yield* quarantine(config, source, m.documentId);
+        for (const m of EffectArray.filter(markers, m => m.repository === name))
+          yield* quarantine(config, source, m.documentId);
         warnings.push(`GitHub repository ${name} access is unresolved.`);
       });
       const refresh = Effect.fn('github.refreshConversation')(function* (
@@ -488,12 +527,12 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
         const rendered = yield* Effect.try({
           try: () => renderGitHubConversation(detailed.success),
           catch: failure =>
-            failure instanceof GitHubSecretBlocked
+            Schema.is(GitHubSecretBlocked)(failure)
               ? failure
               : syncError('GitHub conversation exceeds rendering budget.'),
         }).pipe(Effect.result);
         if (Result.isFailure(rendered)) {
-          if (rendered.failure instanceof GitHubSecretBlocked) yield* quarantine(config, source, doc);
+          if (Schema.is(GitHubSecretBlocked)(rendered.failure)) yield* quarantine(config, source, doc);
           state = {...state, incomplete: true};
           warnings.push(`GitHub conversation ${doc} content deferred.`);
           yield* writeGitHubIdMarker(
@@ -528,7 +567,7 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
           );
           const canRequestRepository = () => canRequest() && client.requests - requestStart < repositoryRequestLimit;
           const name = source.repositories[state.repositoryIndex];
-          const pinned = repositories.find(r => r.name === name);
+          const pinned = EffectOption.getOrUndefined(EffectArray.findFirst(repositories, r => r.name === name));
           const checked = yield* call(() => client.repository(pinned?.canonical ?? name));
           if (Result.isFailure(checked)) {
             if (checked.failure.code === 'authentication-rejected') return yield* denyGlobal();
@@ -561,7 +600,7 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
                 backfillComplete: false,
                 status: 'active',
               };
-          repositories = [...repositories.filter(r => r.name !== name), repoState];
+          repositories = [...EffectArray.filter(repositories, r => r.name !== name), repoState];
           yield* saveRepositories();
           if (access.deniedRepositoryIds?.includes(repository.id)) {
             if (!access.repositoryDenialGenerations?.[repository.id]) yield* advanceDenial([repository.id]);
@@ -572,10 +611,10 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
             ) {
               const markers = yield* listGitHubIdMarkers(config, id);
               if (markers === null) return yield* syncError('GitHub ID inventory is invalid.');
-              for (const marker of markers.filter(m => m.repositoryId === repository.id))
+              for (const marker of EffectArray.filter(markers, m => m.repositoryId === repository.id))
                 yield* quarantine(config, source, marker.documentId);
               repoState = {...repoState, reconcileAfter: undefined, status: 'pending'};
-              repositories = repositories.map(r => (r.name === name ? repoState : r));
+              repositories = EffectArray.map(repositories, r => (r.name === name ? repoState : r));
               yield* saveRepositories();
               state = {
                 ...state,
@@ -588,14 +627,17 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
           }
           const deferNumber = Effect.fn('github.deferNumber')(function* (number: number) {
             const nextAttemptAt = (yield* Clock.currentTimeMillis) + 60_000;
-            const unresolved = (repoState.unresolvedNumbers ?? []).filter(item => item.number !== number);
+            const unresolved = EffectArray.filter(repoState.unresolvedNumbers ?? [], item => item.number !== number);
             if (unresolved.length >= 100) return false;
             repoState = {...repoState, unresolvedNumbers: [...unresolved, {number, nextAttemptAt}], status: 'pending'};
-            repositories = repositories.map(r => (r.name === name ? repoState : r));
+            repositories = EffectArray.map(repositories, r => (r.name === name ? repoState : r));
             yield* saveRepositories();
             const markers = yield* listGitHubIdMarkers(config, id);
             if (markers === null) return yield* syncError('GitHub ID inventory is invalid.');
-            for (const marker of markers.filter(m => m.repositoryId === repository.id && m.number === number)) {
+            for (const marker of EffectArray.filter(
+              markers,
+              m => m.repositoryId === repository.id && m.number === number,
+            )) {
               yield* quarantine(config, source, marker.documentId);
               yield* writeGitHubIdMarker(config, id, {...marker, pending: true, nextAttemptAt}, fence);
             }
@@ -639,11 +681,19 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
               },
               fence,
             );
+            const unresolvedNumbers = repoState.unresolvedNumbers;
             repoState = {
               ...repoState,
-              unresolvedNumbers: repoState.unresolvedNumbers?.filter(item => item.number !== unresolved.number),
+              unresolvedNumbers:
+                unresolvedNumbers === undefined
+                  ? undefined
+                  : EffectArray.filter(
+                      unresolvedNumbers,
+                      (item, __effectArrayIndex) =>
+                        __effectArrayIndex in unresolvedNumbers && item.number !== unresolved.number,
+                    ),
             };
-            repositories = repositories.map(r => (r.name === name ? repoState : r));
+            repositories = EffectArray.map(repositories, r => (r.name === name ? repoState : r));
             yield* saveRepositories();
           }
           while (canRequestRepository()) {
@@ -651,14 +701,15 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
               if (state.phase === 'reconcile') {
                 const markers = yield* listGitHubIdMarkers(config, id);
                 if (markers === null) return yield* syncError('GitHub ID inventory is invalid.');
-                const selected = markers.filter(
+                const selected = EffectArray.filter(
+                  markers,
                   m =>
                     m.repositoryId === repository.id &&
                     (!repoState.reconcileAfter || m.documentId > repoState.reconcileAfter),
                 );
                 state = {
                   ...state,
-                  items: selected.slice(0, 100).map(m => ({id: m.id, number: m.number, kind: m.kind})),
+                  items: EffectArray.map(selected.slice(0, 100), m => ({id: m.id, number: m.number, kind: m.kind})),
                   hasMore: selected.length > 100,
                 };
               } else {
@@ -782,7 +833,7 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
                 repoState = {...repoState, reconcileAfter: githubDocumentId(repository.id, item)};
               state = {...state, offset: state.offset + 1};
               yield* writeGitHubSyncState(config, id, state, fence);
-              repositories = repositories.map(r => (r.name === name ? repoState : r));
+              repositories = EffectArray.map(repositories, r => (r.name === name ? repoState : r));
               yield* saveRepositories();
             }
             if (state.offset < state.items.length) break;
@@ -809,7 +860,7 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
                   ? {watermark: state.boundary, lastReconciledAt: yield* Clock.currentTimeMillis}
                   : {}),
               };
-              repositories = repositories.map(r => (r.name === name ? repoState : r));
+              repositories = EffectArray.map(repositories, r => (r.name === name ? repoState : r));
               yield* saveRepositories();
               yield* clearGitHubRepositoryCheckpoint(config, id, repository.id, repositoryIndex, fence);
               if (
@@ -817,9 +868,17 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
                 state.revalidatingRepositoryId === repository.id &&
                 state.revalidatingRepositoryGeneration === access.repositoryDenialGenerations?.[repository.id]
               ) {
+                const deniedRepositoryIds = access.deniedRepositoryIds;
                 access = {
                   ...access,
-                  deniedRepositoryIds: access.deniedRepositoryIds?.filter(repoId => repoId !== repository.id),
+                  deniedRepositoryIds:
+                    deniedRepositoryIds === undefined
+                      ? undefined
+                      : EffectArray.filter(
+                          deniedRepositoryIds,
+                          (repoId, __effectArrayIndex) =>
+                            __effectArrayIndex in deniedRepositoryIds && repoId !== repository.id,
+                        ),
                 };
                 yield* saveReceipt(config, source, access);
               }
@@ -843,7 +902,7 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
               continuation: undefined,
             };
             yield* writeGitHubSyncState(config, id, state, fence);
-            repositories = repositories.map(r => (r.name === name ? repoState : r));
+            repositories = EffectArray.map(repositories, r => (r.name === name ? repoState : r));
             yield* saveRepositories();
           }
           if (state.repositoryIndex === repositoryIndex) yield* parkRepository(repoState);

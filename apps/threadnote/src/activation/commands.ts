@@ -22,15 +22,15 @@ export interface ActivationOperationExecutionV1 {
   readonly receipt: ActivationReceiptV1;
 }
 
-export class ActivationOperationExecutionError extends Schema.TaggedError<ActivationOperationExecutionError>()(
-  'ActivationOperationExecutionError',
-  {message: Schema.String},
-) {}
+export class ActivationOperationExecutionError extends Schema.TaggedError<
+  ActivationOperationExecutionError,
+  {readonly brand: unique symbol}
+>()('ActivationOperationExecutionError', {message: Schema.String}) {}
 
-export class ActivationOperationPause extends Schema.TaggedError<ActivationOperationPause>()(
-  'ActivationOperationPause',
-  {message: Schema.String},
-) {}
+export class ActivationOperationPause extends Schema.TaggedError<
+  ActivationOperationPause,
+  {readonly brand: unique symbol}
+>()('ActivationOperationPause', {message: Schema.String}) {}
 
 /** Adapter boundary for setup/share/import/brief/candidate/proof subsystems. Raw content stays outside activation state. */
 export interface ActivationOperationExecutorV1<R = never> {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
@@ -45,14 +46,16 @@ import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerStoreTool} from '../../src/mcp/server/store.js';
 import {listDeferredCodeAnchorIntents} from '../../src/memory/deferred/code_anchor.js';
 import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code_anchor_scheduler.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const SOURCE = 'export function value() {\n  return "😀";\n}\n';
 const SOURCE_HASH = codeGraphCommittedFileContentHash('sha1', new TextEncoder().encode(SOURCE));
-const REPOSITORY_ID = '1'.repeat(64);
-const COMMIT = '2'.repeat(40);
-const SNAPSHOT_ID = `cgsn_${'3'.repeat(40)}`;
-const SYMBOL_ID = `cgs_${'4'.repeat(32)}`;
-const MODULE_ID = `cgs_${'6'.repeat(32)}`;
+const REPOSITORY_ID = Effect2.pipe('1', EffectString.repeat(64));
+const COMMIT = Effect2.pipe('2', EffectString.repeat(40));
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`;
+const SYMBOL_ID = `cgs_${Effect2.pipe('4', EffectString.repeat(32))}`;
+const MODULE_ID = `cgs_${Effect2.pipe('6', EffectString.repeat(32))}`;
 
 describe('memory code citation capture and validation', () => {
   effectIt.effect('registered remember_context retains private busy intents and refuses strict and shared writes', () =>
@@ -71,8 +74,8 @@ describe('memory code citation capture and validation', () => {
       // Persisted routes require real identity-shaped digests, unlike capture-only fixtures.
       const status: CodeGraphStatus = {
         ...fixture.status,
-        identity: {...fixture.status.identity, worktreeId: 'e'.repeat(64)},
-        readySnapshot: {...fixture.status.readySnapshot!, worktreeId: 'e'.repeat(64)},
+        identity: {...fixture.status.identity, worktreeId: Effect2.pipe('e', EffectString.repeat(64))},
+        readySnapshot: {...fixture.status.readySnapshot!, worktreeId: Effect2.pipe('e', EffectString.repeat(64))},
       };
       let refreshes = 0;
       const scheduler = DeferredCodeAnchorRefreshScheduler.of({schedule: () => Effect.sync(() => void refreshes++)});
@@ -103,7 +106,9 @@ describe('memory code citation capture and validation', () => {
           recovery: {action: 'retry-capture', retryCondition: 'after-writer-available'},
         });
         expect(JSON.stringify(result.structuredContent)).not.toMatch(/graph index|workset prepare|preparation/u);
-        const uri = String((result.structuredContent as {readonly memoryUri?: unknown})?.memoryUri);
+        if (!Effect2.Predicate.isObject(result.structuredContent))
+          throw new Error('Expected a structured citation response.');
+        const uri = String(result.structuredContent.memoryUri);
         const content = yield* store.read({account: config.account, home, user: config.user}, uri);
         expect(parseMemoryDocument(uri, content)?.metadata.codeCitations ?? []).toEqual([]);
         expect(content).toContain('Retain the intended source invariant.');
@@ -142,7 +147,9 @@ describe('memory code citation capture and validation', () => {
       }
       const intents = yield* listDeferredCodeAnchorIntents(config);
       expect(intents).toHaveLength(2);
-      expect(intents.every(entry => entry.kind === 'valid' && entry.intent.codeRefs[0] === 'src/value.ts')).toBe(true);
+      expect(
+        EffectArray.every(intents, entry => entry.kind === 'valid' && entry.intent.codeRefs[0] === 'src/value.ts'),
+      ).toBe(true);
       expect(refreshes).toBe(0);
       expect(fixture.evidenceCalls()).toBe(0);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
@@ -237,14 +244,43 @@ describe('memory code citation capture and validation', () => {
         candidate,
       ]).pipe(provideTestLayer(Layer.merge(fixture.layer, CodeGraphLanguagePackRegistry.layer)));
 
-      expect(first[0]?.receipts.map(receipt => receipt.status)).toEqual(['exact', 'exact']);
+      expect(
+        Effect2.Option.getOrUndefined(
+          Effect2.Option.map(Effect2.Option.fromNullishOr(first[0]?.receipts), __effectOptionalArrayReceiver =>
+            EffectArray.map(__effectOptionalArrayReceiver, receipt => receipt.status),
+          ),
+        ),
+      ).toEqual(['exact', 'exact']);
       expect(first[0]?.cacheHits).toBeUndefined();
-      expect(new Set(first[0]?.receipts.map(receipt => receipt.observedAt)).size).toBe(1);
-      expect(new Set(second[0]?.receipts.map(receipt => receipt.observedAt)).size).toBe(1);
+      expect(
+        new Set(
+          Effect2.Option.getOrUndefined(
+            Effect2.Option.map(Effect2.Option.fromNullishOr(first[0]?.receipts), __effectOptionalArrayReceiver =>
+              EffectArray.map(__effectOptionalArrayReceiver, receipt => receipt.observedAt),
+            ),
+          ),
+        ).size,
+      ).toBe(1);
+      expect(
+        new Set(
+          Effect2.Option.getOrUndefined(
+            Effect2.Option.map(Effect2.Option.fromNullishOr(second[0]?.receipts), __effectOptionalArrayReceiver =>
+              EffectArray.map(__effectOptionalArrayReceiver, receipt => receipt.observedAt),
+            ),
+          ),
+        ).size,
+      ).toBe(1);
       expect(second[0]?.receipts[0]?.observedAt).not.toBe(first[0]?.receipts[0]?.observedAt);
-      expect(first[0]?.receipts.every(receipt => receipt.snapshotCompletedAt === '2026-08-26T00:00:00.000Z')).toBe(
-        true,
-      );
+      expect(
+        Effect2.Option.getOrUndefined(
+          Effect2.Option.map(Effect2.Option.fromNullishOr(first[0]?.receipts), __effectOptionalArrayReceiver =>
+            EffectArray.every(
+              __effectOptionalArrayReceiver,
+              receipt => receipt.snapshotCompletedAt === '2026-08-26T00:00:00.000Z',
+            ),
+          ),
+        ),
+      ).toBe(true);
       expect(second[0]?.cacheHits).toBe(2);
       expect(fixture.evidenceCalls()).toBe(callsAfterFirstValidation);
       expect(fixture.leases()).toEqual({acquired: 3, released: 3});
@@ -309,7 +345,7 @@ describe('memory code citation capture and validation', () => {
         statusCalls += 1;
         const expectedStatus = fixture.status;
         if (statusCalls !== 2) return expectedStatus;
-        const repositoryId = 'b'.repeat(64);
+        const repositoryId = Effect2.pipe('b', EffectString.repeat(64));
         return {
           ...expectedStatus,
           identity: {
@@ -364,36 +400,33 @@ describe('memory code citation capture and validation', () => {
       const manifestPath = path.join(home, 'seed-manifest.yaml');
       yield* fs.writeFileString(
         manifestPath,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: sibling',
-          `    path: ${JSON.stringify(sibling)}`,
-          '    uri: threadnote://resources/repos/sibling',
-          '    seed: []',
-          'worksets:',
-          '  - name: citation-routing',
-          '    projects:',
-          '      - sibling',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: sibling',
+            `    path: ${JSON.stringify(sibling)}`,
+            '    uri: threadnote://resources/repos/sibling',
+            '    seed: []',
+            'worksets:',
+            '  - name: citation-routing',
+            '    projects:',
+            '      - sibling',
+            '',
+          ],
+          '\n',
+        ),
       );
-      const staged = yield* catalogTestEffect(
-        stageCodeGraphWorksetCatalogGeneration(home, {
-          manifestDigest: codeGraphWorksetManifestDigest(workset),
-          members: [{projection: routingProjection(), repositoryKey: project.name}],
-          worksetName: workset.name,
-        }),
-      );
-      yield* catalogTestEffect(
-        publishCodeGraphWorksetCatalogGeneration(home, {
-          generationId: staged.id,
-          worksetName: workset.name,
-        }),
-      );
-      const qualified = yield* catalogTestEffect(
-        registerCodeGraphQualifiedRef(home, {nodeId: SYMBOL_ID, repositoryId: REPOSITORY_ID}),
-      );
+      const staged = yield* stageCodeGraphWorksetCatalogGeneration(home, {
+        manifestDigest: codeGraphWorksetManifestDigest(workset),
+        members: [{projection: routingProjection(), repositoryKey: project.name}],
+        worksetName: workset.name,
+      });
+      yield* publishCodeGraphWorksetCatalogGeneration(home, {
+        generationId: staged.id,
+        worksetName: workset.name,
+      });
+      const qualified = yield* registerCodeGraphQualifiedRef(home, {nodeId: SYMBOL_ID, repositoryId: REPOSITORY_ID});
       let siblingCurrent = false;
       let swapCallerAfterCapture = false;
       let callerFences = 0;
@@ -572,7 +605,7 @@ function citationFixture(
             edgeCount: 0,
             extractorSet: 'fixture-extractor-set',
             fileCount: 1,
-            graphContentId: `cgc_${'5'.repeat(40)}`,
+            graphContentId: `cgc_${Effect2.pipe('5', EffectString.repeat(40))}`,
             id: SNAPSHOT_ID,
             repositoryId: REPOSITORY_ID,
             state: 'ready' as const,
@@ -589,36 +622,42 @@ function citationFixture(
   const evidence = (request: CodeGraphEffectiveSnapshotCitationEvidenceRequest) => {
     evidenceCalls += 1;
     const paths = [
-      ...new Set([...(request.paths ?? []), ...(request.fileRelocationFallbacks ?? []).map(item => item.path)]),
+      ...new Set([
+        ...(request.paths ?? []),
+        ...EffectArray.map(request.fileRelocationFallbacks ?? [], item => item.path),
+      ]),
     ];
     const contentHashes = [
       ...new Set([
         ...(request.contentHashes ?? []),
-        ...(request.fileRelocationFallbacks ?? [])
-          .filter(item => item.path !== file.path)
-          .map(item => item.contentHash),
+        ...EffectArray.map(
+          EffectArray.filter(request.fileRelocationFallbacks ?? [], item => item.path !== file.path),
+          item => item.contentHash,
+        ),
       ]),
     ];
     return {
       fileInventoryCoverage: 'complete',
-      filesByContentHashes: contentHashes.map(contentHash => ({
+      filesByContentHashes: EffectArray.map(contentHashes, contentHash => ({
         contentHash,
         files: contentHash === SOURCE_HASH ? [file] : [],
         truncated: false,
       })),
-      filesByPaths: paths.map(repositoryPath => ({
+      filesByPaths: EffectArray.map(paths, repositoryPath => ({
         ...(repositoryPath === file.path ? {file} : {}),
         path: repositoryPath,
       })),
-      symbolsByIds: [moduleSymbol, symbol].filter(candidate => (request.symbolIds ?? []).includes(candidate.id)),
-      symbolsBySemanticLocators: (request.semanticLocators ?? []).map(locator => ({
+      symbolsByIds: EffectArray.filter([moduleSymbol, symbol], candidate =>
+        (request.symbolIds ?? []).includes(candidate.id),
+      ),
+      symbolsBySemanticLocators: EffectArray.map(request.semanticLocators ?? [], locator => ({
         locator,
         symbols: [symbol],
         truncated: false,
       })),
     } satisfies CodeGraphEffectiveSnapshotCitationEvidence;
   };
-  const store = CodeGraphStore.of({
+  const store = {
     acquireSnapshotLease: statusOptions.acquireLease ?? (() => Effect.sync(() => `lease-${++acquired}`)),
     effectiveSnapshotCitationEvidence: (
       _databasePath: string,
@@ -629,7 +668,7 @@ function citationFixture(
         ? Effect.sync(() => evidence(request))
         : Effect.fail(statusOptions.evidenceFailure),
     releaseSnapshotLease: () => Effect.sync(() => void ++released),
-  } as unknown as CodeGraphStoreShape);
+  } satisfies Partial<CodeGraphStoreShape>;
   const withStatusSession: NonNullable<Parameters<typeof CodeGraphQueryService.of>[0]['withStatusSession']> = (
     _home,
     _cwd,
@@ -637,14 +676,20 @@ function citationFixture(
     _options,
     use,
   ) => Effect.sync(() => void ++validationSessions).pipe(Effect.andThen(use(status)));
-  const query = CodeGraphQueryService.of({
+  const query = {
     status: (_home: string, cwd: string, options?: {readonly observeWorktree?: boolean}) =>
       Effect.sync(() => statusOptions.statusFor?.(cwd, options?.observeWorktree) ?? status),
+    statusForPublishedIdentity: (
+      _home: string,
+      cwd: string,
+      _expected: unknown,
+      options?: {readonly observeWorktree?: boolean},
+    ) => Effect.sync(() => statusOptions.statusFor?.(cwd, options?.observeWorktree) ?? status),
     withStatusSession,
-  } as unknown as Parameters<typeof CodeGraphQueryService.of>[0]);
+  } satisfies Partial<Parameters<typeof CodeGraphQueryService.of>[0]>;
   return {
     evidenceCalls: () => evidenceCalls,
-    layer: Layer.merge(Layer.succeed(CodeGraphStore, store), Layer.succeed(CodeGraphQueryService, query)),
+    layer: Layer.merge(Layer.mock(CodeGraphStore, store), Layer.mock(CodeGraphQueryService, query)),
     leases: () => ({acquired, released}),
     status,
     symbol,
@@ -652,21 +697,15 @@ function citationFixture(
   };
 }
 
-function catalogTestEffect<A, E>(effect: Effect.Effect<A, E, unknown>): Effect.Effect<A, E> {
-  // The enclosing platform layer provides the catalog's concrete services.
-  // oxlint-disable-next-line effecttsgo/unsafe-effect-type-assertion -- narrow the fully provided test boundary
-  return effect as Effect.Effect<A, E>;
-}
-
 function routingProjection() {
   return createCodeGraphWorksetRoutingProjection({
-    checkoutId: '7'.repeat(64),
+    checkoutId: Effect2.pipe('7', EffectString.repeat(64)),
     commitId: COMMIT,
     componentCount: 1,
     extractorGeneration: 13,
     projectorVersion: CODE_GRAPH_WORKSET_CATALOG_PROJECTOR_VERSION,
     repositoryId: REPOSITORY_ID,
-    snapshotDigest: '8'.repeat(64),
+    snapshotDigest: Effect2.pipe('8', EffectString.repeat(64)),
     snapshotId: SNAPSHOT_ID,
     symbols: [
       {
@@ -682,12 +721,12 @@ function routingProjection() {
         terms: [{term: 'value', weight: 4}],
       },
     ],
-    worktreeId: '9'.repeat(64),
+    worktreeId: Effect2.pipe('9', EffectString.repeat(64)),
   });
 }
 
 function callerStatus(root: string): CodeGraphStatus {
-  const repositoryId = 'a'.repeat(64);
+  const repositoryId = Effect2.pipe('a', EffectString.repeat(64));
   return {
     databasePath: `${root}/graph.sqlite`,
     freshness: 'current',
@@ -710,7 +749,7 @@ function callerStatus(root: string): CodeGraphStatus {
       edgeCount: 0,
       extractorSet: 'fixture-extractor-set',
       fileCount: 0,
-      id: `cgsn_${'a'.repeat(40)}`,
+      id: `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}`,
       repositoryId,
       state: 'ready',
       symbolCount: 0,

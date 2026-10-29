@@ -5,6 +5,8 @@ import {product} from './catalog.js';
 import {DetailModal} from '@threadnote/manager/detail-modal';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function PocketConnectionForm({
   source,
@@ -61,7 +63,13 @@ export function PocketConnectionForm({
 
   async function save(event: React.FormEvent): Promise<void> {
     event.preventDefault();
-    if (busy || !credentialReady || !projectMode || (projectMode === 'project' && !project.trim())) return;
+    if (
+      busy ||
+      !credentialReady ||
+      !projectMode ||
+      (projectMode === 'project' && !Effect.pipe(project, EffectString.trim))
+    )
+      return;
     setBusy(true);
     setError('');
     try {
@@ -70,7 +78,7 @@ export function PocketConnectionForm({
         id,
         editing: !!source,
         ...(credentialMode === 'environment' ? {credentialEnv} : token ? {token} : {}),
-        project: projectMode === 'projectless' ? null : project.trim(),
+        project: projectMode === 'projectless' ? null : Effect.pipe(project, EffectString.trim),
         refreshIntervalMinutes,
         maxStaleHours,
         apply: true,
@@ -238,7 +246,12 @@ export function PocketConnectionForm({
           <button
             type="submit"
             className="primary"
-            disabled={busy || !credentialReady || !projectMode || (projectMode === 'project' && !project.trim())}
+            disabled={
+              busy ||
+              !credentialReady ||
+              !projectMode ||
+              (projectMode === 'project' && !Effect.pipe(project, EffectString.trim))
+            }
           >
             {busy ? 'Saving…' : source ? 'Save settings' : 'Connect and sync'}
           </button>

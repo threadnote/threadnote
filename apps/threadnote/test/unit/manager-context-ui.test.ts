@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 // @vitest-environment happy-dom
 
 import React, {act} from 'react';
@@ -16,10 +17,13 @@ import type {
 } from '@threadnote/threadnote/manager/context';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {ContextBriefResult, ContextPanel, parseCodeRefs} from '@threadnote/manager/context/view';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MEMORY_URI = 'threadnote://memory/tn_manager_context';
 const RELOCATED_URI = 'threadnote://user/tester/memories/durable/projects/product/context-brief.md';
-const GRAPH_REF = `cgs_${'a'.repeat(32)}`;
+const GRAPH_REF = `cgs_${Effect.pipe('a', EffectString.repeat(32))}`;
 
 let reactRoot: Root | undefined;
 let originalFetch: typeof fetch;
@@ -27,7 +31,7 @@ let requests: Array<{readonly body: Record<string, unknown>; readonly path: stri
 let canonicalMemoryBody: string;
 
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   originalFetch = globalThis.fetch;
   requests = [];
   canonicalMemoryBody = 'Canonical memory body';
@@ -35,48 +39,8 @@ beforeEach(() => {
     (input: string | URL | Request, init?: RequestInit) => {
       const path =
         typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
-      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
-      if (path === '/api/worksets') {
-        return Promise.resolve(
-          jsonResponse({
-            definitions: [{memberCount: 1, name: 'platform'}],
-            definitionSource: 'seed-manifest',
-            editability: {state: 'editable'},
-            projectEditability: {state: 'editable'},
-            projects: [
-              {
-                branchState: 'current',
-                folder: 'threadnote',
-                name: 'threadnote',
-                path: '/private/threadnote',
-                worksetCount: 1,
-                worksets: ['platform'],
-              },
-              {
-                branchState: 'current',
-                folder: 'other',
-                name: 'other-project',
-                path: '/private/other-repository',
-                worksetCount: 0,
-                worksets: [],
-              },
-              {
-                branchState: 'current',
-                folder: 'changed',
-                name: 'changed-project',
-                path: '/private/changed',
-                worksetCount: 0,
-                worksets: [],
-              },
-            ],
-            projectsReadOnly: false,
-            readOnly: false,
-            revision: 'a'.repeat(64),
-            type: 'manager-workset-catalog',
-            version: 1,
-          }),
-        );
-      }
+      const body = init?.body ? parseJsonObject(String(init.body)) : {};
+      if (path === '/api/worksets') return Promise.resolve(jsonResponse(managerWorksetCatalog()));
       requests.push({body, path});
       if (path === '/api/context/brief') {
         return Promise.resolve(
@@ -99,7 +63,24 @@ beforeEach(() => {
               createdAt: '2026-08-31T00:00:00.000Z',
               id: 'cgwj_context_recovery',
               progress: {message: 'Ready.', phase: 'completed', total: 1},
-              result: {state: 'ready'},
+              result: {
+                coverage: {complete: true, excluded: 0, failed: 0, missing: 0, ready: 1, requested: 1},
+                manifestDigest: Effect.pipe('b', EffectString.repeat(64)),
+                members: [
+                  {
+                    project: 'threadnote',
+                    projectionDigest: Effect.pipe('c', EffectString.repeat(64)),
+                    repositoryId: Effect.pipe('d', EffectString.repeat(64)),
+                    snapshotId: `cgsn_${Effect.pipe('e', EffectString.repeat(40))}-direct`,
+                    state: 'ready',
+                    symbolCount: 12,
+                  },
+                ],
+                state: 'ready',
+                type: 'code-graph-workset-prepare',
+                version: 1,
+                workset: String(body.workset),
+              },
               status: 'completed',
               workset: body.workset,
             },
@@ -143,11 +124,17 @@ afterEach(async () => {
   globalThis.fetch = originalFetch;
 });
 
+function parseJsonObject(text: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(text);
+  if (!isJsonObject(value)) throw new Error('Expected a request object.');
+  return value;
+}
+
 describe('Manager Context workspace', () => {
   it('offers resume in the Context Brief mode selector', async () => {
     await renderContext();
 
-    expect([...selectWithLabel('Mode').options].map(option => option.value)).toContain('resume');
+    expect(EffectArray.map([...selectWithLabel('Mode').options], option => option.value)).toContain('resume');
   });
 
   it('surfaces the local value workspace beside Context Brief and Recall', async () => {
@@ -162,8 +149,12 @@ describe('Manager Context workspace', () => {
   it('keeps memory-only projects available in the Context memory selector', async () => {
     await renderContext(['memory-only-project']);
 
-    expect([...selectWithLabel('Memory project').options].map(option => option.value)).toContain('memory-only-project');
-    expect([...selectWithLabel('Memory project').options].map(option => option.value)).toContain('threadnote');
+    expect(EffectArray.map([...selectWithLabel('Memory project').options], option => option.value)).toContain(
+      'memory-only-project',
+    );
+    expect(EffectArray.map([...selectWithLabel('Memory project').options], option => option.value)).toContain(
+      'threadnote',
+    );
   });
 
   it('composes a full brief, opens canonical memory, and reruns from an exact graph ref', async () => {
@@ -200,7 +191,7 @@ describe('Manager Context workspace', () => {
 
     await clickButton('Rerun from this ref');
     await waitForRequestCount('/api/context/brief', 2);
-    expect(requests.filter(request => request.path === '/api/context/brief')[1]?.body).toMatchObject({
+    expect(EffectArray.filter(requests, request => request.path === '/api/context/brief')[1]?.body).toMatchObject({
       codeRefs: [GRAPH_REF],
       mode: 'explain',
     });
@@ -220,9 +211,9 @@ describe('Manager Context workspace', () => {
     await changeSelect(selectWithLabel('Repository'), '/private/threadnote');
     await changeTextArea(textareaWithLabel('Task'), 'Bound the selected anchors');
     const refs = Array.from({length: CONTEXT_BRIEF_MAXIMUM_CODE_REFS + 1}, (_, index) => `src/${index}.ts`);
-    await changeTextArea(textareaWithLabel('Code anchors'), refs.join('\n'));
+    await changeTextArea(textareaWithLabel('Code anchors'), EffectArray.join(refs, '\n'));
 
-    expect(parseCodeRefs(refs.join('\n'))).toEqual(refs);
+    expect(parseCodeRefs(EffectArray.join(refs, '\n'))).toEqual(refs);
     expect(document.body.textContent).toContain(`${refs.length}/${CONTEXT_BRIEF_MAXIMUM_CODE_REFS}`);
     expect(document.body.textContent).toContain(
       `codeRefs may contain at most ${CONTEXT_BRIEF_MAXIMUM_CODE_REFS} entries`,
@@ -245,7 +236,7 @@ describe('Manager Context workspace', () => {
     await clickButton('Index graph and rerun');
     await waitForRequestCount('/api/context/brief', 2);
 
-    expect(requests.filter(request => request.path === '/api/graphs/action')).toEqual([
+    expect(EffectArray.filter(requests, request => request.path === '/api/graphs/action')).toEqual([
       {body: {action: 'index-cwd', cwd: '/private/threadnote'}, path: '/api/graphs/action'},
     ]);
     expect(selectWithLabel('Repository').value).toBe('/private/threadnote');
@@ -266,8 +257,8 @@ describe('Manager Context workspace', () => {
     await clickButton('Index graph and rerun');
     await waitForText('The Context Brief inputs changed. Rerun the brief before preparing its graph scope.');
 
-    expect(requests.filter(request => request.path === '/api/graphs/action')).toHaveLength(0);
-    expect(requests.filter(request => request.path === '/api/context/brief')).toHaveLength(1);
+    expect(EffectArray.filter(requests, request => request.path === '/api/graphs/action')).toHaveLength(0);
+    expect(EffectArray.filter(requests, request => request.path === '/api/context/brief')).toHaveLength(1);
   });
 
   it('prepares an explicitly selected Workset and recompiles its Context Brief in place', async () => {
@@ -281,7 +272,7 @@ describe('Manager Context workspace', () => {
     await clickButton('Prepare Workset and rerun');
     await waitForRequestCount('/api/context/brief', 2);
 
-    expect(requests.filter(request => request.path === '/api/worksets/prepare')).toEqual([
+    expect(EffectArray.filter(requests, request => request.path === '/api/worksets/prepare')).toEqual([
       {body: {concurrency: 2, workset: 'platform'}, path: '/api/worksets/prepare'},
     ]);
     expect(selectWithLabel('Prepared Workset').value).toBe('platform');
@@ -293,23 +284,7 @@ describe('Manager Context workspace', () => {
       (input: string | URL | Request, init?: RequestInit) => {
         const path =
           typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
-        if (path === '/api/worksets') {
-          return Promise.resolve(
-            jsonResponse({
-              definitions: [{memberCount: 1, name: 'platform'}],
-              projects: [
-                {
-                  branchState: 'current',
-                  folder: 'threadnote',
-                  name: 'threadnote',
-                  path: '/private/threadnote',
-                  worksetCount: 1,
-                  worksets: ['platform'],
-                },
-              ],
-            }),
-          );
-        }
+        if (path === '/api/worksets') return Promise.resolve(jsonResponse(managerWorksetCatalog(false)));
         return new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), {
             once: true,
@@ -339,7 +314,7 @@ describe('Manager Context workspace', () => {
     await act(async () =>
       reactRoot?.render(
         React.createElement(ContextBriefResult, {
-          brief: projectedBrief(`cgr_${'c'.repeat(40)}`).structuredContent,
+          brief: projectedBrief(`cgr_${Effect.pipe('c', EffectString.repeat(40))}`).structuredContent,
           onOpenMemory: () => undefined,
           onRecoverGraph: () => undefined,
           onRerun: overrides => {
@@ -428,7 +403,9 @@ describe('Manager Context workspace', () => {
 
     await clickButton('Applied');
     await waitForRequestCount('/api/context/feedback', 1);
-    expect(requests.find(request => request.path === '/api/context/feedback')).toEqual({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(requests, request => request.path === '/api/context/feedback')),
+    ).toEqual({
       body: {
         action: 'applied',
         project: 'threadnote',
@@ -441,7 +418,7 @@ describe('Manager Context workspace', () => {
 
     await clickButton('Next');
     await waitForText('Second page result');
-    expect(requests.filter(request => request.path === '/api/context/recall')).toHaveLength(1);
+    expect(EffectArray.filter(requests, request => request.path === '/api/context/recall')).toHaveLength(1);
 
     const row = document.querySelector<HTMLButtonElement>('.context-recall-card > button');
     expect(row).not.toBeNull();
@@ -461,11 +438,11 @@ describe('Manager Context workspace', () => {
     await act(async () => row?.click());
     await waitForText('Canonical memory body page 1.');
 
-    expect(requests.filter(request => request.path === '/api/context/connections')).toHaveLength(0);
+    expect(EffectArray.filter(requests, request => request.path === '/api/context/connections')).toHaveLength(0);
     await clickButton('Connections');
     await waitForText('relations are navigation evidence not entailment');
 
-    expect(requests.filter(request => request.path === '/api/context/connections')).toEqual([
+    expect(EffectArray.filter(requests, request => request.path === '/api/context/connections')).toEqual([
       {body: {includeHistorical: false, uri: MEMORY_URI}, path: '/api/context/connections'},
     ]);
     expect(document.body.textContent).toContain('Outgoing');
@@ -477,7 +454,10 @@ describe('Manager Context workspace', () => {
     await changeInput(inputWithLabel('Target memory'), 'threadnote://memory/tn_neighbor_updated');
     await clickButton('Save relations');
     await waitForRequestCount('/api/memory/relations', 1);
-    expect(requests.find(request => request.path === '/api/memory/relations')?.body).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(requests, request => request.path === '/api/memory/relations'))
+        ?.body,
+    ).toMatchObject({
       expectedContent: 'canonical source content',
       relations: [{type: 'depends_on', uri: 'threadnote://memory/tn_neighbor_updated'}],
       uri: RELOCATED_URI,
@@ -504,7 +484,7 @@ describe('Manager Context workspace', () => {
       (input: string | URL | Request, init?: RequestInit) => {
         const path =
           typeof input === 'string' ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
-        const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+        const body = init?.body ? parseJsonObject(String(init.body)) : {};
         if (path !== '/api/context/read' || body.uri !== RELOCATED_URI) return routedFetch(input, init);
         requests.push({body, path});
         return new Promise<Response>((_resolve, reject) => {
@@ -538,7 +518,7 @@ describe('Manager Context workspace', () => {
     await flush();
 
     expect(refreshAborted).toBe(true);
-    expect(requests.filter(request => request.path === '/api/context/connections')).toHaveLength(1);
+    expect(EffectArray.filter(requests, request => request.path === '/api/context/connections')).toHaveLength(1);
     expect(requests.at(-1)).toMatchObject({
       body: {uri: expect.stringContaining('neighbor.md')},
       path: '/api/context/read',
@@ -600,7 +580,7 @@ describe('Manager Context workspace', () => {
 
     await clickButton('Recall context');
     await waitForText('manager-context-brief');
-    expect(requests.filter(request => request.path === '/api/context/recall')).toHaveLength(2);
+    expect(EffectArray.filter(requests, request => request.path === '/api/context/recall')).toHaveLength(2);
     expect(requests.at(-1)?.body).toEqual({includeArchived: false, query: 'changed criteria'});
 
     await changeSelect(selectWithLabel('Memory project'), 'changed-project');
@@ -658,25 +638,46 @@ async function changeTextArea(input: HTMLTextAreaElement, value: string): Promis
 }
 
 function inputWithLabel(label: string): HTMLInputElement {
-  const element = [...document.querySelectorAll<HTMLLabelElement>('label')]
-    .find(candidate => candidate.textContent?.includes(label))
-    ?.querySelector('input');
+  const element = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLLabelElement>('label')],
+      __effectArrayValue =>
+        !!(candidate =>
+          Effect.pipe(candidate.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(label)),
+          ))(__effectArrayValue),
+    ),
+  )?.querySelector('input');
   if (!element) throw new Error(`Input did not render: ${label}`);
   return element;
 }
 
 function selectWithLabel(label: string): HTMLSelectElement {
-  const element = [...document.querySelectorAll<HTMLLabelElement>('label')]
-    .find(candidate => candidate.textContent?.includes(label))
-    ?.querySelector('select');
+  const element = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLLabelElement>('label')],
+      __effectArrayValue =>
+        !!(candidate =>
+          Effect.pipe(candidate.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(label)),
+          ))(__effectArrayValue),
+    ),
+  )?.querySelector('select');
   if (!element) throw new Error(`Select did not render: ${label}`);
   return element;
 }
 
 function textareaWithLabel(label: string): HTMLTextAreaElement {
-  const element = [...document.querySelectorAll<HTMLLabelElement>('label')]
-    .find(candidate => candidate.textContent?.includes(label))
-    ?.querySelector('textarea');
+  const element = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLLabelElement>('label')],
+      __effectArrayValue =>
+        !!(candidate =>
+          Effect.pipe(candidate.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(label)),
+          ))(__effectArrayValue),
+    ),
+  )?.querySelector('textarea');
   if (!element) throw new Error(`Textarea did not render: ${label}`);
   return element;
 }
@@ -688,14 +689,25 @@ async function clickButton(label: string): Promise<void> {
 }
 
 function findButton(label: string): HTMLButtonElement | undefined {
-  return [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-    candidate => candidate.textContent?.trim() === label,
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      candidate =>
+        Effect.pipe(candidate.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
   );
 }
 
 async function waitForText(text: string): Promise<void> {
   for (let index = 0; index < 30; index += 1) {
-    if (document.body.textContent?.includes(text)) return;
+    if (
+      Effect.pipe(document.body.textContent, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.includes(text)),
+      )
+    )
+      return;
     await flush();
   }
   throw new Error(`Text did not render: ${text}`);
@@ -703,11 +715,11 @@ async function waitForText(text: string): Promise<void> {
 
 async function waitForRequestCount(path: string, count: number): Promise<void> {
   for (let index = 0; index < 30; index += 1) {
-    if (requests.filter(request => request.path === path).length >= count) return;
+    if (EffectArray.filter(requests, request => request.path === path).length >= count) return;
     await flush();
   }
   throw new Error(
-    `Expected ${count} requests to ${path}; observed ${requests.filter(request => request.path === path).length}. Requests: ${JSON.stringify(requests)}`,
+    `Expected ${count} requests to ${path}; observed ${EffectArray.filter(requests, request => request.path === path).length}. Requests: ${JSON.stringify(requests)}`,
   );
 }
 
@@ -716,6 +728,52 @@ async function flush(): Promise<void> {
     await Promise.resolve();
     await new Promise(resolve => window.setTimeout(resolve, 0));
   });
+}
+
+const THREADNOTE_MANAGER_PROJECT = {
+  branchState: 'current',
+  folder: 'threadnote',
+  name: 'threadnote',
+  path: '/private/threadnote',
+  worksetCount: 1,
+  worksets: ['platform'],
+} as const;
+
+function managerWorksetCatalog(includeOtherProjects = true) {
+  return {
+    definitions: [{memberCount: 1, name: 'platform'}],
+    definitionSource: 'seed-manifest',
+    editability: {state: 'editable'},
+    projectEditability: {state: 'editable'},
+    projects: [
+      THREADNOTE_MANAGER_PROJECT,
+      ...(includeOtherProjects
+        ? [
+            {
+              branchState: 'current',
+              folder: 'other',
+              name: 'other-project',
+              path: '/private/other-repository',
+              worksetCount: 0,
+              worksets: [],
+            },
+            {
+              branchState: 'current',
+              folder: 'changed',
+              name: 'changed-project',
+              path: '/private/changed',
+              worksetCount: 0,
+              worksets: [],
+            },
+          ]
+        : []),
+    ],
+    projectsReadOnly: false,
+    readOnly: false,
+    revision: Effect.pipe('a', EffectString.repeat(64)),
+    type: 'manager-workset-catalog',
+    version: 1,
+  };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -824,7 +882,7 @@ function projectedBrief(
             rank: 0,
             relation: 'depends_on',
             sourceRef: graphRef,
-            targetRef: `cgs_${'b'.repeat(32)}`,
+            targetRef: `cgs_${Effect.pipe('b', EffectString.repeat(32))}`,
           },
         ],
       },
@@ -922,7 +980,12 @@ function recallResponse(
     resultSet: {availableResults: 9, maximumResults: 48, totalRanked: 9, truncated: false},
     results: Array.from({length: 9}, (_, index) => {
       const rank = index + 1;
-      const uri = rank === 1 ? MEMORY_URI : rank === 9 ? RELOCATED_URI : `${MEMORY_URI.slice(0, -3)}-${rank}.md`;
+      const uri =
+        rank === 1
+          ? MEMORY_URI
+          : rank === 9
+            ? RELOCATED_URI
+            : `${Effect.pipe(MEMORY_URI, EffectString.slice(0, -3))}-${rank}.md`;
       return {
         canonicalUri: uri,
         category: 'memories',
@@ -977,20 +1040,20 @@ function connectionsResponse(requestedUri: string): ManagerContextConnectionsRes
   const neighborUri = 'threadnote://user/tester/memories/durable/projects/product/neighbor.md';
   const citation = createMemoryCodeCitation({
     extractorSet: 'manager-ui-test',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
     path: 'src/manager/context/view.tsx',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
     target: {
       fragmentCanonicalization: 'utf8-source-span-v1',
-      fragmentHash: {algorithm: 'sha256', value: 'e'.repeat(64)},
+      fragmentHash: {algorithm: 'sha256', value: Effect.pipe('e', EffectString.repeat(64))},
       kind: 'symbol',
       language: 'typescript',
       name: 'ContextPanel',
-      nodeId: `cgs_${'f'.repeat(32)}`,
+      nodeId: `cgs_${Effect.pipe('f', EffectString.repeat(32))}`,
       qualifiedName: 'ContextPanel',
       span: {column: 1, endColumn: 2, endLine: 1, line: 1},
       symbolKind: 'function',

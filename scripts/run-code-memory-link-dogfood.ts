@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Predicate} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Clock, Console, Effect, FileSystem, Path} from 'effect';
@@ -26,6 +28,10 @@ import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, scriptArguments} from './effect/script.js';
 import {CODE_MEMORY_LINK_EVALUATION_USER, candidateEnvironment} from './code-memory-link-codex-preflight.js';
 import {verifyApprovalCheckout} from './verify-code-memory-link-release.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const BUDGET_TOKENS = 1_250;
 const CITED_FILE = 'packages/recall/src/code_links.ts';
@@ -67,7 +73,7 @@ const program = Effect.scoped(
       timeoutMs: 120_000,
     });
     const cloneHead = yield* git(repository, ['rev-parse', 'HEAD']);
-    if (cloneHead.stdout.trim() !== options.approvalCommit) {
+    if (Effect2.pipe(cloneHead.stdout, EffectString.trim) !== options.approvalCommit) {
       return yield* ScriptError.make({message: 'The isolated dogfood clone did not resolve the reviewed harness.'});
     }
     const dogfoodEnvironment = codeMemoryLinkDogfoodEnvironment({
@@ -110,7 +116,7 @@ const program = Effect.scoped(
       '--project',
       'threadnote',
       '--topic',
-      `code-memory-dogfood-${runId.slice(4, 20)}`,
+      `code-memory-dogfood-${Effect2.pipe(runId, EffectString.slice(4, 20))}`,
       '--text',
       `${lexicalMarker} exact-installed practical backlink evidence for the recall selector contract.`,
       '--code-ref',
@@ -138,7 +144,7 @@ const program = Effect.scoped(
         '--budget-tokens',
         String(BUDGET_TOKENS),
         '--json',
-        ...codeRefs.flatMap(ref => ['--code-ref', ref]),
+        ...EffectArray.flatMap(codeRefs, ref => ['--code-ref', ref]),
       ];
       const result = yield* runExact(args);
       return parseContextBriefV1(JSON.parse(result.stdout) as unknown);
@@ -169,7 +175,7 @@ const program = Effect.scoped(
     const graphStatus = projectCodeMemoryLinkDogfoodGraphStatusV1(JSON.parse(graphStatusResult.stdout) as unknown);
     yield* runBrief('stale-graph-abstention', anchorTask, [CITED_FILE], graphStatus);
 
-    const deferredTopic = `code-memory-deferred-${runId.slice(4, 20)}`;
+    const deferredTopic = `code-memory-deferred-${Effect2.pipe(runId, EffectString.slice(4, 20))}`;
     const deferredMemoryUri =
       `threadnote://user/${CODE_MEMORY_LINK_EVALUATION_USER}/memories/durable/projects/threadnote/` +
       `${deferredTopic}.md`;
@@ -201,7 +207,7 @@ const program = Effect.scoped(
     const deferredStartedAt = yield* Clock.currentTimeMillis;
     const deferredWrite = yield* runExact(deferredRememberArgs);
     const durableReceiptMilliseconds = Math.max(0, Math.round((yield* Clock.currentTimeMillis) - deferredStartedAt));
-    if (!deferredWrite.stdout.includes(deferredMemoryUri)) {
+    if (!Effect2.pipe(deferredWrite.stdout, EffectString.includes(deferredMemoryUri))) {
       return yield* ScriptError.make({message: 'Deferred write did not return the canonical durable memory URI.'});
     }
     const beforeContent = (yield* runExact(['read', '--home', home, deferredMemoryUri])).stdout;
@@ -252,10 +258,10 @@ const program = Effect.scoped(
       directMatchesAfterFinalize: afterFinalizeProjection.directMatches,
       directMatchesBeforeFinalize: beforeFinalizeProjection.directMatches,
       deferredReceiptGuidanceObserved:
-        deferredWrite.stdout.includes('Stored memory without finalized code citations') &&
-        deferredWrite.stdout.includes('private local outbox') &&
-        deferredWrite.stdout.includes('retries automatically after graph indexing') &&
-        deferredWrite.stdout.includes('threadnote finalize-code-refs'),
+        Effect2.pipe(deferredWrite.stdout, EffectString.includes('Stored memory without finalized code citations')) &&
+        Effect2.pipe(deferredWrite.stdout, EffectString.includes('private local outbox')) &&
+        Effect2.pipe(deferredWrite.stdout, EffectString.includes('retries automatically after graph indexing')) &&
+        Effect2.pipe(deferredWrite.stdout, EffectString.includes('threadnote finalize-code-refs')),
       durableReceiptMilliseconds,
       falseCurrentCount: afterFinalizeProjection.falseCurrentCount,
       finalizedBacklinkTargetsStoredMemory: contextBriefContainsDirectMemory(afterFinalizeBrief, deferredMemoryUri),
@@ -273,7 +279,8 @@ const program = Effect.scoped(
       strictRecoveryGuidanceObserved:
         /(?:exact current graph evidence|already-published ready graph)/u.test(
           `${strictWrite.stdout}\n${strictWrite.stderr}`,
-        ) && `${strictWrite.stdout}\n${strictWrite.stderr}`.includes('No indexing was started'),
+        ) &&
+        Effect2.pipe(`${strictWrite.stdout}\n${strictWrite.stderr}`, EffectString.includes('No indexing was started')),
       strictWriteRejected: strictWrite.exitCode !== 0,
     };
 
@@ -284,7 +291,7 @@ const program = Effect.scoped(
     if (governanceAfter.commit !== options.approvalCommit) {
       return yield* ScriptError.make({message: 'The reviewed harness checkout changed during dogfood.'});
     }
-    const observations = rawRuns.map(run =>
+    const observations = EffectArray.map(rawRuns, run =>
       createCodeMemoryLinkDogfoodObservationV1({
         candidate,
         harnessCommit: options.approvalCommit,
@@ -317,7 +324,7 @@ const program = Effect.scoped(
     yield* atomicWrite(options.output, `${JSON.stringify(artifact, undefined, 2)}\n`);
     if (result.gate.qualityFailures.length > 0) {
       return yield* ScriptError.make({
-        message: `Dogfood evidence was retained at ${options.output}.\n${result.gate.qualityFailures.join('\n')}`,
+        message: `Dogfood evidence was retained at ${options.output}.\n${EffectArray.join(result.gate.qualityFailures, '\n')}`,
       });
     }
     yield* Console.log(
@@ -337,8 +344,8 @@ function summarizeBrief(
   graphStatus: CodeMemoryLinkDogfoodGraphStatusV1 | null,
 ): CodeMemoryLinkDogfoodObservationSummaryV1 {
   const memories = [...brief.activeHandoffs, ...brief.durableDecisions];
-  const uniqueUris = new Set(memories.map(memory => memory.uri));
-  const direct = memories.filter(memory => memory.selectionBasis === 'code-citation');
+  const uniqueUris = new Set(EffectArray.map(memories, memory => memory.uri));
+  const direct = EffectArray.filter(memories, memory => memory.selectionBasis === 'code-citation');
   const coverage = brief.coverage.memory.codeAnchors;
   const measurement = measureAgentToolResponse({structuredContent: brief, text: renderContextBriefText(brief)});
   return {
@@ -347,8 +354,16 @@ function summarizeBrief(
     directCodeCitationMatches: direct.length,
     duplicateMemoryCount: memories.length - uniqueUris.size,
     estimatedTokens: measurement.estimatedTokens,
-    falseCurrentCount: direct.filter(memory => memory.codeRelations?.some(relation => relation.status !== 'exact'))
-      .length,
+    falseCurrentCount: EffectArray.filter(
+      direct,
+      __effectArrayValue =>
+        !!(memory =>
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(memory.codeRelations), __effectArrayReceiver =>
+              EffectArray.some(__effectArrayReceiver, relation => relation.status !== 'exact'),
+            ),
+          ))(__effectArrayValue),
+    ).length,
     graphStatus,
     id,
     memoryMatches: memories.length,
@@ -364,20 +379,29 @@ function summarizeDirectMemoryEvidence(brief: ReturnType<typeof parseContextBrie
   readonly falseCurrentCount: number;
 } {
   const memories = [...brief.activeHandoffs, ...brief.durableDecisions];
-  const direct = memories.filter(memory => memory.selectionBasis === 'code-citation');
+  const direct = EffectArray.filter(memories, memory => memory.selectionBasis === 'code-citation');
   return {
     directMatches: direct.length,
-    falseCurrentCount: direct.filter(memory => memory.codeRelations?.some(relation => relation.status !== 'exact'))
-      .length,
+    falseCurrentCount: EffectArray.filter(
+      direct,
+      __effectArrayValue =>
+        !!(memory =>
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(memory.codeRelations), __effectArrayReceiver =>
+              EffectArray.some(__effectArrayReceiver, relation => relation.status !== 'exact'),
+            ),
+          ))(__effectArrayValue),
+    ).length,
   };
 }
 
 function contextBriefContainsMemory(brief: ReturnType<typeof parseContextBriefV1>, memoryUri: string): boolean {
-  return [...brief.activeHandoffs, ...brief.durableDecisions].some(memory => memory.uri === memoryUri);
+  return EffectArray.some([...brief.activeHandoffs, ...brief.durableDecisions], memory => memory.uri === memoryUri);
 }
 
 function contextBriefContainsDirectMemory(brief: ReturnType<typeof parseContextBriefV1>, memoryUri: string): boolean {
-  return [...brief.activeHandoffs, ...brief.durableDecisions].some(
+  return EffectArray.some(
+    [...brief.activeHandoffs, ...brief.durableDecisions],
     memory => memory.uri === memoryUri && memory.selectionBasis === 'code-citation',
   );
 }
@@ -389,27 +413,29 @@ export function projectDeferredAnchorFinalization(
   if (
     receipt.type !== 'threadnote-deferred-code-anchor-finalization' ||
     receipt.version !== 1 ||
-    !Array.isArray(receipt.items)
+    !EffectArray.isArray(receipt.items)
   ) {
     throw ScriptError.make({message: 'Dogfood finalization did not use the expected v1 receipt contract.'});
   }
-  const items = receipt.items.map((value, index) => plainRecord(value, `Deferred finalization item ${index + 1}`));
+  const items = EffectArray.map(receipt.items, (value, index) =>
+    plainRecord(value, `Deferred finalization item ${index + 1}`),
+  );
   const count = (field: 'conflictCount' | 'failedCount' | 'finalizedCount' | 'pendingCount' | 'scannedCount') => {
     const candidate = receipt[field];
-    if (!Number.isSafeInteger(candidate) || (candidate as number) < 0) {
+    if (!checkedIsSafeInteger(candidate) || candidate < 0) {
       throw ScriptError.make({message: `Dogfood finalization ${field} must be a non-negative integer.`});
     }
-    return candidate as number;
+    return candidate;
   };
   const projected = {
-    citationCount: items.reduce((total, item) => {
+    citationCount: EffectArray.reduce(items, 0, (total, item) => {
       const candidate = item.citationCount;
       if (candidate === undefined) return total;
-      if (!Number.isSafeInteger(candidate) || (candidate as number) < 0) {
+      if (!checkedIsSafeInteger(candidate) || candidate < 0) {
         throw ScriptError.make({message: 'Dogfood finalization citation count must be a non-negative integer.'});
       }
-      return total + (candidate as number);
-    }, 0),
+      return total + candidate;
+    }),
     conflictCount: count('conflictCount'),
     failedCount: count('failedCount'),
     finalizedCount: count('finalizedCount'),
@@ -418,10 +444,10 @@ export function projectDeferredAnchorFinalization(
   };
   if (
     projected.scannedCount !== items.length ||
-    projected.conflictCount !== items.filter(item => item.state === 'conflict').length ||
-    projected.failedCount !== items.filter(item => item.state === 'failed').length ||
-    projected.finalizedCount !== items.filter(item => item.state === 'finalized').length ||
-    projected.pendingCount !== items.filter(item => item.state === 'pending').length
+    projected.conflictCount !== EffectArray.filter(items, item => item.state === 'conflict').length ||
+    projected.failedCount !== EffectArray.filter(items, item => item.state === 'failed').length ||
+    projected.finalizedCount !== EffectArray.filter(items, item => item.state === 'finalized').length ||
+    projected.pendingCount !== EffectArray.filter(items, item => item.state === 'pending').length
   ) {
     throw ScriptError.make({message: 'Dogfood finalization aggregate counts do not match its item receipts.'});
   }
@@ -433,10 +459,10 @@ export function codeGraphStatusHasIndexingActivity(value: unknown): boolean {
   if (
     status.type !== 'code-graph-status' ||
     (status.version !== 2 && status.version !== 3 && status.version !== 4 && status.version !== 5) ||
-    !Array.isArray(status.builds) ||
-    !Array.isArray(status.waiters) ||
-    !Number.isSafeInteger(status.waiterCount) ||
-    (status.waiterCount as number) < 0 ||
+    !EffectArray.isArray(status.builds) ||
+    !EffectArray.isArray(status.waiters) ||
+    !checkedIsSafeInteger(status.waiterCount) ||
+    status.waiterCount < 0 ||
     !('build' in status)
   ) {
     throw ScriptError.make({message: 'Dogfood graph status omitted its build and waiter activity contract.'});
@@ -452,11 +478,11 @@ const countDeferredAnchorIntents = Effect.fn('codeMemoryLinkDogfood.countDeferre
   const names = yield* fs
     .readDirectory(root, {recursive: true})
     .pipe(Effect.orElseSucceed(() => [] as readonly string[]));
-  return countDeferredAnchorIntentNames(names.map(name => path.basename(name)));
+  return countDeferredAnchorIntentNames(EffectArray.map(names, name => path.basename(name)));
 });
 
 export function countDeferredAnchorIntentNames(names: readonly string[]): number {
-  return names.filter(isDeferredCodeAnchorIntentFilename).length;
+  return EffectArray.filter(names, isDeferredCodeAnchorIntentFilename).length;
 }
 
 export function projectAutomaticDeferredAnchorTransition(input: {
@@ -471,7 +497,7 @@ export function projectAutomaticDeferredAnchorTransition(input: {
     input.pendingIntentCountAfter,
     input.pendingIntentCountBefore,
   ];
-  if (counts.some(count => !Number.isSafeInteger(count) || count < 0)) {
+  if (EffectArray.some(counts, count => !checkedIsSafeInteger(count) || count < 0)) {
     throw ScriptError.make({message: 'Automatic deferred-anchor transition counts must be non-negative integers.'});
   }
   const citationCount = Math.max(0, input.citationCountAfter - input.citationCountBefore);
@@ -566,26 +592,30 @@ export function codeMemoryLinkDogfoodEnvironment(input: {
 }
 
 function plainRecord(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!Predicate.isObject(value)) {
     throw ScriptError.make({message: `${label} must be an object.`});
   }
-  return value as Record<string, unknown>;
+  return value;
 }
 
 function findSymbolId(value: unknown, name: string): string | null {
-  if (Array.isArray(value)) {
+  if (EffectArray.isArray(value)) {
     for (const entry of value) {
       const found = findSymbolId(entry, name);
       if (found !== null) return found;
     }
     return null;
   }
-  if (typeof value !== 'object' || value === null) return null;
-  const object = value as Record<string, unknown>;
+  if (!isStringRecord(value)) return null;
+  const object = value;
   if (object.name === name && typeof object.id === 'string' && /^cgs_[0-9a-f]{32,64}$/u.test(object.id)) {
     return object.id;
   }
-  return findSymbolId(Object.values(object), name);
+  return findSymbolId(EffectRecord.values(object), name);
+}
+
+function isStringRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function parseArguments(args: readonly string[]): {
@@ -612,10 +642,14 @@ function parseArguments(args: readonly string[]): {
 
 function randomOpaqueId(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return `${prefix}_${[...bytes].map(value => value.toString(16).padStart(2, '0')).join('')}`;
+  return `${prefix}_${EffectArray.join(
+    EffectArray.map([...bytes], value => Effect2.pipe(value.toString(16), EffectString.padStart(2, '0'))),
+    '',
+  )}`;
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }

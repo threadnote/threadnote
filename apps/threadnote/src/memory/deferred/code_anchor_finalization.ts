@@ -5,6 +5,7 @@ import {
 } from '@threadnote/recall/mcp/refresh';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {finalizeDeferredCodeAnchors, type DeferredCodeAnchorFinalizationReceiptV1} from './code_anchor.js';
+import {Array as EffectArray} from 'effect';
 
 export interface DeferredCodeAnchorExplicitFinalizationReceipt extends DeferredCodeAnchorFinalizationReceiptV1 {
   readonly derivedIndexes?: DerivedIndexRefreshOutcome;
@@ -13,7 +14,11 @@ export interface DeferredCodeAnchorExplicitFinalizationReceipt extends DeferredC
 export function finalizedDeferredCodeAnchorUris(
   items: readonly DeferredCodeAnchorFinalizationReceiptV1['items'][number][],
 ): readonly string[] {
-  return [...new Set(items.flatMap(item => (item.state === 'finalized' && item.memoryUri ? [item.memoryUri] : [])))];
+  return [
+    ...new Set(
+      EffectArray.flatMap(items, item => (item.state === 'finalized' && item.memoryUri ? [item.memoryUri] : [])),
+    ),
+  ];
 }
 
 /** One post-batch repair preserves citation finality while reporting index readiness honestly. */

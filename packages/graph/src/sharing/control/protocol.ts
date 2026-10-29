@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {GRAPH_SHARE_ACTION_KEY} from '../action.js';
-import {SHA256_DIGEST, SHA256_HEX} from '../digest.js';
+import {parseSha256Digest, SHA256_DIGEST, SHA256_HEX} from '../digest.js';
 import {
   announceGraphShareResult,
   emptyGraphShareReceiptStore,
@@ -190,10 +191,10 @@ export function dispatchGraphShareControl(
     if (body === undefined) return {response: {body: {error: 'invalid-request'}, status: 400}, state};
     const announcement: GraphShareResultAnnouncementV1 = {
       actionKey: body.actionKey,
-      attestationDigest: body.attestationDigest as GraphShareResultAnnouncementV1['attestationDigest'],
+      attestationDigest: parseSha256Digest(body.attestationDigest),
       batchId: body.batchId,
-      resultManifestDigest: body.resultManifestDigest as GraphShareResultAnnouncementV1['resultManifestDigest'],
-      semanticDigest: body.semanticDigest as GraphShareResultAnnouncementV1['semanticDigest'],
+      resultManifestDigest: parseSha256Digest(body.resultManifestDigest),
+      semanticDigest: parseSha256Digest(body.semanticDigest),
     };
     const announced = announceGraphShareResult(state.receipts, announcement);
     const status = announced.status === 'duplicate' ? 200 : announced.status === 'quarantined' ? 409 : 201;
@@ -221,8 +222,9 @@ export function dispatchGraphShareControl(
 }
 
 function forbiddenControlField(body: unknown): string | undefined {
-  if (body === undefined || body === null || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  if (body === undefined || body === null || typeof body !== 'object' || EffectArray.isArray(body)) return undefined;
   for (const key of GRAPH_SHARE_CONTROL_FORBIDDEN_FIELDS) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     if (Object.hasOwn(body, key)) return key;
   }
   return undefined;

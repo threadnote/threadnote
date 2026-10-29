@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Icon} from '../components/Icons';
 import {SiteShell} from '../components/SiteShell';
 import {
@@ -8,6 +9,8 @@ import {
 } from '@threadnote/evidence/performance';
 import {performanceEvidence} from '../content/performanceEvidence';
 import {docsArticleHref, setDocumentMeta, siteHref} from '../lib/site';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const integerFormatter = new Intl.NumberFormat('en-US');
 
@@ -252,16 +255,16 @@ function ProvenanceCard({artifact}: {artifact: RetainedPerformanceArtifact | und
       <a href={artifact.artifact.url} target="_blank" rel="noreferrer">
         <span>Benchmark artifact</span>
         <strong>{artifact.source.repository.name}</strong>
-        <code>{artifact.artifact.sha256.slice(0, 16)}…</code>
+        <code>{Effect.pipe(artifact.artifact.sha256, EffectString.slice(0, 16))}…</code>
       </a>
       <dl>
         <div>
           <dt>Threadnote</dt>
-          <dd>{artifact.source.threadnote.commit.slice(0, 12)}</dd>
+          <dd>{Effect.pipe(artifact.source.threadnote.commit, EffectString.slice(0, 12))}</dd>
         </div>
         <div>
           <dt>Repository</dt>
-          <dd>{artifact.source.repository.commit.slice(0, 12)}</dd>
+          <dd>{Effect.pipe(artifact.source.repository.commit, EffectString.slice(0, 12))}</dd>
         </div>
         <div>
           <dt>Runner</dt>
@@ -287,7 +290,10 @@ export default function PerformancePage() {
   const metrics = scaleCards(artifact);
   const phases = phaseCards(artifact);
   const objectives = artifact ? retainedPerformanceObjectiveResults(artifact) : [];
-  const passedObjectiveCount = objectives.filter(objective => objective.passed).length;
+  const passedObjectiveCount = EffectArray.filter(
+    objectives,
+    (objective, __effectArrayIndex) => __effectArrayIndex in objectives && objective.passed,
+  ).length;
   const surfaces = surfaceCards(artifact);
   const proofGroups = retainedProofGroups;
 
@@ -318,7 +324,7 @@ export default function PerformancePage() {
       </section>
 
       <section className="performance-scale" id="evidence" aria-label="Retained benchmark scale">
-        {metrics.map(metric => (
+        {EffectArray.map(metrics, metric => (
           <article key={metric.label}>
             <span>{metric.label}</span>
             <strong>{metric.value}</strong>
@@ -341,7 +347,7 @@ export default function PerformancePage() {
         </header>
 
         <div className="performance-proof-grid">
-          {proofGroups.map(group => (
+          {EffectArray.map(proofGroups, group => (
             <article key={group.label}>
               <span className={artifact ? 'performance-check performance-check--passed' : 'performance-check'} />
               <small>{artifact ? 'verified release run' : 'checked-in observation'}</small>
@@ -360,7 +366,7 @@ export default function PerformancePage() {
             <p>Each control records its exact query, path, stable node ID, latency, and pass state.</p>
           </header>
           <div>
-            {performanceControlLanguages.map(language => {
+            {EffectArray.map(performanceControlLanguages, language => {
               const control = artifact?.controls[language];
               return (
                 <article key={language}>
@@ -382,7 +388,7 @@ export default function PerformancePage() {
             </p>
           </header>
           <div>
-            {phases.map(phase => (
+            {EffectArray.map(phases, phase => (
               <article key={phase.label}>
                 <span>{phase.label}</span>
                 <strong>{phase.value}</strong>
@@ -403,7 +409,7 @@ export default function PerformancePage() {
                 </p>
               </header>
               <div>
-                {objectives.map(objective => (
+                {EffectArray.map(objectives, objective => (
                   <article key={objective.measurement}>
                     <span>{objective.label}</span>
                     <strong>{objective.passed ? 'Passed' : 'Open'}</strong>
@@ -525,7 +531,7 @@ export default function PerformancePage() {
                   {formatMeasuredDuration(artifact.phases.incremental.totalMilliseconds)} one-file ·{' '}
                   {formatMeasuredDuration(artifact.phases.incremental.registrationMilliseconds)} registration ·{' '}
                   {formatMeasuredDuration(artifact.phases.incremental.postCommittedScanMilliseconds)} post-scan ·
-                  SHA-256 {artifact.artifact.sha256.slice(0, 8)}…
+                  SHA-256 {Effect.pipe(artifact.artifact.sha256, EffectString.slice(0, 8))}…
                 </small>
               </article>
             ) : null}
@@ -558,7 +564,7 @@ export default function PerformancePage() {
           </p>
         </header>
         <ol>
-          {pipeline.map(stage => (
+          {EffectArray.map(pipeline, stage => (
             <li key={stage.number}>
               <div>
                 <span>{stage.number}</span>
@@ -581,7 +587,7 @@ export default function PerformancePage() {
           </p>
         </header>
         <div>
-          {surfaces.map(surface => (
+          {EffectArray.map(surfaces, surface => (
             <article key={surface.label}>
               <span>{surface.label}</span>
               <h3>{surface.title}</h3>

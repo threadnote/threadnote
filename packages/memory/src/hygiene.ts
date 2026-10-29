@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {
   assertMemoryDocumentSchemaWritable,
@@ -15,6 +16,8 @@ import {
   MEMORY_HYGIENE_SOURCES_MARKER,
   parseMemoryHygieneSources,
 } from './hygiene/provenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type CompactableMemoryKind = Extract<MemoryKind, 'durable' | 'handoff' | 'incident'>;
 export {parseMemoryDocument};
@@ -142,16 +145,25 @@ export function nextCompactPlanClockBoundary(
 
 export function buildCompactPlan(records: readonly MemoryRecord[], options: CompactPlanOptions): CompactPlan {
   const now = options.now ?? new Date();
-  const groupedRecords = records
-    .map(record => groupableRecord(record))
-    .filter((item): item is GroupedRecord => item !== undefined)
-    .filter(item => item.project === options.project)
-    .filter(item => options.topic === undefined || item.topic === options.topic)
-    .filter(item => options.kind === undefined || item.record.metadata.kind === options.kind)
-    .sort(compareGroupedRecords);
+  const groupedRecords = EffectArray.filter(
+    EffectArray.filter(
+      EffectArray.filter(
+        EffectArray.filter(
+          EffectArray.map(records, record => groupableRecord(record)),
+          (item): item is GroupedRecord => item !== undefined,
+        ),
+        item => item.project === options.project,
+      ),
+      item => options.topic === undefined || item.topic === options.topic,
+    ),
+    item => options.kind === undefined || item.record.metadata.kind === options.kind,
+  ).sort(compareGroupedRecords);
 
   const mergeReviewProposals = buildMergeReviewProposals(groupedRecords);
-  const mutableRecords = groupedRecords.filter(item => isPersonalMemoryUri(item.record.uri));
+  const mutableRecords = EffectArray.filter(
+    groupedRecords,
+    (item, __effectArrayIndex2) => __effectArrayIndex2 in groupedRecords && isPersonalMemoryUri(item.record.uri),
+  );
   const keepUpdates: KeepUpdateAction[] = [];
   const archives: ArchiveAction[] = [];
   const forgets: ForgetAction[] = [];
@@ -219,14 +231,15 @@ export function buildCompactPlan(records: readonly MemoryRecord[], options: Comp
   }
 
   const groups = new Map<string, GroupedRecord[]>();
-  for (const item of mutableRecords.filter(
+  for (const item of EffectArray.filter(
+    mutableRecords,
     candidate => !claimedMutationUris.has(candidate.record.uri) && !protectedReviewUris.has(candidate.record.uri),
   )) {
     groups.set(item.groupKey, [...(groups.get(item.groupKey) ?? []), item]);
   }
 
   for (const group of [...groups.values()].sort(compareGroupedRecordLists)) {
-    const recordsInGroup = group.map(item => item.record);
+    const recordsInGroup = EffectArray.map(group, item => item.record);
     const kind = recordsInGroup[0]?.metadata.kind;
     const topic = group[0]?.topic;
     const project = group[0]?.project;
@@ -243,18 +256,21 @@ export function buildCompactPlan(records: readonly MemoryRecord[], options: Comp
         continue;
       }
       const metadataReference = duplicateGroup[0];
-      if (!duplicateGroup.every(record => hasEquivalentMemoryMetadata(record, metadataReference))) {
+      if (!EffectArray.every(duplicateGroup, record => hasEquivalentMemoryMetadata(record, metadataReference))) {
         for (const record of duplicateGroup) {
           duplicateMetadataConflictUris.add(record.uri);
           addManualReview(
-            group.find(item => item.record.uri === record.uri)!,
+            EffectOption.getOrUndefined(EffectArray.findFirst(group, item => item.record.uri === record.uri))!,
             'same body has distinct metadata or provenance; no automatic retirement',
           );
         }
         continue;
       }
       const duplicateKeep = preferredKeepRecord(duplicateGroup, topic);
-      for (const duplicate of sortedNewestFirst(duplicateGroup).filter(record => record.uri !== duplicateKeep.uri)) {
+      for (const duplicate of EffectArray.filter(
+        sortedNewestFirst(duplicateGroup),
+        record => record.uri !== duplicateKeep.uri,
+      )) {
         duplicateRetiredUris.add(duplicate.uri);
         const sourceUris = sortedUniqueUris([duplicate.uri, duplicateKeep.uri]);
         forgets.push({
@@ -278,7 +294,8 @@ export function buildCompactPlan(records: readonly MemoryRecord[], options: Comp
       }
     }
 
-    const remainingRecords = recordsInGroup.filter(
+    const remainingRecords = EffectArray.filter(
+      recordsInGroup,
       record => !duplicateRetiredUris.has(record.uri) && !duplicateMetadataConflictUris.has(record.uri),
     );
     if (recordsInGroup.length > 1 && distinctBodyCount === 1) {
@@ -316,7 +333,7 @@ export function buildCompactPlan(records: readonly MemoryRecord[], options: Comp
         uri: keep.uri,
       });
       claimedMutationUris.add(keep.uri);
-      for (const record of sortedNewestFirst(remainingRecords).filter(item => item.uri !== keep.uri)) {
+      for (const record of EffectArray.filter(sortedNewestFirst(remainingRecords), item => item.uri !== keep.uri)) {
         archives.push({
           expectedContent: record.content,
           kind,
@@ -361,48 +378,55 @@ export function memoryContentWithHygieneSources(record: MemoryRecord, sourceUris
   return formatMemoryDocument(
     record.headerTitle,
     metadata,
-    [
-      body,
-      '',
-      MEMORY_HYGIENE_SOURCES_MARKER,
-      MEMORY_HYGIENE_SOURCES_HEADING,
-      '',
-      ...uniqueSourceUris.map(uri => `- ${uri}`),
-    ].join('\n'),
+    EffectArray.join(
+      [
+        body,
+        '',
+        MEMORY_HYGIENE_SOURCES_MARKER,
+        MEMORY_HYGIENE_SOURCES_HEADING,
+        '',
+        ...EffectArray.map(uniqueSourceUris, uri => `- ${uri}`),
+      ],
+      '\n',
+    ),
   );
 }
 
 export function formatCompactPlan(plan: CompactPlan, options: {readonly apply: boolean}): string {
-  const scope = [
-    `project ${plan.options.project}`,
-    plan.options.topic ? `topic ${plan.options.topic}` : undefined,
-    plan.options.kind ? `kind ${plan.options.kind}` : undefined,
-  ]
-    .filter((item): item is string => item !== undefined)
-    .join(', ');
+  const scope = EffectArray.join(
+    EffectArray.filter(
+      [
+        `project ${plan.options.project}`,
+        plan.options.topic ? `topic ${plan.options.topic}` : undefined,
+        plan.options.kind ? `kind ${plan.options.kind}` : undefined,
+      ],
+      (item): item is string => item !== undefined,
+    ),
+    ', ',
+  );
   const lines = [
     `${options.apply ? 'Applying' : 'Dry-run'} memory hygiene plan for ${scope}`,
     `Records scanned: ${plan.recordsScanned}`,
     '',
     formatPlanSection(
       'Keep/update',
-      plan.keepUpdates.map(action => formatPlanAction(action.uri, action.reason, action.sourceUris)),
+      EffectArray.map(plan.keepUpdates, action => formatPlanAction(action.uri, action.reason, action.sourceUris)),
     ),
     formatPlanSection(
       'Archive expired/stale active memories',
-      plan.archives.map(action => formatPlanAction(action.uri, action.reason, action.sourceUris)),
+      EffectArray.map(plan.archives, action => formatPlanAction(action.uri, action.reason, action.sourceUris)),
     ),
     formatPlanSection(
       'Forget exact duplicates',
-      plan.forgets.map(action => formatPlanAction(action.uri, action.reason, action.sourceUris)),
+      EffectArray.map(plan.forgets, action => formatPlanAction(action.uri, action.reason, action.sourceUris)),
     ),
     formatPlanSection(
       'Manual review',
-      plan.manualReview.map(item => `${item.uri} (${item.reason})`),
+      EffectArray.map(plan.manualReview, item => `${item.uri} (${item.reason})`),
     ),
     formatPlanSection(
       'Merge/review proposals',
-      plan.mergeReviewProposals.map(proposal =>
+      EffectArray.map(plan.mergeReviewProposals, proposal =>
         formatPlanAction(`${proposal.project}/${proposal.topic}`, proposal.reason, proposal.sourceUris),
       ),
     ),
@@ -410,7 +434,7 @@ export function formatCompactPlan(plan: CompactPlan, options: {readonly apply: b
   if (!options.apply) {
     lines.push('', 'No changes made. Re-run with --apply to execute this plan.');
   }
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }
 
 export function recallHygieneNudges(
@@ -421,7 +445,17 @@ export function recallHygieneNudges(
   const nudges: string[] = [];
   const returnedUriSet = new Set(activeUris);
   const returnedRecords =
-    options.records?.filter(record => returnedUriSet.has(record.uri)).map(record => groupableRecord(record)) ?? [];
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(options.records), records =>
+        EffectArray.map(
+          EffectArray.filter(
+            records,
+            (record, __effectArrayIndex) => __effectArrayIndex in records && returnedUriSet.has(record.uri),
+          ),
+          record => groupableRecord(record),
+        ),
+      ),
+    ) ?? [];
   const groups = new Map<string, GroupedRecord[]>();
   for (const item of returnedRecords) {
     if (!item) {
@@ -454,7 +488,9 @@ export function recallHygieneNudges(
     }
     projectCounts.set(parsed.project, (projectCounts.get(parsed.project) ?? 0) + 1);
   }
-  for (const [project, count] of [...projectCounts.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [project, count] of [...projectCounts.entries()].sort(([left], [right]) =>
+    Effect.pipe(left, EffectString.localeCompare(right)),
+  )) {
     if (count < 10) {
       continue;
     }
@@ -476,7 +512,7 @@ export function referencedUrisFromRecords(records: readonly MemoryRecord[], reca
   const result: string[] = [];
   for (const record of records) {
     for (const uri of record.metadata.references ?? []) {
-      if (seen.has(uri) || recallOutput.includes(uri)) {
+      if (seen.has(uri) || Effect.pipe(recallOutput, EffectString.includes(uri))) {
         continue;
       }
       seen.add(uri);
@@ -496,8 +532,11 @@ export function existingReferencedUris(
   candidates: readonly string[],
   records: readonly MemoryRecord[],
 ): readonly string[] {
-  const existing = new Set(records.map(record => record.uri));
-  return candidates.filter(uri => existing.has(uri));
+  const existing = new Set(EffectArray.map(records, record => record.uri));
+  return EffectArray.filter(
+    candidates,
+    (uri, __effectArrayIndex) => __effectArrayIndex in candidates && existing.has(uri),
+  );
 }
 
 /** Renders bounded one-way reference pointers without inlining another memory. */
@@ -508,18 +547,18 @@ export function formatReferencedContextPointers(uris: readonly string[], maxUris
   const capped = uris.slice(0, maxUris);
   const lines = [
     'Referenced read-only context (one-way pointers from surfaced memories):',
-    ...capped.map(uri => `- ${uri}`),
+    ...EffectArray.map(capped, uri => `- ${uri}`),
   ];
   if (uris.length > capped.length) {
     const omitted = uris.length - capped.length;
     lines.push(`- … ${omitted} more referenced ${omitted === 1 ? 'memory' : 'memories'} omitted`);
   }
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }
 
 export function activePersonalMemoryUrisFromText(text: string, user: string): readonly string[] {
   const userSegment = uriSegment(user);
-  const matches = text.matchAll(/(?:threadnote|viking):\/\/[^\s)]+/g);
+  const matches = Effect.pipe(text, EffectString.matchAll(/(?:threadnote|viking):\/\/[^\s)]+/g));
   const uris: string[] = [];
   for (const match of matches) {
     const uri = match[0] ? trimTrailingCharacters(match[0], '.,;:') : undefined;
@@ -536,22 +575,58 @@ export function parsePersonalMemoryUri(uri: string, user: string): ParsedMemoryU
   const canonicalUri = canonicalResourceInput(uri);
   if (!canonicalUri) return undefined;
   const prefix = `threadnote://user/${uriSegment(user)}/memories/`;
-  if (!canonicalUri.startsWith(prefix) || isSharedMemoryUri(canonicalUri)) {
+  if (!Effect.pipe(canonicalUri, EffectString.startsWith(prefix)) || isSharedMemoryUri(canonicalUri)) {
     return undefined;
   }
-  const rest = canonicalUri.slice(prefix.length);
-  const parts = rest.split('/').filter(Boolean);
+  const rest = Effect.pipe(canonicalUri, EffectString.slice(prefix.length));
+  const parts = EffectArray.filter(Effect.pipe(rest, EffectString.split('/')), Boolean);
   if (parts.length < 4) {
     return undefined;
   }
-  if (parts[0] === 'handoffs' && parts[1] === 'active' && parts[2] && parts[3]?.endsWith('.md')) {
-    return {kind: 'handoff', project: parts[2], status: 'active', topic: parts[3].replace(/\.md$/, '')};
+  if (
+    parts[0] === 'handoffs' &&
+    parts[1] === 'active' &&
+    parts[2] &&
+    Effect.pipe(parts[3], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    )
+  ) {
+    return {
+      kind: 'handoff',
+      project: parts[2],
+      status: 'active',
+      topic: Effect.pipe(parts[3], EffectString.replace(/\.md$/, '')),
+    };
   }
-  if (parts[0] === 'durable' && parts[1] === 'projects' && parts[2] && parts[3]?.endsWith('.md')) {
-    return {kind: 'durable', project: parts[2], status: 'active', topic: parts[3].replace(/\.md$/, '')};
+  if (
+    parts[0] === 'durable' &&
+    parts[1] === 'projects' &&
+    parts[2] &&
+    Effect.pipe(parts[3], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    )
+  ) {
+    return {
+      kind: 'durable',
+      project: parts[2],
+      status: 'active',
+      topic: Effect.pipe(parts[3], EffectString.replace(/\.md$/, '')),
+    };
   }
-  if (parts[0] === 'incidents' && parts[1] === 'active' && parts[2] && parts[3]?.endsWith('.md')) {
-    return {kind: 'incident', project: parts[2], status: 'active', topic: parts[3].replace(/\.md$/, '')};
+  if (
+    parts[0] === 'incidents' &&
+    parts[1] === 'active' &&
+    parts[2] &&
+    Effect.pipe(parts[3], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    )
+  ) {
+    return {
+      kind: 'incident',
+      project: parts[2],
+      status: 'active',
+      topic: Effect.pipe(parts[3], EffectString.replace(/\.md$/, '')),
+    };
   }
   return undefined;
 }
@@ -589,7 +664,8 @@ function groupableRecord(record: MemoryRecord): GroupedRecord | undefined {
   const topic = topicForRecord(record);
   const memoryScope = memoryScopeForUri(record.uri);
   const workspaceScope = normalizeOptionalMetadata(record.metadata.workspaceScope);
-  const groupKey = [memoryScope, record.metadata.kind, project, workspaceScope ?? '<repo>', topic ?? record.uri].join(
+  const groupKey = EffectArray.join(
+    [memoryScope, record.metadata.kind, project, workspaceScope ?? '<repo>', topic ?? record.uri],
     '\0',
   );
   return {groupKey, memoryScope, project, record, topic, workspaceScope};
@@ -604,19 +680,33 @@ export function topicForRecord(record: MemoryRecord): string | undefined {
 }
 
 function branchFromBody(body: string): string | undefined {
-  const branchLine = body.split(/\r?\n/u).find(line => line.startsWith('branch:'));
+  const branchLine = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      Effect.pipe(body, EffectString.split(/\r?\n/u)),
+      __effectArrayValue => !!(line => Effect.pipe(line, EffectString.startsWith('branch:')))(__effectArrayValue),
+    ),
+  );
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional chaining through branch parsing.
   const branch = branchLine?.slice('branch:'.length).trim();
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional chaining for the optional branch value.
   const firstToken = branch?.split(/\s+/)[0];
   return firstToken ? trimTrailingCharacters(firstToken, '.,;:') : undefined;
 }
 
 function topicFromUri(uri: string): string | undefined {
-  const name = uriBasename(uri).replace(/\.md$/, '');
-  return name.startsWith('threadnote-') ? undefined : name;
+  const name = Effect.pipe(uriBasename(uri), EffectString.replace(/\.md$/, ''));
+  return Effect.pipe(name, EffectString.startsWith('threadnote-')) ? undefined : name;
 }
 
 function parseProjectFromUri(uri: string): string | undefined {
-  const parts = uri.split('/memories/')[1]?.split('/').filter(Boolean) ?? [];
+  const parts =
+    EffectOption.getOrUndefined(
+      EffectOption.map(
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve the optional URI split and its fallback.
+        EffectOption.fromNullishOr(uri.split('/memories/')[1]?.split('/')),
+        __effectOptionalArrayReceiver => EffectArray.filter(__effectOptionalArrayReceiver, Boolean),
+      ),
+    ) ?? [];
   if ((parts[0] === 'handoffs' || parts[0] === 'incidents') && parts[1] === 'active') {
     return parts[2];
   }
@@ -627,7 +717,7 @@ function parseProjectFromUri(uri: string): string | undefined {
 }
 
 function comparableMemoryBody(body: string): string {
-  return stripHygieneSources(body).replace(/\r\n?/g, '\n');
+  return Effect.pipe(stripHygieneSources(body), EffectString.replace(/\r\n?/g, '\n'));
 }
 
 function hasEquivalentMemoryMetadata(left: MemoryRecord, right: MemoryRecord): boolean {
@@ -643,7 +733,7 @@ function hygieneSourceUris(body: string): readonly string[] {
 }
 
 function memoryProvenanceUris(records: readonly MemoryRecord[]): readonly string[] {
-  return sortedUniqueUris(records.flatMap(record => [record.uri, ...hygieneSourceUris(record.body)]));
+  return sortedUniqueUris(EffectArray.flatMap(records, record => [record.uri, ...hygieneSourceUris(record.body)]));
 }
 
 function stripHygieneSources(body: string): string {
@@ -654,8 +744,17 @@ function stripHygieneSources(body: string): string {
 function preferredKeepRecord(records: readonly MemoryRecord[], topic?: string): MemoryRecord {
   const newestFirst = sortedNewestFirst(records);
   const newestTimestamp = timestampMs(newestFirst[0] ?? records[0]);
-  const equallyNew = newestFirst.filter(record => timestampMs(record) === newestTimestamp);
-  return equallyNew.find(record => isStableRecord(record, topic)) ?? equallyNew[0] ?? records[0];
+  const equallyNew = EffectArray.filter(newestFirst, record => timestampMs(record) === newestTimestamp);
+  return (
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        equallyNew,
+        __effectArrayValue => !!(record => isStableRecord(record, topic))(__effectArrayValue),
+      ),
+    ) ??
+    equallyNew[0] ??
+    records[0]
+  );
 }
 
 function isStableRecord(record: MemoryRecord, topic?: string): boolean {
@@ -664,13 +763,13 @@ function isStableRecord(record: MemoryRecord, topic?: string): boolean {
 }
 
 function uriBasename(uri: string): string {
-  return uri.replaceAll('\\', '/').split('/').at(-1) ?? uri;
+  return Effect.pipe(uri, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1) ?? uri;
 }
 
 function sortedNewestFirst<T extends MemoryRecord>(records: readonly T[]): readonly T[] {
   return [...records].sort((left, right) => {
     const timestampDiff = timestampMs(right) - timestampMs(left);
-    return timestampDiff === 0 ? left.uri.localeCompare(right.uri) : timestampDiff;
+    return timestampDiff === 0 ? Effect.pipe(left.uri, EffectString.localeCompare(right.uri)) : timestampDiff;
   });
 }
 
@@ -689,11 +788,14 @@ function memoryAgeMilliseconds(record: MemoryRecord, now: Date): number | undefi
 }
 
 function memoryObservedAt(record: MemoryRecord): number | undefined {
-  const observations = [
-    parseTimestamp(record.metadata.timestamp),
-    parseTimestamp(record.metadata.updatedAt),
-    parseTimestamp(record.metadata.lastReviewed),
-  ].filter((value): value is number => value !== undefined);
+  const observations = EffectArray.filter(
+    [
+      parseTimestamp(record.metadata.timestamp),
+      parseTimestamp(record.metadata.updatedAt),
+      parseTimestamp(record.metadata.lastReviewed),
+    ],
+    (value): value is number => value !== undefined,
+  );
   return observations.length > 0 ? Math.max(...observations) : undefined;
 }
 
@@ -717,7 +819,7 @@ function hasExplicitTerminalHandoffState(body: string): boolean {
   const fields = handoffBodyFields(body);
   const statuses = normalizedFieldValues(fields.get('status'));
   const nextSteps = normalizedFieldValues(fields.get('next_step'));
-  return statuses.some(status => TERMINAL_HANDOFF_STATUSES.has(status)) || nextSteps.includes('none');
+  return EffectArray.some(statuses, status => TERMINAL_HANDOFF_STATUSES.has(status)) || nextSteps.includes('none');
 }
 
 function hasExplicitPendingHandoffState(body: string): boolean {
@@ -726,17 +828,20 @@ function hasExplicitPendingHandoffState(body: string): boolean {
   const nextSteps = normalizedFieldValues(fields.get('next_step'));
   const blockers = normalizedFieldValues([...(fields.get('blockers') ?? []), ...(fields.get('blocker') ?? [])]);
   if (
-    statuses.some(status =>
+    EffectArray.some(statuses, status =>
       /^(?:active|awaiting(?: .+)?|blocked|in[ _-]?progress|open|pending|waiting(?: .+)?)$/.test(status),
     )
   ) {
     return true;
   }
-  if (nextSteps.some(nextStep => nextStep !== 'none' && nextStep !== DEFAULT_HANDOFF_NEXT_STEP)) {
+  if (EffectArray.some(nextSteps, nextStep => nextStep !== 'none' && nextStep !== DEFAULT_HANDOFF_NEXT_STEP)) {
     return true;
   }
   if (
-    blockers.some(blocker => !/^(?:n\/?a|no(?:\s+blockers?)?|none(?:\s+recorded)?|not\s+applicable)$/.test(blocker))
+    EffectArray.some(
+      blockers,
+      blocker => !/^(?:n\/?a|no(?:\s+blockers?)?|none(?:\s+recorded)?|not\s+applicable)$/.test(blocker),
+    )
   ) {
     return true;
   }
@@ -749,27 +854,31 @@ function hasExplicitPendingHandoffState(body: string): boolean {
 }
 
 function handoffBodyFields(body: string): Map<string, string[]> {
-  const lines = body.split(/\r?\n/);
+  const lines = Effect.pipe(body, EffectString.split(/\r?\n/));
   const fields = new Map<string, string[]>();
   for (let index = 0; index < lines.length; index += 1) {
-    const line = stripHandoffBullet((lines[index] ?? '').trim());
-    const colon = line.indexOf(':');
+    const line = stripHandoffBullet(Effect.pipe(lines[index] ?? '', EffectString.trim));
+    const colon = Effect.pipe(
+      line,
+      EffectString.indexOf(':'),
+      Effect.Option.getOrElse(() => -1),
+    );
     if (colon < 0) {
       continue;
     }
-    const name = line.slice(0, colon);
+    const name = Effect.pipe(line, EffectString.slice(0, colon));
     if (!/^(?:status|next_step|blockers?)$/i.test(name)) {
       continue;
     }
-    const key = name.toLowerCase();
-    let value = line.slice(colon + 1).trim();
+    const key = Effect.pipe(name, EffectString.toLowerCase);
+    let value = Effect.pipe(line, EffectString.slice(colon + 1), EffectString.trim);
     if (/[\r\u2028\u2029]/.test(value)) {
       continue;
     }
     if (!value) {
       let followingLine = '';
       for (let followingIndex = index + 1; followingIndex < lines.length; followingIndex += 1) {
-        followingLine = lines[followingIndex].trim();
+        followingLine = Effect.pipe(lines[followingIndex], EffectString.trim);
         if (followingLine) break;
       }
       if (followingLine && !isHandoffHeader(followingLine)) {
@@ -784,28 +893,42 @@ function handoffBodyFields(body: string): Map<string, string[]> {
 }
 
 function stripHandoffBullet(line: string): string {
-  return (line[0] === '-' || line[0] === '*') && line.length > 1 && line[1].trim().length === 0
-    ? line.slice(1).trimStart()
+  return (line[0] === '-' || line[0] === '*') && line.length > 1 && Effect.pipe(line[1], EffectString.trim).length === 0
+    ? Effect.pipe(line, EffectString.slice(1), EffectString.trimStart)
     : line;
 }
 
 function isHandoffHeader(line: string): boolean {
-  const colon = line.indexOf(':');
+  const colon = Effect.pipe(
+    line,
+    EffectString.indexOf(':'),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (colon < 0) return false;
-  const prefix = line.slice(0, colon);
-  if (/^[\w -]+$/.test(prefix.trimEnd())) return true;
-  if ((prefix[0] !== '-' && prefix[0] !== '*') || prefix.length < 2 || prefix[1].trim().length !== 0) {
+  const prefix = Effect.pipe(line, EffectString.slice(0, colon));
+  if (/^[\w -]+$/.test(Effect.pipe(prefix, EffectString.trimEnd))) return true;
+  if (
+    (prefix[0] !== '-' && prefix[0] !== '*') ||
+    prefix.length < 2 ||
+    Effect.pipe(prefix[1], EffectString.trim).length !== 0
+  ) {
     return false;
   }
-  const remainder = prefix.slice(2);
-  const label = remainder.trim();
-  return label ? /^[\w -]+$/.test(label) : remainder.includes(' ');
+  const remainder = Effect.pipe(prefix, EffectString.slice(2));
+  const label = Effect.pipe(remainder, EffectString.trim);
+  return label ? /^[\w -]+$/.test(label) : Effect.pipe(remainder, EffectString.includes(' '));
 }
 
 function normalizedFieldValues(values: readonly string[] | undefined): readonly string[] {
-  return (values ?? [])
-    .map(value => trimTrailingCharacters(value.trim().toLowerCase(), '.!;:').replace(/\s+/g, ' '))
-    .filter(value => value.length > 0);
+  return EffectArray.filter(
+    EffectArray.map(values ?? [], value =>
+      Effect.pipe(
+        trimTrailingCharacters(Effect.pipe(value, EffectString.trim, EffectString.toLowerCase), '.!;:'),
+        EffectString.replace(/\s+/g, ' '),
+      ),
+    ),
+    value => value.length > 0,
+  );
 }
 
 function buildMergeReviewProposals(records: readonly GroupedRecord[]): readonly MergeReviewProposal[] {
@@ -814,7 +937,7 @@ function buildMergeReviewProposals(records: readonly GroupedRecord[]): readonly 
     if (!item.topic) {
       continue;
     }
-    const key = [item.project, item.topic].join('\0');
+    const key = EffectArray.join([item.project, item.topic], '\0');
     groups.set(key, [...(groups.get(key) ?? []), item]);
   }
 
@@ -825,9 +948,9 @@ function buildMergeReviewProposals(records: readonly GroupedRecord[]): readonly 
       continue;
     }
     const reasons: string[] = [];
-    const kinds = new Set(group.map(item => item.record.metadata.kind));
-    const memoryScopes = new Set(group.map(item => item.memoryScope));
-    const workspaceScopes = new Set(group.map(item => item.workspaceScope ?? '<repo>'));
+    const kinds = new Set(EffectArray.map(group, item => item.record.metadata.kind));
+    const memoryScopes = new Set(EffectArray.map(group, item => item.memoryScope));
+    const workspaceScopes = new Set(EffectArray.map(group, item => item.workspaceScope ?? '<repo>'));
     if (kinds.size > 1) {
       reasons.push('same project/topic spans multiple memory kinds');
     }
@@ -838,8 +961,11 @@ function buildMergeReviewProposals(records: readonly GroupedRecord[]): readonly 
       reasons.push('same project/topic spans multiple workspace scopes');
     }
     for (const kind of ['durable', 'incident'] as const) {
-      const sameKind = group.filter(item => item.record.metadata.kind === kind);
-      if (sameKind.length > 1 && new Set(sameKind.map(item => comparableMemoryBody(item.record.body))).size > 1) {
+      const sameKind = EffectArray.filter(group, item => item.record.metadata.kind === kind);
+      if (
+        sameKind.length > 1 &&
+        new Set(EffectArray.map(sameKind, item => comparableMemoryBody(item.record.body))).size > 1
+      ) {
         reasons.push(`divergent active ${kind} memories`);
       }
     }
@@ -848,8 +974,8 @@ function buildMergeReviewProposals(records: readonly GroupedRecord[]): readonly 
     }
     proposals.push({
       project: first.project,
-      reason: reasons.sort().join('; '),
-      sourceUris: sortedUniqueUris(group.map(item => item.record.uri)),
+      reason: EffectArray.join(reasons.sort(), '; '),
+      sourceUris: sortedUniqueUris(EffectArray.map(group, item => item.record.uri)),
       topic: first.topic,
     });
   }
@@ -886,19 +1012,25 @@ function groupBy<T>(values: readonly T[], keyForValue: (value: T) => string): Ma
 }
 
 function compareGroupedRecordLists(left: readonly GroupedRecord[], right: readonly GroupedRecord[]): number {
-  return (left[0]?.groupKey ?? '').localeCompare(right[0]?.groupKey ?? '');
+  return Effect.pipe(left[0]?.groupKey ?? '', EffectString.localeCompare(right[0]?.groupKey ?? ''));
 }
 
 function compareGroupedRecords(left: GroupedRecord, right: GroupedRecord): number {
-  return left.groupKey.localeCompare(right.groupKey) || left.record.uri.localeCompare(right.record.uri);
+  return (
+    Effect.pipe(left.groupKey, EffectString.localeCompare(right.groupKey)) ||
+    Effect.pipe(left.record.uri, EffectString.localeCompare(right.record.uri))
+  );
 }
 
 function compareMergeReviewProposals(left: MergeReviewProposal, right: MergeReviewProposal): number {
   return (
-    left.project.localeCompare(right.project) ||
-    left.topic.localeCompare(right.topic) ||
-    left.sourceUris.join('\0').localeCompare(right.sourceUris.join('\0')) ||
-    left.reason.localeCompare(right.reason)
+    Effect.pipe(left.project, EffectString.localeCompare(right.project)) ||
+    Effect.pipe(left.topic, EffectString.localeCompare(right.topic)) ||
+    Effect.pipe(
+      EffectArray.join(left.sourceUris, '\0'),
+      EffectString.localeCompare(EffectArray.join(right.sourceUris, '\0')),
+    ) ||
+    Effect.pipe(left.reason, EffectString.localeCompare(right.reason))
   );
 }
 
@@ -916,15 +1048,17 @@ function dedupeByUri<T extends {readonly uri: string}>(items: readonly T[]): rea
 }
 
 function sortByUri<T extends {readonly uri: string}>(items: readonly T[]): readonly T[] {
-  return [...items].sort((left, right) => left.uri.localeCompare(right.uri));
+  return [...items].sort((left, right) => Effect.pipe(left.uri, EffectString.localeCompare(right.uri)));
 }
 
 function sortedUniqueUris(uris: readonly string[]): readonly string[] {
-  return [...new Set(uris)].sort((left, right) => left.localeCompare(right));
+  return [...new Set(uris)].sort((left, right) => Effect.pipe(left, EffectString.localeCompare(right)));
 }
 
 function normalizeOptionalMetadata(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
+  const trimmed = Effect.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   return trimmed ? trimmed : undefined;
 }
 
@@ -953,13 +1087,16 @@ function formatPlanSection(title: string, lines: readonly string[]): string {
   }
   const preview = lines.slice(0, COMPACT_PLAN_SECTION_PREVIEW_LIMIT);
   const omitted = lines.length - preview.length;
-  return [
-    `${title} (${lines.length}):`,
-    ...preview.map(line => `- ${line}`),
-    ...(omitted > 0 ? [`- … ${omitted} more omitted; narrow the plan with kind or topic`] : []),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `${title} (${lines.length}):`,
+      ...EffectArray.map(preview, line => `- ${line}`),
+      ...(omitted > 0 ? [`- … ${omitted} more omitted; narrow the plan with kind or topic`] : []),
+    ],
+    '\n',
+  );
 }
 
 function formatPlanAction(uri: string, reason: string, sourceUris: readonly string[]): string {
-  return `${uri} (${reason}; sources: ${sourceUris.join(', ')})`;
+  return `${uri} (${reason}; sources: ${EffectArray.join(sourceUris, ', ')})`;
 }

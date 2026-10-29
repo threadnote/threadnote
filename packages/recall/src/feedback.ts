@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Predicate} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {RECALL_RANKER_VERSION} from './rank.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const RECALL_FEEDBACK_ACTIONS = ['useful', 'wrong', 'pin', 'dismiss', 'applied'] as const;
 
@@ -76,7 +79,8 @@ export const recordRecallFeedback = Effect.fn('recall.recordFeedback')(function*
     Effect.gen(function* () {
       const existing = yield* readFeedbackEvents(fs, path);
       const eventTime = Date.parse(event.timestamp);
-      const duplicate = existing.some(
+      const duplicate = EffectArray.some(
+        existing,
         previous =>
           previous.action === event.action &&
           previous.project === event.project &&
@@ -88,9 +92,10 @@ export const recordRecallFeedback = Effect.fn('recall.recordFeedback')(function*
         yield* writeFeedbackEvents(fs, path, existing);
         return {event, recorded: false};
       }
-      const retained = [...existing, event]
-        .filter(item => eventTime - Date.parse(item.timestamp) <= FEEDBACK_RETENTION_MILLISECONDS)
-        .slice(-MAX_FEEDBACK_EVENTS);
+      const retained = EffectArray.filter(
+        [...existing, event],
+        item => eventTime - Date.parse(item.timestamp) <= FEEDBACK_RETENTION_MILLISECONDS,
+      ).slice(-MAX_FEEDBACK_EVENTS);
       yield* writeFeedbackEvents(fs, path, retained);
       return {event, recorded: true};
     }),
@@ -130,7 +135,7 @@ export const pruneRecallFeedbackEvents = Effect.fn('recall.pruneFeedbackEvents')
   }
   const cutoff = input.now.getTime() - input.retentionDays * MILLISECONDS_PER_DAY;
   return yield* mutateFeedbackEvents(agentContextHome, input.apply, events =>
-    events.filter(event => Date.parse(event.timestamp) >= cutoff),
+    EffectArray.filter(events, event => Date.parse(event.timestamp) >= cutoff),
   );
 });
 
@@ -194,7 +199,7 @@ function feedbackProjectMatches(event: RecallFeedbackEvent, project: string): bo
 }
 
 export const recallQueryFingerprint = Effect.fn('recall.queryFingerprint')((query: string) =>
-  sha256Hex(query.replace(/\s+/g, ' ').trim().toLowerCase()),
+  sha256Hex(Effect2.pipe(query, EffectString.replace(/\s+/g, ' '), EffectString.trim, EffectString.toLowerCase)),
 );
 
 function feedbackPath(pathService: Path.Path, agentContextHome: string): string {
@@ -210,11 +215,10 @@ function readFeedbackEvents(
       return [];
     }
     const raw = yield* fs.readFileString(path);
-    return raw
-      .split('\n')
-      .map(line => parseFeedbackEvent(line))
-      .filter((event): event is RecallFeedbackEvent => event !== undefined)
-      .slice(-MAX_FEEDBACK_EVENTS);
+    return EffectArray.filter(
+      EffectArray.map(Effect2.pipe(raw, EffectString.split('\n')), line => parseFeedbackEvent(line)),
+      (event): event is RecallFeedbackEvent => event !== undefined,
+    ).slice(-MAX_FEEDBACK_EVENTS);
   });
 }
 
@@ -228,7 +232,13 @@ function writeFeedbackEvents(
     yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
     const crypto = yield* Crypto.Crypto;
     const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
-    const content = events.length === 0 ? '' : `${events.map(event => JSON.stringify(event)).join('\n')}\n`;
+    const content =
+      events.length === 0
+        ? ''
+        : `${EffectArray.join(
+            EffectArray.map(events, event => JSON.stringify(event)),
+            '\n',
+          )}\n`;
     yield* fs.writeFileString(temporaryPath, content, {mode: 0o600});
     yield* fs
       .rename(temporaryPath, path)
@@ -254,7 +264,7 @@ const mutateFeedbackEvents = Effect.fn('recall.mutateFeedbackEvents')(function* 
 });
 
 function parseFeedbackEvent(line: string): RecallFeedbackEvent | undefined {
-  if (!line.trim()) {
+  if (!Effect2.pipe(line, EffectString.trim)) {
     return undefined;
   }
   const value = Option.getOrUndefined(Option.liftThrowable((content: string): unknown => JSON.parse(content))(line));
@@ -287,5 +297,5 @@ function parseFeedbackEvent(line: string): RecallFeedbackEvent | undefined {
 }
 
 function isFeedbackAction(value: unknown): value is RecallFeedbackAction {
-  return RECALL_FEEDBACK_ACTIONS.some(action => action === value);
+  return EffectArray.some(RECALL_FEEDBACK_ACTIONS, action => action === value);
 }

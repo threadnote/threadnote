@@ -1,11 +1,15 @@
 import {it as effectIt} from '@effect/vitest';
-import * as BunPath from '@effect/platform-bun/BunPath';
-import {Effect, Path} from 'effect';
+import {TestError} from '@threadnote/testing/test-error';
+import {Effect, Schema} from 'effect';
 import {beforeEach, describe, expect, vi} from 'vitest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import type {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
+import {EffectMcpServerRegistry, type McpToolCallContext} from '@threadnote/threadnote/effect/ai/mcp';
+import {ApplicationLayer, type ApplicationServices} from '../../src/effect/runtime.js';
+import type {ContextMaintenanceToolRegistrar} from '../../src/mcp/server/context/maintenance.js';
 import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mocks = vi.hoisted(() => ({
   inspect: vi.fn(),
@@ -50,27 +54,64 @@ const config = {
   manifestPath: '/manifest',
   user: 'tester',
 } as RuntimeConfig;
-const reviewId = `review-${'a'.repeat(24)}`;
-const caseId = `health-case-${'b'.repeat(40)}`;
-const hash = 'c'.repeat(64);
+const reviewId = `review-${Effect2.pipe('a', EffectString.repeat(24))}`;
+const caseId = `health-case-${Effect2.pipe('b', EffectString.repeat(40))}`;
+const hash = Effect2.pipe('c', EffectString.repeat(64));
 const uri = 'threadnote://user/tester/memories/durable/topic.md';
 const review = {reviewId, revision: 4, project: 'alpha', maintenance: {version: 1, basis: {targetUri: uri}}};
 type ToolResult = {
+  readonly content: readonly unknown[];
   readonly isError?: boolean;
-  readonly structuredContent?: Record<string, unknown>;
-  readonly content?: readonly {readonly type: string; readonly text?: string}[];
+  readonly structuredContent?: unknown;
+};
+type ToolFields = {readonly [key: PropertyKey]: Schema.ConstraintCodec<unknown, unknown, never, never>};
+type ToolHandlerResult = ToolResult | Effect.Effect<ToolResult, unknown, ApplicationServices> | PromiseLike<ToolResult>;
+type ToolDefinition<Fields extends ToolFields> = {
+  readonly annotations?: {
+    readonly destructiveHint?: boolean;
+    readonly idempotentHint?: boolean;
+    readonly openWorldHint?: boolean;
+    readonly readOnlyHint?: boolean;
+    readonly title?: string;
+  };
+  readonly description?: string;
+  readonly inputSchema: Fields;
 };
 
 function registeredTools() {
-  const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult, unknown, Path.Path>>();
-  const server = {
-    registerTool: (name: string, _definition: unknown, handler: unknown) => {
-      handlers.set(name, handler as (input: Record<string, unknown>) => Effect.Effect<ToolResult, unknown, Path.Path>);
+  const registry = new EffectMcpServerRegistry();
+  const handlers = new Map<string, (input: unknown) => ToolHandlerResult>();
+  const context: McpToolCallContext = {
+    progress: {enabled: false, report: () => Effect.void},
+    requestContext: {transport: 'stdio'},
+  };
+  const server: ContextMaintenanceToolRegistrar = {
+    registerTool<const Fields extends ToolFields>(
+      name: string,
+      definition: ToolDefinition<Fields>,
+      handler: (args: Schema.Struct.Type<Fields>, context: McpToolCallContext) => ToolHandlerResult,
+    ): void {
+      registry.registerTool(name, definition, handler);
+      handlers.set(name, input =>
+        // @ts-expect-error This direct call deliberately bypasses MCP schema decoding for the malformed-action regression.
+        handler(input, context),
+      );
     },
-  } as unknown as EffectMcpServerAdapter;
+  };
   registerContextMaintenanceTools(server, config);
-  return (name: string, input: Record<string, unknown>) =>
-    handlers.get(name)!(input).pipe(provideTestLayer(BunPath.layer));
+  return {
+    call: (name: string, input: Record<string, unknown>) =>
+      registry.invokeTool(name, input).pipe(provideTestLayer(ApplicationLayer)),
+    rawCall: (name: string, input: Record<string, unknown>) =>
+      Effect.suspend(() => {
+        const handler = handlers.get(name);
+        if (!handler) return Effect.fail(TestError.make({message: `Missing test handler: ${name}`}));
+        const result = handler(input);
+        return Effect.isEffect(result)
+          ? result
+          : Effect.fail(TestError.make({message: `Expected an Effect handler for malformed input: ${name}`}));
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  };
 }
 
 beforeEach(() => {
@@ -97,9 +138,9 @@ beforeEach(() => {
 describe('registered topic MCP adapters', () => {
   effectIt.effect('rejects missing or invalid actions before any enrollment or review service call', () =>
     Effect.gen(function* () {
-      const call = registeredTools();
+      const {rawCall} = registeredTools();
       for (const action of [undefined, 'invalid']) {
-        const enrollment = yield* call('context_topic_enrollment', {
+        const enrollment = yield* rawCall('context_topic_enrollment', {
           uri,
           action,
           callerCwd: '/selected',
@@ -108,7 +149,7 @@ describe('registered topic MCP adapters', () => {
           expectedContentHash: hash,
           revision: hash,
         });
-        const topicReview = yield* call('context_maintenance_review', {reviewId, action, revision: 4, caseId});
+        const topicReview = yield* rawCall('context_maintenance_review', {reviewId, action, revision: 4, caseId});
         expect(enrollment.isError).toBe(true);
         expect(topicReview.isError).toBe(true);
       }
@@ -125,16 +166,16 @@ describe('registered topic MCP adapters', () => {
 
   effectIt.effect('rejects malformed draft and approval inputs before service calls', () =>
     Effect.gen(function* () {
-      const call = registeredTools();
+      const {rawCall} = registeredTools();
       for (const input of [
         {caseId, modelId: 'gemma'},
         {caseId, backend: 'codex', modelId: 'gemma'},
         {caseId: 'bad', backend: 'local-ai', modelId: 'gemma'},
       ]) {
-        expect((yield* call('context_maintenance_draft', input)).isError).toBe(true);
+        expect((yield* rawCall('context_maintenance_draft', input)).isError).toBe(true);
       }
       expect(
-        (yield* call('context_maintenance_review', {
+        (yield* rawCall('context_maintenance_review', {
           action: 'apply',
           reviewId,
           revision: 4,
@@ -144,7 +185,7 @@ describe('registered topic MCP adapters', () => {
         })).isError,
       ).toBe(true);
       expect(
-        (yield* call('context_topic_enrollment', {
+        (yield* rawCall('context_topic_enrollment', {
           action: 'enroll',
           uri,
           callerCwd: '/selected',
@@ -163,7 +204,7 @@ describe('registered topic MCP adapters', () => {
 
   effectIt.effect('passes exact view, preview, apply and decision inputs to the shared review services', () =>
     Effect.gen(function* () {
-      const call = registeredTools();
+      const {call} = registeredTools();
       const view = yield* call('context_maintenance_review', {action: 'view', reviewId});
       expect(view.structuredContent).toMatchObject({kind: 'topic-maintenance', reviewId});
       yield* call('context_maintenance_review', {
@@ -206,7 +247,7 @@ describe('registered topic MCP adapters', () => {
 
   effectIt.effect('routes explicit enrollment and generation without touching accepted content here', () =>
     Effect.gen(function* () {
-      const call = registeredTools();
+      const {call} = registeredTools();
       yield* call('context_topic_enrollment', {action: 'inspect', uri});
       yield* call('context_topic_enrollment', {
         action: 'preview',
@@ -252,7 +293,7 @@ describe('registered topic MCP adapters', () => {
   effectIt.effect('passes stale case identity without treating its presence as current observation', () =>
     Effect.gen(function* () {
       mocks.caseIdentity.mockReturnValue(Effect.succeed({caseId, observationMatches: false}));
-      const call = registeredTools();
+      const {call} = registeredTools();
       yield* call('context_maintenance_review', {action: 'view', reviewId});
       yield* call('context_maintenance_draft', {caseId, backend: 'local-ai', modelId: 'gemma'});
       expect(mocks.project).toHaveBeenNthCalledWith(1, review, {caseId, observationMatches: false});

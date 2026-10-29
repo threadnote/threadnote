@@ -1,4 +1,4 @@
-import {Array as EffectArray, String as EffectString, Effect, Schema} from 'effect';
+import {Array as EffectArray, String as EffectString, Effect, Predicate, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -24,6 +24,8 @@ import {
 import {loadNativeCloseoutInputs} from '../../src/workflow_automation/closeout_inputs.js';
 import {nativeFixture} from './native-automation-fixture.js';
 import {observeCloseoutGraph, observeCloseoutStage} from './native-closeout-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as Effect2 from 'effect';
 
 export type CloseoutProfile = 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal';
 const generation = 'skill-generation-v1';
@@ -101,7 +103,10 @@ const planDocument = () =>
         selection: 'retain',
         selected: 'Keep the existing store.',
         alternatives: [{id: 'replace-store', design: 'Replace the store.', tradeoffs: 'Adds migration risk.'}],
-        rationale: 'The existing store already preserves the required identity and data. '.repeat(24),
+        rationale: Effect2.pipe(
+          'The existing store already preserves the required identity and data. ',
+          EffectString.repeat(24),
+        ),
         affectedPhases: ['one'],
         authority: 'orchestrator',
       },
@@ -111,7 +116,10 @@ const planDocument = () =>
         selection: 'adapt',
         selected: 'Return complete results in one verified read.',
         alternatives: [{id: 'partial-read', design: 'Return partial data.', tradeoffs: 'Needs continuation.'}],
-        rationale: 'A complete read matches the approved behavior and avoids hidden truncation. '.repeat(24),
+        rationale: Effect2.pipe(
+          'A complete read matches the approved behavior and avoids hidden truncation. ',
+          EffectString.repeat(24),
+        ),
         affectedPhases: ['one'],
         authority: 'orchestrator',
       },
@@ -135,20 +143,21 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
   cycleDelivery: 'local' | 'pr' = 'local',
 ) {
   const system = yield* SystemInfo;
-  const environment = Object.fromEntries(
-    Object.entries(system.environment()).filter(([key]) => !key.startsWith('THREADNOTE_')),
+  const environment = EffectRecord.fromEntries(
+    EffectArray.filter(
+      EffectRecord.toEntries(system.environment()),
+      ([key]) => !Effect2.pipe(key, EffectString.startsWith('THREADNOTE_')),
+    ),
   );
   if (profile === 'cursor-cloud-personal') environment.THREADNOTE_CURSOR_CLOUD_TEAM = 'default';
   const f = yield* observeCloseoutStage('provisioning', nativeFixture(environment));
   const config = {...f.config, ...(profile === 'desktop' ? {} : {manifestSource: 'bundled-example' as const})};
   const scopedSystem = {...system, currentDirectory: () => f.repo, environment: () => environment};
   const call = (request: unknown) => {
-    const input = request && typeof request === 'object' ? (request as Record<string, unknown>) : {};
+    const command = Predicate.hasProperty(request, 'command') ? request.command : undefined;
+    const action = Predicate.hasProperty(request, 'action') ? request.action : undefined;
     const program = f.call(request, config).pipe(Effect.provideService(SystemInfo, scopedSystem));
-    return observeCloseoutStage(
-      input.command ?? input.action,
-      input.action === 'graph-ready' ? observeCloseoutGraph(program) : program,
-    );
+    return observeCloseoutStage(command ?? action, action === 'graph-ready' ? observeCloseoutGraph(program) : program);
   };
   const git = (cwd: string, args: readonly string[]) =>
     observeCloseoutStage('fixture-git', runCommandEffect('git', ['-C', cwd, ...args]));
@@ -217,9 +226,9 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
     if (!specState || spec.kind !== 'spec') throw new Error('Expected ready spec state.');
     plan = decodeNativeAuthoringDocument({
       ...plan,
-      phases: plan.phases.map(phase => ({
+      phases: EffectArray.map(plan.phases, phase => ({
         ...phase,
-        acceptance: phase.acceptance.map(item => ({...item, scenarioIds: ['read']})),
+        acceptance: EffectArray.map(phase.acceptance, item => ({...item, scenarioIds: ['read']})),
       })),
       spec: {
         root: specRoot,
@@ -330,7 +339,7 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
       status: 'passed',
       productState: 'working',
       checks: [{command: 'Private fixture check', result: 'passed', evidence: 'Observed the complete result.'}],
-      acceptance: plan.phases[0].acceptance.map(item => ({
+      acceptance: EffectArray.map(plan.phases[0].acceptance, item => ({
         criterion: item.criterion,
         result: 'passed',
         evidence: 'Observed: ' + item.criterion,

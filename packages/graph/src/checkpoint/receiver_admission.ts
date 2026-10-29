@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {CommandExecutor, type CommandOptions} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -8,10 +9,10 @@ import {isOpaqueCorpusMediaPath} from '../languages/corpus/policy.js';
 import type {CodeGraphInventoryFile, RepositoryIdentity} from '../types.js';
 import type {CodeGraphCheckpointFileRecordV1, CodeGraphCheckpointHeaderV1} from './schema.js';
 
-export class CodeGraphCheckpointReceiverAdmissionError extends Schema.TaggedError<CodeGraphCheckpointReceiverAdmissionError>()(
-  'CodeGraphCheckpointReceiverAdmissionError',
-  {message: Schema.String},
-) {}
+export class CodeGraphCheckpointReceiverAdmissionError extends Schema.TaggedError<
+  CodeGraphCheckpointReceiverAdmissionError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCheckpointReceiverAdmissionError', {message: Schema.String}) {}
 
 type FileIdentity = Pick<CodeGraphInventoryFile, 'path' | 'blobId' | 'contentHash' | 'language' | 'mode'>;
 
@@ -23,7 +24,7 @@ export class CodeGraphCheckpointReceiverFileVerifier {
   readonly #allowStructuralOnly: boolean;
 
   constructor(files: readonly FileIdentity[], options?: {readonly allowStructuralOnly?: boolean}) {
-    this.#remaining = new Map(files.map(file => [file.path, file]));
+    this.#remaining = new Map(EffectArray.map(files, file => [file.path, file]));
     this.#allowStructuralOnly = options?.allowStructuralOnly === true;
   }
 
@@ -50,7 +51,7 @@ export class CodeGraphCheckpointReceiverFileVerifier {
       (this.#remaining.size === 0 ||
         (this.#allowStructuralOnly &&
           !this.#acceptedOpaque &&
-          [...this.#remaining.keys()].every(isOpaqueCorpusMediaPath)))
+          EffectArray.every([...this.#remaining.keys()], isOpaqueCorpusMediaPath)))
     );
   }
 

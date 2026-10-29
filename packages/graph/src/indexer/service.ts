@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {observeCodeGraphSemanticStatus} from '../vector/status.js';
 import {completeCodeGraphDeferredVectors, withCodeGraphDeferredCompletionReporter} from '../vector/publication.js';
 import {
@@ -127,6 +128,8 @@ import {
   type CodeGraphBuildAnonymousTelemetryReporter,
   withCodeGraphBuildAnonymousTelemetry,
 } from '../runtime_ports.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGraphIndexerShape>()(
   '@threadnote/graph/indexer/service/CodeGraphIndexer',
@@ -875,7 +878,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       }
                       if (rawInventory.dirty) {
                         const capturedHashes = new Map(
-                          inventoryOverlayObservation.files.map(file => [file.path, file.contentHash]),
+                          EffectArray.map(inventoryOverlayObservation.files, file => [file.path, file.contentHash]),
                         );
                         const currentRequest = yield* worktreeBuildRequestObservation(
                           identity,
@@ -884,7 +887,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                         ).pipe(Effect.provideService(Crypto.Crypto, crypto));
                         if (
                           !sameOverlayState(currentRequest.state, requestedOverlay) ||
-                          rawInventory.files.some(
+                          EffectArray.some(
+                            rawInventory.files,
                             file => file.source === 'worktree' && capturedHashes.get(file.path) !== file.contentHash,
                           )
                         ) {
@@ -932,7 +936,11 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                         scope,
                       );
                       const forceGeneration = options.force
-                        ? (yield* crypto.randomUUIDv4()).replaceAll('-', '').slice(0, 16)
+                        ? Effect2.pipe(
+                            yield* crypto.randomUUIDv4(),
+                            EffectString.replaceAll('-', ''),
+                            EffectString.slice(0, 16),
+                          )
                         : undefined;
                       const forcedSnapshotId = forcedSnapshotIdentity(logicalSnapshotId, forceGeneration);
                       const directSnapshotId = directFullSnapshotIdentity(logicalSnapshotId);
@@ -1064,7 +1072,8 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       yield* reclaimSnapshots('required');
                       const scopeResolutionChanged =
                         scope !== undefined &&
-                        [...inventoryOverlayObservation.changedPaths, ...inventoryOverlayObservation.deletedPaths].some(
+                        EffectArray.some(
+                          [...inventoryOverlayObservation.changedPaths, ...inventoryOverlayObservation.deletedPaths],
                           relative => languagePacks.isResolutionContext(relative),
                         );
                       const canAttemptIncrementalOverlay =

@@ -1,9 +1,33 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import type {FetchLike} from '@modelcontextprotocol/sdk/shared/transport.js';
-import {Redacted} from 'effect';
+import {Redacted, Schema} from 'effect';
 import fc from 'fast-check';
 import {summarizeContractObservation} from '../src/contract-probe.js';
 import {probeSelectedPageContractRaw, ProbeError} from '../src/probe.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const RequestSchema = withRest(
+  Schema.Struct({
+    id: Schema.optionalKey(Schema.Unknown),
+    method: Schema.String,
+    params: Schema.optionalKey(
+      withRest(
+        Schema.Struct({
+          arguments: Schema.optionalKey(Schema.Unknown),
+          name: Schema.optionalKey(Schema.String),
+        }),
+      ),
+    ),
+  }),
+);
+const decodeRequest = Schema.decodeUnknownSync(RequestSchema);
+const isArgumentRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 
 const selectedUrl = 'https://docs.superhuman.com/d/Synthetic_do1/Page_pa1';
 const token = Redacted.make('synthetic-contract-token');
@@ -16,11 +40,7 @@ function syntheticFetch(
   decodedDocUri = docUri,
 ): FetchLike {
   return async (_url, init) => {
-    const request = JSON.parse(String(init?.body)) as {
-      id?: unknown;
-      method: string;
-      params?: {name: string; arguments: Record<string, unknown>};
-    };
+    const request = decodeRequest(JSON.parse(String(init?.body)));
     if (request.method === 'initialize')
       return Response.json({
         jsonrpc: '2.0',
@@ -33,7 +53,10 @@ function syntheticFetch(
       });
     if (request.method === 'notifications/initialized') return new Response(null, {status: 202});
     if (request.method !== 'tools/call' || !request.params) throw new Error('unexpected request');
-    calls.push({name: request.params.name, args: request.params.arguments});
+    const name = request.params.name;
+    const args = request.params.arguments;
+    if (typeof name !== 'string' || !isArgumentRecord(args)) throw new Error('unexpected tool arguments');
+    calls.push({name, args});
     const value =
       request.params.name === 'url_convert'
         ? {result: {uri: decodedUri, docUri: decodedDocUri}}
@@ -52,8 +75,8 @@ async function errorCode(work: Promise<unknown>) {
   try {
     await work;
   } catch (error) {
-    expect(error).toBeInstanceOf(ProbeError);
-    return (error as ProbeError).code;
+    if (!Schema.is(ProbeError)(error)) throw error;
+    return error.code;
   }
   throw new Error('expected probe failure');
 }
@@ -79,7 +102,7 @@ describe('selected Superhuman page contract probe', () => {
         }),
       ),
     ).toBe('catalog-invalid');
-    expect(calls.map(call => call.name)).toEqual(['tool_guide', 'url_convert']);
+    expect(EffectArray.map(calls, call => call.name)).toEqual(['tool_guide', 'url_convert']);
   });
 
   it('never exposes arbitrary provider strings or field names in structural diagnostics', () => {
@@ -115,7 +138,9 @@ describe('selected Superhuman page contract probe', () => {
       fetch: syntheticFetch(calls),
     });
     expect(raw.scopeMatched).toBe(true);
-    expect(calls.find(call => call.name === 'url_convert')?.args.url).toBe(selectedUrl);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(calls, call => call.name === 'url_convert'))?.args.url,
+    ).toBe(selectedUrl);
   });
 
   it('preserves provider URI context and compares document IDs independently of fragments', async () => {
@@ -126,8 +151,12 @@ describe('selected Superhuman page contract probe', () => {
       fetch: syntheticFetch(calls, contextualPageUri, contextualDocUri),
     });
     expect(raw.scopeMatched).toBe(true);
-    expect(calls.find(call => call.name === 'document_outline')?.args.uri).toBe(contextualDocUri);
-    expect(calls.find(call => call.name === 'page_describe')?.args.uri).toBe(contextualPageUri);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(calls, call => call.name === 'document_outline'))?.args.uri,
+    ).toBe(contextualDocUri);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(calls, call => call.name === 'page_describe'))?.args.uri,
+    ).toBe(contextualPageUri);
   });
 
   it('follows bounded redirects within the official MCP service without changing the call', async () => {
@@ -135,12 +164,12 @@ describe('selected Superhuman page contract probe', () => {
     const normal = syntheticFetch(calls);
     const urls: string[] = [];
     const fetchImpl: FetchLike = async (url, init) => {
-      const request = JSON.parse(String(init?.body)) as {method: string; params?: {name: string}};
+      const request = decodeRequest(JSON.parse(String(init?.body)));
       if (request.params?.name === 'page_describe') {
         urls.push(String(url));
         expect(init?.method).toBe('POST');
         expect(new Headers(init?.headers).get('Authorization')).toBe(`Bearer ${Redacted.value(token)}`);
-        if (String(url).endsWith('/apis/mcp'))
+        if (Effect.pipe(String(url), EffectString.endsWith('/apis/mcp')))
           return new Response(null, {status: 307, headers: {location: '/apis/mcp/synthetic-route'}});
       }
       return normal(url, init);
@@ -151,7 +180,7 @@ describe('selected Superhuman page contract probe', () => {
       'https://docs.superhuman.com/apis/mcp',
       'https://docs.superhuman.com/apis/mcp/synthetic-route',
     ]);
-    expect(calls.filter(call => call.name === 'page_describe')).toHaveLength(1);
+    expect(EffectArray.filter(calls, call => call.name === 'page_describe')).toHaveLength(1);
   });
 
   it('rejects redirects outside the MCP namespace and repeated redirect targets', async () => {
@@ -160,7 +189,7 @@ describe('selected Superhuman page contract probe', () => {
       const normal = syntheticFetch(calls);
       let redirects = 0;
       const fetchImpl: FetchLike = async (url, init) => {
-        const request = JSON.parse(String(init?.body)) as {params?: {name: string}};
+        const request = decodeRequest(JSON.parse(String(init?.body)));
         if (request.params?.name === 'page_describe') {
           redirects++;
           return new Response(null, {status: 307, headers: {location: target}});
@@ -170,7 +199,7 @@ describe('selected Superhuman page contract probe', () => {
       expect(await errorCode(probeSelectedPageContractRaw(token, selectedUrl, 'primary', {fetch: fetchImpl}))).toBe(
         'transport-rejected',
       );
-      expect(redirects).toBe(target.endsWith('/loop') ? 2 : 1);
+      expect(redirects).toBe(Effect.pipe(target, EffectString.endsWith('/loop')) ? 2 : 1);
     }
   });
 
@@ -214,14 +243,14 @@ describe('selected Superhuman page contract probe', () => {
         }),
       ),
     ).toBe('catalog-invalid');
-    expect(calls.map(call => call.name)).toEqual(['tool_guide', 'url_convert']);
+    expect(EffectArray.map(calls, call => call.name)).toEqual(['tool_guide', 'url_convert']);
   });
 
   it('keeps provider errors static and stops before a body read', async () => {
     const calls: Array<{name: string; args: Record<string, unknown>}> = [];
     const normal = syntheticFetch(calls);
     const fetchImpl: FetchLike = async (url, init) => {
-      const request = JSON.parse(String(init?.body)) as {method: string; params?: {name: string}};
+      const request = decodeRequest(JSON.parse(String(init?.body)));
       if (request.method === 'tools/call' && request.params?.name === 'page_describe') {
         calls.push({name: 'page_describe', args: {uri: pageUri}});
         return new Response('private provider detail', {status: 404});
@@ -232,12 +261,17 @@ describe('selected Superhuman page contract probe', () => {
       await probeSelectedPageContractRaw(token, selectedUrl, 'primary', {fetch: fetchImpl});
       throw new Error('expected failure');
     } catch (error) {
-      expect(error).toBeInstanceOf(ProbeError);
-      expect((error as ProbeError).code).toBe('transport-rejected');
-      expect((error as ProbeError).operation).toBe('page_describe');
+      if (!Schema.is(ProbeError)(error)) throw error;
+      expect(error.code).toBe('transport-rejected');
+      expect(error.operation).toBe('page_describe');
       expect(String(error)).not.toContain('private provider detail');
     }
-    expect(calls.map(call => call.name)).toEqual(['tool_guide', 'url_convert', 'document_outline', 'page_describe']);
+    expect(EffectArray.map(calls, call => call.name)).toEqual([
+      'tool_guide',
+      'url_convert',
+      'document_outline',
+      'page_describe',
+    ]);
   });
 
   it('rejects other origins and credentials in the selected URL without network access', async () => {

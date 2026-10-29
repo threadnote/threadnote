@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, Option} from 'effect';
@@ -8,6 +9,8 @@ import {resolveCodeGraphWorkspaceCatalog} from '@threadnote/graph/index_scope';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const files = [
   bazelFile('MODULE.bazel', 'module(name = "root")'),
@@ -26,10 +29,12 @@ const permutedFiles = FC.array(FC.integer({max: 10_000, min: -10_000}), {
   maxLength: files.length,
   minLength: files.length,
 }).map(priorities =>
-  files
-    .map((file, index) => ({file, index, priority: priorities[index]}))
-    .sort((left, right) => left.priority - right.priority || left.index - right.index)
-    .map(item => item.file),
+  EffectArray.map(
+    EffectArray.map(files, (file, index) => ({file, index, priority: priorities[index]})).sort(
+      (left, right) => left.priority - right.priority || left.index - right.index,
+    ),
+    item => item.file,
+  ),
 );
 
 describe('Bazel workspace properties', () => {
@@ -46,11 +51,13 @@ describe('Bazel workspace properties', () => {
       };
       const first = yield* resolveCodeGraphWorkspaceCatalog(files, registry);
       const expected = structuredClone(first);
-      (first.resolutionContextPaths as string[]).push('caller-mutation');
+      expect(
+        Reflect.set(first.resolutionContextPaths, String(first.resolutionContextPaths.length), 'caller-mutation'),
+      ).toBe(true);
       const second = yield* resolveCodeGraphWorkspaceCatalog([...files].reverse(), registry);
       expect(second).toEqual(expected);
       expect(discoveries).toBe(1);
-      const changed = files.map(file =>
+      const changed = EffectArray.map(files, file =>
         file.path === 'libs/ui/BUILD.bazel'
           ? {...file, blobId: 'changed', contentHash: 'changed', content: 'kt_jvm_library(name="ui")'}
           : file,
@@ -67,7 +74,7 @@ describe('Bazel workspace properties', () => {
     {slots: FC.array(FC.integer({min: 0, max: 12}), {minLength: 2, maxLength: 24})},
     ({slots}) =>
       Effect.gen(function* () {
-        const registries = ['one', 'two'].map(name => ({
+        const registries = EffectArray.map(['one', 'two'], name => ({
           ...BUILTIN_LANGUAGE_PACK_REGISTRY,
           discoverWorkspace: (input: readonly CodeGraphInventoryFile[]) =>
             BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(input).pipe(
@@ -115,7 +122,7 @@ describe('Bazel workspace properties', () => {
         discoverWorkspace: () => {
           oversizedDiscoveries += 1;
           return Effect.succeed({
-            diagnostics: ['x'.repeat(2_097_152)],
+            diagnostics: [Effect2.pipe('x', EffectString.repeat(2_097_152))],
             fingerprint: 'large',
             projects: [],
             workspaces: [],
@@ -134,9 +141,9 @@ describe('Bazel workspace properties', () => {
     {
       value: FC.array(FC.constantFrom('a', '🧠', '\\', '"', '\n', '\r', '\t', '\u2028', '\u2029', '#', '('), {
         maxLength: 128,
-      }).map(characters => characters.join('')),
+      }).map(characters => EffectArray.join(characters, '')),
       comment: FC.array(FC.constantFrom('x', '🧠', '"', "'", '#', '(', ')'), {maxLength: 64}).map(characters =>
-        characters.join(''),
+        EffectArray.join(characters, ''),
       ),
     },
     ({value, comment}) => {
@@ -145,8 +152,8 @@ describe('Bazel workspace properties', () => {
       const parsed = parseBazelSyntax(`${prefix}${call}`);
       expect(parsed.calls).toHaveLength(1);
       expect(parsed.calls[0]).toMatchObject({callee: 'rule', start: prefix.length, end: prefix.length + call.length});
-      expect(parsed.calls[0].strings.map(literal => literal.value)).toEqual([value]);
-      expect(parsed.calls[0].attributes[0].strings.map(literal => literal.value)).toEqual([value]);
+      expect(EffectArray.map(parsed.calls[0].strings, literal => literal.value)).toEqual([value]);
+      expect(EffectArray.map(parsed.calls[0].attributes[0].strings, literal => literal.value)).toEqual([value]);
     },
     {fastCheck: {numRuns: 150}},
   );
@@ -154,9 +161,18 @@ describe('Bazel workspace properties', () => {
   it('preserves raw and multiline literal boundaries without treating embedded calls as code', () => {
     const source = 'rule(name = r"raw\\n", doc = """🧠\n# fake()\nline\\tend""")\nnext()';
     const parsed = parseBazelSyntax(source);
-    expect(parsed.calls.map(call => call.callee)).toEqual(['rule', 'next']);
-    expect(parsed.calls[0].strings.map(literal => literal.value)).toEqual(['raw\\n', '🧠\n# fake()\nline\tend']);
-    expect(parsed.calls[1].start).toBe(source.indexOf('next()'));
+    expect(EffectArray.map(parsed.calls, call => call.callee)).toEqual(['rule', 'next']);
+    expect(EffectArray.map(parsed.calls[0].strings, literal => literal.value)).toEqual([
+      'raw\\n',
+      '🧠\n# fake()\nline\tend',
+    ]);
+    expect(parsed.calls[1].start).toBe(
+      Effect2.pipe(
+        source,
+        EffectString.indexOf('next()'),
+        Effect2.Option.getOrElse(() => -1),
+      ),
+    );
   });
 
   fcEffectProp(
@@ -169,12 +185,16 @@ describe('Bazel workspace properties', () => {
         const actual = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(permuted);
 
         expect(actual).toEqual(expected);
-        expect(actual.projects.find(project => project.name === '//libs/ui')?.dependencies).toContain(
-          actual.projects.find(project => project.name === '//libs/core')?.id,
+        expect(
+          Option.getOrUndefined(EffectArray.findFirst(actual.projects, project => project.name === '//libs/ui'))
+            ?.dependencies,
+        ).toContain(
+          Option.getOrUndefined(EffectArray.findFirst(actual.projects, project => project.name === '//libs/core'))?.id,
         );
-        expect(actual.projects.find(project => project.name === '//')?.workspaceRoots).toEqual(
-          expect.arrayContaining(['apps/isolated']),
-        );
+        expect(
+          Option.getOrUndefined(EffectArray.findFirst(actual.projects, project => project.name === '//'))
+            ?.workspaceRoots,
+        ).toEqual(expect.arrayContaining(['apps/isolated']));
       }),
     {fastCheck: {numRuns: 150}},
   );
@@ -195,7 +215,10 @@ describe('Bazel workspace properties', () => {
       );
 
       const facts = extractBazelFacts(build, {packageName: Option.none(), project: Option.none()});
-      const dependencies = facts.edges.filter(edge => edge.relation === 'depends_on').map(edge => edge.targetName);
+      const dependencies = EffectArray.map(
+        EffectArray.filter(facts.edges, edge => edge.relation === 'depends_on'),
+        edge => edge.targetName,
+      );
       expect(dependencies).toContain(`//:${target}`);
       expect(dependencies).toContain(absolute);
       expect(dependencies).not.toContain('plain.txt');
@@ -215,20 +238,20 @@ describe('Bazel workspace properties', () => {
       callee: FC.stringMatching(/^[A-Za-z_][A-Za-z0-9_]{0,10}$/),
     },
     ({name, param, typeName, constant, callee}) => {
-      const typed = [
-        `def ${name}(${param}: ${typeName}) -> ${typeName}:`,
-        `    ${callee}(${param})`,
-        `    return ${param}`,
-        '',
-        `${constant} = ${callee}()`,
-      ].join('\n');
-      const untyped = [
-        `def ${name}(${param}):`,
-        `    ${callee}(${param})`,
-        `    return ${param}`,
-        '',
-        `${constant} = ${callee}()`,
-      ].join('\n');
+      const typed = EffectArray.join(
+        [
+          `def ${name}(${param}: ${typeName}) -> ${typeName}:`,
+          `    ${callee}(${param})`,
+          `    return ${param}`,
+          '',
+          `${constant} = ${callee}()`,
+        ],
+        '\n',
+      );
+      const untyped = EffectArray.join(
+        [`def ${name}(${param}):`, `    ${callee}(${param})`, `    return ${param}`, '', `${constant} = ${callee}()`],
+        '\n',
+      );
 
       const axl = extractBazelFacts(bazelFile(`lib/${name}.axl`, typed), {
         packageName: Option.none(),
@@ -246,20 +269,20 @@ describe('Bazel workspace properties', () => {
 });
 
 function normalizeStarlarkShape(facts: ReturnType<typeof extractBazelFacts>) {
-  const symbolsById = new Map(facts.symbols.map(symbol => [symbol.id, symbol]));
+  const symbolsById = new Map(EffectArray.map(facts.symbols, symbol => [symbol.id, symbol]));
   return {
-    edges: facts.edges
-      .filter(edge => edge.relation !== 'contains')
-      .map(edge => {
+    edges: EffectArray.map(
+      EffectArray.filter(facts.edges, edge => edge.relation !== 'contains'),
+      edge => {
         const source = edge.sourceId === undefined ? undefined : symbolsById.get(edge.sourceId);
         const sourceKey = source?.kind === 'module' ? 'module' : (source?.name ?? edge.sourceName);
         return [edge.relation, sourceKey, edge.targetName] as const;
-      })
-      .sort(),
-    symbols: facts.symbols
-      .filter(symbol => symbol.kind !== 'module')
-      .map(symbol => [symbol.kind, symbol.name] as const)
-      .sort(),
+      },
+    ).sort(),
+    symbols: EffectArray.map(
+      EffectArray.filter(facts.symbols, symbol => symbol.kind !== 'module'),
+      symbol => [symbol.kind, symbol.name] as const,
+    ).sort(),
   };
 }
 

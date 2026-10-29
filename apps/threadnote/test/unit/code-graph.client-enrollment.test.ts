@@ -1,20 +1,30 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Clock, Deferred, Effect, Fiber, FileSystem, Layer, Redacted} from 'effect';
+import {Clock, Deferred, Effect, Fiber, FileSystem, Layer, Redacted, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {enrollGraphControlClient, prepareGraphControlWorkerIdentity} from '@threadnote/graph/sharing/client/enrollment';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {graphSharingUnavailable} from '@threadnote/graph/sharing/errors';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
+const enrollmentRequestSchema = Schema.Struct({
+  idempotencyKey: Schema.String,
+  profileDigest: Schema.String,
+  repositoryId: Schema.String,
+  signingPublicKey: Schema.optionalKey(Schema.String),
+});
+const isEnrollmentRequest = Schema.is(enrollmentRequestSchema);
 
 const scope = {
   coordinatorUrl: 'https://graph.example.test/team',
   organization: 'acme',
   profileDigest: sha256Digest('profile'),
-  repositoryId: 'a'.repeat(64),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
 };
 const fixture = Effect.fn('test.clientEnrollment.fixture')(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -36,12 +46,8 @@ const fixture = Effect.fn('test.clientEnrollment.fixture')(function* () {
       Effect.gen(function* () {
         calls++;
         expect(pathname).toBe('/v1/enroll');
-        const request = body as {
-          idempotencyKey: string;
-          repositoryId: string;
-          profileDigest: string;
-          signingPublicKey?: string;
-        };
+        if (!isEnrollmentRequest(body)) throw new Error('Invalid graph enrollment request fixture.');
+        const request = body;
         expect(request.repositoryId).toBe(scope.repositoryId);
         expect(request.profileDigest).toBe(scope.profileDigest);
         requests.push({idempotencyKey: request.idempotencyKey, signingPublicKey: request.signingPublicKey});
@@ -50,7 +56,7 @@ const fixture = Effect.fn('test.clientEnrollment.fixture')(function* () {
         if (worker === undefined) {
           worker = {
             expiresAt: Math.floor((yield* Clock.currentTimeMillis) / 1000) + 3600,
-            workerId: 'gw_' + (operations.size + 1).toString(16).padStart(32, '0'),
+            workerId: 'gw_' + Effect2.pipe((operations.size + 1).toString(16), EffectString.padStart(32, '0')),
           };
           operations.set(operation, worker);
         }
@@ -132,14 +138,14 @@ describe('automatic graph client enrollment', () => {
       const unsigned = yield* f.enroll();
       const enroll = (signingPublicKey: string) =>
         enrollGraphControlClient({home: f.home, scope, client: f.client, signingPublicKey});
-      const first = yield* enroll('a'.repeat(64));
-      expect(first.signingPublicKey).toBe('a'.repeat(64));
+      const first = yield* enroll(Effect2.pipe('a', EffectString.repeat(64)));
+      expect(first.signingPublicKey).toBe(Effect2.pipe('a', EffectString.repeat(64)));
       expect(first.workerId).not.toBe(unsigned.workerId);
-      expect((yield* enroll('a'.repeat(64))).workerId).toBe(first.workerId);
+      expect((yield* enroll(Effect2.pipe('a', EffectString.repeat(64)))).workerId).toBe(first.workerId);
       expect(f.calls()).toBe(2);
-      const second = yield* enroll('b'.repeat(64));
+      const second = yield* enroll(Effect2.pipe('b', EffectString.repeat(64)));
       expect(second.workerId).not.toBe(first.workerId);
-      expect(second.signingPublicKey).toBe('b'.repeat(64));
+      expect(second.signingPublicKey).toBe(Effect2.pipe('b', EffectString.repeat(64)));
       expect(f.calls()).toBe(3);
     }).pipe(provideTestLayer(layer)),
   );
@@ -195,7 +201,7 @@ describe('automatic graph client enrollment', () => {
       Effect.gen(function* () {
         const f = yield* fixture();
         const enrolled = yield* Effect.forEach(Array.from({length: 8}), () => f.enroll(), {concurrency: 8});
-        expect(new Set(enrolled.map(worker => worker.workerId)).size).toBe(1);
+        expect(new Set(EffectArray.map(enrolled, worker => worker.workerId)).size).toBe(1);
         expect(f.calls()).toBe(1);
         f.switchPrincipal();
         const second = yield* f.enroll();

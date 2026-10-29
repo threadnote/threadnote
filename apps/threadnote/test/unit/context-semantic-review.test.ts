@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate, String as EffectString} from 'effect';
 import {
   observeSelectedMaintenanceCase,
   refreshContextMaintenanceCase,
@@ -13,6 +14,7 @@ import {
   canonicalMemoryDocumentContent,
   formatMemoryDocument,
   parseMemoryDocument,
+  type MemoryMetadata,
   type MemoryRecord,
 } from '@threadnote/memory/document';
 import {
@@ -49,6 +51,9 @@ import {
   buildSemanticReviewPreview,
   refreshSemanticComparison,
 } from '../../src/memory/context/semantic_review.js';
+import * as EffectRecord from 'effect/Record';
+import * as Effect2 from 'effect';
+import * as EffectString2 from 'effect/String';
 
 function memory(name: string, body: string): MemoryRecord {
   return parseMemoryDocument(
@@ -78,6 +83,29 @@ function input(choice: 'left' | 'right' | 'both' = 'left', corpus = records) {
     left: {recordUri: evidence.left.recordUri, recordContentFingerprint: evidence.left.recordContentFingerprint},
     right: {recordUri: evidence.right.recordUri, recordContentFingerprint: evidence.right.recordContentFingerprint},
     choice,
+  };
+}
+type SemanticReviewInput = ReturnType<typeof input>;
+function parseSemanticReviewInput(value: unknown): SemanticReviewInput {
+  if (!Predicate.isObject(value) || typeof value.project !== 'string' || typeof value.contradictionId !== 'string')
+    throw new Error('Semantic review request identity is malformed.');
+  if (value.choice !== 'left' && value.choice !== 'right' && value.choice !== 'both')
+    throw new Error('Semantic review choice is malformed.');
+  const side = (candidate: unknown) => {
+    if (
+      !Predicate.isObject(candidate) ||
+      typeof candidate.recordUri !== 'string' ||
+      typeof candidate.recordContentFingerprint !== 'string'
+    )
+      throw new Error('Semantic review source identity is malformed.');
+    return {recordUri: candidate.recordUri, recordContentFingerprint: candidate.recordContentFingerprint};
+  };
+  return {
+    project: value.project,
+    contradictionId: value.contradictionId,
+    left: side(value.left),
+    right: side(value.right),
+    choice: value.choice,
   };
 }
 
@@ -147,19 +175,31 @@ describe('explicit semantic review', () => {
     }).pipe(provideTestLayer(reviewLayer)),
   );
   it('previews an exact comparison whose claim was beyond the direct analyzer limit', () => {
-    const filler = Array.from(
-      {length: 17},
-      (_, index) => `Worker token${String.fromCharCode(97 + index)} must retain verified context.`,
-    ).join('\n');
-    const subject = Array.from(
-      {length: 100},
-      (_, index) =>
-        `Deployment policy${String.fromCharCode(97 + Math.floor(index / 26))}${String.fromCharCode(97 + (index % 26))}`,
-    ).find(
-      candidate =>
-        extractContextHealthSemanticClaims(
-          memory('a-late', `${filler}\n${candidate} must use signed artifacts.`),
-        ).claims.findIndex(claim => claim.text.startsWith(candidate)) >= 16,
+    const filler = EffectArray.join(
+      Array.from(
+        {length: 17},
+        (_, index) => `Worker token${String.fromCharCode(97 + index)} must retain verified context.`,
+      ),
+      '\n',
+    );
+    const subject = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        Array.from(
+          {length: 100},
+          (_, index) =>
+            `Deployment policy${String.fromCharCode(97 + Math.floor(index / 26))}${String.fromCharCode(97 + (index % 26))}`,
+        ),
+        candidate =>
+          EffectOption.getOrElse(
+            EffectArray.findFirstIndex(
+              extractContextHealthSemanticClaims(memory('a-late', `${filler}\n${candidate} must use signed artifacts.`))
+                .claims,
+              __effectArrayValue =>
+                !!(claim => Effect2.pipe(claim.text, EffectString.startsWith(candidate)))(__effectArrayValue),
+            ),
+            () => -1,
+          ) >= 16,
+      ),
     )!;
     const corpus = [
       memory('a-late', `${filler}\n${subject} must use signed artifacts.`),
@@ -186,8 +226,8 @@ describe('explicit semantic review', () => {
   });
   it('returns plain safe recovery messages and reserves stale status for changed evidence', () => {
     const native = ResourceConflict.make({
-      actualFingerprint: 'a'.repeat(64),
-      expectedFingerprint: 'b'.repeat(64),
+      actualFingerprint: Effect2.pipe('a', EffectString.repeat(64)),
+      expectedFingerprint: Effect2.pipe('b', EffectString.repeat(64)),
       uri: records[0].uri,
       message: `Resource changed: ${records[0].uri}`,
     });
@@ -225,7 +265,9 @@ describe('explicit semantic review', () => {
               ? {recordContentFingerprint: request.right.recordContentFingerprint, recordUri: request.right.recordUri}
               : request.right,
           };
-          const reordered = Object.fromEntries(keys.map(key => [key, values[key]])) as typeof request;
+          const reordered = parseSemanticReviewInput(
+            EffectRecord.fromEntries(EffectArray.map(keys, key => [key, values[key]])),
+          );
           expect(buildSemanticReviewPreview(reordered, records, 'tester').revision).toBe(
             buildSemanticReviewPreview(request, records, 'tester').revision,
           );
@@ -252,21 +294,29 @@ describe('explicit semantic review', () => {
         expect((yield* applySemanticReview(config, approval)).status).toBe('applied');
         expect((yield* applySemanticReview(config, approval)).status).toBe('already-applied');
         expect(yield* store.read(location, preview.keptUri!)).toBe(
-          corpus.find(record => record.uri === preview.keptUri)!.content,
+          EffectOption.getOrUndefined(EffectArray.findFirst(corpus, record => record.uri === preview.keptUri))!.content,
         );
       }).pipe(provideTestLayer(reviewLayer)),
     {fastCheck: {numRuns: 12}},
   );
   it('requires an explicit choice and both exact current source revisions', () => {
-    expect(() => buildSemanticReviewPreview({...input(), choice: undefined} as never, records, 'tester')).toThrow(
-      /choice/iu,
-    );
+    const missingChoice = {...input(), choice: undefined};
+    expect(() =>
+      buildSemanticReviewPreview(
+        // @ts-expect-error This regression case deliberately omits the required reviewer choice.
+        missingChoice,
+        records,
+        'tester',
+      ),
+    ).toThrow(/choice/iu);
     for (const name of ['a', 'b']) {
       expect(() =>
         buildSemanticReviewPreview(
           input(),
-          records.map(record =>
-            record.uri.endsWith(`${name}.md`) ? memory(name, `${record.body}\nChanged.`) : record,
+          EffectArray.map(records, record =>
+            Effect2.pipe(record.uri, EffectString.endsWith(`${name}.md`))
+              ? memory(name, `${record.body}\nChanged.`)
+              : record,
           ),
           'tester',
         ),
@@ -290,7 +340,7 @@ describe('explicit semantic review', () => {
           })).status,
         ).toBe('applied');
         expect(yield* store.read(location, preview.keptUri!)).toBe(
-          `\n${records.find(record => record.uri === preview.keptUri)!.content}\n`,
+          `\n${EffectOption.getOrUndefined(EffectArray.findFirst(records, record => record.uri === preview.keptUri))!.content}\n`,
         );
         const both = yield* fixture();
         const retained = yield* previewSemanticReview(both.config, input('both'));
@@ -307,21 +357,28 @@ describe('explicit semantic review', () => {
   it('previews the entire other memory with policy/applicability caveats and preserves both original bodies', () => {
     const preview = buildSemanticReviewPreview(input(), records, 'tester');
     expect(preview.mode).toBe('archive-other');
-    expect(preview.constraints.join(' ')).toMatch(/entire|policy|applicability/iu);
-    expect([preview.keptContent, preview.archivedContent].sort()).toEqual(records.map(record => record.body).sort());
+    expect(EffectArray.join(preview.constraints, ' ')).toMatch(/entire|policy|applicability/iu);
+    expect([preview.keptContent, preview.archivedContent].sort()).toEqual(
+      EffectArray.map(records, record => record.body).sort(),
+    );
     expect(buildSemanticReviewPreview(input('both'), records, 'tester').mode).toBe('keep-both');
   });
   it('blocks storage-unsafe records without choosing a winner', () => {
-    for (const patch of [{visibility: 'shared'}, {consolidationError: 'broken'}, {citationErrors: [{reason: 'bad'}]}]) {
-      const changed = records.map(record => ({
+    const unsafeMetadataPatches: readonly Partial<MemoryMetadata>[] = [
+      {visibility: 'shared'},
+      {consolidationError: 'broken'},
+      {citationErrors: [{reason: 'invalid-shape'}]},
+    ];
+    for (const patch of unsafeMetadataPatches) {
+      const changed = EffectArray.map(records, record => ({
         ...record,
         metadata: {...record.metadata, ...patch},
-      })) as readonly MemoryRecord[];
+      }));
       expect(buildSemanticReviewPreview(input(), changed, 'tester').mode).toBe('review-only');
     }
-    const future = records.map(record => ({
+    const future = EffectArray.map(records, record => ({
       ...record,
-      content: record.content.replace('schema_version: 2', 'schema_version: 999'),
+      content: Effect2.pipe(record.content, EffectString.replace('schema_version: 2', 'schema_version: 999')),
     }));
     expect(buildSemanticReviewPreview(input('left', future), future, 'tester').mode).toBe('review-only');
   });
@@ -342,7 +399,7 @@ describe('explicit semantic review', () => {
         lastChecked: 'now',
         attemptCount: 1,
         events: [],
-        subjectContentHashes: records.map(record => ({
+        subjectContentHashes: EffectArray.map(records, record => ({
           uri: record.uri,
           hash: sha256HexSync(canonicalMemoryDocumentContent(record.content)),
         })),
@@ -386,13 +443,25 @@ describe('explicit semantic review', () => {
       yield* store.write(location, changed.uri, changed.content, {mode: 'replace'});
       const updated = yield* request('threadnote');
       expect(updated?.body).toMatchObject({outcome: 'ready'});
-      const refreshed = updated?.body as {
-        item: {caseId: string};
-        packet: {semanticEvidence: typeof finding.semanticEvidence};
-      };
-      expect(refreshed.item.caseId).not.toBe(item.caseId);
+      const refreshedBody: unknown = updated?.body;
+      if (
+        !Predicate.isObject(refreshedBody) ||
+        !Predicate.isObject(refreshedBody.item) ||
+        !Predicate.isObject(refreshedBody.packet) ||
+        !Predicate.isObject(refreshedBody.packet.semanticEvidence) ||
+        !Predicate.isObject(refreshedBody.packet.semanticEvidence.left) ||
+        !Predicate.isObject(refreshedBody.packet.semanticEvidence.right) ||
+        typeof refreshedBody.packet.semanticEvidence.left.text !== 'string' ||
+        typeof refreshedBody.packet.semanticEvidence.right.text !== 'string'
+      ) {
+        throw new Error('Expected refreshed semantic evidence in the successful response.');
+      }
+      expect(refreshedBody.item.caseId).not.toBe(item.caseId);
       expect(
-        [refreshed.packet.semanticEvidence!.left.text, refreshed.packet.semanticEvidence!.right.text].join(' '),
+        EffectArray.join(
+          [refreshedBody.packet.semanticEvidence.left.text, refreshedBody.packet.semanticEvidence.right.text],
+          ' ',
+        ),
       ).toContain('90');
       expect(yield* store.read(location, changed.uri)).toBe(changed.content);
     }).pipe(provideTestLayer(reviewLayer)),
@@ -419,16 +488,16 @@ describe('explicit semantic review', () => {
 
   effectIt.effect('records keep-both locally for shared sources without changing or publishing them', () =>
     Effect.gen(function* () {
-      const corpus = records.map(record =>
+      const corpus = EffectArray.map(records, record =>
         parseMemoryDocument(
-          record.uri.replace('/durable/projects/', '/shared/default/durable/projects/'),
+          Effect2.pipe(record.uri, EffectString.replace('/durable/projects/', '/shared/default/durable/projects/')),
           formatMemoryDocument('MEMORY', {...record.metadata, visibility: 'shared'}, record.body),
         )!,
       );
       const {config, store, location} = yield* fixture(corpus);
       const preview = yield* previewSemanticReview(config, input('both', corpus));
       expect(preview.mode).toBe('keep-both');
-      expect(preview.constraints.join(' ')).toContain('local');
+      expect(EffectArray.join(preview.constraints, ' ')).toContain('local');
       const approval = {
         project: 'threadnote',
         previewId: preview.previewId,
@@ -469,12 +538,15 @@ describe('explicit semantic review', () => {
       fc.property(
         fc.array(fc.constantFrom('personal', 'shared', 'other-owner'), {minLength: 2, maxLength: 2}),
         kinds => {
-          const corpus = records.map((record, index) =>
+          const corpus = EffectArray.map(records, (record, index) =>
             parseMemoryDocument(
               kinds[index] === 'shared'
-                ? record.uri.replace('/durable/projects/', '/shared/default/durable/projects/')
+                ? Effect2.pipe(
+                    record.uri,
+                    EffectString.replace('/durable/projects/', '/shared/default/durable/projects/'),
+                  )
                 : kinds[index] === 'other-owner'
-                  ? record.uri.replace('/tester/', '/someone-else/')
+                  ? Effect2.pipe(record.uri, EffectString.replace('/tester/', '/someone-else/'))
                   : record.uri,
               formatMemoryDocument(
                 'MEMORY',
@@ -490,11 +562,15 @@ describe('explicit semantic review', () => {
           const snapshot = JSON.stringify(corpus);
           expect(buildSemanticReviewPreview(request, corpus, 'tester').mode).toBe('keep-both');
           expect(JSON.stringify(corpus)).toBe(snapshot);
-          for (const patch of [{project: 'another-project'}, {status: 'archived'}]) {
+          const lifecyclePatches: readonly Partial<MemoryMetadata>[] = [
+            {project: 'another-project'},
+            {status: 'archived'},
+          ];
+          for (const patch of lifecyclePatches) {
             expect(() =>
               buildSemanticReviewPreview(
                 request,
-                [{...corpus[0], metadata: {...corpus[0].metadata, ...patch}}, corpus[1]] as MemoryRecord[],
+                [{...corpus[0], metadata: {...corpus[0].metadata, ...patch}}, corpus[1]],
                 'tester',
               ),
             ).toThrow(/changed|active/iu);
@@ -583,10 +659,13 @@ describe('explicit semantic review', () => {
           })).status,
         ).toBe('already-applied');
         expect(yield* store.read(location, preview.keptUri!)).toBe(
-          records.find(record => record.uri === preview.keptUri)!.content,
+          EffectOption.getOrUndefined(EffectArray.findFirst(records, record => record.uri === preview.keptUri))!
+            .content,
         );
         const history = parseMemoryDocument(result.archivedUri!, yield* store.read(location, result.archivedUri!))!;
-        const original = records.find(record => record.uri === preview.archivedUri)!;
+        const original = EffectOption.getOrUndefined(
+          EffectArray.findFirst(records, record => record.uri === preview.archivedUri),
+        )!;
         expect(history.metadata.archivedFrom).toBe(original.uri);
         expect(history.metadata.memoryId).toBe(original.metadata.memoryId);
         expect(history.body).toContain(original.body);
@@ -627,19 +706,29 @@ describe('explicit semantic review', () => {
         const ids = yield* reviewedSemanticContradictionIds(config, 'threadnote', records);
         expect(ids).toEqual([input().contradictionId]);
         expect(
-          buildContextHealthReport({
-            project: 'threadnote',
-            records,
-            now: NOW,
-            reviewedSemanticContradictionIds: ids,
-          }).findings.filter(finding => finding.semanticEvidence),
+          EffectArray.filter(
+            buildContextHealthReport({
+              project: 'threadnote',
+              records,
+              now: NOW,
+              reviewedSemanticContradictionIds: ids,
+            }).findings,
+            finding => finding.semanticEvidence !== undefined,
+          ),
         ).toEqual([]);
-        const finding = buildContextHealthReport({project: 'threadnote', records, now: NOW}).findings.find(
-          finding => finding.semanticEvidence,
-        )!;
+        const finding = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            buildContextHealthReport({project: 'threadnote', records, now: NOW}).findings,
+            finding => finding.semanticEvidence !== undefined,
+          ),
+        );
+        if (finding === undefined) throw new Error('Expected semantic contradiction finding.');
+        const caseIdentity = finding.caseIdentity;
+        const caseId = finding.caseId;
+        if (caseIdentity === undefined || caseId === undefined) throw new Error('Expected semantic case identity.');
         const item = {
-          ...finding.caseIdentity!,
-          caseId: finding.caseId!,
+          ...caseIdentity,
+          caseId,
           evidenceRevision: 'original',
           disposition: 'needs-decision' as const,
           reason: 'original',
@@ -648,7 +737,7 @@ describe('explicit semantic review', () => {
           lastChecked: '2026-06-01',
           attemptCount: 0,
           events: [{at: '2026-06-01', reason: 'original'}],
-          subjectContentHashes: records.map(record => ({
+          subjectContentHashes: EffectArray.map(records, record => ({
             uri: record.uri,
             hash:
               input().left.recordUri === record.uri
@@ -668,11 +757,23 @@ describe('explicit semantic review', () => {
         yield* fs.makeDirectory(path.dirname(stateFile), {recursive: true});
         yield* fs.writeFileString(
           stateFile,
-          JSON.stringify({version: 2, paused: false, projects: [], checkpoints: {}, receipts: [], cases: [item]}),
+          JSON.stringify({
+            version: 2,
+            paused: false,
+            state: 'idle',
+            generation: '',
+            projects: [],
+            checkpoints: {},
+            receipts: [],
+            cases: [item],
+          } satisfies MaintenanceState),
         );
         expect(
-          (yield* readContextMaintenanceStatus(config, 'threadnote')).cases.find(
-            current => current.caseId === item.caseId,
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              (yield* readContextMaintenanceStatus(config, 'threadnote')).cases,
+              current => current.caseId === item.caseId,
+            ),
           )?.disposition,
         ).toBe('resolved');
         yield* applySemanticReview(config, apply);
@@ -681,19 +782,25 @@ describe('explicit semantic review', () => {
         yield* store.write(location, records[0].uri, `${records[0].content}\n`, {mode: 'replace'});
         expect(yield* reviewedSemanticContradictionIds(config, 'threadnote', records)).toEqual([]);
         expect(
-          (yield* readContextMaintenanceStatus(config, 'threadnote')).cases.find(
-            current => current.caseId === item.caseId,
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              (yield* readContextMaintenanceStatus(config, 'threadnote')).cases,
+              current => current.caseId === item.caseId,
+            ),
           )?.disposition,
         ).toBe('needs-decision');
         yield* store.write(location, records[0].uri, records[0].content, {mode: 'replace'});
         yield* writeSemanticReviewState(config, {
           ...journal,
-          entries: journal.entries.map(entry => ({...entry, rawSources: undefined})),
+          entries: EffectArray.map(journal.entries, entry => ({...entry, rawSources: undefined})),
         });
         expect(yield* reviewedSemanticContradictionIds(config, 'threadnote', records)).toEqual([]);
         expect(
-          (yield* readContextMaintenanceStatus(config, 'threadnote')).cases.find(
-            current => current.caseId === item.caseId,
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              (yield* readContextMaintenanceStatus(config, 'threadnote')).cases,
+              current => current.caseId === item.caseId,
+            ),
           )?.disposition,
         ).toBe('needs-decision');
         yield* writeSemanticReviewState(config, journal);
@@ -733,7 +840,7 @@ describe('explicit semantic review', () => {
                     'durable',
                     'projects',
                     'threadnote',
-                    changed.uri.endsWith('/a.md') ? 'a.md' : 'b.md',
+                    Effect2.pipe(changed.uri, EffectString.endsWith('/a.md')) ? 'a.md' : 'b.md',
                   ),
                   `${changed.content}\nConcurrent edit.`,
                 )
@@ -776,17 +883,17 @@ describe('explicit semantic review', () => {
       Effect.gen(function* () {
         const citation = createMemoryCodeCitation({
           version: 1,
-          repositoryId: 'b'.repeat(64),
+          repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
           repositoryIdentityKind: 'local',
-          sourceCommit: 'c'.repeat(40),
+          sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
           sourceDirty: false,
-          sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+          sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
           extractorSet: 'test',
           path: 'source.ts',
-          fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+          fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
           target: {kind: 'file'},
         });
-        const corpus = records.map(record =>
+        const corpus = EffectArray.map(records, record =>
           parseMemoryDocument(
             record.uri,
             formatMemoryDocument(
@@ -813,7 +920,9 @@ describe('explicit semantic review', () => {
         };
         const result = yield* applySemanticReview(config, approval);
         const history = parseMemoryDocument(result.archivedUri!, yield* store.read(location, result.archivedUri!))!;
-        const original = corpus.find(record => record.uri === preview.archivedUri)!;
+        const original = EffectOption.getOrUndefined(
+          EffectArray.findFirst(corpus, record => record.uri === preview.archivedUri),
+        )!;
         expect(history.body).toBe(`Archived original Threadnote memory.\n\n${original.body}`);
         expect(history.metadata).toMatchObject({
           memoryId: original.metadata.memoryId,
@@ -827,11 +936,11 @@ describe('explicit semantic review', () => {
         const saved = yield* readSemanticReviewState(config);
         yield* writeSemanticReviewState(config, {
           ...saved,
-          entries: saved.entries.map(entry => ({...entry, applied: false})),
+          entries: EffectArray.map(saved.entries, entry => ({...entry, applied: false})),
         });
         expect((yield* applySemanticReview(config, approval)).status).toBe('already-applied');
         expect(yield* store.read(location, preview.keptUri!)).toBe(
-          corpus.find(record => record.uri === preview.keptUri)!.content,
+          EffectOption.getOrUndefined(EffectArray.findFirst(corpus, record => record.uri === preview.keptUri))!.content,
         );
         yield* store.write(location, original.uri, original.content, {mode: 'create'});
         expect(Result.isFailure(yield* applySemanticReview(config, approval).pipe(Effect.result))).toBe(true);
@@ -860,7 +969,17 @@ describe('explicit semantic review', () => {
         right: request.right,
       });
       expect(reordered?.status).toBe(200);
-      const preview = (reordered!.body as {preview: {previewId: string; revision: string}}).preview;
+      if (
+        reordered?.status !== 200 ||
+        !Predicate.isObject(reordered.body) ||
+        !Predicate.hasProperty(reordered.body, 'preview') ||
+        !Predicate.isObject(reordered.body.preview)
+      )
+        throw new Error('Expected a semantic review preview response.');
+      const previewValue = reordered.body.preview;
+      if (typeof previewValue.previewId !== 'string' || typeof previewValue.revision !== 'string')
+        throw new Error('Semantic review preview approval is malformed.');
+      const preview = {previewId: previewValue.previewId, revision: previewValue.revision};
       const applied = yield* handleManagerAttentionAction({
         config,
         body: Effect.succeed({
@@ -883,14 +1002,14 @@ effectIt.effect('fences both terminal semantic and removed-citation supersession
     for (const family of ['semantic-contradiction', 'citation'] as const) {
       const citation = createMemoryCodeCitation({
         version: 1,
-        repositoryId: 'b'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString2.repeat(64)),
         repositoryIdentityKind: 'local',
-        sourceCommit: 'c'.repeat(40),
+        sourceCommit: Effect2.pipe('c', EffectString2.repeat(40)),
         sourceDirty: false,
-        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+        sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString2.repeat(40))}`,
         extractorSet: 'test',
         path: 'source.ts',
-        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString2.repeat(64))},
         target: {kind: 'file'},
       });
       const original =
@@ -922,7 +1041,7 @@ effectIt.effect('fences both terminal semantic and removed-citation supersession
         lastChecked: 'now',
         attemptCount: 1,
         events: [],
-        subjectContentHashes: selected.map(record => ({
+        subjectContentHashes: EffectArray.map(selected, record => ({
           uri: record.uri,
           hash: sha256HexSync(canonicalMemoryDocumentContent(record.content)),
         })),
@@ -948,7 +1067,7 @@ effectIt.effect('fences both terminal semantic and removed-citation supersession
             .readFileString(...args)
             .pipe(
               Effect.tap(() =>
-                args[0].endsWith('/a.md') && openings++ === 0
+                Effect2.pipe(args[0], EffectString2.endsWith('/a.md')) && openings++ === 0
                   ? fs.writeFileString(args[0], original.content)
                   : Effect.void,
               ),
@@ -1033,25 +1152,31 @@ effectIt.effect(
           body: Effect.succeed(body),
         });
       for (const patch of [
-        {left: {...selected.left, claimFingerprint: 'f'.repeat(64)}},
+        {left: {...selected.left, claimFingerprint: Effect2.pipe('f', EffectString2.repeat(64))}},
         {
           left: {...selected.left, recordUri: selected.right.recordUri},
           right: {...selected.right, recordUri: selected.left.recordUri},
         },
-        {contradictionId: 'f'.repeat(64)},
+        {contradictionId: Effect2.pipe('f', EffectString2.repeat(64))},
       ])
         expect((yield* request({...selected, ...patch}))?.status).toBe(400);
       expect((yield* request({...selected, project: 'other'}))?.body).toMatchObject({outcome: 'unavailable'});
       expect(
         (yield* request({
           ...selected,
-          left: {...selected.left, recordUri: records[0].uri.replace('a.md', 'missing.md')},
+          left: {
+            ...selected.left,
+            recordUri: Effect2.pipe(records[0].uri, EffectString2.replace('a.md', 'missing.md')),
+          },
         }))?.status,
       ).toBe(404);
       expect(
         (yield* request({
           ...selected,
-          left: {...selected.left, recordUri: records[0].uri.replace('/tester/', '/foreign/')},
+          left: {
+            ...selected.left,
+            recordUri: Effect2.pipe(records[0].uri, EffectString2.replace('/tester/', '/foreign/')),
+          },
         }))?.status,
       ).toBe(403);
       const swapped = yield* request({...selected, left: selected.right, right: selected.left});
@@ -1067,7 +1192,7 @@ effectIt.effect('reconstructs changed current statements and detects raw-source 
     const result = yield* refreshSemanticComparison(config, refreshInput());
     expect(result).toMatchObject({outcome: 'ready'});
     if (result.outcome === 'ready') {
-      expect([result.evidence.left.text, result.evidence.right.text].join(' ')).toContain('90');
+      expect(EffectArray.join([result.evidence.left.text, result.evidence.right.text], ' ')).toContain('90');
       expect(result.evidence.contradictionId).not.toBe(refreshInput().contradictionId);
     }
     let reads = 0;
@@ -1095,7 +1220,7 @@ const boundedSemanticRefreshCases = [
     name: 'body limit hides a still-present selected conflict',
     reason: 'body-limit',
     count: 0,
-    left: '```\n' + 'x'.repeat(65_536) + '\n```\nTimeout is 60 seconds.',
+    left: '```\n' + Effect2.pipe('x', EffectString2.repeat(65_536)) + '\n```\nTimeout is 60 seconds.',
     right: records[1].body,
   },
   {
@@ -1103,8 +1228,10 @@ const boundedSemanticRefreshCases = [
     reason: 'claim-limit',
     count: 0,
     left:
-      Array.from({length: 23}, (_, index) => `Queue${index} is ${10 + index} seconds.`).join('\n') +
-      '\nTimeout is 60 seconds.',
+      EffectArray.join(
+        Array.from({length: 23}, (_, index) => `Queue${index} is ${10 + index} seconds.`),
+        '\n',
+      ) + '\nTimeout is 60 seconds.',
     right: records[1].body,
   },
   {
@@ -1113,7 +1240,10 @@ const boundedSemanticRefreshCases = [
     count: 1,
     left:
       'Retries is 60 seconds.\n' +
-      Array.from({length: 21}, (_, index) => `Queue${index} is ${10 + index} seconds.`).join('\n') +
+      EffectArray.join(
+        Array.from({length: 21}, (_, index) => `Queue${index} is ${10 + index} seconds.`),
+        '\n',
+      ) +
       '\nTimeout is 60 seconds.',
     right: 'Retries must be 30 seconds.\nTimeout must be 30 seconds.',
   },
@@ -1129,8 +1259,12 @@ for (const scenario of boundedSemanticRefreshCases) {
         now: NOW,
       });
       expect(report.semanticCompleteness.state).not.toBe('complete');
-      expect(report.semanticCompleteness.unknownReasons.map(value => value.reason)).toContain(scenario.reason);
-      expect(report.findings.filter(value => value.semanticEvidence)).toHaveLength(scenario.count);
+      expect(EffectArray.map(report.semanticCompleteness.unknownReasons, value => value.reason)).toContain(
+        scenario.reason,
+      );
+      expect(EffectArray.filter(report.findings, value => Boolean(value.semanticEvidence))).toHaveLength(
+        scenario.count,
+      );
       expect(changed[0].body).toContain(records[0].body);
       expect(changed[1].body).toContain(records[1].body);
       const {config, store, location} = yield* fixture();
@@ -1150,7 +1284,10 @@ fcEffectProp(
   ({extraClaims, reverse}) =>
     Effect.gen(function* () {
       const fillers = Array.from({length: extraClaims}, (_, index) => `Queue${index} is ${10 + index} seconds.`);
-      const changed = memory('a', (reverse ? fillers.reverse() : fillers).join('\n') + '\n' + records[0].body);
+      const changed = memory(
+        'a',
+        EffectArray.join(reverse ? fillers.reverse() : fillers, '\n') + '\n' + records[0].body,
+      );
       const {config, store, location} = yield* fixture();
       yield* store.write(location, changed.uri, changed.content, {mode: 'replace'});
       expect((yield* refreshSemanticComparison(config, refreshInput())).outcome).toBe('incomplete');
@@ -1188,7 +1325,7 @@ function retainedSemanticState() {
     lastChecked: 'now',
     attemptCount: 1,
     events: [],
-    subjectContentHashes: records.map(record => ({
+    subjectContentHashes: EffectArray.map(records, record => ({
       uri: record.uri,
       hash: sha256HexSync(canonicalMemoryDocumentContent(record.content)),
     })),
@@ -1257,7 +1394,7 @@ effectIt.effect(
             .readFileString(...args)
             .pipe(
               Effect.tap(() =>
-                args[0].endsWith('/a.md') && openings++ === 0
+                Effect2.pipe(args[0], EffectString2.endsWith('/a.md')) && openings++ === 0
                   ? fs.writeFileString(args[0], records[0].content)
                   : Effect.void,
               ),

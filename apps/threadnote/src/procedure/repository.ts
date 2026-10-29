@@ -1,3 +1,5 @@
+import * as EffectAll from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Effect, Exit, FileSystem, Option, Path, PlatformError, Result} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runtimeTextDirectoryNamePage} from '@threadnote/platform/system';
@@ -10,6 +12,7 @@ import {
 } from '@threadnote/context/procedure/contract';
 import {decodeExactProcedureText} from '@threadnote/context/procedure/exact_text';
 import type {PublishedProcedureCandidate, VerifiedProcedureCoverageGap} from '@threadnote/context/procedure/selection';
+import * as EffectRecord from 'effect/Record';
 
 const MAXIMUM_DISCOVERED_PROCEDURES = 128;
 const MAXIMUM_ARTIFACT_SOURCES = 256;
@@ -46,7 +49,7 @@ export const loadPublishedProcedureCandidates = Effect.fn('procedure.repository.
   }
 
   const sourcesByTeam: ArtifactSource[][] = [];
-  for (const [team, teamConfig] of Object.entries(teamsExit.value.teams).sort(([left], [right]) =>
+  for (const [team, teamConfig] of EffectRecord.toEntries(teamsExit.value.teams).sort(([left], [right]) =>
     compareText(left, right),
   )) {
     const artifactShareRoot = path.join(teamConfig.worktree, 'agent-artifacts');
@@ -83,7 +86,9 @@ export const loadPublishedProcedureCandidates = Effect.fn('procedure.repository.
   }
 
   const sources = roundRobin(sourcesByTeam, MAXIMUM_ARTIFACT_SOURCES);
-  if (sourcesByTeam.some(teamSources => teamSources.some(source => !sources.includes(source)))) {
+  if (
+    EffectArray.some(sourcesByTeam, teamSources => EffectArray.some(teamSources, source => !sources.includes(source)))
+  ) {
     gaps.add('procedure-evidence-truncated');
   }
   const versionsBySource: Array<{readonly source: ArtifactSource; readonly versions: readonly string[]}> = [];
@@ -107,8 +112,8 @@ export const loadPublishedProcedureCandidates = Effect.fn('procedure.repository.
   }
 
   const versionSources = roundRobin(
-    versionsBySource.map(entry =>
-      entry.versions.map(version => ({
+    EffectArray.map(versionsBySource, entry =>
+      EffectArray.map(entry.versions, version => ({
         source: entry.source,
         version,
         versionRoot: path.join(entry.source.root, version),
@@ -117,10 +122,14 @@ export const loadPublishedProcedureCandidates = Effect.fn('procedure.repository.
     MAXIMUM_INSPECTED_VERSIONS,
   );
   if (
-    versionsBySource.some(entry =>
-      entry.versions.some(
+    EffectArray.some(versionsBySource, entry =>
+      EffectArray.some(
+        entry.versions,
         version =>
-          !versionSources.some(candidate => candidate.source === entry.source && candidate.version === version),
+          !EffectArray.some(
+            versionSources,
+            candidate => candidate.source === entry.source && candidate.version === version,
+          ),
       ),
     )
   ) {
@@ -137,11 +146,16 @@ export const loadPublishedProcedureCandidates = Effect.fn('procedure.repository.
       ],
       {concurrency: 3},
     );
-    if (values.some(Option.isNone)) {
+    if (
+      EffectAll.pipe(
+        values,
+        EffectArray.some((value): boolean => Option.isNone(value)),
+      )
+    ) {
       gaps.add('procedure-evidence-unavailable');
       continue;
     }
-    const [manifestText, receiptText, artifactText] = values.map(Option.getOrThrow);
+    const [manifestText, receiptText, artifactText] = EffectArray.map(values, Option.getOrThrow);
     const parsed = parseCandidate(manifestText, receiptText);
     if (
       parsed === undefined ||

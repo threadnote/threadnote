@@ -1,6 +1,9 @@
 import {execFile} from '@threadnote/testing/node-child-process';
+import {Predicate} from 'effect';
 import {promisify} from '@threadnote/testing/node-util';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execFilePromise = promisify(execFile);
 
@@ -11,7 +14,7 @@ describe('Code Memory Link evidence runner entrypoints', () => {
     ['scripts/run-code-memory-link-agent-trial.ts', [], '--assignment requires a value'],
     [
       'scripts/run-code-memory-link-agent-trial.ts',
-      ['--assignment', 'fixture.json', '--approval-commit', 'a'.repeat(40)],
+      ['--assignment', 'fixture.json', '--approval-commit', Effect.pipe('a', EffectString.repeat(40))],
       '--attempts requires a value',
     ],
     ['scripts/run-code-memory-link-dogfood.ts', [], '--approval-commit requires a value'],
@@ -22,7 +25,13 @@ describe('Code Memory Link evidence runner entrypoints', () => {
       cwd: process.cwd(),
       env: {...process.env, NO_COLOR: '1'},
       timeout: 30_000,
-    }).catch(cause => cause as {readonly stderr?: string; readonly stdout?: string});
+    }).catch(cause => {
+      if (!Predicate.isObject(cause)) return {};
+      return {
+        stderr: Predicate.hasProperty(cause, 'stderr') && typeof cause.stderr === 'string' ? cause.stderr : undefined,
+        stdout: Predicate.hasProperty(cause, 'stdout') && typeof cause.stdout === 'string' ? cause.stdout : undefined,
+      };
+    });
     const output = `${failure.stdout ?? ''}\n${failure.stderr ?? ''}`;
 
     expect(output).toContain(expected);

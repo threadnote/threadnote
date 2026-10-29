@@ -1,10 +1,14 @@
+import {Array as EffectArray} from 'effect';
 import {canonicalJson} from '../../checkpoint/canonical_json.js';
 import {parseCodeGraphFileFacts} from '../../fact/validation.js';
 import type {CodeGraphFileFacts} from '../../types.js';
 import {GRAPH_SHARE_ACTION_KEY, type GraphShareActionKey} from '../action.js';
-import {SHA256_DIGEST, SHA256_HEX, sha256Digest, type Sha256Digest} from '../digest.js';
+import {parseSha256Digest, SHA256_DIGEST, SHA256_HEX, sha256Digest, type Sha256Digest} from '../digest.js';
 import {graphSharingFailure} from '../errors.js';
 import {GRAPH_SHARE_GIT_OBJECT_ID} from '../git.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const GRAPH_SHARE_PARSE_RESULT_SCHEMA_VERSION = 1 as const;
 
@@ -42,7 +46,7 @@ export function parseGraphShareParseResult(value: unknown): GraphShareParseResul
     schemaVersion: GRAPH_SHARE_PARSE_RESULT_SCHEMA_VERSION,
     semanticDigest: parseDigest(value.semanticDigest, 'semanticDigest'),
   };
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(Object.keys(result).sort())) {
+  if (JSON.stringify(EffectRecord.keys(value).sort()) !== JSON.stringify(EffectRecord.keys(result).sort())) {
     throw graphSharingFailure('Parse-result artifact contains unsupported fields.');
   }
   if (result.facts.path !== result.normalizedPath) {
@@ -93,7 +97,7 @@ function requiredHex(value: unknown, label: string): string {
 }
 
 function requiredText(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 4_096) {
+  if (typeof value !== 'string' || Effect.pipe(value, EffectString.trim).length === 0 || value.length > 4_096) {
     throw graphSharingFailure(`Parse-result ${label} is invalid.`);
   }
   return value;
@@ -103,9 +107,9 @@ function parseDigest(value: unknown, label: string): Sha256Digest {
   if (typeof value !== 'string' || !SHA256_DIGEST.test(value)) {
     throw graphSharingFailure(`Parse-result ${label} is invalid.`);
   }
-  return value as Sha256Digest;
+  return parseSha256Digest(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }

@@ -17,14 +17,14 @@ export interface RankedJsonPrefixProjection<T> {
   readonly value: T;
 }
 
-export class AgentResponseBudgetTooSmallError extends Schema.TaggedError<AgentResponseBudgetTooSmallError>()(
-  'AgentResponseBudgetTooSmallError',
-  {
-    maximumBytes: Schema.Finite,
-    message: Schema.String,
-    minimumBytes: Schema.Finite,
-  },
-) {
+export class AgentResponseBudgetTooSmallError extends Schema.TaggedError<
+  AgentResponseBudgetTooSmallError,
+  {readonly brand: unique symbol}
+>()('AgentResponseBudgetTooSmallError', {
+  maximumBytes: Schema.Finite,
+  message: Schema.String,
+  minimumBytes: Schema.Finite,
+}) {
   static of(maximumBytes: number, minimumBytes: number): AgentResponseBudgetTooSmallError {
     return AgentResponseBudgetTooSmallError.make({
       maximumBytes,

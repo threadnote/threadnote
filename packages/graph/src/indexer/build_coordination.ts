@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect} from 'effect';
 import {estimatedMaterializationStorageBytes} from './materialization.js';
 import type {CodeGraphBuildAndActivateInput, CodeGraphIndexResourceGate} from './types.js';
@@ -26,9 +27,8 @@ export function coordinateCodeGraphBuild<A, E, R>(
     return input.legacyBuildAdmission(build({...input, legacyBuildAdmission: undefined}));
   }
   if (splitPreparation && input.preparedSpoolBudgetGate) {
-    const sourceBytes = input.inventory.files.reduce(
-      (total, file) => Math.min(Number.MAX_SAFE_INTEGER, total + file.size),
-      0,
+    const sourceBytes = EffectArray.reduce(input.inventory.files, 0, (total, file) =>
+      Math.min(Number.MAX_SAFE_INTEGER, total + file.size),
     );
     const estimate = estimatedMaterializationStorageBytes(undefined, sourceBytes, 'direct-persistent');
     const preparedBytes = Math.min(

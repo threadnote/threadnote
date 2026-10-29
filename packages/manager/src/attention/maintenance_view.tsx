@@ -1,3 +1,6 @@
+import {isManagerContextMaintenanceResult, isManagerContextMaintenanceStatusV2} from '../api/response_guards.js';
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {ShieldCheck} from 'lucide-react';
 import {WorkspaceUtilities} from '../workspace_utilities.js';
 import {Schema} from 'effect';
@@ -29,6 +32,8 @@ import {MaintenanceCaseDialog, MaintenanceTaskDialog} from './maintenance_dialog
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 import {AutomaticMemoryPanel} from './automatic_memory.js';
 import {useManagerLiveResource} from '../live/provider.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface Props {
   readonly project: string;
@@ -55,10 +60,16 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}`,
         undefined,
         {signal, timeoutMilliseconds: 10_000},
+        isManagerContextMaintenanceStatusV2,
       ),
     [props.project],
   );
-  const live = useManagerLiveResource('context-maintenance', props.project, readStatus);
+  const live = useManagerLiveResource(
+    'context-maintenance',
+    props.project,
+    readStatus,
+    isManagerContextMaintenanceStatusV2,
+  );
   const legacyStatus = !live.active || live.snapshot.status === 'unsupported';
   const [tab, setTab] = useState<'decisions' | 'recovery' | 'history' | 'hygiene'>('decisions');
   const [snapshot, setSnapshot] = useState<{
@@ -155,6 +166,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       try {
         const result = await api<ManagerContextMaintenanceStatusV2>(
           `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}`,
+          undefined,
+          undefined,
+          isManagerContextMaintenanceStatusV2,
         );
         if (cancelled || mutationEpoch.current !== epoch) return;
         if (!validMaintenanceStatus(result))
@@ -182,7 +196,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         const reportRevision = JSON.stringify([
           result.generation,
           result.page?.generation,
-          result.projects.find(item => item.project === props.project),
+          EffectOption.getOrUndefined(EffectArray.findFirst(result.projects, item => item.project === props.project)),
         ]);
         if (
           props.healthLegacy !== false &&
@@ -243,7 +257,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     const reportRevision = JSON.stringify([
       result.generation,
       result.page?.generation,
-      result.projects.find(item => item.project === props.project),
+      EffectOption.getOrUndefined(EffectArray.findFirst(result.projects, item => item.project === props.project)),
     ]);
     if (
       props.healthLegacy !== false &&
@@ -310,11 +324,16 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     try {
       const result = await api<
         ManagerContextMaintenanceStatusV2 | {status: 'undone' | 'already-undone' | 'conflict'; reason?: string}
-      >('/api/attention/context-maintenance', {
-        project,
-        action,
-        ...(receiptId ? {receiptId} : {}),
-      });
+      >(
+        '/api/attention/context-maintenance',
+        {
+          project,
+          action,
+          ...(receiptId ? {receiptId} : {}),
+        },
+        undefined,
+        isManagerContextMaintenanceResult,
+      );
       if (!mounted.current || activeProject.current !== project || projectEpoch.current !== epoch) return;
       if ('version' in result) {
         setSnapshot({project, status: result});
@@ -322,7 +341,15 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         if (legacyStatus && (action === 'resume' || action === 'run-now')) setRefresh(value => value + 1);
       } else if (result.status === 'conflict') {
         setError(maintenanceUndoConflictMessage(result.reason));
-        setConflictSubjectUri(status?.receipts.find(item => item.receiptId === receiptId)?.subjectUri);
+        setConflictSubjectUri(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(status?.receipts), __effectArrayReceiver =>
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(__effectArrayReceiver, item => item.receiptId === receiptId),
+              ),
+            ),
+          )?.subjectUri,
+        );
       } else {
         setNotice(
           result.status === 'already-undone'
@@ -336,7 +363,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       if (mounted.current && activeProject.current === project && projectEpoch.current === epoch) {
         if (action === 'undo' && Schema.is(ManagerApiError)(cause) && cause.status === 409) {
           setError(maintenanceUndoConflictMessage(cause.message));
-          setConflictSubjectUri(status?.receipts.find(item => item.receiptId === receiptId)?.subjectUri);
+          setConflictSubjectUri(
+            EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(status?.receipts), items =>
+                EffectOption.getOrUndefined(EffectArray.findFirst(items, item => item.receiptId === receiptId)),
+              ),
+            )?.subjectUri,
+          );
         } else {
           if (maintenanceReadRequiresRedaction(cause)) redactProjectEvidence(project);
           setError(errorMessage(cause));
@@ -361,6 +394,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     try {
       const page = await api<ManagerContextMaintenanceStatusV2>(
         `/api/attention/context-maintenance?project=${encodeURIComponent(project)}&${kind === 'cases' ? 'caseCursor' : 'receiptCursor'}=${encodeURIComponent(cursor)}`,
+        undefined,
+        undefined,
+        isManagerContextMaintenanceStatusV2,
       );
       if (!mounted.current || activeProject.current !== project || projectEpoch.current !== epoch) return;
       const merged = mergeMaintenanceStatusPage(current, page, kind);
@@ -379,12 +415,17 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   }
 
   const summary = report.maintenance;
-  const cases = (status?.cases ?? []).filter(item => item.project === props.project);
+  const cases = EffectArrayPipe(status?.cases ?? [], __effectArrayValues2 =>
+    EffectArray.filter(
+      __effectArrayValues2,
+      (item, __effectArrayIndex3) => __effectArrayIndex3 in __effectArrayValues2 && item.project === props.project,
+    ),
+  );
   const groups = healthDecisionGroups(report, cases);
   const moreDecisionCases =
     status?.page?.caseNextCursor !== undefined &&
     (status.counts?.['needs-decision'] ?? Infinity) >
-      cases.filter(item => item.disposition === 'needs-decision').length;
+      EffectArray.filter(cases, item => item.disposition === 'needs-decision').length;
   const decisionCount =
     (automatic?.project === props.project ? automatic.ready : 0) +
     Math.max(
@@ -392,9 +433,21 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       status?.counts?.decisionMemories ?? 0,
       groups.length,
       new Set(
-        status?.cases
-          .filter(item => item.project === props.project && item.disposition === 'needs-decision')
-          .map(item => item.memoryId) ?? [],
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(status), __status => {
+            const __cases = __status.cases;
+            return EffectArray.map(
+              EffectArray.filter(
+                __cases,
+                (__item, __effectArrayIndex) =>
+                  __effectArrayIndex in __cases &&
+                  __item.project === props.project &&
+                  __item.disposition === 'needs-decision',
+              ),
+              __item => __item.memoryId,
+            );
+          }),
+        ) ?? [],
       ).size,
     );
   const onDecisionCountChange = props.onDecisionCountChange;
@@ -405,7 +458,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   useEffect(() => () => onDecisionCountChange?.(props.project, undefined), [onDecisionCountChange, props.project]);
   const citation = summary?.citationCoverage;
   const semantic = summary?.semanticCoverage ?? report.semanticCompleteness;
-  const semanticProgress = status?.semanticCoverage?.find(item => item.project === props.project);
+  const semanticProgress = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(status?.semanticCoverage), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, item => item.project === props.project)),
+    ),
+  );
   const semanticState = semanticProgress?.state ?? semantic.state;
   const semanticScanComplete =
     semanticProgress === undefined || (semanticProgress.extractionComplete && semanticProgress.comparisonComplete);
@@ -415,7 +472,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       : citation?.state === 'unavailable' && semanticState === 'unavailable'
         ? 'unavailable'
         : 'partial';
-  const projectProgress = status?.projects.find(item => item.project === props.project);
+  const projectProgress = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(status?.projects), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, item => item.project === props.project)),
+    ),
+  );
   const emptyProject =
     projectProgress === undefined && status?.preparation?.complete === true && report.recordsScanned === 0;
   const scanComplete =
@@ -438,23 +499,41 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             : 'Scanning';
   const causes =
     status?.groups === undefined
-      ? groupMaintenanceCauses((status?.cases ?? []).filter(item => item.project === props.project))
-      : status.groups
-          .filter(
-            item =>
-              item.project === props.project &&
-              ['queued', 'repairing', 'waiting-evidence', 'deferred-policy'].includes(item.disposition),
-          )
-          .map(item => ({
+      ? groupMaintenanceCauses(
+          EffectArrayPipe(status?.cases ?? [], __effectArrayValues2 =>
+            EffectArray.filter(
+              __effectArrayValues2,
+              (item, __effectArrayIndex3) =>
+                __effectArrayIndex3 in __effectArrayValues2 && item.project === props.project,
+            ),
+          ),
+        )
+      : EffectArray.map(
+          EffectArrayPipe(status.groups, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (item, __effectArrayIndex2) =>
+                __effectArrayIndex2 in __effectArrayValues &&
+                item.project === props.project &&
+                ['queued', 'repairing', 'waiting-evidence', 'deferred-policy'].includes(item.disposition),
+            ),
+          ),
+          item => ({
             key: item.causeKey,
             reason: item.reason,
             repositoryId: item.repositoryId,
             count: item.affectedMemories,
             nextAttemptAt: item.nextAttemptAt,
-          }));
-  const receipts = (status?.receipts ?? []).filter(item => item.project === props.project);
+          }),
+        );
+  const receipts = EffectArrayPipe(status?.receipts ?? [], __effectArrayValues2 =>
+    EffectArray.filter(
+      __effectArrayValues2,
+      (item, __effectArrayIndex3) => __effectArrayIndex3 in __effectArrayValues2 && item.project === props.project,
+    ),
+  );
   const dispositionCount = (disposition: string) =>
-    status?.counts?.[disposition] ?? cases.filter(item => item.disposition === disposition).length;
+    status?.counts?.[disposition] ?? EffectArray.filter(cases, item => item.disposition === disposition).length;
   if (
     blockedProject === props.project ||
     (!legacyStatus &&
@@ -502,25 +581,26 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         onSummaryChange={(project, summary) => setAutomatic(summary ? {project, ...summary} : undefined)}
       />
       <div className="workspace-tabs" role="tablist" aria-label="Context Health sections">
-        {(
+        {EffectArray.map(
           [
             ['decisions', 'Needs a decision'],
             ['recovery', 'Automatic recovery'],
             ['history', 'History'],
             ['hygiene', 'Hygiene'],
-          ] as const
-        ).map(([value, label]) => (
-          <button
-            key={value}
-            role="tab"
-            aria-selected={tab === value}
-            className={tab === value ? 'is-active' : undefined}
-            onClick={() => setTab(value)}
-          >
-            {label}
-            {value === 'decisions' && decisionCount > 0 ? <span>{decisionCount}</span> : null}
-          </button>
-        ))}
+          ] as const,
+          ([value, label]) => (
+            <button
+              key={value}
+              role="tab"
+              aria-selected={tab === value}
+              className={tab === value ? 'is-active' : undefined}
+              onClick={() => setTab(value)}
+            >
+              {label}
+              {value === 'decisions' && decisionCount > 0 ? <span>{decisionCount}</span> : null}
+            </button>
+          ),
+        )}
       </div>
       <p role="status" aria-live="polite" className="workspace-note">
         <ShieldCheck />
@@ -662,7 +742,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           {status.error.diagnostic ? (
             <>
               <p>{status.error.diagnostic.summary}</p>
-              <p>Stage: {status.error.diagnostic.stage.replaceAll('-', ' ')}</p>
+              <p>Stage: {Effect.pipe(status.error.diagnostic.stage, EffectString.replaceAll('-', ' '))}</p>
               {status.error.diagnostic.memoryUri ? (
                 <p>
                   <code>{status.error.diagnostic.memoryUri}</code>
@@ -855,7 +935,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         <details>
           <summary>Coverage details and scan progress</summary>
           {status?.preparation?.incompleteReason ? (
-            <p>Inventory check: {status.preparation.incompleteReason.replaceAll('-', ' ')}. Progress is preserved.</p>
+            <p>
+              Inventory check: {Effect.pipe(status.preparation.incompleteReason, EffectString.replaceAll('-', ' '))}.
+              Progress is preserved.
+            </p>
           ) : null}
           <p>
             {report.recordsScanned.toLocaleString()} records scanned.{' '}
@@ -863,14 +946,19 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
               ? `${projectProgress.checked} of ${projectProgress.eligible} maintenance tasks checked.`
               : 'No completed maintenance checkpoint yet.'}
           </p>
-          {citation?.reasons.map(reason => (
+          {EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(citation?.reasons), __effectArrayReceiver =>
+              EffectArray.map(__effectArrayReceiver, reason => (
+                <p key={reason.reason}>
+                  {reason.count} — {Effect.pipe(reason.reason, EffectString.replaceAll('-', ' '))}.{' '}
+                  {maintenanceRecoveryInstruction(reason.reason)}
+                </p>
+              )),
+            ),
+          )}
+          {EffectArray.map(semantic.unknownReasons, reason => (
             <p key={reason.reason}>
-              {reason.count} — {reason.reason.replaceAll('-', ' ')}. {maintenanceRecoveryInstruction(reason.reason)}
-            </p>
-          ))}
-          {semantic.unknownReasons?.map(reason => (
-            <p key={reason.reason}>
-              {reason.count} semantic checks: {reason.reason.replaceAll('-', ' ')}.
+              {reason.count} semantic checks: {Effect.pipe(reason.reason, EffectString.replaceAll('-', ' '))}.
             </p>
           ))}
         </details>
@@ -884,7 +972,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         {groups.length === 0 ? (
           <p>No decisions are waiting in the loaded context. Open Automatic recovery to inspect evidence coverage.</p>
         ) : null}
-        {groups.map(group => (
+        {EffectArray.map(groups, group => (
           <article key={group.key} className="attention-card health-record health-decision-card">
             <header>
               <div>
@@ -905,43 +993,48 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 Open memory
               </button>
             ) : null}
-            {group.preview?.code.map(code => (
-              <section className="health-code-preview" key={code.citationId}>
-                <h4>{code.targetLabel ?? code.path}</h4>
-                <p>
-                  {code.path}
-                  {code.line ? `:${code.line}` : ''}
-                </p>
-                {code.evidence ? (
-                  code.evidence.excerpts.map(excerpt => (
-                    <section key={`${excerpt.provenance}:${excerpt.excerptHash}`}>
-                      <p>
-                        {excerpt.provenance === 'historical-verified'
-                          ? 'Historical evidence preserved; does not verify current source'
-                          : excerpt.supportsCitation
-                            ? 'Current source supports this citation'
-                            : 'Current source changed; review the claim'}
-                      </p>
-                      <p>
-                        {excerpt.source.path}:{excerpt.startLine} · {excerpt.source.sourceCommit}
-                      </p>
-                      <pre>{excerpt.content}</pre>
-                    </section>
-                  ))
-                ) : code.excerpt ? (
-                  <pre>{code.excerpt}</pre>
-                ) : (
-                  <p>Open the review to compare source evidence.</p>
-                )}
-              </section>
-            ))}
-            {group.findings.map(finding => (
+            {EffectOption.getOrUndefined(
+              EffectOption.map(EffectOption.fromNullishOr(group.preview?.code), __effectArrayReceiver2 =>
+                EffectArray.map(__effectArrayReceiver2, code => (
+                  <section className="health-code-preview" key={code.citationId}>
+                    <h4>{code.targetLabel ?? code.path}</h4>
+                    <p>
+                      {code.path}
+                      {code.line ? `:${code.line}` : ''}
+                    </p>
+                    {code.evidence ? (
+                      EffectArray.map(code.evidence.excerpts, excerpt => (
+                        <section key={`${excerpt.provenance}:${excerpt.excerptHash}`}>
+                          <p>
+                            {excerpt.provenance === 'historical-verified'
+                              ? 'Historical evidence preserved; does not verify current source'
+                              : excerpt.supportsCitation
+                                ? 'Current source supports this citation'
+                                : 'Current source changed; review the claim'}
+                          </p>
+                          <p>
+                            {excerpt.source.path}:{excerpt.startLine} · {excerpt.source.sourceCommit}
+                          </p>
+                          <pre>{excerpt.content}</pre>
+                        </section>
+                      ))
+                    ) : code.excerpt ? (
+                      <pre>{code.excerpt}</pre>
+                    ) : (
+                      <p>Open the review to compare source evidence.</p>
+                    )}
+                  </section>
+                )),
+              ),
+            )}
+            {EffectArray.map(group.findings, finding => (
               <section key={finding.caseId ?? finding.id} className="health-finding">
-                <h4>{finding.category.replaceAll('-', ' ')}</h4>
+                <h4>{Effect.pipe(finding.category, EffectString.replaceAll('-', ' '))}</h4>
                 <p>{finding.summary}</p>
                 <p>
-                  {finding.confidence} confidence · {finding.repairability.replaceAll('-', ' ')}. The engine stopped
-                  because this requires a supported content or authority decision.
+                  {finding.confidence} confidence ·{' '}
+                  {Effect.pipe(finding.repairability, EffectString.replaceAll('-', ' '))}. The engine stopped because
+                  this requires a supported content or authority decision.
                 </p>
                 <button type="button" className="health-primary-action" onClick={() => setSelected(finding)}>
                   Compare evidence and preview change
@@ -950,7 +1043,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             ))}
             {group.cases.length > 0 ? (
               <section className="health-finding">
-                {[...new Set(group.cases.map(item => item.reason))].map(reason => (
+                {EffectArray.map([...new Set(EffectArray.map(group.cases, item => item.reason))], reason => (
                   <div key={reason}>
                     <h4>{maintenanceDecisionLabel(reason)}</h4>
                     {group.preview || group.cases.length > 1 ? <p>{maintenanceDecisionExplanation(reason)}</p> : null}
@@ -1029,9 +1122,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         {causes.length === 0 ? (
           <p>No blocked recovery groups are reported. Queued evidence checks are tracked in coverage.</p>
         ) : (
-          causes.map(group => (
+          EffectArray.map(causes, group => (
             <article key={group.key} className="attention-card health-recovery-card">
-              <h4>{group.reason.replaceAll('-', ' ')}</h4>
+              <h4>{Effect.pipe(group.reason, EffectString.replaceAll('-', ' '))}</h4>
               <p>
                 {group.count} {status?.groups === undefined ? 'affected anchors or checks' : 'affected memories'}
                 {group.repositoryId ? ' in one repository' : ''}.
@@ -1074,12 +1167,12 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             {status!.omittedCases} additional case details are outside this bounded view. Totals include those cases.
           </p>
         ) : null}
-        {receipts.map(receipt => (
+        {EffectArray.map(receipts, receipt => (
           <article key={receipt.receiptId} className="attention-card health-history-card">
             <p>
               {receipt.state === 'applied'
                 ? 'Safe local structural change applied'
-                : receipt.state.replaceAll('-', ' ')}{' '}
+                : Effect.pipe(receipt.state, EffectString.replaceAll('-', ' '))}{' '}
               · {new Date(receipt.timestamp).toLocaleString()}
             </p>
             <div className="health-record-actions">
@@ -1111,10 +1204,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         <details>
           <summary>Bounded maintenance diagnostics</summary>
           <p>Evidence generation: {projectProgress?.generation ?? status?.generation ?? 'unavailable'}.</p>
-          {cases.map(item => (
+          {EffectArray.map(cases, item => (
             <p key={item.caseId}>
-              {item.disposition.replaceAll('-', ' ')}: {item.reason.replaceAll('-', ' ')} · {item.attemptCount} attempts
-              · last checked {item.lastChecked}{' '}
+              {Effect.pipe(item.disposition, EffectString.replaceAll('-', ' '))}:{' '}
+              {Effect.pipe(item.reason, EffectString.replaceAll('-', ' '))} · {item.attemptCount} attempts · last
+              checked {item.lastChecked}{' '}
               <button
                 type="button"
                 onClick={() => setInspectedCase({caseId: item.caseId, evidenceRevision: item.evidenceRevision})}
@@ -1156,19 +1250,25 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           project={props.project}
           caseId={inspectedCase.caseId}
           memoryUri={inspectedCase.memoryUri}
-          initialCase={cases.find(item => item.caseId === inspectedCase.caseId)}
+          initialCase={EffectOption.getOrUndefined(
+            EffectArray.findFirst(cases, item => item.caseId === inspectedCase.caseId),
+          )}
           relatedCases={
-            groups.find(
-              group =>
-                (inspectedCase.memoryUri === undefined || group.uri === inspectedCase.memoryUri) &&
-                group.cases.some(item => item.caseId === inspectedCase.caseId),
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                groups,
+                __effectArrayValue =>
+                  !!(group =>
+                    (inspectedCase.memoryUri === undefined || group.uri === inspectedCase.memoryUri) &&
+                    EffectArray.some(group.cases, item => item.caseId === inspectedCase.caseId))(__effectArrayValue),
+              ),
             )?.cases
           }
           title={inspectedCase.title}
           stale={
             inspectedCase.evidenceRevision !== undefined &&
-            cases.find(item => item.caseId === inspectedCase.caseId)?.evidenceRevision !==
-              inspectedCase.evidenceRevision
+            EffectOption.getOrUndefined(EffectArray.findFirst(cases, item => item.caseId === inspectedCase.caseId))
+              ?.evidenceRevision !== inspectedCase.evidenceRevision
           }
           onEvidenceUpdated={adoptEvidence}
           onClose={() => setInspectedCase(undefined)}
@@ -1177,11 +1277,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             if (result.project !== activeProject.current) return;
             mutationEpoch.current += 1;
             setAppliedCases(previous => [
-              ...previous.filter(
-                item =>
-                  item.project !== result.project ||
-                  item.caseId !== result.caseId ||
-                  item.evidenceRevision !== result.evidenceRevision,
+              ...EffectArray.filter(
+                previous,
+                (item, __effectArrayIndex) =>
+                  __effectArrayIndex in previous &&
+                  (item.project !== result.project ||
+                    item.caseId !== result.caseId ||
+                    item.evidenceRevision !== result.evidenceRevision),
               ),
               result,
             ]);
@@ -1205,12 +1307,16 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           key={`${props.project}:${selected.caseId ?? selected.id}`}
           project={props.project}
           finding={selected}
-          memoryPreview={report.recordPreviews.find(preview => preview.uri === selected.repair.subjectUri)}
+          memoryPreview={EffectOption.getOrUndefined(
+            EffectArray.findFirst(report.recordPreviews, preview => preview.uri === selected.repair.subjectUri),
+          )}
           repairsAvailable={report.repositoryEvidence.state === 'available'}
           stale={
             !!props.healthLiveStale ||
             statusUnconfirmed ||
-            JSON.stringify(report.findings.find(item => item.id === selected.id)) !== JSON.stringify(selected)
+            JSON.stringify(
+              EffectOption.getOrUndefined(EffectArray.findFirst(report.findings, item => item.id === selected.id)),
+            ) !== JSON.stringify(selected)
           }
           onEvidenceUpdated={adoptEvidence}
           onClose={() => setSelected(undefined)}
@@ -1231,9 +1337,9 @@ function validMaintenanceStatus(result: ManagerContextMaintenanceStatusV2): bool
   return (
     !!result &&
     result.version === 2 &&
-    Array.isArray(result.projects) &&
-    Array.isArray(result.cases) &&
-    Array.isArray(result.receipts)
+    EffectArray.isArray(result.projects) &&
+    EffectArray.isArray(result.cases) &&
+    EffectArray.isArray(result.receipts)
   );
 }
 
@@ -1256,9 +1362,12 @@ export function adoptMaintenanceEvidence(
   item: ManagerContextMaintenanceCaseV2,
   previousCaseId = item.caseId,
 ): readonly ManagerContextMaintenanceCaseV2[] {
-  const first = cases.findIndex(value => value.caseId === previousCaseId || value.caseId === item.caseId);
+  const first = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(cases, value => value.caseId === previousCaseId || value.caseId === item.caseId),
+    () => -1,
+  );
   if (first < 0) return [...cases, item];
-  return cases.flatMap((value, index) =>
+  return EffectArray.flatMap(cases, (value, index) =>
     value.caseId === previousCaseId || value.caseId === item.caseId ? (index === first ? [item] : []) : [value],
   );
 }

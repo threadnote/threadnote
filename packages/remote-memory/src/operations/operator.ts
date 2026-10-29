@@ -6,6 +6,8 @@ import {
   verifyOperationsEvidence,
   verifyOperationsReceipt,
 } from '../operations.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runOperationsFileCommand = Effect.fn('remoteMemory.operations.fileCommand')(function* (
   command: string,
@@ -14,7 +16,7 @@ export const runOperationsFileCommand = Effect.fn('remoteMemory.operations.fileC
   return yield* Effect.gen(function* () {
     const options = parseOptions(command, arguments_);
     if (command === 'operations-plan') {
-      const raw = yield* readOperatorJson<unknown>(options.get('input')!);
+      const raw = yield* readOperatorJson(options.get('input')!);
       const manifest = yield* Effect.try(() => buildOperationsManifest(raw));
       yield* writeOperatorJsonExclusive(options.get('output')!, manifest);
       yield* Console.log(
@@ -27,7 +29,7 @@ export const runOperationsFileCommand = Effect.fn('remoteMemory.operations.fileC
       );
       return 0;
     }
-    const manifest = yield* readOperatorJson<unknown>(options.get('manifest')!);
+    const manifest = yield* readOperatorJson(options.get('manifest')!);
     if (command === 'operations-template') {
       const evidence = yield* Effect.try(() =>
         operationsEvidenceTemplate(manifest, options.get('drill')!, options.get('target')!),
@@ -36,9 +38,9 @@ export const runOperationsFileCommand = Effect.fn('remoteMemory.operations.fileC
       yield* Console.log(JSON.stringify({status: 'pending', providerActions: 'none', version: 1}));
       return 2;
     }
-    const evidence = yield* readOperatorJson<unknown>(options.get('evidence')!);
+    const evidence = yield* readOperatorJson(options.get('evidence')!);
     const existing =
-      command === 'operations-receipt-verify' ? yield* readOperatorJson<unknown>(options.get('receipt')!) : undefined;
+      command === 'operations-receipt-verify' ? yield* readOperatorJson(options.get('receipt')!) : undefined;
     const receipt = yield* Effect.try(() =>
       command === 'operations-receipt-verify'
         ? verifyOperationsReceipt(manifest, evidence, existing, options.get('at')!)
@@ -68,8 +70,14 @@ function parseOptions(command: string, arguments_: readonly string[]): ReadonlyM
   for (let index = 0; index < arguments_.length; index += 2) {
     const option = arguments_[index];
     const value = arguments_[index + 1];
-    const key = option.slice(2);
-    if (!option.startsWith('--') || !allowed.includes(key) || options.has(key) || !value || value.startsWith('--')) {
+    const key = Effect2.pipe(option, EffectString.slice(2));
+    if (
+      !Effect2.pipe(option, EffectString.startsWith('--')) ||
+      !allowed.includes(key) ||
+      options.has(key) ||
+      !value ||
+      Effect2.pipe(value, EffectString.startsWith('--'))
+    ) {
       throw new Error('Invalid operations options.');
     }
     options.set(key, value);

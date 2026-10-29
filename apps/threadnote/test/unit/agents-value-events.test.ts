@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -91,8 +92,11 @@ describe('agent setup value events', () => {
 
           const events = yield* readLocalValueEvents(config.agentContextHome);
           expect(events).toHaveLength(2);
-          expect(events.map(event => (event.kind === 'setup' ? event.supportedAgentReuse : undefined))).toEqual([0, 1]);
+          expect(
+            EffectArray.map(events, event => (event.kind === 'setup' ? event.supportedAgentReuse : undefined)),
+          ).toEqual([0, 1]);
           for (const event of events) {
+            // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
             expect(Object.keys(event).sort()).toEqual(
               ['completed', 'kind', 'supportedAgentReuse', 'timestamp', 'version'].sort(),
             );

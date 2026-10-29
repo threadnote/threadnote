@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -22,6 +23,9 @@ import {
   type RemoteMemoryExistingRecordV1,
   type RemoteMemoryPortableRecordV1,
 } from '@threadnote/remote-memory/portability';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const COMPATIBILITY_END = '2027-12-31T23:59:59.000Z';
 const PORTABLE_SEGMENT_CHARACTERS = [...'abcdefghijklmnopqrstuvwxyz0123456789'] as const;
@@ -35,7 +39,7 @@ const portableSegmentArbitrary = fc.oneof(
   fc.constantFrom(...PORTABLE_SEGMENT_CHARACTERS),
   fc
     .array(fc.constantFrom(...PORTABLE_SEGMENT_CHARACTERS), {maxLength: 8})
-    .map(characters => `seg-${characters.join('')}`),
+    .map(characters => `seg-${EffectArray.join(characters, '')}`),
 );
 
 describe('remote memory Git beta portability', () => {
@@ -50,7 +54,10 @@ describe('remote memory Git beta portability', () => {
     const plan = planGitBetaImport({
       aliasCompatibilityEndsAt: COMPATIBILITY_END,
       dryRun: true,
-      existing: [existing(diverged, '0'.repeat(64)), existing(unchanged, sha256HexSync(unchanged.content))],
+      existing: [
+        existing(diverged, Effect.pipe('0', EffectString.repeat(64))),
+        existing(unchanged, sha256HexSync(unchanged.content)),
+      ],
       policy: {projects: ['threadnote']},
       records: [unmapped, blocked, invalid, unchanged, duplicate, diverged, importable],
       shareId: 'share-1',
@@ -64,7 +71,12 @@ describe('remote memory Git beta portability', () => {
       unchanged: 1,
       would_import: 1,
     });
-    expect(plan.entries.map(entry => entry.reason).filter(Boolean)).toEqual(
+    expect(
+      EffectArray.filter(
+        EffectArray.map(plan.entries, entry => entry.reason),
+        Boolean,
+      ),
+    ).toEqual(
       expect.arrayContaining([
         'blocked:credential',
         'existing_content_conflict',
@@ -138,7 +150,9 @@ describe('remote memory Git beta portability', () => {
     // are independently revalidated during materialization.
     const arbitraryAlias = forgePlan({
       ...plan,
-      entries: [{...plan.entries[0], aliasUri: beta.sourceUri.replace('cloud-user', 'attacker')}],
+      entries: [
+        {...plan.entries[0], aliasUri: Effect.pipe(beta.sourceUri, EffectString.replace('cloud-user', 'attacker'))},
+      ],
     });
     expect(() => materializeGitBetaImport(arbitraryAlias, [beta])).toThrow('changed after planning');
     const omitted = forgePlan({
@@ -160,7 +174,7 @@ describe('remote memory Git beta portability', () => {
     });
     const changed = forgePlan({
       ...plan,
-      entries: plan.entries.map(entry => ({
+      entries: EffectArray.map(plan.entries, entry => ({
         ...entry,
         classification: entry.classification === 'duplicate' ? 'would_import' : 'duplicate',
       })),
@@ -187,7 +201,9 @@ describe('remote memory Git beta portability', () => {
       }),
     ]);
     expect(() => verifyRemoteMemoryExportPlan(exportPlan)).not.toThrow();
-    expect(() => planRemoteMemoryExport([{...records[0], contentHash: 'f'.repeat(64)}])).toThrow('hash mismatch');
+    expect(() =>
+      planRemoteMemoryExport([{...records[0], contentHash: Effect.pipe('f', EffectString.repeat(64))}]),
+    ).toThrow('hash mismatch');
     const changedFiles = [{...exportPlan.files[0], relativePath: 'durable/projects/threadnote/other.md'}];
     const rehashed = {
       ...exportPlan,
@@ -355,7 +371,7 @@ describe('remote memory Git beta portability', () => {
         fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'),
         fc.array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz 0123456789'), {maxLength: 59}),
       )
-      .map(([first, rest]) => [first, ...rest].join(''));
+      .map(([first, rest]) => EffectArray.join([first, ...rest], ''));
     fc.assert(
       fc.property(
         fc.uniqueArray(fc.record({body, project: portableSegmentArbitrary, topic: portableSegmentArbitrary}), {
@@ -364,7 +380,9 @@ describe('remote memory Git beta portability', () => {
           selector: value => `${value.project}/${value.topic}`,
         }),
         values => {
-          const sources = values.map((value, index) => source(value.project, value.topic, value.body, `user-${index}`));
+          const sources = EffectArray.map(values, (value, index) =>
+            source(value.project, value.topic, value.body, `user-${index}`),
+          );
           const forward = planGitBetaImport({
             aliasCompatibilityEndsAt: COMPATIBILITY_END,
             dryRun: false,
@@ -380,10 +398,11 @@ describe('remote memory Git beta portability', () => {
           expect(reverse).toEqual(forward);
           const records = materializeGitBetaImport(forward, sources);
           const exported = planRemoteMemoryExport([...records].reverse());
-          expect(exported.files.map(file => file.contentHash)).toEqual(
-            [...records]
-              .sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0))
-              .map(record => record.contentHash),
+          expect(EffectArray.map(exported.files, file => file.contentHash)).toEqual(
+            EffectArray.map(
+              [...records].sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0)),
+              record => record.contentHash,
+            ),
           );
           verifyRemoteMemoryExportPlan(exported);
         },
@@ -399,7 +418,7 @@ describe('remote memory portability operator', () => {
     const recordsByUri = new Map<string, RemoteMemoryPortableRecordV1>();
     const adapter: RemoteMemoryOperatorAdapter = {
       applyGitBetaImport: async input =>
-        input.records.map(record => {
+        EffectArray.map(input.records, record => {
           const status = state.has(record.uri) ? 'unchanged' : 'imported';
           state.set(record.uri, {
             aliases: record.aliases,
@@ -475,7 +494,7 @@ describe('remote memory portability operator', () => {
       records: [beta],
       shareId: 'share-1',
     });
-    current.push(existing(beta, '0'.repeat(64)));
+    current.push(existing(beta, Effect.pipe('0', EffectString.repeat(64))));
 
     await expect(applyGitBetaImportOperator(adapter, {plan, records: [beta]})).rejects.toMatchObject({
       code: 'blocked_plan',
@@ -514,13 +533,13 @@ function portabilityCitation(
 ) {
   return createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
     path: 'src/remote_memory/portability.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: overrides.repositoryIdentityKind ?? 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
     sourceDirty: overrides.sourceDirty ?? false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });
@@ -544,21 +563,24 @@ function portabilityCitationContent(topic: string, citation: ReturnType<typeof p
 }
 
 function portabilityMalformedCitationContent(topic: string): string {
-  return formatMemoryDocument(
-    'MEMORY',
-    {
-      kind: 'durable',
-      project: 'threadnote',
-      schemaVersion: MEMORY_SCHEMA_VERSION,
-      sourceAgentClient: 'codex',
-      status: 'active',
-      timestamp: '2026-08-26T20:00:00.000Z',
-      topic,
-    },
-    'Malformed citation metadata must not cross a remote boundary.',
-  ).replace(
-    `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-    `schema_version: ${MEMORY_SCHEMA_VERSION}\n  code_citation: {not-json}`,
+  return Effect.pipe(
+    formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        project: 'threadnote',
+        schemaVersion: MEMORY_SCHEMA_VERSION,
+        sourceAgentClient: 'codex',
+        status: 'active',
+        timestamp: '2026-08-26T20:00:00.000Z',
+        topic,
+      },
+      'Malformed citation metadata must not cross a remote boundary.',
+    ),
+    EffectString.replace(
+      `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+      `schema_version: ${MEMORY_SCHEMA_VERSION}\n  code_citation: {not-json}`,
+    ),
   );
 }
 
@@ -567,9 +589,9 @@ function existing(
   contentHash: string,
   aliases: readonly string[] = [sourceRecord.sourceUri],
 ): RemoteMemoryExistingRecordV1 {
-  const parsed = sourceRecord.sourceUri.split('/');
+  const parsed = Effect.pipe(sourceRecord.sourceUri, EffectString.split('/'));
   const project = parsed.at(-2)!;
-  const topic = parsed.at(-1)!.slice(0, -3);
+  const topic = Effect.pipe(parsed.at(-1)!, EffectString.slice(0, -3));
   return {
     aliases,
     contentHash,
@@ -591,14 +613,14 @@ function forgePlan(value: ReturnType<typeof planGitBetaImport>): ReturnType<type
       version: value.version,
     }),
   );
-  return {...value, planDigest: digest, planId: `tnmi_${digest.slice(0, 32)}`};
+  return {...value, planDigest: digest, planId: `tnmi_${Effect.pipe(digest, EffectString.slice(0, 32))}`};
 }
 
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, current) => {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
-    return Object.fromEntries(
-      Object.entries(current).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+    if (!current || typeof current !== 'object' || EffectArray.isArray(current)) return current;
+    return EffectRecord.fromEntries(
+      EffectRecord.toEntries(current).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
     );
   });
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Predicate} from 'effect';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -10,6 +11,9 @@ import {
   memoryCodeCitationProjectScopeMatches,
   MemoryCodeCitationCaptureError,
 } from '@threadnote/context/citation/capture';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export type DeferredCodeAnchorProjectScopeExpectationV1 = MemoryCodeCitationProjectScopeExpectationV1;
 
@@ -104,12 +108,17 @@ export function deferredCodeAnchorIntentId(input: {
       );
     }
   }
-  return sha256Hex(fields.join('\n')).pipe(Effect.map(digest => `tnca_${digest.slice(0, 32)}`));
+  return sha256Hex(EffectArray.join(fields, '\n')).pipe(
+    Effect.map(digest => `tnca_${Effect2.pipe(digest, EffectString.slice(0, 32))}`),
+  );
 }
 
 export function hasDeferredCodeAnchorIntentKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
   const allowed = new Set([...required, 'project', 'projectScope']);
-  return required.every(key => key in value) && Object.keys(value).every(key => allowed.has(key));
+  return (
+    EffectArray.every(required, key => key in value) &&
+    EffectArray.every(EffectRecord.keys(value), key => allowed.has(key))
+  );
 }
 
 export function parseMemoryCodeCitationProjectScopeReceipt(
@@ -196,7 +205,7 @@ export function isMemoryCodeCitationRecovery(value: unknown): value is MemoryCod
       hasExactKeys(value.preparation, ['action', 'arguments', 'command', 'target']) &&
       value.preparation.action === 'index-current-graph' &&
       value.preparation.command === 'threadnote graph index --no-vectors' &&
-      Array.isArray(value.preparation.arguments) &&
+      EffectArray.isArray(value.preparation.arguments) &&
       value.preparation.arguments.length === 0
     );
   }
@@ -205,7 +214,7 @@ export function isMemoryCodeCitationRecovery(value: unknown): value is MemoryCod
     hasExactKeys(value.preparation, ['action', 'arguments', 'command', 'target']) &&
     value.preparation.action === 'prepare-workset' &&
     value.preparation.command === 'threadnote workset prepare' &&
-    Array.isArray(value.preparation.arguments) &&
+    EffectArray.isArray(value.preparation.arguments) &&
     value.preparation.arguments.length === 1 &&
     typeof value.preparation.arguments[0] === 'string' &&
     value.preparation.arguments[0].length > 0
@@ -213,7 +222,7 @@ export function isMemoryCodeCitationRecovery(value: unknown): value is MemoryCod
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+  return actual.length === expected.length && EffectArray.every(actual, (key, index) => key === expected[index]);
 }

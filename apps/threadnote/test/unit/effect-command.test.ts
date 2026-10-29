@@ -3,7 +3,7 @@ import {TestError} from '@threadnote/testing/test-error';
 import {mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {Clock, Effect, Fiber, FileSystem, Path, Result} from 'effect';
+import {Clock, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   runBinaryCommandEffect,
@@ -21,6 +21,7 @@ import {
 } from '@threadnote/threadnote/telemetry/session';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {runEffect as run} from '../helpers/effect-runtime.js';
+import * as EffectRecord from 'effect/Record';
 
 describe('Effect CommandExecutor', () => {
   it('returns captured output for successful commands', async () => {
@@ -209,7 +210,7 @@ describe('Effect CommandExecutor', () => {
       expect(spawned).toBe(true);
       const childEnvironment = await readCompleteEnvironmentReceipt(receiptPath);
       expect(childEnvironment).toEqual(expect.objectContaining({THREADNOTE_DETACHED_SAFE_VALUE: 'preserved'}));
-      for (const variable of Object.keys(privateValues)) {
+      for (const variable of EffectRecord.keys(privateValues)) {
         expect(childEnvironment[variable]).toBeUndefined();
       }
     } finally {
@@ -263,8 +264,8 @@ async function readCompleteEnvironmentReceipt(path: string): Promise<Record<stri
     if (receipt !== undefined) {
       try {
         const parsed: unknown = JSON.parse(receipt);
-        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-          return parsed as Record<string, string>;
+        if (Schema.is(Schema.Record(Schema.String, Schema.String))(parsed)) {
+          return parsed;
         }
       } catch {
         // A detached writer can create the file before its complete JSON payload is visible.
@@ -280,11 +281,6 @@ function isProcessRunning(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (cause: unknown) {
-    return !(
-      typeof cause === 'object' &&
-      cause !== null &&
-      'code' in cause &&
-      (cause as {readonly code?: unknown}).code === 'ESRCH'
-    );
+    return !(typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ESRCH');
   }
 }

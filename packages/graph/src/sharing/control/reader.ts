@@ -44,6 +44,8 @@ import {
   type GraphShareEnrollment,
   type GraphShareProfileV1,
 } from '../profile.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface GraphControlReaderOptions {
   readonly casRoot: string;
@@ -104,6 +106,7 @@ export const makeGraphControlReader = Effect.fn('codeGraph.sharing.makeControlRe
     const now = yield* Clock.currentTimeMillis;
     if (!globalAdmission('listener', now)) return reply(429, {error: 'rate-limited'});
     const request = yield* HttpServerRequest.HttpServerRequest;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
     const pathname = request.url.split('?', 1)[0] ?? '';
     const operation: Operation =
       pathname === '/.well-known/threadnote-graph'
@@ -167,7 +170,8 @@ export const makeGraphControlReader = Effect.fn('codeGraph.sharing.makeControlRe
         const declared = Number(request.headers['content-length'] ?? 0);
         if (!Number.isSafeInteger(declared) || declared < 0 || declared > GRAPH_SHARE_CONTROL_MAX_BODY_BYTES)
           return reply(413, {error: 'invalid-request'});
-        if (request.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json')
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-header short-circuiting and native split indexing.
+        if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json')
           return reply(400, {error: 'invalid-request'});
         const decoded = yield* readGraphWorkerEnrollmentRequest(request.stream).pipe(Effect.option);
         if (decoded._tag === 'None') return reply(400, {error: 'invalid-request'});
@@ -191,7 +195,8 @@ export const makeGraphControlReader = Effect.fn('codeGraph.sharing.makeControlRe
         const declared = Number(request.headers['content-length'] ?? 0);
         if (!Number.isSafeInteger(declared) || declared < 0 || declared > GRAPH_SHARE_CONTROL_MAX_BODY_BYTES)
           return reply(413, {error: 'invalid-request'});
-        if (request.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json')
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-header short-circuiting and native split indexing.
+        if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json')
           return reply(400, {error: 'invalid-request'});
         const decoded = yield* readGraphControlWorkerResultRequest(request.stream).pipe(Effect.option);
         if (decoded._tag === 'None') return reply(400, {error: 'invalid-request'});
@@ -233,8 +238,9 @@ export const makeGraphControlReader = Effect.fn('codeGraph.sharing.makeControlRe
       const frontier = yield* readGraphControlFrontier(options);
       if (!(yield* authorized)) return reply(403, {error: 'forbidden'});
       if (operation === 'frontier') {
-        const expected = graphShareFrontierDiscoveryTag(scope.repositoryId, frontier.manifest.branch).slice(
-          'tn-frontier-'.length,
+        const expected = Effect2.pipe(
+          graphShareFrontierDiscoveryTag(scope.repositoryId, frontier.manifest.branch),
+          EffectString.slice('tn-frontier-'.length),
         );
         if (pathname !== `/v1/frontiers/${expected}`) return reply(404, {error: 'not-found'});
         return reply(200, {
@@ -300,7 +306,7 @@ export const readGraphControlFrontier = Effect.fn('codeGraph.sharing.readControl
   const path = yield* Path.Path;
   const layout = graphSharingLayout(path, options.threadnoteHome, options.casRoot);
   const pointerFile = graphSharingFrontierPointerPath(path, layout.frontiersRoot, scope.repositoryId);
-  const publication = options.profile.registry.canonical.startsWith('oci://')
+  const publication = Effect2.pipe(options.profile.registry.canonical, EffectString.startsWith('oci://'))
     ? yield* readGraphSharePublicationReceipt(
         options.threadnoteHome,
         graphSharePublicationAuthority(graphShareRegistryPublicationScope(options), options.profile.registry.canonical),

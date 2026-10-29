@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {runMcpBroker, type McpBrokerChild} from '@threadnote/threadnote/mcp/broker';
 
@@ -22,8 +23,8 @@ describe('MCP broker idle child retirement', () => {
       await settle();
       await vi.advanceTimersByTimeAsync(500);
       expect(session.children).toHaveLength(1);
-      expect(child.received.some(line => line.id === 3)).toBe(false);
-      expect(session.output.some(line => line.id === 2)).toBe(false);
+      expect(EffectArray.some(child.received, line => line.id === 3)).toBe(false);
+      expect(EffectArray.some(session.output, line => line.id === 2)).toBe(false);
       await session.close();
     },
   );
@@ -92,7 +93,7 @@ describe('MCP broker idle child retirement', () => {
     expect(resumed.received).toEqual([{jsonrpc: '2.0', id: 1, method: 'initialize', params: {}}]);
     resumed.emit({id: 1, result: {}});
     await settle();
-    expect(resumed.received.map(line => line.method)).toEqual([
+    expect(EffectArray.map(resumed.received, line => line.method)).toEqual([
       'initialize',
       'notifications/initialized',
       'tools/call',
@@ -100,7 +101,7 @@ describe('MCP broker idle child retirement', () => {
     expect(resumed.version).toBe('4.0.1');
     resumed.emit({id: 2, result: {ok: true}});
     await settle();
-    expect(session.output.filter(line => line.id === 1)).toHaveLength(1);
+    expect(EffectArray.filter(session.output, line => line.id === 1)).toHaveLength(1);
     expect(session.output.at(-1)).toMatchObject({id: 2, result: {ok: true}});
     await session.close();
   });
@@ -215,6 +216,23 @@ describe('MCP broker idle child retirement', () => {
   });
 });
 
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const EnvelopeSchema = Schema.StructWithRest(
+  Schema.Struct({
+    id: Schema.optionalKey(Schema.Union([Schema.String, Schema.Finite])),
+    method: Schema.optionalKey(Schema.String),
+    params: Schema.optionalKey(Schema.Unknown),
+    result: Schema.optionalKey(Schema.Unknown),
+  }),
+  [JsonRecordSchema],
+);
+
+function parseEnvelope(line: string): Envelope {
+  const value: unknown = JSON.parse(line);
+  if (!Schema.is(EnvelopeSchema)(value)) throw new Error('Invalid MCP broker envelope.');
+  return value;
+}
+
 interface Envelope {
   readonly id?: string | number;
   readonly method?: string;
@@ -260,7 +278,7 @@ function startSession(writeOutput: (line: Envelope) => Promise<void> = async () 
       return child;
     },
     writeOutput: async line => {
-      const parsed = JSON.parse(line) as Envelope;
+      const parsed = parseEnvelope(line);
       await writeOutput(parsed);
       output.push(parsed);
     },
@@ -285,7 +303,7 @@ class ControlledChild implements McpBrokerChild {
   readonly input = {
     write: (line: string) => {
       if (this.ended) throw new Error('Child input is closed');
-      this.received.push(JSON.parse(line) as Envelope);
+      this.received.push(parseEnvelope(line));
       return line.length;
     },
     flush: async () => undefined,

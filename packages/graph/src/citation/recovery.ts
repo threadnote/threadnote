@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {runtimeTextDirectoryNamePage, SystemInfo} from '@threadnote/platform/system';
@@ -183,10 +184,14 @@ const observeCitationRouteInventory = Effect.fn('codeGraph.citationRouteInventor
     if (!(yield* fs.exists(repositoryRoot))) return {names: [], overflow: false};
     return yield* runtimeTextDirectoryNamePage(repositoryRoot, MAXIMUM_RECOVERY_CHECKOUTS);
   }).pipe(Effect.orElseSucceed(() => undefined));
+  const inventoryNames = inventoryPage?.names ?? [];
   const checkoutIds = [
     ...new Set([
       ...(caller === undefined ? [] : [caller.checkoutId]),
-      ...(inventoryPage?.names ?? []).filter(name => /^[0-9a-f]{64}$/.test(name)),
+      ...EffectArray.filter(
+        inventoryNames,
+        (name, __effectArrayIndex) => __effectArrayIndex in inventoryNames && /^[0-9a-f]{64}$/.test(name),
+      ),
     ]),
   ].slice(0, MAXIMUM_RECOVERY_CHECKOUTS);
   const observations = yield* Effect.forEach(
@@ -214,12 +219,12 @@ const observeCitationRouteInventory = Effect.fn('codeGraph.citationRouteInventor
         return {
           complete:
             inventory.worktreeIds.length <= MAXIMUM_RECOVERY_ASSOCIATIONS_PER_CHECKOUT &&
-            records.every(record => record.evidence.state === 'verified'),
+            EffectArray.every(records, record => record.evidence.state === 'verified'),
           records,
           revision: [
             checkoutId,
             inventory.worktreeIds,
-            records.map(record => [
+            EffectArray.map(records, record => [
               record.association.available,
               'path' in record.association ? record.association.path : undefined,
               record.evidence.state,
@@ -237,11 +242,11 @@ const observeCitationRouteInventory = Effect.fn('codeGraph.citationRouteInventor
       }),
     {concurrency: 4},
   );
-  const records = observations.flatMap(observation => observation.records);
+  const records = EffectArray.flatMap(observations, observation => observation.records);
   const paths = [
     ...new Set([
       ...(caller === undefined ? [] : [caller.repoRoot]),
-      ...records.flatMap(record =>
+      ...EffectArray.flatMap(records, record =>
         record.association.available && record.association.path !== undefined ? [record.association.path] : [],
       ),
     ]),
@@ -292,8 +297,15 @@ export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGr
           if (!(yield* fs.exists(root))) return {names: [], overflow: false};
           return yield* runtimeTextDirectoryNamePage(root, MAXIMUM_RECOVERY_CHECKOUTS);
         }).pipe(Effect.orElseSucceed(() => undefined));
+        const pageNames = page?.names ?? [];
         return [
-          ...new Set([caller.identity.checkoutId, ...(page?.names ?? []).filter(name => /^[0-9a-f]{64}$/.test(name))]),
+          ...new Set([
+            caller.identity.checkoutId,
+            ...EffectArray.filter(
+              pageNames,
+              (name, __effectArrayIndex) => __effectArrayIndex in pageNames && /^[0-9a-f]{64}$/.test(name),
+            ),
+          ]),
         ].slice(0, MAXIMUM_RECOVERY_CHECKOUTS);
       }),
     );
@@ -315,7 +327,8 @@ export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGr
             }),
           {concurrency: 4},
         );
-        return records.filter(
+        return EffectArray.filter(
+          records,
           (record): record is Extract<CodeGraphLocalReconciliationEvidence, {readonly state: 'verified'}> =>
             record.state === 'verified',
         );
@@ -355,7 +368,10 @@ export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGr
         if (preferredIdentity.identity.repositoryId === input.repositoryId)
           callerRoute = {databasePath, ...preferredIdentity};
         else {
-          for (const prior of (yield* callerPriors).filter(prior => prior.repositoryId === input.repositoryId)) {
+          for (const prior of EffectArray.filter(
+            yield* callerPriors,
+            prior => prior.repositoryId === input.repositoryId,
+          )) {
             const aliasProof = yield* verifyObservedCitationRepositoryAlias(
               input.threadnoteHome,
               prior,
@@ -410,7 +426,7 @@ export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGr
       }
       const {caller, inventoryPage, checkoutIds, observations, records, paths, identities, registrations} =
         yield* inventory;
-      const priors = records.flatMap(record =>
+      const priors = EffectArray.flatMap(records, record =>
         record.evidence.state === 'verified' && record.evidence.repositoryId === input.repositoryId
           ? [record.evidence]
           : [],
@@ -430,7 +446,7 @@ export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGr
           routes.push({databasePath, identity, registration});
           continue;
         }
-        for (const prior of priors.filter(prior => prior.checkoutId === identity.checkoutId)) {
+        for (const prior of EffectArray.filter(priors, prior => prior.checkoutId === identity.checkoutId)) {
           const aliasProof = yield* verifyObservedCitationRepositoryAlias(
             input.threadnoteHome,
             prior,
@@ -445,14 +461,24 @@ export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGr
           }
         }
       }
-      const preferred = caller === undefined ? undefined : routes.find(route => sameIdentity(route.identity, caller));
-      const authorities = new Set(routes.map(route => `${route.identity.repositoryId}\0${route.identity.headCommit}`));
+      const preferred =
+        caller === undefined
+          ? undefined
+          : Option.getOrUndefined(
+              EffectArray.findFirst(
+                routes,
+                __effectArrayValue => !!(route => sameIdentity(route.identity, caller))(__effectArrayValue),
+              ),
+            );
+      const authorities = new Set(
+        EffectArray.map(routes, route => `${route.identity.repositoryId}\0${route.identity.headCommit}`),
+      );
       return {
         ambiguous: preferred === undefined && authorities.size > 1,
         complete:
           inventoryPage !== undefined &&
           !inventoryPage.overflow &&
-          observations.every(observation => observation.complete) &&
+          EffectArray.every(observations, observation => observation.complete) &&
           paths.length < MAXIMUM_RECOVERY_PATHS,
         checkoutIds,
         generation: sha256HexSync(
@@ -460,9 +486,9 @@ export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGr
             input.repositoryId,
             input.sourceCommit,
             inventoryPage,
-            observations.map(observation => observation.revision),
+            EffectArray.map(observations, observation => observation.revision),
             identities,
-            routes.map(route => [
+            EffectArray.map(routes, route => [
               route.identity,
               route.registration,
               route.aliasProof === undefined

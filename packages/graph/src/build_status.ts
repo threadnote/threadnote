@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, PlatformError, Ref, Schema, Semaphore} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readExclusiveFileLockOwner, type FileLockOwner} from '@threadnote/platform/file/lock';
@@ -14,10 +15,8 @@ import {
   accountCodeGraphBuildScheduling,
   observeCodeGraphBuildAdmission,
   observeCodeGraphBuildResource,
-  type CodeGraphBuildScheduling,
 } from './build_status/scheduling.js';
 import type {CodeGraphBuilderAdmissionQueue} from './builder/admission_scheduler.js';
-import type {CodeGraphCapacityFailureOperation} from './disk/capacity.js';
 import {
   CODE_GRAPH_BUILD_HASH_ID as HASH_ID,
   CODE_GRAPH_BUILD_ID as BUILD_ID,
@@ -43,217 +42,65 @@ import {
   codeGraphPathExtension,
   codeGraphSourceSizeBucket,
   retainCodeGraphSlowFileTelemetry,
-  type CodeGraphScanningMetrics,
-  type CodeGraphSlowFileTelemetry,
-  type CodeGraphSourceSizeBucket,
 } from './progress/telemetry.js';
 import {
-  type CodeGraphActivationActivity,
-  type CodeGraphDiskCapacityFailureEvidence,
-  type CodeGraphIndexSummary,
-  type CodeGraphMaterializationActivity,
-  type CodeGraphMaterializationMetrics,
-  type CodeGraphRegistrationActivity,
   type CodeGraphOverlayFallbackReason,
   type CodeGraphProgress,
-  type CodeGraphResolutionActivity,
   type CodeGraphSnapshot,
   type RepositoryIdentity,
 } from './types.js';
-
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import type {
+  CodeGraphBuildCounters,
+  CodeGraphBuildActivity,
+  CodeGraphBuildExtraction,
+  CodeGraphBuildMaterialization,
+  CodeGraphBuildActivation,
+  CodeGraphBuildResolution,
+  CodeGraphBuildRegistration,
+  CodeGraphBuildStatus,
+  ObservedCodeGraphBuildStatus,
+  CodeGraphBuildReporter,
+  CodeGraphBuildHistoryPruneResult,
+  CodeGraphBuildHistoryPruneOptions,
+} from './build_status/contracts.js';
+export type {
+  CodeGraphBuildCounters,
+  CodeGraphBuildState,
+  CodeGraphBuildLiveness,
+  CodeGraphBuildActivity,
+  CodeGraphBuildExtraction,
+  CodeGraphBuildTimings,
+  CodeGraphBuildMaterialization,
+  CodeGraphBuildCapacityFailure,
+  CodeGraphBuildError,
+  CodeGraphBuildActivation,
+  CodeGraphBuildResolution,
+  CodeGraphBuildRegistration,
+  CodeGraphBuildStatus,
+  ObservedCodeGraphBuildStatus,
+  CodeGraphBuildStatusSelection,
+  CodeGraphBuildReporter,
+  CodeGraphBuildOwnerStatusCorroboration,
+  CodeGraphBuildHistoryPruneResult,
+  CodeGraphBuildHistoryPruneOptions,
+} from './build_status/contracts.js';
+import {compareObservedBuildStatus} from './build_status/selection.js';
+export {selectCodeGraphBuildStatuses} from './build_status/selection.js';
 export {codeGraphBuildStatusError, parseCodeGraphBuildStatus} from './build_status/codec.js';
 export {CODE_GRAPH_BUILD_STATUS_SCHEMA_VERSION} from './build_status/validation.js';
 export const CODE_GRAPH_BUILD_HEARTBEAT_INTERVAL_MILLISECONDS = 2_000;
 export const CODE_GRAPH_BUILD_PROGRESS_WRITE_INTERVAL_MILLISECONDS = 250;
 export const CODE_GRAPH_BUILD_STALE_AFTER_MILLISECONDS = 15_000;
 
-class CodeGraphBuildStatusError extends Schema.TaggedError<CodeGraphBuildStatusError>()('CodeGraphBuildStatusError', {
+class CodeGraphBuildStatusError extends Schema.TaggedError<
+  CodeGraphBuildStatusError,
+  {readonly brand: unique symbol}
+>()('CodeGraphBuildStatusError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
-
-export type CodeGraphBuildState = 'completed' | 'failed' | 'queued' | 'running';
-export type CodeGraphBuildLiveness = 'abandoned' | 'active' | 'completed' | 'failed' | 'stalled';
-
-export interface CodeGraphBuildCounters {
-  readonly accepted?: number;
-  readonly completed?: number;
-  readonly edges?: number;
-  readonly embedded?: number;
-  readonly excluded?: number;
-  readonly pagesCompleted?: number;
-  readonly reused?: number;
-  readonly resolved?: number;
-  readonly rowsDeleted?: number;
-  readonly skipped?: number;
-  readonly symbols?: number;
-  readonly total?: number;
-  readonly unit?: 'files' | 'references' | 'snapshots' | 'symbols';
-}
-
-export interface CodeGraphBuildActivity {
-  readonly batchCompleted: number;
-  readonly batchTotal: number;
-  readonly bytes: number;
-  readonly classifier?: string;
-  readonly degraded?: boolean;
-  readonly factsBytes?: number;
-  readonly language: string;
-  readonly parseMilliseconds?: number;
-  readonly persistMilliseconds?: number;
-  readonly relations?: number;
-  readonly role?: string;
-  readonly sizeBucket?: CodeGraphSourceSizeBucket;
-  readonly stage: 'extracting' | 'persisting' | 'reading';
-  readonly symbols?: number;
-}
-
-export interface CodeGraphBuildExtraction {
-  readonly completedFiles: number;
-  readonly metrics?: CodeGraphScanningMetrics;
-  readonly slowFiles: number;
-  readonly topSlowFiles: readonly CodeGraphSlowFileTelemetry[];
-}
-
-export interface CodeGraphBuildTimings {
-  readonly extractionMilliseconds: number;
-  readonly persistenceMilliseconds: number;
-  readonly readingMilliseconds: number;
-  readonly serializationMilliseconds?: number;
-}
-
-export interface CodeGraphBuildMaterialization {
-  readonly activity?: CodeGraphMaterializationActivity & {readonly startedAt: string};
-  readonly metrics?: CodeGraphMaterializationMetrics;
-}
-
-export interface CodeGraphBuildCapacityFailure {
-  readonly code: 'no-space' | 'transient-io';
-  readonly evidence: CodeGraphDiskCapacityFailureEvidence;
-  readonly operation: CodeGraphCapacityFailureOperation;
-}
-
-export interface CodeGraphBuildError {
-  readonly capacity?: CodeGraphBuildCapacityFailure;
-  readonly summary: string;
-}
-
-export interface CodeGraphBuildActivation {
-  readonly activity: CodeGraphActivationActivity & {readonly startedAt: string};
-}
-
-export interface CodeGraphBuildResolution {
-  readonly activity: CodeGraphResolutionActivity & {readonly startedAt: string};
-}
-
-export interface CodeGraphBuildRegistration {
-  readonly activity: CodeGraphRegistrationActivity;
-}
-
-export interface CodeGraphBuildStatus {
-  readonly activation?: CodeGraphBuildActivation;
-  /** Privacy-safe in-flight activity; repository paths and content are intentionally omitted. */
-  readonly activity?: CodeGraphBuildActivity;
-  readonly buildId: string;
-  readonly counters: CodeGraphBuildCounters;
-  readonly error?: CodeGraphBuildError;
-  readonly eta?: {
-    readonly basis?: 'cached-fact-bytes' | 'extraction-work' | 'files' | 'final-fact-bytes' | 'source-bytes';
-    readonly confidence: 'high' | 'low' | 'medium';
-    readonly remainingMilliseconds: number;
-    readonly scope: 'phase';
-  };
-  readonly extraction?: CodeGraphBuildExtraction;
-  readonly identity: {
-    readonly checkoutId: string;
-    readonly commit: string;
-    readonly displayName?: string;
-    readonly repositoryId: string;
-    /** Opaque configured-view key; absent is the legacy complete repository view. */
-    readonly scopeId?: string;
-    readonly worktreeId: string;
-  };
-  readonly materialization?: CodeGraphBuildMaterialization;
-  readonly owner: {
-    readonly processId: number;
-    readonly processStartIdentity?: string;
-    readonly runtime: 'bun';
-    readonly runtimeVersion: string;
-  };
-  readonly phase: CodeGraphProgress['phase'];
-  readonly request?: {
-    /** Privacy-safe identity for callers waiting on the same source and extraction pipeline. */
-    readonly key: string;
-  };
-  readonly registration?: CodeGraphBuildRegistration;
-  readonly resolution?: CodeGraphBuildResolution;
-  readonly result?: {
-    readonly dirty: boolean;
-    readonly edges: number;
-    readonly files: number;
-    readonly snapshotId: string;
-    readonly symbols: number;
-    readonly overlayAssessment?: {
-      readonly outcome: 'overlay-success' | CodeGraphOverlayFallbackReason;
-    };
-  };
-  readonly schemaVersion: typeof CODE_GRAPH_BUILD_STATUS_SCHEMA_VERSION;
-  readonly scheduling?: CodeGraphBuildScheduling;
-  readonly state: CodeGraphBuildState;
-  readonly subphase?: string;
-  readonly timings?: CodeGraphBuildTimings;
-  readonly worktreeLockHeld?: boolean;
-  readonly timestamps: {
-    readonly completedAt?: string;
-    readonly heartbeatAt: string;
-    readonly lastProgressAt: string;
-    readonly phaseStartedAt: string;
-    readonly startedAt: string;
-    readonly updatedAt: string;
-  };
-}
-
-export interface ObservedCodeGraphBuildStatus extends CodeGraphBuildStatus {
-  readonly coordination?: {
-    readonly lockVerified: boolean;
-    readonly progressSilent?: boolean;
-    readonly role: 'history' | 'owner' | 'waiter';
-  };
-  /** Local-only Manager context. Never written into the privacy-safe build status document. */
-  readonly managerContext?: {
-    readonly branch?: string;
-    readonly worktreePath: string;
-  };
-  readonly observation: {
-    readonly heartbeatAgeMilliseconds: number;
-    readonly liveness: CodeGraphBuildLiveness;
-    readonly reason?: 'heartbeat-stale' | 'owner-exited' | 'pid-reused';
-  };
-}
-
-export interface CodeGraphBuildStatusSelection {
-  /** One authoritative owner or most useful terminal status per worktree. */
-  readonly builds: readonly ObservedCodeGraphBuildStatus[];
-  /** Live lock contenders, retained separately from the authoritative owner. */
-  readonly waiters: readonly ObservedCodeGraphBuildStatus[];
-}
-
-export interface CodeGraphBuildReporter {
-  readonly admission: (queue?: CodeGraphBuilderAdmissionQueue) => Effect.Effect<void, never>;
-  readonly complete: (summary: CodeGraphIndexSummary) => Effect.Effect<void, never>;
-  readonly completeSnapshot: (snapshot: CodeGraphSnapshot) => Effect.Effect<void, never>;
-  readonly fail: (cause: unknown) => Effect.Effect<void, never>;
-  readonly heartbeat: Effect.Effect<void, never>;
-  /** Exact privacy-safe owner instance persisted with resumable build state. */
-  readonly ownerIdentity: CodeGraphBuildOwnerIdentity;
-  readonly progress: (progress: CodeGraphProgress) => Effect.Effect<void, never>;
-  readonly resource: (
-    resource: import('./build/resources.js').CodeGraphBuildResource | undefined,
-  ) => Effect.Effect<void, never>;
-  readonly markWorktreeLockHeld: (held: boolean) => Effect.Effect<void, never>;
-}
-
-export type CodeGraphBuildOwnerStatusCorroboration = 'absent' | 'matches' | 'mismatch';
 
 interface ReporterState {
   readonly accountedAtMilliseconds: number;
@@ -287,26 +134,6 @@ const BUILD_HISTORY_IO_RETRY_MILLISECONDS = 1_000;
 const BUILD_STATUS_FILE = /^([0-9a-f-]{16,64})\.json$/;
 const BUILD_STATUS_VIEW_DIRECTORY = /^[0-9a-f]{64}(?:\.scope-[0-9a-f]{64})?$/;
 
-export type CodeGraphBuildHistoryPruneResult =
-  | {readonly state: 'complete'}
-  | {readonly cursorToken: string; readonly removedAbandoned?: true; readonly state: 'progress'}
-  | {
-      readonly blockedCode: 'invalid-sidecar' | 'io-error' | 'permission-denied';
-      readonly retryAfterMilliseconds: number;
-      readonly state: 'deferred';
-    };
-
-export interface CodeGraphBuildHistoryPruneOptions {
-  /** @internal Deterministic replacement seam before exact pair removal. */
-  readonly beforeFinalStatusObservation?: () => Effect.Effect<void, unknown>;
-  /** @internal Deterministic interruption seam after context removal. */
-  readonly afterManagerContextRemoval?: () => Effect.Effect<void, unknown>;
-  /** @internal Deterministic directory replacement seam after cursor authority freezes. */
-  readonly beforeCursorRecovery?: () => Effect.Effect<void, unknown>;
-  /** @internal Deterministic directory replacement seam before cursor state changes. */
-  readonly beforeCursorMutation?: () => Effect.Effect<void, unknown>;
-}
-
 export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeReporter')(function* (
   identity: RepositoryIdentity,
   layout: CodeGraphLayout,
@@ -317,14 +144,16 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const buildId = (yield* crypto.randomUUIDv4()).toLowerCase();
-  const pathHashSalt = (yield* crypto.randomUUIDv4()).toLowerCase();
+  const buildId = Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.toLowerCase);
+  const pathHashSalt = Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.toLowerCase);
   const startedAtMilliseconds = yield* Clock.currentTimeMillis;
   const startedAt = DateTime.formatIso(DateTime.makeUnsafe(startedAtMilliseconds));
   const processStartIdentity = yield* system.processStartIdentity(system.processId);
   const file = codeGraphBuildStatusPath(path, layout, identity.worktreeId, buildId);
   let writeSequence = 0;
-  const reporterHistoryAuthority = {current: undefined as BuildHistoryDirectoryAuthority | undefined};
+  const reporterHistoryAuthority = {
+    current: undefined as BuildHistoryDirectoryAuthority | undefined,
+  };
   const state = yield* Ref.make<ReporterState>({
     accountedAtMilliseconds: startedAtMilliseconds,
     etaTracker: makeCodeGraphEtaTracker(),
@@ -334,7 +163,7 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
       counters: {},
       identity: {
         checkoutId: identity.checkoutId,
-        commit: identity.headCommit.slice(0, 12),
+        commit: Effect2.pipe(identity.headCommit, EffectString.slice(0, 12)),
         displayName: boundedText(identity.displayName, 256),
         repositoryId: identity.repositoryId,
         ...(layout.scopeId === undefined ? {} : {scopeId: layout.scopeId}),
@@ -402,7 +231,9 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
     snapshot: CodeGraphSnapshot,
     reusedFiles: number,
     skippedFiles: number,
-    overlayAssessment?: {readonly outcome: 'overlay-success' | CodeGraphOverlayFallbackReason},
+    overlayAssessment?: {
+      readonly outcome: 'overlay-success' | CodeGraphOverlayFallbackReason;
+    },
   ) =>
     persist((current, now) => {
       const timestamp = new Date(now).toISOString();
@@ -434,7 +265,11 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
             symbols: snapshot.symbolCount,
           },
           state: 'completed',
-          scheduling: {...current.status.scheduling, blocker: undefined, resource: undefined},
+          scheduling: {
+            ...current.status.scheduling,
+            blocker: undefined,
+            resource: undefined,
+          },
           subphase: 'ready',
           timings: undefined,
           timestamps: {
@@ -479,7 +314,9 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
         summary.snapshot.dirty && summary.materialization?.mode === 'incremental-overlay'
           ? {outcome: 'overlay-success'}
           : summary.snapshot.dirty && summary.materialization?.mode === 'full'
-            ? {outcome: summary.materialization.fallbackReason ?? 'staging-unavailable'}
+            ? {
+                outcome: summary.materialization.fallbackReason ?? 'staging-unavailable',
+              }
             : undefined,
       ),
     completeSnapshot: snapshot => complete(snapshot, 0, 0),
@@ -499,7 +336,11 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
               : undefined,
             resolution: undefined,
             state: 'failed',
-            scheduling: {...current.status.scheduling, blocker: undefined, resource: undefined},
+            scheduling: {
+              ...current.status.scheduling,
+              blocker: undefined,
+              resource: undefined,
+            },
             subphase: 'failed',
             timings: undefined,
             timestamps: {
@@ -538,8 +379,17 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
             ...latest,
             status: {
               ...latest.status,
-              eta: Option.getOrUndefined(Option.map(eta, value => ({...value, scope: 'phase' as const}))),
-              timestamps: {...latest.status.timestamps, heartbeatAt: timestamp, updatedAt: timestamp},
+              eta: Option.getOrUndefined(
+                Option.map(eta, value => ({
+                  ...value,
+                  scope: 'phase' as const,
+                })),
+              ),
+              timestamps: {
+                ...latest.status.timestamps,
+                heartbeatAt: timestamp,
+                updatedAt: timestamp,
+              },
             },
           };
         }, true);
@@ -556,7 +406,10 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
           ...current,
           status: {
             ...current.status,
-            timestamps: {...current.status.timestamps, updatedAt: new Date(now).toISOString()},
+            timestamps: {
+              ...current.status.timestamps,
+              updatedAt: new Date(now).toISOString(),
+            },
             worktreeLockHeld: held,
           },
         }),
@@ -586,7 +439,13 @@ export const makeCodeGraphBuildReporter = Effect.fn('codeGraph.buildStatus.makeR
         },
       ),
     resource: resource =>
-      persist(current => ({...current, status: observeCodeGraphBuildResource(current.status, resource)}), true),
+      persist(
+        current => ({
+          ...current,
+          status: observeCodeGraphBuildResource(current.status, resource),
+        }),
+        true,
+      ),
   } satisfies CodeGraphBuildReporter;
 });
 
@@ -597,7 +456,8 @@ export const readCodeGraphBuildStatuses = Effect.fn('codeGraph.buildStatus.readC
   const path = yield* Path.Path;
   const statuses =
     layout.scopeId === undefined
-      ? (yield* readBuildStatusesBelow(fs, path, path.join(layout.repositoryRoot, STATUS_DIRECTORY))).filter(
+      ? EffectArray.filter(
+          yield* readBuildStatusesBelow(fs, path, path.join(layout.repositoryRoot, STATUS_DIRECTORY)),
           status => status.identity.scopeId === undefined,
         )
       : yield* readWorktreeStatuses(
@@ -645,7 +505,11 @@ export function codeGraphBuildHistoryInventory(page: {
   readonly overflow: boolean;
 }): readonly string[] | undefined {
   if (page.overflow || page.names.length > CODE_GRAPH_BUILD_HISTORY_DIRECTORY_ENTRY_LIMIT) return undefined;
-  const statusNames = page.names.filter(name => BUILD_STATUS_FILE.test(name)).sort();
+  const names = page.names;
+  const statusNames = EffectArray.filter(
+    names,
+    (name, __effectArrayIndex) => __effectArrayIndex in names && BUILD_STATUS_FILE.test(name),
+  ).sort();
   return statusNames.length <= CODE_GRAPH_BUILD_HISTORY_STATUS_LIMIT ? statusNames : undefined;
 }
 
@@ -676,7 +540,9 @@ export const pruneCodeGraphBuildHistoryUnit = Effect.fn('codeGraph.buildStatus.p
   return yield* Effect.gen(function* () {
     const authority = yield* inspectBuildHistoryDirectory(fs, path, layout, worktreeId);
     if (authority === undefined) {
-      return {state: 'complete'} as const satisfies CodeGraphBuildHistoryPruneResult;
+      return {
+        state: 'complete',
+      } as const satisfies CodeGraphBuildHistoryPruneResult;
     }
     return yield* pruneCodeGraphBuildHistoryUnitWithServices(
       fs,
@@ -710,7 +576,10 @@ export const maintainCodeGraphBuildHistoryUnit = Effect.fn('codeGraph.buildStatu
   const system = yield* SystemInfo;
   return yield* Effect.gen(function* () {
     const authority = yield* inspectBuildHistoryDirectory(fs, path, layout, worktreeId);
-    if (authority === undefined) return {state: 'complete'} as const satisfies CodeGraphBuildHistoryPruneResult;
+    if (authority === undefined)
+      return {
+        state: 'complete',
+      } as const satisfies CodeGraphBuildHistoryPruneResult;
     return yield* runPersistedCodeGraphBuildHistoryUnit(
       fs,
       path,
@@ -732,7 +601,10 @@ export const readAllCodeGraphBuildStatuses = Effect.fn('codeGraph.buildStatus.re
   const root = codeGraphRepositoriesRoot(path, threadnoteHome);
   if (!(yield* regularDirectory(fs, root))) return [];
   const statuses = yield* Effect.forEach(
-    (yield* fs.readDirectory(root)).filter(name => HASH_ID.test(name)).sort(),
+    EffectArray.filter(
+      yield* fs.readDirectory(root),
+      __effectArrayValue2 => !!(name => HASH_ID.test(name))(__effectArrayValue2),
+    ).sort(),
     checkoutId =>
       readBuildStatusesBelow(fs, path, path.join(root, checkoutId, STATUS_DIRECTORY)).pipe(
         Effect.flatMap(statuses => annotateBuildCoordinationByWorktree(fs, path, threadnoteHome, checkoutId, statuses)),
@@ -747,7 +619,8 @@ export const currentCodeGraphBuildStatus = Effect.fn('codeGraph.buildStatus.curr
   layout: CodeGraphLayout,
   worktreeId: string,
 ) {
-  const statuses = (yield* readCodeGraphBuildStatuses(layout)).filter(
+  const statuses = EffectArray.filter(
+    yield* readCodeGraphBuildStatuses(layout),
     status => status.identity.worktreeId === worktreeId,
   );
   return statuses.sort(compareObservedBuildStatus)[0];
@@ -762,15 +635,25 @@ export function observeCodeGraphBuildStatus(
     ? Math.max(0, observation.nowMilliseconds - heartbeat)
     : Number.POSITIVE_INFINITY;
   if (status.state === 'completed') {
-    return {...status, observation: {heartbeatAgeMilliseconds, liveness: 'completed'}};
+    return {
+      ...status,
+      observation: {heartbeatAgeMilliseconds, liveness: 'completed'},
+    };
   }
   if (status.state === 'failed') {
-    return {...status, observation: {heartbeatAgeMilliseconds, liveness: 'failed'}};
+    return {
+      ...status,
+      observation: {heartbeatAgeMilliseconds, liveness: 'failed'},
+    };
   }
   if (!observation.isRunning) {
     return {
       ...status,
-      observation: {heartbeatAgeMilliseconds, liveness: 'abandoned', reason: 'owner-exited'},
+      observation: {
+        heartbeatAgeMilliseconds,
+        liveness: 'abandoned',
+        reason: 'owner-exited',
+      },
     };
   }
   if (
@@ -780,16 +663,27 @@ export function observeCodeGraphBuildStatus(
   ) {
     return {
       ...status,
-      observation: {heartbeatAgeMilliseconds, liveness: 'abandoned', reason: 'pid-reused'},
+      observation: {
+        heartbeatAgeMilliseconds,
+        liveness: 'abandoned',
+        reason: 'pid-reused',
+      },
     };
   }
   if (heartbeatAgeMilliseconds > CODE_GRAPH_BUILD_STALE_AFTER_MILLISECONDS) {
     return {
       ...status,
-      observation: {heartbeatAgeMilliseconds, liveness: 'stalled', reason: 'heartbeat-stale'},
+      observation: {
+        heartbeatAgeMilliseconds,
+        liveness: 'stalled',
+        reason: 'heartbeat-stale',
+      },
     };
   }
-  return {...status, observation: {heartbeatAgeMilliseconds, liveness: 'active'}};
+  return {
+    ...status,
+    observation: {heartbeatAgeMilliseconds, liveness: 'active'},
+  };
 }
 
 /** @internal Pure destructive-admission boundary for nonterminal build-status cleanup. */
@@ -814,7 +708,12 @@ export function codeGraphAbandonedBuildStatusRemovable(
 
 function observeBuildHistoryCandidate(system: SystemInfoShape, status: CodeGraphBuildStatus, nowMilliseconds: number) {
   if (status.state === 'completed' || status.state === 'failed') {
-    return Effect.succeed(observeCodeGraphBuildStatus(status, {isRunning: false, nowMilliseconds}));
+    return Effect.succeed(
+      observeCodeGraphBuildStatus(status, {
+        isRunning: false,
+        nowMilliseconds,
+      }),
+    );
   }
   const isRunning = system.isProcessRunning(status.owner.processId);
   return (isRunning ? system.processStartIdentity(status.owner.processId) : Effect.void).pipe(
@@ -838,7 +737,10 @@ function observeProgress(
   const phaseChanged = current.status.phase !== progress.phase;
   const etaObservation = observeCodeGraphEta(current.etaTracker, codeGraphEtaMeasurement(progress), now);
   const eta = Option.getOrUndefined(
-    Option.map(etaObservation.estimate, value => ({...value, scope: 'phase' as const})),
+    Option.map(etaObservation.estimate, value => ({
+      ...value,
+      scope: 'phase' as const,
+    })),
   );
   return {
     ...current,
@@ -855,7 +757,10 @@ function observeProgress(
       registration: progressRegistration(progress),
       resolution: progressResolution(current.status.resolution, progress, timestamp),
       state: progress.phase === 'waiting' ? 'queued' : 'running',
-      scheduling: {...current.status.scheduling, blocker: progress.phase === 'waiting' ? progress.reason : undefined},
+      scheduling: {
+        ...current.status.scheduling,
+        blocker: progress.phase === 'waiting' ? progress.reason : undefined,
+      },
       subphase: progressSubphase(progress),
       timings: codeGraphProgressTimings(current.status, progress),
       timestamps: {
@@ -1044,7 +949,11 @@ function progressCounters(progress: CodeGraphProgress): CodeGraphBuildCounters {
       };
     case 'resolving':
       return progress.subphase === 'complete'
-        ? {edges: progress.edges, resolved: progress.resolved, symbols: progress.symbols}
+        ? {
+            edges: progress.edges,
+            resolved: progress.resolved,
+            symbols: progress.symbols,
+          }
         : progress.activity
           ? {
               completed: progress.activity.referencesCompleted,
@@ -1073,7 +982,9 @@ function codeGraphBuildStatusPath(
   buildId: string,
 ): string {
   if (!HASH_ID.test(worktreeId) || !BUILD_ID.test(buildId))
-    throw CodeGraphBuildStatusError.make({message: 'Code graph build identity is invalid.'});
+    throw CodeGraphBuildStatusError.make({
+      message: 'Code graph build identity is invalid.',
+    });
   return path.join(
     layout.repositoryRoot,
     STATUS_DIRECTORY,
@@ -1095,10 +1006,14 @@ function writeCodeGraphBuildStatus(
     if (initializeDirectory) {
       yield* ensurePrivateRegularDirectory(fs, path, directory);
     } else if (!(yield* regularDirectory(fs, directory))) {
-      return yield* CodeGraphBuildStatusError.make({message: 'Code graph build status directory was removed.'});
+      return yield* CodeGraphBuildStatusError.make({
+        message: 'Code graph build status directory was removed.',
+      });
     }
     if ((yield* fs.readLink(file).pipe(Effect.option))._tag === 'Some') {
-      return yield* CodeGraphBuildStatusError.make({message: 'Code graph build status path is a symbolic link.'});
+      return yield* CodeGraphBuildStatusError.make({
+        message: 'Code graph build status path is a symbolic link.',
+      });
     }
     const temporary = path.join(directory, `.${status.buildId}.${sequence}.tmp`);
     const content = `${JSON.stringify(status)}\n`;
@@ -1207,7 +1122,10 @@ function readCodeGraphManagerContext(fs: FileSystem.FileSystem, file: string, bu
     ) {
       return undefined;
     }
-    return {...(value.branch === undefined ? {} : {branch: value.branch}), worktreePath: value.worktreePath};
+    return {
+      ...(value.branch === undefined ? {} : {branch: value.branch}),
+      worktreePath: value.worktreePath,
+    };
   }).pipe(Effect.orElseSucceed(() => undefined));
 }
 
@@ -1216,11 +1134,15 @@ function ensurePrivateRegularDirectory(fs: FileSystem.FileSystem, path: Path.Pat
     const parent = path.dirname(directory);
     yield* fs.makeDirectory(parent, {recursive: true, mode: 0o700});
     if ((yield* fs.readLink(parent).pipe(Effect.option))._tag === 'Some') {
-      return yield* CodeGraphBuildStatusError.make({message: 'Code graph build status parent is a symbolic link.'});
+      return yield* CodeGraphBuildStatusError.make({
+        message: 'Code graph build status parent is a symbolic link.',
+      });
     }
     yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
     if ((yield* fs.readLink(directory).pipe(Effect.option))._tag === 'Some') {
-      return yield* CodeGraphBuildStatusError.make({message: 'Code graph build status directory is a symbolic link.'});
+      return yield* CodeGraphBuildStatusError.make({
+        message: 'Code graph build status directory is a symbolic link.',
+      });
     }
   });
 }
@@ -1228,7 +1150,10 @@ function ensurePrivateRegularDirectory(fs: FileSystem.FileSystem, path: Path.Pat
 function readBuildStatusesBelow(fs: FileSystem.FileSystem, path: Path.Path, root: string) {
   return Effect.gen(function* () {
     if (!(yield* regularDirectory(fs, root))) return [];
-    const worktrees = (yield* fs.readDirectory(root)).filter(name => BUILD_STATUS_VIEW_DIRECTORY.test(name)).sort();
+    const worktrees = EffectArray.filter(
+      yield* fs.readDirectory(root),
+      __effectArrayValue2 => !!(name => BUILD_STATUS_VIEW_DIRECTORY.test(name))(__effectArrayValue2),
+    ).sort();
     const groups = yield* Effect.forEach(
       worktrees,
       worktreeId => readWorktreeStatuses(fs, path, path.join(root, worktreeId)),
@@ -1241,14 +1166,19 @@ function readBuildStatusesBelow(fs: FileSystem.FileSystem, path: Path.Path, root
 function readWorktreeStatuses(fs: FileSystem.FileSystem, path: Path.Path, directory: string) {
   return Effect.gen(function* () {
     if (!(yield* regularDirectory(fs, directory))) return [];
-    const files = (yield* fs.readDirectory(directory))
-      .filter(name => BUILD_ID.test(name.slice(0, -5)) && name.endsWith('.json'))
-      .sort();
+    const files = EffectArray.filter(
+      yield* fs.readDirectory(directory),
+      __effectArrayValue2 =>
+        !!(name =>
+          BUILD_ID.test(Effect2.pipe(name, EffectString.slice(0, -5))) &&
+          Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue2),
+    ).sort();
     const statuses = yield* Effect.forEach(files, name => readStatusFile(fs, path.join(directory, name)), {
       concurrency: 8,
     });
     const expectedViewKey = path.basename(directory);
-    return statuses.filter(
+    return EffectArray.filter(
+      statuses,
       (status): status is ObservedCodeGraphBuildStatus =>
         status !== undefined &&
         codeGraphScopeViewKey(status.identity.worktreeId, status.identity.scopeId) === expectedViewKey,
@@ -1265,7 +1195,10 @@ function readStatusFile(fs: FileSystem.FileSystem, file: string) {
     if (!parsed) return undefined;
     const nowMilliseconds = yield* Clock.currentTimeMillis;
     if (parsed.state === 'completed' || parsed.state === 'failed') {
-      return observeCodeGraphBuildStatus(parsed, {isRunning: false, nowMilliseconds});
+      return observeCodeGraphBuildStatus(parsed, {
+        isRunning: false,
+        nowMilliseconds,
+      });
     }
     const system = yield* SystemInfo;
     const isRunning = system.isProcessRunning(parsed.owner.processId);
@@ -1370,13 +1303,13 @@ interface BuildHistoryDirectoryAuthority {
 
 type BuildHistoryCursor = {readonly mode: 'reset'} | {readonly afterBuildId: string; readonly mode: 'scan'};
 
-class InvalidBuildHistorySidecarError extends Schema.TaggedError<InvalidBuildHistorySidecarError>()(
-  'InvalidBuildHistorySidecarError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class InvalidBuildHistorySidecarError extends Schema.TaggedError<
+  InvalidBuildHistorySidecarError,
+  {readonly brand: unique symbol}
+>()('InvalidBuildHistorySidecarError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const pruneCodeGraphBuildHistoryUnitWithServices = Effect.fn('codeGraph.buildStatus.pruneHistoryUnitUnsafe')(function* (
   fs: FileSystem.FileSystem,
@@ -1397,25 +1330,34 @@ const pruneCodeGraphBuildHistoryUnitWithServices = Effect.fn('codeGraph.buildSta
   ).pipe(
     Effect.mapError(cause =>
       cause instanceof TypeError
-        ? InvalidBuildHistorySidecarError.make({message: 'Build history inventory contains a non-text name.'})
+        ? InvalidBuildHistorySidecarError.make({
+            message: 'Build history inventory contains a non-text name.',
+          })
         : cause,
     ),
   );
   const statusNames = codeGraphBuildHistoryInventory(inventoryPage);
   if (statusNames === undefined) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history inventory exceeded its limit.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history inventory exceeded its limit.',
+    });
   }
   const parsedCursor = cursorToken === undefined ? undefined : parseBuildHistoryCursor(cursorToken);
   const afterBuildId = parsedCursor?.mode === 'scan' ? parsedCursor.afterBuildId : undefined;
   if (afterBuildId !== undefined && !statusNames.includes(`${afterBuildId}.json`)) {
-    return {cursorToken: buildHistoryResetCursor(), state: 'progress'} as const;
+    return {
+      cursorToken: buildHistoryResetCursor(),
+      state: 'progress',
+    } as const;
   }
-  const remainingNames = statusNames.filter(name =>
+  const remainingNames = EffectArray.filter(statusNames, name =>
     afterBuildId === undefined ? true : name > `${afterBuildId}.json`,
   );
   const pageNames = remainingNames.slice(0, CODE_GRAPH_BUILD_HISTORY_STATUS_PAGE_LIMIT);
   if (pageNames.length === 0) {
-    return {state: 'complete'} as const satisfies CodeGraphBuildHistoryPruneResult;
+    return {
+      state: 'complete',
+    } as const satisfies CodeGraphBuildHistoryPruneResult;
   }
 
   const candidates = yield* Effect.forEach(
@@ -1423,8 +1365,10 @@ const pruneCodeGraphBuildHistoryUnitWithServices = Effect.fn('codeGraph.buildSta
     name => readBuildHistoryCandidate(fs, path, path.join(directory, name), layout.checkoutId, worktreeId),
     {concurrency: 4},
   );
-  if (candidates.some(candidate => candidate === undefined)) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history changed during its bounded page.'});
+  if (EffectArray.some(candidates, candidate => candidate === undefined)) {
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history changed during its bounded page.',
+    });
   }
   const completeCandidates: BuildHistoryCandidate[] = [];
   for (const candidate of candidates) {
@@ -1447,35 +1391,49 @@ const pruneCodeGraphBuildHistoryUnitWithServices = Effect.fn('codeGraph.buildSta
   const abandoned =
     initialLock.state === 'unavailable'
       ? undefined
-      : [...ranked]
-          .reverse()
-          .find(observed =>
-            codeGraphAbandonedBuildStatusRemovable(
-              observed.status,
-              initialLock.state === 'present' ? initialLock.owner : undefined,
-              protectedBuildId,
-            ),
-          );
-  const expiredFailed = [...ranked]
-    .reverse()
-    .find(observed => codeGraphFailedBuildStatusRemovable(observed.status, protectedBuildId));
+      : Option.getOrUndefined(
+          EffectArray.findFirst(
+            [...ranked].reverse(),
+            __effectArrayValue =>
+              !!(observed =>
+                codeGraphAbandonedBuildStatusRemovable(
+                  observed.status,
+                  initialLock.state === 'present' ? initialLock.owner : undefined,
+                  protectedBuildId,
+                ))(__effectArrayValue),
+          ),
+        );
+  const expiredFailed = Option.getOrUndefined(
+    EffectArray.findFirst(
+      [...ranked].reverse(),
+      __effectArrayValue =>
+        !!(observed => codeGraphFailedBuildStatusRemovable(observed.status, protectedBuildId))(__effectArrayValue),
+    ),
+  );
   const terminal =
     statusNames.length <= STATUS_HISTORY_PER_WORKTREE
       ? undefined
-      : ranked
-          .slice(STATUS_HISTORY_PER_WORKTREE)
-          .reverse()
-          .find(
+      : Option.getOrUndefined(
+          EffectArray.findFirst(
+            ranked.slice(STATUS_HISTORY_PER_WORKTREE).reverse(),
             observed =>
               observed.status.buildId !== protectedBuildId &&
               (observed.status.state === 'completed' || observed.status.state === 'failed'),
-          );
+          ),
+        );
   const selected = abandoned ?? expiredFailed ?? terminal;
   if (selected === undefined) {
     const hasMore = remainingNames.length > pageNames.length;
-    const lastBuildId = pageNames.at(-1)?.slice(0, -'.json'.length);
+    const lastBuildId = Effect2.pipe(pageNames.at(-1), effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.slice(0, -'.json'.length)),
+    );
     return hasMore && lastBuildId !== undefined
-      ? ({cursorToken: buildHistoryScanCursor(lastBuildId), state: 'progress'} as const)
+      ? ({
+          cursorToken: buildHistoryScanCursor(lastBuildId),
+          state: 'progress',
+        } as const)
       : ({state: 'complete'} as const);
   }
   const candidate = selected.candidate;
@@ -1492,7 +1450,9 @@ const pruneCodeGraphBuildHistoryUnitWithServices = Effect.fn('codeGraph.buildSta
     !sameBuildHistorySidecar(candidate, finalStatus) ||
     !sameOptionalBuildHistorySidecar(initialContext, finalContext)
   ) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history authority changed.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history authority changed.',
+    });
   }
   if (removalKind === 'abandoned') {
     const finalLock = yield* inspectBuildHistoryLock(fs, lockPath);
@@ -1509,7 +1469,9 @@ const pruneCodeGraphBuildHistoryUnitWithServices = Effect.fn('codeGraph.buildSta
         protectedBuildId,
       )
     ) {
-      return yield* InvalidBuildHistorySidecarError.make({message: 'Build history owner changed.'});
+      return yield* InvalidBuildHistorySidecarError.make({
+        message: 'Build history owner changed.',
+      });
     }
   }
 
@@ -1522,7 +1484,9 @@ const pruneCodeGraphBuildHistoryUnitWithServices = Effect.fn('codeGraph.buildSta
   const ownedStatus = yield* readBuildHistoryCandidate(fs, path, candidate.file, layout.checkoutId, worktreeId);
   const remainingContext = yield* readBuildHistoryManagerContext(fs, contextFile, candidate.status.buildId);
   if (ownedStatus === undefined || !sameBuildHistorySidecar(candidate, ownedStatus) || remainingContext !== undefined) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history changed before removal.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history changed before removal.',
+    });
   }
   if (removalKind === 'abandoned') {
     const ownedLock = yield* inspectBuildHistoryLock(fs, lockPath);
@@ -1539,7 +1503,9 @@ const pruneCodeGraphBuildHistoryUnitWithServices = Effect.fn('codeGraph.buildSta
         protectedBuildId,
       )
     ) {
-      return yield* InvalidBuildHistorySidecarError.make({message: 'Build history owner changed before removal.'});
+      return yield* InvalidBuildHistorySidecarError.make({
+        message: 'Build history owner changed before removal.',
+      });
     }
   }
   yield* revalidateBuildHistoryDirectoryAuthority(fs, authority);
@@ -1562,15 +1528,23 @@ const inspectBuildHistoryDirectory = Effect.fn('codeGraph.buildStatus.inspectHis
   const statusRoot = yield* freezeBuildHistoryDirectory(fs, path.join(layout.repositoryRoot, STATUS_DIRECTORY));
   if (statusRoot === undefined) return undefined;
   if (statusRoot.canonicalPath !== path.join(repositoryRoot.canonicalPath, STATUS_DIRECTORY)) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history status root escaped containment.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history status root escaped containment.',
+    });
   }
   const viewKey = codeGraphScopeViewKey(worktreeId, layout.scopeId);
   const directory = yield* freezeBuildHistoryDirectory(fs, path.join(statusRoot.path, viewKey));
   if (directory === undefined) return undefined;
   if (directory.canonicalPath !== path.join(statusRoot.canonicalPath, viewKey)) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history worktree escaped containment.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history worktree escaped containment.',
+    });
   }
-  return {directory, repositoryRoot, statusRoot} satisfies BuildHistoryDirectoryAuthority;
+  return {
+    directory,
+    repositoryRoot,
+    statusRoot,
+  } satisfies BuildHistoryDirectoryAuthority;
 });
 
 const freezeBuildHistoryDirectory = Effect.fn('codeGraph.buildStatus.freezeHistoryDirectory')(function* (
@@ -1578,26 +1552,38 @@ const freezeBuildHistoryDirectory = Effect.fn('codeGraph.buildStatus.freezeHisto
   directory: string,
 ) {
   if (Option.isSome(yield* fs.readLink(directory).pipe(Effect.option))) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history directory is a symbolic link.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history directory is a symbolic link.',
+    });
   }
   const info = yield* optionalBuildHistoryFileInfo(fs, directory);
   if (info === undefined) return undefined;
   if (info.type !== 'Directory') {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history path is not a directory.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history path is not a directory.',
+    });
   }
   const canonicalPath = yield* fs.realPath(directory);
   const confirmed = yield* fs.stat(directory);
   if (!sameBuildHistoryDirectoryInfo(info, confirmed)) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history directory changed while freezing.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history directory changed while freezing.',
+    });
   }
-  return {canonicalPath, info, path: directory} satisfies FrozenBuildHistoryDirectory;
+  return {
+    canonicalPath,
+    info,
+    path: directory,
+  } satisfies FrozenBuildHistoryDirectory;
 });
 
 const revalidateBuildHistoryDirectoryAuthority = Effect.fn('codeGraph.buildStatus.revalidateHistoryDirectory')(
   function* (fs: FileSystem.FileSystem, authority: BuildHistoryDirectoryAuthority) {
     for (const frozen of [authority.repositoryRoot, authority.statusRoot, authority.directory]) {
       if (Option.isSome(yield* fs.readLink(frozen.path).pipe(Effect.option))) {
-        return yield* InvalidBuildHistorySidecarError.make({message: 'Build history directory became a symlink.'});
+        return yield* InvalidBuildHistorySidecarError.make({
+          message: 'Build history directory became a symlink.',
+        });
       }
       const current = yield* optionalBuildHistoryFileInfo(fs, frozen.path);
       if (
@@ -1605,7 +1591,9 @@ const revalidateBuildHistoryDirectoryAuthority = Effect.fn('codeGraph.buildStatu
         !sameBuildHistoryDirectoryInfo(frozen.info, current) ||
         (yield* fs.realPath(frozen.path)) !== frozen.canonicalPath
       ) {
-        return yield* InvalidBuildHistorySidecarError.make({message: 'Build history directory authority changed.'});
+        return yield* InvalidBuildHistorySidecarError.make({
+          message: 'Build history directory authority changed.',
+        });
       }
     }
   },
@@ -1622,7 +1610,10 @@ const readBuildHistoryCandidate = Effect.fn('codeGraph.buildStatus.readHistoryCa
   if (observed === undefined) return undefined;
   const status = yield* Effect.try({
     try: () => parseCodeGraphBuildStatus(JSON.parse(observed.content)),
-    catch: () => InvalidBuildHistorySidecarError.make({message: 'Build history status is invalid JSON.'}),
+    catch: () =>
+      InvalidBuildHistorySidecarError.make({
+        message: 'Build history status is invalid JSON.',
+      }),
   });
   if (
     status === undefined ||
@@ -1630,7 +1621,9 @@ const readBuildHistoryCandidate = Effect.fn('codeGraph.buildStatus.readHistoryCa
     status.identity.worktreeId !== worktreeId ||
     path.basename(file) !== `${status.buildId}.json`
   ) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history status authority is invalid.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history status authority is invalid.',
+    });
   }
   return {...observed, status} satisfies BuildHistoryCandidate;
 });
@@ -1665,10 +1658,15 @@ const readBuildHistoryManagerContext = Effect.fn('codeGraph.buildStatus.readHist
         (value.branch === undefined || isText(value.branch, 1_024))
       );
     },
-    catch: () => InvalidBuildHistorySidecarError.make({message: 'Build history Manager context is invalid JSON.'}),
+    catch: () =>
+      InvalidBuildHistorySidecarError.make({
+        message: 'Build history Manager context is invalid JSON.',
+      }),
   });
   if (!valid) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history Manager context is invalid.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history Manager context is invalid.',
+    });
   }
   return observed;
 });
@@ -1679,12 +1677,16 @@ const readBoundedBuildHistorySidecar = Effect.fn('codeGraph.buildStatus.readBoun
   bytesLimit: number,
 ) {
   if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option))) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history sidecar is a symbolic link.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history sidecar is a symbolic link.',
+    });
   }
   const pathInfo = yield* optionalBuildHistoryFileInfo(fs, file);
   if (pathInfo === undefined) return undefined;
   if (pathInfo.type !== 'File' || Number(pathInfo.size) > bytesLimit || (pathInfo.mode & 0o077) !== 0) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history sidecar is not a bounded file.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history sidecar is not a bounded file.',
+    });
   }
   return yield* Effect.scoped(
     Effect.gen(function* () {
@@ -1692,7 +1694,9 @@ const readBoundedBuildHistorySidecar = Effect.fn('codeGraph.buildStatus.readBoun
       const openedBefore = yield* opened.stat;
       const pathOpened = yield* fs.stat(file);
       if (!sameBuildHistoryFileInfo(pathInfo, openedBefore) || !sameBuildHistoryFileInfo(pathInfo, pathOpened)) {
-        return yield* InvalidBuildHistorySidecarError.make({message: 'Build history sidecar changed while opening.'});
+        return yield* InvalidBuildHistorySidecarError.make({
+          message: 'Build history sidecar changed while opening.',
+        });
       }
 
       const bytes = new Uint8Array(bytesLimit + 1);
@@ -1700,7 +1704,9 @@ const readBoundedBuildHistorySidecar = Effect.fn('codeGraph.buildStatus.readBoun
       while (offset < bytes.length) {
         const count = Number(yield* opened.read(bytes.subarray(offset)));
         if (!Number.isSafeInteger(count) || count < 0 || count > bytes.length - offset) {
-          return yield* InvalidBuildHistorySidecarError.make({message: 'Build history read size is invalid.'});
+          return yield* InvalidBuildHistorySidecarError.make({
+            message: 'Build history read size is invalid.',
+          });
         }
         if (count === 0) break;
         offset += count;
@@ -1713,13 +1719,22 @@ const readBoundedBuildHistorySidecar = Effect.fn('codeGraph.buildStatus.readBoun
         offset > bytesLimit ||
         BigInt(offset) !== pathInfo.size
       ) {
-        return yield* InvalidBuildHistorySidecarError.make({message: 'Build history sidecar changed during read.'});
+        return yield* InvalidBuildHistorySidecarError.make({
+          message: 'Build history sidecar changed during read.',
+        });
       }
       const content = yield* Effect.try({
         try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes.subarray(0, offset)),
-        catch: () => InvalidBuildHistorySidecarError.make({message: 'Build history sidecar is not valid UTF-8.'}),
+        catch: () =>
+          InvalidBuildHistorySidecarError.make({
+            message: 'Build history sidecar is not valid UTF-8.',
+          }),
       });
-      return {content, file, info: pathInfo} satisfies ObservedBuildHistorySidecar;
+      return {
+        content,
+        file,
+        info: pathInfo,
+      } satisfies ObservedBuildHistorySidecar;
     }),
   );
 });
@@ -1734,7 +1749,9 @@ const readPersistedBuildHistoryCursor = Effect.fn('codeGraph.buildStatus.readPer
   if (observed === undefined) return undefined;
   const cursorToken = parsePersistedBuildHistoryCursor(observed.content);
   if (cursorToken === undefined) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history cursor is invalid.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history cursor is invalid.',
+    });
   }
   return {...observed, cursorToken} satisfies PersistedBuildHistoryCursor;
 });
@@ -1771,13 +1788,17 @@ const recoverPersistedBuildHistoryCursor = Effect.fn('codeGraph.buildStatus.reco
     BUILD_HISTORY_CURSOR_FILE_BYTES_LIMIT,
   );
   if (currentTemporary === undefined || !sameBuildHistorySidecar(temporary, currentTemporary)) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history cursor temporary changed.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history cursor temporary changed.',
+    });
   }
   yield* revalidateBuildHistoryDirectoryAuthority(fs, authority);
   yield* fs.rename(temporaryFile, path.join(directory, BUILD_HISTORY_CURSOR_FILE));
   const promoted = yield* readPersistedBuildHistoryCursor(fs, path, directory);
   if (promoted === undefined || promoted.cursorToken !== cursorToken) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history cursor promotion failed.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history cursor promotion failed.',
+    });
   }
   return promoted;
 });
@@ -1791,7 +1812,9 @@ const writePersistedBuildHistoryCursor = Effect.fn('codeGraph.buildStatus.writeP
 ) {
   if (observed?.cursorToken === cursorToken) return;
   if (parseBuildHistoryCursor(cursorToken)?.mode !== 'scan') {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history cursor progress is invalid.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history cursor progress is invalid.',
+    });
   }
   yield* revalidateBuildHistoryDirectoryAuthority(fs, authority);
   const directory = authority.directory.path;
@@ -1799,13 +1822,17 @@ const writePersistedBuildHistoryCursor = Effect.fn('codeGraph.buildStatus.writeP
   const temporary = path.join(directory, BUILD_HISTORY_CURSOR_TEMPORARY_FILE);
   const content = `${JSON.stringify({cursorToken, schemaVersion: BUILD_HISTORY_CURSOR_SCHEMA_VERSION})}\n`;
   if (new TextEncoder().encode(content).byteLength > BUILD_HISTORY_CURSOR_FILE_BYTES_LIMIT) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history cursor exceeded its size limit.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history cursor exceeded its size limit.',
+    });
   }
   yield* revalidateBuildHistoryDirectoryAuthority(fs, authority);
   yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});
   const latest = yield* readPersistedBuildHistoryCursor(fs, path, directory);
   if (!sameOptionalBuildHistorySidecar(observed, latest)) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history cursor changed before update.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history cursor changed before update.',
+    });
   }
   yield* revalidateBuildHistoryDirectoryAuthority(fs, authority);
   yield* fs.rename(temporary, file);
@@ -1827,7 +1854,9 @@ const removeObservedBuildHistorySidecar = Effect.fn('codeGraph.buildStatus.remov
 ) {
   const current = yield* readBoundedBuildHistorySidecar(fs, observed.file, BUILD_HISTORY_CURSOR_FILE_BYTES_LIMIT);
   if (current === undefined || !sameBuildHistorySidecar(observed, current)) {
-    return yield* InvalidBuildHistorySidecarError.make({message: 'Build history sidecar changed before removal.'});
+    return yield* InvalidBuildHistorySidecarError.make({
+      message: 'Build history sidecar changed before removal.',
+    });
   }
   yield* revalidateBuildHistoryDirectoryAuthority(fs, authority);
   yield* fs.remove(observed.file, {force: false});
@@ -1896,13 +1925,13 @@ function compareBuildHistoryCandidate(left: BuildHistoryCandidate, right: BuildH
   return (
     rightModifiedAt - leftModifiedAt ||
     Date.parse(right.status.timestamps.updatedAt) - Date.parse(left.status.timestamps.updatedAt) ||
-    right.status.buildId.localeCompare(left.status.buildId)
+    Effect2.pipe(right.status.buildId, EffectString.localeCompare(left.status.buildId))
   );
 }
 
 function parseBuildHistoryCursor(cursorToken: string): BuildHistoryCursor | undefined {
   if (cursorToken === 'bh1:r') return {mode: 'reset'};
-  const fields = cursorToken.split(':');
+  const fields = Effect2.pipe(cursorToken, EffectString.split(':'));
   return fields.length === 3 && fields[0] === 'bh1' && fields[1] === 's' && BUILD_ID.test(fields[2])
     ? {afterBuildId: fields[2], mode: 'scan'}
     : undefined;
@@ -1919,9 +1948,17 @@ function buildHistoryScanCursor(buildId: string): string {
 function classifyBuildHistoryFailure(cause: unknown): CodeGraphBuildHistoryPruneResult {
   if (Schema.is(InvalidBuildHistorySidecarError)(cause)) return invalidBuildHistoryResult();
   if (cause instanceof PlatformError.PlatformError && cause.reason._tag === 'PermissionDenied') {
-    return {blockedCode: 'permission-denied', retryAfterMilliseconds: 30_000, state: 'deferred'};
+    return {
+      blockedCode: 'permission-denied',
+      retryAfterMilliseconds: 30_000,
+      state: 'deferred',
+    };
   }
-  return {blockedCode: 'io-error', retryAfterMilliseconds: BUILD_HISTORY_IO_RETRY_MILLISECONDS, state: 'deferred'};
+  return {
+    blockedCode: 'io-error',
+    retryAfterMilliseconds: BUILD_HISTORY_IO_RETRY_MILLISECONDS,
+    state: 'deferred',
+  };
 }
 
 function invalidBuildHistoryResult(): CodeGraphBuildHistoryPruneResult {
@@ -1940,50 +1977,6 @@ function regularDirectory(fs: FileSystem.FileSystem, directory: string) {
   }).pipe(Effect.orElseSucceed(() => false));
 }
 
-function compareObservedBuildStatus(left: ObservedCodeGraphBuildStatus, right: ObservedCodeGraphBuildStatus): number {
-  const priority = (status: ObservedCodeGraphBuildStatus) => {
-    if (status.coordination?.role === 'owner') return 0;
-    if (status.observation.liveness === 'active') return status.state === 'running' ? 1 : 2;
-    if (status.observation.liveness === 'completed') return 3;
-    if (status.observation.liveness === 'failed') return 4;
-    if (status.observation.liveness === 'stalled') return status.state === 'running' ? 5 : 6;
-    return 7;
-  };
-  return (
-    priority(left) - priority(right) || Date.parse(right.timestamps.updatedAt) - Date.parse(left.timestamps.updatedAt)
-  );
-}
-
-export function selectCodeGraphBuildStatuses(
-  statuses: readonly ObservedCodeGraphBuildStatus[],
-): CodeGraphBuildStatusSelection {
-  const byWorktree = new Map<string, ObservedCodeGraphBuildStatus[]>();
-  for (const status of statuses) {
-    const key = `${status.identity.checkoutId}\0${status.identity.worktreeId}\0${status.identity.scopeId ?? ''}`;
-    const current = byWorktree.get(key) ?? [];
-    current.push(status);
-    byWorktree.set(key, current);
-  }
-  const builds: ObservedCodeGraphBuildStatus[] = [];
-  const waiters: ObservedCodeGraphBuildStatus[] = [];
-  for (const group of byWorktree.values()) {
-    group.sort(compareObservedBuildStatus);
-    const owner = group.find(status => status.coordination?.role === 'owner');
-    builds.push(owner ?? group[0]);
-    waiters.push(
-      ...group.filter(
-        status =>
-          status.coordination?.role === 'waiter' &&
-          (status.observation.liveness === 'active' || status.observation.liveness === 'stalled'),
-      ),
-    );
-  }
-  return {
-    builds: builds.sort(compareObservedBuildStatus),
-    waiters: waiters.sort(compareObservedBuildStatus),
-  };
-}
-
 function boundedText(value: string, maximum: number): string {
-  return value.length <= maximum ? value : `${value.slice(0, Math.max(0, maximum - 1))}…`;
+  return value.length <= maximum ? value : `${Effect2.pipe(value, EffectString.slice(0, Math.max(0, maximum - 1)))}…`;
 }

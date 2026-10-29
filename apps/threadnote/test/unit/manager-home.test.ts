@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Deferred, Effect, Fiber, Option, Ref, Schema} from 'effect';
 import * as TestClock from 'effect/testing/TestClock';
@@ -16,6 +17,8 @@ import {TestError} from '@threadnote/testing/test-error';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const config: RuntimeConfig = {
   account: 'local',
@@ -31,14 +34,14 @@ describe('Manager home API', () => {
     {letters: Schema.Array(Schema.Literals(['a', 'Z', '2', '-', '_', '.'])).check(Schema.isMaxLength(20))},
     ({letters}) =>
       Effect.gen(function* () {
-        const project = `Example ${letters.join('')} Project`;
+        const project = `Example ${EffectArray.join(letters, '')} Project`;
         const defaults = testSources();
         const [template] = yield* defaults.records(config);
         const selected = {...template, metadata: {...template.metadata, project}};
         const neighbor = {
           ...selected,
           uri: `${selected.uri}.neighbor`,
-          metadata: {...selected.metadata, project: project.replaceAll(' ', '-')},
+          metadata: {...selected.metadata, project: Effect2.pipe(project, EffectString.replaceAll(' ', '-'))},
         };
         const records = [selected, neighbor];
         const before = JSON.stringify(records);
@@ -82,7 +85,7 @@ describe('Manager home API', () => {
         const defaults = testSources();
         const [template] = yield* defaults.records(config);
         if (!template) throw new Error('Expected synthetic template');
-        const records = inputs.map((item, index) => ({
+        const records = EffectArray.map(inputs, (item, index) => ({
           ...template,
           uri: `threadnote://user/tester/memories/item-${index}.md`,
           metadata: {
@@ -90,7 +93,7 @@ describe('Manager home API', () => {
             project: item.project,
             kind: item.handoff ? ('handoff' as const) : ('durable' as const),
             status: item.active ? ('active' as const) : ('archived' as const),
-            timestamp: `2026-10-${String(item.day).padStart(2, '0')}T00:00:00.000Z`,
+            timestamp: `2026-10-${Effect2.pipe(String(item.day), EffectString.padStart(2, '0'))}T00:00:00.000Z`,
           },
         }));
         const before = JSON.stringify(records);
@@ -114,21 +117,36 @@ describe('Manager home API', () => {
         expect(response).toEqual(reversed);
         expect(response).toMatchObject({
           status: 200,
-          body: {project: '', stats: {memories: inputs.filter(item => item.active).length, pending: 0}},
+          body: {
+            project: '',
+            stats: {
+              memories: EffectArray.filter(
+                inputs,
+                (item, __effectArrayIndex) => __effectArrayIndex in inputs && item.active,
+              ).length,
+              pending: 0,
+            },
+          },
         });
         expect(response?.body).not.toHaveProperty('stats.coverage');
         if (!response || !('handoffs' in response.body)) throw new Error('Expected All home');
         const handoffs = response.body.handoffs;
-        const eligible = records.filter(
+        const eligible = EffectArray.filter(
+          records,
           record => record.metadata.status === 'active' && record.metadata.kind === 'handoff',
         );
         expect(handoffs).toHaveLength(Math.min(5, eligible.length));
         for (const handoff of handoffs) {
-          expect(handoff.project).toBe(records.find(record => record.uri === handoff.uri)?.metadata.project);
+          expect(handoff.project).toBe(
+            Option.getOrUndefined(EffectArray.findFirst(records, record => record.uri === handoff.uri))?.metadata
+              .project,
+          );
           expect(
-            eligible.every(
+            EffectArray.every(
+              eligible,
               record =>
-                handoffs.some(item => item.uri === record.uri) || record.metadata.timestamp <= handoff.timestamp,
+                EffectArray.some(handoffs, item => item.uri === record.uri) ||
+                record.metadata.timestamp <= handoff.timestamp,
             ),
           ).toBe(true);
         }

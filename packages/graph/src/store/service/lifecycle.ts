@@ -1,8 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {cancelCodeGraphEmbeddingDemandSql} from '../../vector/demand.js';
 import {withCodeGraphLeaseTiming} from '../lease_timing.js';
 import {DateTime, Effect, Option, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
-import * as SqlError from 'effect/sql/SqlError';
 import {CODE_GRAPH_CACHE_TRANSACTION_LIMITS, codeGraphTextFieldsCapacityBytes} from '../../cache_capacity.js';
 import {saturatingCapacityAdd} from '../../disk/capacity.js';
 import {ensureBoundedCodeGraphFact} from '../../fact/budget.js';
@@ -80,6 +80,8 @@ import {promoteSnapshot} from '../resolution.js';
 import {type CodeGraphStoreRuntime} from '../runtime.js';
 import {type CodeGraphStoreShape} from '../shape.js';
 import {temporaryActivationPublicationCapacity} from '../temporary_capacity.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type CodeGraphStoreLifecycleMethods = Pick<
   CodeGraphStoreShape,
@@ -280,9 +282,7 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
         }),
         options?.readOnly === true,
       ).pipe(
-        Effect.catchTag('SqlError', cause =>
-          Effect.fail(storeError('use code graph database session', cause as SqlError.SqlError)),
-        ),
+        Effect.catchTag('SqlError', cause => Effect.fail(storeError('use code graph database session', cause))),
         Effect.tap(() =>
           detachedCleanupRequest.completedBuild
             ? startCompletedBuildCleanup(
@@ -408,7 +408,7 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
         if (
           token.length === 0 ||
           token.length > 1_024 ||
-          token.includes('\0') ||
+          Effect2.pipe(token, EffectString.includes('\0')) ||
           !Number.isSafeInteger(minimumRemainingMilliseconds) ||
           minimumRemainingMilliseconds < 0 ||
           minimumRemainingMilliseconds > 60 * 60_000
@@ -592,7 +592,7 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
           try: () =>
             prepareMaterializedShardCacheChunks(
               files,
-              facts.map(ensureBoundedCodeGraphFact),
+              EffectArray.map(facts, ensureBoundedCodeGraphFact),
               extractorSet,
               derivationIdentity,
               createdAt,
@@ -624,22 +624,20 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
       persistentCapacityProtector,
     ) =>
       Effect.gen(function* () {
-        const rowCount = batches.reduce((total, batch) => saturatingCapacityAdd(total, batch.files.length), 0);
+        const rowCount = EffectArray.reduce(batches, 0, (total, batch) =>
+          saturatingCapacityAdd(total, batch.files.length),
+        );
         if (batches.length === 0) return;
         if (rowCount > CODE_GRAPH_CACHE_TRANSACTION_LIMITS.rows) {
           return yield* CodeGraphStoreError.of('Materialized file shard association group is too large.');
         }
-        const finalFactBytes = batches.reduce(
-          (total, batch) =>
-            batch.files.reduce(
-              (batchTotal, file) =>
-                saturatingCapacityAdd(
-                  batchTotal,
-                  codeGraphTextFieldsCapacityBytes(snapshotId, file.path, batch.selectedShardIds.get(file.path) ?? ''),
-                ),
-              total,
+        const finalFactBytes = EffectArray.reduce(batches, 0, (total, batch) =>
+          EffectArray.reduce(batch.files, total, (batchTotal, file) =>
+            saturatingCapacityAdd(
+              batchTotal,
+              codeGraphTextFieldsCapacityBytes(snapshotId, file.path, batch.selectedShardIds.get(file.path) ?? ''),
             ),
-          0,
+          ),
         );
         if (finalFactBytes > CODE_GRAPH_CACHE_TRANSACTION_LIMITS.payloadBytes) {
           return yield* CodeGraphStoreError.of('Materialized file shard association group payload is too large.');

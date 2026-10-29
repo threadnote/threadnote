@@ -8,6 +8,8 @@ import {runSharePublishTool} from '@threadnote/threadnote/mcp/server/share';
 import {sharePublishEligibilityError} from '@threadnote/threadnote/share/publish_policy';
 import type {ShareRuntime} from '@threadnote/threadnote/types';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const config: ShareRuntime = {
   account: 'local',
@@ -131,7 +133,11 @@ describe('share publication eligibility', () => {
   it('rejects anchors while accepting canonicalized legacy aliases', () => {
     const uri = 'threadnote://user/tester/memories/durable/projects/foo/bar.md';
     expect(
-      sharePublishEligibilityError(config, uri.replace('threadnote://', 'viking://'), content('durable')),
+      sharePublishEligibilityError(
+        config,
+        Effect2.pipe(uri, EffectString.replace('threadnote://', 'viking://')),
+        content('durable'),
+      ),
     ).toBeUndefined();
     expect(sharePublishEligibilityError(config, `${uri}#x.md`, content('durable'))).toContain(
       'only active personal durable memories',

@@ -1,15 +1,64 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {spawnSync} from '@threadnote/testing/node-child-process';
-import {mkdtemp, mkdir, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
+import {mkdtemp, mkdir, readFile, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
 import {afterEach, describe, expect, it} from 'vitest';
 import {workflowScenarios} from '../src/scenarios.js';
 import {captureBaseline} from './helpers/capture-baseline.js';
+import * as EffectRecord from 'effect/Record';
+
+type FileMeasurement = {readonly path: string; readonly bytes: number};
+type ScenarioCase = {readonly id: string; readonly expectedInvariants: string[]; readonly measurementUnits: string[]};
+type BaselineMeasurements = {
+  readonly skillDocuments: {readonly files: FileMeasurement[]; readonly totalBytes: number};
+  readonly scenarios: {readonly count: number; readonly cases: ScenarioCase[]};
+};
+type RuntimeMeasurements = {
+  readonly startup: {readonly durationsMilliseconds: number[]};
+  readonly fileSize: {readonly bytes: number; readonly label: string};
+};
+
+const isStringArray = (value: unknown): value is string[] =>
+  EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
+const isBaselineMeasurements = (value: unknown): value is BaselineMeasurements => {
+  if (!Predicate.isObject(value)) return false;
+  const skills = value.skillDocuments;
+  const scenarios = value.scenarios;
+  return (
+    Predicate.isObject(skills) &&
+    EffectArray.isArray(skills.files) &&
+    EffectArray.every(
+      skills.files,
+      file => Predicate.isObject(file) && typeof file.path === 'string' && typeof file.bytes === 'number',
+    ) &&
+    typeof skills.totalBytes === 'number' &&
+    Predicate.isObject(scenarios) &&
+    typeof scenarios.count === 'number' &&
+    EffectArray.isArray(scenarios.cases) &&
+    EffectArray.every(
+      scenarios.cases,
+      item =>
+        Predicate.isObject(item) &&
+        typeof item.id === 'string' &&
+        isStringArray(item.expectedInvariants) &&
+        isStringArray(item.measurementUnits),
+    )
+  );
+};
+const isRuntimeMeasurements = (value: unknown): value is RuntimeMeasurements =>
+  Predicate.isObject(value) &&
+  Predicate.isObject(value.startup) &&
+  EffectArray.isArray(value.startup.durationsMilliseconds) &&
+  EffectArray.every(value.startup.durationsMilliseconds, duration => typeof duration === 'number') &&
+  Predicate.isObject(value.fileSize) &&
+  typeof value.fileSize.bytes === 'number' &&
+  typeof value.fileSize.label === 'string';
 
 const roots: string[] = [];
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, {recursive: true, force: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {recursive: true, force: true})));
 });
 
 async function makeGitFixture() {
@@ -58,14 +107,23 @@ async function makeEncodedPathCliCheckout() {
     await writeFile(target, await readFile(source));
   const testingShim = join(checkout, 'node_modules/@threadnote/testing');
   await mkdir(testingShim, {recursive: true});
-  const exports = Object.fromEntries(
-    [
-      ['node-child-process', 'child_process'],
-      ['node-crypto', 'crypto'],
-      ['node-fs-promises', 'fs/promises'],
-      ['node-path', 'path'],
-      ['node-url', 'url'],
-    ].map(([name]) => [`./${name}`, `./${name}.js`]),
+  // The copied CLI imports Effect, just as the real workspace package does.
+  await symlink(
+    dirname(fileURLToPath(import.meta.resolve('effect/package.json'))),
+    join(checkout, 'node_modules/effect'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  const exports = EffectRecord.fromEntries(
+    EffectArray.map(
+      [
+        ['node-child-process', 'child_process'],
+        ['node-crypto', 'crypto'],
+        ['node-fs-promises', 'fs/promises'],
+        ['node-path', 'path'],
+        ['node-url', 'url'],
+      ],
+      ([name]) => [`./${name}`, `./${name}.js`],
+    ),
   );
   await writeFile(join(testingShim, 'package.json'), JSON.stringify({name: '@threadnote/testing', exports}));
   for (const [name, builtin] of [
@@ -84,11 +142,10 @@ describe('workflow baseline capture', () => {
     const {root} = await makeGitFixture();
     const first = await captureBaseline({repo: root});
     const second = await captureBaseline({repo: root});
-    const firstMeasurements = first.sourceMeasurements as {
-      skillDocuments: {files: {path: string; bytes: number}[]; totalBytes: number};
-      scenarios: {count: number; cases: {id: string; expectedInvariants: string[]; measurementUnits: string[]}[]};
-    };
-    const secondMeasurements = second.sourceMeasurements as typeof firstMeasurements;
+    if (!isBaselineMeasurements(first.sourceMeasurements) || !isBaselineMeasurements(second.sourceMeasurements))
+      throw new Error('Baseline source measurements are malformed.');
+    const firstMeasurements = first.sourceMeasurements;
+    const secondMeasurements = second.sourceMeasurements;
     expect(first.source).toEqual(second.source);
     expect(firstMeasurements).toEqual(secondMeasurements);
     const collection = firstMeasurements.skillDocuments;
@@ -112,13 +169,15 @@ describe('workflow baseline capture', () => {
         closeoutVersion: 1,
       },
     });
-    expect(firstMeasurements.skillDocuments.files.map(file => file.path)).toEqual([
+    expect(EffectArray.map(firstMeasurements.skillDocuments.files, file => file.path)).toEqual([
       'config/agent-skills/dev-spec/SKILL.md',
       'config/agent-skills/dev-spec/references/contract.md',
     ]);
     expect(firstMeasurements.skillDocuments.totalBytes).toBeGreaterThan(0);
     expect(firstMeasurements.scenarios.count).toBe(workflowScenarios.length);
-    expect(firstMeasurements.scenarios.cases.map(item => item.id)).toEqual(workflowScenarios.map(item => item.id));
+    expect(EffectArray.map(firstMeasurements.scenarios.cases, item => item.id)).toEqual(
+      EffectArray.map(workflowScenarios, item => item.id),
+    );
     for (const [index, item] of workflowScenarios.entries()) {
       expect(firstMeasurements.scenarios.cases[index]).toEqual({
         id: item.id,
@@ -160,10 +219,8 @@ describe('workflow baseline capture', () => {
       },
       sourceIdentity: {path: 'withheld'},
     });
-    const runtime = baseline.runtime as {
-      startup: {durationsMilliseconds: number[]};
-      fileSize: {bytes: number; label: string};
-    };
+    if (!isRuntimeMeasurements(baseline.runtime)) throw new Error('Runtime measurements are malformed.');
+    const runtime = baseline.runtime;
     expect(runtime.startup.durationsMilliseconds).toHaveLength(3);
     expect(runtime.fileSize.bytes).toBeGreaterThan(0);
     expect(['executable-binary-bytes', 'launcher-file-bytes']).toContain(runtime.fileSize.label);
@@ -188,8 +245,11 @@ describe('workflow baseline capture', () => {
       timeout: 8_000,
       maxBuffer: 8_192,
     });
-    expect(run.status).toBe(0);
-    const capture = JSON.parse(await readFile(output, 'utf8')) as {source: {repositoryHead: string}};
+    expect(run.status, run.stderr || run.stdout).toBe(0);
+    const capture: unknown = JSON.parse(await readFile(output, 'utf8'));
+    if (!Predicate.isObject(capture) || !Predicate.isObject(capture.source))
+      throw new Error('Baseline CLI output is malformed.');
+    if (typeof capture.source.repositoryHead !== 'string') throw new Error('Baseline repository head is malformed.');
     expect(capture.source.repositoryHead.length).toBeGreaterThan(0);
   });
 });

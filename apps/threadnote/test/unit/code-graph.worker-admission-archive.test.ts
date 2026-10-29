@@ -24,6 +24,8 @@ import {
 } from '@threadnote/graph/sharing/worker/admission_state';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const policy: GraphControlPolicy = {
@@ -33,24 +35,24 @@ const policy: GraphControlPolicy = {
   jwksUrl: 'https://identity.example.test/jwks.json',
   organization: 'acme',
   profileDigest: sha256Digest('profile'),
-  repositoryId: 'a'.repeat(64),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   schemaVersion: 1,
 };
 
 function receipt(seed: number, sourceCommit: string): GraphWorkerAdmissionReceiptV2 {
   const authority = {
     expiresAt: 2000,
-    graphAbi: 'b'.repeat(64),
+    graphAbi: Effect2.pipe('b', EffectString.repeat(64)),
     principalId: sha256Digest('principal'),
     profileDigest: policy.profileDigest,
     repositoryId: policy.repositoryId,
-    signingPublicKey: 'c'.repeat(64),
-    workerId: `gw_${'d'.repeat(32)}`,
+    signingPublicKey: Effect2.pipe('c', EffectString.repeat(64)),
+    workerId: `gw_${Effect2.pipe('d', EffectString.repeat(32))}`,
   };
   const fields = {
-    actionKey: 'e'.repeat(64),
+    actionKey: Effect2.pipe('e', EffectString.repeat(64)),
     attestationDigest: sha256Digest(`attestation-${seed}`),
-    batchId: sourceCommit.slice(0, 40),
+    batchId: Effect2.pipe(sourceCommit, EffectString.slice(0, 40)),
     principalId: authority.principalId,
     profileDigest: authority.profileDigest,
     repositoryId: authority.repositoryId,
@@ -66,7 +68,7 @@ function receipt(seed: number, sourceCommit: string): GraphWorkerAdmissionReceip
     },
     publicKey: authority.signingPublicKey,
     schemaVersion: 1 as const,
-    signature: seed.toString(16).padStart(128, '0'),
+    signature: Effect2.pipe(seed.toString(16), EffectString.padStart(128, '0')),
   };
   const admitted = admitGraphWorkerAnnouncement(emptyGraphWorkerAdmissionStore(), {
     announcement,
@@ -92,7 +94,7 @@ describe('signed worker admission cold archive', () => {
   effectIt.effect('recovers a segment written before its manifest commit while hot evidence remains', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const source = '1'.repeat(40);
+      const source = Effect2.pipe('1', EffectString.repeat(40));
       const candidate = receipt(1, source);
       yield* writeDurablePrivateJsonFile(f.hotPath, {...emptyGraphWorkerAdmissionStore(), receipts: [candidate]});
       const initial = yield* readGraphWorkerAdmissionArchive(f.hotPath, policy);
@@ -117,7 +119,7 @@ describe('signed worker admission cold archive', () => {
   effectIt.effect('preserves one logical receipt through archive commit, hot removal, and source retirement', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const source = '1'.repeat(40);
+      const source = Effect2.pipe('1', EffectString.repeat(40));
       const candidate = receipt(1, source);
       yield* writeDurablePrivateJsonFile(f.hotPath, {
         ...emptyGraphWorkerAdmissionStore(),
@@ -141,7 +143,7 @@ describe('signed worker admission cold archive', () => {
   effectIt.effect('fails closed when a committed archive disappears after hot removal', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const source = '1'.repeat(40);
+      const source = Effect2.pipe('1', EffectString.repeat(40));
       const candidate = receipt(1, source);
       const initial = yield* readGraphWorkerAdmissionArchive(f.hotPath, policy);
       expect((yield* parkGraphWorkerAdmissionReceipts(f.hotPath, policy, initial, source, [candidate])).status).toBe(
@@ -160,7 +162,7 @@ describe('signed worker admission cold archive', () => {
   effectIt.effect('rejects a changed hot overlap using the indexed full-receipt digest', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const source = '1'.repeat(40);
+      const source = Effect2.pipe('1', EffectString.repeat(40));
       const candidate = receipt(1, source);
       const initial = yield* readGraphWorkerAdmissionArchive(f.hotPath, policy);
       expect((yield* parkGraphWorkerAdmissionReceipts(f.hotPath, policy, initial, source, [candidate])).status).toBe(
@@ -171,7 +173,11 @@ describe('signed worker admission cold archive', () => {
         archiveStarted: true,
         receipts: [{...candidate, admittedAt: candidate.admittedAt + 1}],
       });
-      expect(yield* readGraphWorkerAdmissionStore(f.home, policy, '2'.repeat(40)).pipe(Effect.flip)).toMatchObject({
+      expect(
+        yield* readGraphWorkerAdmissionStore(f.home, policy, Effect2.pipe('2', EffectString.repeat(40))).pipe(
+          Effect.flip,
+        ),
+      ).toMatchObject({
         kind: 'unavailable',
       });
     }).pipe(provideTestLayer(layer)),
@@ -180,7 +186,7 @@ describe('signed worker admission cold archive', () => {
   effectIt.effect('does not retire an indexed covered segment whose bytes have changed', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const source = '1'.repeat(40);
+      const source = Effect2.pipe('1', EffectString.repeat(40));
       const candidate = receipt(1, source);
       const initial = yield* readGraphWorkerAdmissionArchive(f.hotPath, policy);
       expect((yield* parkGraphWorkerAdmissionReceipts(f.hotPath, policy, initial, source, [candidate])).status).toBe(
@@ -191,7 +197,7 @@ describe('signed worker admission cold archive', () => {
       const name = (yield* f.fs.readDirectory(paths.segments))[0];
       const target = f.path.join(paths.segments, name);
       const original = yield* f.fs.readFileString(target);
-      yield* f.fs.writeFileString(target, `${original.slice(0, -2)}0\n`);
+      yield* f.fs.writeFileString(target, `${Effect2.pipe(original, EffectString.slice(0, -2))}0\n`);
       expect(
         yield* withCoordinatorStateLock(
           {threadnoteHome: f.home},
@@ -205,8 +211,8 @@ describe('signed worker admission cold archive', () => {
   effectIt.effect('quarantines a current hot result against a parked semantic alternative', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const parkedReceipt = receipt(1, '1'.repeat(40));
-      const currentReceipt = receipt(2, '2'.repeat(40));
+      const parkedReceipt = receipt(1, Effect2.pipe('1', EffectString.repeat(40)));
+      const currentReceipt = receipt(2, Effect2.pipe('2', EffectString.repeat(40)));
       const initial = yield* readGraphWorkerAdmissionArchive(f.hotPath, policy);
       yield* parkGraphWorkerAdmissionReceipts(f.hotPath, policy, initial, parkedReceipt.sourceCommit, [parkedReceipt]);
       yield* writeDurablePrivateJsonFile(f.hotPath, {...emptyGraphWorkerAdmissionStore(), receipts: [currentReceipt]});
@@ -234,8 +240,8 @@ describe('signed worker admission cold archive', () => {
   effectIt.effect('keeps indexed quarantine conservative until a same-size damaged segment is scrubbed', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const first = receipt(1, '1'.repeat(40));
-      const second = receipt(2, '2'.repeat(40));
+      const first = receipt(1, Effect2.pipe('1', EffectString.repeat(40)));
+      const second = receipt(2, Effect2.pipe('2', EffectString.repeat(40)));
       const initial = yield* readGraphWorkerAdmissionArchive(f.hotPath, policy);
       const parkedFirst = yield* parkGraphWorkerAdmissionReceipts(f.hotPath, policy, initial, first.sourceCommit, [
         first,
@@ -252,7 +258,15 @@ describe('signed worker admission cold archive', () => {
       const segment = parkedFirst.archive.manifest.segments[0];
       const other = f.path.join(graphWorkerAdmissionArchivePaths(f.hotPath).segments, `${segment.digest}.json`);
       const original = yield* f.fs.readFileString(other);
-      const changed = `${original.slice(0, -2)}${original.at(-2) === '1' ? '2' : '1'}\n`;
+      const changed = `${Effect2.pipe(original, EffectString.slice(0, -2))}${
+        Effect2.pipe(
+          original,
+          EffectString.at(-2),
+          Effect2.Option.getOrElse(() => undefined),
+        ) === '1'
+          ? '2'
+          : '1'
+      }\n`;
       expect(changed.length).toBe(original.length);
       yield* f.fs.writeFileString(other, changed);
       const selected = yield* readGraphWorkerAdmissionStore(f.home, policy, second.sourceCommit);

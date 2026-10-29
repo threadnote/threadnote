@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Effect's symlink API lacks the junction type required for unprivileged Windows fixtures.
@@ -21,6 +22,9 @@ import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 describe('code graph expected repository identity', () => {
   effectIt.layer(ApplicationLayer)(it => {
@@ -187,16 +191,29 @@ describe('code graph expected repository identity', () => {
               worktreeChanged: false,
             });
             expect(invocations).toHaveLength(3);
-            expect(invocations.filter(args => args.includes('status'))).toHaveLength(1);
             expect(
-              invocations.map(args => args.find(argument => ['remote', 'rev-parse', 'status'].includes(argument))),
+              EffectArray.filter(
+                invocations,
+                __effectArrayValue => !!(args => args.includes('status'))(__effectArrayValue),
+              ),
+            ).toHaveLength(1);
+            expect(
+              EffectArray.map(invocations, args =>
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(
+                    args,
+                    __effectArrayValue =>
+                      !!(argument => ['remote', 'rev-parse', 'status'].includes(argument))(__effectArrayValue),
+                  ),
+                ),
+              ),
             ).toEqual(['rev-parse', 'remote', 'status']);
 
             const failure = yield* resolvePublishedRepositoryReadFence(caller, expected, {
               afterInitialIdentity: () => fs.remove(caller).pipe(Effect.andThen(fs.symlink(second, caller))),
             }).pipe(Effect.flip);
             expect(failure).toBeInstanceOf(Error);
-            expect((failure as Error).message).toBe('Repository identity changed during the graph read.');
+            expect(failure).toHaveProperty('message', 'Repository identity changed during the graph read.');
 
             yield* fs.remove(caller);
             yield* fs.symlink(first, caller);
@@ -207,7 +224,7 @@ describe('code graph expected repository identity', () => {
                 ),
             }).pipe(Effect.flip);
             expect(remoteFailure).toBeInstanceOf(Error);
-            expect((remoteFailure as Error).message).toBe('Repository identity changed during the graph read.');
+            expect(remoteFailure).toHaveProperty('message', 'Repository identity changed during the graph read.');
             yield* git(first, ['remote', 'set-url', 'origin', 'https://github.com/example/read-fence.git']);
 
             const lateRetargetFailure = yield* resolvePublishedRepositoryReadFence(caller, expected, {
@@ -215,7 +232,7 @@ describe('code graph expected repository identity', () => {
                 fs.remove(caller).pipe(Effect.andThen(fs.symlink(second, caller))),
             }).pipe(Effect.flip);
             expect(lateRetargetFailure).toBeInstanceOf(Error);
-            expect((lateRetargetFailure as Error).message).toBe('Repository identity changed during the graph read.');
+            expect(lateRetargetFailure).toHaveProperty('message', 'Repository identity changed during the graph read.');
 
             yield* fs.remove(caller);
             yield* fs.symlink(first, caller);
@@ -244,7 +261,8 @@ describe('code graph expected repository identity', () => {
               Effect.flip,
             );
             expect(commonDirectoryFailure).toBeInstanceOf(Error);
-            expect((commonDirectoryFailure as Error).message).toBe(
+            expect(commonDirectoryFailure).toHaveProperty(
+              'message',
               'Repository identity changed during the graph read.',
             );
 
@@ -262,7 +280,7 @@ describe('code graph expected repository identity', () => {
                 ]).pipe(Effect.asVoid),
             }).pipe(Effect.flip);
             expect(headFailure).toBeInstanceOf(Error);
-            expect((headFailure as Error).message).toBe('Repository identity changed during the graph read.');
+            expect(headFailure).toHaveProperty('message', 'Repository identity changed during the graph read.');
           }),
         ),
       ),
@@ -359,7 +377,12 @@ describe('code graph expected repository identity', () => {
         else expect(yield* observation.pipe(Effect.flip)).toBeInstanceOf(Error);
         expect(invocations).toHaveLength(4);
         expect(invocations[0]).toContain('--show-toplevel');
-        expect(invocations.filter(args => args.includes('status'))).toHaveLength(1);
+        expect(
+          EffectArray.filter(
+            invocations,
+            __effectArrayValue => !!(args => args.includes('status'))(__effectArrayValue),
+          ),
+        ).toHaveLength(1);
         yield* fs.remove(caller);
         yield* directoryLink(first, caller);
         yield* fs.writeFileString(path.join(first, 'tracked.ts'), 'original');
@@ -395,7 +418,7 @@ describe('code graph expected repository identity', () => {
   );
 
   it('never classifies a porcelain-v2 change record as a clean worktree', () => {
-    const head = 'a'.repeat(40);
+    const head = Effect2.pipe('a', EffectString.repeat(40));
     fc.assert(
       fc.property(fc.stringMatching(/^[A-Za-z0-9._/-]{1,64}$/u), repositoryPath => {
         const output = `# branch.oid ${head}\0# branch.head main\0? ${repositoryPath}\0`;

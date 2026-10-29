@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {graphRegistryFixture} from '@threadnote/graph/test/helpers/graph-registry';
@@ -10,6 +11,8 @@ import {readTrustedGraphShareOciProfile} from '@threadnote/graph/sharing/profile
 import {graphShareProfileOciArtifact} from '@threadnote/graph/sharing/profile/oci_artifact';
 import {defaultGraphShareProfile, ociProfilePointer} from '@threadnote/graph/sharing/profile';
 import {trustReceiptFromEnrollment} from '@threadnote/graph/sharing/trust';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const canonicalRegistry = 'oci://registry.example.test/acme/canonical';
 
@@ -25,7 +28,7 @@ effectIt.effect('imports a v2 OCI profile only through existing exact authority 
         canonicalRemote: 'github.com/acme/example',
         organization: 'acme',
         publisherKeyFingerprint: sha256Digest('publisher'),
-        repositoryId: 'a'.repeat(64),
+        repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
       }),
       registry: {canonical: canonicalRegistry, worker: 'oci://registry.example.test/acme/worker'},
     };
@@ -53,7 +56,7 @@ effectIt.effect('imports a v2 OCI profile only through existing exact authority 
     expect(registry.requests).toHaveLength(0);
 
     expect(yield* registry.provide(readTrustedGraphShareOciProfile(cas, enrollment, trust))).toEqual(profile);
-    expect(registry.requests.map(request => request.pathname)).toEqual([
+    expect(EffectArray.map(registry.requests, request => request.pathname)).toEqual([
       `/v2/acme/canonical/manifests/${artifact.manifestDigest}`,
       `/v2/acme/canonical/blobs/${artifact.profileDigest}`,
     ]);
@@ -64,7 +67,11 @@ effectIt.effect('imports a v2 OCI profile only through existing exact authority 
     expect(yield* registry.provide(readTrustedGraphShareOciProfile(cas, enrollment, trust))).toEqual(profile);
     expect(registry.requests).toHaveLength(2);
 
-    const bodyPath = graphSharingCasBlobPath(path, cas, artifact.profileDigest.slice('sha256:'.length));
+    const bodyPath = graphSharingCasBlobPath(
+      path,
+      cas,
+      Effect2.pipe(artifact.profileDigest, EffectString.slice('sha256:'.length)),
+    );
     yield* fs.writeFileString(bodyPath, '{}');
     expect((yield* Effect.result(registry.provide(readTrustedGraphShareOciProfile(cas, enrollment, trust))))._tag).toBe(
       'Failure',

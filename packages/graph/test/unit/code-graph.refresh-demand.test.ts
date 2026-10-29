@@ -12,11 +12,13 @@ import {
   resumeCodeGraphRefreshDemand,
 } from '@threadnote/graph/refresh/demand_scheduler';
 import {codeGraphRefreshDemandContinuity} from '@threadnote/graph/refresh/demand';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const checkout = 'a'.repeat(64);
-const worktree = 'b'.repeat(64);
-const key = (value: string) => value.repeat(64).slice(0, 64);
-const token = (value: string) => `cgdq_${value.repeat(32).slice(0, 32)}`;
+const checkout = Effect.pipe('a', EffectString.repeat(64));
+const worktree = Effect.pipe('b', EffectString.repeat(64));
+const key = (value: string) => Effect.pipe(value, EffectString.repeat(64), EffectString.slice(0, 64));
+const token = (value: string) => `cgdq_${Effect.pipe(value, EffectString.repeat(32), EffectString.slice(0, 32))}`;
 const initial = () => emptyCodeGraphRefreshDemand(checkout, worktree);
 
 describe('code graph refresh demand scheduler', () => {

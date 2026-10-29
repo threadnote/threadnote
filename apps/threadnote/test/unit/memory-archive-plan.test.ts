@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Effect, FileSystem, Layer, Path, Result} from 'effect';
@@ -30,6 +31,8 @@ import {captureConsole} from '../../src/effect/console.js';
 import {CliOutput} from '../../src/effect/cli/output.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const dependencies = Layer.mergeAll(
   BunServices.layer,
@@ -195,12 +198,12 @@ effectIt.effect('retains stable identity, schema, code citations and privacy in 
       version: 1,
       extractorSet: 'native-code-graph-13',
       path: 'src/example.ts',
-      fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
-      repositoryId: 'b'.repeat(64),
+      fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
+      repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
       repositoryIdentityKind: 'remote',
-      sourceCommit: 'c'.repeat(40),
+      sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
       target: {kind: 'file'},
     });
     const f = yield* fixture(
@@ -251,12 +254,14 @@ effectIt.effect('refreshes the real active lexical index after the exact archive
   Effect.gen(function* () {
     const f = yield* fixture();
     const before = yield* loadRecallIndexData(f.config, {forceRefresh: true, includeInactive: false});
-    expect(before.candidates.some(item => item.uri === SOURCE)).toBe(true);
+    expect(EffectArray.some(before.candidates, item => item.uri === SOURCE)).toBe(true);
     const plan = yield* f.pinned(planMemoryArchive(f.config, SOURCE));
     yield* f.pinned(commitMemoryArchive(f.config, plan));
     expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
     const after = yield* loadRecallIndexData(f.config, {includeInactive: false});
-    expect(after.candidates.some(item => item.uri === SOURCE || item.uri === plan.destination.uri)).toBe(false);
+    expect(EffectArray.some(after.candidates, item => item.uri === SOURCE || item.uri === plan.destination.uri)).toBe(
+      false,
+    );
   }).pipe(provide),
 );
 
@@ -295,7 +300,10 @@ effectIt.effect('refuses full raw header-only drift and never cleans up a newer 
   Effect.gen(function* () {
     const f = yield* fixture();
     const plan = yield* f.pinned(planMemoryArchive(f.config, SOURCE));
-    const changed = f.raw.replace('source_agent_client: legacy', 'source_agent_client: changed');
+    const changed = Effect2.pipe(
+      f.raw,
+      EffectString.replace('source_agent_client: legacy', 'source_agent_client: changed'),
+    );
     yield* f.store.write(f.location, SOURCE, changed, {mode: 'replace'});
     for (const operation of [checkMemoryArchivePlan, commitMemoryArchive]) {
       const failure = yield* f.pinned(operation(f.config, plan)).pipe(Effect.result);

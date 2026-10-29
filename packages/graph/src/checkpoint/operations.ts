@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {checkpointTerminalText} from './terminal_text.js';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
@@ -58,18 +59,20 @@ import {
 } from '@threadnote/graph/checkpoint/schema';
 import {prepareCodeGraphCheckpointReceiverAdmission} from '@threadnote/graph/checkpoint/receiver_admission';
 import {recordCodeGraphSnapshotAdmission} from '@threadnote/graph/admission_freshness';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CHECKPOINT_IO_CHUNK_BYTES = 64 * 1_024;
 const CHECKPOINT_GIT_OUTPUT_BYTES_MAXIMUM = 16 * 1_024 * 1_024;
 const CHECKPOINT_SNAPSHOT_DOMAIN = 'threadnote-code-graph-checkpoint-local-snapshot-v1\0';
 
-export class CodeGraphCheckpointCommandError extends Schema.TaggedError<CodeGraphCheckpointCommandError>()(
-  'CodeGraphCheckpointCommandError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphCheckpointCommandError extends Schema.TaggedError<
+  CodeGraphCheckpointCommandError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCheckpointCommandError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export interface CodeGraphCheckpointArtifactOptions {
   readonly expectedDigest?: string;
@@ -519,13 +522,26 @@ function verifyCheckpointFiles(
   chunk: CodeGraphCheckpointVerifiedChunkV1,
 ) {
   return Effect.gen(function* () {
-    const files = chunk.records.filter((record): record is CodeGraphCheckpointFileRecordV1 => record.kind === 'file');
+    const files = EffectArray.filter(
+      chunk.records,
+      (record): record is CodeGraphCheckpointFileRecordV1 => record.kind === 'file',
+    );
     if (files.length === 0) return;
     const system = yield* SystemInfo;
     for (const batch of codeGraphCheckpointGitPathBatches(files)) {
       const result = yield* runBinaryCommandEffect(
         'git',
-        ['-C', identity.repoRoot, 'ls-tree', '-l', '-z', '--full-tree', commit, '--', ...batch.map(file => file.path)],
+        [
+          '-C',
+          identity.repoRoot,
+          'ls-tree',
+          '-l',
+          '-z',
+          '--full-tree',
+          commit,
+          '--',
+          ...EffectArray.map(batch, file => file.path),
+        ],
         {
           env: {...system.environment(), GIT_LITERAL_PATHSPECS: '1', GIT_NO_LAZY_FETCH: '1'},
           maxOutputBytes: CHECKPOINT_GIT_OUTPUT_BYTES_MAXIMUM,
@@ -558,7 +574,9 @@ function verifyCheckpointFiles(
  * file record instead of trusting header-only blob claims.
  */
 function checkpointAttributionRecordVerifier(header: CodeGraphCheckpointHeaderV1) {
-  const remaining = new Map((header.reuse?.inventory?.attributionFiles ?? []).map(file => [file.path, file] as const));
+  const remaining = new Map(
+    EffectArray.map(header.reuse?.inventory?.attributionFiles ?? [], file => [file.path, file] as const),
+  );
   return {
     accept: (chunk: CodeGraphCheckpointVerifiedChunkV1) =>
       Effect.gen(function* () {
@@ -606,7 +624,7 @@ function validateCheckpointReceiver(
   if (!compatibility.compatible) {
     const detail =
       compatibility.code === 'language-pack-unavailable'
-        ? ` Missing packs: ${checkpointTerminalText(compatibility.unavailablePackIds?.join(', ') ?? 'unknown')}.`
+        ? ` Missing packs: ${checkpointTerminalText(Option.getOrUndefined(Option.map(Option.fromNullishOr(compatibility.unavailablePackIds), __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, ', '))) ?? 'unknown')}.`
         : '';
     throw CodeGraphCheckpointCommandError.make({message: `Checkpoint runtime ABI is incompatible.${detail}`});
   }
@@ -654,7 +672,7 @@ function checkpointImportReceipt(
     abi: {algorithm: 'sha256', digest: inspection.header.abi.digest},
     artifact: {
       algorithm: 'sha256',
-      digest: inspection.descriptor.digest.slice('sha256:'.length),
+      digest: Effect2.pipe(inspection.descriptor.digest, EffectString.slice('sha256:'.length)),
       mediaType: CODE_GRAPH_CHECKPOINT_MEDIA_TYPE,
       size: inspection.descriptor.size,
     },
@@ -672,9 +690,12 @@ function checkpointImportReceipt(
 }
 
 function checkpointSnapshotId(header: CodeGraphCheckpointHeaderV1): string {
-  return `cgsn_${sha256HexSync(
-    `${CHECKPOINT_SNAPSHOT_DOMAIN}${header.repository.repositoryId}\0${header.source.commit}\0${header.logical.digest}`,
-  ).slice(0, 40)}`;
+  return `cgsn_${Effect2.pipe(
+    sha256HexSync(
+      `${CHECKPOINT_SNAPSHOT_DOMAIN}${header.repository.repositoryId}\0${header.source.commit}\0${header.logical.digest}`,
+    ),
+    EffectString.slice(0, 40),
+  )}`;
 }
 
 function checkpointBuildingSnapshot(
@@ -782,8 +803,8 @@ function requireCheckpointEof(file: FileSystem.File) {
 
 function parseExpectedDigest(value: string | undefined) {
   if (value === undefined) return succeedUndefined;
-  const normalized = value.trim().toLowerCase();
-  const prefixed = normalized.startsWith('sha256:') ? normalized : `sha256:${normalized}`;
+  const normalized = Effect2.pipe(value, EffectString.trim, EffectString.toLowerCase);
+  const prefixed = Effect2.pipe(normalized, EffectString.startsWith('sha256:')) ? normalized : `sha256:${normalized}`;
   return isCheckpointSha256(prefixed)
     ? Effect.succeed(prefixed)
     : checkpointFailure('--expected-digest must be a lowercase SHA-256 digest.');
@@ -925,7 +946,11 @@ function checkpointCommandCwd(value: string | undefined) {
   return Effect.gen(function* () {
     const system = yield* SystemInfo;
     const path = yield* Path.Path;
-    return path.resolve(value?.trim() || system.currentDirectory());
+    return path.resolve(
+      Effect2.pipe(value, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || system.currentDirectory(),
+    );
   });
 }
 

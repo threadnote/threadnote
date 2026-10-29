@@ -21,6 +21,9 @@ import type {ProjectManifest, RuntimeConfig, SeedManifest} from '@threadnote/wor
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const layer = Layer.merge(CodeGraphStore.layer, TestCommandExecutorLayer).pipe(
   Layer.provideMerge(TestSystemInfoLayer),
@@ -69,7 +72,7 @@ const fixture = Effect.fn('test.scopeRetirementFixture')(function* (options: {re
   const seed = (uri: string, index: number, worktreeId = identity.worktreeId) =>
     Effect.sync(() => {
       const scopeId = uri === 'full' ? 'full-repository' : `code-graph-scope:${sha256HexSync(uri)}`;
-      const snapshotId = `cgsn_${index.toString(16).padStart(40, '0')}`;
+      const snapshotId = `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`;
       const database = new Database(layout.databasePath);
       try {
         database
@@ -136,10 +139,20 @@ describe('configured graph scope retirement', () => {
             const root = f.path.join(f.home, 'scope-retirements-v1');
             maximumIntentFiles = Math.max(
               maximumIntentFiles,
-              (yield* f.fs.readDirectory(root)).filter(name => name.endsWith('.json')).length,
+              EffectArray.filter(
+                yield* f.fs.readDirectory(root),
+                __effectArrayValue =>
+                  !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+              ).length,
             );
             expect(yield* reconcileCodeGraphScopeRetirements(f.input)).toBeUndefined();
-            expect((yield* f.fs.readDirectory(root)).filter(name => name.endsWith('.json'))).toEqual([]);
+            expect(
+              EffectArray.filter(
+                yield* f.fs.readDirectory(root),
+                __effectArrayValue =>
+                  !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+              ),
+            ).toEqual([]);
             current = next;
           }
           expect(maximumIntentFiles).toBeLessThanOrEqual(1);
@@ -160,8 +173,9 @@ describe('configured graph scope retirement', () => {
           );
           if (exit._tag === 'Failure') failures += 1;
         }
-        const files = (yield* f.fs.readDirectory(f.path.join(f.home, 'scope-retirements-v1'))).filter(name =>
-          name.endsWith('.json'),
+        const files = EffectArray.filter(
+          yield* f.fs.readDirectory(f.path.join(f.home, 'scope-retirements-v1')),
+          __effectArrayValue => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
         );
         expect(failures).toBe(6);
         expect(files).toHaveLength(64);
@@ -175,7 +189,7 @@ describe('configured graph scope retirement', () => {
         const f = yield* fixture();
         yield* f.seed('full', 1);
         yield* f.seed('threadnote://resources/repos/sibling', 2);
-        yield* f.seed(f.project.uri, 3, 'e'.repeat(64));
+        yield* f.seed(f.project.uri, 3, Effect2.pipe('e', EffectString.repeat(64)));
         let current = f.project;
         for (let index = 0; index < 6; index++) {
           yield* f.seed(current.uri, 10 + index);

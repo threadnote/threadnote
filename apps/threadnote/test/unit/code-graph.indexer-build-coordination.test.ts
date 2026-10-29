@@ -1,10 +1,12 @@
 import {it as effectIt} from '@effect/vitest';
-import {Context, Deferred, Effect, FileSystem, Fiber, Layer, Path, Ref} from 'effect';
+import {Context, Crypto, Deferred, Effect, FileSystem, Fiber, Layer, Path, Ref} from 'effect';
+import {SystemInfo} from '@threadnote/platform/system';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphEmbeddingIndex} from '@threadnote/graph/embedding';
+import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {readCodeGraphBuildStatuses} from '@threadnote/graph/build_status';
 import {codeGraphScopeViewKey} from '@threadnote/graph/scope/identity';
@@ -14,11 +16,14 @@ import {buildOwnedCleanSnapshot} from '@threadnote/graph/indexer/build';
 import {measureCodeGraphAttribution} from '@threadnote/graph/indexer/build_coordination';
 import type {CodeGraphIndexResourceGate} from '@threadnote/graph/indexer/types';
 import {codeGraphLayout} from '@threadnote/graph/layout';
-import type {CodeGraphStoreShape} from '@threadnote/graph/store';
-import type {CodeGraphLanguagePackRegistryShape} from '@threadnote/graph/languages/registry';
+import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
+import {CodeGraphLanguagePackError} from '@threadnote/graph/languages/types';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 describe('indexer build coordination wiring', () => {
   effectIt.effect('starts attribution timing after preparation admission wait', () =>
@@ -75,7 +80,7 @@ describe('indexer build coordination wiring', () => {
         Deferred.await(entered),
         Fiber.join(first).pipe(
           Effect.flatMap(summary =>
-            Effect.die(`Index completed before embedding barrier: ${summary.diagnostics.join('; ')}`),
+            Effect.die(`Index completed before embedding barrier: ${EffectArray.join(summary.diagnostics, '; ')}`),
           ),
         ),
       );
@@ -92,7 +97,7 @@ describe('indexer build coordination wiring', () => {
       yield* Deferred.succeed(release, undefined);
       const completed = yield* Fiber.join(first);
       expect(yield* Ref.get(attached)).toBe(false);
-      expect(completed.diagnostics.join('; ')).toContain('superseded');
+      expect(EffectArray.join(completed.diagnostics, '; ')).toContain('superseded');
       expect((yield* store.readySnapshot(actualLayout.databasePath, identity.worktreeId))?.id).toBe(
         replacement.snapshot.id,
       );
@@ -140,7 +145,7 @@ describe('indexer build coordination wiring', () => {
         Deferred.await(entered),
         Fiber.join(first).pipe(
           Effect.flatMap(summary =>
-            Effect.die(`Index completed before embedding barrier: ${summary.diagnostics.join('; ')}`),
+            Effect.die(`Index completed before embedding barrier: ${EffectArray.join(summary.diagnostics, '; ')}`),
           ),
         ),
       );
@@ -179,36 +184,50 @@ describe('indexer build coordination wiring', () => {
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-clean-build-coordination-'});
       const identity: RepositoryIdentity = {
         caseMode: 'sensitive',
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
         displayName: 'fixture',
         gitCommonDirectory: path.join(home, '.git'),
-        headCommit: 'b'.repeat(40),
+        headCommit: Effect2.pipe('b', EffectString.repeat(40)),
         objectFormat: 'sha1',
         repoRoot: home,
-        repositoryId: 'c'.repeat(64),
-        worktreeId: 'd'.repeat(64),
+        repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
       };
       const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
       yield* fs.makeDirectory(layout.repositoryRoot, {recursive: true});
       const events = yield* Ref.make<string[]>([]);
       const stopped = new Error('stop after coordination');
-      const store = {
-        claimPersistentBuild: () => Effect.succeed('owner-token'),
-        resumableForcedBuild: () => Effect.void,
-      } as unknown as CodeGraphStoreShape;
+      const storeContext = yield* Layer.build(
+        Layer.mock(CodeGraphStore, {
+          claimPersistentBuild: () => Effect.succeed('owner-token'),
+          resumableForcedBuild: () => Effect.as(Effect.void, undefined),
+        }),
+      );
+      const store = Context.get(storeContext, CodeGraphStore);
       const languagePacks = {
-        activeCacheIdentities: () => [],
-        activeDerivationIdentities: () => [],
-        discoverWorkspace: () => Effect.fail(stopped),
-      } as unknown as CodeGraphLanguagePackRegistryShape;
+        ...BUILTIN_LANGUAGE_PACK_REGISTRY,
+        discoverWorkspace: () => Effect.fail(CodeGraphLanguagePackError.make({message: stopped.message})),
+      };
       const exit = yield* Effect.exit(
         buildOwnedCleanSnapshot({
-          buildOwner: {processId: process.pid} as never,
-          capacityProtection: {} as never,
-          embedding: {} as never,
+          buildOwner: {buildId: 'fixture-build', processId: process.pid},
+          capacityProtection: {
+            availableDiskBytes: () => Effect.succeed(1_000_000),
+            crypto: yield* Crypto.Crypto,
+            maintenance: yield* CodeGraphMaintenanceCoordinator,
+            path,
+            system: yield* SystemInfo,
+            temporaryDirectory: home,
+            walAutoCheckpointPages: 1_000,
+          },
+          embedding: CodeGraphEmbeddingIndex.of({
+            check: () => Effect.succeed({state: 'unavailable', reason: 'unused in this failure-path fixture'}),
+            ensure: () => Effect.succeed({embedded: 0, reused: 0, ready: true}),
+            search: () => Effect.succeed(new Map()),
+          }),
           ensureVectors: false,
           existing: undefined,
-          fallbackSnapshotId: `cgsn_${'e'.repeat(40)}-direct`,
+          fallbackSnapshotId: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}-direct`,
           force: true,
           fs,
           identity,
@@ -224,7 +243,7 @@ describe('indexer build coordination wiring', () => {
           legacyBuildAdmission: effect =>
             Ref.update(events, values => [...values, 'legacy']).pipe(Effect.andThen(effect)),
           layout,
-          logicalSnapshotId: `cgsn_${'f'.repeat(40)}`,
+          logicalSnapshotId: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
           preparationGate: effect =>
             Ref.update(events, values => [...values, 'preparation']).pipe(Effect.andThen(effect)),
           preparedSpoolBudgetGate: (_bytes, _snapshotId, effect) =>

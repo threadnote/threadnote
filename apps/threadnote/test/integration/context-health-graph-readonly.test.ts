@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import {Cause, Context, Effect, Exit, FileSystem, Layer, Option, Path, PlatformError} from 'effect';
@@ -21,6 +23,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {collectContextHealth} from '@threadnote/threadnote/memory/context/health_commands';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Context Health graph observation', () => {
   effectIt.effect('uses an existing session for a snapshot published during an absent observation', () =>
@@ -153,7 +157,16 @@ describe('Context Health graph observation', () => {
       expect(yield* store.read(location, uri)).toBe(content);
       expect(yield* fs.readFileString(path.join(indexed, 'src/price.ts'))).toBe(SOURCE);
       const current = yield* collectContextHealth(config, 'fixture-health', [record], indexed);
-      expect(current.findings.filter(finding => finding.category.startsWith('citation-'))).toEqual([]);
+      expect(
+        EffectArrayPipe(current.findings, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (finding, __effectArrayIndex) =>
+              __effectArrayIndex in __effectArrayValues &&
+              Effect2.pipe(finding.category, EffectString.startsWith('citation-')),
+          ),
+        ),
+      ).toEqual([]);
       expect(yield* store.read(location, uri)).toBe(content);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
@@ -262,8 +275,19 @@ describe('Context Health graph observation', () => {
         expect(yield* fs.exists(ownedRoot)).toBe(false);
         expect(Exit.isFailure(result)).toBe(true);
         if (Exit.isFailure(result)) {
-          const failures = result.cause.reasons.filter(Cause.isFailReason);
-          const defects = result.cause.reasons.filter(Cause.isDieReason);
+          const reasons = result.cause.reasons;
+          const presentReasons = EffectArray.filter(
+            reasons,
+            (reason, index): reason is (typeof reasons)[number] => index in reasons,
+          );
+          const failures = EffectArray.filter(
+            presentReasons,
+            (reason): reason is Extract<(typeof reasons)[number], {_tag: 'Fail'}> => Cause.isFailReason(reason),
+          );
+          const defects = EffectArray.filter(
+            presentReasons,
+            (reason): reason is Extract<(typeof reasons)[number], {_tag: 'Die'}> => Cause.isDieReason(reason),
+          );
           expect(failures).toHaveLength(failingPhase === 'body' ? 1 : 0);
           expect(defects).toHaveLength(failingPhase === 'release' ? 1 : 0);
           if (failingPhase === 'body') expect(failures[0]?.error).toBe(removalError);

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {
   NativeCyclePlanSchema,
@@ -8,6 +9,9 @@ import {
 } from './cycle.js';
 import {NativeCycleSnapshotSchema, NativeCycleReviewSchema, validateNativeCycleReviewHistory} from './cycle_review.js';
 import {WorkflowAutomationError} from './contracts.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -69,16 +73,16 @@ export type NativeCycleRuntime = typeof NativeCycleRuntimeSchema.Type;
 export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
   const runtime = Schema.decodeUnknownSync(NativeCycleRuntimeSchema, {onExcessProperty: 'error'})(input);
   decodeNativeCycleState(runtime.state);
-  runtime.plans.forEach(decodeNativeCyclePlan);
+  EffectArray.forEach(runtime.plans, decodeNativeCyclePlan);
   function fail(message: string): never {
     throw WorkflowAutomationError.make({code: 'invalid-cycle-state', message});
   }
-  const snapshots = new Map(runtime.snapshots.map(entry => [entry.snapshot.snapshotId, entry]));
-  const reviews = new Map(runtime.reviews.map(entry => [entry.snapshotId, entry.report]));
+  const snapshots = new Map(EffectArray.map(runtime.snapshots, entry => [entry.snapshot.snapshotId, entry]));
+  const reviews = new Map(EffectArray.map(runtime.reviews, entry => [entry.snapshotId, entry.report]));
   if (
     snapshots.size !== runtime.snapshots.length ||
     reviews.size !== runtime.reviews.length ||
-    new Set(runtime.attempts.map(attempt => attempt.id)).size !== runtime.attempts.length
+    new Set(EffectArray.map(runtime.attempts, attempt => attempt.id)).size !== runtime.attempts.length
   )
     fail('Duplicate cycle evidence identity.');
   const limits: Record<string, number> = {};
@@ -89,14 +93,17 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       !Number.isSafeInteger(expansion.to) ||
       expansion.to <= expansion.from ||
       expansion.to > 256 ||
-      !expansion.authority.trim()
+      !Effect.pipe(expansion.authority, EffectString.trim)
     )
       fail('Review expansion lost its phase, prior budget or explicit authority.');
     limits[expansion.phaseId] = expansion.to;
   }
-  if (JSON.stringify(Object.entries(limits).sort()) !== JSON.stringify(Object.entries(runtime.reviewLimits).sort()))
+  if (
+    JSON.stringify(EffectRecord.toEntries(limits).sort()) !==
+    JSON.stringify(EffectRecord.toEntries(runtime.reviewLimits).sort())
+  )
     fail('Review limits differ from their continuous authorization history.');
-  for (const [phaseId, baseline] of Object.entries(runtime.baselines)) {
+  for (const [phaseId, baseline] of EffectRecord.toEntries(runtime.baselines)) {
     if (!runtime.state.phases[phaseId] || new Set(baseline.preservedFiles).size !== baseline.preservedFiles.length)
       fail('The pre-implementation baseline lost its phase or preserved-work manifest.');
   }
@@ -106,16 +113,18 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       fail('Snapshot baseline differs from its pre-implementation source pin.');
     if (
       !runtime.state.phases[snapshot.phaseId] ||
-      !runtime.plans.some(
+      !EffectArray.some(
+        runtime.plans,
         plan =>
-          plan.phases.some(phase => phase.id === snapshot.phaseId) &&
+          EffectArray.some(plan.phases, phase => phase.id === snapshot.phaseId) &&
           nativeCyclePhaseHash(plan, snapshot.phaseId) === snapshot.phaseHash,
       ) ||
       new Set(snapshot.files).size !== snapshot.files.length ||
       new Set(snapshot.scopeFiles).size !== snapshot.scopeFiles.length ||
-      snapshot.scopeFiles.some(file => !snapshot.files.includes(file)) ||
-      new Set(incoming.map(item => item.path)).size !== incoming.length ||
-      incoming.some(
+      EffectArray.some(snapshot.scopeFiles, file => !snapshot.files.includes(file)) ||
+      new Set(EffectArray.map(incoming, item => item.path)).size !== incoming.length ||
+      EffectArray.some(
+        incoming,
         item =>
           !snapshot.files.includes(item.path) ||
           (item.source === 'preserved'
@@ -161,6 +170,7 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
       previous && priorReport ? {snapshot: previous, review: priorReport} : undefined,
     );
   }
-  if (runtime.attempts.some(attempt => !snapshots.has(attempt.snapshotId))) fail('Review attempt snapshot is missing.');
+  if (EffectArray.some(runtime.attempts, attempt => !snapshots.has(attempt.snapshotId)))
+    fail('Review attempt snapshot is missing.');
   return runtime;
 }

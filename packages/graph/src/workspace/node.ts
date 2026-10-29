@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphInventoryFile} from '../types.js';
 import {compareCodeUnits} from '../ordering.js';
 import type {CodeGraphExternalDependencyKind, CodeGraphExternalDependencyV1} from '../cross_repository/types.js';
@@ -14,6 +15,9 @@ import {
   type ProjectCandidate,
   uniqueStrings,
 } from './primitives.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface NodePackageManifest {
   readonly dependencyAliases: readonly string[];
@@ -87,26 +91,39 @@ export function discoverNodeWorkspaceCandidates(
   const manifestsByRoot = manifestIndex.byRoot;
   const pnpmPatterns = parsePnpmWorkspaces(orderedFiles);
   const nxRoots = new Set(
-    orderedFiles.filter(file => basename(file.path).toLowerCase() === 'nx.json').map(file => dirname(file.path)),
+    EffectArray.map(
+      EffectArray.filter<CodeGraphInventoryFile>(
+        orderedFiles,
+        (file: CodeGraphInventoryFile) => Effect.pipe(basename(file.path), EffectString.toLowerCase) === 'nx.json',
+      ),
+      file => dirname(file.path),
+    ),
   );
   const tsconfigs = parseTsconfigs(orderedFiles, diagnostics);
-  const tsconfigsByPath = new Map(tsconfigs.map(config => [config.file.path, config]));
+  const tsconfigsByPath = new Map(EffectArray.map(tsconfigs, config => [config.file.path, config]));
   const pathDependenciesByConfig = new Map(
-    tsconfigs.map(config => [config.file.path, typescriptPathDependencies(config, manifestIndex)] as const),
+    EffectArray.map(
+      tsconfigs,
+      config => [config.file.path, typescriptPathDependencies(config, manifestIndex)] as const,
+    ),
   );
 
-  const packageCandidates = manifests.map(manifest => {
+  const packageCandidates = EffectArray.map(manifests, manifest => {
     const match = nearestNodeWorkspace(manifest.root, manifestsByRoot, pnpmPatterns);
     const workspaceRoot = match?.root ?? manifest.root;
     const tsconfig = tsconfigsByPath.get(joinPath(manifest.root, 'tsconfig.json'));
-    const referenceRoots = (tsconfig?.dependencyAliases ?? []).map(alias => dirname(alias.slice('tsconfig:'.length)));
-    const referencedPackageNames = referenceRoots.flatMap(referenceRoot => {
+    const referenceRoots = EffectArray.map(tsconfig?.dependencyAliases ?? [], alias =>
+      dirname(Effect.pipe(alias, EffectString.slice('tsconfig:'.length))),
+    );
+    const referencedPackageNames = EffectArray.flatMap(referenceRoots, referenceRoot => {
       const target = manifestsByRoot.get(referenceRoot);
       return target ? [target.name] : [];
     });
     const pathDependencies = tsconfig ? pathDependenciesByConfig.get(tsconfig.file.path)! : [];
     const dependencyEvidence = new Map(
-      pathDependencies.flatMap(dependency => dependency.aliases.map(alias => [alias, dependency.evidence] as const)),
+      EffectArray.flatMap(pathDependencies, dependency =>
+        EffectArray.map(dependency.aliases, alias => [alias, dependency.evidence] as const),
+      ),
     );
     return {
       aliases: uniqueStrings([manifest.name, manifest.root]),
@@ -115,7 +132,7 @@ export function discoverNodeWorkspaceCandidates(
         ...manifest.dependencyAliases,
         ...referenceRoots,
         ...referencedPackageNames,
-        ...pathDependencies.flatMap(dependency => dependency.aliases),
+        ...EffectArray.flatMap(pathDependencies, dependency => dependency.aliases),
       ]),
       dependencyEvidence,
       diagnostics: [],
@@ -137,19 +154,19 @@ export function discoverNodeWorkspaceCandidates(
   });
 
   const declaredWorkspaceRoots = new Set([
-    ...packageCandidates.flatMap(candidate => candidate.workspaceRoots),
+    ...EffectArray.flatMap(packageCandidates, candidate => candidate.workspaceRoots),
     ...pnpmPatterns.keys(),
     ...nxRoots,
   ]);
-  const tsconfigCandidates = tsconfigs.map(config => {
+  const tsconfigCandidates = EffectArray.map(tsconfigs, config => {
     const workspaceRoot = nearestAncestor(config.root, declaredWorkspaceRoots) ?? config.root;
     const candidateDiagnostics = [...config.diagnostics];
     const pathDependencies = pathDependenciesByConfig.get(config.file.path)!;
     const localPackage = manifestsByRoot.get(config.root);
     for (const alias of config.dependencyAliases) {
-      if (!tsconfigsByPath.has(alias.slice('tsconfig:'.length))) {
+      if (!tsconfigsByPath.has(Effect.pipe(alias, EffectString.slice('tsconfig:'.length)))) {
         candidateDiagnostics.push(
-          `${config.file.path}: TypeScript project reference ${alias.slice('tsconfig:'.length)} was not indexed`,
+          `${config.file.path}: TypeScript project reference ${Effect.pipe(alias, EffectString.slice('tsconfig:'.length))} was not indexed`,
         );
       }
     }
@@ -161,10 +178,12 @@ export function discoverNodeWorkspaceCandidates(
       buildSystem: 'typescript',
       dependencyAliases: uniqueStrings([
         ...config.dependencyAliases,
-        ...pathDependencies.flatMap(dependency => dependency.aliases),
+        ...EffectArray.flatMap(pathDependencies, dependency => dependency.aliases),
       ]),
       dependencyEvidence: new Map(
-        pathDependencies.flatMap(dependency => dependency.aliases.map(alias => [alias, dependency.evidence] as const)),
+        EffectArray.flatMap(pathDependencies, dependency =>
+          EffectArray.map(dependency.aliases, alias => [alias, dependency.evidence] as const),
+        ),
       ),
       diagnostics: uniqueStrings(candidateDiagnostics),
       evidence: config.file.path,
@@ -187,14 +206,21 @@ function parsePackageManifests(
   files: readonly CodeGraphInventoryFile[],
   diagnostics: string[],
 ): readonly NodePackageManifest[] {
-  return files
-    .filter(file => basename(file.path).toLowerCase() === 'package.json' && file.content !== undefined)
-    .flatMap(file => {
+  return EffectArray.flatMap(
+    EffectArray.filter<CodeGraphInventoryFile>(
+      files,
+      (file: CodeGraphInventoryFile) =>
+        Effect.pipe(basename(file.path), EffectString.toLowerCase) === 'package.json' && file.content !== undefined,
+    ),
+    file => {
       const manifest = parseJsonObject(file, 'package manifest', diagnostics);
       if (!manifest) return [];
       const root = dirname(file.path);
-      const declaredName = typeof manifest.name === 'string' && manifest.name.trim() ? manifest.name.trim() : undefined;
-      let name = declaredName ?? (root.split('/').at(-1) || 'root');
+      const declaredName =
+        typeof manifest.name === 'string' && Effect.pipe(manifest.name, EffectString.trim)
+          ? Effect.pipe(manifest.name, EffectString.trim)
+          : undefined;
+      let name = declaredName ?? (Effect.pipe(root, EffectString.split('/')).at(-1) || 'root');
       let nameRegistryValid = false;
       if (declaredName !== undefined) {
         try {
@@ -215,9 +241,14 @@ function parsePackageManifests(
       );
       return [
         {
-          dependencyAliases: externalDependencies
-            .filter(dependency => dependency.importAlias === dependency.name)
-            .map(dependency => dependency.name),
+          dependencyAliases: EffectArray.map(
+            EffectArray.filter(
+              externalDependencies,
+              (dependency, __effectArrayIndex) =>
+                __effectArrayIndex in externalDependencies && dependency.importAlias === dependency.name,
+            ),
+            dependency => dependency.name,
+          ),
           externalDependencies,
           file,
           name,
@@ -225,35 +256,44 @@ function parsePackageManifests(
           nameRegistryValid,
           nameSpan: jsonPropertySpan(file, 'name', declaredName ?? name, stringTokens, lineIndex),
           root,
-          ...(typeof manifest.version === 'string' && manifest.version.trim()
-            ? {version: manifest.version.trim()}
+          ...(typeof manifest.version === 'string' && Effect.pipe(manifest.version, EffectString.trim)
+            ? {version: Effect.pipe(manifest.version, EffectString.trim)}
             : {}),
           workspacePatterns: packageWorkspacePatterns(manifest),
         },
       ];
-    });
+    },
+  );
 }
 
 function parsePnpmWorkspaces(files: readonly CodeGraphInventoryFile[]): ReadonlyMap<string, readonly string[]> {
   const output = new Map<string, readonly string[]>();
   for (const file of files) {
-    if (basename(file.path).toLowerCase() !== 'pnpm-workspace.yaml' || file.content === undefined) continue;
+    if (
+      Effect.pipe(basename(file.path), EffectString.toLowerCase) !== 'pnpm-workspace.yaml' ||
+      file.content === undefined
+    )
+      continue;
     output.set(dirname(file.path), pnpmWorkspacePatterns(file.content));
   }
   return output;
 }
 
 function parseTsconfigs(files: readonly CodeGraphInventoryFile[], diagnostics: string[]): readonly ParsedTsconfig[] {
-  return files
-    .filter(file => /^tsconfig(?:\.[^/]+)?\.jsonc?$/iu.test(basename(file.path)) && file.content !== undefined)
-    .flatMap(file => {
+  return EffectArray.flatMap(
+    EffectArray.filter<CodeGraphInventoryFile>(
+      files,
+      (file: CodeGraphInventoryFile) =>
+        /^tsconfig(?:\.[^/]+)?\.jsonc?$/iu.test(basename(file.path)) && file.content !== undefined,
+    ),
+    file => {
       const parsed = parseJsonObject(file, 'TypeScript config', diagnostics, true);
       if (!parsed) return [];
       const root = dirname(file.path);
       const configDiagnostics: string[] = [];
       return [
         {
-          dependencyAliases: typescriptReferencePaths(root, parsed).map(path => `tsconfig:${path}`),
+          dependencyAliases: EffectArray.map(typescriptReferencePaths(root, parsed), path => `tsconfig:${path}`),
           diagnostics: configDiagnostics,
           file,
           pathMappings: typescriptPathMappings(root, parsed, file.path, configDiagnostics),
@@ -261,7 +301,8 @@ function parseTsconfigs(files: readonly CodeGraphInventoryFile[], diagnostics: s
           sourceRoots: typescriptSourceRoots(root, parsed, file.path, configDiagnostics),
         },
       ];
-    });
+    },
+  );
 }
 
 function typescriptPathDependencies(
@@ -273,8 +314,8 @@ function typescriptPathDependencies(
     for (const manifest of manifestsMatchingAlias(mapping.alias, manifests)) {
       const capture = matchTypeScriptPathAlias(mapping.alias, manifest.name);
       if (capture === undefined) continue;
-      const matchesTarget = mapping.targets.some(target => {
-        const resolved = normalizeContainedPath('', target.replaceAll('*', capture));
+      const matchesTarget = EffectArray.some(mapping.targets, target => {
+        const resolved = normalizeContainedPath('', Effect.pipe(target, EffectString.replaceAll('*', capture)));
         return resolved === manifest.root;
       });
       if (!matchesTarget) continue;
@@ -302,17 +343,22 @@ function indexNodePackageManifests(manifests: readonly NodePackageManifest[]): N
 }
 
 function manifestsMatchingAlias(pattern: string, manifests: NodePackageManifestIndex): readonly NodePackageManifest[] {
-  const wildcard = pattern.indexOf('*');
+  const wildcard = Effect.pipe(
+    pattern,
+    EffectString.indexOf('*'),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (wildcard < 0) return manifests.byName.get(pattern) ?? [];
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   if (pattern.indexOf('*', wildcard + 1) >= 0) return [];
-  const prefix = pattern.slice(0, wildcard);
-  const suffix = pattern.slice(wildcard + 1);
+  const prefix = Effect.pipe(pattern, EffectString.slice(0, wildcard));
+  const suffix = Effect.pipe(pattern, EffectString.slice(wildcard + 1));
   const start = lowerBound(manifests.sortedNames, prefix);
   const matches: NodePackageManifest[] = [];
   for (let index = start; index < manifests.sortedNames.length; index += 1) {
     const name = manifests.sortedNames[index];
-    if (!name.startsWith(prefix)) break;
-    if (!name.endsWith(suffix) || name.length < prefix.length + suffix.length) continue;
+    if (!Effect.pipe(name, EffectString.startsWith(prefix))) break;
+    if (!Effect.pipe(name, EffectString.endsWith(suffix)) || name.length < prefix.length + suffix.length) continue;
     matches.push(...(manifests.byName.get(name) ?? []));
   }
   return matches;
@@ -330,13 +376,19 @@ function lowerBound(values: readonly string[], target: string): number {
 }
 
 function matchTypeScriptPathAlias(pattern: string, packageName: string): string | undefined {
-  const wildcard = pattern.indexOf('*');
+  const wildcard = Effect.pipe(
+    pattern,
+    EffectString.indexOf('*'),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (wildcard < 0) return pattern === packageName ? '' : undefined;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   if (pattern.indexOf('*', wildcard + 1) >= 0) return undefined;
-  const prefix = pattern.slice(0, wildcard);
-  const suffix = pattern.slice(wildcard + 1);
-  return packageName.startsWith(prefix) && packageName.endsWith(suffix)
-    ? packageName.slice(prefix.length, packageName.length - suffix.length)
+  const prefix = Effect.pipe(pattern, EffectString.slice(0, wildcard));
+  const suffix = Effect.pipe(pattern, EffectString.slice(wildcard + 1));
+  return Effect.pipe(packageName, EffectString.startsWith(prefix)) &&
+    Effect.pipe(packageName, EffectString.endsWith(suffix))
+    ? Effect.pipe(packageName, EffectString.slice(prefix.length, packageName.length - suffix.length))
     : undefined;
 }
 
@@ -354,15 +406,16 @@ function typescriptPathMappings(
     diagnostics.push(`${evidence}: TypeScript baseUrl escapes the repository`);
     return [];
   }
-  return Object.entries(compilerOptions.paths)
-    .sort(([left], [right]) => compareCodeUnits(left, right))
-    .flatMap(([alias, targets]) => {
-      const values = stringArray(targets).flatMap(target => {
+  return EffectArray.flatMap(
+    EffectRecord.toEntries(compilerOptions.paths).sort(([left], [right]) => compareCodeUnits(left, right)),
+    ([alias, targets]) => {
+      const values = EffectArray.flatMap(stringArray(targets), target => {
         const normalized = normalizeContainedPath(baseRoot, target);
         return normalized === undefined ? [] : [normalized];
       });
       return alias && values.length > 0 ? [{alias, evidence, targets: values}] : [];
-    });
+    },
+  );
 }
 
 function discoverNxProjects(
@@ -371,9 +424,13 @@ function discoverNxProjects(
   declaredWorkspaceRoots: ReadonlySet<string>,
   diagnostics: string[],
 ): readonly ProjectCandidate[] {
-  const projects: NxProjectManifest[] = files
-    .filter(file => basename(file.path).toLowerCase() === 'project.json' && file.content !== undefined)
-    .flatMap(file => {
+  const projects: NxProjectManifest[] = EffectArray.flatMap(
+    EffectArray.filter<CodeGraphInventoryFile>(
+      files,
+      (file: CodeGraphInventoryFile) =>
+        Effect.pipe(basename(file.path), EffectString.toLowerCase) === 'project.json' && file.content !== undefined,
+    ),
+    file => {
       const parsed = parseJsonObject(file, 'Nx project manifest', diagnostics, true);
       if (!parsed) return [];
       const fileRoot = dirname(file.path);
@@ -385,8 +442,13 @@ function discoverNxProjects(
       const sourceRoot =
         nxDeclaredPath(parsed.sourceRoot, workspaceRoot, root, file.path, 'sourceRoot', projectDiagnostics) ?? root;
       const name =
-        typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : root.split('/').at(-1) || 'root';
-      const dependencyNames = stringArray(parsed.implicitDependencies).filter(value => !value.startsWith('!'));
+        typeof parsed.name === 'string' && Effect.pipe(parsed.name, EffectString.trim)
+          ? Effect.pipe(parsed.name, EffectString.trim)
+          : Effect.pipe(root, EffectString.split('/')).at(-1) || 'root';
+      const dependencyNames = EffectArray.filter(
+        stringArray(parsed.implicitDependencies),
+        value => !Effect.pipe(value, EffectString.startsWith('!')),
+      );
       return [
         {
           dependencyNames,
@@ -399,8 +461,9 @@ function discoverNxProjects(
           workspaceRoot,
         },
       ];
-    });
-  const names = new Set(projects.map(project => project.name));
+    },
+  );
+  const names = new Set(EffectArray.map(projects, project => project.name));
   for (const project of projects) {
     for (const dependency of project.dependencyNames) {
       if (!names.has(dependency)) {
@@ -408,13 +471,14 @@ function discoverNxProjects(
       }
     }
   }
-  return projects.flatMap(
+  return EffectArray.flatMap(
+    projects,
     project =>
       [
         {
           aliases: [`nx-project:${project.name}`],
           buildSystem: 'nx',
-          dependencyAliases: project.dependencyNames.map(nxProjectAlias),
+          dependencyAliases: EffectArray.map(project.dependencyNames, nxProjectAlias),
           diagnostics: uniqueStrings(project.diagnostics),
           evidence: project.file.path,
           identityKey: `nx-project:${project.name}:${project.root}`,
@@ -427,7 +491,8 @@ function discoverNxProjects(
           sourceRoots: project.sourceRoots,
           workspaceRoots: [project.workspaceRoot],
         },
-        ...project.targets.map(
+        ...EffectArray.map(
+          project.targets,
           target =>
             ({
               aliases: [nxTargetAlias(project.name, target.name)],
@@ -462,16 +527,17 @@ function parseNxTargets(
     diagnostics.push(`${evidence}: Nx targets must be an object`);
     return [];
   }
-  return Object.entries(value)
-    .sort(([left], [right]) => compareCodeUnits(left, right))
-    .map(([name, target]) => ({
+  return EffectArray.map(
+    EffectRecord.toEntries(value).sort(([left], [right]) => compareCodeUnits(left, right)),
+    ([name, target]) => ({
       dependencyAliases: nxDependsOnAliases(
         Predicate.isObject(target) ? target.dependsOn : undefined,
         projectName,
         projectDependencies,
       ),
       name,
-    }));
+    }),
+  );
 }
 
 function nxDependsOnAliases(
@@ -479,12 +545,16 @@ function nxDependsOnAliases(
   projectName: string,
   projectDependencies: readonly string[],
 ): readonly string[] {
-  if (!Array.isArray(value)) return [];
+  if (!EffectArray.isArray(value)) return [];
   const aliases: string[] = [];
   for (const dependency of value) {
     if (typeof dependency === 'string') {
-      if (dependency.startsWith('^')) {
-        aliases.push(...projectDependencies.map(name => nxTargetAlias(name, dependency.slice(1))));
+      if (Effect.pipe(dependency, EffectString.startsWith('^'))) {
+        aliases.push(
+          ...EffectArray.map(projectDependencies, name =>
+            nxTargetAlias(name, Effect.pipe(dependency, EffectString.slice(1))),
+          ),
+        );
       } else {
         const [project, target] = splitNxTarget(dependency, projectName);
         aliases.push(nxTargetAlias(project, target));
@@ -498,14 +568,20 @@ function nxDependsOnAliases(
     const projects = stringArray(record.projects);
     const targetProjects =
       record.dependencies === true ? projectDependencies : projects.length > 0 ? projects : [projectName];
-    aliases.push(...targetProjects.map(project => nxTargetAlias(project, target)));
+    aliases.push(...EffectArray.map(targetProjects, project => nxTargetAlias(project, target)));
   }
   return uniqueStrings(aliases);
 }
 
 function splitNxTarget(value: string, defaultProject: string): readonly [string, string] {
-  const separator = value.lastIndexOf(':');
-  return separator <= 0 ? [defaultProject, value] : [value.slice(0, separator), value.slice(separator + 1)];
+  const separator = Effect.pipe(
+    value,
+    EffectString.lastIndexOf(':'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  return separator <= 0
+    ? [defaultProject, value]
+    : [Effect.pipe(value, EffectString.slice(0, separator)), Effect.pipe(value, EffectString.slice(separator + 1))];
 }
 
 function nxProjectAlias(name: string): string {
@@ -589,9 +665,15 @@ function packageDependencies(
   const output: CodeGraphExternalDependencyV1[] = [];
   for (const [section, kind] of sections) {
     const dependencies = manifest[section];
-    if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) continue;
+    if (!dependencies || typeof dependencies !== 'object' || EffectArray.isArray(dependencies)) continue;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- Package manifests are dynamically decoded objects.
     for (const [rawName, rawConstraint] of Object.entries(dependencies)) {
-      if (typeof rawConstraint !== 'string' || !rawConstraint.trim() || rawConstraint.trim().length > 8_192) continue;
+      if (
+        typeof rawConstraint !== 'string' ||
+        !Effect.pipe(rawConstraint, EffectString.trim) ||
+        Effect.pipe(rawConstraint, EffectString.trim).length > 8_192
+      )
+        continue;
       try {
         const declaration = npmDependencyDeclaration(rawName, rawConstraint);
         output.push({
@@ -631,16 +713,33 @@ function npmDependencyDeclaration(
   rawConstraint: string,
 ): {readonly importAlias: string; readonly name: string; readonly versionConstraint: string} {
   const importAlias = normalizeNpmPackageName(rawName);
-  const constraint = rawConstraint.normalize('NFKC').trim();
-  if (!constraint.startsWith('npm:')) {
+  const constraint = Effect.pipe(rawConstraint, EffectString.normalize('NFKC'), EffectString.trim);
+  if (!Effect.pipe(constraint, EffectString.startsWith('npm:'))) {
     return {importAlias, name: importAlias, versionConstraint: constraint};
   }
-  const target = constraint.slice('npm:'.length).trim();
-  const packageSeparator = target.startsWith('@')
-    ? target.indexOf('@', target.indexOf('/') + 1)
-    : target.lastIndexOf('@');
-  const packageName = packageSeparator > 0 ? target.slice(0, packageSeparator) : target;
-  const versionConstraint = packageSeparator > 0 ? target.slice(packageSeparator + 1).trim() : '*';
+  const target = Effect.pipe(constraint, __effectPipeInput => {
+    const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.slice('npm:'.length));
+    const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.trim);
+    return __effectPipeStage1;
+  });
+  const packageSeparator = Effect.pipe(target, EffectString.startsWith('@'))
+    ? // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
+      target.indexOf(
+        '@',
+        Effect.pipe(
+          target,
+          EffectString.indexOf('/'),
+          Effect.Option.getOrElse(() => -1),
+        ) + 1,
+      )
+    : Effect.pipe(
+        target,
+        EffectString.lastIndexOf('@'),
+        Effect.Option.getOrElse(() => -1),
+      );
+  const packageName = packageSeparator > 0 ? Effect.pipe(target, EffectString.slice(0, packageSeparator)) : target;
+  const versionConstraint =
+    packageSeparator > 0 ? Effect.pipe(target, EffectString.slice(packageSeparator + 1), EffectString.trim) : '*';
   if (!versionConstraint) throw new Error('npm alias version constraint is empty');
   return {
     importAlias,
@@ -688,7 +787,7 @@ function jsonStringTokens(content: string): readonly JsonStringToken[] {
     }
     if (character !== '"') continue;
     const end = jsonStringEnd(content, index);
-    const raw = content.slice(index, end);
+    const raw = Effect.pipe(content, EffectString.slice(index, end));
     const value = JSON.parse(raw) as unknown;
     if (typeof value === 'string') {
       output.push({
@@ -778,35 +877,47 @@ function lastJsonTokenIndex(
 
 function packageWorkspacePatterns(manifest: Record<string, unknown>): readonly string[] {
   const workspaces = manifest.workspaces;
-  if (Array.isArray(workspaces)) return workspaces.filter((value): value is string => typeof value === 'string');
+  if (EffectArray.isArray(workspaces))
+    return EffectArray.filter(workspaces, (value): value is string => typeof value === 'string');
   if (!Predicate.isObject(workspaces)) return [];
   const packages = workspaces.packages;
-  return Array.isArray(packages) ? packages.filter((value): value is string => typeof value === 'string') : [];
+  return EffectArray.isArray(packages)
+    ? EffectArray.filter(packages, (value): value is string => typeof value === 'string')
+    : [];
 }
 
 function pnpmWorkspacePatterns(content: string): readonly string[] {
   const patterns: string[] = [];
   let packages = false;
-  for (const rawLine of content.split(/\r?\n/)) {
-    const trimmedStart = rawLine.trimStart();
-    const colon = trimmedStart.indexOf(':');
-    if (colon >= 0 && trimmedStart.slice(0, colon).trimEnd() === 'packages') {
+  for (const rawLine of Effect.pipe(content, EffectString.split(/\r?\n/))) {
+    const trimmedStart = Effect.pipe(rawLine, EffectString.trimStart);
+    const colon = Effect.pipe(
+      trimmedStart,
+      EffectString.indexOf(':'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    if (colon >= 0 && Effect.pipe(trimmedStart, EffectString.slice(0, colon), EffectString.trimEnd) === 'packages') {
       packages = true;
       continue;
     }
     if (packages && rawLine === trimmedStart && trimmedStart) break;
     if (!packages) continue;
-    if (!trimmedStart.startsWith('-')) continue;
-    let value = trimmedStart.slice(1).trimStart();
+    if (!Effect.pipe(trimmedStart, EffectString.startsWith('-'))) continue;
+    let value = Effect.pipe(trimmedStart, EffectString.slice(1), EffectString.trimStart);
     const quote = value[0] === '"' || value[0] === "'" ? value[0] : undefined;
     if (quote) {
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
       const closing = value.indexOf(quote, 1);
-      if (closing < 0 || !isBlankOrComment(value.slice(closing + 1))) continue;
-      value = value.slice(1, closing).trim();
+      if (closing < 0 || !isBlankOrComment(Effect.pipe(value, EffectString.slice(closing + 1)))) continue;
+      value = Effect.pipe(value, EffectString.slice(1, closing), EffectString.trim);
     } else {
-      const comment = value.indexOf('#');
-      value = (comment < 0 ? value : value.slice(0, comment)).trim();
-      if (value.includes('"') || value.includes("'")) continue;
+      const comment = Effect.pipe(
+        value,
+        EffectString.indexOf('#'),
+        Effect.Option.getOrElse(() => -1),
+      );
+      value = Effect.pipe(comment < 0 ? value : Effect.pipe(value, EffectString.slice(0, comment)), EffectString.trim);
+      if (Effect.pipe(value, EffectString.includes('"')) || Effect.pipe(value, EffectString.includes("'"))) continue;
     }
     if (value) patterns.push(value);
   }
@@ -814,14 +925,14 @@ function pnpmWorkspacePatterns(content: string): readonly string[] {
 }
 
 function isBlankOrComment(value: string): boolean {
-  const trimmed = value.trimStart();
-  return !trimmed || trimmed.startsWith('#');
+  const trimmed = Effect.pipe(value, EffectString.trimStart);
+  return !trimmed || Effect.pipe(trimmed, EffectString.startsWith('#'));
 }
 
 function typescriptReferencePaths(root: string, config: Record<string, unknown>): readonly string[] {
-  if (!Array.isArray(config.references)) return [];
+  if (!EffectArray.isArray(config.references)) return [];
   return uniqueStrings(
-    config.references.flatMap(reference => {
+    EffectArray.flatMap(config.references, reference => {
       if (!Predicate.isObject(reference)) return [];
       const value = reference.path;
       if (typeof value !== 'string') return [];
@@ -842,9 +953,9 @@ function typescriptSourceRoots(
   const declared = [
     ...(typeof compilerOptions.rootDir === 'string' ? [compilerOptions.rootDir] : []),
     ...stringArray(compilerOptions.rootDirs),
-    ...stringArray(config.include).map(staticPatternRoot),
+    ...EffectArray.map(stringArray(config.include), staticPatternRoot),
   ];
-  const output = declared.flatMap(value => {
+  const output = EffectArray.flatMap(declared, value => {
     const normalized = normalizeContainedPath(root, value);
     if (normalized === undefined) {
       diagnostics.push(`${evidence}: TypeScript source root ${value} escapes the repository`);
@@ -856,32 +967,52 @@ function typescriptSourceRoots(
 }
 
 function staticPatternRoot(pattern: string): string {
-  const normalized = pattern.replaceAll('\\', '/').replace(/^\.\//, '');
-  const glob = normalized.search(/[?*[{]/u);
-  const prefix = (glob < 0 ? normalized : normalized.slice(0, glob)).replace(/\/+$/u, '');
+  const normalized = Effect.pipe(pattern, EffectString.replaceAll('\\', '/'), EffectString.replace(/^\.\//, ''));
+  const glob = Effect.pipe(
+    normalized,
+    EffectString.search(/[?*[{]/u),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const prefix = Effect.pipe(
+    glob < 0 ? normalized : Effect.pipe(normalized, EffectString.slice(0, glob)),
+    EffectString.replace(/\/+$/u, ''),
+  );
   return /\.[^/]+$/u.test(prefix) ? dirname(prefix) : prefix || '.';
 }
 
 function workspacePatternsInclude(patterns: readonly string[], relative: string): boolean {
-  const included = patterns.some(
-    pattern => !pattern.trim().startsWith('!') && workspacePatternMatches(pattern, relative),
+  const included = EffectArray.some(
+    patterns,
+    pattern =>
+      !Effect.pipe(pattern, EffectString.trim, EffectString.startsWith('!')) &&
+      workspacePatternMatches(pattern, relative),
   );
-  const excluded = patterns.some(pattern => {
-    const normalized = pattern.trim();
-    return normalized.startsWith('!') && workspacePatternMatches(normalized.slice(1), relative);
+  const excluded = EffectArray.some(patterns, pattern => {
+    const normalized = Effect.pipe(pattern, EffectString.trim);
+    return (
+      Effect.pipe(normalized, EffectString.startsWith('!')) &&
+      workspacePatternMatches(Effect.pipe(normalized, EffectString.slice(1)), relative)
+    );
   });
   return included && !excluded;
 }
 
 function workspacePatternMatches(pattern: string, relative: string): boolean {
-  const normalized = pattern.trim().replace(/^\.\//, '').replace(/\/$/, '');
+  const normalized = Effect.pipe(
+    pattern,
+    EffectString.trim,
+    EffectString.replace(/^\.\//, ''),
+    EffectString.replace(/\/$/, ''),
+  );
   if (!normalized) return false;
-  const escaped = normalized
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replaceAll('**', '\u0000')
-    .replaceAll('*', '[^/]*')
-    .replaceAll('?', '[^/]')
-    .replaceAll('\u0000', '.*');
+  const escaped = Effect.pipe(
+    normalized,
+    EffectString.replace(/[.+^${}()|[\]\\]/g, '\\$&'),
+    EffectString.replaceAll('**', '\u0000'),
+    EffectString.replaceAll('*', '[^/]*'),
+    EffectString.replaceAll('?', '[^/]'),
+    EffectString.replaceAll('\u0000', '.*'),
+  );
   return new RegExp(`^${escaped}$`).test(relative);
 }
 
@@ -962,10 +1093,12 @@ function nextJsoncToken(content: string, start: number): number {
 }
 
 function stringArray(value: unknown): readonly string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  return EffectArray.isArray(value)
+    ? EffectArray.filter(value, (item): item is string => typeof item === 'string')
+    : [];
 }
 
 function tsconfigName(path: string): string {
   const root = dirname(path);
-  return root ? `${root.split('/').at(-1)}:${basename(path)}` : basename(path);
+  return root ? `${Effect.pipe(root, EffectString.split('/')).at(-1)}:${basename(path)}` : basename(path);
 }

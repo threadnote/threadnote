@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Console, Crypto, Effect, FileSystem, Path, Schema} from 'effect';
 import {fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {createRemoteMemorySql} from '@threadnote/remote-memory/postgres/control_plane';
@@ -29,6 +30,7 @@ import {
   type HostedContextHealthRunInputV1,
 } from '@threadnote/remote-memory/hosted/context_health';
 import type {RemoteMemoryProvisioningPlanV1} from '@threadnote/remote-memory/provisioning';
+import {REMOTE_MEMORY_FEATURE_FLAGS} from '@threadnote/remote-memory/authorization';
 import {
   readGitBetaImportPlan,
   readGitBetaMemorySources,
@@ -39,6 +41,9 @@ import {
 } from '@threadnote/remote-memory/operator/files';
 import {PostgresRemoteMemoryOperatorAdapter} from '@threadnote/remote-memory/operator/postgres';
 import {runOperationsFileCommand} from '@threadnote/remote-memory/operations/operator';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const Identifier = Schema.String.check(
   Schema.isMinLength(1),
@@ -133,16 +138,7 @@ const RemoteMemoryProvisioningStateSchema = Schema.Struct({
   principalStatus: Schema.optionalKey(Schema.Literals(['active', 'disabled'])),
   share: Schema.optionalKey(
     Schema.Struct({
-      featureFlags: Schema.Array(
-        Schema.Literals([
-          'cursor_oidc_required',
-          'remote_memory_durable_write',
-          'remote_memory_ga',
-          'remote_memory_handoff_write',
-          'remote_memory_read',
-          'remote_memory_write',
-        ]),
-      ),
+      featureFlags: Schema.Array(Schema.Literals(REMOTE_MEMORY_FEATURE_FLAGS)),
       policyDigest: Schema.String,
       policyVersion: Schema.String,
       status: Schema.Literals(['active', 'deleted', 'revoked']),
@@ -208,10 +204,10 @@ const HostedContextHealthSchedulePlanInputSchema = Schema.Struct({
   tenantId: Identifier,
 });
 
-class RemoteMemoryOperatorInvocationError extends Schema.TaggedError<RemoteMemoryOperatorInvocationError>()(
-  'RemoteMemoryOperatorInvocationError',
-  {message: Schema.String},
-) {}
+class RemoteMemoryOperatorInvocationError extends Schema.TaggedError<
+  RemoteMemoryOperatorInvocationError,
+  {readonly brand: unique symbol}
+>()('RemoteMemoryOperatorInvocationError', {message: Schema.String}) {}
 
 export interface RemoteMemoryOperatorRuntime {
   readonly createAdapter: (
@@ -242,7 +238,7 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
     return 0;
   }
   return yield* Effect.gen(function* () {
-    if (command.startsWith('operations-')) {
+    if (Effect2.pipe(command, EffectString.startsWith('operations-'))) {
       return yield* runOperationsFileCommand(command, rest);
     }
     const databaseUrl = operatorDatabaseUrl(environment.THREADNOTE_REMOTE_DATABASE_URL);
@@ -269,7 +265,7 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
             rejectOptions(options, ['input']);
             const input = yield* Schema.decodeUnknownEffect(RemoteMemoryProvisioningInputSchema, {
               onExcessProperty: 'error',
-            })(yield* readOperatorJson<unknown>(requiredOption(options, 'input')));
+            })(yield* readOperatorJson(requiredOption(options, 'input')));
             yield* Console.log(
               JSON.stringify(yield* operatorPromise(() => provisionRemoteMemoryOperator(adapter, input))),
             );
@@ -279,7 +275,7 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
             rejectOptions(options, ['for-apply', 'input', 'output']);
             const request = yield* Schema.decodeUnknownEffect(RemoteMemoryProvisioningRequestSchema, {
               onExcessProperty: 'error',
-            })(yield* readOperatorJson<unknown>(requiredOption(options, 'input')));
+            })(yield* readOperatorJson(requiredOption(options, 'input')));
             const plan = yield* operatorPromise(() =>
               planRemoteMemoryProvisioningOperator(adapter, {apply: flag(options, 'for-apply'), request}),
             );
@@ -297,12 +293,13 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
           }
           if (command === 'provision-apply') {
             rejectOptions(options, ['plan', 'receipt']);
-            const plan = yield* Schema.decodeUnknownEffect(RemoteMemoryProvisioningPlanSchema, {
-              onExcessProperty: 'error',
-            })(yield* readOperatorJson<unknown>(requiredOption(options, 'plan')));
-            const receipt = yield* operatorPromise(() =>
-              applyRemoteMemoryProvisioningOperator(adapter, plan as RemoteMemoryProvisioningPlanV1),
-            );
+            const plan: RemoteMemoryProvisioningPlanV1 = yield* Schema.decodeUnknownEffect(
+              RemoteMemoryProvisioningPlanSchema,
+              {
+                onExcessProperty: 'error',
+              },
+            )(yield* readOperatorJson(requiredOption(options, 'plan')));
+            const receipt = yield* operatorPromise(() => applyRemoteMemoryProvisioningOperator(adapter, plan));
             yield* writeOperatorJsonExclusive(requiredOption(options, 'receipt'), receipt);
             yield* Console.log(
               JSON.stringify({
@@ -382,7 +379,7 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
             if (!adapter.capabilities.available.includes('manage_context_ci') || !adapter.controlContextCi) {
               return yield* operatorInvocationError('Hosted Context CI control is unavailable.');
             }
-            const input = yield* readOperatorJson<unknown>(requiredOption(options, 'input'));
+            const input = yield* readOperatorJson(requiredOption(options, 'input'));
             const receipt = yield* operatorPromise(() =>
               adapter.controlContextCi!(input, environment.THREADNOTE_CONTEXT_CI_WEBHOOK_KEY),
             );
@@ -394,8 +391,9 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
           }
           if (command === 'health-schedule') {
             rejectOptions(options, ['input', 'receipt']);
-            const raw = yield* readOperatorJson<unknown>(requiredOption(options, 'input'));
-            if (!isJsonRecord(raw) || typeof raw.nextDueAt !== 'string') {
+            const raw = yield* readOperatorJson(requiredOption(options, 'input'));
+            const nextDueAt = isJsonRecord(raw) ? raw.nextDueAt : undefined;
+            if (!isJsonRecord(raw) || typeof nextDueAt !== 'string') {
               return yield* operatorInvocationError('Hosted health schedule input is invalid.');
             }
             const schedule = yield* Effect.try({
@@ -403,7 +401,7 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
               catch: cause => operatorInvocationError(operatorInputFailureMessage(cause)),
             });
             const receipt = yield* operatorPromise(() =>
-              registerHostedContextHealthOperator(adapter, schedule, raw.nextDueAt as string),
+              registerHostedContextHealthOperator(adapter, schedule, nextDueAt),
             );
             yield* writeOperatorJsonExclusive(requiredOption(options, 'receipt'), receipt);
             yield* Console.log(JSON.stringify(receipt));
@@ -413,7 +411,7 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
             rejectOptions(options, ['input', 'output']);
             const input = yield* Schema.decodeUnknownEffect(HostedContextHealthSchedulePlanInputSchema, {
               onExcessProperty: 'error',
-            })(yield* readOperatorJson<unknown>(requiredOption(options, 'input')));
+            })(yield* readOperatorJson(requiredOption(options, 'input')));
             const schedule = yield* Effect.try({
               try: () =>
                 buildHostedContextHealthScheduleV1({
@@ -442,7 +440,7 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
           if (command === 'health-run') {
             rejectOptions(options, ['input', 'receipt']);
             yield* operatorPromise(() => assertHostedContextHealthWorkerPrivileges(adapter));
-            const raw = yield* readOperatorJson<unknown>(requiredOption(options, 'input'));
+            const raw = yield* readOperatorJson(requiredOption(options, 'input'));
             const input = yield* Effect.try({
               try: () => parseHostedContextHealthRunInputV1(raw),
               catch: cause => operatorInvocationError(operatorInputFailureMessage(cause)),
@@ -455,7 +453,10 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
             yield* writeOperatorJsonExclusive(requiredOption(options, 'receipt'), receipt);
             yield* Console.log(
               JSON.stringify({
-                alerts: receipt.alerts.filter(alert => alert.state === 'firing').map(alert => alert.kind),
+                alerts: EffectArray.map(
+                  EffectArray.filter(receipt.alerts, alert => alert.state === 'firing'),
+                  alert => alert.kind,
+                ),
                 labels: receipt.labels,
                 outcome: receipt.outcome,
                 receiptId: receipt.receiptId,
@@ -467,15 +468,16 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
           if (command === 'health-cycle') {
             rejectOptions(options, ['input', 'receipt']);
             yield* operatorPromise(() => assertHostedContextHealthWorkerPrivileges(adapter));
-            const raw = yield* readOperatorJson<unknown>(requiredOption(options, 'input'));
+            const raw = yield* readOperatorJson(requiredOption(options, 'input'));
             if (!isJsonRecord(raw)) {
               return yield* operatorInvocationError('Hosted health cycle input is invalid.');
             }
-            if (Object.keys(raw).some(key => key !== 'concurrency' && key !== 'runs')) {
+            if (EffectArray.some(EffectRecord.keys(raw), key => key !== 'concurrency' && key !== 'runs')) {
               return yield* operatorInvocationError('Hosted health cycle input is invalid.');
             }
             const rawRuns = raw.runs;
-            if (!Array.isArray(rawRuns)) return yield* operatorInvocationError('Hosted health cycle input is invalid.');
+            if (!EffectArray.isArray(rawRuns))
+              return yield* operatorInvocationError('Hosted health cycle input is invalid.');
             const concurrency = raw.concurrency;
             if (typeof concurrency !== 'number') {
               return yield* operatorInvocationError('Hosted health cycle scheduling values are invalid.');
@@ -487,8 +489,11 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
               generation: cycle.completion.generation,
               invalidCandidates: cycle.invalidCandidates,
               nextTenantOrdinal: cycle.nextTenantOrdinal,
-              receipts: receipts.map(receipt => ({
-                alerts: receipt.alerts.filter(alert => alert.state === 'firing').map(alert => alert.kind),
+              receipts: EffectArray.map(receipts, receipt => ({
+                alerts: EffectArray.map(
+                  EffectArray.filter(receipt.alerts, alert => alert.state === 'firing'),
+                  alert => alert.kind,
+                ),
                 labels: receipt.labels,
                 outcome: receipt.outcome,
                 receiptId: receipt.receiptId,
@@ -502,9 +507,10 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
             } as const;
             yield* writeOperatorJsonExclusive(requiredOption(options, 'receipt'), cycleReceipt);
             yield* Console.log(JSON.stringify(cycleReceipt));
-            return cycle.completion.status === 'failed' || receipts.some(receipt => receipt.outcome === 'unknown')
+            return cycle.completion.status === 'failed' ||
+              EffectArray.some(receipts, receipt => receipt.outcome === 'unknown')
               ? 2
-              : receipts.some(receipt => receipt.reviewRequired)
+              : EffectArray.some(receipts, receipt => receipt.reviewRequired)
                 ? 1
                 : 0;
           }
@@ -512,7 +518,7 @@ export const runRemoteMemoryOperator = Effect.fn('remoteMemory.operator.run')(fu
             rejectOptions(options, ['input', 'receipt']);
             const target = yield* Schema.decodeUnknownEffect(HostedContextHealthTargetSchema, {
               onExcessProperty: 'error',
-            })(yield* readOperatorJson<unknown>(requiredOption(options, 'input')));
+            })(yield* readOperatorJson(requiredOption(options, 'input')));
             const receipt = yield* operatorPromise(() =>
               setHostedContextHealthOperatorStatus(adapter, {
                 ...target,
@@ -537,13 +543,13 @@ function parseOptions(arguments_: readonly string[]): ReadonlyMap<string, string
   const options = new Map<string, string | true>();
   for (let index = 0; index < arguments_.length; index += 1) {
     const token = arguments_[index];
-    if (!token.startsWith('--') || token.length <= 2) {
+    if (!Effect2.pipe(token, EffectString.startsWith('--')) || token.length <= 2) {
       throw operatorInvocationError('Operator arguments must use --name followed by an optional value.');
     }
-    const key = token.slice(2);
+    const key = Effect2.pipe(token, EffectString.slice(2));
     if (options.has(key)) throw operatorInvocationError('An operator option was provided more than once.');
     const next = arguments_[index + 1];
-    if (!next || next.startsWith('--')) options.set(key, true);
+    if (!next || Effect2.pipe(next, EffectString.startsWith('--'))) options.set(key, true);
     else {
       options.set(key, next);
       index += 1;
@@ -572,10 +578,10 @@ function optionalList(options: ReadonlyMap<string, string | true>, key: string):
   if (typeof value !== 'string') {
     throw operatorInvocationError(`Operator option --${key} requires a comma-separated value.`);
   }
-  const values = value
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean);
+  const values = EffectArray.filter(
+    EffectArray.map(Effect2.pipe(value, EffectString.split(',')), item => Effect2.pipe(item, EffectString.trim)),
+    Boolean,
+  );
   if (values.length === 0) throw operatorInvocationError(`Operator option --${key} cannot be empty.`);
   return values;
 }
@@ -588,6 +594,7 @@ function flag(options: ReadonlyMap<string, string | true>, key: string): boolean
 }
 
 function operatorDatabaseUrl(value: string | undefined): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for URL construction and return.
   if (!value?.trim()) throw operatorInvocationError('THREADNOTE_REMOTE_DATABASE_URL is required.');
   let url: URL;
   try {
@@ -635,7 +642,7 @@ function operatorInputFailureMessage(cause: unknown): string {
 }
 
 function isJsonRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 async function executeHostedContextHealthCycle(
@@ -651,7 +658,7 @@ async function executeHostedContextHealthCycle(
   readonly selected: number;
   readonly unavailableClaims: number;
 }> {
-  const parsed = rawRuns.map(raw => parseHealthCandidate(raw));
+  const parsed = EffectArray.map(rawRuns, raw => parseHealthCandidate(raw));
   const validBySchedule = new Map<string, HostedContextHealthRunInputV1>();
   const duplicates = new Set<string>();
   let invalidCandidates = 0;
@@ -671,10 +678,13 @@ async function executeHostedContextHealthCycle(
   for (const duplicate of duplicates) validBySchedule.delete(duplicate);
 
   const batch = await claimHostedContextHealthOperator(adapter, concurrency);
-  const claimedIds = new Set(batch.claims.map(claim => claim.schedule.scheduleId));
-  invalidCandidates += [...validBySchedule.keys()].filter(scheduleId => !claimedIds.has(scheduleId)).length;
+  const claimedIds = new Set(EffectArray.map(batch.claims, claim => claim.schedule.scheduleId));
+  invalidCandidates += EffectArray.filter(
+    [...validBySchedule.keys()],
+    scheduleId => !claimedIds.has(scheduleId),
+  ).length;
   const settled = await Promise.all(
-    batch.claims.map(async claim => {
+    EffectArray.map(batch.claims, async claim => {
       const input = validBySchedule.get(claim.schedule.scheduleId);
       if (!input) {
         await failHostedContextHealthOperatorClaim(adapter, claim).catch(() => undefined);
@@ -688,8 +698,8 @@ async function executeHostedContextHealthCycle(
       }
     }),
   );
-  const failedClaims = settled.filter(result => result.failed).length;
-  const receipts = settled.flatMap(result => (result.failed ? [] : [result.receipt]));
+  const failedClaims = EffectArray.filter(settled, result => result.failed).length;
+  const receipts = EffectArray.flatMap(settled, result => (result.failed ? [] : [result.receipt]));
   const completion = await completeHostedContextHealthOperatorCycle(adapter, {
     failed: failedClaims > 0 || invalidCandidates > 0 || batch.unavailableCount > 0,
     generation: batch.generation,
@@ -721,36 +731,39 @@ function parseHealthCandidate(raw: unknown): {
 }
 
 function operatorHelp(): string {
-  return [
-    'Threadnote remote memory operator',
-    '',
-    'Database credentials are accepted only through THREADNOTE_REMOTE_DATABASE_URL.',
-    '  migrate',
-    '  capabilities',
-    '  operations-plan --input <draft.json> --output <manifest.json>',
-    '  operations-template --manifest <manifest.json> --drill <opaque-id> --target <opaque-id> --output <evidence.json>',
-    '  operations-verify --manifest <manifest.json> --evidence <evidence.json> --at <ISO timestamp> --receipt <new.json>',
-    '  operations-receipt-verify --manifest <manifest.json> --evidence <evidence.json> --at <ISO timestamp> --receipt <existing.json>',
-    '  provision --input <json>',
-    '  provision-plan --input <json> --output <plan.json> [--for-apply]',
-    '  provision-apply --plan <plan.json> --receipt <receipt.json>',
-    '  import-plan --source <git-share> --user <id> --team <team> --share <id>',
-    '    --alias-compatibility-ends-at <ISO timestamp> --output <plan.json> [--projects <csv>] [--for-apply]',
-    '  import-apply --source <git-share> --user <id> --team <team> --plan <plan.json> --receipt <json>',
-    '  export --share <id> --output <new-directory>',
-    '  ci-control --input <action.json> --receipt <receipt.json>',
-    '  health-schedule-plan --input <json> --output <plan.json>',
-    '  health-schedule --input <json> --receipt <receipt.json>',
-    '  health-run --input <immutable-evidence.json> --receipt <receipt.json>',
-    '  health-cycle --input <immutable-evidence-batch.json> --receipt <receipt.json>',
-    '  health-pause --input <target.json> --receipt <receipt.json>',
-    '  health-resume --input <target.json> --receipt <receipt.json>',
-    '',
-    'Pilot provisioning defaults omitted capabilities to memory:read. Write grants require named projects,',
-    'an OAuth client binding, and an expiry no more than 31 days after planning.',
-    'Import never deletes the Git source and never enables dual-write. A ready receipt still requires an explicit',
-    'Cursor Dashboard transport switch. PostgreSQL import apply is atomic and requires the share git_beta_import flag.',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Threadnote remote memory operator',
+      '',
+      'Database credentials are accepted only through THREADNOTE_REMOTE_DATABASE_URL.',
+      '  migrate',
+      '  capabilities',
+      '  operations-plan --input <draft.json> --output <manifest.json>',
+      '  operations-template --manifest <manifest.json> --drill <opaque-id> --target <opaque-id> --output <evidence.json>',
+      '  operations-verify --manifest <manifest.json> --evidence <evidence.json> --at <ISO timestamp> --receipt <new.json>',
+      '  operations-receipt-verify --manifest <manifest.json> --evidence <evidence.json> --at <ISO timestamp> --receipt <existing.json>',
+      '  provision --input <json>',
+      '  provision-plan --input <json> --output <plan.json> [--for-apply]',
+      '  provision-apply --plan <plan.json> --receipt <receipt.json>',
+      '  import-plan --source <git-share> --user <id> --team <team> --share <id>',
+      '    --alias-compatibility-ends-at <ISO timestamp> --output <plan.json> [--projects <csv>] [--for-apply]',
+      '  import-apply --source <git-share> --user <id> --team <team> --plan <plan.json> --receipt <json>',
+      '  export --share <id> --output <new-directory>',
+      '  ci-control --input <action.json> --receipt <receipt.json>',
+      '  health-schedule-plan --input <json> --output <plan.json>',
+      '  health-schedule --input <json> --receipt <receipt.json>',
+      '  health-run --input <immutable-evidence.json> --receipt <receipt.json>',
+      '  health-cycle --input <immutable-evidence-batch.json> --receipt <receipt.json>',
+      '  health-pause --input <target.json> --receipt <receipt.json>',
+      '  health-resume --input <target.json> --receipt <receipt.json>',
+      '',
+      'Pilot provisioning defaults omitted capabilities to memory:read. Write grants require named projects,',
+      'an OAuth client binding, and an expiry no more than 31 days after planning.',
+      'Import never deletes the Git source and never enables dual-write. A ready receipt still requires an explicit',
+      'Cursor Dashboard transport switch. PostgreSQL import apply is atomic and requires the share git_beta_import flag.',
+    ],
+    '\n',
+  );
 }
 
 export type RemoteMemoryOperatorFileServices = Crypto.Crypto | FileSystem.FileSystem | Path.Path;

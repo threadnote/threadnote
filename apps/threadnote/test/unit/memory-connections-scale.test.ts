@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import * as BunCrypto from '@effect/platform-bun/BunCrypto';
 import {Crypto, Effect} from 'effect';
@@ -29,6 +30,8 @@ import {
 } from '@threadnote/threadnote/evaluation/memory-connections-scale-contract';
 import {runMemoryConnectionsScaleWorkload} from '@threadnote/threadnote/evaluation/memory-connections-scale';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('memory-connections one-hop scale contract', () => {
   it('pins the release corpus, sample shape, and smoke-only overrides', () => {
@@ -36,22 +39,27 @@ describe('memory-connections one-hop scale contract', () => {
     expect(
       parseMemoryConnectionsScaleTargetArguments([
         '--candidate-commit',
-        '1'.repeat(40),
+        Effect2.pipe('1', EffectString.repeat(40)),
         '--built-artifact-sha256',
-        '2'.repeat(64),
+        Effect2.pipe('2', EffectString.repeat(64)),
       ]),
     ).toMatchObject({developmentSmoke: false, memoryCandidates: 100_000, samples: 25, warmups: 5});
     expect(() =>
-      parseMemoryConnectionsScaleTargetArguments(['--candidate-commit', '1'.repeat(40), '--memory-candidates', '1000']),
+      parseMemoryConnectionsScaleTargetArguments([
+        '--candidate-commit',
+        Effect2.pipe('1', EffectString.repeat(40)),
+        '--memory-candidates',
+        '1000',
+      ]),
     ).toThrow('require --development-smoke');
     expect(
       parseVerifyMemoryConnectionsScaleArtifactArguments([
         '--artifact',
         'artifact.json',
         '--candidate-commit',
-        '1'.repeat(40),
+        Effect2.pipe('1', EffectString.repeat(40)),
       ]),
-    ).toMatchObject({artifactPath: 'artifact.json', candidateCommit: '1'.repeat(40)});
+    ).toMatchObject({artifactPath: 'artifact.json', candidateCommit: Effect2.pipe('1', EffectString.repeat(40))});
   });
 
   it('derives a passing release gate from exact correctness and provenance', () => {
@@ -149,7 +157,7 @@ describe('memory-connections one-hop scale contract', () => {
           ...artifact,
           capture: {
             ...artifact.capture,
-            scenarios: artifact.capture.scenarios.map((scenario, index) =>
+            scenarios: EffectArray.map(artifact.capture.scenarios, (scenario, index) =>
               index === 0 ? {...scenario, samples: [{...scenario.samples[0], milliseconds: Number.NaN}]} : scenario,
             ),
           },
@@ -188,7 +196,7 @@ describe('memory-connections one-hop scale contract', () => {
             : key === 'gitStatusObserved' || key === 'githubActions'
               ? false
               : key === 'candidateCommit' || key === 'observedCommit'
-                ? '3'.repeat(40)
+                ? Effect2.pipe('3', EffectString.repeat(40))
                 : 'invalid',
       } as MemoryConnectionsScaleIdentityV1;
       expect(
@@ -260,18 +268,21 @@ describe('memory-connections one-hop scale contract', () => {
 
   it('binds the release candidate to the exact package version and Bun runtime', () => {
     expect(
-      memoryConnectionsScaleCandidateBinding('1'.repeat(40), {
+      memoryConnectionsScaleCandidateBinding(Effect2.pipe('1', EffectString.repeat(40)), {
         packageManager: 'bun@1.4.2',
         version: '5.0.0',
       }),
     ).toEqual({
-      commit: '1'.repeat(40),
+      commit: Effect2.pipe('1', EffectString.repeat(40)),
       packageManager: 'bun@1.4.2',
       runtime: 'bun/1.4.2',
       sourceVersion: 'threadnote-5.0.0',
     });
     expect(() =>
-      memoryConnectionsScaleCandidateBinding('1'.repeat(40), {packageManager: 'bun@latest', version: '5.0.0'}),
+      memoryConnectionsScaleCandidateBinding(Effect2.pipe('1', EffectString.repeat(40)), {
+        packageManager: 'bun@latest',
+        version: '5.0.0',
+      }),
     ).toThrow(/explicit Bun version/u);
   });
 
@@ -282,7 +293,7 @@ describe('memory-connections one-hop scale contract', () => {
       scenarioIndex = 0,
     ): MemoryConnectionsScaleCaptureV1 => ({
       ...baseline,
-      scenarios: baseline.scenarios.map((scenario, index) =>
+      scenarios: EffectArray.map(baseline.scenarios, (scenario, index) =>
         index === scenarioIndex ? {...scenario, cold: update(scenario.cold)} : scenario,
       ),
     });
@@ -292,7 +303,7 @@ describe('memory-connections one-hop scale contract', () => {
       failures(
         mutateCold(value => ({
           ...value,
-          projectedConnections: value.projectedConnections.map((receipt, index) =>
+          projectedConnections: EffectArray.map(value.projectedConnections, (receipt, index) =>
             index === 0 ? {...receipt, neighborMemoryId: 'tn_foreign_hub'} : receipt,
           ),
         })),
@@ -302,7 +313,7 @@ describe('memory-connections one-hop scale contract', () => {
       failures(
         mutateCold(value => ({
           ...value,
-          projectedConnections: value.projectedConnections.map((receipt, index) =>
+          projectedConnections: EffectArray.map(value.projectedConnections, (receipt, index) =>
             index === 0 ? {...receipt, currentness: 'historical'} : receipt,
           ),
         })),
@@ -339,19 +350,27 @@ describe('memory-connections one-hop scale contract', () => {
     const missingCoverage = failures(
       mutateCold(value => ({...omitProjectedReceipt(value), projectedConnectionCoverageTruncated: false}), 1),
     );
-    expect(missingCoverage.some(failure => failure.startsWith('projected connection coverage accuracy'))).toBe(true);
+    expect(
+      EffectArray.some(missingCoverage, failure =>
+        Effect2.pipe(failure, EffectString.startsWith('projected connection coverage accuracy')),
+      ),
+    ).toBe(true);
 
     const inflatedResultCoverage = failures(
       mutateCold(value => ({...value, projectedCoverageResultCount: value.projectedCoverageResultCount + 1}), 1),
     );
-    expect(inflatedResultCoverage.some(failure => failure.startsWith('projected connection coverage accuracy'))).toBe(
-      true,
-    );
+    expect(
+      EffectArray.some(inflatedResultCoverage, failure =>
+        Effect2.pipe(failure, EffectString.startsWith('projected connection coverage accuracy')),
+      ),
+    ).toBe(true);
 
     const missingActionableBundle = failures(withProjectedReceiptPrefix(baseline, 1, 0, true));
-    expect(missingActionableBundle.some(failure => failure.startsWith('projected connection coverage accuracy'))).toBe(
-      true,
-    );
+    expect(
+      EffectArray.some(missingActionableBundle, failure =>
+        Effect2.pipe(failure, EffectString.startsWith('projected connection coverage accuracy')),
+      ),
+    ).toBe(true);
 
     const missingAccounting = failures(
       mutateCold(
@@ -363,7 +382,11 @@ describe('memory-connections one-hop scale contract', () => {
         1,
       ),
     );
-    expect(missingAccounting.some(failure => failure.startsWith('projected receipt accounting accuracy'))).toBe(true);
+    expect(
+      EffectArray.some(missingAccounting, failure =>
+        Effect2.pipe(failure, EffectString.startsWith('projected receipt accounting accuracy')),
+      ),
+    ).toBe(true);
   });
 
   it.each(['missing-neighbor', 'duplicate-row', 'substitute-allowed', 'misassign-roles', 'missing-source'] as const)(
@@ -551,7 +574,7 @@ function releaseCapture(): MemoryConnectionsScaleCaptureV1 {
       recallDatabaseBytes: 10_000_000,
       recallStorageBytes: 10_000_000,
     },
-    scenarios: MEMORY_CONNECTIONS_SCALE_SCENARIOS.map(id => {
+    scenarios: EffectArray.map(MEMORY_CONNECTIONS_SCALE_SCENARIOS, id => {
       const expectedMemoryIds = memoryConnectionsScaleExpectedIds(id);
       const expectedTruncated = id === 'incoming-hub';
       const premiseMemoryId =
@@ -580,7 +603,7 @@ function observation(
     milliseconds: 10,
     omittedConnectionReceiptCount: 0,
     omittedPremiseReceiptCount: 0,
-    projectedConnections: returnedMemoryIds.map(memoryId => ({
+    projectedConnections: EffectArray.map(returnedMemoryIds, memoryId => ({
       currentness: 'current',
       direction: 'incoming',
       distance: 1,
@@ -617,7 +640,7 @@ function releaseArtifact(capture: MemoryConnectionsScaleCaptureV1) {
 
 function releaseCandidate(): MemoryConnectionsScaleCandidateBinding {
   return {
-    commit: '1'.repeat(40),
+    commit: Effect2.pipe('1', EffectString.repeat(40)),
     packageManager: 'bun@1.4.2',
     runtime: 'bun/1.4.2',
     sourceVersion: 'threadnote-5.0.0',
@@ -627,14 +650,14 @@ function releaseCandidate(): MemoryConnectionsScaleCandidateBinding {
 function releaseIdentity(): MemoryConnectionsScaleIdentityV1 {
   return {
     architecture: 'arm64',
-    builtArtifactSha256: '2'.repeat(64),
-    candidateCommit: '1'.repeat(40),
+    builtArtifactSha256: Effect2.pipe('2', EffectString.repeat(64)),
+    candidateCommit: Effect2.pipe('1', EffectString.repeat(40)),
     cpu: 'Apple M1 Max',
     dirty: false,
     githubActions: true,
     gitStatusObserved: true,
     invocationMode: 'release-scale',
-    observedCommit: '1'.repeat(40),
+    observedCommit: Effect2.pipe('1', EffectString.repeat(40)),
     operatingSystem: 'macOS 15.6.1',
     packageManager: 'bun@1.4.2',
     runnerArchitecture: 'ARM64',
@@ -654,11 +677,11 @@ function mapObservations(
   const map = (observation: MemoryConnectionsScaleObservationV1) => update(observation, index++);
   return {
     ...capture,
-    scenarios: capture.scenarios.map(scenario => ({
+    scenarios: EffectArray.map(capture.scenarios, scenario => ({
       ...scenario,
       cold: map(scenario.cold),
-      samples: scenario.samples.map(map),
-      warmups: scenario.warmups.map(map),
+      samples: EffectArray.map(scenario.samples, map),
+      warmups: EffectArray.map(scenario.warmups, map),
     })),
   };
 }
@@ -670,7 +693,9 @@ function withColdObservation(
 ): MemoryConnectionsScaleCaptureV1 {
   return {
     ...capture,
-    scenarios: capture.scenarios.map((scenario, index) => (index === scenarioIndex ? {...scenario, cold} : scenario)),
+    scenarios: EffectArray.map(capture.scenarios, (scenario, index) =>
+      index === scenarioIndex ? {...scenario, cold} : scenario,
+    ),
   };
 }
 
@@ -706,7 +731,7 @@ function withProjectedReceiptPrefix(
 function projectedReceiptBackedResultCount(value: MemoryConnectionsScaleObservationV1): number {
   const returnedMemoryIds = new Set(value.returnedMemoryIds);
   return new Set(
-    value.projectedConnections.flatMap(connection =>
+    EffectArray.flatMap(value.projectedConnections, connection =>
       connection.neighborMemoryId !== null && returnedMemoryIds.has(connection.neighborMemoryId)
         ? [connection.neighborMemoryId]
         : [],
@@ -716,13 +741,15 @@ function projectedReceiptBackedResultCount(value: MemoryConnectionsScaleObservat
 
 function hasActionableProjectedBundle(value: MemoryConnectionsScaleObservationV1): boolean {
   const returnedMemoryIds = new Set(value.returnedMemoryIds);
-  return value.projectedConnections.some(
+  return EffectArray.some(
+    value.projectedConnections,
     connection =>
       connection.resolution === 'resolved' &&
       (connection.currentness === 'current' || connection.currentness === 'historical') &&
       connection.neighborMemoryId !== null &&
       returnedMemoryIds.has(connection.neighborMemoryId) &&
-      value.projectedPremises.some(
+      EffectArray.some(
+        value.projectedPremises,
         premise =>
           premise.requestedOrdinal === connection.requestedOrdinal &&
           (premise.state === 'current' || premise.state === 'historical'),

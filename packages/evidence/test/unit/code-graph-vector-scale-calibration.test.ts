@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -261,8 +262,11 @@ describe('hosted macOS ARM64 100k vector calibration', () => {
       ),
     )(source);
     const sourceVectorRows = governedSweep.controls.vectorRowCounts[0];
-    const sourceThreadPlan = governedSweep.threadPlans.find(
-      plan => plan.contexts === calibration.capacityCrossCheck.sourceEffectiveContexts,
+    const sourceThreadPlan = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        governedSweep.threadPlans,
+        plan => plan.contexts === calibration.capacityCrossCheck.sourceEffectiveContexts,
+      ),
     );
     if (sourceVectorRows === undefined || sourceThreadPlan === undefined) {
       throw new Error('Governed embedding-context evidence is incomplete.');
@@ -276,7 +280,14 @@ describe('hosted macOS ARM64 100k vector calibration', () => {
       calibration.capacityCrossCheck.sourceMedianColdIndexMilliseconds,
     );
     expect(sourceVectorRows).toBe(calibration.capacityCrossCheck.sourceVectorRows);
-    expect(sourceThreadPlan.threads).toBe(calibration.capacityCrossCheck.sourceThreadCounts.join(','));
+    expect(sourceThreadPlan.threads).toBe(
+      EffectArray.join(
+        EffectArray.map(calibration.capacityCrossCheck.sourceThreadCounts, item =>
+          item === null || item === undefined ? '' : String(item),
+        ),
+        ',',
+      ),
+    );
 
     const predicted =
       governedSweep.contexts['2'].coldIndexMilliseconds.median *
@@ -333,7 +344,7 @@ function calibrationArtifact(
       runner: 'threadnote-code-graph-e2e',
       runnerVersion: '1',
     },
-    measurements: guardedMeasurements.map(guard =>
+    measurements: EffectArray.map(guardedMeasurements, guard =>
       benchmarkMeasurement(
         guard.measurementName,
         guard.unit,

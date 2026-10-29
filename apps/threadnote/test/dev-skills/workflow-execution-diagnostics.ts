@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Exit, Option, Tracer} from 'effect';
 
 export const WORKFLOW_EXECUTION_PHASES = [
@@ -201,8 +202,8 @@ export function createWorkflowExecutionDiagnostics(options: Options = {}) {
       successfulCommands,
       activeCount,
       unlistedActiveCount: activeCount - active.size,
-      active: [...active.values()].map(entry => ({...entry, elapsedMs: at - entry.startedMs})),
-      recent: recent.map(entry => ({...entry})),
+      active: EffectArray.map([...active.values()], entry => ({...entry, elapsedMs: at - entry.startedMs})),
+      recent: EffectArray.map(recent, entry => ({...entry})),
       droppedRecords,
       droppedActiveRecords,
       overflow,

@@ -1,8 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {createWorkspaceAttributor} from '@threadnote/graph/workspace';
 import type {CodeGraphWorkspace, CodeGraphWorkspaceProject} from '@threadnote/graph/languages/types';
 import type {CodeGraphFileFacts, CodeGraphReference} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function project(id: string, root: string, dependencies: readonly string[] = []): CodeGraphWorkspaceProject {
   return {
@@ -55,14 +58,18 @@ describe('workspace reference scopes', () => {
       project(
         'app',
         'app',
-        dependencies.map(dependency => dependency.id),
+        EffectArray.map(dependencies, dependency => dependency.id),
       ),
       ...dependencies,
     ];
     const key = pathKey('packages/dep0/index.ts');
-    expect(attribute(projects, [[key]]).flat()).toEqual([key.replace('typescript:', 'typescript:dep0:')]);
+    expect(attribute(projects, [[key]]).flat()).toEqual([
+      Effect.pipe(key, EffectString.replace('typescript:', 'typescript:dep0:')),
+    ]);
     const local = pathKey('app/local.ts', 'qualified:value:arity:2');
-    expect(attribute(projects, [[local]]).flat()).toEqual([local.replace('typescript:', 'typescript:app:')]);
+    expect(attribute(projects, [[local]]).flat()).toEqual([
+      Effect.pipe(local, EffectString.replace('typescript:', 'typescript:app:')),
+    ]);
   });
 
   it('uses symbol ownership for nested source roots, modules, and encoded paths', () => {
@@ -74,11 +81,11 @@ describe('workspace reference scopes', () => {
     const module = `typescript:module:${encodeURIComponent('packages/shared/a:b ü.ts')}`;
     const key = pathKey('packages/shared/a:b ü.ts', 'qualified:value:implementation');
     expect(attribute(projects, [[module, key]]).flat()).toEqual([
-      module.replace('typescript:', 'typescript:nested:'),
-      key.replace('typescript:', 'typescript:nested:'),
+      Effect.pipe(module, EffectString.replace('typescript:', 'typescript:nested:')),
+      Effect.pipe(key, EffectString.replace('typescript:', 'typescript:nested:')),
     ]);
     expect(attribute(projects, [[pathKey('elsewhere/local.ts')]]).flat()).toEqual([
-      pathKey('elsewhere/local.ts').replace('typescript:', 'typescript:nested:'),
+      Effect.pipe(pathKey('elsewhere/local.ts'), EffectString.replace('typescript:', 'typescript:nested:')),
     ]);
   });
 
@@ -91,8 +98,10 @@ describe('workspace reference scopes', () => {
       'global:name:value',
     ];
     expect(attribute(projects, [unknown])).toEqual([
-      unknown.map(key => key.replace(/^typescript:/u, 'typescript:app:')),
-      unknown.map(key => key.replace(/^typescript:/u, 'typescript:dependency:')),
+      EffectArray.map(unknown, key => Effect.pipe(key, EffectString.replace(/^typescript:/u, 'typescript:app:'))),
+      EffectArray.map(unknown, key =>
+        Effect.pipe(key, EffectString.replace(/^typescript:/u, 'typescript:dependency:')),
+      ),
     ]);
     expect(attribute(projects, [[pathKey('hidden/index.ts')]])).toEqual([[]]);
   });
@@ -121,27 +130,43 @@ describe('workspace reference scopes', () => {
             ),
             ...Array.from({length: 19}, (_, i) => project(`dep${i}`, `dep${i}`)),
           ];
-          const tiers = inputs.map(tier =>
-            tier.map(({owner, name, suffix}) => pathKey(`dep${owner}/index.ts`, `name:${name}${suffix}`)),
+          const tiers = EffectArray.map(inputs, tier =>
+            EffectArray.map(tier, ({owner, name, suffix}) => pathKey(`dep${owner}/index.ts`, `name:${name}${suffix}`)),
           );
           const before = structuredClone(tiers);
-          const legacy = tiers.flatMap(tier => [
-            tier.map(key => key.replace('typescript:', 'typescript:app:')),
-            projects
-              .slice(1, count + 1)
-              .flatMap(dependency => tier.map(key => key.replace('typescript:', `typescript:${dependency.id}:`))),
+          const legacy = EffectArray.flatMap(tiers, tier => [
+            EffectArray.map(tier, key => Effect.pipe(key, EffectString.replace('typescript:', 'typescript:app:'))),
+            EffectArray.flatMap(projects.slice(1, count + 1), dependency =>
+              EffectArray.map(tier, key =>
+                Effect.pipe(key, EffectString.replace('typescript:', `typescript:${dependency.id}:`)),
+              ),
+            ),
           ]);
           const keys = new Set(
-            inputs.flatMap(tier =>
-              tier.map(
+            EffectArray.flatMap(inputs, tier =>
+              EffectArray.map(
+                tier,
                 ({owner, name, suffix}) =>
                   `typescript:dep${owner}:path:${encodeURIComponent(`dep${owner}/index.ts`)}:name:${name}${suffix}`,
               ),
             ),
           );
           const resolve = (values: readonly (readonly string[])[]) =>
-            values.map(tier => [...new Set(tier.filter(key => keys.has(key)))].sort()).find(tier => tier.length > 0) ??
-            [];
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                EffectArray.map(values, tier =>
+                  [
+                    ...new Set(
+                      EffectArray.filter(
+                        tier,
+                        (key, __effectArrayIndex) => __effectArrayIndex in tier && keys.has(key),
+                      ),
+                    ),
+                  ].sort(),
+                ),
+                tier => tier.length > 0,
+              ),
+            ) ?? [];
           expect(resolve(attribute(projects, tiers))).toEqual(resolve(legacy));
           expect(tiers).toEqual(before);
           expect(attribute(projects, tiers).flat().length).toBeLessThanOrEqual(tiers.flat().length);

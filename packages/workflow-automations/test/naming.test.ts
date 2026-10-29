@@ -8,6 +8,9 @@ import {
   workflowTitleSlug,
   type WorkflowNameFamily,
 } from '../src/naming.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const caught = (run: () => unknown): unknown => {
   try {
@@ -57,23 +60,31 @@ describe('native workflow naming policy', () => {
 
   it('resolves lossy and truncation collisions with explicit family ordinals', () => {
     expect(workflowTitleSlug('Café plan')).toBe(workflowTitleSlug('Cafe plan'));
-    expect(workflowTitleSlug('a'.repeat(200))).toBe('a'.repeat(80));
+    expect(workflowTitleSlug(Effect.pipe('a', EffectString.repeat(200)))).toBe(
+      Effect.pipe('a', EffectString.repeat(80)),
+    );
     expect(workflowFamilyStem(family('Café plan', 1))).not.toBe(workflowFamilyStem(family('Cafe plan', 2)));
   });
 
   it('rejects malformed titles, noncanonical families, unsafe roles, and invalid ordinals', () => {
-    for (const title of ['', ' \t\n ', 'bad\u0000title', 'x'.repeat(4097), '\ud800'])
-      expect(caught(() => workflowTitleSlug(title))).toMatchObject({code: 'invalid-name'});
+    for (const title of ['', ' \t\n ', 'bad\u0000title', Effect.pipe('x', EffectString.repeat(4097)), '\ud800'])
+      expect(caught(() => workflowTitleSlug(title))).toMatchObject({
+        code: 'invalid-name',
+      });
     for (const invalid of [
-      {policyVersion: 2, slug: 'plan', ordinal: 1},
+      Object.defineProperty(family('Plan'), 'policyVersion', {value: 2}),
       {policyVersion: 1, slug: 'Plan', ordinal: 1},
       {policyVersion: 1, slug: 'plan..draft', ordinal: 1},
-      {policyVersion: 1, slug: 'a'.repeat(81), ordinal: 1},
+      {
+        policyVersion: 1,
+        slug: Effect.pipe('a', EffectString.repeat(81)),
+        ordinal: 1,
+      },
       {policyVersion: 1, slug: 'plan', ordinal: 0},
       {policyVersion: 1, slug: 'plan', ordinal: 1_000_001},
       {policyVersion: 1, slug: 'plan', ordinal: Number.MAX_SAFE_INTEGER + 1},
     ])
-      expect(caught(() => workflowFamilyStem(invalid as WorkflowNameFamily))).toMatchObject({code: 'invalid-name'});
+      expect(caught(() => workflowFamilyStem(invalid))).toMatchObject({code: 'invalid-name'});
     for (const role of ['../outside', 'Root', 'root/path', 'a..b', 'a--b', 'a-'])
       expect(caught(() => workflowMemoryStem(family('Plan'), role))).toMatchObject({code: 'invalid-name'});
     expect(caught(() => workflowMemoryStem(family('Plan'), 'root', 0))).toMatchObject({code: 'invalid-name'});
@@ -86,11 +97,11 @@ describe('native workflow naming policy', () => {
     const token = fc.constantFrom('A', 'a', 'é', 'e\u0301', 'ø', '世界', 'Ж', 'م', '🧭', ' ', '/', '-', '_');
     fc.assert(
       fc.property(
-        fc.array(token, {maxLength: 90}).map(parts => parts.join('')),
+        fc.array(token, {maxLength: 90}).map(parts => EffectArray.join(parts, '')),
         fc.integer({min: 1, max: 1_000_000}),
         fc.integer({min: 1, max: 1_000_000}),
         (title, ordinal, revision) => {
-          const slug = workflowTitleSlug(title.trim().length === 0 ? 'Generated' : title);
+          const slug = workflowTitleSlug(Effect.pipe(title, EffectString.trim).length === 0 ? 'Generated' : title);
           const currentFamily = {policyVersion: 1 as const, slug, ordinal};
           const familyStem = workflowFamilyStem(currentFamily);
           const memoryStem = workflowMemoryStem(currentFamily, 'architecture-current', revision);
@@ -98,7 +109,12 @@ describe('native workflow naming policy', () => {
           expect(new TextEncoder().encode(slug).byteLength).toBeLessThanOrEqual(80);
           expect(workflowTitleSlug(slug)).toBe(slug);
           expect(workflowFamilyStem(currentFamily)).toBe(familyStem);
-          expect(workflowFamilyStem({...currentFamily, ordinal: ordinal === 1 ? 2 : 1})).not.toBe(familyStem);
+          expect(
+            workflowFamilyStem({
+              ...currentFamily,
+              ordinal: ordinal === 1 ? 2 : 1,
+            }),
+          ).not.toBe(familyStem);
           for (const stem of [familyStem, memoryStem, archivedStem]) {
             expect(stem).not.toMatch(/[\\/:*?"<>|. ]/u);
             expect(new TextEncoder().encode(`${stem}.json`).byteLength).toBeLessThanOrEqual(200);

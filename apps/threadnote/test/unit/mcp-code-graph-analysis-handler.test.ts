@@ -1,4 +1,5 @@
-import {serveCodeGraphAnalysisRead, type CodeGraphAnalysisReadInput} from '@threadnote/graph/isolated/analysis';
+import {Array as EffectArray} from 'effect';
+import {serveCodeGraphAnalysisRead} from '@threadnote/graph/isolated/analysis';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {BunFileSystem} from '@effect/platform-bun';
@@ -10,6 +11,7 @@ import {TestClock} from 'effect/testing';
 import {McpSchema, McpServer} from 'effect/ai';
 import {describe, expect, it} from 'vitest';
 import {CodeGraphAnalysis, analyzeCodeGraph} from '@threadnote/graph/analysis';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
@@ -33,6 +35,70 @@ import type {CommandResult} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {analysisSnapshot, pagedAnalysisStore} from '@threadnote/graph/test/helpers/code-graph-analysis';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const codeGraphAnalysisReadInputSchema = Schema.Struct({
+  budget: Schema.optional(
+    Schema.Struct({
+      maxEdgeVisits: Schema.optional(Schema.Int),
+      maxEdges: Schema.optional(Schema.Int),
+      maxNodes: Schema.optional(Schema.Int),
+    }),
+  ),
+  communityId: Schema.optional(Schema.String),
+  cwd: Schema.String,
+  deadlineMilliseconds: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0)),
+  freshness: Schema.Literals(['current', 'ready', 'allow-stale']),
+  includeHeuristic: Schema.optional(Schema.Boolean),
+  includeModelAssociations: Schema.optional(Schema.Boolean),
+  limits: Schema.optional(
+    Schema.Struct({
+      communities: Schema.optional(Schema.Int),
+      communityMembers: Schema.optional(Schema.Int),
+      components: Schema.optional(Schema.Int),
+      confidenceFindings: Schema.optional(Schema.Int),
+      hubs: Schema.optional(Schema.Int),
+      memberships: Schema.optional(Schema.Int),
+      relationshipGroupMembers: Schema.optional(Schema.Int),
+      relationshipGroups: Schema.optional(Schema.Int),
+      surprisingLinks: Schema.optional(Schema.Int),
+    }),
+  ),
+  manifestPath: Schema.optional(Schema.String),
+  memberLimit: Schema.optional(Schema.Int),
+  operation: Schema.Literals([
+    'stats',
+    'communities',
+    'community',
+    'groups',
+    'hubs',
+    'surprises',
+    'confidence',
+    'full',
+  ]),
+  project: Schema.optional(Schema.String),
+  refresh: Schema.optional(Schema.Boolean),
+  threadnoteHome: Schema.String,
+});
+
+const codeGraphQueryOperationSchema = Schema.Literals(['explain', 'impact', 'neighbors', 'node', 'path', 'query']);
+
+function decodeCodeGraphQueryOperationRequest(value: unknown): Record<string, unknown> & {
+  readonly operation: CodeGraphQueryResult['operation'];
+} {
+  if (!isJsonObject(value) || !Schema.is(codeGraphQueryOperationSchema)(value.operation)) {
+    throw new Error('Expected an isolated code graph query operation.');
+  }
+  return {...value, operation: value.operation};
+}
+
+function requireTextBlock(value: unknown): string {
+  if (!isJsonObject(value) || value.type !== 'text' || typeof value.text !== 'string')
+    throw new Error('Expected a text content block.');
+  return value.text;
+}
 
 describe('registered analyze_code_graph snapshot resolution', () => {
   effectIt.effect('allows analysis selection to take thirty seconds within the default 55-second deadline', () => {
@@ -74,7 +140,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
         const result = yield* harness.invokeInspect({
           callerCwd: ready.identity.repoRoot,
           operation,
-          nodeId: `cgs_${'a'.repeat(32)}`,
+          nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
           query: 'value',
           responseFormat: 'dual',
         });
@@ -208,7 +274,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
         for (const request of [
           {operation: 'query' as const, query: 'value'},
           {edgeLimit: 17, nodeLimit: 9, operation: 'query' as const, query: 'value'},
-          {nodeId: `cgs_${'a'.repeat(32)}`, operation: 'neighbors' as const},
+          {nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`, operation: 'neighbors' as const},
         ]) {
           const result = yield* harness.invokeInspect({
             callerCwd: ready.identity.repoRoot,
@@ -305,7 +371,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
     return Effect.gen(function* () {
       for (const request of [
         {operation: 'query' as const, query: 'value'},
-        {nodeId: `cgs_${'a'.repeat(32)}`, operation: 'node' as const},
+        {nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`, operation: 'node' as const},
       ]) {
         const started = harness.awaitIsolatedInspectCall(harness.observation.isolatedInspectCalls + 1);
         const fiber = yield* harness
@@ -359,8 +425,8 @@ describe('registered analyze_code_graph snapshot resolution', () => {
     const harness = analyzeHandlerHarness({attachResults: [], refresh: false, statuses: [stale]});
     const requests = [
       {operation: 'query' as const, query: 'value'},
-      {nodeId: `cgs_${'a'.repeat(32)}`, operation: 'node' as const},
-      {nodeId: `cgs_${'a'.repeat(32)}`, operation: 'neighbors' as const},
+      {nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`, operation: 'node' as const},
+      {nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`, operation: 'neighbors' as const},
       {operation: 'explain' as const, symbol: 'value'},
     ];
 
@@ -383,7 +449,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
       expect(harness.observation.isolatedInspectCalls).toBe(requests.length);
       expect(harness.observation.refreshOptions).toEqual([]);
       expect(harness.observation.watcherStatusTargets).toEqual(
-        requests.map(() => ({
+        EffectArray.map(requests, () => ({
           cwd: stale.identity.repoRoot,
           threadnoteHome: TEST_HOME,
           manifestPath: `${TEST_HOME}/seed-manifest.yaml`,
@@ -422,8 +488,8 @@ describe('registered analyze_code_graph snapshot resolution', () => {
     const harness = analyzeHandlerHarness({attachResults: [], refresh: true, statuses: [cold]});
     const requests = [
       {operation: 'query' as const, query: 'value'},
-      {nodeId: `cgs_${'a'.repeat(32)}`, operation: 'node' as const},
-      {nodeId: `cgs_${'a'.repeat(32)}`, operation: 'neighbors' as const},
+      {nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`, operation: 'node' as const},
+      {nodeId: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`, operation: 'neighbors' as const},
       {operation: 'explain' as const, symbol: 'value'},
     ];
 
@@ -448,7 +514,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
       expect(harness.observation.refreshOptions).toEqual([]);
       expect(harness.observation.watcherStatusCalls).toBe(0);
       expect(harness.observation.lifecycleEvents).toEqual(
-        requests.flatMap(() => ['isolated-read-start', 'isolated-read-complete']),
+        EffectArray.flatMap(requests, () => ['isolated-read-start', 'isolated-read-complete']),
       );
     }).pipe(provideTestLayer(harness.layer));
   });
@@ -639,7 +705,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
       expect(result.content).toEqual([
         expect.objectContaining({type: 'text', text: expect.stringContaining('Graph analysis:')}),
       ]);
-      const text = (result.content[0] as {readonly text: string}).text;
+      const text = requireTextBlock(result.content[0]);
       expect(text).not.toContain('Read:');
       expect(text).not.toContain(ready.identity.repositoryId);
       expect(text).not.toContain(ready.readySnapshot!.id);
@@ -665,9 +731,11 @@ describe('registered analyze_code_graph snapshot resolution', () => {
           freshness: 'ready',
           operation: 'stats',
         });
-        const text = (result.content[0] as {readonly text: string}).text;
+        const text = requireTextBlock(result.content[0]);
 
-        expect(text).toContain(`Evidence: freshness stale, commit ${stale.readySnapshot!.commit.slice(0, 12)}.`);
+        expect(text).toContain(
+          `Evidence: freshness stale, commit ${Effect2.pipe(stale.readySnapshot!.commit, EffectString.slice(0, 12))}.`,
+        );
         expect(text).not.toContain('Read:');
         expect(text).not.toContain(stale.identity.repositoryId);
         expect(text).not.toContain(stale.readySnapshot!.id);
@@ -699,7 +767,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
         operation: 'stats',
         project: 'threadnote-app',
       });
-      const text = (result.content[0] as {readonly text: string}).text;
+      const text = requireTextBlock(result.content[0]);
 
       expect(text).toContain(
         'Project scope: threadnote-app, project, partial, negative proof selected-graph-only, roots root-a, root-b, 1 root(s) omitted.',
@@ -722,7 +790,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
 
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         expect(result.structuredContent).toMatchObject({operation: 'stats', type: 'code-graph-analysis'});
-        const text = (result.content[0] as {readonly text: string}).text;
+        const text = requireTextBlock(result.content[0]);
         expect(text).toContain('Graph analysis:');
         expect(text).not.toContain('Read:');
         expect(text).not.toContain(ready.identity.repositoryId);
@@ -999,14 +1067,19 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
           })
         : arguments_.at(-1) === '--threadnote-code-graph-analysis-worker'
           ? Effect.gen(function* () {
-              const request = JSON.parse(new TextDecoder().decode(options?.input)) as CodeGraphAnalysisReadInput;
+              const request = yield* Schema.decodeUnknownEffect(codeGraphAnalysisReadInputSchema)(
+                JSON.parse(new TextDecoder().decode(options?.input)),
+              ).pipe(Effect.orDie);
               if (input.analysisDelayMilliseconds !== undefined) yield* Effect.sleep(input.analysisDelayMilliseconds);
               const result = yield* serveCodeGraphAnalysisRead(request).pipe(
                 Effect.provideService(CodeGraphQueryService, query),
                 Effect.provideService(CodeGraphAnalysis, analysis),
                 Effect.provideService(
                   CodeGraphIndexer,
-                  {} as import('@threadnote/graph/indexer').CodeGraphIndexerShape,
+                  CodeGraphIndexer.of({
+                    ensureCommit: () => Effect.die('Unexpected commit lease request.'),
+                    index: () => Effect.die('Unexpected graph index request.'),
+                  }),
                 ),
                 Effect.orDie,
               );
@@ -1019,9 +1092,7 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
               if (status === undefined || options?.input === undefined) {
                 return yield* Effect.die('Unexpected isolated graph inspection.');
               }
-              const request = JSON.parse(new TextDecoder().decode(options.input)) as Record<string, unknown> & {
-                readonly operation: CodeGraphQueryResult['operation'];
-              };
+              const request = decodeCodeGraphQueryOperationRequest(JSON.parse(new TextDecoder().decode(options.input)));
               lifecycleEvents.push('isolated-read-start');
               isolatedRequests.push(request);
               if (input.inspectDelayMilliseconds !== undefined) yield* Effect.sleep(input.inspectDelayMilliseconds);
@@ -1083,7 +1154,20 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
   let analyzeHandle: AddedTool['handle'] | undefined;
   let inspectHandle: AddedTool['handle'] | undefined;
   let inspectTool: AddedTool['tool'] | undefined;
-  const mcpLayer = Layer.succeed(McpServer.McpServer, {
+  const mcpLayer = Layer.mock(McpServer.McpServer, {
+    notifications: {
+      'notifications/cancelled': () => Effect.die('Unexpected MCP cancellation notification.'),
+      'notifications/message': () => Effect.die('Unexpected MCP logging notification.'),
+      'notifications/progress': () => Effect.die('Unexpected MCP progress notification.'),
+      'notifications/prompts/list_changed': () => Effect.die('Unexpected MCP prompts notification.'),
+      'notifications/resources/list_changed': () => Effect.die('Unexpected MCP resources notification.'),
+      'notifications/resources/updated': () => Effect.die('Unexpected MCP resource update notification.'),
+      'notifications/tools/list_changed': () => Effect.die('Unexpected MCP tools notification.'),
+    },
+    prompts: [],
+    resourceTemplates: [],
+    resources: [],
+    tools: [],
     addTool: (options: AddedTool) =>
       Effect.sync(() => {
         if (options.tool.name === 'analyze_code_graph') analyzeHandle = options.handle;
@@ -1092,8 +1176,9 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
           inspectTool = options.tool;
         }
       }),
-  } as unknown as EffectMcpServer);
+  });
   const applicationLayer = Layer.mergeAll(
+    ApplicationLayer,
     BunFileSystem.layer,
     BunPath.layer,
     Layer.succeed(CommandExecutor, command),
@@ -1102,16 +1187,7 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
     Layer.succeed(CodeGraphWatcher, watcher),
     Layer.succeed(SystemInfo, systemInfoStub()),
   );
-  // This registry contains only the code-graph handlers audited above. The
-  // production registry type is deliberately conservative because arbitrary
-  // registries may capture any ApplicationServices member.
-  // oxlint-disable effecttsgo/unsafe-effect-type-assertion -- narrow this test-only registry to its actual services
-  const registrationLayer = server.registrationLayer() as Layer.Layer<
-    never,
-    never,
-    McpServer.McpServer | Layer.Success<typeof applicationLayer>
-  >;
-  // oxlint-enable effecttsgo/unsafe-effect-type-assertion
+  const registrationLayer = server.registrationLayer();
   const layer = registrationLayer.pipe(Layer.provideMerge(mcpLayer), Layer.provideMerge(applicationLayer));
 
   return {
@@ -1184,7 +1260,7 @@ function scopedProjectObservation(): CodeGraphQueryScope {
       definitionDigest: 'definition-digest',
       extractorSet: 'extractor-set',
       inventoryFingerprint: 'inventory-fingerprint',
-      observedCommit: 'b'.repeat(40),
+      observedCommit: Effect2.pipe('b', EffectString.repeat(40)),
       policyFingerprint: 'policy-fingerprint',
       repositoryId: analysisSnapshot([], []).repositoryId,
       scopeKey: 'code-graph-scope:web',
@@ -1232,7 +1308,7 @@ function systemInfoStub(): SystemInfoShape {
 }
 
 function codeGraphStatus(options: {readonly ready: boolean; readonly stale: boolean}): CodeGraphStatus {
-  const readySnapshot = {...analysisSnapshot([], []), id: `cgsn_${'c'.repeat(40)}`};
+  const readySnapshot = {...analysisSnapshot([], []), id: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`};
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
     checkoutId: 'analysis-checkout',
@@ -1266,7 +1342,7 @@ function codeGraphInspectionResult(
       {
         contentHash: 'fixture',
         exported: true,
-        id: `cgs_${'a'.repeat(32)}`,
+        id: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
         kind: 'variable',
         language: 'typescript',
         name: 'value',
@@ -1340,20 +1416,23 @@ function runtimeConfig(manifestPath = `${TEST_HOME}/seed-manifest.yaml`): Runtim
 }
 
 function graphManifest(projects: readonly string[], projectPath = '/workspace/repository'): string {
-  return [
-    'version: 1',
-    'projects:',
-    ...projects.flatMap(name => [
-      `  - name: ${name}`,
-      `    path: ${projectPath}`,
-      '    seed: []',
-      `    uri: threadnote://resources/repos/${name}`,
-      '    graph:',
-      '      closure: dependencies',
-      '      roots: [src]',
-    ]),
-    '',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'version: 1',
+      'projects:',
+      ...EffectArray.flatMap(projects, name => [
+        `  - name: ${name}`,
+        `    path: ${projectPath}`,
+        '    seed: []',
+        `    uri: threadnote://resources/repos/${name}`,
+        '    graph:',
+        '      closure: dependencies',
+        '      roots: [src]',
+      ]),
+      '',
+    ],
+    '\n',
+  );
 }
 
 function mcpServerClient(): McpSchema.McpServerClient['Service'] {

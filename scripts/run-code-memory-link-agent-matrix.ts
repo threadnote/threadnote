@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed sequential harness owns exact OS ledger and child-process boundaries. */
 
@@ -53,6 +55,9 @@ import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {scriptArguments} from './effect/script.js';
 import {captureCodeMemoryLinkProcessGroup} from './code-memory-link-process-boundary.js';
 import {verifyCodeMemoryLinkEvaluatedSubject} from './code-memory-link-evaluated-subject.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_MEMORY_LINK_MATRIX_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_CALIBRATION_RESULT_VERSION = 1 as const;
@@ -160,7 +165,7 @@ export async function runReleaseMatrix(options: ReleaseOptions, candidateInstall
   }
   if (
     suite.tasks.length !== manifest.tasks.length ||
-    suite.tasks.some((task, index) => {
+    EffectArray.some(suite.tasks, (task, index) => {
       const expected = manifest.tasks[index];
       return (
         expected === undefined ||
@@ -207,7 +212,9 @@ export async function runReleaseMatrix(options: ReleaseOptions, candidateInstall
     });
     if (state.pending !== null) {
       const pending = state.pending;
-      const pendingClient = registry.clients.find(client => client.clientId === pending.trial.clientId);
+      const pendingClient = EffectOption.getOrUndefined(
+        EffectArray.findFirst(registry.clients, client => client.clientId === pending.trial.clientId),
+      );
       if (!pendingClient) throw new Error('Pending commit names a client outside the reviewed registry.');
       const recovery = await invoke(pendingClient);
       if (recovery.exitCode !== 0) {
@@ -257,7 +264,9 @@ export async function runReleaseMatrix(options: ReleaseOptions, candidateInstall
       return;
     }
     const scheduled = manifest.schedule[state.trials];
-    const client = registry.clients.find(value => value.clientId === scheduled.clientId);
+    const client = EffectOption.getOrUndefined(
+      EffectArray.findFirst(registry.clients, value => value.clientId === scheduled.clientId),
+    );
     if (!client) throw new Error('Frozen schedule names a client absent from the reviewed registry.');
     let result: Awaited<ReturnType<typeof invoke>>;
     try {
@@ -347,7 +356,7 @@ export async function runCalibrationMatrix(options: CalibrationOptions): Promise
   const command = await canonicalRegularFile(options.calibrationCommand, 'calibration command');
   assertOutsideRoot(root, command, 'calibration command');
   const resultsPath = normalizedAbsolute(options.resultsPath, 'calibration results');
-  if (!resultsPath.endsWith('.calibration.jsonl')) {
+  if (!Effect2.pipe(resultsPath, EffectString.endsWith('.calibration.jsonl'))) {
     throw new Error('Calibration results must use a visibly separate .calibration.jsonl suffix.');
   }
   assertOutsideRoot(root, resultsPath, 'calibration results');
@@ -418,7 +427,7 @@ export async function materializeCodeMemoryLinkCalibrationSandboxV1(
   const sandbox = await mkdtemp(resolve(temporaryRoot, 'threadnote-code-memory-link-calibration-'));
   try {
     await writeSandboxText(sandbox, 'calibration/plan.json', `${JSON.stringify(plan, null, 2)}\n`);
-    const artifacts = new Map(plan.fixture.artifacts.map(artifact => [artifact.artifactId, artifact]));
+    const artifacts = new Map(EffectArray.map(plan.fixture.artifacts, artifact => [artifact.artifactId, artifact]));
     for (const mapping of plan.fixtureFiles) {
       const content = await readRequiredText(joinRoot(preparedRoot, mapping.source), 128 * 1_024);
       const artifact = artifacts.get(mapping.artifactId);
@@ -493,12 +502,15 @@ export function releaseInvocationArguments(input: {
     String(options.timeoutMilliseconds),
     '--trials',
     options.trialsPath,
-    ...client.clientArtifactBindings.flatMap(binding => [
+    ...EffectArray.flatMap(client.clientArtifactBindings, binding => [
       '--client-artifact-binding',
       `${binding.role}=${binding.path}`,
     ]),
-    ...client.clientBinaryBindings.flatMap(binding => ['--client-binary-binding', `${binding.role}=${binding.path}`]),
-    ...client.clientArguments.flatMap(argument => ['--client-arg', argument]),
+    ...EffectArray.flatMap(client.clientBinaryBindings, binding => [
+      '--client-binary-binding',
+      `${binding.role}=${binding.path}`,
+    ]),
+    ...EffectArray.flatMap(client.clientArguments, argument => ['--client-arg', argument]),
   ];
 }
 
@@ -589,10 +601,10 @@ export function parseClientRegistry(value: unknown): ClientRegistryV1 {
   const registry = record(value, 'client registry');
   exactKeys(registry, ['clients', 'version'], 'client registry');
   if (registry.version !== 1) throw new Error('Client registry version must be 1.');
-  if (!Array.isArray(registry.clients) || registry.clients.length < 2 || registry.clients.length > 8) {
+  if (!EffectArray.isArray(registry.clients) || registry.clients.length < 2 || registry.clients.length > 8) {
     throw new Error('Client registry must contain between two and eight clients.');
   }
-  const clients = registry.clients.map((input, index) => {
+  const clients = EffectArray.map(registry.clients, (input, index) => {
     const client = record(input, `client registry entry ${index}`);
     exactKeys(
       client,
@@ -654,11 +666,11 @@ export function parseClientRegistry(value: unknown): ClientRegistryV1 {
     } satisfies CodeMemoryLinkPreparedClientV1;
   });
   unique(
-    clients.map(client => client.clientId),
+    EffectArray.map(clients, client => client.clientId),
     'client registry ids',
   );
   unique(
-    clients.map(client => client.implementationDescriptorHash),
+    EffectArray.map(clients, client => client.implementationDescriptorHash),
     'client registry descriptor hashes',
   );
   return {clients, version: 1};
@@ -669,7 +681,9 @@ function assertRegistryMatchesManifest(registry: ClientRegistryV1, manifest: Cod
     throw new Error('Client registry size differs from the frozen manifest roster.');
   }
   for (const expected of manifest.clients) {
-    const client = registry.clients.find(candidate => candidate.clientId === expected.clientId);
+    const client = EffectOption.getOrUndefined(
+      EffectArray.findFirst(registry.clients, candidate => candidate.clientId === expected.clientId),
+    );
     if (
       !client ||
       client.implementationDescriptorHash !== expected.implementationDescriptorHash ||
@@ -708,16 +722,16 @@ export function parseCalibrationPlan(value: unknown): CodeMemoryLinkCalibrationP
     throw new Error('Calibration plan must be explicitly non-evidence and release-incompatible.');
   }
   const calibrationCorpusHash = matching(plan.calibrationCorpusHash, HASH, 'calibration corpus hash');
-  const clients = stringArray(plan.clients, 'calibration clients', true).map((client, index) =>
+  const clients = EffectArray.map(stringArray(plan.clients, 'calibration clients', true), (client, index) =>
     matching(client, CLIENT_ID, `calibration client ${index}`),
   );
   if (clients.length !== 2) throw new Error('Calibration plan requires exactly two clients.');
   canonicalAscendingUnique(clients, 'calibration clients');
   const fixture = parseCodeMemoryLinkFixtureV1(plan.fixture);
-  if (!Array.isArray(plan.fixtureFiles) || plan.fixtureFiles.length !== fixture.artifacts.length) {
+  if (!EffectArray.isArray(plan.fixtureFiles) || plan.fixtureFiles.length !== fixture.artifacts.length) {
     throw new Error('Calibration fixture layout must map every sealed fixture artifact exactly once.');
   }
-  const fixtureFiles = plan.fixtureFiles.map((input, index) => {
+  const fixtureFiles = EffectArray.map(plan.fixtureFiles, (input, index) => {
     const mapping = record(input, `calibration fixture mapping ${index}`);
     exactKeys(
       mapping,
@@ -725,7 +739,7 @@ export function parseCalibrationPlan(value: unknown): CodeMemoryLinkCalibrationP
       `calibration fixture mapping ${index}`,
     );
     const source = relativeFile(mapping.source, `calibration fixture mapping ${index} source`);
-    if (!source.startsWith('calibration/artifacts/fixture/')) {
+    if (!Effect2.pipe(source, EffectString.startsWith('calibration/artifacts/fixture/'))) {
       throw new Error(`Calibration fixture mapping ${index} source is outside its private artifact namespace.`);
     }
     return {
@@ -737,24 +751,24 @@ export function parseCalibrationPlan(value: unknown): CodeMemoryLinkCalibrationP
     };
   });
   canonicalAscendingUnique(
-    fixtureFiles.map(file => file.artifactId),
+    EffectArray.map(fixtureFiles, file => file.artifactId),
     'calibration fixture artifact ids',
   );
-  if (fixtureFiles.some((file, index) => file.artifactId !== fixture.artifacts[index].artifactId)) {
+  if (EffectArray.some(fixtureFiles, (file, index) => file.artifactId !== fixture.artifacts[index].artifactId)) {
     throw new Error('Calibration fixture layout differs from the content-addressed fixture roster.');
   }
   unique(
-    fixtureFiles.map(file => `${file.taskId}\0${file.scope}\0${file.destination}`),
+    EffectArray.map(fixtureFiles, file => `${file.taskId}\0${file.scope}\0${file.destination}`),
     'calibration fixture destinations',
   );
   unique(
-    fixtureFiles.map(file => file.source),
+    EffectArray.map(fixtureFiles, file => file.source),
     'calibration fixture sources',
   );
-  if (!Array.isArray(plan.tasks) || plan.tasks.length !== 2) {
+  if (!EffectArray.isArray(plan.tasks) || plan.tasks.length !== 2) {
     throw new Error('Calibration plan requires exactly two tasks.');
   }
-  const tasks = plan.tasks.map((input, index) => {
+  const tasks = EffectArray.map(plan.tasks, (input, index) => {
     const task = record(input, `calibration task ${index}`);
     exactKeys(
       task,
@@ -769,11 +783,10 @@ export function parseCalibrationPlan(value: unknown): CodeMemoryLinkCalibrationP
     );
     const packet = parseCodeMemoryLinkTaskPacketV1(task.packet);
     const rubric = parseCodeMemoryLinkRubricV1(task.rubric);
-    const preflightExpectedCitationDigests = stringArray(
-      task.preflightExpectedCitationDigests,
-      `calibration task ${index} preflight citation digests`,
-      false,
-    ).map((digest, digestIndex) => matching(digest, HASH, `calibration task ${index} citation ${digestIndex}`));
+    const preflightExpectedCitationDigests = EffectArray.map(
+      stringArray(task.preflightExpectedCitationDigests, `calibration task ${index} preflight citation digests`, false),
+      (digest, digestIndex) => matching(digest, HASH, `calibration task ${index} citation ${digestIndex}`),
+    );
     canonicalAscendingUnique(preflightExpectedCitationDigests, `calibration task ${index} preflight citation digests`);
     const preflightExpectedSelectedMemories = selectedMemoryRoster(
       task.preflightExpectedSelectedMemories,
@@ -792,7 +805,7 @@ export function parseCalibrationPlan(value: unknown): CodeMemoryLinkCalibrationP
       packet.taskId !== rubric.taskId ||
       packet.taskKind !== 'hidden-constraint' ||
       rubric.taskKind !== packet.taskKind ||
-      rubric.goldCitationDigests.some(digest => !preflightExpectedCitationDigests.includes(digest))
+      EffectArray.some(rubric.goldCitationDigests, digest => !preflightExpectedCitationDigests.includes(digest))
     ) {
       throw new Error(`Calibration task ${index} does not bind its fixture, rubric, packet, and preflight citations.`);
     }
@@ -805,27 +818,34 @@ export function parseCalibrationPlan(value: unknown): CodeMemoryLinkCalibrationP
     };
   });
   canonicalAscendingUnique(
-    tasks.map(task => task.packet.taskId),
+    EffectArray.map(tasks, task => task.packet.taskId),
     'calibration task ids',
   );
-  const taskIds = new Set(tasks.map(task => task.packet.taskId));
+  const taskIds = new Set(EffectArray.map(tasks, task => task.packet.taskId));
   if (
-    fixtureFiles.some(file => !taskIds.has(file.taskId)) ||
-    tasks.some(task => fixtureFiles.every(file => file.taskId !== task.packet.taskId || file.scope !== 'repository'))
+    EffectArray.some(fixtureFiles, file => !taskIds.has(file.taskId)) ||
+    EffectArray.some(tasks, task =>
+      EffectArray.every(fixtureFiles, file => file.taskId !== task.packet.taskId || file.scope !== 'repository'),
+    )
   ) {
     throw new Error('Calibration fixture layout must provide repository artifacts only for its two task ids.');
   }
-  if (!Array.isArray(plan.runs) || plan.runs.length !== clients.length * tasks.length * 3) {
+  if (!EffectArray.isArray(plan.runs) || plan.runs.length !== clients.length * tasks.length * 3) {
     throw new Error('Calibration plan does not contain the complete bounded client/task/arm matrix.');
   }
-  const expectedRuns = clients
-    .flatMap(clientId =>
-      tasks.flatMap(task =>
-        (['anchored', 'task-only', 'no-memory'] as const).map(arm => ({arm, clientId, taskId: task.packet.taskId})),
+  const expectedRuns = EffectArray.map(
+    EffectArray.flatMap(clients, clientId =>
+      EffectArray.flatMap(tasks, task =>
+        EffectArray.map(['anchored', 'task-only', 'no-memory'] as const, arm => ({
+          arm,
+          clientId,
+          taskId: task.packet.taskId,
+        })),
       ),
-    )
-    .map((run, runOrder) => ({...run, runOrder}));
-  const runs = plan.runs.map((input, index) => {
+    ),
+    (run, runOrder) => ({...run, runOrder}),
+  );
+  const runs = EffectArray.map(plan.runs, (input, index) => {
     const run = record(input, `calibration run ${index}`);
     exactKeys(run, ['arm', 'clientId', 'runOrder', 'taskId'], `calibration run ${index}`);
     const parsed = {
@@ -955,8 +975,8 @@ export function parseCodeMemoryLinkCalibrationResultsJsonl(
   if (new TextEncoder().encode(input).byteLength > MAXIMUM_CALIBRATION_LEDGER_BYTES) {
     throw new Error('Calibration JSONL exceeds 4 MiB.');
   }
-  return input.split(/\r?\n/u).flatMap((line, index) => {
-    if (!line.trim()) return [];
+  return EffectArray.flatMap(Effect2.pipe(input, EffectString.split(/\r?\n/u)), (line, index) => {
+    if (!Effect2.pipe(line, EffectString.trim)) return [];
     try {
       return [parseCodeMemoryLinkCalibrationResultV1(JSON.parse(line) as unknown)];
     } catch (cause) {
@@ -969,7 +989,7 @@ export function assertCodeMemoryLinkCalibrationPrefixV1(
   plan: CodeMemoryLinkCalibrationPlanV1,
   resultsInput: readonly unknown[],
 ): void {
-  const results = resultsInput.map(parseCodeMemoryLinkCalibrationResultV1);
+  const results = EffectArray.map(resultsInput, parseCodeMemoryLinkCalibrationResultV1);
   if (results.length > plan.runs.length) throw new Error('Calibration results exceed the frozen schedule.');
   for (const [index, result] of results.entries()) {
     const run = plan.runs[index];
@@ -1179,7 +1199,7 @@ async function canonicalRegularFile(path: string, label: string): Promise<string
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
     throw new Error(`${label} must be one regular non-linked file.`);
   }
-  if ((metadata.mode & 0o111) === 0 && label.includes('executable')) {
+  if ((metadata.mode & 0o111) === 0 && Effect2.pipe(label, EffectString.includes('executable'))) {
     throw new Error(`${label} must be executable.`);
   }
   const canonical = await realpath(normalized);
@@ -1198,7 +1218,13 @@ export async function resolveCodeMemoryLinkAgentTrialRunner(): Promise<string> {
 }
 
 function normalizedAbsolute(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value || value.includes('\0') || !isAbsolute(value) || resolve(value) !== value) {
+  if (
+    typeof value !== 'string' ||
+    !value ||
+    Effect2.pipe(value, EffectString.includes('\0')) ||
+    !isAbsolute(value) ||
+    resolve(value) !== value
+  ) {
     throw new Error(`${label} must be a normalized absolute path.`);
   }
   return value;
@@ -1209,12 +1235,15 @@ function relativeFile(value: unknown, label: string): string {
     typeof value !== 'string' ||
     !value ||
     value.length > 4_096 ||
-    value.includes('\\') ||
-    value.includes('\0') ||
+    Effect2.pipe(value, EffectString.includes('\\')) ||
+    Effect2.pipe(value, EffectString.includes('\0')) ||
     isAbsolute(value) ||
     posix.normalize(value) !== value ||
-    value.endsWith('/') ||
-    value.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect2.pipe(value, EffectString.endsWith('/')) ||
+    EffectArray.some(
+      Effect2.pipe(value, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw new Error(`${label} must be one normalized relative file path.`);
   }
@@ -1227,25 +1256,31 @@ function fixtureScope(value: unknown, label: string): 'repository' | 'threadnote
 }
 
 function joinRoot(root: string, relative: string): string {
-  if (!relative || relative.startsWith('/') || relative.includes('\\')) throw new Error('Prepared path is invalid.');
+  if (
+    !relative ||
+    Effect2.pipe(relative, EffectString.startsWith('/')) ||
+    Effect2.pipe(relative, EffectString.includes('\\'))
+  )
+    throw new Error('Prepared path is invalid.');
   const joined = resolve(root, relative);
-  if (joined === root || !joined.startsWith(`${root}/`)) throw new Error('Prepared path escapes the experiment root.');
+  if (joined === root || !Effect2.pipe(joined, EffectString.startsWith(`${root}/`)))
+    throw new Error('Prepared path escapes the experiment root.');
   return joined;
 }
 
 function assertOutsideRoot(root: string, path: string, label: string): void {
-  if (path === root || path.startsWith(`${root}/`)) {
+  if (path === root || Effect2.pipe(path, EffectString.startsWith(`${root}/`))) {
     throw new Error(`${label} must be outside the immutable prepared experiment root.`);
   }
 }
 
 function assertNoForbiddenCalibrationFields(value: unknown): void {
-  if (Array.isArray(value)) {
+  if (EffectArray.isArray(value)) {
     for (const item of value) assertNoForbiddenCalibrationFields(item);
     return;
   }
   if (typeof value !== 'object' || value === null) return;
-  for (const [key, nested] of Object.entries(value)) {
+  for (const [key, nested] of EffectRecord.toEntries(value)) {
     if (CALIBRATION_FORBIDDEN_FIELDS.has(key)) {
       throw new Error(`Calibration data cannot contain release-evidence field ${key}.`);
     }
@@ -1295,18 +1330,24 @@ export function boundedCodeMemoryLinkChildFailureDiagnostic(input: {
     ...(input.stdout ? [{label: 'stdout', value: input.stdout}] : []),
   ];
   if (streams.length === 0) return '(child produced no stdout or stderr)';
-  const headers = streams.map(stream => `${stream.label}:\n`);
-  const payloadBudget = MAXIMUM_CHILD_FAILURE_DIAGNOSTIC_CHARACTERS - headers.join('\n').length;
+  const headers = EffectArray.map(streams, stream => `${stream.label}:\n`);
+  const payloadBudget = MAXIMUM_CHILD_FAILURE_DIAGNOSTIC_CHARACTERS - EffectArray.join(headers, '\n').length;
   const fairShare = Math.floor(payloadBudget / streams.length);
-  const budgets = streams.map(stream => Math.min(stream.value.length, fairShare));
-  let remaining = payloadBudget - budgets.reduce((total, budget) => total + budget, 0);
+  const budgets = EffectArray.map(streams, stream => Math.min(stream.value.length, fairShare));
+  let remaining = payloadBudget - EffectArray.reduce(budgets, 0, (total, budget) => total + budget);
   for (let index = streams.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const available = streams[index].value.length - budgets[index];
     const granted = Math.min(available, remaining);
     budgets[index] += granted;
     remaining -= granted;
   }
-  return streams.map((stream, index) => `${headers[index]}${stream.value.slice(-budgets[index])}`).join('\n');
+  return EffectArray.join(
+    EffectArray.map(
+      streams,
+      (stream, index) => `${headers[index]}${Effect2.pipe(stream.value, EffectString.slice(-budgets[index]))}`,
+    ),
+    '\n',
+  );
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -1316,35 +1357,34 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object.`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     throw new Error(`${label} has unsupported or missing fields.`);
   }
 }
 
 function stringArray(value: unknown, label: string, requireNonempty: boolean): readonly string[] {
   if (
-    !Array.isArray(value) ||
+    !EffectArray.isArray(value) ||
     (requireNonempty && value.length === 0) ||
-    value.some(item => typeof item !== 'string')
+    EffectArray.some(value, item => typeof item !== 'string')
   ) {
     throw new Error(`${label} must be ${requireNonempty ? 'a nonempty' : 'an'} array of strings.`);
   }
-  return value as string[];
+  return EffectArray.filter(value, (item): item is string => typeof item === 'string');
 }
 
 function fileBindingArray(value: unknown, label: string): readonly {readonly path: string; readonly role: string}[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 64) {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > 64) {
     throw new Error(`${label} bindings must be a bounded nonempty array.`);
   }
-  const bindings = value.map((input, index) => {
+  const bindings = EffectArray.map(value, (input, index) => {
     const binding = record(input, `${label} binding ${index}`);
     exactKeys(binding, ['path', 'role'], `${label} binding ${index}`);
     return {
@@ -1353,11 +1393,11 @@ function fileBindingArray(value: unknown, label: string): readonly {readonly pat
     };
   });
   canonicalAscendingUnique(
-    bindings.map(binding => binding.role),
+    EffectArray.map(bindings, binding => binding.role),
     `${label} binding roles`,
   );
   unique(
-    bindings.map(binding => binding.path),
+    EffectArray.map(bindings, binding => binding.path),
     `${label} binding paths`,
   );
   return bindings;
@@ -1368,11 +1408,11 @@ function assertDescriptorBindingRoster(
   expected: readonly {readonly pathDigest: string; readonly role: string}[],
   label: string,
 ): void {
-  const projection = actual.map(binding => ({
+  const projection = EffectArray.map(actual, binding => ({
     pathDigest: codeMemoryLinkClientPathDigest(binding.path),
     role: binding.role,
   }));
-  const descriptorProjection = expected.map(({pathDigest, role}) => ({pathDigest, role}));
+  const descriptorProjection = EffectArray.map(expected, ({pathDigest, role}) => ({pathDigest, role}));
   if (JSON.stringify(projection) !== JSON.stringify(descriptorProjection)) {
     throw new Error(`${label} binding roles or paths differ from the descriptor.`);
   }
@@ -1382,8 +1422,8 @@ function selectedMemoryRoster(
   value: unknown,
   label: string,
 ): readonly {readonly contentSha256: string; readonly memoryIdDigest: string}[] {
-  if (!Array.isArray(value) || value.length > 24) throw new Error(`${label} is invalid.`);
-  const parsed = value.map((input, index) => {
+  if (!EffectArray.isArray(value) || value.length > 24) throw new Error(`${label} is invalid.`);
+  const parsed = EffectArray.map(value, (input, index) => {
     const memory = record(input, `${label}[${index}]`);
     exactKeys(memory, ['contentSha256', 'memoryIdDigest'], `${label}[${index}]`);
     return {
@@ -1392,14 +1432,15 @@ function selectedMemoryRoster(
     };
   });
   if (
-    parsed.some(
+    EffectArray.some(
+      parsed,
       (entry, index) =>
         index > 0 &&
         (parsed[index - 1].memoryIdDigest > entry.memoryIdDigest ||
           (parsed[index - 1].memoryIdDigest === entry.memoryIdDigest &&
             parsed[index - 1].contentSha256 >= entry.contentSha256)),
     ) ||
-    new Set(parsed.map(memory => memory.memoryIdDigest)).size !== parsed.length
+    new Set(EffectArray.map(parsed, memory => memory.memoryIdDigest)).size !== parsed.length
   ) {
     throw new Error(`${label} must be unique in canonical order.`);
   }
@@ -1407,7 +1448,7 @@ function selectedMemoryRoster(
 }
 
 function canonicalAscendingUnique(values: readonly string[], label: string): void {
-  if (values.some((value, index) => index > 0 && value <= values[index - 1])) {
+  if (EffectArray.some(values, (value, index) => index > 0 && value <= values[index - 1])) {
     throw new Error(`${label} must be unique in canonical ascending order.`);
   }
 }
@@ -1427,13 +1468,13 @@ function matching(value: unknown, pattern: RegExp, label: string): string {
 }
 
 function nonnegativeInteger(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${label} must be a nonnegative integer.`);
-  return value as number;
+  if (!checkedIsSafeInteger(value) || value < 0) throw new Error(`${label} must be a nonnegative integer.`);
+  return value;
 }
 
 function boundedPositiveInteger(value: string, label: string, maximum: number): number {
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+  if (!checkedIsSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
     throw ScriptError.make({message: `${label} must be a positive integer no greater than ${maximum}.`});
   }
   return parsed;
@@ -1441,7 +1482,7 @@ function boundedPositiveInteger(value: string, label: string, maximum: number): 
 
 function boundedNonnegativeInteger(value: string, label: string, maximum: number): number {
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximum) {
+  if (!checkedIsSafeInteger(parsed) || parsed < 0 || parsed > maximum) {
     throw ScriptError.make({message: `${label} must be a nonnegative integer no greater than ${maximum}.`});
   }
   return parsed;
@@ -1452,6 +1493,7 @@ function sha256(value: string | Uint8Array): string {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }

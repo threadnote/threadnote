@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Path, Schema} from 'effect';
 import {AGENT_CATALOG, findAgentSurface, type AgentCatalogEntry} from '@threadnote/integrations/catalog';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -6,6 +7,8 @@ import {DevSkillsError, type DevSkillsSelector, type DevSkillsTarget} from '../d
 import {getAgentAdapter} from './adapters.js';
 import {resolveAgentHostPaths} from './host_paths.js';
 import {resolveJsonAgentSkillPaths} from './surface_plan.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const failure = (code: string, message: string) => DevSkillsError.make({code, message});
 const selectorError = (error: unknown) =>
@@ -24,11 +27,14 @@ const selectedEntry = (selector: DevSkillsSelector) => {
   // cloud surface cannot silently downgrade or switch to another provider.
   const personal =
     entry.devSkills.profile === 'desktop' && profile !== 'desktop'
-      ? AGENT_CATALOG.find(
-          candidate =>
-            candidate.agentId === entry.agentId &&
-            candidate.devSkills.status === 'managed' &&
-            candidate.devSkills.profile === profile,
+      ? EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            AGENT_CATALOG,
+            candidate =>
+              candidate.agentId === entry.agentId &&
+              candidate.devSkills.status === 'managed' &&
+              candidate.devSkills.profile === profile,
+          ),
         )
       : undefined;
   if (!personal) throw failure('profile-conflict', `${entry.id} does not declare the selected workflow profile.`);
@@ -45,7 +51,7 @@ export const resolveDevSkillsIdentity = Effect.fn('devSkills.resolveIdentity')(f
 
 /** Pure capability projection; installation/readiness state is supplied separately. */
 export function listDevSkillsTargets() {
-  return AGENT_CATALOG.map(entry => ({
+  return EffectArray.map(AGENT_CATALOG, entry => ({
     surfaceId: entry.id,
     agentId: entry.agentId,
     displayName: entry.displayName,
@@ -71,7 +77,10 @@ export const legacyDevSkillsDiscoveryRoots = Effect.fn('devSkills.legacyDiscover
   const path = yield* Path.Path;
   return [
     ...new Set(
-      target.discoveryRoots.flatMap(root => [path.join(root, 'threadnote'), path.join(root, 'threadnote-packs')]),
+      EffectArray.flatMap(target.discoveryRoots, root => [
+        path.join(root, 'threadnote'),
+        path.join(root, 'threadnote-packs'),
+      ]),
     ),
   ];
 });
@@ -91,7 +100,9 @@ export const resolveDevSkillsTarget = Effect.fn('devSkills.resolveTarget')(funct
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const environment = system.environment();
-  const mode = environment.THREADNOTE_CURSOR_CLOUD_MODE?.trim();
+  const mode = Effect2.pipe(environment.THREADNOTE_CURSOR_CLOUD_MODE, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (
     (mode && mode !== 'personal') ||
     environment.THREADNOTE_CURSOR_MEMORY_ENDPOINT ||
@@ -99,13 +110,13 @@ export const resolveDevSkillsTarget = Effect.fn('devSkills.resolveTarget')(funct
     ['cursor-cloud-local', 'org', 'remote-hybrid'].includes(environment.THREADNOTE_MCP_TOOLSET ?? '')
   )
     return yield* failure('unsupported-profile', 'Corporate and remote-hybrid workflow targets are unsupported.');
-  if (!capability.platforms.some(platform => platform === system.platform))
+  if (!EffectArray.some(capability.platforms, platform => platform === system.platform))
     return yield* failure('unsupported-platform', `${entry.id} has no native workflow target on ${system.platform}.`);
   const scope = selector.scope ?? recorded?.scope ?? capability.defaultScope;
   if (!capability.scopes.includes(scope))
     return yield* failure(
       'unsupported-scope',
-      `${entry.id} declares native workflow scopes ${capability.scopes.join(', ')}; ${scope} is unsupported. ${capability.scopeReason ?? ''}`,
+      `${entry.id} declares native workflow scopes ${EffectArray.join(capability.scopes, ', ')}; ${scope} is unsupported. ${capability.scopeReason ?? ''}`,
     );
   if (recorded) {
     if (
@@ -127,7 +138,7 @@ export const resolveDevSkillsTarget = Effect.fn('devSkills.resolveTarget')(funct
       !path.isAbsolute(recorded.skillRoot) ||
       path.dirname(recorded.skillRoot) === recorded.skillRoot ||
       !recorded.discoveryRoots.includes(recorded.skillRoot) ||
-      !recorded.discoveryRoots.every(root => path.isAbsolute(root))
+      !EffectArray.every(recorded.discoveryRoots, root => path.isAbsolute(root))
     )
       return yield* failure(
         'target-conflict',
@@ -150,18 +161,30 @@ export const resolveDevSkillsTarget = Effect.fn('devSkills.resolveTarget')(funct
     discoveryRoots = [skillRoot];
   } else if (capability.root.kind === 'omp-profile') {
     const profile = environment.OMP_PROFILE ?? environment.PI_PROFILE;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native optional-chain guard narrows `profile` for the following validation.
     if (profile?.trim() && (!/^[A-Za-z0-9_.-]+$/u.test(profile.trim()) || ['.', '..'].includes(profile.trim())))
       return yield* failure('invalid-host-root', 'OMP_PROFILE/PI_PROFILE must be one profile name.');
-    const configured = environment.PI_CODING_AGENT_DIR?.trim();
-    if (!profile?.trim() && configured && !path.isAbsolute(configured) && !configured.startsWith('~/'))
+    const configured = Effect2.pipe(environment.PI_CODING_AGENT_DIR, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    if (
+      !Effect2.pipe(profile, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) &&
+      configured &&
+      !path.isAbsolute(configured) &&
+      !Effect2.pipe(configured, EffectString.startsWith('~/'))
+    )
       return yield* failure('invalid-host-root', 'PI_CODING_AGENT_DIR must be absolute or home-relative.');
     skillRoot = (yield* resolveAgentHostPaths('omp'))!.skillRoot;
     discoveryRoots = [skillRoot];
   } else {
-    skillRoot = path.join(system.homeDirectory, ...capability.root.path.split('/'));
-    discoveryRoots = capability.root.discoveryPaths.map(root => path.join(system.homeDirectory, ...root.split('/')));
+    skillRoot = path.join(system.homeDirectory, ...Effect2.pipe(capability.root.path, EffectString.split('/')));
+    discoveryRoots = EffectArray.map(capability.root.discoveryPaths, root =>
+      path.join(system.homeDirectory, ...Effect2.pipe(root, EffectString.split('/'))),
+    );
   }
-  if (!path.isAbsolute(skillRoot) || !discoveryRoots.every(root => path.isAbsolute(root)))
+  if (!path.isAbsolute(skillRoot) || !EffectArray.every(discoveryRoots, root => path.isAbsolute(root)))
     return yield* failure('invalid-host-root', 'Native skill roots must be absolute.');
   return {
     surfaceId: entry.id,

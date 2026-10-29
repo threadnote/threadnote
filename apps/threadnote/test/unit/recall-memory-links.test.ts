@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -53,7 +54,7 @@ describe('recall memory links', () => {
       yield* loadRecallIndexData(config(home, user), {forceRefresh: true, includeInactive: false});
 
       const rows = yield* Effect.sync(() => readMemoryLinks(home));
-      expect(rows.filter(row => row.source_uri === sourceUri)).toEqual([
+      expect(EffectArray.filter(rows, row => row.source_uri === sourceUri)).toEqual([
         {
           relation_ordinal: 1,
           relation_origin: 'evidence',
@@ -133,7 +134,7 @@ describe('recall memory links', () => {
       );
       expect(plans.currentnessSql).toContain('AS source_valid_from');
       expect(plans.currentnessParams).not.toContain('2026-08-31T12:00:00.000Z');
-      const storedSelectors = rows.map(({source_uri: _sourceUri, ...row}) => row);
+      const storedSelectors = EffectArray.map(rows, ({source_uri: _sourceUri, ...row}) => row);
       expect(JSON.stringify(storedSelectors)).not.toContain('threadnote://');
       expect(JSON.stringify(storedSelectors)).not.toContain('source body');
     }).pipe(provideTestLayer(ApplicationLayer)),
@@ -391,16 +392,13 @@ function readMemoryLinks(home: string, includeInactive = false): readonly Memory
 function inspectMemoryLinkSchema(home: string) {
   const database = new Database(`${home}/indexes/lexical/${recallIndexDatabaseFilename(false)}`, {readonly: true});
   const columns = (name: string) =>
-    database
-      .query(`PRAGMA index_info(${name})`)
-      .all()
-      .map(row => (row as {readonly name: string}).name);
+    EffectArray.map(database.query<{readonly name: string}, []>(`PRAGMA index_info(${name})`).all(), row => row.name);
   try {
     return {
-      columns: database
-        .query('PRAGMA table_info(memory_links)')
-        .all()
-        .map(row => (row as {readonly name: string}).name),
+      columns: EffectArray.map(
+        database.query<{readonly name: string}, []>('PRAGMA table_info(memory_links)').all(),
+        row => row.name,
+      ),
       locatorIndex: columns('memory_links_locator'),
       sourceIndex: columns('memory_links_source'),
       targetIndex: columns('memory_links_target'),
@@ -446,11 +444,15 @@ function inspectBoundedMemoryLinkPlans(home: string, user: string) {
   const database = new Database(`${home}/indexes/lexical/${recallIndexDatabaseFilename(false)}`, {readonly: true});
   try {
     const plan = (query: NonNullable<typeof incoming>) =>
-      database
-        .query<{readonly detail: string}, Array<number | string>>(`EXPLAIN QUERY PLAN ${query.sql}`)
-        .all(...query.params)
-        .map(row => row.detail)
-        .join('\n');
+      EffectArray.join(
+        EffectArray.map(
+          database
+            .query<{readonly detail: string}, Array<number | string>>(`EXPLAIN QUERY PLAN ${query.sql}`)
+            .all(...query.params),
+          row => row.detail,
+        ),
+        '\n',
+      );
     return {
       currentness: plan(currentness),
       currentnessParams: currentness.params,

@@ -1,7 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from '../effect/errors.js';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {detectSecretMatches} from '@threadnote/platform/scrubber';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const RECALL_RERANKER_DATASET_VERSION = 1 as const;
 export const RECALL_RERANKER_MAX_CANDIDATES = 32 as const;
@@ -308,10 +312,10 @@ export function parseRecallRerankerValidationReceiptV1(value: unknown): RecallRe
 }
 
 export function parseRecallRerankerGroupJsonLinesV1(content: string): readonly RecallRerankerQueryGroupV1[] {
-  const lines = content.split(/\r?\n/);
+  const lines = Effect.pipe(content, EffectString.split(/\r?\n/));
   const groups: RecallRerankerQueryGroupV1[] = [];
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
+    const line = Effect.pipe(lines[index], EffectString.trim);
     if (line.length === 0) continue;
     let value: unknown;
     try {
@@ -326,25 +330,34 @@ export function parseRecallRerankerGroupJsonLinesV1(content: string): readonly R
 }
 
 export function serializeRecallRerankerGroupsV1(groups: readonly RecallRerankerQueryGroupV1[]): string {
-  return `${[...groups]
-    .sort((left, right) => compareRecallRerankerStringsV1(left.id, right.id))
-    .map(group => JSON.stringify(group))
-    .join('\n')}\n`;
+  return `${EffectArray.join(
+    EffectArray.map(
+      [...groups].sort((left, right) => compareRecallRerankerStringsV1(left.id, right.id)),
+      group => JSON.stringify(group),
+    ),
+    '\n',
+  )}\n`;
 }
 
-export function recallRerankerGroupsHashV1(groups: readonly RecallRerankerQueryGroupV1[]): string {
-  const canonical = [...groups]
-    .sort((left, right) => compareRecallRerankerStringsV1(left.id, right.id))
-    .map(group => canonicalJson(group))
-    .join('\n');
+export function recallRerankerGroupsHashV1(groups: readonly Readonly<{id: string}>[]): string {
+  const canonical = EffectArray.join(
+    EffectArray.map(
+      [...groups].sort((left, right) => compareRecallRerankerStringsV1(left.id, right.id)),
+      group => canonicalJson(group),
+    ),
+    '\n',
+  );
   return sha256HexSync(`${canonical}\n`);
 }
 
 export function recallRerankerForbiddenTextsHashV1(values: Iterable<string>): string {
-  const canonical = [...new Set(Array.from(values, normalizeRecallRerankerText))]
-    .sort(compareRecallRerankerStringsV1)
-    .map(value => JSON.stringify(value))
-    .join('\n');
+  const canonical = EffectArray.join(
+    EffectArray.map(
+      [...new Set(Array.from(values, normalizeRecallRerankerText))].sort(compareRecallRerankerStringsV1),
+      value => JSON.stringify(value),
+    ),
+    '\n',
+  );
   return sha256HexSync(`${canonical}\n`);
 }
 
@@ -563,8 +576,16 @@ export function recallRerankerDatasetCountsV1(
 export function normalizeRecallRerankerText(value: string): string {
   let output = '';
   let pendingSpace = false;
-  for (const character of value.normalize('NFKC')) {
-    if (isRecallRerankerWhitespace(character.codePointAt(0)!)) {
+  for (const character of Effect.pipe(value, EffectString.normalize('NFKC'))) {
+    if (
+      isRecallRerankerWhitespace(
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        )!,
+      )
+    ) {
       pendingSpace = output.length > 0;
     } else {
       if (pendingSpace) output += ' ';
@@ -572,7 +593,7 @@ export function normalizeRecallRerankerText(value: string): string {
       pendingSpace = false;
     }
   }
-  return output.toLowerCase();
+  return Effect.pipe(output, EffectString.toLowerCase);
 }
 
 export function compareRecallRerankerStringsV1(left: string, right: string): number {
@@ -612,6 +633,7 @@ function validateSource(source: RecallRerankerSourceV1): void {
     throw ScriptError.make({message: `Public source ${source.id} must use the public_licensed privacy basis.`});
   }
   if (source.kind === 'opt_in_sanitized') {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing for the consent reference.
     if (source.privacyBasis !== 'explicit_opt_in' || !source.consentReference?.trim()) {
       throw ScriptError.make({message: `Opt-in source ${source.id} requires an explicit consent reference.`});
     }
@@ -624,7 +646,7 @@ function validateSource(source: RecallRerankerSourceV1): void {
 function validateSafeText(value: string, label: string): void {
   const matches = detectSecretMatches(value);
   if (matches.length > 0)
-    throw ScriptError.make({message: `${label} contains sensitive data (${matches.join(', ')}).`});
+    throw ScriptError.make({message: `${label} contains sensitive data (${EffectArray.join(matches, ', ')}).`});
   if (
     /(?:^|[\s"'`(])(?:[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]|\/mnt\/[a-z]\/(?:Users|home)\/|\\\\[^\\\s]+\\[^\\\s]+)/i.test(
       value,
@@ -656,13 +678,16 @@ function assertSha256(value: string, label: string): void {
 }
 
 function isSafeRelativeFile(value: string): boolean {
-  const normalized = value.replaceAll('\\', '/');
+  const normalized = Effect.pipe(value, EffectString.replaceAll('\\', '/'));
   return (
     normalized.length > 0 &&
     normalized.length <= 512 &&
-    !normalized.startsWith('/') &&
+    !Effect.pipe(normalized, EffectString.startsWith('/')) &&
     !/^[A-Za-z]:\//.test(normalized) &&
-    normalized.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
+    EffectArray.every(
+      Effect.pipe(normalized, EffectString.split('/')),
+      segment => segment.length > 0 && segment !== '.' && segment !== '..',
+    )
   );
 }
 
@@ -671,12 +696,13 @@ function canonicalJson(value: unknown): string {
 }
 
 function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, canonicalValue);
   if (typeof value !== 'object' || value === null) return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .sort(([left], [right]) => compareRecallRerankerStringsV1(left, right))
-      .map(([key, item]) => [key, canonicalValue(item)]),
+  return EffectRecord.fromEntries(
+    EffectArray.map(
+      EffectRecord.toEntries(value).sort(([left], [right]) => compareRecallRerankerStringsV1(left, right)),
+      ([key, item]) => [key, canonicalValue(item)],
+    ),
   );
 }
 

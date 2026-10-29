@@ -17,6 +17,8 @@ import {loadSharedGraphQuerySource, writeSharedGraphProvenance} from '@threadnot
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('graph share TCG1 delta publication and apply', () => {
   effectIt.effect(
@@ -164,7 +166,7 @@ describe('graph share TCG1 delta publication and apply', () => {
             checkpointDigest: frontier.checkpoint.manifestDigest,
           });
           yield* writeSharedGraphProvenance(clientHome, identity.checkoutId, {
-            checkpointDigest: `sha256:${'9'.repeat(64)}`,
+            checkpointDigest: `sha256:${Effect2.pipe('9', EffectString.repeat(64))}`,
             deltaCount: 0,
             frontierCommit: frontier.sourceCommit,
             profileDigest: frontier.profileDigest,

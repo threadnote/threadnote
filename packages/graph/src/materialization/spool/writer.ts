@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {Database} from 'bun:sqlite';
 import type {CodeGraphMonikerV1} from '../../cross_repository/types.js';
 import {
@@ -19,6 +20,7 @@ import type {CodeGraphReusableReexport} from '../../store/models.js';
 import {codeGraphSqliteGet, codeGraphSqliteRun} from '../../sqlite_statement.js';
 import type {CodeGraphEdge, CodeGraphReference, CodeGraphSymbol} from '../../types.js';
 import {recordCodeGraphMaterializationSpoolSurfaceCapacity} from './surfaces.js';
+import * as EffectRecord from 'effect/Record';
 
 const SPOOL_INSERT_PARAMETER_MAXIMUM = 32_000;
 const SPOOL_INSERT_ROW_MAXIMUM = 4_000;
@@ -57,7 +59,7 @@ export function prepareCodeGraphMaterializationSpoolFactBatch(
   };
   return {
     ...prepared,
-    rowCount: Object.values(prepared).reduce((total, rows) => total + rows.length, 0),
+    rowCount: EffectArray.reduce(EffectRecord.values(prepared), 0, (total, rows) => total + rows.length),
   };
 }
 
@@ -167,11 +169,17 @@ function insertRows<Row>(
   const pageRows = Math.min(SPOOL_INSERT_ROW_MAXIMUM, Math.floor(SPOOL_INSERT_PARAMETER_MAXIMUM / columnCount));
   for (let offset = 0; offset < rows.length; offset += pageRows) {
     const page = rows.slice(offset, offset + pageRows);
-    const placeholders = `(${Array.from({length: columnCount}, () => '?').join(', ')})`;
+    const placeholders = `(${EffectArray.join(
+      Array.from({length: columnCount}, () => '?'),
+      ', ',
+    )})`;
     codeGraphSqliteRun(
       database,
-      `INSERT INTO materialization_raw_${surface} VALUES ${page.map(() => placeholders).join(', ')}`,
-      ...page.flatMap(row => [...parameters(row)]),
+      `INSERT INTO materialization_raw_${surface} VALUES ${EffectArray.join(
+        EffectArray.map(page, () => placeholders),
+        ', ',
+      )}`,
+      ...EffectArray.flatMap(page, row => [...parameters(row)]),
     );
   }
   recordCodeGraphMaterializationSpoolSurfaceCapacity(database, surface, afterRowid, rows.length);

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -13,6 +14,7 @@ import {
   isObsidianSource,
   isObsidianProjection,
   type ObsidianProjectionConfig,
+  type ObsidianSourceConfig,
   requireObsidianSource,
   requireObsidianProjection,
   upsertObsidianSource,
@@ -25,12 +27,29 @@ import {runObsidianInboxScan} from './inbox.js';
 import {captureIntegrationConsole as captureConsole} from '@threadnote/integration-core/manager-http';
 import type {ManagerIntegrationApiRequest} from '@threadnote/integration-core/manager-http';
 import {integrationFeatureError} from '@threadnote/integration-core/manager-http';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const listObsidianIntegrations = Effect.fn('manager.obsidianList')(function* (config: RuntimeConfig) {
   const configuration = yield* readObsidianConfiguration(config);
   return {
-    sources: configuration.sources.filter(isObsidianSource),
-    projections: configuration.projections.filter(isObsidianProjection),
+    sources: EffectArray.filter(
+      configuration.sources,
+      (
+        __effectFilterValue: (typeof configuration.sources)[number],
+        __effectFilterIndex: number,
+      ): __effectFilterValue is ObsidianSourceConfig =>
+        __effectFilterIndex in configuration.sources && isObsidianSource(__effectFilterValue),
+    ),
+    projections: EffectArray.filter(
+      configuration.projections,
+      (
+        __effectFilterValue: (typeof configuration.projections)[number],
+        __effectFilterIndex: number,
+      ): __effectFilterValue is ObsidianProjectionConfig =>
+        __effectFilterIndex in configuration.projections && isObsidianProjection(__effectFilterValue),
+    ),
   };
 });
 
@@ -40,12 +59,25 @@ const routeManagerObsidianIntegration = Effect.fn('manager.obsidianIntegration')
   if (request.url.pathname !== '/api/integrations/obsidian') return undefined;
   if (request.method === 'GET') {
     const configuration = yield* readObsidianConfiguration(request.config);
-    return {status: 200, body: {...configuration, sources: configuration.sources.filter(isObsidianSource)}};
+    return {
+      status: 200,
+      body: {
+        ...configuration,
+        sources: EffectArray.filter(
+          configuration.sources,
+          (
+            __effectFilterValue: (typeof configuration.sources)[number],
+            __effectFilterIndex: number,
+          ): __effectFilterValue is ObsidianSourceConfig =>
+            __effectFilterIndex in configuration.sources && isObsidianSource(__effectFilterValue),
+        ),
+      },
+    };
   }
   if (request.method !== 'POST') return {status: 405, body: {error: 'Method not allowed'}};
   const body = yield* request.body;
   const action = requireString(body.action, 'action');
-  const id = requireString(body.id, 'connection name').trim().toLowerCase();
+  const id = Effect2.pipe(requireString(body.id, 'connection name'), EffectString.trim, EffectString.toLowerCase);
   const apply = body.apply === true;
   if (apply) requireConfirm(body);
   const config = request.config;
@@ -54,7 +86,7 @@ const routeManagerObsidianIntegration = Effect.fn('manager.obsidianIntegration')
       switch (action) {
         case 'save-source': {
           const current = yield* readObsidianConfiguration(config);
-          const existing = current.sources.some(source => source.id === id)
+          const existing = EffectArray.some(current.sources, source => source.id === id)
             ? requireObsidianSource(current, id)
             : undefined;
           if (!!existing !== (body.editing === true))
@@ -75,9 +107,12 @@ const routeManagerObsidianIntegration = Effect.fn('manager.obsidianIntegration')
         }
         case 'save-projection': {
           const current = yield* readObsidianConfiguration(config);
-          const existing = current.projections.find(
-            (projection): projection is ObsidianProjectionConfig =>
-              isObsidianProjection(projection) && projection.id === id,
+          const existing = EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              current.projections,
+              (projection): projection is ObsidianProjectionConfig =>
+                isObsidianProjection(projection) && projection.id === id,
+            ),
           );
           if (!!existing !== (body.editing === true))
             throw new Error(
@@ -85,9 +120,11 @@ const routeManagerObsidianIntegration = Effect.fn('manager.obsidianIntegration')
                 ? 'A memory export already uses this name. Open its settings to edit it.'
                 : 'This memory export no longer exists. Refresh connections.',
             );
-          const kinds = requireStringArray(body.kinds, 'memory kinds').map(kind => memoryKind(kind));
-          const statuses = requireStringArray(body.statuses, 'statuses').map(status => memoryStatus(status));
-          if (kinds.some(kind => !kind) || statuses.some(status => !status))
+          const kinds = EffectArray.map(requireStringArray(body.kinds, 'memory kinds'), kind => memoryKind(kind));
+          const statuses = EffectArray.map(requireStringArray(body.statuses, 'statuses'), status =>
+            memoryStatus(status),
+          );
+          if (EffectArray.some(kinds, kind => !kind) || EffectArray.some(statuses, status => !status))
             throw new Error('Choose valid memory kinds and statuses.');
           const selection = body.selection;
           if (selection !== 'all' && selection !== 'selected')
@@ -100,8 +137,8 @@ const routeManagerObsidianIntegration = Effect.fn('manager.obsidianIntegration')
             vault: existing?.vault ?? requireString(body.vault, 'vault path'),
             folder: existing?.folder ?? requireString(body.folder, 'export folder'),
             includeShared: body.includeShared === true,
-            kinds: kinds.filter(kind => kind !== undefined),
-            statuses: statuses.filter(status => status !== undefined),
+            kinds: EffectArray.filter(kinds, kind => kind !== undefined),
+            statuses: EffectArray.filter(statuses, status => status !== undefined),
             selectedUris,
           });
           return {};
@@ -146,7 +183,7 @@ export const handleManagerObsidianIntegrationRequest = (request: ManagerIntegrat
   routeManagerObsidianIntegration(request).pipe(Effect.catchCause(integrationFeatureError));
 
 function stringList(value: unknown, name: string): readonly string[] {
-  if (!Array.isArray(value) || !value.every(item => typeof item === 'string'))
+  if (!EffectArray.isArray(value) || !EffectArray.every(value, item => typeof item === 'string'))
     throw new Error('Provide ' + name + ' as a list.');
   return value;
 }

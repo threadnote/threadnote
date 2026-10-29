@@ -9,6 +9,8 @@ import {
   withNativeWatchControlLock,
   type NativeWatchEnvelope,
 } from './watch_store.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function nativeWatchInvocation(
   executablePath: string,
@@ -18,11 +20,15 @@ export function nativeWatchInvocation(
 ) {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(watchId) ||
-    watchId.includes('..') ||
+    Effect2.pipe(watchId, EffectString.includes('..')) ||
     !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(token)
   )
     throw WorkflowAutomationError.make({code: 'invalid-request', message: 'Invalid collector identity.'});
-  const name = executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  const name = Effect2.pipe(
+    Effect2.pipe(executablePath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   return {
     executable: executablePath,
     arguments: [

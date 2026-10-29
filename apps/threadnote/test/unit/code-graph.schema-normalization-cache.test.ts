@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {describe, expect, it} from '@effect/vitest';
@@ -8,10 +9,12 @@ import {inspectCodeGraphQueryIndexes} from '@threadnote/graph/store/query/indexe
 import {normalizeSchemaDefinition} from '@threadnote/graph/store/schema/normalization';
 import {normalizeSchemaDefinition as normalizeUncachedVectorSchema} from '@threadnote/graph/vector/retirement/inspection';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const literal = FC.array(FC.constantFrom('A', 'a', ' ', '\n', "'", '"', '`', '[', ']', ',', 'İ', '😀'), {
   maxLength: 40,
-}).map(characters => characters.join(''));
+}).map(characters => EffectArray.join(characters, ''));
 const definition = FC.record({
   identifierQuote: FC.constantFrom('"', '`', '['),
   literal,
@@ -29,7 +32,7 @@ describe('bounded pure schema normalization', () => {
       for (const item of [...definitions, ...definitions.slice().reverse()]) {
         const quote = item.identifierQuote;
         const identifier = `${quote}Mixed_${item.suffix}${quote === '[' ? ']' : quote}`;
-        const quotedLiteral = `'${item.literal.replaceAll("'", "''")}'`;
+        const quotedLiteral = `'${Effect2.pipe(item.literal, EffectString.replaceAll("'", "''"))}'`;
         const s = item.space;
         const input = `${s}CREATE${s}TABLE${s}${item.optional ? `IF NOT EXISTS${s}` : ''}${identifier}${s}(${s}value${s}TEXT${s}CHECK${s}(${s}value${s}=${s}${quotedLiteral}${s})${s})${s}`;
         const expected = `create table ${identifier}(value text check(value = ${quotedLiteral}))`;
@@ -66,7 +69,7 @@ describe('bounded pure schema normalization', () => {
           {
             maxLength: 40,
           },
-        ).map(parts => parts.join('')),
+        ).map(parts => EffectArray.join(parts, '')),
         {maxLength: 15, minLength: 1},
       ),
     },
@@ -84,12 +87,16 @@ describe('bounded pure schema normalization', () => {
       ...Array.from({length: 160}, (_, index) => `CREATE TABLE short_${index}(value TEXT)`),
       ...Array.from(
         {length: 160},
-        (_, index) => `CREATE TABLE churn_${index}(value TEXT DEFAULT '${'A'.repeat(4_000)}')`,
+        (_, index) =>
+          `CREATE TABLE churn_${index}(value TEXT DEFAULT '${Effect2.pipe('A', EffectString.repeat(4_000))}')`,
       ),
-      `CREATE TABLE oversized(value TEXT DEFAULT '${'Q'.repeat(100_000)}')`,
+      `CREATE TABLE oversized(value TEXT DEFAULT '${Effect2.pipe('Q', EffectString.repeat(100_000))}')`,
     ];
-    const expected = inputs.map(normalizeUncachedVectorSchema);
-    for (const order of [inputs.map((_, index) => index), inputs.map((_, index) => index).reverse()]) {
+    const expected = EffectArray.map(inputs, normalizeUncachedVectorSchema);
+    for (const order of [
+      EffectArray.map(inputs, (_, index) => index),
+      EffectArray.map(inputs, (_, index) => index).reverse(),
+    ]) {
       for (const index of order) expect(normalizeSchemaDefinition(inputs[index])).toBe(expected[index]);
     }
   });

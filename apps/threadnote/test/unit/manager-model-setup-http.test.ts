@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
 import {Context, Crypto, Effect, FileSystem, Layer, Path, Schema} from 'effect';
@@ -9,7 +10,7 @@ import {testHttpFetch} from '@threadnote/testing/http-fetch';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {HttpService} from '@threadnote/platform/http';
 import {SystemInfo} from '@threadnote/platform/system';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {BUILTIN_MODEL_MANIFESTS, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -26,6 +27,9 @@ import {makeManagerLiveConsumerObservation} from '../../src/manager/live_consume
 import {captureConsole} from '../../src/effect/console.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {startManagerTestServer} from '../helpers/manager-test-server.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, BunCrypto.layer, TestSystemInfoLayer);
 function providePlatform<A, E, R>(effect: Effect.Effect<A, E, R>) {
@@ -37,7 +41,12 @@ const fixture = (environment: NodeJS.ProcessEnv = {}) =>
     const path = yield* Path.Path;
     const temporary = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-setup-api-'});
     const home = path.join(yield* fs.realPath(temporary), 'home');
-    const manifest = {...BUILTIN_MODEL_MANIFESTS.find(model => model.id === CORE_GENERATION_MODEL_ID)!, size: 4};
+    const manifest = {
+      ...EffectOption.getOrUndefined(
+        EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === CORE_GENERATION_MODEL_ID),
+      )!,
+      size: 4,
+    };
     const baseSystem = yield* SystemInfo;
     const system = SystemInfo.of({
       ...baseSystem,
@@ -118,7 +127,7 @@ describe('Manager setup adapter', () => {
       expect((yield* readModelSetupStatus(f.home).pipe(Effect.provide(f.services))).artifactReady).toBe(true);
       const revisions: string[] = [];
       const broker = yield* makeManagerLiveConsumerObservation(
-        {agentContextHome: f.home} as RuntimeConfig,
+        runtimeConfigForTest({agentContextHome: f.home}),
         {
           onInvalidate: (_resource, revision) =>
             Effect.sync(() => {
@@ -332,7 +341,8 @@ it('routes authenticated GET and rejects invalid or oversized HTTP bodies withou
       'null',
       '[]',
       '"text"',
-      ' '.repeat(5000) + JSON.stringify({action: 'policy', policy: 'off', confirm: true, expectedEpoch: 0}),
+      Effect2.pipe(' ', EffectString.repeat(5000)) +
+        JSON.stringify({action: 'policy', policy: 'off', confirm: true, expectedEpoch: 0}),
     ])
       expect((await request('POST', body)).status).toBe(400);
     expect(await readdir(home)).not.toContain('models');

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import React from 'react';
 import ReactMarkdown, {defaultUrlTransform} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -5,6 +6,8 @@ import {ManagerAutocompleteInput} from '@threadnote/manager/dialog';
 import {isMemoryKind, isMemoryStatus} from './support.js';
 import type {MemoryMetadata, SelectId, TargetForm, TreeNode} from '@threadnote/manager/ui/contracts';
 import {MermaidBlock} from '../mermaid_block.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface DropdownOption {
   readonly disabled?: boolean;
@@ -30,7 +33,7 @@ export function TargetFields(props: {
         label="Kind"
         onChange={value => void (isMemoryKind(value) && set({kind: value}))}
         openSelect={props.openSelect}
-        options={(['durable', 'handoff', 'incident', 'preference', 'smoke'] as const).map(kind => ({
+        options={EffectArray.map(['durable', 'handoff', 'incident', 'preference', 'smoke'] as const, kind => ({
           label: kind,
           value: kind,
         }))}
@@ -43,7 +46,7 @@ export function TargetFields(props: {
         label="Status"
         onChange={value => void (isMemoryStatus(value) && set({status: value}))}
         openSelect={props.openSelect}
-        options={(['active', 'archived', 'expired', 'superseded'] as const).map(status => ({
+        options={EffectArray.map(['active', 'archived', 'expired', 'superseded'] as const, status => ({
           label: status,
           value: status,
         }))}
@@ -82,7 +85,9 @@ export function DropdownSelect(props: {
   readonly value: string;
 }): React.ReactElement {
   const isOpen = props.disabled !== true && props.openSelect === props.id;
-  const selected = props.options.find(option => option.value === props.value);
+  const selected = EffectOption.getOrUndefined(
+    EffectArray.findFirst(props.options, option => option.value === props.value),
+  );
   return (
     <div
       className="select-field"
@@ -106,7 +111,7 @@ export function DropdownSelect(props: {
       </button>
       {isOpen ? (
         <div aria-label={props.label} className="select-menu" role="listbox">
-          {props.options.map(option => (
+          {EffectArray.map(props.options, option => (
             <button
               aria-selected={option.value === props.value}
               className={`select-option ${option.value === props.value ? 'is-selected' : ''}`}
@@ -176,29 +181,38 @@ const MarkdownCodeBlock: NonNullable<React.ComponentProps<typeof ReactMarkdown>[
   if (
     code?.type === 'element' &&
     code.tagName === 'code' &&
-    Array.isArray(code.properties.className) &&
-    code.properties.className.some(value => String(value).toLowerCase() === 'language-mermaid')
+    EffectArray.isArray(code.properties.className) &&
+    EffectArray.some(
+      code.properties.className,
+      value => Effect.pipe(String(value), EffectString.toLowerCase) === 'language-mermaid',
+    )
   ) {
-    const source = code.children.map(child => (child.type === 'text' ? child.value : '')).join('');
+    const source = EffectArray.join(
+      EffectArray.map(code.children, child => (child.type === 'text' ? child.value : '')),
+      '',
+    );
     return <MermaidBlock source={source} />;
   }
   return <pre {...props}>{children}</pre>;
 };
 
 export function Metadata(props: {readonly metadata?: MemoryMetadata; readonly node?: TreeNode}): React.ReactElement {
-  const rows: Array<[string, string | undefined]> = [
-    ['kind', props.metadata?.kind],
-    ['status', props.metadata?.status],
-    ['project', props.metadata?.project],
-    ['topic', props.metadata?.topic],
-    ['source', props.metadata?.sourceAgentClient],
-    ['timestamp', props.metadata?.timestamp],
-    ['team', props.node?.sharedTeam],
-    ['size', props.node?.size === undefined ? undefined : `${props.node.size} bytes`],
-  ].filter((row): row is [string, string] => typeof row[1] === 'string' && row[1].length > 0);
+  const rows: Array<[string, string | undefined]> = EffectArray.filter(
+    [
+      ['kind', props.metadata?.kind],
+      ['status', props.metadata?.status],
+      ['project', props.metadata?.project],
+      ['topic', props.metadata?.topic],
+      ['source', props.metadata?.sourceAgentClient],
+      ['timestamp', props.metadata?.timestamp],
+      ['team', props.node?.sharedTeam],
+      ['size', props.node?.size === undefined ? undefined : `${props.node.size} bytes`],
+    ],
+    (row): row is [string, string] => typeof row[1] === 'string' && row[1].length > 0,
+  );
   return (
     <dl className="metadata">
-      {rows.map(([label, value]) => (
+      {EffectArray.map(rows, ([label, value]) => (
         <div key={label} className="metadata-item">
           <dt>{label}</dt>
           <dd>{value}</dd>

@@ -5,6 +5,8 @@ import {managerContextHealthRecordPreviews} from '@threadnote/threadnote/manager
 import type {ManagerContextHealthResponseV1} from '@threadnote/manager/attention/contracts';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const evidence = vi.hoisted(() => ({calls: 0}));
 vi.mock('@threadnote/context/citation_validation', async importOriginal => {
@@ -20,20 +22,20 @@ vi.mock('@threadnote/context/citation_validation', async importOriginal => {
 
 const citation = createMemoryCodeCitation({
   extractorSet: 'synthetic',
-  fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+  fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
   path: 'src/example.ts',
-  repositoryId: 'b'.repeat(64),
+  repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
   repositoryIdentityKind: 'remote',
-  sourceCommit: 'c'.repeat(40),
+  sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
   sourceDirty: false,
-  sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+  sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
   target: {
     fragmentCanonicalization: 'utf8-source-span-v1',
-    fragmentHash: {algorithm: 'sha256', value: 'e'.repeat(64)},
+    fragmentHash: {algorithm: 'sha256', value: Effect2.pipe('e', EffectString.repeat(64))},
     kind: 'symbol',
     language: 'typescript',
     name: 'supported',
-    nodeId: `cgs_${'f'.repeat(32)}`,
+    nodeId: `cgs_${Effect2.pipe('f', EffectString.repeat(32))}`,
     qualifiedName: 'module.supported',
     span: {column: 1, endColumn: 10, endLine: 12, line: 12},
     symbolKind: 'function',
@@ -58,9 +60,27 @@ const content = formatMemoryDocument(
 const record = parseMemoryDocument(uri, content);
 if (record === undefined) throw new Error('Invalid synthetic preview record.');
 const findings = [
-  {id: 'finding-1', uris: [uri], repair: {targetUri: `${uri}#${citation.id}`}},
-  {id: 'finding-2', uris: [uri], repair: {targetUri: `${uri}#${citation.id}`}},
-] as unknown as ManagerContextHealthResponseV1['findings'];
+  {
+    category: 'citation-missing',
+    confidence: 'high',
+    id: 'finding-1',
+    repair: {kind: 'repair-citation', summary: 'Review the missing citation.', targetUri: `${uri}#${citation.id}`},
+    repairability: 'reviewable',
+    severity: 'medium',
+    summary: 'The memory citation needs review.',
+    uris: [uri],
+  },
+  {
+    category: 'citation-missing',
+    confidence: 'high',
+    id: 'finding-2',
+    repair: {kind: 'repair-citation', summary: 'Review the missing citation.', targetUri: `${uri}#${citation.id}`},
+    repairability: 'reviewable',
+    severity: 'medium',
+    summary: 'The memory citation needs review.',
+    uris: [uri],
+  },
+] satisfies ManagerContextHealthResponseV1['findings'];
 
 describe('Manager Context Health list previews', () => {
   effectIt.effect('keeps canonical memory and citation labels without reading native source evidence', () =>

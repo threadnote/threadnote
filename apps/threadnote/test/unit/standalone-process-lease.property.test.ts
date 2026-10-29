@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -51,13 +52,16 @@ describe('standalone process retirement properties', () => {
   it('explicit retirement preserves exactly the leases that opt into session preservation', () => {
     fc.assert(
       fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 40}), preserveFlags => {
-        const leases = preserveFlags.map((preserve, index) => ({
+        const leases = EffectArray.map(preserveFlags, (preserve, index) => ({
           processId: index + 1,
           retirementPolicy: preserve ? ('preserve-session' as const) : ('terminate' as const),
         }));
 
         expect([...explicitlyPreservedStandaloneProcessIds(leases)]).toEqual(
-          leases.filter(lease => lease.retirementPolicy === 'preserve-session').map(lease => lease.processId),
+          EffectArray.map(
+            EffectArray.filter(leases, lease => lease.retirementPolicy === 'preserve-session'),
+            lease => lease.processId,
+          ),
         );
       }),
       {numRuns: 200},

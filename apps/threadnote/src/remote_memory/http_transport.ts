@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {WebStandardStreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type {RemoteMemoryServiceConfig} from '@threadnote/remote-memory/config';
 import {admitOrgCloudRequest, ORG_CLOUD_REPOSITORY_SET_HEADER} from '@threadnote/remote-memory/cloud_admission';
@@ -16,6 +17,9 @@ import {isLocalIdpPath} from './local_idp.js';
 import type {RemoteMemoryServiceDependencies} from '@threadnote/remote-memory/service_types';
 import {createRemoteMemoryMcpServer} from './tools.js';
 import type {RemoteMemoryRequestExecution} from '@threadnote/remote-memory/request_execution';
+
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -204,8 +208,14 @@ async function authenticateRequest(
 }
 
 function validateHost(request: Request, allowedHosts: readonly string[]): void {
-  const host = request.headers.get('host')?.trim().toLowerCase();
-  if (!host || !allowedHosts.some(allowed => allowed.toLowerCase() === host)) {
+  const host = Effect.pipe(
+    request.headers.get('host'),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
+  if (!host || !EffectArray.some(allowedHosts, allowed => Effect.pipe(allowed, EffectString.toLowerCase) === host)) {
     throw remoteMemoryError('forbidden', 'The request Host is not allowed.');
   }
 }
@@ -235,13 +245,20 @@ function validateOrigin(request: Request, allowedOrigins: readonly string[], req
   } catch {
     throw remoteMemoryError('forbidden', 'The request Origin is invalid.');
   }
-  if (!allowedOrigins.some(allowed => allowed === origin)) {
+  if (!EffectArray.some(allowedOrigins, allowed => allowed === origin)) {
     throw remoteMemoryError('forbidden', 'The request Origin is not allowed.');
   }
 }
 
 function requireJsonContentType(request: Request): void {
-  const value = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+  const value = Effect.pipe(
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+    request.headers.get('content-type')?.split(';', 1)[0],
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
   if (value !== 'application/json') {
     throw remoteMemoryError('invalid_request', 'The request Content-Type must be application/json.');
   }
@@ -289,9 +306,10 @@ async function readBoundedJson(request: Request, maximum: number, signal: AbortS
 }
 
 function attestationCompletionInput(value: unknown): {readonly challengeId: string; readonly token: string} {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) {
     throw remoteMemoryError('invalid_request', 'The attestation request must be a JSON object.');
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- The parsed request is arbitrary JSON, not a ReadonlyRecord.
   const keys = Object.keys(value);
   if (keys.length !== 2 || !keys.includes('challengeId') || !keys.includes('token')) {
     throw remoteMemoryError('invalid_request', 'The attestation request has unsupported fields.');
@@ -379,7 +397,9 @@ function deadlineController(
 }
 
 function remoteRequestId(request: Request): string {
-  const supplied = request.headers.get('x-request-id')?.trim();
+  const supplied = Effect.pipe(request.headers.get('x-request-id'), effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   return supplied && REQUEST_ID_PATTERN.test(supplied) ? supplied : randomUuidV4();
 }
 

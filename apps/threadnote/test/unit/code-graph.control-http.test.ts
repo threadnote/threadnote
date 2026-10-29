@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
@@ -10,12 +11,14 @@ import {enrollGraphControlClient} from '@threadnote/graph/sharing/client/enrollm
 import {makeAuthenticatedGraphControlClient} from '@threadnote/graph/sharing/control/http';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const scope = {
   coordinatorUrl: 'https://graph.example.test/team',
   organization: 'acme',
   profileDigest: sha256Digest('profile'),
-  repositoryId: 'a'.repeat(64),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
 };
 const issuer = 'https://login.example.test/';
 const audience = 'https://graph.example.test';
@@ -169,9 +172,9 @@ describe('authenticated graph control transport', () => {
         () => f.client.request('POST', '/v1/enroll', {idempotencyKey: 'operation'}),
         {concurrency: 8},
       );
-      expect(results.every(result => result.status === 201 && result.body.ok === true)).toBe(true);
+      expect(EffectArray.every(results, result => result.status === 201 && result.body.ok === true)).toBe(true);
       expect(f.helperCalls()).toBe(2);
-      expect(new Set(results.map(result => result.credential.identity)).size).toBe(1);
+      expect(new Set(EffectArray.map(results, result => result.credential.identity)).size).toBe(1);
     }).pipe(provideTestLayer(layer)),
   );
 
@@ -185,12 +188,14 @@ describe('authenticated graph control transport', () => {
         '//foreign.example.test',
         '/v1/../v1/enroll',
         '/v1/enroll?destination=other',
-        '/v1/cas/sha256:' + 'a'.repeat(64),
+        '/v1/cas/sha256:' + Effect2.pipe('a', EffectString.repeat(64)),
       ])
         expect((yield* Effect.result(f.client.request('POST', pathname, {})))._tag).toBe('Failure');
-      expect((yield* Effect.result(f.client.request('POST', '/v1/enroll', {large: 'x'.repeat(65536)})))._tag).toBe(
-        'Failure',
-      );
+      expect(
+        (yield* Effect.result(
+          f.client.request('POST', '/v1/enroll', {large: Effect2.pipe('x', EffectString.repeat(65536))}),
+        ))._tag,
+      ).toBe('Failure');
       expect(f.httpCalls()).toBe(0);
       expect(f.helperCalls()).toBe(0);
       expect((yield* Effect.result(f.client.request('GET', '/v1/status')))._tag).toBe('Failure');
@@ -200,7 +205,7 @@ describe('authenticated graph control transport', () => {
 
   effectIt.effect('bounds streamed metadata and preserves backpressure without retaining server bodies', () =>
     Effect.gen(function* () {
-      const big = yield* fixture(() => new Response('x'.repeat(65537)));
+      const big = yield* fixture(() => new Response(Effect2.pipe('x', EffectString.repeat(65537))));
       expect((yield* Effect.result(big.client.request('GET', '/v1/status')))._tag).toBe('Failure');
       const denied = yield* fixture(
         () => new Response('synthetic-private-response', {status: 429, headers: {'retry-after': '120'}}),

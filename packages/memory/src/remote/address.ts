@@ -7,6 +7,9 @@ import {
   resourceIdWithoutAnchor,
   validatePortableSegment,
 } from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export const REMOTE_SHARE_NAMESPACE = 'share' as const;
 export const REMOTE_MEMORY_ALIAS_VERSION = 1 as const;
@@ -33,15 +36,15 @@ export interface RemoteMemoryAddressResolutionV1 {
   readonly version: typeof REMOTE_MEMORY_ALIAS_VERSION;
 }
 
-export class InvalidRemoteMemoryAddress extends Schema.TaggedError<InvalidRemoteMemoryAddress>()(
-  'InvalidRemoteMemoryAddress',
-  {input: Schema.String, message: Schema.String, reason: Schema.String},
-) {}
+export class InvalidRemoteMemoryAddress extends Schema.TaggedError<
+  InvalidRemoteMemoryAddress,
+  {readonly brand: unique symbol}
+>()('InvalidRemoteMemoryAddress', {input: Schema.String, message: Schema.String, reason: Schema.String}) {}
 
-export class InvalidRemoteMemoryAlias extends Schema.TaggedError<InvalidRemoteMemoryAlias>()(
-  'InvalidRemoteMemoryAlias',
-  {input: Schema.String, message: Schema.String, reason: Schema.String},
-) {}
+export class InvalidRemoteMemoryAlias extends Schema.TaggedError<
+  InvalidRemoteMemoryAlias,
+  {readonly brand: unique symbol}
+>()('InvalidRemoteMemoryAlias', {input: Schema.String, message: Schema.String, reason: Schema.String}) {}
 
 export function formatRemoteShareRootUri(shareId: string): string {
   return canonicalResourceUri(REMOTE_SHARE_NAMESPACE, [validatePortableSegment(shareId), 'memories']);
@@ -90,10 +93,16 @@ export function parseRemoteShareAddress(input: string): RemoteShareAddress {
   } else {
     return invalidAddress(input, 'expected a durable or active-handoff memory address');
   }
-  if (!project || !file?.endsWith('.md') || file === '.md') {
+  if (
+    !project ||
+    !Effect.pipe(file, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    ) ||
+    file === '.md'
+  ) {
     return invalidAddress(input, 'memory address requires a project and .md topic');
   }
-  const topic = file.slice(0, -3);
+  const topic = Effect.pipe(file, EffectString.slice(0, -3));
   const canonicalUri = formatRemoteMemoryUri({kind, project, shareId, topic});
   if (canonicalUri !== resource.canonicalUri) return invalidAddress(input, 'memory address is not canonical');
   return {canonicalUri, kind, project, shareId, topic};
@@ -122,7 +131,8 @@ export function resolveRemoteMemoryAlias(input: {
   }
 
   const normalizedInput = canonicalAliasSource(input.inputUri);
-  const matches = input.aliases.filter(
+  const matches = EffectArray.filter(
+    input.aliases,
     alias => alias.shareId === authorizedShareId && canonicalAliasSource(alias.aliasUri) === normalizedInput,
   );
   if (matches.length === 0) return invalidAlias(input.inputUri, 'no alias exists in the authorized share');

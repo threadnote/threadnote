@@ -1,15 +1,20 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {CODEX_HOOKS_PATH, HOOK_CODEX_RESUME_COMMAND} from '../constants.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {isJsonObject, parseJsonConfigObject} from '../utils.js';
 import type {HooksInstallOptions} from '../types.js';
 import type {JsonObject} from '@threadnote/platform/json';
+import * as EffectRecord from 'effect/Record';
 
 export const CODEX_RESUME_ADDITIONAL_CONTEXT_LIMIT = 800 as const;
 
-class CodexHooksConfigError extends Schema.TaggedError<CodexHooksConfigError>()('CodexHooksConfigError', {
-  message: Schema.String,
-}) {}
+class CodexHooksConfigError extends Schema.TaggedError<CodexHooksConfigError, {readonly brand: unique symbol}>()(
+  'CodexHooksConfigError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 const managedCommand = {
   type: 'command',
@@ -23,9 +28,9 @@ function isManagedCommand(value: unknown): boolean {
 }
 
 function withoutManagedCodexResumeHookGroups(entries: readonly unknown[]): unknown[] {
-  return entries.flatMap(entry => {
-    if (!isJsonObject(entry) || !Array.isArray(entry.hooks)) return [entry];
-    const hooks = entry.hooks.filter(hook => !isManagedCommand(hook));
+  return EffectArray.flatMap(entries, entry => {
+    if (!isJsonObject(entry) || !EffectArray.isArray(entry.hooks)) return [entry];
+    const hooks = EffectArray.filter(entry.hooks, hook => !isManagedCommand(hook));
     if (hooks.length === entry.hooks.length) return [entry];
     return hooks.length === 0 ? [] : [{...entry, hooks}];
   });
@@ -34,14 +39,14 @@ function withoutManagedCodexResumeHookGroups(entries: readonly unknown[]): unkno
 /** Preserve every unrelated Codex hook and identify Threadnote ownership by its exact command. */
 export function withCodexHooks(input: JsonObject, remove = false): JsonObject {
   const hooks = isJsonObject(input.hooks) ? {...input.hooks} : {};
-  const existing = Array.isArray(hooks.UserPromptSubmit) ? hooks.UserPromptSubmit : [];
+  const existing = EffectArray.isArray(hooks.UserPromptSubmit) ? hooks.UserPromptSubmit : [];
   const retained = withoutManagedCodexResumeHookGroups(existing);
   if (!remove) retained.push({hooks: [managedCommand]});
   if (retained.length > 0) hooks.UserPromptSubmit = retained;
   else delete hooks.UserPromptSubmit;
 
   const next: Record<string, unknown> = {...input};
-  if (Object.keys(hooks).length > 0 || isJsonObject(input.hooks)) next.hooks = hooks;
+  if (EffectRecord.keys(hooks).length > 0 || isJsonObject(input.hooks)) next.hooks = hooks;
   else delete next.hooks;
   return next;
 }
@@ -59,7 +64,8 @@ export const runCodexHooksInstall = Effect.fn('hooks.installCodex')(function* (o
   if (
     !parsed ||
     (parsed.hooks !== undefined && !isJsonObject(parsed.hooks)) ||
-    (isJsonObject(parsed.hooks) && Object.values(parsed.hooks).some(entries => !Array.isArray(entries)))
+    (isJsonObject(parsed.hooks) &&
+      EffectArray.some(EffectRecord.values(parsed.hooks), entries => !EffectArray.isArray(entries)))
   ) {
     return yield* CodexHooksConfigError.make({
       message: `Refusing to modify invalid Codex hooks config at ${configPath}. Expected an object of hook event arrays.`,
@@ -104,9 +110,10 @@ export const hasManagedCodexHooks = Effect.fn('hooks.hasManagedCodexHooks')(func
   const configPath = yield* expandPath(CODEX_HOOKS_PATH);
   if (!(yield* fs.exists(configPath))) return false;
   const parsed = parseJsonConfigObject(yield* fs.readFileString(configPath));
-  if (!parsed || !isJsonObject(parsed.hooks) || !Array.isArray(parsed.hooks.UserPromptSubmit)) return false;
-  return parsed.hooks.UserPromptSubmit.some(
-    entry => isJsonObject(entry) && Array.isArray(entry.hooks) && entry.hooks.some(isManagedCommand),
+  if (!parsed || !isJsonObject(parsed.hooks) || !EffectArray.isArray(parsed.hooks.UserPromptSubmit)) return false;
+  return EffectArray.some(
+    parsed.hooks.UserPromptSubmit,
+    entry => isJsonObject(entry) && EffectArray.isArray(entry.hooks) && EffectArray.some(entry.hooks, isManagedCommand),
   );
 });
 

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import type * as THREE from 'three';
 import type {CodeGraphAutomaticCompactionStatus} from '@threadnote/graph/automatic/compaction';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
@@ -13,6 +14,8 @@ import {
   MANAGER_GRAPH_MAX_EDGE_LIMIT,
   MANAGER_GRAPH_MAX_NODE_LIMIT,
 } from '@threadnote/graph/visualization/limits';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface GraphProject {
   readonly buildSystem?: string;
@@ -481,12 +484,17 @@ export function orderGraphBuildStatuses(
   repositories: readonly GraphRepositoryGroup[] = [],
 ): readonly GraphBuildStatus[] {
   const location = (build: GraphBuildStatus): string => {
-    const repository = repositories.find(candidate => candidate.repositoryId === build.identity.repositoryId);
-    const view = repository?.views.find(
-      candidate =>
-        candidate.checkoutId === build.identity.checkoutId &&
-        candidate.scopeId === build.identity.scopeId &&
-        candidate.worktreeId === build.identity.worktreeId,
+    const repository = EffectOption.getOrUndefined(
+      EffectArray.findFirst(repositories, candidate => candidate.repositoryId === build.identity.repositoryId),
+    );
+    const view = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        repository?.views ?? [],
+        candidate =>
+          candidate.checkoutId === build.identity.checkoutId &&
+          candidate.scopeId === build.identity.scopeId &&
+          candidate.worktreeId === build.identity.worktreeId,
+      ),
     );
     return view?.localAssociation.displayPath ?? build.managerContext?.worktreePath ?? build.identity.checkoutId;
   };
@@ -533,11 +541,14 @@ export function compareGraphAdministrationJob(left: GraphBuildStatus, right: Gra
 export function graphAdministrationInventorySummary(
   summary: Pick<CodeGraphLocalDiagnosticsReport['summary'], 'databaseCount' | 'readySnapshotCount' | 'viewCount'>,
 ): string {
-  return [
-    graphAdministrationCount(summary.databaseCount, 'graph database'),
-    graphAdministrationCount(summary.readySnapshotCount, 'stored ready snapshot'),
-    graphAdministrationCount(summary.viewCount, 'active worktree view'),
-  ].join(' · ');
+  return EffectArray.join(
+    [
+      graphAdministrationCount(summary.databaseCount, 'graph database'),
+      graphAdministrationCount(summary.readySnapshotCount, 'stored ready snapshot'),
+      graphAdministrationCount(summary.viewCount, 'active worktree view'),
+    ],
+    ' · ',
+  );
 }
 
 export function graphAdministrationCount(count: number, singular: string): string {
@@ -562,14 +573,21 @@ export function graphBuildTarget(
   repositories: readonly GraphRepositoryGroup[],
   configuredProjects: readonly GraphConfiguredProject[] = [],
 ): GraphBuildTarget {
-  const repository = repositories.find(candidate => candidate.repositoryId === build.identity.repositoryId);
-  const view = repository?.views.find(
-    candidate =>
-      candidate.checkoutId === build.identity.checkoutId &&
-      candidate.scopeId === build.identity.scopeId &&
-      candidate.worktreeId === build.identity.worktreeId,
+  const repository = EffectOption.getOrUndefined(
+    EffectArray.findFirst(repositories, candidate => candidate.repositoryId === build.identity.repositoryId),
   );
-  const fallbackName = build.identity.displayName?.trim();
+  const view = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      repository?.views ?? [],
+      candidate =>
+        candidate.checkoutId === build.identity.checkoutId &&
+        candidate.scopeId === build.identity.scopeId &&
+        candidate.worktreeId === build.identity.worktreeId,
+    ),
+  );
+  const fallbackName = Effect.pipe(build.identity.displayName, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   const repositoryLabel = repository
     ? graphRepositoryOptionLabel(repository, repositories)
     : fallbackName
@@ -584,8 +602,12 @@ export function graphBuildTarget(
   return {
     repositoryLabel: graphRepositoryScopeLabel(repositoryLabel, build.identity.scopeId, configuredProjects),
     worktreeLabel:
-      ([branch, folder].filter((value): value is string => value !== undefined).join(' · ') || view?.label) ??
-      `Local folder unavailable · commit ${build.identity.commit.slice(0, 8) || 'unknown'}`,
+      (EffectArray.join(
+        EffectArray.filter([branch, folder], (value): value is string => value !== undefined),
+        ' · ',
+      ) ||
+        view?.label) ??
+      `Local folder unavailable · commit ${Effect.pipe(build.identity.commit, EffectString.slice(0, 8)) || 'unknown'}`,
   };
 }
 
@@ -596,9 +618,11 @@ export function graphRepositoryScopeLabel(
   configuredProjects: readonly Pick<GraphConfiguredProject, 'name' | 'scopeId'>[] = [],
 ): string {
   if (scopeId === undefined) return repositoryLabel;
-  const project = configuredProjects.find(candidate => candidate.scopeId === scopeId);
-  const fallback = scopeId.startsWith('code-graph-scope:')
-    ? `scope ${scopeId.slice('code-graph-scope:'.length, 'code-graph-scope:'.length + 8)}`
+  const project = EffectOption.getOrUndefined(
+    EffectArray.findFirst(configuredProjects, candidate => candidate.scopeId === scopeId),
+  );
+  const fallback = Effect.pipe(scopeId, EffectString.startsWith('code-graph-scope:'))
+    ? `scope ${Effect.pipe(scopeId, EffectString.slice('code-graph-scope:'.length, 'code-graph-scope:'.length + 8))}`
     : 'scoped graph';
   return `${repositoryLabel}: ${project?.name ?? fallback}`;
 }
@@ -615,12 +639,17 @@ export function graphConfiguredProjectScopeIds(
   query: string,
   configuredProjects: readonly Pick<GraphConfiguredProject, 'name' | 'scopeId'>[] = [],
 ): readonly string[] {
-  const needle = query.trim().toLowerCase();
+  const needle = Effect.pipe(query, EffectString.trim, EffectString.toLowerCase);
   if (needle.length === 0) return [];
   return [
     ...new Set(
-      configuredProjects.flatMap(project =>
-        project.scopeId !== undefined && project.name.toLowerCase().includes(needle) ? [project.scopeId] : [],
+      EffectArray.flatMap(configuredProjects, (project, effectFlatMapIndex) =>
+        effectFlatMapIndex in configuredProjects
+          ? project.scopeId !== undefined &&
+            Effect.pipe(project.name, EffectString.toLowerCase, EffectString.includes(needle))
+            ? [project.scopeId]
+            : []
+          : [],
       ),
     ),
   ]
@@ -633,8 +662,12 @@ export function graphAdministrationJobView(
   views: CodeGraphLocalDiagnosticsReport['databases'][number]['views'],
   job: Pick<GraphBuildStatus, 'identity'>,
 ): CodeGraphLocalDiagnosticsReport['databases'][number]['views'][number] | undefined {
-  return views.find(
-    candidate => candidate.viewWorktreeId === job.identity.worktreeId && candidate.viewScopeId === job.identity.scopeId,
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      views,
+      candidate =>
+        candidate.viewWorktreeId === job.identity.worktreeId && candidate.viewScopeId === job.identity.scopeId,
+    ),
   );
 }
 
@@ -648,20 +681,27 @@ export function graphBuildConcurrencyState(
   waiters: readonly GraphBuildStatus[],
   repositories: readonly GraphRepositoryGroup[],
 ): GraphBuildConcurrencyState {
-  const matchingWaiters = waiters.filter(
-    waiter =>
+  const matchingWaiters = EffectArray.filter(
+    waiters,
+    (waiter, __effectArrayIndex) =>
+      __effectArrayIndex in waiters &&
       waiter.buildId !== build.buildId &&
       waiter.identity.checkoutId === build.identity.checkoutId &&
       waiter.identity.scopeId === build.identity.scopeId &&
       waiter.identity.worktreeId === build.identity.worktreeId,
   );
   const latest = [build, ...matchingWaiters].sort(compareGraphBuildRequest)[matchingWaiters.length];
-  const repository = repositories.find(candidate => candidate.repositoryId === build.identity.repositoryId);
-  const ready = repository?.views.find(
-    candidate =>
-      candidate.checkoutId === build.identity.checkoutId &&
-      candidate.scopeId === build.identity.scopeId &&
-      candidate.worktreeId === build.identity.worktreeId,
+  const repository = EffectOption.getOrUndefined(
+    EffectArray.findFirst(repositories, candidate => candidate.repositoryId === build.identity.repositoryId),
+  );
+  const ready = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      repository?.views ?? [],
+      candidate =>
+        candidate.checkoutId === build.identity.checkoutId &&
+        candidate.scopeId === build.identity.scopeId &&
+        candidate.worktreeId === build.identity.worktreeId,
+    ),
   );
   const queuedRequests = matchingWaiters.length;
   const readySnapshotCommit = ready?.snapshot.commit;
@@ -681,7 +721,11 @@ export function compareGraphBuildRequest(left: GraphBuildStatus, right: GraphBui
 }
 
 export function graphCommitMatches(left: string, right: string): boolean {
-  return left === right || left.startsWith(right) || right.startsWith(left);
+  return (
+    left === right ||
+    Effect.pipe(left, EffectString.startsWith(right)) ||
+    Effect.pipe(right, EffectString.startsWith(left))
+  );
 }
 
 export function graphStatusPollDelay(
@@ -690,7 +734,7 @@ export function graphStatusPollDelay(
   lifecyclePending = false,
   automaticCompaction?: CodeGraphAutomaticCompactionStatus,
 ): number {
-  return builds.some(graphBuildIsActive) ||
+  return EffectArray.some(builds, graphBuildIsActive) ||
     maintenance !== undefined ||
     lifecyclePending ||
     automaticCompaction?.state === 'inspecting' ||
@@ -824,7 +868,7 @@ export function graphCatalogEmptyState(input: {
   ) {
     return 'recovering';
   }
-  if (input.builds.some(graphBuildIsActive)) return 'building';
+  if (EffectArray.some(input.builds, graphBuildIsActive)) return 'building';
   return input.catalogError ? 'retrying' : 'empty';
 }
 
@@ -842,17 +886,19 @@ export function graphStatusRequiresCatalogRefresh(
     return true;
   }
   if (!catalog) {
-    return builds.some(build => {
+    return EffectArray.some(builds, build => {
       const identity = graphCompletedBuildResultIdentity(build);
       return identity !== undefined && !acknowledgedResults.has(identity);
     });
   }
-  return builds.some(build => {
+  return EffectArray.some(builds, build => {
     const identity = graphCompletedBuildResultIdentity(build);
-    const resultVisible = catalog.repositories.some(
+    const resultVisible = EffectArray.some(
+      catalog.repositories,
       repository =>
         repository.repositoryId === build.identity.repositoryId &&
-        repository.views.some(
+        EffectArray.some(
+          repository.views,
           view =>
             view.checkoutId === build.identity.checkoutId &&
             view.scopeId === build.identity.scopeId &&
@@ -877,8 +923,10 @@ export function graphDiagnosticsRequiresCatalogRefresh(
 }
 
 export function graphWaiterCountForBuild(build: GraphBuildStatus, waiters: readonly GraphBuildStatus[]): number {
-  return waiters.filter(
-    waiter =>
+  return EffectArray.filter(
+    waiters,
+    (waiter, __effectArrayIndex) =>
+      __effectArrayIndex in waiters &&
       waiter.buildId !== build.buildId &&
       waiter.identity.checkoutId === build.identity.checkoutId &&
       waiter.identity.scopeId === build.identity.scopeId &&
@@ -892,9 +940,14 @@ export function resolveGraphSelection(
   currentRepositoryId: string,
   currentViewId: string,
 ): {readonly repositoryId: string; readonly viewId: string} {
-  const repository = repositories.find(candidate => candidate.id === currentRepositoryId) ?? repositories[0];
+  const repository =
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(repositories, candidate => candidate.id === currentRepositoryId),
+    ) ?? repositories[0];
   if (!repository) return {repositoryId: '', viewId: ''};
-  const view = repository.views.find(candidate => candidate.id === currentViewId);
+  const view = EffectOption.getOrUndefined(
+    EffectArray.findFirst(repository.views, candidate => candidate.id === currentViewId),
+  );
   return {
     repositoryId: repository.id,
     viewId: view?.id ?? repository.defaultViewId ?? repository.views[0]?.id ?? '',
@@ -905,30 +958,33 @@ export function graphRepositoryOptionLabel(
   repository: GraphRepositoryGroup,
   repositories: readonly GraphRepositoryGroup[],
 ): string {
-  const collides = repositories.some(
+  const collides = EffectArray.some(
+    repositories,
     candidate => candidate.id !== repository.id && candidate.displayName === repository.displayName,
   );
   if (!collides) return repository.displayName;
-  const folder = repository.views.find(view => view.localAssociation.displayPath)?.localAssociation.displayPath;
-  return `${repository.displayName} · ${folder ?? `repository ${repository.id.slice(0, 8)}`}`;
+  const folder = EffectOption.getOrUndefined(
+    EffectArray.findFirst(repository.views, view => Boolean(view.localAssociation.displayPath)),
+  )?.localAssociation.displayPath;
+  return `${repository.displayName} · ${folder ?? `repository ${Effect.pipe(repository.id, EffectString.slice(0, 8))}`}`;
 }
 
 export function shortGraphIdentity(value: string): string {
-  return value.slice(-8) || 'unknown';
+  return Effect.pipe(value, EffectString.slice(-8)) || 'unknown';
 }
 
 export function mergeGraphRepositoryGroups(
   current: readonly GraphRepositoryGroup[],
   additions: readonly GraphRepositoryGroup[],
 ): readonly GraphRepositoryGroup[] {
-  const groups = new Map(current.map(group => [group.id, {...group, views: [...group.views]}]));
+  const groups = new Map(EffectArray.map(current, group => [group.id, {...group, views: [...group.views]}]));
   for (const addition of additions) {
     const existing = groups.get(addition.id);
     if (!existing) {
       groups.set(addition.id, {...addition, views: [...addition.views]});
       continue;
     }
-    const views = new Map(existing.views.map(view => [view.id, view]));
+    const views = new Map(EffectArray.map(existing.views, view => [view.id, view]));
     for (const view of addition.views) {
       const currentView = views.get(view.id);
       views.set(view.id, currentView ? mergeGraphRepository(currentView, view) : view);
@@ -958,15 +1014,26 @@ export function graphCatalogPageOffsets(input: {
   readonly viewId: string;
 }): {readonly projectOffset: number; readonly viewOffset: number; readonly workspaceOffset: number} {
   const continuation = input.continuation?.viewId === input.viewId ? input.continuation : undefined;
+  const baseProjects = input.baseRepository?.projects;
+  const baseViews = input.baseRepositoryGroup?.views;
+  const baseProjectOffset =
+    baseProjects === undefined
+      ? undefined
+      : EffectArray.filter(
+          baseProjects,
+          (project, __effectArrayIndex) =>
+            __effectArrayIndex in baseProjects && Effect.pipe(project.id, EffectString.startsWith('cgp_')),
+        ).length;
+  const baseViewOffset =
+    baseViews === undefined
+      ? undefined
+      : EffectArray.filter(
+          baseViews,
+          (view, __effectArrayIndex) => __effectArrayIndex in baseViews && view.checkoutId === input.checkoutId,
+        ).length;
   return {
-    projectOffset:
-      continuation?.projectOffset ??
-      input.baseRepository?.projects.filter(project => project.id.startsWith('cgp_')).length ??
-      0,
-    viewOffset:
-      continuation?.viewOffset ??
-      input.baseRepositoryGroup?.views.filter(view => view.checkoutId === input.checkoutId).length ??
-      0,
+    projectOffset: continuation?.projectOffset ?? baseProjectOffset ?? 0,
+    viewOffset: continuation?.viewOffset ?? baseViewOffset ?? 0,
     workspaceOffset: continuation?.workspaceOffset ?? input.baseRepository?.workspaces.length ?? 0,
   };
 }
@@ -977,9 +1044,9 @@ export function mergeGraphRepository(current: GraphRepository, addition: GraphRe
     const additionTime = Date.parse(addition.activatedAt ?? addition.snapshot.completedAt ?? '') || 0;
     return additionTime > currentTime ? addition : current;
   }
-  const projects = new Map(current.projects.map(project => [project.id, project]));
+  const projects = new Map(EffectArray.map(current.projects, project => [project.id, project]));
   for (const project of addition.projects) projects.set(project.id, project);
-  const workspaces = new Map(current.workspaces.map(workspace => [workspace.id, workspace]));
+  const workspaces = new Map(EffectArray.map(current.workspaces, workspace => [workspace.id, workspace]));
   for (const workspace of addition.workspaces) workspaces.set(workspace.id, workspace);
   return {
     ...current,
@@ -1092,9 +1159,10 @@ export function graphDisplayEdges(
   focusMode: GraphFocusMode,
   relationFilter: string,
 ): readonly GraphEdge[] {
-  const related = relationFilter === 'all' ? edges : edges.filter(edge => edge.relation === relationFilter);
+  const related =
+    relationFilter === 'all' ? edges : EffectArray.filter(edges, edge => edge.relation === relationFilter);
   if (!selectedNodeId || focusMode === 'all') return related;
-  return related.filter(edge => {
+  return EffectArray.filter(related, edge => {
     if (focusMode === 'incoming') return edge.targetId === selectedNodeId;
     if (focusMode === 'outgoing') return edge.sourceId === selectedNodeId;
     return edge.sourceId === selectedNodeId || edge.targetId === selectedNodeId;
@@ -1134,7 +1202,7 @@ export function graphQueryRequestIsCurrent(
     graphRequestIsCurrent(currentSequence, requestedSequence, currentScope, requestedScope) &&
     graph.repository.snapshot.id === expectedSnapshotId &&
     graph.query.state === 'ready' &&
-    graph.query.text.trim() === expectedQuery
+    Effect.pipe(graph.query.text, EffectString.trim) === expectedQuery
   );
 }
 
@@ -1257,7 +1325,9 @@ export function cacheGraphNodeDetail(
 
 export function graphWithNodeNeighborhood(graph: GraphVisualization, detail: GraphNodeDetail): GraphVisualization {
   if (graph.mode !== 'detail') return graph;
-  const nodesById = new Map(graph.nodes.slice(0, MANAGER_GRAPH_MAX_NODE_LIMIT).map(node => [node.id, node]));
+  const nodesById = new Map(
+    EffectArray.map(graph.nodes.slice(0, MANAGER_GRAPH_MAX_NODE_LIMIT), node => [node.id, node]),
+  );
   const existingRoot = nodesById.get(detail.node.id);
   if (existingRoot || nodesById.size < MANAGER_GRAPH_MAX_NODE_LIMIT) {
     nodesById.set(detail.node.id, {
@@ -1277,7 +1347,9 @@ export function graphWithNodeNeighborhood(graph: GraphVisualization, detail: Gra
     });
   }
 
-  const edgesById = new Map(graph.edges.slice(0, MANAGER_GRAPH_MAX_EDGE_LIMIT).map(edge => [edge.id, edge]));
+  const edgesById = new Map(
+    EffectArray.map(graph.edges.slice(0, MANAGER_GRAPH_MAX_EDGE_LIMIT), edge => [edge.id, edge]),
+  );
   let truncated = graph.nodes.length > nodesById.size || graph.edges.length > edgesById.size;
   for (const relationship of detail.relationships.slice(0, MAX_EXPANDED_NEIGHBOR_EDGES)) {
     const relatedId = relationship.related.id;
@@ -1318,7 +1390,7 @@ export function graphWithNodeNeighborhood(graph: GraphVisualization, detail: Gra
 
   const edges = [...edgesById.values()];
   const degrees = graphNodeSizeValues(edges, 'connections');
-  const nodes = [...nodesById.values()].map(node => ({...node, degree: degrees.get(node.id) ?? 0}));
+  const nodes = EffectArray.map([...nodesById.values()], node => ({...node, degree: degrees.get(node.id) ?? 0}));
   const addedNodes = nodes.length - graph.nodes.length;
   return {
     ...graph,
@@ -1401,18 +1473,21 @@ export function graphCatalogSearchOptions(
   repositories: readonly GraphRepositoryGroup[],
   configuredProjects: readonly Pick<GraphConfiguredProject, 'name' | 'scopeId'>[] = [],
 ): GraphCatalogSearchOptions {
-  const workspaces = new Map(repository.workspaces.map(workspace => [workspace.id, workspace]));
-  const projects = repository.projects
-    .map(project => {
-      const workspace = project.workspaceId ? workspaces.get(project.workspaceId) : undefined;
-      return {
-        description: [workspace?.name, graphProjectBadge(project)].filter(Boolean).join(' · '),
-        id: project.id,
-        label: project.label,
-        viewId: repository.id,
-      };
-    })
-    .sort((left, right) => compareCodeUnits(left.label, right.label) || compareCodeUnits(left.id, right.id));
+  const workspaces = new Map(EffectArray.map(repository.workspaces, workspace => [workspace.id, workspace]));
+  const projects = EffectArray.map(repository.projects, project => {
+    const workspace = project.workspaceId ? workspaces.get(project.workspaceId) : undefined;
+    return {
+      description: EffectArray.join(
+        EffectArray.map(EffectArray.filter([workspace?.name, graphProjectBadge(project)], Boolean), item =>
+          item === null || item === undefined ? '' : String(item),
+        ),
+        ' · ',
+      ),
+      id: project.id,
+      label: project.label,
+      viewId: repository.id,
+    };
+  }).sort((left, right) => compareCodeUnits(left.label, right.label) || compareCodeUnits(left.id, right.id));
   const viewsById = new Map<
     string,
     {readonly description: string; readonly id: string; readonly label: string; readonly repositoryId: string}
@@ -1420,7 +1495,7 @@ export function graphCatalogSearchOptions(
   for (const group of repositories) {
     for (const view of group.views) {
       viewsById.set(view.id, {
-        description: `${group.displayName} · ${view.snapshot.commit.slice(0, 8)}${view.snapshot.dirty ? ' · dirty' : ''}${view.localAssociation.branch ? ` · observed branch ${view.localAssociation.branch}` : ''} · folder ${graphLocalAssociationText(view.localAssociation)}`,
+        description: `${group.displayName} · ${Effect.pipe(view.snapshot.commit, EffectString.slice(0, 8))}${view.snapshot.dirty ? ' · dirty' : ''}${view.localAssociation.branch ? ` · observed branch ${view.localAssociation.branch}` : ''} · folder ${graphLocalAssociationText(view.localAssociation)}`,
         id: view.id,
         label: graphRepositoryScopeLabel(view.label, view.scopeId, configuredProjects),
         repositoryId: group.id,
@@ -1570,7 +1645,7 @@ export const DEFAULT_QUERY_WORKING_SET = {edgeLimit: 240, nodeLimit: 120} as con
 export const MAX_QUERY_WORKING_SET = {edgeLimit: 500, nodeLimit: 200} as const;
 
 export function managerGraphQueryCandidate(input: string): string | undefined {
-  const candidate = input.trim();
+  const candidate = Effect.pipe(input, EffectString.trim);
   return candidate.length > 0 && candidate.length <= GRAPH_QUERY_MAXIMUM_LENGTH ? candidate : undefined;
 }
 
@@ -1580,12 +1655,13 @@ export function managerGraphDebouncedQueryCandidate(input: string): string | und
 }
 
 export function graphOverviewSizeLabel(graph: GraphVisualization): string {
-  return graph.repository.metrics === 'complete' && graph.nodes.some(node => node.symbolCount !== undefined)
+  return graph.repository.metrics === 'complete' &&
+    EffectArray.some(graph.nodes, node => node.symbolCount !== undefined)
     ? 'Component symbols'
     : 'Visible relationship degree';
 }
 export function graphLocalAssociationText(association: CodeGraphLocalAssociation): string {
-  return association.displayPath ?? association.state.replaceAll('-', ' ');
+  return association.displayPath ?? Effect.pipe(association.state, EffectString.replaceAll('-', ' '));
 }
 export function graphNodeSizeValues(
   edges: readonly Pick<GraphEdge, 'sourceId' | 'targetId'>[],
@@ -1602,7 +1678,7 @@ export function graphNodeSizeValues(
     if (metric !== 'incoming') add(edge.sourceId, edge.targetId);
     if (metric !== 'outgoing') add(edge.targetId, edge.sourceId);
   }
-  return new Map([...connected].map(([nodeId, neighbors]) => [nodeId, neighbors.size]));
+  return new Map(EffectArray.map([...connected], ([nodeId, neighbors]) => [nodeId, neighbors.size]));
 }
 export function isAbortError(cause: unknown): boolean {
   return cause instanceof DOMException
@@ -1621,7 +1697,10 @@ export function graphProjectBadge(project: GraphProject): string {
 }
 
 export function relationLabel(value: string): string {
-  return value.replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+  return Effect.pipe(value, EffectString.replaceAll('_', ' ')).replace(/\b\w/g, letter =>
+    Effect.pipe(letter, EffectString.toUpperCase),
+  );
 }
 
 export function sizeMetricLabel(metric: GraphSizeMetric): string {
@@ -1636,8 +1715,8 @@ export function sizeMetricLabel(metric: GraphSizeMetric): string {
 }
 
 export function sourceBreadcrumb(projectId: string, path: string): readonly string[] {
-  const project = projectId.replace(/^[^:]+:/, '');
-  const parts = path.split('/').filter(Boolean);
+  const project = Effect.pipe(projectId, EffectString.replace(/^[^:]+:/, ''));
+  const parts = EffectArray.filter(Effect.pipe(path, EffectString.split('/')), Boolean);
   const compactPath = parts.length > 4 ? [...parts.slice(0, 2), '…', ...parts.slice(-2)] : parts;
-  return [project, ...compactPath.filter((part, index) => index > 0 || part !== project)];
+  return [project, ...EffectArray.filter(compactPath, (part, index) => index > 0 || part !== project)];
 }

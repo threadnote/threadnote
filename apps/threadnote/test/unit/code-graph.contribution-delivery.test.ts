@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -20,6 +21,8 @@ import {sha256Digest, sha256HexFromDigest} from '@threadnote/graph/sharing/diges
 import {drainQueuedGraphShareContributions} from '@threadnote/graph/sharing/parse/cache';
 import {defaultGraphShareProfile, graphShareProfileDigest} from '@threadnote/graph/sharing/profile';
 import {writeGraphShareTrustReceipt} from '@threadnote/graph/sharing/trust';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer), Layer.provideMerge(BunHttpClient.layer));
 
@@ -29,7 +32,7 @@ const fixture = Effect.fn('test.contributionDeliveryFixture')(function* (
   const fs = yield* FileSystem.FileSystem;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-contribution-delivery-'});
   const cas = `${home}/cas`;
-  const repositoryId = 'a'.repeat(64);
+  const repositoryId = Effect2.pipe('a', EffectString.repeat(64));
   const server = yield* Effect.acquireRelease(
     Effect.sync(() => Bun.serve({hostname: '127.0.0.1', port: 0, fetch: reply})),
     server => Effect.promise(() => server.stop(true)),
@@ -145,7 +148,10 @@ describe('automatic contribution delivery boundaries', () => {
             f.home,
             f.repositoryId,
             'join',
-            {...f.contribution.announcement, actionKey: index.toString(16).padStart(64, '0')},
+            {
+              ...f.contribution.announcement,
+              actionKey: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
+            },
             'passive',
           );
         }
@@ -171,7 +177,7 @@ describe('automatic contribution delivery boundaries', () => {
           return Response.json({});
         });
         const rounds = yield* Effect.all([f.drain, f.drain, f.drain], {concurrency: 3});
-        expect(rounds.reduce((sum, round) => sum + round.sent, 0)).toBe(1);
+        expect(EffectArray.reduce(rounds, 0, (sum, round) => sum + round.sent)).toBe(1);
         expect(requests).toBe(4);
         expect((yield* readGraphShareContributionQueue(f.home, f.repositoryId, 'passive')).announcements).toEqual([]);
       }).pipe(provideTestLayer(layer)),

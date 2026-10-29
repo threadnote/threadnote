@@ -16,12 +16,15 @@ import type {MaintenanceState} from '../../src/memory/context/maintenance.js';
 import {publicStatus, renderContextMaintenanceStatus} from '../../src/memory/context/maintenance_projection.js';
 import {maintenanceSnapshotFailure} from '../../src/memory/context/maintenance_snapshot.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 function legacyProgress(eligibleRecords = 2, cursor = 1, totalBatches = 1) {
   return {generation: 'legacy-generation', eligibleRecords, cursor, totalBatches, partial: false};
 }
 
-function state(progress: unknown): MaintenanceState {
+function state(progress: MaintenanceState['semanticProgress'] = undefined): MaintenanceState {
   return {
     version: 2,
     paused: true,
@@ -31,7 +34,15 @@ function state(progress: unknown): MaintenanceState {
     cases: [],
     receipts: [],
     checkpoints: {},
-    semanticProgress: progress as MaintenanceState['semanticProgress'],
+    semanticProgress: progress,
+  };
+}
+
+function malformedState(progress: unknown): MaintenanceState {
+  return {
+    ...state(),
+    // @ts-expect-error -- This helper models invalid persisted progress passed to the defensive projector.
+    semanticProgress: progress,
   };
 }
 
@@ -81,7 +92,8 @@ describe('maintenance status semantic checkpoint compatibility', () => {
     expect(text).toContain('Category: invalid-header');
     expect(text).toContain('Stage: record-read');
     expect(text).toContain('backup');
-    expect(text.split('Memory:')).toHaveLength(9);
+    expect(Effect2.pipe(text, EffectString.split('Memory:'))).toHaveLength(9);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
     expect(text.split('Memory: ' + diagnostics[0].memoryUri)).toHaveLength(2);
     expect(text).toContain('4 additional diagnostics omitted');
     expect(text).not.toContain('broken-8.md');
@@ -93,7 +105,10 @@ describe('maintenance status semantic checkpoint compatibility', () => {
   it.each([{}, {version: 1}, {version: 2, analyzerVersion: 1}])(
     'shows obsolete completed progress %j as incomplete without rewriting it',
     version => {
-      const original = state({threadnote: {...legacyProgress(), ...version}});
+      const original =
+        version.version === undefined
+          ? state({threadnote: legacyProgress()})
+          : malformedState({threadnote: {...legacyProgress(), ...version}});
       const before = structuredClone(original);
       expect(publicStatus(original, 'threadnote').semanticCoverage).toEqual([
         {...incomplete, project: 'threadnote', eligibleRecords: 2, totalRecords: 2, totalBatches: 1},
@@ -120,7 +135,14 @@ describe('maintenance status semantic checkpoint compatibility', () => {
           ]);
           expect(scoped[0]).not.toHaveProperty('totalClaimPairs');
           expect(publicStatus(original, 'absent').semanticCoverage).toEqual([]);
-          expect(publicStatus(original).semanticCoverage?.map(item => item.project)).toEqual(['selected', 'other']);
+          expect(
+            EffectOption.getOrUndefined(
+              EffectOption.map(
+                EffectOption.fromNullishOr(publicStatus(original).semanticCoverage),
+                __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, item => item.project),
+              ),
+            ),
+          ).toEqual(['selected', 'other']);
           expect(original).toEqual(before);
         },
       ),
@@ -145,7 +167,7 @@ describe('maintenance status semantic checkpoint compatibility', () => {
       comparedClaimPairs: 1,
       churnCount: 0,
       outputOmittedFindings: 0,
-    };
+    } satisfies NonNullable<MaintenanceState['semanticProgress']>[string];
     expect(publicStatus(state({threadnote: current})).semanticCoverage).toEqual([
       {
         ...incomplete,

@@ -1,3 +1,5 @@
+import {isJsonObject} from '@threadnote/platform/json';
+import {Array as EffectArray} from 'effect';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {afterAll, beforeAll, describe, expect, it} from 'vitest';
@@ -29,6 +31,32 @@ import {
 import {createRemoteMemoryHttpHandler} from '@threadnote/threadnote/remote_memory/http_transport';
 import {PostgresRemoteControlPlane} from '@threadnote/remote-memory/postgres/control_plane';
 import {PostgresRemoteMemoryRepository} from '@threadnote/remote-memory/postgres/repository';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+type RemoteMemoryRpcBody = {
+  readonly result?: {
+    readonly isError?: boolean;
+    readonly structuredContent?: Record<string, unknown>;
+    readonly content?: unknown;
+  };
+};
+
+function requireCursorAttestationId(value: unknown): string {
+  if (!isJsonObject(value) || typeof value.attestationId !== 'string')
+    throw new Error('Expected a cursor attestation identifier.');
+  return value.attestationId;
+}
+
+function assertRemoteMemoryRpcBody(value: unknown): asserts value is RemoteMemoryRpcBody {
+  if (!isJsonObject(value)) throw new Error('Expected a remote memory JSON-RPC response.');
+  if (value.result === undefined) return;
+  if (!isJsonObject(value.result)) throw new Error('Expected a remote memory JSON-RPC result.');
+  if (value.result.isError !== undefined && typeof value.result.isError !== 'boolean')
+    throw new Error('Expected a boolean JSON-RPC error marker.');
+  if (value.result.structuredContent !== undefined && !isJsonObject(value.result.structuredContent))
+    throw new Error('Expected structured JSON-RPC content.');
+}
 
 const databaseUrl = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const shareId = 'org-cloud-acceptance';
@@ -147,10 +175,13 @@ const cloudConfig = (contribute = false) =>
       database?.dispose(),
       fixture ? rm(fixture.root, {recursive: true, force: true}) : Promise.resolve(),
     ]);
-    const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    const failures = EffectArray.filter(
+      cleanup,
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
     if (failures.length > 0)
       throw new AggregateError(
-        failures.map(result => result.reason),
+        EffectArray.map(failures, result => result.reason),
         'Acceptance cleanup failed.',
       );
   });
@@ -221,7 +252,8 @@ const cloudConfig = (contribute = false) =>
       }),
     );
     expect(completion.status).toBe(200);
-    const {attestationId} = (await completion.json()) as {attestationId: string};
+    const completionPayload: unknown = await completion.json();
+    const attestationId = requireCursorAttestationId(completionPayload);
     const written = await call('remember_context', {...write, attestationId, operationId: 'cloud-write'}, true);
     expect(written.result?.isError).not.toBe(true);
     const committed = parseRemoteMemoryReceiptV1(written.result!.structuredContent!);
@@ -257,7 +289,7 @@ const cloudConfig = (contribute = false) =>
       return transaction<{markdown_body: string}[]>`SELECT markdown_body FROM remote_memory.memory_revisions`;
     });
     expect(bodies.length).toBeGreaterThan(0);
-    expect(bodies.every(row => row.markdown_body === '')).toBe(true);
+    expect(EffectArray.every(bodies, row => row.markdown_body === '')).toBe(true);
 
     const wrongBindings: Record<string, string>[] = [
       {'threadnote-share-id': 'wrong-share'},
@@ -369,7 +401,7 @@ const cloudConfig = (contribute = false) =>
     enabled = false;
     expect((await call('read_context', {uri, version: 1})).response.status).toBe(503);
     await withLocal(home, true, async client => {
-      expect((await client.listTools()).tools.map(tool => tool.name)).toContain('inspect_code_graph');
+      expect(EffectArray.map((await client.listTools()).tools, tool => tool.name)).toContain('inspect_code_graph');
       const status = await client.callTool({name: 'cursor_cloud_status', arguments: {callerCwd: cold}});
       expect(status.isError).not.toBe(true);
       expect(status.structuredContent).toMatchObject({status: 'ok', shareId, localMemoryFallback: 'disabled'});
@@ -431,9 +463,8 @@ const cloudConfig = (contribute = false) =>
         body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'tools/call', params: {name, arguments: args}}),
       }),
     );
-    const body = (await response.json()) as {
-      result?: {isError?: boolean; structuredContent?: Record<string, unknown>; content?: unknown};
-    };
+    const body: unknown = await response.json();
+    assertRemoteMemoryRpcBody(body);
     return {response, ...body};
   }
 
@@ -471,7 +502,7 @@ const cloudConfig = (contribute = false) =>
     expect(rows).toEqual([
       {
         current_revision_id: revision,
-        git_commit: (await git(['rev-parse', 'HEAD'], fixture.worktree)).trim(),
+        git_commit: Effect.pipe(await git(['rev-parse', 'HEAD'], fixture.worktree), EffectString.trim),
         git_path: path,
         markdown_body: '',
       },

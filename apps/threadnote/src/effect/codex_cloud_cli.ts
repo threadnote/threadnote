@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Command} from 'effect/cli';
 import type {CliRuntimeRunner} from './cli.js';
 import {
@@ -128,7 +129,7 @@ export function makeCodexCloudCommand(withRuntime: CliRuntimeRunner) {
         runCodexCloudMemory(
           config,
           'remember',
-          {...options, relations: relations.map(value => JSON.parse(value) as unknown)},
+          {...options, relations: EffectArray.map(relations, value => JSON.parse(value) as unknown)},
           json,
         ),
       ),

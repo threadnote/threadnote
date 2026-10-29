@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import type {MemoryAuthority, MemoryTrust} from '@threadnote/memory/document';
@@ -15,6 +16,8 @@ import {
 import {recallEligibilityPredicate} from '@threadnote/recall/index/eligibility';
 import {recallIndexedProject} from '@threadnote/recall/index/refresh';
 import type {RecallCandidate} from '@threadnote/recall/rank';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('recall eligibility policy', () => {
   it('keeps an omitted explicit project global', () => {
@@ -185,20 +188,25 @@ describe('recall eligibility policy', () => {
 
     const caseStableProject = fc
       .array(fc.constantFrom('a', 'b', 'm', 'z', 'é', '-', '_', '0', '7'), {maxLength: 30, minLength: 1})
-      .map(parts => parts.join(''));
+      .map(parts => EffectArray.join(parts, ''));
     fc.assert(
       fc.property(caseStableProject, value => {
-        expect(normalizeRecallProjectNames([`  ${value.toUpperCase().normalize('NFD')}  `])).toEqual(
-          normalizeRecallProjectNames([value]),
-        );
+        expect(
+          normalizeRecallProjectNames([
+            `  ${Effect.pipe(value, EffectString.toUpperCase, EffectString.normalize('NFD'))}  `,
+          ]),
+        ).toEqual(normalizeRecallProjectNames([value]));
       }),
       {numRuns: 100},
     );
 
     fc.assert(
       fc.property(fc.array(fc.tuple(fc.integer(), fc.string()), {maxLength: 40}), entries => {
-        const values = entries.map(([, value]) => value);
-        const permutation = [...entries].sort(([left], [right]) => left - right).map(([, value]) => value);
+        const values = EffectArray.map(entries, ([, value]) => value);
+        const permutation = EffectArray.map(
+          [...entries].sort(([left], [right]) => left - right),
+          ([, value]) => value,
+        );
         const normalized = normalizeRecallProjectNames(values);
         expect(normalizeRecallProjectNames(normalized)).toEqual(normalized);
         expect(normalizeRecallProjectNames(permutation)).toEqual(normalized);
@@ -394,7 +402,7 @@ describe('plural recall workspace eligibility', () => {
         fc.array(fc.constantFrom('product', 'mobile', 'checkout', 'tax', 'foreign-workset'), {maxLength: 12}),
         tokens => {
           const policy = deriveRecallEligibilityPolicy({
-            originalQuery: tokens.join(' '),
+            originalQuery: EffectArray.join(tokens, ' '),
             workspaceProjects: ['product', 'product-mobile'],
           });
           expect(policy).toMatchObject({projects: {projects: ['product', 'product-mobile']}});

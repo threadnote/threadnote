@@ -1,10 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
+import {Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import * as FC from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -30,9 +31,16 @@ import {
   codeGraphVectorRetirementCursorLockPath,
   codeGraphVectorWriteLockPath,
 } from '@threadnote/graph/layout';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const OrdinaryVectorTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
-const CHECKOUT_ID = 'a'.repeat(64);
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const PREPARATION = {
   deadlineMonotonicMilliseconds: 250,
   monotonicMilliseconds: () => 0,
@@ -317,7 +325,10 @@ describe('code graph ordinary vector retirement maintenance', () => {
           const path = yield* Path.Path;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ordinary-vector-delayed-clean-'});
           const input = yield* makeVectorHome(fs, path, home);
-          const names = Array.from({length: 64}, (_, index) => `model-${index.toString().padStart(3, '0')}`);
+          const names = Array.from(
+            {length: 64},
+            (_, index) => `model-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
+          );
           yield* Effect.forEach(
             names,
             name =>
@@ -425,7 +436,7 @@ describe('code graph ordinary vector retirement maintenance', () => {
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ordinary-vector-first-only-'});
           const input = yield* makeVectorHome(fs, path, home);
           const databasePath = yield* makeModelDatabase(fs, path, input, 'model-a', [
-            {generation: 'generation-live', pointer: 'b'.repeat(64), vectorCount: 0},
+            {generation: 'generation-live', pointer: Effect2.pipe('b', EffectString.repeat(64)), vectorCount: 0},
             {generation: 'generation-orphan', vectorCount: 0},
           ]);
 
@@ -445,7 +456,7 @@ describe('code graph ordinary vector retirement maintenance', () => {
           const path = yield* Path.Path;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ordinary-vector-associated-'});
           const input = yield* makeVectorHome(fs, path, home);
-          const worktreeId = 'c'.repeat(64);
+          const worktreeId = Effect2.pipe('c', EffectString.repeat(64));
           const databasePath = yield* makeModelDatabase(fs, path, input, 'model-a', [
             {generation: 'generation-associated', pointer: worktreeId, vectorCount: 1},
           ]);
@@ -492,7 +503,7 @@ describe('code graph ordinary vector retirement maintenance', () => {
 
           expect(readVectorCount(later)).toBe(0);
           expect(readVectorCount(first)).toBeGreaterThan(0);
-          expect(order.some(value => value.endsWith(':0'))).toBe(true);
+          expect(EffectArray.some(order, value => Effect2.pipe(value, EffectString.endsWith(':0')))).toBe(true);
         }),
       ),
     );
@@ -591,7 +602,7 @@ describe('code graph ordinary vector retirement maintenance', () => {
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ordinary-vector-reverify-'});
           const input = yield* makeVectorHome(fs, path, home);
           const databasePath = yield* makeModelDatabase(fs, path, input, 'model-a', [
-            {generation: 'generation-live', pointer: 'b'.repeat(64), vectorCount: 0},
+            {generation: 'generation-live', pointer: Effect2.pipe('b', EffectString.repeat(64)), vectorCount: 0},
           ]);
           expect((yield* runUntilComplete(input, 24)).at(-1)).toEqual({state: 'complete'});
           insertGeneration(databasePath, {generation: 'generation-new', vectorCount: 1});
@@ -612,10 +623,10 @@ describe('code graph ordinary vector retirement maintenance', () => {
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ordinary-vector-final-seal-'});
           const input = yield* makeVectorHome(fs, path, home);
           const earlier = yield* makeModelDatabase(fs, path, input, 'model-a', [
-            {generation: 'generation-live-a', pointer: 'a'.repeat(64), vectorCount: 0},
+            {generation: 'generation-live-a', pointer: Effect2.pipe('a', EffectString.repeat(64)), vectorCount: 0},
           ]);
           yield* makeModelDatabase(fs, path, input, 'model-z', [
-            {generation: 'generation-live-z', pointer: 'b'.repeat(64), vectorCount: 0},
+            {generation: 'generation-live-z', pointer: Effect2.pipe('b', EffectString.repeat(64)), vectorCount: 0},
           ]);
           let inserted = false;
           let sealedResult: CodeGraphOrdinaryVectorMaintenanceUnitResult | undefined;
@@ -799,7 +810,7 @@ function makeModelDirectories(
   count: number,
 ) {
   return Effect.forEach(
-    Array.from({length: count}, (_, index) => `model-${index.toString().padStart(3, '0')}`),
+    Array.from({length: count}, (_, index) => `model-${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`),
     name => fs.makeDirectory(modelRoot(path, input, name), {recursive: true, mode: 0o700}),
     {concurrency: 8, discard: true},
   );
@@ -843,13 +854,20 @@ function activeReceiptOperations(fs: FileSystem.FileSystem, path: Path.Path, thr
   return Effect.gen(function* () {
     const root = codeGraphDiskReservationRoot(path, threadnoteHome);
     if (!(yield* fs.exists(root))) return [] as string[];
-    const names = (yield* fs.readDirectory(root)).filter(name => /^v1-[0-9a-f]{64}\.json$/.test(name)).sort();
+    const names = EffectArray.filter(
+      yield* fs.readDirectory(root),
+      __effectArrayValue => !!(name => /^v1-[0-9a-f]{64}\.json$/.test(name))(__effectArrayValue),
+    ).sort();
     return yield* Effect.forEach(names, name =>
-      fs
-        .readFileString(path.join(root, name))
-        .pipe(
-          Effect.map(content => String((JSON.parse(content) as {readonly operation?: unknown}).operation ?? 'invalid')),
-        ),
+      Effect.gen(function* () {
+        const content = yield* fs.readFileString(path.join(root, name));
+        const receipt = yield* Schema.decodeUnknownEffect(
+          Schema.StructWithRest(Schema.Struct({operation: Schema.optionalKey(Schema.Unknown)}), [
+            Schema.Record(Schema.String, Schema.Unknown),
+          ]),
+        )(JSON.parse(content));
+        return String(receipt.operation ?? 'invalid');
+      }),
     );
   });
 }
@@ -945,7 +963,7 @@ function insertGenerationWithDatabase(database: Database, fixture: GenerationFix
       fixture.generation,
       `snapshot-${fixture.generation}`,
       'model-test',
-      'f'.repeat(64),
+      Effect2.pipe('f', EffectString.repeat(64)),
       fixture.vectorCount,
       new Date(0).toISOString(),
     );
@@ -959,7 +977,7 @@ function insertGenerationWithDatabase(database: Database, fixture: GenerationFix
   );
   database.transaction(() => {
     for (let index = 0; index < fixture.vectorCount; index += 1) {
-      const symbolId = `symbol-${fixture.generation}-${index.toString().padStart(6, '0')}`;
+      const symbolId = `symbol-${fixture.generation}-${Effect2.pipe(index.toString(), EffectString.padStart(6, '0'))}`;
       insertVector.run(fixture.generation, symbolId, `fingerprint-${symbolId}`, new Uint8Array(16));
     }
   })();
@@ -968,10 +986,12 @@ function insertGenerationWithDatabase(database: Database, fixture: GenerationFix
 function readGenerations(databasePath: string): string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query('SELECT generation FROM vector_generations ORDER BY generation')
-      .all()
-      .map(row => String((row as {readonly generation: unknown}).generation));
+    return EffectArray.map(
+      database
+        .query<{readonly generation: unknown}, []>('SELECT generation FROM vector_generations ORDER BY generation')
+        .all(),
+      row => String(row.generation),
+    );
   } finally {
     database.close(false);
   }
@@ -984,12 +1004,12 @@ function readRetirementMarkers(
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return database
-      .query(
+      .query<{readonly generation: string; readonly retiredByWorktreeId: string | null}, SQLQueryBindings[]>(
         `SELECT generation, retired_by_worktree_id AS retiredByWorktreeId
          FROM vector_generation_retirements
          ORDER BY generation`,
       )
-      .all() as Array<{readonly generation: string; readonly retiredByWorktreeId: string | null}>;
+      .all();
   } finally {
     database.close(false);
   }
@@ -1000,8 +1020,10 @@ function readRetirementSequence(databasePath: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     const row = database
-      .query("SELECT seq FROM sqlite_sequence WHERE name = 'vector_generation_retirements'")
-      .get() as {readonly seq?: unknown} | null;
+      .query<{readonly seq?: unknown} | null, SQLQueryBindings[]>(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'vector_generation_retirements'",
+      )
+      .get();
     return row === null ? 0 : Number(row.seq);
   } finally {
     database.close(false);
@@ -1011,7 +1033,11 @@ function readRetirementSequence(databasePath: string): number {
 function readVectorCount(databasePath: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return Number((database.query('SELECT COUNT(*) AS count FROM vectors').get() as {readonly count: number}).count);
+    return Number(
+      requiredRow(
+        database.query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM vectors').get(),
+      ).count,
+    );
   } finally {
     database.close(false);
   }
@@ -1021,10 +1047,15 @@ function readGenerationVectorCount(databasePath: string, generation: string): nu
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return Number(
-      (
-        database.query('SELECT COUNT(*) AS count FROM vectors WHERE generation = ?').get(generation) as {
-          readonly count: number;
-        }
+      requiredRow(
+        database
+          .query<
+            {
+              readonly count: number;
+            },
+            SQLQueryBindings[]
+          >('SELECT COUNT(*) AS count FROM vectors WHERE generation = ?')
+          .get(generation),
       ).count,
     );
   } finally {
@@ -1037,12 +1068,15 @@ function hasTable(databasePath: string, table: string): boolean {
   try {
     return (
       Number(
-        (
+        requiredRow(
           database
-            .query("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
-            .get(table) as {
-            readonly count: number;
-          }
+            .query<
+              {
+                readonly count: number;
+              },
+              SQLQueryBindings[]
+            >("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .get(table),
         ).count,
       ) === 1
     );

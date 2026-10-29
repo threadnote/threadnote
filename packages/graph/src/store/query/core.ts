@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -11,6 +12,8 @@ import {CODE_GRAPH_STORED_FACT_CODEC, storedCodeGraphFactRawBytesSql} from '../.
 import {type CodeGraphProvenance, CodeGraphStoreError} from '../../types.js';
 import {sqlTextOption} from '../utilities.js';
 import {type CodeGraphSqlQueryStatement} from '../visualization_sql.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function selectFileBlobMetadataBatch(
   sql: SqlClient.SqlClient,
@@ -24,8 +27,11 @@ function selectFileBlobMetadataBatch(
     `SELECT path_hint, ${storedCodeGraphFactRawBytesSql('facts_json')} AS facts_bytes
      FROM file_blobs
      WHERE extractor_set = ?
-       AND (${files.map(() => '(content_hash = ? AND path_hint = ?)').join(' OR ')})`,
-    [extractorSet, ...files.flatMap(file => [file.contentHash, file.path])],
+       AND (${EffectArray.join(
+         EffectArray.map(files, () => '(content_hash = ? AND path_hint = ?)'),
+         ' OR ',
+       )})`,
+    [extractorSet, ...EffectArray.flatMap(files, file => [file.contentHash, file.path])],
   );
 }
 
@@ -110,7 +116,7 @@ interface ReusableFileBlobTarget {
 }
 
 function reusableFileBlobTargets(files: readonly CodeGraphBlobReuseFile[]): readonly ReusableFileBlobTarget[] {
-  return files.flatMap(file => {
+  return EffectArray.flatMap(files, file => {
     const reuseClass = codeGraphBlobExtractionReuseClass(file);
     return reuseClass === undefined
       ? []
@@ -128,12 +134,15 @@ function reusableFileBlobTargets(files: readonly CodeGraphBlobReuseFile[]): read
 
 function reusableFileBlobTargetCte(targets: readonly ReusableFileBlobTarget[]): string {
   return `WITH requested(target_path, content_hash, blob_id, reuse_class) AS (
-    VALUES ${targets.map(() => '(?, ?, ?, ?)').join(', ')}
+    VALUES ${EffectArray.join(
+      EffectArray.map(targets, () => '(?, ?, ?, ?)'),
+      ', ',
+    )}
   )`;
 }
 
 function reusableFileBlobTargetParameters(targets: readonly ReusableFileBlobTarget[]): readonly string[] {
-  return targets.flatMap(target => [target.path, target.contentHash, target.blobId, target.reuseClass]);
+  return EffectArray.flatMap(targets, target => [target.path, target.contentHash, target.blobId, target.reuseClass]);
 }
 
 function reusableFileBlobJoin(alias: string): string {
@@ -161,9 +170,21 @@ export function codeGraphCachedCommittedFileKeysStatement(
       ? ''
       : files.length === 0
         ? ' AND 0'
-        : ` AND (${files.map(() => '(path_hint = ? AND content_hash = ?)').join(' OR ')})`;
+        : ` AND (${EffectArray.join(
+            EffectArray.map(files, () => '(path_hint = ? AND content_hash = ?)'),
+            ' OR ',
+          )})`;
   return {
-    parameters: [extractorSet, ...(files?.flatMap(file => [file.path, file.contentHash]) ?? [])],
+    parameters: [
+      extractorSet,
+      ...(Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(files), effectFlatMapValues =>
+          EffectArray.flatMap(effectFlatMapValues, (file, effectFlatMapIndex) =>
+            effectFlatMapIndex in effectFlatMapValues ? [file.path, file.contentHash] : [],
+          ),
+        ),
+      ) ?? []),
+    ],
     text: `SELECT
       CASE
         WHEN typeof(blob_id) = 'text' AND length(CAST(blob_id AS BLOB)) IN (40, 64) THEN blob_id
@@ -193,7 +214,7 @@ const selectCachedCommittedFileKeys = Effect.fn('codeGraph.selectCachedCommitted
     readonly path_hint: string;
     readonly reuse_class: unknown;
   }>(statement.text, statement.parameters);
-  const keys = new Set(rows.map(row => `${row.path_hint}\0${row.content_hash}\0${extractorSet}`));
+  const keys = new Set(EffectArray.map(rows, row => `${row.path_hint}\0${row.content_hash}\0${extractorSet}`));
   for (const row of rows) {
     if (
       typeof row.blob_id !== 'string' ||
@@ -351,7 +372,7 @@ export function codeGraphExactSymbolQueryStatement(
   return {
     parameters,
     text: `WITH exact_candidates AS (
-        ${branches.join('\n        UNION ALL\n        ')}
+        ${EffectArray.join(branches, '\n        UNION ALL\n        ')}
       ),
       ranked_exact_symbols AS (
         SELECT exact_candidates.*,
@@ -484,18 +505,28 @@ const SIDE_EFFECT_OWNER_TERMS = new Set([
 const TEST_FILE_NAME_PATTERN = /(?:^|[._-])(?:spec|test)s?\.[^.]+$/;
 
 export function codeGraphSymbolPathClass(path: string): CodeGraphSymbolPathClass {
-  const segments = path.replaceAll('\\', '/').toLowerCase().split('/').filter(Boolean);
+  const segments = EffectArray.filter(
+    Effect2.pipe(path, EffectString.replaceAll('\\', '/'), EffectString.toLowerCase, EffectString.split('/')),
+    Boolean,
+  );
   const fileName = segments.at(-1) ?? '';
   const directories = segments.slice(0, -1);
-  const extensionIndex = fileName.lastIndexOf('.');
-  const extension = extensionIndex === -1 ? '' : fileName.slice(extensionIndex);
+  const extensionIndex = Effect2.pipe(
+    fileName,
+    EffectString.lastIndexOf('.'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const extension = extensionIndex === -1 ? '' : Effect2.pipe(fileName, EffectString.slice(extensionIndex));
   if (
     DOCUMENTATION_PATH_EXTENSIONS.has(extension) ||
-    directories.some(segment => DOCUMENTATION_PATH_DIRECTORIES.has(segment))
+    EffectArray.some(directories, segment => DOCUMENTATION_PATH_DIRECTORIES.has(segment))
   ) {
     return 'documentation';
   }
-  if (directories.some(segment => TEST_PATH_DIRECTORIES.has(segment)) || TEST_FILE_NAME_PATTERN.test(fileName)) {
+  if (
+    EffectArray.some(directories, segment => TEST_PATH_DIRECTORIES.has(segment)) ||
+    TEST_FILE_NAME_PATTERN.test(fileName)
+  ) {
     return 'test';
   }
   return 'implementation';
@@ -505,7 +536,9 @@ export function codeGraphSymbolPathScoreMultiplier(path: string, queryTerms: rea
   const pathClass = codeGraphSymbolPathClass(path);
   if (pathClass === 'implementation') return 1;
   const requestedTerms = pathClass === 'test' ? TEST_QUERY_TERMS : DOCUMENTATION_QUERY_TERMS;
-  return queryTerms.some(term => requestedTerms.has(term)) ? 1 : SYMBOL_PATH_CLASS_SCORE_MULTIPLIERS[pathClass];
+  return EffectArray.some(queryTerms, term => requestedTerms.has(term))
+    ? 1
+    : SYMBOL_PATH_CLASS_SCORE_MULTIPLIERS[pathClass];
 }
 
 /** Prefer production methods that own a mutation or lifecycle transition over lexical copies of that behavior. */
@@ -518,17 +551,23 @@ export function codeGraphSymbolSearchScoreMultiplier(
   const pathMultiplier = codeGraphSymbolPathScoreMultiplier(path, queryTerms);
   if (
     codeGraphSymbolPathClass(path) !== 'implementation' ||
-    queryTerms.some(term => TEST_QUERY_TERMS.has(term) || DOCUMENTATION_QUERY_TERMS.has(term)) ||
+    EffectArray.some(queryTerms, term => TEST_QUERY_TERMS.has(term) || DOCUMENTATION_QUERY_TERMS.has(term)) ||
     !SIDE_EFFECT_OWNER_KINDS.has(kind)
   ) {
     return pathMultiplier;
   }
-  const nameTerms = name
-    .replace(/([a-z0-9])([A-Z])/gu, '$1 $2')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/gu)
-    .filter(Boolean);
-  return nameTerms.some(term => SIDE_EFFECT_OWNER_TERMS.has(term)) ? pathMultiplier * 1.12 : pathMultiplier;
+  const nameTerms = EffectArray.filter(
+    Effect2.pipe(
+      name,
+      EffectString.replace(/([a-z0-9])([A-Z])/gu, '$1 $2'),
+      EffectString.toLowerCase,
+      EffectString.split(/[^a-z0-9]+/gu),
+    ),
+    Boolean,
+  );
+  return EffectArray.some(nameTerms, term => SIDE_EFFECT_OWNER_TERMS.has(term))
+    ? pathMultiplier * 1.12
+    : pathMultiplier;
 }
 
 function searchSymbolKindOrder(kind: string): number {
@@ -570,7 +609,10 @@ export function codeGraphSymbolsByIdsQueryStatement(
   ids: readonly string[],
 ): CodeGraphSqlQueryStatement {
   const uniqueIds = [...new Set(ids)].slice(0, 400);
-  const placeholders = uniqueIds.map(() => '?').join(', ');
+  const placeholders = EffectArray.join(
+    EffectArray.map(uniqueIds, () => '?'),
+    ', ',
+  );
   return {
     parameters: [snapshotId, ...uniqueIds, baseSnapshotId ?? '', ...uniqueIds, snapshotId, snapshotId],
     text: `WITH matching_symbols AS (
@@ -602,13 +644,15 @@ export function isCanonicalAbsoluteBazelLabel(value: string): boolean {
 }
 
 function normalizeExactSearchPath(value: string): string | undefined {
-  const trimmed = value.trim();
+  const trimmed = Effect2.pipe(value, EffectString.trim);
   if (isCanonicalAbsoluteBazelLabel(trimmed)) return undefined;
-  const normalized = trimmed
-    .replaceAll('\\', '/')
-    .replace(/^\.\/+/, '')
-    .replace(/\/{2,}/g, '/');
-  return normalized.includes('/') ? normalized : undefined;
+  const normalized = Effect2.pipe(
+    trimmed,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/^\.\/+/, ''),
+    EffectString.replace(/\/{2,}/g, '/'),
+  );
+  return Effect2.pipe(normalized, EffectString.includes('/')) ? normalized : undefined;
 }
 
 function effectiveAdjacentEdgesCte(
@@ -622,8 +666,14 @@ function effectiveAdjacentEdgesCte(
 ): CodeGraphSqlQueryStatement {
   const ids = [...new Set(nodeIds)].slice(0, 500);
   const provenances = [...new Set(allowedProvenances)];
-  const idPlaceholders = ids.map(() => '?').join(', ');
-  const provenancePlaceholders = provenances.map(() => '?').join(', ');
+  const idPlaceholders = EffectArray.join(
+    EffectArray.map(ids, () => '?'),
+    ', ',
+  );
+  const provenancePlaceholders = EffectArray.join(
+    EffectArray.map(provenances, () => '?'),
+    ', ',
+  );
   const axes =
     direction === 'incoming'
       ? ([{column: 'target_id', index: 'edges_target_resolved'}] as const)
@@ -640,9 +690,13 @@ function effectiveAdjacentEdgesCte(
   const columns = (alias: string) =>
     projection === 'full'
       ? `${alias}.*`
-      : ['id', 'source_id', 'target_id', 'relation', 'provenance', 'confidence', 'source_name', 'target_name']
-          .map(column => `${alias}.${column}`)
-          .join(', ');
+      : EffectArray.join(
+          EffectArray.map(
+            ['id', 'source_id', 'target_id', 'relation', 'provenance', 'confidence', 'source_name', 'target_name'],
+            column => `${alias}.${column}`,
+          ),
+          ', ',
+        );
   for (const axis of axes) {
     const currentBranch = `SELECT ${columns('current_edges')}
       FROM edges AS current_edges INDEXED BY ${axis.index}
@@ -688,7 +742,7 @@ function effectiveAdjacentEdgesCte(
     // UNION (rather than UNION ALL) is needed only for `both`: a self-loop is
     // found through both directional indexes but remains one logical edge.
     text: `WITH adjacent_edges AS (
-      ${branches.join(direction === 'both' ? '\n      UNION\n      ' : '\n      UNION ALL\n      ')}
+      ${EffectArray.join(branches, direction === 'both' ? '\n      UNION\n      ' : '\n      UNION ALL\n      ')}
     )`,
   };
 }
@@ -742,7 +796,10 @@ export function codeGraphDirectEdgeQueryStatement(
   allowedProvenances: readonly CodeGraphProvenance[],
 ): CodeGraphSqlQueryStatement {
   const provenances = [...new Set(allowedProvenances)];
-  const placeholders = provenances.map(() => '?').join(', ');
+  const placeholders = EffectArray.join(
+    EffectArray.map(provenances, () => '?'),
+    ', ',
+  );
   return {
     parameters: [
       snapshotId,

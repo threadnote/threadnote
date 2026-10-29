@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed outer adapter is the trusted operating-system isolation boundary. */
 
@@ -10,6 +11,7 @@ import {
   deriveCodeMemoryLinkCodexAppServerProjectionV1,
   normalizeCodeMemoryLinkCodexAppServerEvidenceV1,
   type CodeMemoryLinkArmPacketV1,
+  type CodeMemoryLinkExpectedCodexClientV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
 import {
   CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION,
@@ -50,6 +52,8 @@ import {
   removeCodeMemoryLinkRepositorySnapshot,
   type CodeMemoryLinkRepositorySnapshotV1,
 } from './code-memory-link-repository-snapshot.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_CODEX_CLIENT_OUTPUT_VERSION = 1 as const;
 
@@ -136,7 +140,9 @@ export async function runCodeMemoryLinkCodexClient(environment: Readonly<Record<
     root: config.sealedSuite.root,
     taskId: harness.taskId,
   });
-  const mappedTask = loaded.layout.tasks.find(task => task.taskId === harness.taskId)!;
+  const mappedTask = EffectOption.getOrUndefined(
+    EffectArray.findFirst(loaded.layout.tasks, task => task.taskId === harness.taskId),
+  )!;
   return await runCodeMemoryLinkCodexExecutionTask(environment, config, {
     fixture: loaded.fixture,
     fixtureHash: loaded.suite.fixture.fixtureHash,
@@ -254,8 +260,15 @@ export async function runCodeMemoryLinkCodexExecutionTask(
       task: loaded.taskPacket.prompt,
       threadnoteHome: isolation.threadnoteHome,
     });
-    const expectedClient = {
-      appServerVersion: CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION.replace('codex-cli ', '') as '0.149.0-alpha.4.1',
+    const appServerVersion = Effect.pipe(
+      CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION,
+      EffectString.replace('codex-cli ', ''),
+    );
+    if (appServerVersion !== '0.149.0-alpha.4.1') {
+      throw new Error('Trusted Code Memory Link app-server version changed.');
+    }
+    const expectedClient: CodeMemoryLinkExpectedCodexClientV1 = {
+      appServerVersion,
       model: config.model.id,
       modelProvider: config.model.provider,
       reasoningEffort: config.model.reasoningEffort,
@@ -431,7 +444,9 @@ export async function runCodeMemoryLinkCodexExecutionTask(
     ...nestedCleanups,
     ...(await Promise.allSettled([rm(stagingRoot, {force: true, maxRetries: 3, recursive: true})])),
   ];
-  const cleanupFailures = cleanups.flatMap(result => (result.status === 'rejected' ? [result.reason] : []));
+  const cleanupFailures = EffectArray.flatMap(cleanups, result =>
+    result.status === 'rejected' ? [result.reason] : [],
+  );
   if (executionFailed) {
     if (cleanupFailures.length > 0) {
       throw new AggregateError(
@@ -453,13 +468,14 @@ export function parseCodeMemoryLinkCodexHarnessEnvironment(
 ): CodeMemoryLinkCodexHarnessInputV1 {
   const value = (name: keyof typeof CODE_MEMORY_LINK_CODEX_CLIENT_ENV): string => {
     const observed = environment[CODE_MEMORY_LINK_CODEX_CLIENT_ENV[name]];
-    if (!observed || observed.trim() !== observed) throw new Error(`Missing trusted harness field ${String(name)}.`);
+    if (!observed || Effect.pipe(observed, EffectString.trim) !== observed)
+      throw new Error(`Missing trusted harness field ${String(name)}.`);
     return observed;
   };
   return {
     approvalCommit: match(value('approvalCommit'), /^[0-9a-f]{40}$/u, 'approval commit'),
     arm: oneOf(value('arm'), ['anchored', 'task-only', 'no-memory'] as const, 'arm'),
-    armPosition: integer(value('armPosition'), 'arm position', 1, 3) as 1 | 2 | 3,
+    armPosition: integerChoice(integer(value('armPosition'), 'arm position', 1, 3), [1, 2, 3] as const, 'arm position'),
     assignmentHash: hash(value('assignmentHash'), 'assignment hash'),
     blindLabel: oneOf(value('blindLabel'), ['X', 'Y', 'Z'] as const, 'blind label'),
     budget: {
@@ -558,7 +574,8 @@ export function selectCodeMemoryLinkQualifyingActionItemId(
     const type = String(item.type);
     if (!allowedTypes.includes(type)) continue;
     if (event.method === 'item/started') {
-      if (started.some(candidate => candidate.id === id)) throw new Error('Qualifying action item started twice.');
+      if (EffectArray.some(started, candidate => candidate.id === id))
+        throw new Error('Qualifying action item started twice.');
       started.push({id, type});
       continue;
     }
@@ -569,7 +586,10 @@ export function selectCodeMemoryLinkQualifyingActionItemId(
         (type !== 'commandExecution' || item.exitCode === undefined || item.exitCode === 0),
     );
   }
-  return started.find(candidate => completed.get(candidate.id) === true)?.id ?? null;
+  return (
+    EffectOption.getOrUndefined(EffectArray.findFirst(started, candidate => completed.get(candidate.id) === true))
+      ?.id ?? null
+  );
 }
 
 const CODE_MEMORY_LINK_AGENT_OUTPUT_SCHEMA = {
@@ -580,9 +600,8 @@ const CODE_MEMORY_LINK_AGENT_OUTPUT_SCHEMA = {
 } as const;
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object.`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  return value;
 }
 
 function nonEmptyText(value: unknown, label: string): string {
@@ -612,14 +631,31 @@ function match(value: string, pattern: RegExp, label: string): string {
 }
 
 function normalizedAbsolute(value: string, label: string): string {
-  if (!value.startsWith('/') || resolve(value) !== value || value.includes('\0'))
+  if (
+    !Effect.pipe(value, EffectString.startsWith('/')) ||
+    resolve(value) !== value ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  )
     throw new Error(`${label} must be normalized and absolute.`);
   return value;
 }
 
 function oneOf<T extends string>(value: string, allowed: readonly T[], label: string): T {
-  if (!allowed.includes(value as T)) throw new Error(`${label} is invalid.`);
-  return value as T;
+  const matched = EffectOption.getOrElse(
+    EffectArray.findFirst(allowed, candidate => candidate === value),
+    () => undefined,
+  );
+  if (matched === undefined) throw new Error(`${label} is invalid.`);
+  return matched;
+}
+
+function integerChoice<T extends readonly number[]>(value: number, allowed: T, label: string): T[number] {
+  const matched = EffectOption.getOrElse(
+    EffectArray.findFirst(allowed, candidate => candidate === value),
+    () => undefined,
+  );
+  if (matched === undefined) throw new Error(`${label} is invalid.`);
+  return matched;
 }
 
 async function main(): Promise<void> {

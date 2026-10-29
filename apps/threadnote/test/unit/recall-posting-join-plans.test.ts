@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
@@ -10,6 +11,9 @@ import {postingLexicalScore} from '@threadnote/recall/index/lexical';
 import {selectRecallQueryTermStatistics, selectTopRecallPostingsByTerms} from '@threadnote/recall/index/selection';
 import type {RecallCorpusStatistics} from '@threadnote/recall/rank';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const withDatabase = provideTestLayer(SqliteClient.layer({filename: ':memory:'}));
 const prefix = 'threadnote://user/test/memories/allowed';
@@ -87,7 +91,7 @@ describe('scoped recall posting joins', () => {
         1,
         statistics,
       );
-      expect(selected.map(row => row.document_id)).toEqual([4]);
+      expect(EffectArray.map(selected, row => row.document_id)).toEqual([4]);
     }).pipe(withDatabase),
   );
 
@@ -95,7 +99,7 @@ describe('scoped recall posting joins', () => {
     Effect.gen(function* () {
       const documents: Document[] = Array.from({length: 2_000}, (_, index) => ({
         id: 2_000 - index,
-        uri: `${prefix}/${String(index).padStart(5, '0')}`,
+        uri: `${prefix}/${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`,
         logicalKey: `logical-${index}`,
         length: 20,
         project: 'p',
@@ -126,14 +130,22 @@ describe('scoped recall posting joins', () => {
         8,
         statistics,
       );
-      expect(selected.map(row => row.uri)).toEqual(documents.slice(0, 8).map(row => row.uri));
-      const joins = captured.filter(query => query.text.includes('COUNT(DISTINCT d.logical_key)'));
+      expect(EffectArray.map(selected, row => row.uri)).toEqual(EffectArray.map(documents.slice(0, 8), row => row.uri));
+      const joins = EffectArray.filter(captured, query =>
+        Effect2.pipe(query.text, EffectString.includes('COUNT(DISTINCT d.logical_key)')),
+      );
       expect(joins).toHaveLength(1);
       for (const query of joins) {
         const plan = yield* sql.unsafe<{detail: string}>(`EXPLAIN QUERY PLAN ${query.text}`, query.parameters);
-        expect(plan.some(row => /SEARCH p USING PRIMARY KEY \(term=/u.test(row.detail))).toBe(true);
-        expect(plan.some(row => row.detail.includes('SEARCH d USING INTEGER PRIMARY KEY (rowid=?)'))).toBe(true);
-        expect(plan.some(row => /(?:SCAN d|SEARCH d USING INDEX documents_uri)/u.test(row.detail))).toBe(false);
+        expect(EffectArray.some(plan, row => /SEARCH p USING PRIMARY KEY \(term=/u.test(row.detail))).toBe(true);
+        expect(
+          EffectArray.some(plan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('SEARCH d USING INTEGER PRIMARY KEY (rowid=?)')),
+          ),
+        ).toBe(true);
+        expect(EffectArray.some(plan, row => /(?:SCAN d|SEARCH d USING INDEX documents_uri)/u.test(row.detail))).toBe(
+          false,
+        );
       }
     }).pipe(withDatabase),
   );
@@ -161,12 +173,18 @@ describe('scoped recall posting joins', () => {
         });
         expect(statistics.documentFrequency).toEqual({alpha: 1});
       }
-      const frequencyQueries = captured.filter(query => query.text.includes('COUNT(DISTINCT d.logical_key)'));
+      const frequencyQueries = EffectArray.filter(captured, query =>
+        Effect2.pipe(query.text, EffectString.includes('COUNT(DISTINCT d.logical_key)')),
+      );
       expect(frequencyQueries).toHaveLength(2);
       expect(frequencyQueries[0]).toEqual(frequencyQueries[1]);
       for (const query of frequencyQueries) {
         const plan = yield* sql.unsafe<{detail: string}>(`EXPLAIN QUERY PLAN ${query.text}`, query.parameters);
-        expect(plan.some(row => row.detail.includes('documents_workspace_scope_uri'))).toBe(true);
+        expect(
+          EffectArray.some(plan, row =>
+            Effect2.pipe(row.detail, EffectString.includes('documents_workspace_scope_uri')),
+          ),
+        ).toBe(true);
       }
       const selected = yield* selectTopRecallPostingsByTerms(
         observed,
@@ -179,13 +197,21 @@ describe('scoped recall posting joins', () => {
         1,
         modelStatistics(documents.slice(0, 1)),
       );
-      expect(selected.map(row => row.document_id)).toEqual([1]);
-      const postingQuery = captured.find(query => query.text.startsWith('WITH query_terms'))!;
+      expect(EffectArray.map(selected, row => row.document_id)).toEqual([1]);
+      const postingQuery = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          captured,
+          __effectArrayValue =>
+            !!(query => Effect2.pipe(query.text, EffectString.startsWith('WITH query_terms')))(__effectArrayValue),
+        ),
+      )!;
       const plan = yield* sql.unsafe<{detail: string}>(
         `EXPLAIN QUERY PLAN ${postingQuery.text}`,
         postingQuery.parameters,
       );
-      expect(plan.some(row => row.detail.includes('documents_uri'))).toBe(true);
+      expect(EffectArray.some(plan, row => Effect2.pipe(row.detail, EffectString.includes('documents_uri')))).toBe(
+        true,
+      );
     }).pipe(withDatabase),
   );
 
@@ -202,10 +228,10 @@ describe('scoped recall posting joins', () => {
     },
     ({rows, limit, scope, project, workspace, policy}) =>
       Effect.gen(function* () {
-        const documents: Document[] = rows.map((row, index) => ({
+        const documents: Document[] = EffectArray.map(rows, (row, index) => ({
           ...row,
           id: rows.length - index,
-          uri: `${prefix}${row.allowed ? '' : '-elsewhere'}/${String(index).padStart(4, '0')}`,
+          uri: `${prefix}${row.allowed ? '' : '-elsewhere'}/${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
           logicalKey: `logical-${row.logical}`,
         }));
         const allowedUriScopes =
@@ -240,12 +266,14 @@ describe('scoped recall posting joins', () => {
           workspaceScope: workspace === 'all' ? undefined : 'team/app',
           workspaceScopeMode: workspace === 'sibling' ? 'sibling' : 'hierarchy',
         };
-        const eligible = documents.filter(
-          row =>
+        const eligible = EffectArray.filter(
+          documents,
+          (row, index) =>
+            index in documents &&
             (scope === 'all' ||
               (scope === 'exact'
                 ? row.uri === documents[0].uri
-                : scope === 'prefix' && row.uri.startsWith(`${prefix}/`))) &&
+                : scope === 'prefix' && Effect2.pipe(row.uri, EffectString.startsWith(`${prefix}/`)))) &&
             (project === undefined || row.project === project) &&
             policy !== 'deny' &&
             (policy !== 'approved' || row.approved) &&
@@ -277,32 +305,35 @@ describe('scoped recall posting joins', () => {
           limit,
           actualStatistics,
         );
-        const expected = terms.flatMap(term =>
-          eligible
-            .filter(row => row.terms.includes(term))
-            .map(row => ({
-              row,
-              score: postingLexicalScore(
-                {documentLength: row.length, fieldWeight: row.weight, termFrequency: row.frequency},
-                term,
-                expectedStatistics,
-              ),
-            }))
-            .sort(
-              (left, right) =>
-                right.score - left.score ||
-                right.row.weight - left.row.weight ||
-                (left.row.uri < right.row.uri ? -1 : left.row.uri > right.row.uri ? 1 : 0),
+        const expected = EffectArray.flatMap(terms, term =>
+          EffectArray.map(
+            EffectArray.map(
+              EffectArray.filter(eligible, row => row.terms.includes(term)),
+              row => ({
+                row,
+                score: postingLexicalScore(
+                  {documentLength: row.length, fieldWeight: row.weight, termFrequency: row.frequency},
+                  term,
+                  expectedStatistics,
+                ),
+              }),
             )
-            .slice(0, limit)
-            .map(({row}) => ({
+              .sort(
+                (left, right) =>
+                  right.score - left.score ||
+                  right.row.weight - left.row.weight ||
+                  (left.row.uri < right.row.uri ? -1 : left.row.uri > right.row.uri ? 1 : 0),
+              )
+              .slice(0, limit),
+            ({row}) => ({
               term,
               document_id: row.id,
               document_length: row.length,
               field_weight: row.weight,
               term_frequency: row.frequency,
               uri: row.uri,
-            })),
+            }),
+          ),
         );
         expect(selected).toEqual(expected);
         expect(yield* sql.unsafe('SELECT * FROM documents ORDER BY id')).toEqual(before);
@@ -328,10 +359,18 @@ function observeQueries(sql: SqlClient.SqlClient) {
 function modelStatistics(documents: readonly Document[]): RecallCorpusStatistics {
   const lengths = new Map<string, number>();
   for (const row of documents) lengths.set(row.logicalKey, Math.max(lengths.get(row.logicalKey) ?? 0, row.length));
-  const totalDocumentLength = [...lengths.values()].reduce((sum, length) => sum + length, 0);
+  const totalDocumentLength = EffectArray.reduce([...lengths.values()], 0, (sum, length) => sum + length);
   const documentFrequency: Record<string, number> = {};
   for (const term of terms) {
-    const count = new Set(documents.filter(row => row.terms.includes(term)).map(row => row.logicalKey)).size;
+    const count = new Set(
+      EffectArray.map(
+        EffectArray.filter(
+          documents,
+          (row, __effectArrayIndex) => __effectArrayIndex in documents && row.terms.includes(term),
+        ),
+        row => row.logicalKey,
+      ),
+    ).size;
     if (count > 0) documentFrequency[term] = count;
   }
   return {

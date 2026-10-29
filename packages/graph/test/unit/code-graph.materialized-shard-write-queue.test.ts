@@ -8,6 +8,8 @@ import type {
   CodeGraphMaterializedShardCacheBatch,
   CodeGraphStoreShape,
 } from '@threadnote/graph/store';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('materialized shard physical-write queue', () => {
   effectIt.effect('flushes cache before associations and attributes each physical flush exactly once', () =>
@@ -74,8 +76,8 @@ function associationBatch(index: number): CodeGraphMaterializedShardAssociationB
 
 function inventoryFile(index: number) {
   return {
-    blobId: index.toString(16).padStart(40, '0'),
-    contentHash: index.toString(16).padStart(64, '0'),
+    blobId: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
+    contentHash: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
     language: 'typescript',
     mode: '100644',
     path: `src/file-${index}.ts`,

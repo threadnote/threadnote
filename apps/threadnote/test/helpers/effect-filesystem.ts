@@ -7,7 +7,7 @@ const FileSystemLayer = BunFileSystem.layer;
 const runFileSystem = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
   Effect.runPromise(effect.pipe(provideTestLayer(FileSystemLayer)));
 
-const pathService = Effect.runSync(Path.Path.pipe(provideTestLayer(BunPath.layer)));
+export const pathService = Effect.runSync(Path.Path.pipe(provideTestLayer(BunPath.layer)));
 
 export const join = pathService.join;
 

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Exit, FileSystem, Path} from 'effect';
@@ -16,6 +17,8 @@ import {
 import {writeMemoryFile} from '@threadnote/threadnote/share/core';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('private memory relocation receipts', () => {
   effectIt.effect('resolves a moved URI, lets live reuse win, and prevents stale receipt revival', () =>
@@ -133,7 +136,7 @@ describe('private memory relocation receipts', () => {
         const sourceUri = memoryUri(0);
         const targetUri = memoryUri(1);
         const original = memoryContent('tn_receipt_witness', 'Receipt-witnessed evidence.');
-        const missingIdentity = original.replace('memory_id: tn_receipt_witness\n', '');
+        const missingIdentity = Effect2.pipe(original, EffectString.replace('memory_id: tn_receipt_witness\n', ''));
         yield* fixture.store.write(fixture.location, sourceUri, original, {mode: 'create'});
         yield* fixture.store.write(fixture.location, targetUri, original, {mode: 'create'});
         yield* recordMemoryRelocation(fixture.config, {
@@ -194,7 +197,7 @@ describe('private memory relocation receipts', () => {
           yield* fixture.store.remove(fixture.location, sourceUri);
           const destination =
             destinationMemoryId === undefined
-              ? original.replace('memory_id: tn_receipt_property\n', '')
+              ? Effect2.pipe(original, EffectString.replace('memory_id: tn_receipt_property\n', ''))
               : memoryContent(destinationMemoryId, 'Property evidence.');
           yield* fixture.store.write(fixture.location, targetUri, destination, {mode: 'upsert'});
 
@@ -334,7 +337,10 @@ describe('private memory relocation receipts', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const fixture = yield* makeFixture('oversized');
-        const longPath = Array.from({length: 72}, (_, index) => `${index}-${'x'.repeat(220)}`).join('/');
+        const longPath = EffectArray.join(
+          Array.from({length: 72}, (_, index) => `${index}-${Effect2.pipe('x', EffectString.repeat(220))}`),
+          '/',
+        );
         const sourceUri = `threadnote://user/tester/memories/${longPath}/source.md`;
         const targetUri = `threadnote://user/tester/memories/${longPath}/target.md`;
         const content = memoryContent('tn_oversized_receipt', 'Oversized receipt evidence.');

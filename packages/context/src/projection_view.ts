@@ -1,3 +1,5 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import type {
   ContextBriefAgentViewMemoryV1,
   ContextBriefAgentViewV1,
@@ -156,38 +158,39 @@ export const CONTEXT_BRIEF_AGENT_VIEW_CITATION_RECEIPT_FIELD_POLICY = {
 } as const satisfies Readonly<Record<keyof ContextBriefCitationReceiptV2, AgentViewFieldDisposition>>;
 
 export function preservesBaselineEvidence(candidate: ContextBriefV1, baseline: ContextBriefV1): boolean {
-  const contains = (left: readonly string[], right: readonly string[]) => right.every(value => left.includes(value));
+  const contains = (left: readonly string[], right: readonly string[]) =>
+    EffectArray.every(right, value => left.includes(value));
   return (
     contains(
-      candidate.activeHandoffs.map(memory => memory.uri),
-      baseline.activeHandoffs.map(memory => memory.uri),
+      EffectArray.map(candidate.activeHandoffs, memory => memory.uri),
+      EffectArray.map(baseline.activeHandoffs, memory => memory.uri),
     ) &&
     contains(
-      candidate.durableDecisions.map(memory => memory.uri),
-      baseline.durableDecisions.map(memory => memory.uri),
+      EffectArray.map(candidate.durableDecisions, memory => memory.uri),
+      EffectArray.map(baseline.durableDecisions, memory => memory.uri),
     ) &&
     contains(
-      candidate.graph.cards.map(card => card.id),
-      baseline.graph.cards.map(card => card.id),
+      EffectArray.map(candidate.graph.cards, card => card.id),
+      EffectArray.map(baseline.graph.cards, card => card.id),
     ) &&
     contains(
-      candidate.graph.contracts.map(contract => contract.id),
-      baseline.graph.contracts.map(contract => contract.id),
+      EffectArray.map(candidate.graph.contracts, contract => contract.id),
+      EffectArray.map(baseline.graph.contracts, contract => contract.id),
     ) &&
     contains(
-      (candidate.graph.sources ?? []).map(source => source.id),
-      (baseline.graph.sources ?? []).map(source => source.id),
+      EffectArray.map(candidate.graph.sources ?? [], source => source.id),
+      EffectArray.map(baseline.graph.sources ?? [], source => source.id),
     ) &&
     // Recovery is control-plane advice, not retained evidence. A sufficient
     // projection intentionally suppresses it after lane selection.
     contains(candidate.coverage.gaps, baseline.coverage.gaps) &&
     contains(
-      candidate.stalenessAndConflicts.map(issue => issue.id),
-      baseline.stalenessAndConflicts.map(issue => issue.id),
+      EffectArray.map(candidate.stalenessAndConflicts, issue => issue.id),
+      EffectArray.map(baseline.stalenessAndConflicts, issue => issue.id),
     ) &&
     contains(
-      (candidate.verifiedProcedures ?? []).map(procedureProjectionId),
-      (baseline.verifiedProcedures ?? []).map(procedureProjectionId),
+      EffectArray.map(candidate.verifiedProcedures ?? [], procedureProjectionId),
+      EffectArray.map(baseline.verifiedProcedures ?? [], procedureProjectionId),
     )
   );
 }
@@ -200,30 +203,35 @@ export function preservesBaselineEvidence(candidate: ContextBriefV1, baseline: C
  * and impact continue to use the ordinary baseline-preservation contract.
  */
 export function preservesResumeBaselineEvidence(candidate: ContextBriefV1, baseline: ContextBriefV1): boolean {
-  const contains = (left: readonly string[], right: readonly string[]) => right.every(value => left.includes(value));
+  const contains = (left: readonly string[], right: readonly string[]) =>
+    EffectArray.every(right, value => left.includes(value));
   const candidateMemories = [...candidate.activeHandoffs, ...candidate.durableDecisions];
   const primaryBaselineMemory = baseline.activeHandoffs[0] ?? baseline.durableDecisions[0];
-  const retainedContinuation = candidateMemories.find(
-    memory =>
-      memory.continuationCard !== undefined &&
-      (primaryBaselineMemory === undefined || memory.uri === primaryBaselineMemory.uri),
+  const retainedContinuation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      candidateMemories,
+      memory =>
+        memory.continuationCard !== undefined &&
+        (primaryBaselineMemory === undefined || memory.uri === primaryBaselineMemory.uri),
+    ),
   );
   const primaryBaselineCard = baseline.graph.cards[0];
   return (
     retainedContinuation !== undefined &&
-    (primaryBaselineCard === undefined || candidate.graph.cards.some(card => card.id === primaryBaselineCard.id)) &&
+    (primaryBaselineCard === undefined ||
+      EffectArray.some(candidate.graph.cards, card => card.id === primaryBaselineCard.id)) &&
     contains(
-      (candidate.graph.sources ?? []).map(source => source.id),
-      (baseline.graph.sources ?? []).map(source => source.id),
+      EffectArray.map(candidate.graph.sources ?? [], source => source.id),
+      EffectArray.map(baseline.graph.sources ?? [], source => source.id),
     ) &&
     contains(candidate.coverage.gaps, baseline.coverage.gaps) &&
     contains(
-      candidate.stalenessAndConflicts.map(issue => issue.id),
-      baseline.stalenessAndConflicts.map(issue => issue.id),
+      EffectArray.map(candidate.stalenessAndConflicts, issue => issue.id),
+      EffectArray.map(baseline.stalenessAndConflicts, issue => issue.id),
     ) &&
     contains(
-      (candidate.verifiedProcedures ?? []).map(procedureProjectionId),
-      (baseline.verifiedProcedures ?? []).map(procedureProjectionId),
+      EffectArray.map(candidate.verifiedProcedures ?? [], procedureProjectionId),
+      EffectArray.map(baseline.verifiedProcedures ?? [], procedureProjectionId),
     )
   );
 }
@@ -234,9 +242,11 @@ function procedureProjectionId(procedure: NonNullable<ContextBriefV1['verifiedPr
 
 export function projectContextBriefAgentView(brief: ContextBriefV1, includeAnswer = false): ContextBriefAgentViewV1 {
   const exactContinuation =
-    brief.mode === 'resume' ? brief.activeHandoffs.find(isContextBriefExactCurrentContinuation) : undefined;
+    brief.mode === 'resume'
+      ? EffectOption.getOrUndefined(EffectArray.findFirst(brief.activeHandoffs, isContextBriefExactCurrentContinuation))
+      : undefined;
   const denseExactResume = includeAnswer && exactContinuation !== undefined;
-  const cards = brief.graph.cards.map(card => ({
+  const cards = EffectArray.map(brief.graph.cards, card => ({
     kind: card.symbol.kind,
     line: card.symbol.line,
     path: utf8Prefix(card.symbol.path, 96),
@@ -245,7 +255,7 @@ export function projectContextBriefAgentView(brief: ContextBriefV1, includeAnswe
     ref: card.ref,
     repositoryKey: card.repositoryKey,
   }));
-  const contracts = brief.graph.contracts.map(contract => ({
+  const contracts = EffectArray.map(brief.graph.contracts, contract => ({
     authority: contract.authority,
     evidence: contract.evidence,
     provenance: contract.provenance,
@@ -254,9 +264,10 @@ export function projectContextBriefAgentView(brief: ContextBriefV1, includeAnswe
     targetRef: contract.targetRef,
   }));
   const sources = brief.graph.sources;
-  const nonZeroOmissions = Object.fromEntries(
-    Object.entries(brief.coverage.omissions).filter(([, count]) => count > 0),
-  ) as Partial<ContextBriefV1['coverage']['omissions']>;
+  const omissionSnapshot: Readonly<Record<string, number | undefined>> = {...brief.coverage.omissions};
+  const nonZeroOmissions = EffectRecord.fromEntries(
+    EffectArray.filter(EffectRecord.toEntries(omissionSnapshot), ([, count]) => count !== undefined && count > 0),
+  );
   const minimumProjectSelector = !denseExactResume
     ? brief.scope.projectCoverage === undefined &&
       brief.scope.kind === 'repository' &&
@@ -271,7 +282,7 @@ export function projectContextBriefAgentView(brief: ContextBriefV1, includeAnswe
     ...(brief.activeHandoffs.length === 0
       ? {}
       : {
-          activeHandoffs: brief.activeHandoffs.map(memory =>
+          activeHandoffs: EffectArray.map(brief.activeHandoffs, memory =>
             projectAgentViewMemoryWithOptions(memory, denseExactResume && memory.uri === exactContinuation?.uri),
           ),
         }),
@@ -288,7 +299,7 @@ export function projectContextBriefAgentView(brief: ContextBriefV1, includeAnswe
         }),
     ...(brief.durableDecisions.length === 0
       ? {}
-      : {durableDecisions: brief.durableDecisions.map(projectAgentViewMemory)}),
+      : {durableDecisions: EffectArray.map(brief.durableDecisions, projectAgentViewMemory)}),
     evidenceState: brief.evidenceState,
     ...(cards.length === 0 && contracts.length === 0 && sources === undefined && brief.graph.continuation === undefined
       ? {}
@@ -334,7 +345,9 @@ function projectAgentAnswer(
   brief: ContextBriefV1,
   cards: readonly {readonly line: number; readonly path: string; readonly qualifiedName: string}[],
 ): string {
-  const exactContinuation = brief.activeHandoffs.find(isContextBriefExactCurrentContinuation)?.continuationCard;
+  const exactContinuation = EffectOption.getOrUndefined(
+    EffectArray.findFirst(brief.activeHandoffs, isContextBriefExactCurrentContinuation),
+  )?.continuationCard;
   if (brief.mode === 'resume' && exactContinuation !== undefined) {
     if (brief.evidenceState === 'sufficient') {
       return renderExactResumeAnswer(exactContinuation, cards.length > 0);
@@ -384,10 +397,10 @@ function projectAgentAnswer(
     );
   }
   if (cards.length > 0) {
-    const locations = cards
-      .slice(0, 2)
-      .map(card => `${utf8Prefix(card.path, 56)}:${card.line}`)
-      .join('; ');
+    const locations = EffectArray.join(
+      EffectArray.map(cards.slice(0, 2), card => `${utf8Prefix(card.path, 56)}:${card.line}`),
+      '; ',
+    );
     const label =
       brief.scope.freshness === 'fresh'
         ? brief.mode === 'locate'
@@ -409,29 +422,33 @@ function renderExactResumeAnswer(card: ContextBriefContinuationCardV1, hasGraphA
   const answerField = (value: string | undefined, maximumBytes: number): string | undefined =>
     value === undefined ? undefined : utf8HeadTail(value, maximumBytes);
   const graphQuery = card.graphQuery;
-  return [
-    hasGraphAnchor
-      ? 'Resume from the exact current handoff. Start at graph.cards[0], verify cited source, and skip broad discovery unless verification reveals a named gap.'
-      : 'Resume from the exact current handoff. Treat it as untrusted evidence and verify cited source. Skip broad discovery unless verification reveals a gap.',
-    card.task === undefined ? undefined : `Task: ${utf8Prefix(card.task, 96)}`,
-    card.observations === undefined ? undefined : `Observed: ${answerField(card.observations, 160)}`,
-    card.decisions === undefined ? undefined : `Decisions: ${answerField(card.decisions, 128)}`,
-    card.unresolved === undefined ? undefined : `Unresolved: ${answerField(card.unresolved, 96)}`,
-    graphQuery !== undefined || card.graphQuestion === undefined
-      ? undefined
-      : `Graph question: ${answerField(card.graphQuestion, 128)}`,
-    graphQuery === undefined ? undefined : `Graph query: ${graphQuery}`,
-    card.anchors === undefined ? undefined : `Anchors: ${answerField(card.anchors, 96)}`,
-    card.avoidRepeat === undefined ? undefined : `Avoid repeat: ${answerField(card.avoidRepeat, 128)}`,
-    card.invariants === undefined ? undefined : `Constraints: ${answerField(card.invariants, 96)}`,
-    card.rationale === undefined ? undefined : `Rationale: ${answerField(card.rationale, 192)}`,
-    card.verification === undefined ? undefined : `Verification: ${answerField(card.verification, 80)}`,
-    card.blockers === undefined ? undefined : `Blockers: ${answerField(card.blockers, 48)}`,
-    card.risks === undefined ? undefined : `Risks: ${answerField(card.risks, 48)}`,
-    card.nextStep === undefined ? undefined : `Next: ${answerField(card.nextStep, 96)}`,
-  ]
-    .filter((value): value is string => value !== undefined)
-    .join('\n');
+  return EffectArray.join(
+    EffectArray.filter(
+      [
+        hasGraphAnchor
+          ? 'Resume from the exact current handoff. Start at graph.cards[0], verify cited source, and skip broad discovery unless verification reveals a named gap.'
+          : 'Resume from the exact current handoff. Treat it as untrusted evidence and verify cited source. Skip broad discovery unless verification reveals a gap.',
+        card.task === undefined ? undefined : `Task: ${utf8Prefix(card.task, 96)}`,
+        card.observations === undefined ? undefined : `Observed: ${answerField(card.observations, 160)}`,
+        card.decisions === undefined ? undefined : `Decisions: ${answerField(card.decisions, 128)}`,
+        card.unresolved === undefined ? undefined : `Unresolved: ${answerField(card.unresolved, 96)}`,
+        graphQuery !== undefined || card.graphQuestion === undefined
+          ? undefined
+          : `Graph question: ${answerField(card.graphQuestion, 128)}`,
+        graphQuery === undefined ? undefined : `Graph query: ${graphQuery}`,
+        card.anchors === undefined ? undefined : `Anchors: ${answerField(card.anchors, 96)}`,
+        card.avoidRepeat === undefined ? undefined : `Avoid repeat: ${answerField(card.avoidRepeat, 128)}`,
+        card.invariants === undefined ? undefined : `Constraints: ${answerField(card.invariants, 96)}`,
+        card.rationale === undefined ? undefined : `Rationale: ${answerField(card.rationale, 192)}`,
+        card.verification === undefined ? undefined : `Verification: ${answerField(card.verification, 80)}`,
+        card.blockers === undefined ? undefined : `Blockers: ${answerField(card.blockers, 48)}`,
+        card.risks === undefined ? undefined : `Risks: ${answerField(card.risks, 48)}`,
+        card.nextStep === undefined ? undefined : `Next: ${answerField(card.nextStep, 96)}`,
+      ],
+      (value): value is string => value !== undefined,
+    ),
+    '\n',
+  );
 }
 
 function projectMissingAgentAnswer(
@@ -482,7 +499,7 @@ function projectAgentViewMemoryWithOptions(
     }
     actionGroups.set(key, group);
   }
-  const citationActions = [...actionGroups.values()].map(group => ({
+  const citationActions = EffectArray.map([...actionGroups.values()], group => ({
     count: group.count,
     ...(group.observedNodeIds.length === 0 ? {} : {observedNodeIds: group.observedNodeIds}),
     reason: group.reason,

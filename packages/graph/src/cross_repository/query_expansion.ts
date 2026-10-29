@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {
   codeGraphEvidenceCardId,
@@ -15,14 +16,16 @@ import {
   readPublishedCodeGraphWorksetCatalogBridgeSetSummary,
   type CodeGraphCrossRepositoryBridgeCursorV1,
 } from './store.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class CodeGraphQueryExpansionError extends Schema.TaggedError<CodeGraphQueryExpansionError>()(
-  'CodeGraphQueryExpansionError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphQueryExpansionError extends Schema.TaggedError<
+  CodeGraphQueryExpansionError,
+  {readonly brand: unique symbol}
+>()('CodeGraphQueryExpansionError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const DEFAULT_SEED_REPOSITORIES = 16;
 const MAXIMUM_BRIDGES_PER_SEED_DIRECTION = 64;
@@ -74,7 +77,7 @@ export const readCodeGraphWorksetQueryBridgeExpansion = Effect.fn(
       warnings: ['Cross-repository bridge coverage is incomplete; contract-neighbor expansion was withheld.'],
     } satisfies CodeGraphWorksetQueryBridgeExpansionV1;
   }
-  const memberByKey = new Map(published.members.map(member => [member.repositoryKey, member] as const));
+  const memberByKey = new Map(EffectArray.map(published.members, member => [member.repositoryKey, member] as const));
   const reads = yield* Effect.forEach(
     seeds,
     seed => {
@@ -136,8 +139,10 @@ export function expandCodeGraphWorksetRouterWithBridges(
   expansion: CodeGraphWorksetQueryBridgeExpansionV1,
 ): CodeGraphWorksetRouterResultV1 {
   validateExpansion(router, published, expansion);
-  const originalByKey = new Map(router.repositories.map(repository => [repository.repositoryKey, repository] as const));
-  const publishedByKey = new Map(published.members.map(member => [member.repositoryKey, member] as const));
+  const originalByKey = new Map(
+    EffectArray.map(router.repositories, repository => [repository.repositoryKey, repository] as const),
+  );
+  const publishedByKey = new Map(EffectArray.map(published.members, member => [member.repositoryKey, member] as const));
   const additions = new Map<string, BridgeCandidate>();
   for (const bridge of expansion.bridges) {
     const sourceSeed = originalByKey.get(bridge.source.repositoryKey);
@@ -150,7 +155,7 @@ export function expandCodeGraphWorksetRouterWithBridges(
     }
   }
   const ordered = [
-    ...router.repositories.map(repository => {
+    ...EffectArray.map(router.repositories, repository => {
       const bridge = additions.get(repository.repositoryKey);
       return {
         kind: 'catalog' as const,
@@ -161,9 +166,10 @@ export function expandCodeGraphWorksetRouterWithBridges(
         repository,
       };
     }),
-    ...[...additions.values()]
-      .filter(addition => !originalByKey.has(addition.member.repositoryKey))
-      .map(addition => ({kind: 'bridge' as const, priority: addition.seedRank * 2 + 1, addition})),
+    ...EffectArray.map(
+      EffectArray.filter([...additions.values()], addition => !originalByKey.has(addition.member.repositoryKey)),
+      addition => ({kind: 'bridge' as const, priority: addition.seedRank * 2 + 1, addition}),
+    ),
   ].sort((left, right) => {
     const priority = left.priority - right.priority;
     if (priority !== 0) return priority;
@@ -171,7 +177,7 @@ export function expandCodeGraphWorksetRouterWithBridges(
     const rightKey = right.kind === 'catalog' ? right.repository.repositoryKey : right.addition.member.repositoryKey;
     return compareText(leftKey, rightKey);
   });
-  const repositories = ordered.map((entry, index): CodeGraphWorksetRouterRepositoryCandidateV1 => {
+  const repositories = EffectArray.map(ordered, (entry, index): CodeGraphWorksetRouterRepositoryCandidateV1 => {
     if (entry.kind === 'catalog') return {...entry.repository, rank: index + 1};
     const score = Math.max(1, Math.floor(entry.addition.seedScore * 0.75));
     return {
@@ -211,7 +217,7 @@ export function attachCodeGraphWorksetBridgeRelationships(
   usableRepositoryKeys: ReadonlySet<string>,
 ): readonly CodeGraphEvidenceCardV1[] {
   const byRef = new Map<string, CompactEvidenceRelationshipV1[]>();
-  const cardRefs = new Set(cards.map(card => card.ref));
+  const cardRefs = new Set(EffectArray.map(cards, card => card.ref));
   for (const bridge of bridges) {
     if (
       bridge.source.reference.kind !== 'qualified-ref' ||
@@ -242,7 +248,7 @@ export function attachCodeGraphWorksetBridgeRelationships(
     values.push(relationship);
     byRef.set(adjacentRef, values);
   }
-  return cards.map(card => {
+  return EffectArray.map(cards, card => {
     const related = byRef.get(card.ref);
     if (related === undefined || related.length === 0) return card;
     const unique = new Map<string, CompactEvidenceRelationshipV1>();
@@ -271,7 +277,7 @@ export function materializeCodeGraphWorksetBridgeEndpointCards(
     throw CodeGraphQueryExpansionError.make({message: 'Workset bridge endpoint card limit is invalid.'});
   }
   if (maximumCards === 0) return [];
-  const members = new Map(published.members.map(member => [member.repositoryKey, member] as const));
+  const members = new Map(EffectArray.map(published.members, member => [member.repositoryKey, member] as const));
   const byRef = new Map<string, CodeGraphEvidenceCardV1>();
   for (const bridge of [...bridges].sort(compareBridge)) {
     for (const endpoint of [bridge.source, bridge.target]) {
@@ -287,11 +293,11 @@ export function materializeCodeGraphWorksetBridgeEndpointCards(
         });
       }
       if (byRef.has(endpoint.reference.ref)) continue;
-      const qualifiedName = bridge.identity.replace(/^protobuf:[^:]+:/u, '');
+      const qualifiedName = Effect2.pipe(bridge.identity, EffectString.replace(/^protobuf:[^:]+:/u, ''));
       const name =
         bridge.kind === 'file'
-          ? (qualifiedName.split('/').at(-1) ?? qualifiedName)
-          : (qualifiedName.split(/[./]/u).at(-1) ?? qualifiedName);
+          ? (Effect2.pipe(qualifiedName, EffectString.split('/')).at(-1) ?? qualifiedName)
+          : (Effect2.pipe(qualifiedName, EffectString.split(/[./]/u)).at(-1) ?? qualifiedName);
       byRef.set(endpoint.reference.ref, {
         id: codeGraphEvidenceCardId(endpoint.reference.ref, member.snapshotId, member.worktreeId),
         reason: {
@@ -328,8 +334,8 @@ export function mergeCodeGraphWorksetBridgeEndpointCards(
   }
   const output: CodeGraphEvidenceCardV1[] = [];
   const refs = new Set<string>();
-  const localByRef = new Map(localCards.map(card => [card.ref, card] as const));
-  const bridgeByRef = new Map(bridgeCards.map(card => [card.ref, card] as const));
+  const localByRef = new Map(EffectArray.map(localCards, card => [card.ref, card] as const));
+  const bridgeByRef = new Map(EffectArray.map(bridgeCards, card => [card.ref, card] as const));
   const canonicalLocalCard = (card: CodeGraphEvidenceCardV1): CodeGraphEvidenceCardV1 => {
     const bridge = bridgeByRef.get(card.ref);
     return bridge === undefined ? card : {...card, symbol: bridge.symbol};
@@ -431,7 +437,7 @@ function validateExpansion(
   published: CodeGraphWorksetCatalogPublishedGenerationV1,
   expansion: CodeGraphWorksetQueryBridgeExpansionV1,
 ): void {
-  if (!Array.isArray(expansion.bridges) || expansion.bridges.length > MAXIMUM_EXPANSION_BRIDGES) {
+  if (!EffectArray.isArray(expansion.bridges) || expansion.bridges.length > MAXIMUM_EXPANSION_BRIDGES) {
     throw CodeGraphQueryExpansionError.make({message: 'Workset query bridge expansion exceeds its supported bound.'});
   }
   if (
@@ -448,9 +454,9 @@ function validateExpansion(
     throw CodeGraphQueryExpansionError.make({message: 'Workset query bridges belong to another generation.'});
   }
   const members = new Map(
-    published.members.map(member => [`${member.repositoryId}\0${member.snapshotId}`, member] as const),
+    EffectArray.map(published.members, member => [`${member.repositoryId}\0${member.snapshotId}`, member] as const),
   );
-  const seeds = new Set(router.repositories.map(repository => repository.repositoryKey));
+  const seeds = new Set(EffectArray.map(router.repositories, repository => repository.repositoryKey));
   const seen = new Set<string>();
   for (const bridge of expansion.bridges) {
     if (seen.has(bridge.id))
@@ -473,18 +479,24 @@ function validateExpansion(
 }
 
 function relationshipKey(relationship: CompactEvidenceRelationshipV1): string {
-  return [
-    relationship.source.repositoryKey,
-    relationship.source.ref,
-    relationship.relation,
-    relationship.target.repositoryKey,
-    relationship.target.ref,
-    relationship.provenance,
-    relationship.evidence.repositoryKey,
-    relationship.evidence.path,
-    relationship.evidence.span.line,
-    relationship.evidence.span.column,
-  ].join('\0');
+  return EffectArray.join(
+    EffectArray.map(
+      [
+        relationship.source.repositoryKey,
+        relationship.source.ref,
+        relationship.relation,
+        relationship.target.repositoryKey,
+        relationship.target.ref,
+        relationship.provenance,
+        relationship.evidence.repositoryKey,
+        relationship.evidence.path,
+        relationship.evidence.span.line,
+        relationship.evidence.span.column,
+      ],
+      item => (item === null || item === undefined ? '' : String(item)),
+    ),
+    '\0',
+  );
 }
 
 function compareRelationship(left: CompactEvidenceRelationshipV1, right: CompactEvidenceRelationshipV1): number {

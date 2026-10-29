@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {
@@ -20,6 +21,8 @@ import {
   type BazelCall,
   type BazelDefinition,
 } from './syntax.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface MutableBazelFacts {
   readonly diagnostics: string[];
@@ -104,7 +107,7 @@ function extractStarlark(facts: MutableBazelFacts): void {
   }
 
   const loadedBindings = new Map<string, LoadedBinding>();
-  for (const call of syntax.calls.filter(candidate => normalizedCallee(candidate.callee) === 'load')) {
+  for (const call of EffectArray.filter(syntax.calls, candidate => normalizedCallee(candidate.callee) === 'load')) {
     const sourceLabel = call.strings[0]?.value;
     if (!sourceLabel) continue;
     const canonical = canonicalBazelLabel(sourceLabel, facts.packagePath);
@@ -162,7 +165,7 @@ function extractStarlark(facts: MutableBazelFacts): void {
     }
   }
 
-  const targetCalls = new Set(targets.map(target => target.call));
+  const targetCalls = new Set(EffectArray.map(targets, target => target.call));
   const ownerAt = createOwnerResolver(facts.module, definitions, targets);
   for (const call of syntax.calls) {
     const callee = normalizedCallee(call.callee);
@@ -178,9 +181,12 @@ function extractStarlark(facts: MutableBazelFacts): void {
 function extractBazelRc(facts: MutableBazelFacts): void {
   const configs = new Map<string, CodeGraphSymbol>();
   let offset = 0;
-  for (const line of facts.file.content!.split(/\r?\n/u)) {
+  for (const line of Effect.pipe(facts.file.content!, EffectString.split(/\r?\n/u))) {
     const comment = bazelCommentStart(line);
-    const source = (comment < 0 ? line : line.slice(0, comment)).trim();
+    const source = Effect.pipe(
+      comment < 0 ? line : Effect.pipe(line, EffectString.slice(0, comment)),
+      EffectString.trim,
+    );
     const end = offset + line.length;
     if (!source) {
       offset = end + 1;
@@ -206,7 +212,7 @@ function extractBazelRc(facts: MutableBazelFacts): void {
       ]);
       configs.set(command, config);
     }
-    for (const match of source.matchAll(/--config(?:=|\s+)([A-Za-z_][\w-]*)/gu)) {
+    for (const match of Effect.pipe(source, EffectString.matchAll(/--config(?:=|\s+)([A-Za-z_][\w-]*)/gu))) {
       addReference(facts, config, match[1], 'configures', 'declared', offset, end, [[`bazel:config:${match[1]}`]]);
     }
     offset = end + 1;
@@ -214,9 +220,14 @@ function extractBazelRc(facts: MutableBazelFacts): void {
 }
 
 function bazelCommentStart(line: string): number {
-  let cursor = line.indexOf('#');
+  let cursor = Effect.pipe(
+    line,
+    EffectString.indexOf('#'),
+    Effect.Option.getOrElse(() => -1),
+  );
   while (cursor >= 0) {
     if (cursor > 0 && /\s/u.test(line[cursor - 1])) return cursor;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     cursor = line.indexOf('#', cursor + 1);
   }
   return -1;
@@ -306,10 +317,11 @@ function bazelSymbol(
   identityOccurrences.set(identity, occurrence + 1);
   return {
     contentHash: file.contentHash,
-    exported: !name.startsWith('_'),
-    id: `cgs_${sha256HexSync(
-      `bazel-symbol-v1\n${file.path}\n${file.language}\n${kind}\n${qualifiedName}\n${occurrence}`,
-    ).slice(0, 32)}`,
+    exported: !Effect.pipe(name, EffectString.startsWith('_')),
+    id: `cgs_${Effect.pipe(
+      sha256HexSync(`bazel-symbol-v1\n${file.path}\n${file.language}\n${kind}\n${qualifiedName}\n${occurrence}`),
+      EffectString.slice(0, 32),
+    )}`,
     kind,
     language: file.language,
     lookupKeys,
@@ -332,13 +344,15 @@ function addCallReference(
   end: number,
 ): void {
   if (!callee || BAZEL_NON_CALL_KEYWORDS.has(callee)) return;
-  const local = callee.split('.')[0];
+  const local = Effect.pipe(callee, EffectString.split('.'))[0];
   const loaded = loadedBindings.get(local);
   const importedName = loaded ? `${loaded.label}%${loaded.imported}` : undefined;
   addReference(facts, source, callee, 'calls', 'syntactic', start, end, [
     ...(importedName ? [[bazelLabelKey(importedName)]] : []),
     [bazelNameKey(callee)],
-    ...(callee.includes('.') ? [[bazelNameKey(callee.split('.').at(-1)!)]] : []),
+    ...(Effect.pipe(callee, EffectString.includes('.'))
+      ? [[bazelNameKey(Effect.pipe(callee, EffectString.split('.')).at(-1)!)]]
+      : []),
   ]);
 }
 
@@ -355,10 +369,11 @@ function addReference(
   lookupTiers: readonly (readonly string[])[],
 ): void {
   if (facts.references.length >= MAX_BAZEL_REFERENCES) return;
-  const id = `cge_${sha256HexSync(
-    `bazel-edge-v1\n${facts.file.path}\n${source.id}\n${relation}\n${targetName}\n${provenance}`,
-  ).slice(0, 32)}`;
-  if (facts.edges.some(edge => edge.id === id)) return;
+  const id = `cge_${Effect.pipe(
+    sha256HexSync(`bazel-edge-v1\n${facts.file.path}\n${source.id}\n${relation}\n${targetName}\n${provenance}`),
+    EffectString.slice(0, 32),
+  )}`;
+  if (EffectArray.some(facts.edges, edge => edge.id === id)) return;
   const span = sourceSpan(facts.lineIndex, start, end);
   const edge: CodeGraphEdge = {
     confidence: provenance === 'declared' ? 1 : 0.75,
@@ -399,9 +414,10 @@ function resolvedEdge(
     confidence: provenance === 'declared' ? 1 : 0.75,
     evidencePath: facts.file.path,
     evidenceSpan: sourceSpan(facts.lineIndex, start, end),
-    id: `cge_${sha256HexSync(
-      `bazel-edge-v1\n${facts.file.path}\n${source.id}\n${relation}\n${target.id}\n${provenance}`,
-    ).slice(0, 32)}`,
+    id: `cge_${Effect.pipe(
+      sha256HexSync(`bazel-edge-v1\n${facts.file.path}\n${source.id}\n${relation}\n${target.id}\n${provenance}`),
+      EffectString.slice(0, 32),
+    )}`,
     provenance,
     relation,
     sourceId: source.id,
@@ -417,12 +433,12 @@ function createOwnerResolver(
   targets: readonly {readonly call: BazelCall; readonly symbol: CodeGraphSymbol}[],
 ): (offset: number) => CodeGraphSymbol {
   const intervals = [
-    ...[...definitions].map(([definition, symbol]) => ({
+    ...EffectArray.map([...definitions], ([definition, symbol]) => ({
       end: definition.bodyEnd,
       start: definition.start,
       symbol,
     })),
-    ...targets.map(target => ({end: target.call.end, start: target.call.start, symbol: target.symbol})),
+    ...EffectArray.map(targets, target => ({end: target.call.end, start: target.call.start, symbol: target.symbol})),
   ].sort((left, right) => left.start - right.start || right.end - left.end);
   let active: typeof intervals = [];
   let cursor = 0;
@@ -435,7 +451,7 @@ function createOwnerResolver(
       cursor = 0;
     }
     previousOffset = offset;
-    active = active.filter(interval => interval.end >= offset);
+    active = EffectArray.filter(active, interval => interval.end >= offset);
     while (cursor < intervals.length && intervals[cursor].start <= offset) {
       const interval = intervals[cursor];
       if (interval.end >= offset) active.push(interval);
@@ -464,5 +480,5 @@ function bazelNameKey(name: string): string {
 }
 
 function normalizedCallee(value: string): string {
-  return value.replace(/\s+/gu, '');
+  return Effect.pipe(value, EffectString.replace(/\s+/gu, ''));
 }

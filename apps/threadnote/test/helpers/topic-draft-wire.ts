@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -14,6 +15,10 @@ import {
   topicDraftGenerationEligible,
   topicDraftPolicyScope,
 } from '../../src/manager/topic_draft_schema.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 interface ParagraphDecision {
   ordinal: number;
@@ -38,18 +43,21 @@ export function makeTopicDraftWireBasis(
     sourceCount > 8
   )
     throw new Error('Invalid topic wire fixture size.');
-  const ids = Array.from({length: sourceCount}, (_, index) => 'tncc_' + index.toString(16).padStart(40, '0'));
+  const ids = Array.from(
+    {length: sourceCount},
+    (_, index) => 'tncc_' + Effect.pipe(index.toString(16), EffectString.padStart(40, '0')),
+  );
   const paragraphs = Array.from({length: count}, (_, ordinal) =>
     ordinal === 0 && options.firstParagraph ? options.firstParagraph : `Claim ${ordinal}.`,
   );
   return validateTopicMaintenanceDraftBasis({
     version: 1,
     targetUri: 'threadnote://user/tester/memories/durable/topic.md',
-    targetHash: 'a'.repeat(64),
-    observationRevision: 'b'.repeat(64),
-    packetDigest: 'c'.repeat(64),
-    body: paragraphs.join('\n\n'),
-    paragraphs: paragraphs.map((text, ordinal) => ({
+    targetHash: Effect.pipe('a', EffectString.repeat(64)),
+    observationRevision: Effect.pipe('b', EffectString.repeat(64)),
+    packetDigest: Effect.pipe('c', EffectString.repeat(64)),
+    body: EffectArray.join(paragraphs, '\n\n'),
+    paragraphs: EffectArray.map(paragraphs, (text, ordinal) => ({
       ordinal,
       hash: sha256HexSync(text),
       role: ordinal === options.protectedOrdinal ? 'normative' : 'descriptive',
@@ -57,7 +65,7 @@ export function makeTopicDraftWireBasis(
       citationIds: ids,
     })),
     additionalDependencies: [],
-    handles: ids.flatMap(id => [
+    handles: EffectArray.flatMap(ids, id => [
       {id: `historical:${id}`, citationId: id, variant: 'historical'},
       {id: `current:${id}`, citationId: id, variant: 'current'},
     ]),
@@ -87,7 +95,7 @@ export interface TopicDraftWireFixture {
 export function makeTopicDraftWireEvidence(basis: TopicMaintenanceDraftBasis) {
   return topicDraftCurrentEvidence(
     basis,
-    topicDraftCurrentSourceHandles(basis).map((handleId, index) => ({
+    EffectArray.map(topicDraftCurrentSourceHandles(basis), (handleId, index) => ({
       handleId,
       content: `Current source ${index}.`,
     })),
@@ -100,7 +108,7 @@ export function topicDraftEvidenceFromPrompt(
 ): Readonly<Record<string, string>> {
   const packet = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
   return Object.freeze(
-    Object.fromEntries(
+    EffectRecord.fromEntries(
       packet.sources.map((source: {sourceIndex: number; current: {excerpt: string}}) => [
         topicDraftCurrentSourceHandles(basis)[source.sourceIndex],
         source.current.excerpt,
@@ -115,7 +123,11 @@ export function makeTopicDraftWireFixture(
   _evidence = makeTopicDraftWireEvidence(basis),
 ): TopicDraftWireFixture {
   const unresolved = disposition === 'unresolved';
-  const eligible = basis.paragraphs.filter(topicDraftGenerationEligible);
+  const eligible = EffectArray.filter(
+    basis.paragraphs,
+    (__effectFilterValue: (typeof basis.paragraphs)[number], __effectFilterIndex: number) =>
+      __effectFilterIndex in basis.paragraphs && topicDraftGenerationEligible(__effectFilterValue),
+  );
   const scope = topicDraftPolicyScope(basis);
   const policyUnknown = unresolved && scope.normativeOrdinals.length > 0;
   const sourceReview = !eligible.length && !policyUnknown;
@@ -126,7 +138,7 @@ export function makeTopicDraftWireFixture(
     packetDigest: basis.packetDigest,
     facts: {
       version: 1,
-      entries: eligible.map<ParagraphDecision>(paragraph => ({
+      entries: EffectArray.map(eligible, paragraph => ({
         ordinal: paragraph.ordinal,
         currentBehavior: unresolved ? null : 'Current supported behavior.',
         rationale: unresolved ? 'Manual review.' : 'Checked.',
@@ -134,21 +146,29 @@ export function makeTopicDraftWireFixture(
         sourceIndices: unresolved
           ? []
           : [
-              topicDraftCurrentSourceHandles(basis).findIndex(handle =>
-                [...paragraph.citationIds, ...basis.additionalDependencies.map(d => d.citationId)].some(
-                  id => handle === `current:${id}`,
+              EffectOption.getOrElse(
+                EffectArray.findFirstIndex(
+                  topicDraftCurrentSourceHandles(basis),
+                  __effectArrayValue =>
+                    !!(handle =>
+                      EffectArray.some(
+                        [...paragraph.citationIds, ...EffectArray.map(basis.additionalDependencies, d => d.citationId)],
+                        id => handle === `current:${id}`,
+                      ))(__effectArrayValue),
                 ),
+                () => -1,
               ),
             ],
         ...(disposition === 'update' ? {text: `Current claim ${paragraph.ordinal}.`} : {}),
       })),
     },
-    normativeComparisons: basis.paragraphs
-      .filter(p => p.role === 'normative')
-      .map(p => ({
+    normativeComparisons: EffectArray.map(
+      EffectArray.filter(basis.paragraphs, p => p.role === 'normative'),
+      p => ({
         ordinal: p.ordinal,
         rationale: unresolved ? 'Manual review.' : 'Checked.',
-      })),
+      }),
+    ),
     decision: {
       ...(policyUnknown
         ? {
@@ -158,24 +178,26 @@ export function makeTopicDraftWireFixture(
         : {}),
       policyAssessment: policyUnknown ? 'undetermined' : sourceReview ? 'source-review' : 'no-conflict-observed',
       removedClaims: [],
-      ...(sourceReview ? {reviewedSourceIndices: topicDraftCurrentSourceHandles(basis).map((_, index) => index)} : {}),
+      ...(sourceReview
+        ? {reviewedSourceIndices: EffectArray.map(topicDraftCurrentSourceHandles(basis), (_, index) => index)}
+        : {}),
     },
   };
 }
 
 /** Complete trusted packet for controller tests; no graph, model or provider process. */
 export function makeTopicDraftControllerPacket() {
-  const citations = [0, 1].map(index =>
+  const citations = EffectArray.map([0, 1], index =>
     createMemoryCodeCitation({
       evidenceRetention: 'capsule-retained',
       extractorSet: 'test',
-      fileContentHash: {algorithm: 'sha256', value: '2'.repeat(64)},
+      fileContentHash: {algorithm: 'sha256', value: Effect.pipe('2', EffectString.repeat(64))},
       path: `source-${index}.ts`,
-      repositoryId: '3'.repeat(64),
+      repositoryId: Effect.pipe('3', EffectString.repeat(64)),
       repositoryIdentityKind: 'local',
-      sourceCommit: '1'.repeat(40),
+      sourceCommit: Effect.pipe('1', EffectString.repeat(40)),
       sourceDirty: false,
-      sourceSnapshotId: `cgsn_${'1'.repeat(40)}`,
+      sourceSnapshotId: `cgsn_${Effect.pipe('1', EffectString.repeat(40))}`,
       target: {kind: 'file'},
       version: 1,
     }),
@@ -199,12 +221,12 @@ export function makeTopicDraftControllerPacket() {
       'Old first fact.\n\nOld second fact.\n\nProtected requirement.',
     ),
   )!;
-  const paragraphs = record.body.split('\n\n').map((text, ordinal) => ({
+  const paragraphs = EffectArray.map(Effect.pipe(record.body, EffectString.split('\n\n')), (text, ordinal) => ({
     ordinal,
     hash: sha256HexSync(text),
     role: ordinal === 2 ? ('normative' as const) : ('descriptive' as const),
     support: 'direct' as const,
-    citationIds: citations.map(citation => citation.id),
+    citationIds: EffectArray.map(citations, citation => citation.id),
   }));
   const excerpt = (citation: (typeof citations)[number], provenance: 'current-verified' | 'historical-verified') => {
     const content =
@@ -234,12 +256,12 @@ export function makeTopicDraftControllerPacket() {
     outcome: 'ready' as const,
     targetUri: uri,
     targetHash: sha256HexSync(record.content),
-    observationRevision: 'b'.repeat(64),
+    observationRevision: Effect.pipe('b', EffectString.repeat(64)),
     coverage: 'declared-only' as const,
     body: record.body,
     paragraphs,
     additionalDependencies: [],
-    sources: citations.map(citation => ({
+    sources: EffectArray.map(citations, citation => ({
       citationId: citation.id,
       status: 'changed' as const,
       original: citation,
@@ -252,7 +274,7 @@ export function makeTopicDraftControllerPacket() {
     record,
     packet: {
       version: 2 as const,
-      caseId: 'health-case-' + 'a'.repeat(40),
+      caseId: 'health-case-' + Effect.pipe('a', EffectString.repeat(40)),
       project: 'fixture',
       memoryUri: uri,
       memoryId: 'tn_controller_topic',
@@ -276,22 +298,32 @@ export function compactAutomaticTopicDraftFixture(
   draft: AutomaticMaintenanceDraftV2,
 ) {
   const evidence = [
-    ...new Set([...basis.assessment.evidence.map(entry => entry.id), ...basis.handles.map(h => h.citationId)]),
+    ...new Set([
+      ...EffectArray.map(basis.assessment.evidence, entry => entry.id),
+      ...EffectArray.map(basis.handles, h => h.citationId),
+    ]),
   ].sort();
-  const current = [...new Set(basis.handles.filter(h => h.variant === 'current').map(h => h.id))].sort();
+  const current = [
+    ...new Set(
+      EffectArray.map(
+        EffectArray.filter(basis.handles, h => h.variant === 'current'),
+        h => h.id,
+      ),
+    ),
+  ].sort();
   const {purpose: _purpose, reviewedHandles, paragraphDecisions, operations, ...rest} = draft;
   return {
     ...rest,
     version: 1 as const,
     kind: 'automatic-model' as const,
-    paragraphDecisions: paragraphDecisions.map(({beforeHash: _beforeHash, evidenceIds, ...decision}) => ({
+    paragraphDecisions: EffectArray.map(paragraphDecisions, ({beforeHash: _beforeHash, evidenceIds, ...decision}) => ({
       ...decision,
-      evidenceIndices: evidenceIds.map(id => evidence.indexOf(id)),
+      evidenceIndices: EffectArray.map(evidenceIds, id => evidence.indexOf(id)),
     })),
-    operations: operations.map(({beforeHash: _beforeHash, supportHandles, ...operation}) => ({
+    operations: EffectArray.map(operations, ({beforeHash: _beforeHash, supportHandles, ...operation}) => ({
       ...operation,
-      supportIndices: supportHandles.map(handle => current.indexOf(handle)),
+      supportIndices: EffectArray.map(supportHandles, handle => current.indexOf(handle)),
     })),
-    currentSourceIndices: reviewedHandles.map(handle => current.indexOf(handle)),
+    currentSourceIndices: EffectArray.map(reviewedHandles, handle => current.indexOf(handle)),
   };
 }

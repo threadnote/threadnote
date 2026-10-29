@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {compareCodeUnits} from '../ordering.js';
 import type {CodeGraphReference, CodeGraphSymbol} from '../types.js';
 
@@ -77,7 +78,7 @@ export function hasSameCodeGraphReexportResolutionSurface(
 function staticReexportResolutionSurface(
   references: readonly CodeGraphReference[],
 ): ReadonlyMap<string, string> | undefined {
-  const aliases = references.filter(reference => (reference.aliasLookupKeys?.length ?? 0) > 0);
+  const aliases = EffectArray.filter(references, reference => (reference.aliasLookupKeys?.length ?? 0) > 0);
   if (aliases.length === 0) return new Map();
 
   const referenceIds = new Set<string>();
@@ -107,7 +108,7 @@ function reexportResolutionSurface(reference: CodeGraphReference): string {
     edgeId: reference.edgeId,
     evidencePath: reference.evidencePath,
     exportedOnly: reference.exportedOnly,
-    lookupTiers: reference.lookupTiers.map(canonicalStringSet),
+    lookupTiers: EffectArray.map(reference.lookupTiers, canonicalStringSet),
     provenance: reference.provenance,
     relation: reference.relation,
     resolutionDomain: reference.resolutionDomain,

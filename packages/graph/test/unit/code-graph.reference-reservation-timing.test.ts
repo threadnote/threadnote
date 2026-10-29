@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path} from 'effect';
@@ -9,8 +10,13 @@ import {TestError} from '@threadnote/testing/test-error';
 import {SystemInfo} from '@threadnote/platform/system';
 import {withCodeGraphDiskReservation, type CodeGraphDiskReservationOptions} from '../../src/disk/reservation.js';
 import {withCodeGraphIndexTiming, type CodeGraphIndexTimingObserver} from '../../src/indexer/types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const stages = ['owner-identity', 'claim', 'use', 'release'].map(stage => `reference-reservation-${stage}`);
+const stages = EffectArray.map(
+  ['owner-identity', 'claim', 'use', 'release'],
+  stage => `reference-reservation-${stage}`,
+);
 const completeEvents = ['owner', 'owner', 'claim', 'use', 'release', 'owner'];
 const provideFixtureLayer = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(BunServices.layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
@@ -36,10 +42,10 @@ const fixture = Effect.gen(function* () {
           transientHighWaterBytes: 10,
         },
         durableAvailableBytes: 100,
-        durableFilesystemKey: 'a'.repeat(64),
+        durableFilesystemKey: Effect2.pipe('a', EffectString.repeat(64)),
         freelistBytes: 0,
         temporaryAvailableBytes: 100,
-        temporaryFilesystemKey: 'a'.repeat(64),
+        temporaryFilesystemKey: Effect2.pipe('a', EffectString.repeat(64)),
       };
     }),
     beforeReleaseAttempt: Effect.sync(() => {
@@ -107,7 +113,7 @@ effectIt.effect('observes the original reference reservation owner, claim, use a
     ).pipe(Effect.provideService(SystemInfo, f.system));
     expect(result).toBe('value');
     expect(f.events).toEqual(completeEvents);
-    expect(observed).toEqual(stages.flatMap(stage => [`start:${stage}`, `end:${stage}`]));
+    expect(observed).toEqual(EffectArray.flatMap(stages, stage => [`start:${stage}`, `end:${stage}`]));
     expect(yield* f.fs.readDirectory(f.options.ledgerRoot)).toEqual([]);
   }).pipe(TestClock.withLive, provideFixtureLayer),
 );
@@ -164,7 +170,7 @@ effectIt.effect('a refused original acquisition never executes the transaction o
     ).pipe(Effect.provideService(SystemInfo, f.system), Effect.exit);
     expect(Exit.isFailure(exit)).toBe(true);
     expect(f.events).toEqual(['owner', 'owner']);
-    expect(observed).toEqual(stages.slice(0, 2).flatMap(stage => [`start:${stage}`, `end:${stage}`]));
+    expect(observed).toEqual(EffectArray.flatMap(stages.slice(0, 2), stage => [`start:${stage}`, `end:${stage}`]));
     expect(yield* f.fs.readDirectory(f.options.ledgerRoot)).toEqual([]);
   }).pipe(TestClock.withLive, provideFixtureLayer),
 );
@@ -235,7 +241,7 @@ effectIt.effect(
       const exit = yield* Fiber.await(fiber);
       expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
       expect(cleaned).toBe(1);
-      expect(f.events.filter(event => event === 'release')).toHaveLength(1);
+      expect(EffectArray.filter(f.events, event => event === 'release')).toHaveLength(1);
       expect(yield* f.fs.readDirectory(f.options.ledgerRoot)).toEqual([]);
     }).pipe(TestClock.withLive, provideFixtureLayer),
 );

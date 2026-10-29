@@ -12,7 +12,8 @@ const policy = Layer.mergeAll(
   }),
   Layer.succeed(RuntimeEntrypoint, {developmentEntrypoint: '/test/threadnote.ts'}),
 );
+export const citationSystemInfoLayer = SystemInfo.layer.pipe(Layer.provide(policy));
 export const citationPlatformLayer = Layer.mergeAll(
-  SystemInfo.layer.pipe(Layer.provide(policy)),
-  CommandExecutor.layer.pipe(Layer.provideMerge(SystemInfo.layer.pipe(Layer.provide(policy))), Layer.provide(policy)),
+  citationSystemInfoLayer,
+  CommandExecutor.layer.pipe(Layer.provideMerge(citationSystemInfoLayer), Layer.provide(policy)),
 ).pipe(Layer.provideMerge(BunServices.layer));

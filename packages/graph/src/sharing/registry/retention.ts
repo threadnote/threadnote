@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {canonicalJson} from '../../checkpoint/canonical_json.js';
 import {compareCodeUnits} from '../../ordering.js';
 import {GRAPH_SHARE_OCI_EMPTY_CONFIG_MEDIA_TYPE, GRAPH_SHARE_OCI_IMAGE_MANIFEST_MEDIA_TYPE} from '../artifacts.js';
@@ -36,7 +37,10 @@ export function graphShareRegistryRetentionRoot(input: readonly GraphShareRegist
         throw graphSharingFailure('Registry publication exceeds its retained artifact limits.');
     }
   }
-  const entries = [...sizes].sort(([a], [b]) => compareCodeUnits(a, b)).map(([digest, size]) => ({digest, size}));
+  const entries = EffectArray.map(
+    [...sizes].sort(([a], [b]) => compareCodeUnits(a, b)),
+    ([digest, size]) => ({digest, size}),
+  );
   const bytes = new TextEncoder().encode(
     canonicalJson({
       artifactType: 'application/vnd.threadnote.graph.retention.v1+json',
@@ -45,9 +49,10 @@ export function graphShareRegistryRetentionRoot(input: readonly GraphShareRegist
         mediaType: GRAPH_SHARE_OCI_EMPTY_CONFIG_MEDIA_TYPE,
         size: GRAPH_SHARE_OCI_EMPTY_CONFIG_BYTES.byteLength,
       },
-      layers: entries
-        .filter(entry => entry.digest !== GRAPH_SHARE_OCI_EMPTY_CONFIG_DIGEST)
-        .map(entry => ({...entry, mediaType: 'application/octet-stream'})),
+      layers: EffectArray.map(
+        EffectArray.filter(entries, entry => entry.digest !== GRAPH_SHARE_OCI_EMPTY_CONFIG_DIGEST),
+        entry => ({...entry, mediaType: 'application/octet-stream'}),
+      ),
       mediaType: GRAPH_SHARE_OCI_IMAGE_MANIFEST_MEDIA_TYPE,
       schemaVersion: 2,
     }),

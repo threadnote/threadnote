@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import {trimBoundaryCharacters} from '@threadnote/platform/string-boundaries';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface BazelStringLiteral {
   readonly end: number;
@@ -65,7 +68,7 @@ export function parseBazelSyntax(content: string): BazelSyntax {
     if (isIdentifierStart(character) && !isIdentifierPart(masked[index - 1] ?? '')) {
       const start = index;
       index = scanDottedIdentifier(masked, index);
-      const callee = masked.slice(start, index);
+      const callee = Effect.pipe(masked, EffectString.slice(start, index));
       let open = index;
       while (WHITESPACE.test(masked[open] ?? '')) open += 1;
       if (masked[open] === '(' && !isDefinitionName(masked, start)) {
@@ -84,7 +87,7 @@ export function parseBazelSyntax(content: string): BazelSyntax {
               nesting.braces === 0 &&
               nesting.brackets === 0 &&
               nesting.parentheses === 0 &&
-              /^\s*$/u.test(masked.slice(lineStart(masked, start), start)),
+              /^\s*$/u.test(Effect.pipe(masked, EffectString.slice(lineStart(masked, start), start))),
           });
           if (stringCount >= MAX_BAZEL_STRING_LITERALS) bounded = true;
         }
@@ -109,24 +112,39 @@ export function parseBazelSyntax(content: string): BazelSyntax {
 }
 
 export function bazelAttribute(call: BazelCall, name: string): Option.Option<BazelAttribute> {
-  return Option.fromUndefinedOr(call.attributes.find(attribute => attribute.name === name));
+  return Option.fromUndefinedOr(
+    Option.getOrUndefined(EffectArray.findFirst(call.attributes, attribute => attribute.name === name)),
+  );
 }
 
 export function canonicalBazelLabel(raw: string, packagePath: string): Option.Option<string> {
-  const label = raw.trim();
+  const label = Effect.pipe(raw, EffectString.trim);
   if (!label || /[\s\r\n]/u.test(label)) return Option.none();
-  if (label.startsWith(':')) return label.length > 1 ? Option.some(`//${packagePath}${label}`) : Option.none();
-  if (!label.startsWith('//') && !label.startsWith('@')) return Option.none();
-  const separator = label.indexOf('//');
+  if (Effect.pipe(label, EffectString.startsWith(':')))
+    return label.length > 1 ? Option.some(`//${packagePath}${label}`) : Option.none();
+  if (!Effect.pipe(label, EffectString.startsWith('//')) && !Effect.pipe(label, EffectString.startsWith('@')))
+    return Option.none();
+  const separator = Effect.pipe(
+    label,
+    EffectString.indexOf('//'),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (separator < 0) return Option.none();
-  const repository = label.slice(0, separator);
-  const body = trimBoundaryCharacters(label.slice(separator + 2), '/');
-  const colon = body.indexOf(':');
-  const rawPackage = colon >= 0 ? body.slice(0, colon) : body;
-  const rawTarget = colon >= 0 ? body.slice(colon + 1) : (rawPackage.split('/').at(-1) ?? '');
-  if (rawPackage.split('/').includes('..')) return Option.none();
+  const repository = Effect.pipe(label, EffectString.slice(0, separator));
+  const body = trimBoundaryCharacters(Effect.pipe(label, EffectString.slice(separator + 2)), '/');
+  const colon = Effect.pipe(
+    body,
+    EffectString.indexOf(':'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const rawPackage = colon >= 0 ? Effect.pipe(body, EffectString.slice(0, colon)) : body;
+  const rawTarget =
+    colon >= 0
+      ? Effect.pipe(body, EffectString.slice(colon + 1))
+      : (Effect.pipe(rawPackage, EffectString.split('/')).at(-1) ?? '');
+  if (Effect.pipe(rawPackage, EffectString.split('/')).includes('..')) return Option.none();
   const normalizedPackage = normalizeBazelPath(rawPackage);
-  const normalizedTarget = rawTarget.trim();
+  const normalizedTarget = Effect.pipe(rawTarget, EffectString.trim);
   if (!normalizedTarget || normalizedTarget === '.' || normalizedTarget === '..') return Option.none();
   return Option.some(`${repository}//${normalizedPackage}:${normalizedTarget}`);
 }
@@ -136,13 +154,18 @@ export function bazelLabelPackage(label: string): Option.Option<{
   readonly packagePath: string;
   readonly target: string;
 }> {
-  const separator = label.indexOf('//');
+  const separator = Effect.pipe(
+    label,
+    EffectString.indexOf('//'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const colon = label.indexOf(':', separator + 2);
   if (separator < 0 || colon < 0) return Option.none();
   return Option.some({
     external: separator > 0,
-    packagePath: label.slice(separator + 2, colon),
-    target: label.slice(colon + 1),
+    packagePath: Effect.pipe(label, EffectString.slice(separator + 2, colon)),
+    target: Effect.pipe(label, EffectString.slice(colon + 1)),
   });
 }
 
@@ -150,7 +173,9 @@ export function bazelPackagePath(filePath: string, workspaceRoot: string): strin
   const root = dirname(filePath);
   if (!workspaceRoot) return root;
   if (root === workspaceRoot) return '';
-  return root.startsWith(`${workspaceRoot}/`) ? root.slice(workspaceRoot.length + 1) : root;
+  return Effect.pipe(root, EffectString.startsWith(`${workspaceRoot}/`))
+    ? Effect.pipe(root, EffectString.slice(workspaceRoot.length + 1))
+    : root;
 }
 
 export function bazelFileLabel(filePath: string, workspaceRoot: string): string {
@@ -161,7 +186,7 @@ export function bazelFileLabel(filePath: string, workspaceRoot: string): string 
 function scanDefinitions(masked: string): BazelDefinition[] {
   const output: BazelDefinition[] = [];
   const expression = /^(\s*)def\s+([A-Za-z_]\w*)\s*\(/gmu;
-  for (const match of masked.matchAll(expression)) {
+  for (const match of Effect.pipe(masked, EffectString.matchAll(expression))) {
     if (output.length >= MAX_BAZEL_DECLARATIONS) break;
     const start = match.index ?? 0;
     const indent = indentationWidth(match[1] ?? '');
@@ -178,7 +203,7 @@ function scanDefinitions(masked: string): BazelDefinition[] {
 function scanAssignments(masked: string): BazelAssignment[] {
   const output: BazelAssignment[] = [];
   const expression = /^([A-Za-z_]\w*)\s*=(?!=)/gmu;
-  for (const match of masked.matchAll(expression)) {
+  for (const match of Effect.pipe(masked, EffectString.matchAll(expression))) {
     if (output.length >= MAX_BAZEL_DECLARATIONS) break;
     const start = match.index ?? 0;
     output.push({end: endOfLine(masked, start), name: match[1], start});
@@ -197,7 +222,7 @@ function scanAttributes(content: string, masked: string, start: number, end: num
     }
     const nameStart = cursor;
     cursor = scanIdentifier(masked, cursor);
-    const name = masked.slice(nameStart, cursor);
+    const name = Effect.pipe(masked, EffectString.slice(nameStart, cursor));
     while (WHITESPACE.test(masked[cursor] ?? '')) cursor += 1;
     if (masked[cursor] !== '=') {
       cursor = nextTopLevelComma(masked, cursor, end) + 1;
@@ -251,7 +276,7 @@ function stringPrefixAt(
   let cursor = index;
   while (cursor < end && STRING_PREFIX_CHARACTER.test(content[cursor] ?? '') && cursor - index < 3) cursor += 1;
   if (content[cursor] !== '"' && content[cursor] !== "'") return Option.none();
-  return Option.some({quoteStart: cursor, raw: /r/iu.test(content.slice(index, cursor))});
+  return Option.some({quoteStart: cursor, raw: /r/iu.test(Effect.pipe(content, EffectString.slice(index, cursor)))});
 }
 
 function readStringLiteral(
@@ -262,14 +287,20 @@ function readStringLiteral(
 ): Option.Option<BazelStringLiteral> {
   const literalEnd = stringLiteralEnd(content, quoteStart, end, raw);
   if (literalEnd === undefined) return Option.none();
-  const width = content.startsWith(content[quoteStart].repeat(3), quoteStart) ? 3 : 1;
-  const value = content.slice(quoteStart + width, literalEnd - width);
+  const width = Effect.pipe(
+    content,
+    EffectString.startsWith(Effect.pipe(content[quoteStart], EffectString.repeat(3)), quoteStart),
+  )
+    ? 3
+    : 1;
+  const value = Effect.pipe(content, EffectString.slice(quoteStart + width, literalEnd - width));
   return Option.some({
     end: literalEnd,
     start: quoteStart,
     value: raw
       ? value
-      : value.replace(/\\([\s\S])/gu, (_, escaped: string) =>
+      : // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
+        value.replace(/\\([\s\S])/gu, (_, escaped: string) =>
           escaped === 'n' ? '\n' : escaped === 'r' ? '\r' : escaped === 't' ? '\t' : escaped,
         ),
   });
@@ -277,11 +308,12 @@ function readStringLiteral(
 
 function stringLiteralEnd(content: string, quoteStart: number, end: number, raw: boolean): number | undefined {
   const quote = content[quoteStart];
-  const triple = content.startsWith(quote.repeat(3), quoteStart);
+  const triple = Effect.pipe(content, EffectString.startsWith(Effect.pipe(quote, EffectString.repeat(3)), quoteStart));
   const width = triple ? 3 : 1;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   const delimiter = quote.repeat(width);
   for (let cursor = quoteStart + width; cursor < end; cursor += 1) {
-    if (content.startsWith(delimiter, cursor)) return cursor + width;
+    if (Effect.pipe(content, EffectString.startsWith(delimiter, cursor))) return cursor + width;
     if (!raw && content[cursor] === '\\' && cursor + 1 < end) cursor += 1;
   }
   return undefined;
@@ -302,14 +334,17 @@ function maskBazelNonCode(content: string): string {
     }
     if (end === undefined) continue;
     output.push(
-      content.slice(start, index),
-      content.slice(index, end).replace(/[^\r\n\u2028\u2029]+/gu, value => ' '.repeat(value.length)),
+      Effect.pipe(content, EffectString.slice(start, index)),
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only. The callback count is a matched non-empty string length.
+      Effect.pipe(content, EffectString.slice(index, end)).replace(/[^\r\n\u2028\u2029]+/gu, value =>
+        Effect.pipe(' ', EffectString.repeat(value.length)),
+      ),
     );
     start = end;
     index = end - 1;
   }
-  output.push(content.slice(start));
-  return output.join('');
+  output.push(Effect.pipe(content, EffectString.slice(start)));
+  return EffectArray.join(output, '');
 }
 
 function nextTopLevelComma(masked: string, start: number, end: number): number {
@@ -342,15 +377,16 @@ function findMatchingDelimiter(source: string, start: number, open: string, clos
 }
 
 function isDefinitionName(source: string, start: number): boolean {
-  return /\bdef\s*$/u.test(source.slice(lineStart(source, start), start));
+  return /\bdef\s*$/u.test(Effect.pipe(source, EffectString.slice(lineStart(source, start), start)));
 }
 
 function definitionBodyEnd(source: string, afterHeader: number, declarationIndent: number): number {
   let cursor = afterHeader;
   while (cursor < source.length) {
     const next = endOfLine(source, cursor + 1);
-    const line = source.slice(cursor + 1, next);
-    if (line.trim() && indentationWidth(/^\s*/u.exec(line)?.[0] ?? '') <= declarationIndent) return cursor;
+    const line = Effect.pipe(source, EffectString.slice(cursor + 1, next));
+    if (Effect.pipe(line, EffectString.trim) && indentationWidth(/^\s*/u.exec(line)?.[0] ?? '') <= declarationIndent)
+      return cursor;
     cursor = next;
   }
   return source.length;
@@ -376,11 +412,14 @@ function scanIdentifier(source: string, start: number): number {
 }
 
 function lineStart(source: string, offset: number): number {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   return Math.max(source.lastIndexOf('\n', offset - 1), source.lastIndexOf('\r', offset - 1)) + 1;
 }
 
 function endOfLine(source: string, offset: number): number {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const lineFeed = source.indexOf('\n', offset);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const carriageReturn = source.indexOf('\r', offset);
   if (lineFeed < 0) return carriageReturn < 0 ? source.length : carriageReturn;
   if (carriageReturn < 0) return lineFeed;
@@ -388,25 +427,25 @@ function endOfLine(source: string, offset: number): number {
 }
 
 function indentationWidth(value: string): number {
-  return [...value].reduce((total, character) => total + (character === '\t' ? 8 - (total % 8) : 1), 0);
+  return EffectArray.reduce([...value], 0, (total, character) => total + (character === '\t' ? 8 - (total % 8) : 1));
 }
 
 function normalizeBazelPath(value: string): string {
   const output: string[] = [];
-  for (const segment of value.replaceAll('\\', '/').split('/')) {
+  for (const segment of Effect.pipe(value, EffectString.replaceAll('\\', '/'), EffectString.split('/'))) {
     if (!segment || segment === '.') continue;
     if (segment === '..') return '';
     output.push(segment);
   }
-  return output.join('/');
+  return EffectArray.join(output, '/');
 }
 
 function basename(path: string): string {
-  return path.split('/').at(-1) ?? path;
+  return Effect.pipe(path, EffectString.split('/')).at(-1) ?? path;
 }
 
 function dirname(path: string): string {
-  return path.split('/').slice(0, -1).join('/');
+  return EffectArray.join(Effect.pipe(path, EffectString.split('/')).slice(0, -1), '/');
 }
 
 function isIdentifierStart(character: string): boolean {

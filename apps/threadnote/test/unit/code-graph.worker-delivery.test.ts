@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
@@ -45,6 +46,8 @@ import {
 } from '@threadnote/graph/sharing/worker/candidate_scan';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 const encode = (value: unknown) => new TextEncoder().encode(canonicalJson(value));
@@ -54,11 +57,11 @@ const fixture = Effect.fn('test.workerDelivery.fixture')(function* () {
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'graph-worker-delivery-'});
   const signer = yield* makeGraphWorkerSigner(home, sha256Digest('credential identity'));
   const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
-  const sourceCommit = '1'.repeat(40);
-  const repositoryId = 'c'.repeat(64);
+  const sourceCommit = Effect2.pipe('1', EffectString.repeat(40));
+  const repositoryId = Effect2.pipe('c', EffectString.repeat(64));
   const action = {
-    contentHash: 'a'.repeat(64),
-    extractorSet: 'b'.repeat(64),
+    contentHash: Effect2.pipe('a', EffectString.repeat(64)),
+    extractorSet: Effect2.pipe('b', EffectString.repeat(64)),
     languageAndRole: 'typescript:source',
     normalizedPath: 'src/index.ts',
     repositoryId,
@@ -66,7 +69,7 @@ const fixture = Effect.fn('test.workerDelivery.fixture')(function* () {
   const result = graphShareParseResultArtifact({
     ...action,
     actionKey: graphShareParseActionKey(action),
-    gitBlobId: 'd'.repeat(40),
+    gitBlobId: Effect2.pipe('d', EffectString.repeat(40)),
     facts: {path: action.normalizedPath, diagnostics: [], edges: [], symbols: []},
   });
   const resultBytes = encode(result);
@@ -75,12 +78,12 @@ const fixture = Effect.fn('test.workerDelivery.fixture')(function* () {
   const profileDigest = sha256Digest('profile');
   const authority = {
     expiresAt: now + 3600,
-    graphAbi: 'e'.repeat(64),
+    graphAbi: Effect2.pipe('e', EffectString.repeat(64)),
     principalId: sha256Digest('first principal'),
     profileDigest,
     repositoryId,
     signingPublicKey: signer.publicKey,
-    workerId: 'gw_' + 'f'.repeat(32),
+    workerId: 'gw_' + Effect2.pipe('f', EffectString.repeat(32)),
   };
   const candidate = {
     actionKey: result.actionKey,
@@ -98,7 +101,7 @@ const fixture = Effect.fn('test.workerDelivery.fixture')(function* () {
     resultDigest,
     resultSize: resultBytes.byteLength,
     semanticDigest: result.semanticDigest,
-    snapshotId: `cgsn_${'2'.repeat(40)}`,
+    snapshotId: `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`,
     sourceCommit,
   };
   yield* persistGraphShareSignedCandidates(home, repositoryId, [candidate]);
@@ -366,7 +369,7 @@ describe('automatic signed graph worker delivery', () => {
         const f = yield* fixture();
         const identity = graphShareSignedCandidateIdentity(f.candidate);
         yield* acknowledgeGraphShareSignedCandidatePage(f.home, f.repositoryId, f.candidatePageId, new Set([identity]));
-        const other = {...f.candidate, snapshotId: `cgsn_${'3'.repeat(40)}`};
+        const other = {...f.candidate, snapshotId: `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`};
         yield* persistGraphShareSignedCandidates(f.home, f.repositoryId, [f.candidate, other]);
         const [newPageId] = yield* listGraphShareSignedCandidatePageIds(f.home, f.repositoryId);
         expect(newPageId).not.toBe(f.candidatePageId);
@@ -396,10 +399,10 @@ describe('automatic signed graph worker delivery', () => {
     TestClock.withLive(
       Effect.gen(function* () {
         const f = yield* fixture();
-        const newer = {...f.scope, workerId: 'gw_' + '9'.repeat(32)};
-        expect((yield* listGraphWorkerDeliveryPrincipalScopes(f.home, newer)).map(scope => scope.workerId)).toContain(
-          f.scope.workerId,
-        );
+        const newer = {...f.scope, workerId: 'gw_' + Effect2.pipe('9', EffectString.repeat(32))};
+        expect(
+          EffectArray.map(yield* listGraphWorkerDeliveryPrincipalScopes(f.home, newer), scope => scope.workerId),
+        ).toContain(f.scope.workerId);
         const admitted = yield* markGraphWorkerDeliveryAdmitted({
           scope: f.scope,
           candidateIdentity: f.prepared.operation.candidateIdentity,
@@ -424,7 +427,7 @@ describe('automatic signed graph worker delivery', () => {
     TestClock.withLive(
       Effect.gen(function* () {
         const f = yield* fixture();
-        const authority = {...f.authority, workerId: 'gw_' + '9'.repeat(32)};
+        const authority = {...f.authority, workerId: 'gw_' + Effect2.pipe('9', EffectString.repeat(32))};
         const newer = yield* createGraphWorkerResultArtifact({
           metadata: {
             batchId: f.candidate.batchId,
@@ -498,7 +501,7 @@ describe('automatic signed graph worker delivery', () => {
         ).toBe(true);
         expect(yield* listGraphWorkerDeliveryOutboxOperations(f.home, f.scope)).toEqual([]);
         expect(yield* listGraphShareSignedCandidatePageIds(f.home, f.repositoryId)).toEqual([f.candidatePageId]);
-        const next = yield* prepareGeneration(f, `gw_${'9'.repeat(32)}`);
+        const next = yield* prepareGeneration(f, `gw_${Effect2.pipe('9', EffectString.repeat(32))}`);
         expect(next.prepared).toBe(true);
       }).pipe(provideTestLayer(layer)),
   );
@@ -544,10 +547,10 @@ describe('automatic signed graph worker delivery', () => {
         yield* TestClock.setTime(1_750_000_000_000);
         const f = yield* fixture();
         for (let index = 1; index < 128; index++) {
-          const workerId = `gw_${index.toString(16).padStart(32, '0')}`;
+          const workerId = `gw_${Effect2.pipe(index.toString(16), EffectString.padStart(32, '0'))}`;
           yield* prepareGeneration(f, workerId);
         }
-        const current = {...f.scope, workerId: `gw_${'9'.repeat(32)}`};
+        const current = {...f.scope, workerId: `gw_${Effect2.pipe('9', EffectString.repeat(32))}`};
         expect((yield* listGraphWorkerDeliveryPrincipalScopes(f.home, current)).length).toBe(129);
         yield* TestClock.adjust(3_601_000);
         yield* reclaimExpiredGraphWorkerGenerations(f.home, current);
@@ -572,12 +575,12 @@ describe('automatic signed graph worker delivery', () => {
         );
         const candidates = Array.from({length: 10}, (_, index) => ({
           ...f.candidate,
-          snapshotId: `cgsn_${index.toString(16).padStart(40, '0')}`,
+          snapshotId: `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`,
         }));
         yield* persistGraphShareSignedCandidates(f.home, f.repositoryId, candidates);
         const first = yield* nextGraphWorkerCandidateScan(f.home, f.repositoryId);
-        expect(first.map(item => item.candidate.snapshotId)).toEqual(
-          candidates.slice(0, 8).map(item => item.snapshotId),
+        expect(EffectArray.map(first, item => item.candidate.snapshotId)).toEqual(
+          EffectArray.map(candidates.slice(0, 8), item => item.snapshotId),
         );
         yield* advanceGraphWorkerCandidateScan(f.home, f.repositoryId, first.at(-1)!);
         const next = yield* nextGraphWorkerCandidateScan(f.home, f.repositoryId);

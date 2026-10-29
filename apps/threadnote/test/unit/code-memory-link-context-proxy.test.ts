@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, mkdir, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -15,12 +16,14 @@ import {
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
 import {parseContextBriefJsonText} from '@threadnote/context/projector';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Code Memory Link context proxy', () => {
   const temporaryRoots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('forwards agent-discovered refs only for the anchored arm', async () => {
@@ -37,7 +40,7 @@ describe('Code Memory Link context proxy', () => {
     await handleCodeMemoryLinkContextBriefRequest(anchored, request, runCandidate);
     await handleCodeMemoryLinkContextBriefRequest(taskOnly, request, runCandidate);
 
-    expect(runCandidate.mock.calls.map(call => call[1].codeRefs)).toEqual([
+    expect(EffectArray.map(runCandidate.mock.calls, call => call[1].codeRefs)).toEqual([
       ['src/service.ts', 'cgs_0123456789abcdef'],
       [],
     ]);
@@ -59,7 +62,7 @@ describe('Code Memory Link context proxy', () => {
         proxyDecisionHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
         rawRequestHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
         responseHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
-        runBindingHash: '4'.repeat(64),
+        runBindingHash: Effect.pipe('4', EffectString.repeat(64)),
         version: 1,
       },
     });
@@ -91,7 +94,7 @@ describe('Code Memory Link context proxy', () => {
 
     await expect(
       handleCodeMemoryLinkContextBriefRequest(sealed, {callerCwd: root, task: sealed.taskPacket.prompt}, async () =>
-        candidateResult('anchored', 'x'.repeat(4_000)),
+        candidateResult('anchored', Effect.pipe('x', EffectString.repeat(4_000))),
       ),
     ).rejects.toThrow('dual-channel response envelope');
   });
@@ -160,7 +163,10 @@ describe('Code Memory Link context proxy', () => {
         fc.stringMatching(/^[a-z][a-z0-9]{0,12}$/u),
         async (additionalSeparators, leaf) => {
           const separators = ['\\', ...additionalSeparators];
-          const reference = `${separators.map(separator => `..${separator}`).join('')}private/${leaf}.json`;
+          const reference = `${EffectArray.join(
+            EffectArray.map(separators, separator => `..${separator}`),
+            '',
+          )}private/${leaf}.json`;
           await expect(
             handleCodeMemoryLinkContextBriefRequest(
               sealed,
@@ -206,7 +212,7 @@ async function fixtureRoot(roots: string[]): Promise<string> {
 function packet(root: string, policy: CodeMemoryLinkArmPolicy): CodeMemoryLinkContextProxyPacketV1 {
   const taskWithoutHash = {
     budget: {steps: 1, tokens: 1_250},
-    fixtureHash: '1'.repeat(64),
+    fixtureHash: Effect.pipe('1', EffectString.repeat(64)),
     prompt: 'Respect the repository constraint.',
     taskId: 'tsk_0123456789abcdef',
     taskKind: 'hidden-constraint' as const,
@@ -214,12 +220,12 @@ function packet(root: string, policy: CodeMemoryLinkArmPolicy): CodeMemoryLinkCo
   };
   const taskPacket = {...taskWithoutHash, packetHash: codeMemoryLinkTaskPacketHashV1(taskWithoutHash)};
   const armWithoutHash = {
-    assignmentHash: '2'.repeat(64),
+    assignmentHash: Effect.pipe('2', EffectString.repeat(64)),
     blindLabel: 'X' as const,
     fixtureHash: taskPacket.fixtureHash,
     packetHash: taskPacket.packetHash,
     policy,
-    rubricHash: '3'.repeat(64),
+    rubricHash: Effect.pipe('3', EffectString.repeat(64)),
     runNonce: 'run_0123456789abcdef',
     taskId: taskPacket.taskId,
     taskKind: taskPacket.taskKind,
@@ -230,10 +236,10 @@ function packet(root: string, policy: CodeMemoryLinkArmPolicy): CodeMemoryLinkCo
     agentId: 'code-memory-gate',
     armPacket: {...armWithoutHash, armPacketHash: codeMemoryLinkArmPacketHashV1(armWithoutHash)},
     candidateExecutable: '/opt/threadnote/bin/threadnote',
-    candidateExecutableSha256: 'a'.repeat(64),
+    candidateExecutableSha256: Effect.pipe('a', EffectString.repeat(64)),
     callerCwd: root,
     project: 'code-memory-fixture',
-    runBindingHash: '4'.repeat(64),
+    runBindingHash: Effect.pipe('4', EffectString.repeat(64)),
     safeExecutablePath: '/usr/bin:/bin',
     taskPacket,
     threadnoteHome: '/private/threadnote-home',

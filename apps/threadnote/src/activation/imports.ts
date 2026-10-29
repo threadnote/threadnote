@@ -1,17 +1,23 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {getAgentAdapter} from '../agent_integration/adapters.js';
 import {readBoundedContainedStableRegularFile} from '@threadnote/graph/inventory/contained_file';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {collectGuidanceImportSourcesAtRoot} from '../guidance/index.js';
 import {credentialScrubberBlocker} from '@threadnote/platform/scrubber';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MAXIMUM_IMPORT_BYTES = 60 * 1024;
 const MAXIMUM_IMPORT_SOURCES = 64;
 const MAXIMUM_SELECTED_SURFACES = 16;
 
-export class ActivationImportError extends Schema.TaggedError<ActivationImportError>()('ActivationImportError', {
-  message: Schema.String,
-}) {}
+export class ActivationImportError extends Schema.TaggedError<ActivationImportError, {readonly brand: unique symbol}>()(
+  'ActivationImportError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export interface ActivationImportOptionsV1 {
   readonly adrPaths: readonly string[];
@@ -75,7 +81,8 @@ const collectActivationImportPreviewEffect = Effect.fn('activation.imports.colle
       ? Effect.succeed([])
       : collectGuidanceImportSourcesAtRoot(adapter, root).pipe(
           Effect.map(sources =>
-            sources.map(
+            EffectArray.map(
+              sources,
               source =>
                 ({...source, kind: 'guidance' as const, surfaceId: adapter.catalog.id}) satisfies ImportObservation,
             ),
@@ -86,10 +93,10 @@ const collectActivationImportPreviewEffect = Effect.fn('activation.imports.colle
   const merged = yield* checked(() => mergeObservations([...guidance.flat(), ...adrs]));
   if (merged.length > MAXIMUM_IMPORT_SOURCES)
     return yield* activationImportFailure(`Activation import accepts at most ${MAXIMUM_IMPORT_SOURCES} sources.`);
-  const totalBytes = merged.reduce((sum, source) => sum + utf8Bytes(source.text), 0);
+  const totalBytes = EffectArray.reduce(merged, 0, (sum, source) => sum + utf8Bytes(source.text));
   if (totalBytes > MAXIMUM_IMPORT_BYTES)
     return yield* activationImportFailure(`Activation import exceeds ${MAXIMUM_IMPORT_BYTES} total bytes.`);
-  const sources = merged.map(source => publicSource(source));
+  const sources = EffectArray.map(merged, source => publicSource(source));
   const candidates = reviewCandidates(merged, sources);
   for (const candidate of candidates) {
     const blocker = credentialScrubberBlocker(candidate.proposedText);
@@ -98,7 +105,7 @@ const collectActivationImportPreviewEffect = Effect.fn('activation.imports.colle
   }
   const sourceSetHash = sha256HexSync(
     JSON.stringify(
-      sources.map(({contentHash, kinds, relativePath, surfaceIds}) => ({
+      EffectArray.map(sources, ({contentHash, kinds, relativePath, surfaceIds}) => ({
         contentHash,
         kinds,
         relativePath,
@@ -128,15 +135,18 @@ export function collectActivationImportPreview(options: ActivationImportOptionsV
 function validateAdrPaths(paths: readonly string[]): readonly string[] {
   if (paths.length > MAXIMUM_IMPORT_SOURCES)
     throw activationImportFailure(`Activation import accepts at most ${MAXIMUM_IMPORT_SOURCES} ADR paths.`);
-  const canonical = paths.map(value => {
+  const canonical = EffectArray.map(paths, value => {
     if (
       value.length === 0 ||
-      value !== value.trim() ||
-      value.includes('\\') ||
-      value.includes('\u0000') ||
-      value.includes('://') ||
-      value.startsWith('/') ||
-      value.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+      value !== Effect2.pipe(value, EffectString.trim) ||
+      Effect2.pipe(value, EffectString.includes('\\')) ||
+      Effect2.pipe(value, EffectString.includes('\u0000')) ||
+      Effect2.pipe(value, EffectString.includes('://')) ||
+      Effect2.pipe(value, EffectString.startsWith('/')) ||
+      EffectArray.some(
+        Effect2.pipe(value, EffectString.split('/')),
+        segment => segment === '' || segment === '.' || segment === '..',
+      )
     )
       throw activationImportFailure('ADR paths must be canonical repository-relative local paths.');
     return value;
@@ -148,12 +158,12 @@ function validateAdrPaths(paths: readonly string[]): readonly string[] {
 function validateSurfaceIds(selectors: readonly string[]) {
   if (selectors.length > MAXIMUM_SELECTED_SURFACES)
     throw activationImportFailure(`Activation import accepts at most ${MAXIMUM_SELECTED_SURFACES} agent surfaces.`);
-  const adapters = selectors.map(selector => {
+  const adapters = EffectArray.map(selectors, selector => {
     const adapter = getAgentAdapter(selector);
     if (!adapter) throw activationImportFailure(`Unknown agent surface: ${selector}`);
     return adapter;
   });
-  const ids = adapters.map(adapter => adapter.catalog.id);
+  const ids = EffectArray.map(adapters, adapter => adapter.catalog.id);
   if (new Set(ids).size !== ids.length)
     throw activationImportFailure('Select each catalog agent surface exactly once.');
   return adapters.sort((left, right) => compareText(left.catalog.id, right.catalog.id));
@@ -166,11 +176,11 @@ const readAdr = Effect.fn('activation.imports.readAdr')(function* (
   relativePath: string,
 ) {
   const target = path.resolve(root, relativePath);
-  if (target === root || !target.startsWith(`${root}${path.sep}`))
+  if (target === root || !Effect2.pipe(target, EffectString.startsWith(`${root}${path.sep}`)))
     return yield* activationImportFailure('ADR path escapes the repository root.');
   const bytes = yield* readBoundedContainedStableRegularFile(fs, path, root, relativePath, MAXIMUM_IMPORT_BYTES);
   const text = yield* checked(() => decodeExactText(bytes, relativePath));
-  const proposedText = text.trim();
+  const proposedText = Effect2.pipe(text, EffectString.trim);
   if (!proposedText) return yield* activationImportFailure(`Selected ADR is empty: ${relativePath}`);
   return {
     contentHash: sha256HexSync(text),
@@ -187,22 +197,23 @@ function mergeObservations(observations: readonly ImportObservation[]): readonly
     entries.push(observation);
     byPath.set(observation.relativePath, entries);
   }
-  return [...byPath.entries()]
-    .sort(([left], [right]) => compareText(left, right))
-    .map(([relativePath, entries]) => {
+  return EffectArray.map(
+    [...byPath.entries()].sort(([left], [right]) => compareText(left, right)),
+    ([relativePath, entries]) => {
       const first = entries[0];
-      if (entries.some(entry => entry.contentHash !== first.contentHash || entry.text !== first.text))
+      if (EffectArray.some(entries, entry => entry.contentHash !== first.contentHash || entry.text !== first.text))
         throw activationImportFailure(`Selected import source is ambiguous or changed while reading: ${relativePath}`);
       return {
         contentHash: first.contentHash,
-        kinds: [...new Set(entries.map(entry => entry.kind))].sort(compareText),
+        kinds: [...new Set(EffectArray.map(entries, entry => entry.kind))].sort(compareText),
         relativePath,
-        surfaceIds: [...new Set(entries.flatMap(entry => (entry.surfaceId ? [entry.surfaceId] : [])))].sort(
-          compareText,
-        ),
+        surfaceIds: [
+          ...new Set(EffectArray.flatMap(entries, entry => (entry.surfaceId ? [entry.surfaceId] : []))),
+        ].sort(compareText),
         text: first.text,
       };
-    });
+    },
+  );
 }
 
 function publicSource(source: MergedImportSource): ActivationImportSourceV1 {
@@ -212,7 +223,10 @@ function publicSource(source: MergedImportSource): ActivationImportSourceV1 {
     relativePath: source.relativePath,
     surfaceIds: source.surfaceIds,
   };
-  return {...metadata, sourceId: `activation-source-${sha256HexSync(JSON.stringify(metadata)).slice(0, 24)}`};
+  return {
+    ...metadata,
+    sourceId: `activation-source-${Effect2.pipe(sha256HexSync(JSON.stringify(metadata)), EffectString.slice(0, 24))}`,
+  };
 }
 
 function reviewCandidates(
@@ -227,16 +241,18 @@ function reviewCandidates(
     group.sourceIds.push(sources[index].sourceId);
     byTextHash.set(contentHash, group);
   }
-  return [...byTextHash.entries()]
-    .sort(([left], [right]) => compareText(left, right))
-    .map(([contentHash, group]) => ({
-      candidateId: `activation-candidate-${sha256HexSync(
-        JSON.stringify({contentHash, sourceIds: group.sourceIds}),
-      ).slice(0, 24)}`,
+  return EffectArray.map(
+    [...byTextHash.entries()].sort(([left], [right]) => compareText(left, right)),
+    ([contentHash, group]) => ({
+      candidateId: `activation-candidate-${Effect2.pipe(
+        sha256HexSync(JSON.stringify({contentHash, sourceIds: group.sourceIds})),
+        EffectString.slice(0, 24),
+      )}`,
       contentHash,
       proposedText: group.text,
       sourceIds: group.sourceIds,
-    }));
+    }),
+  );
 }
 
 function decodeExactText(bytes: Uint8Array, relativePath: string): string {
@@ -248,7 +264,7 @@ function decodeExactText(bytes: Uint8Array, relativePath: string): string {
   }
   const encoded = new TextEncoder().encode(text);
   if (
-    text.includes('\u0000') ||
+    Effect2.pipe(text, EffectString.includes('\u0000')) ||
     bytes.byteLength !== encoded.byteLength ||
     !bytes.every((value, index) => value === encoded[index])
   )

@@ -1,4 +1,5 @@
-import {Effect, FileSystem, Path, Predicate} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Effect, FileSystem, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -7,6 +8,7 @@ import {readThreadnoteIgnoreSources} from '../threadnote_ignore.js';
 import {CodeGraphInventoryError} from './error.js';
 import {CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION, CODE_GRAPH_INVENTORY_EXCLUSION_REASONS} from './policy.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
+import {CodeGraphWorkspaceSchema} from '../languages/types.js';
 import type {CodeGraphWorkspace} from '../languages/types.js';
 import {
   CODE_GRAPH_INVENTORY_REUSE_RECEIPT_VERSION,
@@ -20,6 +22,8 @@ import {compareCodeUnits} from '../ordering.js';
 import type {CodeGraphAttributionContextFile} from '../store/models.js';
 import {isRepositoryFactAttributionContextPath} from '../extractor_context.js';
 import {createCachedCodeGraphContractHash} from '../cached_contract_hash.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ATTRIBUTION_CONTEXT_FILES_MAXIMUM = 10_000;
 const ATTRIBUTION_CONTEXT_BYTES_MAXIMUM = 16 * 1_048_576;
@@ -75,7 +79,10 @@ export const readCodeGraphInventoryReuseEnvironment = Effect.fn('codeGraph.readI
     ],
     {concurrency: 2},
   );
-  if (gitInfoExcludeResult.exitCode !== 0 || gitInfoExcludeResult.stdout.trim().length === 0) {
+  if (
+    gitInfoExcludeResult.exitCode !== 0 ||
+    Effect2.pipe(gitInfoExcludeResult.stdout, EffectString.trim).length === 0
+  ) {
     return yield* CodeGraphInventoryError.make({message: 'Git exclude policy path is unavailable.'});
   }
   if (globalExcludeResult.exitCode !== 0 && globalExcludeResult.exitCode !== 1) {
@@ -84,7 +91,7 @@ export const readCodeGraphInventoryReuseEnvironment = Effect.fn('codeGraph.readI
   const ignoreSources = yield* readThreadnoteIgnoreSources(fs, path, identity.repoRoot);
   const threadnoteIgnore = ignoreSources.committed;
   const threadnoteIgnoreLocal = ignoreSources.local;
-  const observedGitInfoExcludePath = gitInfoExcludeResult.stdout.trim();
+  const observedGitInfoExcludePath = Effect2.pipe(gitInfoExcludeResult.stdout, EffectString.trim);
   const gitInfoExcludePath = path.isAbsolute(observedGitInfoExcludePath)
     ? observedGitInfoExcludePath
     : path.resolve(identity.repoRoot, observedGitInfoExcludePath);
@@ -97,7 +104,9 @@ export const readCodeGraphInventoryReuseEnvironment = Effect.fn('codeGraph.readI
   );
   // An explicitly empty config disables global excludes; only an absent key uses Git's default.
   const globalExcludePath =
-    globalExcludeResult.exitCode === 1 ? defaultGlobalExcludePath : globalExcludeResult.stdout.trim();
+    globalExcludeResult.exitCode === 1
+      ? defaultGlobalExcludePath
+      : Effect2.pipe(globalExcludeResult.stdout, EffectString.trim);
   const [gitInfoExclude, globalExclude] = yield* Effect.all(
     [
       readOptionalText(fs, gitInfoExcludePath),
@@ -112,13 +121,16 @@ export const readCodeGraphInventoryReuseEnvironment = Effect.fn('codeGraph.readI
   );
   return {
     fingerprint: sha256HexSync(
-      [
-        'code-graph-inventory-environment-v1',
-        `threadnote:${sha256HexSync(threadnoteIgnore)}`,
-        `threadnote-local:${sha256HexSync(threadnoteIgnoreLocal)}`,
-        `git-info-exclude:${sha256HexSync(gitInfoExclude)}`,
-        `global-exclude:${sha256HexSync(globalExclude)}`,
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'code-graph-inventory-environment-v1',
+          `threadnote:${sha256HexSync(threadnoteIgnore)}`,
+          `threadnote-local:${sha256HexSync(threadnoteIgnoreLocal)}`,
+          `git-info-exclude:${sha256HexSync(gitInfoExclude)}`,
+          `global-exclude:${sha256HexSync(globalExclude)}`,
+        ],
+        '\n',
+      ),
     ),
     threadnoteIgnore,
     threadnoteIgnoreLocal,
@@ -129,14 +141,14 @@ export function codeGraphInventoryReuseContract(
   languagePacks: CodeGraphLanguagePackRegistryShape,
   includeOpaqueCorpusAssets: boolean,
 ): string {
-  const packs = languagePacks.packs
-    .map(pack => ({
-      files: pack.files
-        .map(matcher => `${matcher.kind}:${matcher.value.toLowerCase()}:${matcher.language}:${matcher.role}`)
-        .sort(),
-      id: pack.id,
-    }))
-    .sort((left, right) => left.id.localeCompare(right.id));
+  const packs = EffectArray.map(languagePacks.packs, pack => ({
+    files: EffectArray.map(
+      pack.files,
+      matcher =>
+        `${matcher.kind}:${Effect2.pipe(matcher.value, EffectString.toLowerCase)}:${matcher.language}:${matcher.role}`,
+    ).sort(),
+    id: pack.id,
+  })).sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id)));
   const hashContract = includeOpaqueCorpusAssets ? opaqueInventoryContractHash : inventoryContractHash;
   return hashContract(
     languagePacks,
@@ -194,7 +206,7 @@ export function decodeCodeGraphInventoryReuseReceipt(value: unknown): CodeGraphI
 }
 
 function normalizedAttributionFiles(value: unknown): readonly CodeGraphAttributionContextFile[] | undefined {
-  if (!Array.isArray(value) || value.length > ATTRIBUTION_CONTEXT_FILES_MAXIMUM) return undefined;
+  if (!EffectArray.isArray(value) || value.length > ATTRIBUTION_CONTEXT_FILES_MAXIMUM) return undefined;
   const files: CodeGraphAttributionContextFile[] = [];
   const paths = new Set<string>();
   let contentBytes = 0;
@@ -239,10 +251,9 @@ function normalizedAttributionFiles(value: unknown): readonly CodeGraphAttributi
 }
 
 function normalizedWorkspace(value: unknown): CodeGraphWorkspace | undefined {
-  if (!Predicate.isObject(value) || !isSha256(value.fingerprint) || !Array.isArray(value.projects)) return undefined;
-  if (!Array.isArray(value.diagnostics) || !Array.isArray(value.workspaces)) return undefined;
+  if (!Schema.is(CodeGraphWorkspaceSchema)(value) || !isSha256(value.fingerprint)) return undefined;
   try {
-    return mergeCodeGraphWorkspaces([value as unknown as CodeGraphWorkspace]);
+    return mergeCodeGraphWorkspaces([value]);
   } catch {
     return undefined;
   }
@@ -253,7 +264,7 @@ function isPolicyExclusionSummary(value: unknown): value is CodeGraphInventoryPo
   if (!isNonNegativeSafeInteger(value.bytes) || !isNonNegativeSafeInteger(value.files)) return false;
   if (
     value.policyVersion !== CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION ||
-    !Array.isArray(value.reasons) ||
+    !EffectArray.isArray(value.reasons) ||
     value.reasons.length !== CODE_GRAPH_INVENTORY_EXCLUSION_REASONS.length
   ) {
     return false;
@@ -261,7 +272,7 @@ function isPolicyExclusionSummary(value: unknown): value is CodeGraphInventoryPo
   const reasons = new Set<string>();
   let bytes = 0;
   let files = 0;
-  const valid = value.reasons.every(reason => {
+  const valid = EffectArray.every(value.reasons, reason => {
     if (!Predicate.isObject(reason)) return false;
     const bytesValue = reason.bytes;
     const filesValue = reason.files;
@@ -302,8 +313,8 @@ function isCodeGraphInventoryExclusionReason(
 
 function isBoundedStringArray(value: unknown, maxItems: number, maxLength: number): value is readonly string[] {
   return (
-    Array.isArray(value) &&
+    EffectArray.isArray(value) &&
     value.length <= maxItems &&
-    value.every(item => typeof item === 'string' && item.length <= maxLength)
+    EffectArray.every(value, item => typeof item === 'string' && item.length <= maxLength)
   );
 }

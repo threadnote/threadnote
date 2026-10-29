@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {describe, expect, it} from 'vitest';
@@ -57,6 +58,9 @@ import {
   type GraphQueryVisualization,
 } from '@threadnote/manager/graph';
 import {GraphSummary} from '@threadnote/manager/graph/panels';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('manager graph focus', () => {
   it('carries the complete selected graph identity into administration actions', () => {
@@ -67,24 +71,24 @@ describe('manager graph focus', () => {
       }),
     ).toEqual({checkoutId: 'checkout', repositoryId: 'repository', worktreeId: 'worktree'});
     expect(
-      graphViewRemovalTarget('a'.repeat(64), {
-        snapshot: {id: `cgsn_${'c'.repeat(40)}-direct`},
-        worktreeId: 'b'.repeat(64),
+      graphViewRemovalTarget(Effect.pipe('a', EffectString.repeat(64)), {
+        snapshot: {id: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}-direct`},
+        worktreeId: Effect.pipe('b', EffectString.repeat(64)),
       }),
     ).toEqual({
-      checkoutId: 'a'.repeat(64),
-      expectedSnapshotId: `cgsn_${'c'.repeat(40)}-direct`,
-      worktreeId: 'b'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
+      expectedSnapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}-direct`,
+      worktreeId: Effect.pipe('b', EffectString.repeat(64)),
     });
   });
 
   it('distinguishes stored snapshots from active worktree views without requiring a local folder', () => {
     const neverResolves = () => new Promise<never>(() => undefined);
-    const checkoutId = 'a'.repeat(64);
-    const worktreeId = 'b'.repeat(64);
-    const snapshotId = `cgsn_${'c'.repeat(40)}-direct`;
-    const scopeId = `code-graph-scope:${'d'.repeat(64)}`;
-    const docsScopeId = `code-graph-scope:${'e'.repeat(64)}`;
+    const checkoutId = Effect.pipe('a', EffectString.repeat(64));
+    const worktreeId = Effect.pipe('b', EffectString.repeat(64));
+    const snapshotId = `cgsn_${Effect.pipe('c', EffectString.repeat(40))}-direct`;
+    const scopeId = `code-graph-scope:${Effect.pipe('d', EffectString.repeat(64))}`;
+    const docsScopeId = `code-graph-scope:${Effect.pipe('e', EffectString.repeat(64))}`;
     const markup = renderToStaticMarkup(
       createElement(GraphWorkspace, {
         administration: {
@@ -97,18 +101,46 @@ describe('manager graph focus', () => {
                   identity: {
                     checkoutId,
                     commit: 'abcdef01',
-                    repositoryId: 'd'.repeat(64),
+                    repositoryId: Effect.pipe('d', EffectString.repeat(64)),
                     scopeId: docsScopeId,
                     worktreeId,
                   },
                   phase: 'resolving',
+                  schemaVersion: 1,
+                  owner: {processId: 42, runtime: 'bun', runtimeVersion: 'test'},
                 },
               ],
               checkoutId,
-              health: {integrity: 'migration-pending', readySnapshots: 3},
+              health: {
+                activeSnapshots: 0,
+                buildingSnapshots: 0,
+                cachedFileBlobs: 0,
+                failedSnapshots: 0,
+                foreignKeyViolations: 0,
+                integrity: 'migration-pending',
+                readySnapshots: 3,
+                snapshotFileCitationBaseIndexes: 'current',
+                snapshotFileCitationSchema: 'current',
+              },
               healthState: 'checked',
               issues: [],
-              storage: {state: 'available', totalBytes: 0},
+              lifecycle: [],
+              storage: {
+                checkoutId,
+                databaseBytes: 0,
+                filesystemBytes: 0,
+                journalBytes: 0,
+                pageStorage: {
+                  reason: 'database-busy-or-unreadable',
+                  state: 'unavailable',
+                  threshold: {minimumReclaimableBytes: 1, minimumReclaimableRatio: 0.1},
+                },
+                shmBytes: 0,
+                state: 'available',
+                totalBytes: 0,
+                temporaryBytes: 0,
+                walBytes: 0,
+              },
               views: [
                 {
                   localAssociation: {available: false, state: 'legacy-unknown'},
@@ -117,8 +149,19 @@ describe('manager graph focus', () => {
                   model: 'workspace',
                   projectCount: 0,
                   projectsTruncated: false,
-                  repository: {displayName: 'acme/platform', repositoryId: 'd'.repeat(64)},
-                  snapshot: {edgeCount: 0, fileCount: 0, id: snapshotId, symbolCount: 0},
+                  repository: {displayName: 'acme/platform', repositoryId: Effect.pipe('d', EffectString.repeat(64))},
+                  snapshot: {
+                    commit: 'abcdef01',
+                    dirty: false,
+                    edgeCount: 0,
+                    extractorSet: 'fixture',
+                    fileCount: 0,
+                    id: snapshotId,
+                    repositoryId: Effect.pipe('d', EffectString.repeat(64)),
+                    state: 'ready',
+                    symbolCount: 0,
+                    worktreeId,
+                  },
                   viewScopeId: scopeId,
                   viewWorktreeId: worktreeId,
                   workspaceCount: 0,
@@ -136,12 +179,18 @@ describe('manager graph focus', () => {
                   model: 'workspace',
                   projectCount: 0,
                   projectsTruncated: false,
-                  repository: {displayName: 'acme/platform', repositoryId: 'd'.repeat(64)},
+                  repository: {displayName: 'acme/platform', repositoryId: Effect.pipe('d', EffectString.repeat(64))},
                   snapshot: {
+                    commit: 'abcdef01',
+                    dirty: false,
                     edgeCount: 0,
+                    extractorSet: 'fixture',
                     fileCount: 0,
-                    id: `cgsn_${'e'.repeat(40)}-direct`,
+                    id: `cgsn_${Effect.pipe('e', EffectString.repeat(40))}-direct`,
+                    repositoryId: Effect.pipe('d', EffectString.repeat(64)),
+                    state: 'ready',
                     symbolCount: 0,
+                    worktreeId,
                   },
                   viewScopeId: docsScopeId,
                   viewWorktreeId: worktreeId,
@@ -155,10 +204,24 @@ describe('manager graph focus', () => {
           generatedAt: '2026-08-08T12:00:00.000Z',
           mode: {analyze: false, deep: false},
           obsoleteStores: {bytes: 0, checkouts: [], fileCount: 0, unsafeEntryCount: 0},
-          summary: {databaseCount: 1, readySnapshotCount: 3, viewCount: 2},
+          summary: {
+            activeBuildCount: 1,
+            analysisCompleteCount: 0,
+            analysisPartialCount: 0,
+            databaseCount: 1,
+            deferredDatabaseCount: 0,
+            healthyDatabaseCount: 0,
+            migrationPendingDatabaseCount: 1,
+            readySnapshotCount: 3,
+            totalStorageBytes: 0,
+            unhealthyDatabaseCount: 0,
+            unreadableDatabaseCount: 0,
+            viewCount: 2,
+            waiterCount: 0,
+          },
           type: 'code-graph-diagnostics',
           version: 2,
-        } as never,
+        },
         catalog: {
           builds: [],
           configuredProjects: [
@@ -189,7 +252,13 @@ describe('manager graph focus', () => {
     expect(markup).toContain('Snapshot and view counts can differ');
     expect(markup).toContain('<strong>acme/platform: mobile</strong>');
     expect(markup).not.toContain('Active view bbbbbbbb');
-    expect(markup.match(/aria-label="Remove active worktree view bbbbbbbb"/g)).toHaveLength(2);
+    expect(
+      Effect.pipe(
+        markup,
+        EffectString.match(/aria-label="Remove active worktree view bbbbbbbb"/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(2);
     expect(markup).toContain(
       '<p class="graph-database-job">acme/platform: docs · folder ~/docs · active · resolving · active</p>',
     );
@@ -208,11 +277,37 @@ describe('manager graph focus', () => {
           databases: [
             {
               builds: [],
-              checkoutId: 'a'.repeat(64),
-              health: {integrity: 'ok', readySnapshots: 0},
+              checkoutId: Effect.pipe('a', EffectString.repeat(64)),
+              health: {
+                activeSnapshots: 0,
+                buildingSnapshots: 0,
+                cachedFileBlobs: 0,
+                failedSnapshots: 0,
+                foreignKeyViolations: 0,
+                integrity: 'ok',
+                readySnapshots: 0,
+                snapshotFileCitationBaseIndexes: 'current',
+                snapshotFileCitationSchema: 'current',
+              },
               healthState: 'checked',
               issues: [],
-              storage: {state: 'available', totalBytes: 12_000},
+              lifecycle: [],
+              storage: {
+                checkoutId: Effect.pipe('a', EffectString.repeat(64)),
+                databaseBytes: 12_000,
+                filesystemBytes: 12_000,
+                journalBytes: 0,
+                pageStorage: {
+                  reason: 'database-busy-or-unreadable',
+                  state: 'unavailable',
+                  threshold: {minimumReclaimableBytes: 1, minimumReclaimableRatio: 0.1},
+                },
+                shmBytes: 0,
+                state: 'available',
+                totalBytes: 12_000,
+                temporaryBytes: 0,
+                walBytes: 0,
+              },
               views: [],
               waiters: [],
             },
@@ -220,10 +315,24 @@ describe('manager graph focus', () => {
           generatedAt: '2026-08-12T12:00:00.000Z',
           mode: {analyze: false, deep: false},
           obsoleteStores: {bytes: 0, checkouts: [], fileCount: 0, unsafeEntryCount: 0},
-          summary: {databaseCount: 1, readySnapshotCount: 0, viewCount: 0},
+          summary: {
+            activeBuildCount: 0,
+            analysisCompleteCount: 0,
+            analysisPartialCount: 0,
+            databaseCount: 1,
+            deferredDatabaseCount: 0,
+            healthyDatabaseCount: 1,
+            migrationPendingDatabaseCount: 0,
+            readySnapshotCount: 0,
+            totalStorageBytes: 12_000,
+            unhealthyDatabaseCount: 0,
+            unreadableDatabaseCount: 0,
+            viewCount: 0,
+            waiterCount: 0,
+          },
           type: 'code-graph-diagnostics',
           version: 2,
-        } as never,
+        },
         loadAnalysis: neverResolves,
         loadCatalogPage: neverResolves,
         loadGraph: neverResolves,
@@ -315,7 +424,7 @@ describe('manager graph focus', () => {
             },
           ],
           diagnostics: [],
-          manifestRevision: 'a'.repeat(64),
+          manifestRevision: Effect.pipe('a', EffectString.repeat(64)),
           repositories: [],
           waiterCount: 0,
           waiters: [],
@@ -347,7 +456,7 @@ describe('manager graph focus', () => {
           builds: [],
           configuredProjects: [],
           diagnostics: [],
-          manifestRevision: 'a'.repeat(64),
+          manifestRevision: Effect.pipe('a', EffectString.repeat(64)),
           repositories: [],
           waiterCount: 0,
           waiters: [],
@@ -397,12 +506,18 @@ describe('manager graph focus', () => {
       },
     };
 
-    expect(orderGraphBuildStatuses([earlier, later]).map(build => build.buildId)).toEqual(['build-a', 'build-z']);
+    expect(EffectArray.map(orderGraphBuildStatuses([earlier, later]), build => build.buildId)).toEqual([
+      'build-a',
+      'build-z',
+    ]);
     expect(
-      orderGraphBuildStatuses([
-        {...earlier, managerContext: undefined},
-        {...later, managerContext: undefined},
-      ]).map(build => build.buildId),
+      EffectArray.map(
+        orderGraphBuildStatuses([
+          {...earlier, managerContext: undefined},
+          {...later, managerContext: undefined},
+        ]),
+        build => build.buildId,
+      ),
     ).toEqual(['build-a', 'build-z']);
   });
 
@@ -414,11 +529,11 @@ describe('manager graph focus', () => {
           builds: [],
           diagnostics: [],
           maintenance: {
-            checkoutId: 'a'.repeat(64),
+            checkoutId: Effect.pipe('a', EffectString.repeat(64)),
             completed: 3,
             operation: 'selected-snapshot-purge',
             phase: 'verifying-graph',
-            snapshotId: `cgsn_${'b'.repeat(40)}-direct`,
+            snapshotId: `cgsn_${Effect.pipe('b', EffectString.repeat(40))}-direct`,
             startedAt: '2026-08-09T12:00:00.000Z',
             total: 5,
             updatedAt: '2026-08-09T12:00:01.000Z',
@@ -492,7 +607,7 @@ describe('manager graph focus', () => {
     const repository = {
       ...baseRepository,
       displayName: 'example/repository',
-      views: baseRepository.views.map(view => ({
+      views: EffectArray.map(baseRepository.views, view => ({
         ...view,
         localAssociation: {
           available: true,
@@ -633,7 +748,7 @@ describe('manager graph focus', () => {
     const baseRepository = repositoryGroup('repository', ['worktree'], 'worktree');
     const repository = {
       ...baseRepository,
-      views: baseRepository.views.map(view => ({
+      views: EffectArray.map(baseRepository.views, view => ({
         ...view,
         checkoutId: 'checkout',
         snapshot: {...view.snapshot, commit: '1111111111111111111111111111111111111111'},
@@ -668,7 +783,7 @@ describe('manager graph focus', () => {
     const otherScopeWaiter = {
       ...waiter,
       buildId: 'other-scope-waiter',
-      identity: {...waiter.identity, scopeId: `code-graph-scope:${'a'.repeat(64)}`},
+      identity: {...waiter.identity, scopeId: `code-graph-scope:${Effect.pipe('a', EffectString.repeat(64))}`},
     };
     expect(graphBuildConcurrencyState(build, [waiter, otherScopeWaiter], [repository]).queuedRequests).toBe(1);
 
@@ -725,11 +840,11 @@ describe('manager graph focus', () => {
       graphStatusPollDelay([], undefined, false, {startedAt: '2026-08-12T00:00:00.000Z', state: 'inspecting'}),
     ).toBe(1_000);
     const maintenance = {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
       completed: 3,
       operation: 'selected-snapshot-purge' as const,
       phase: 'verifying-graph' as const,
-      snapshotId: `cgsn_${'b'.repeat(40)}-direct`,
+      snapshotId: `cgsn_${Effect.pipe('b', EffectString.repeat(40))}-direct`,
       total: 5,
     };
     expect(graphStatusPollDelay([], maintenance)).toBe(1_000);
@@ -804,7 +919,7 @@ describe('manager graph focus', () => {
 
     const merged = mergeGraphCatalogStatus(undefined, {
       automaticCompaction: {
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect.pipe('a', EffectString.repeat(64)),
         opportunityBytes: 19.6 * 1024 ** 3,
         startedAt: '2026-08-12T00:00:00.000Z',
         state: 'running',
@@ -860,11 +975,11 @@ describe('manager graph focus', () => {
     expect(markup).not.toContain('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 
     const previousMaintenance = {
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
       completed: 3,
       operation: 'selected-snapshot-purge' as const,
       phase: 'verifying-graph' as const,
-      snapshotId: `cgsn_${'b'.repeat(40)}-direct`,
+      snapshotId: `cgsn_${Effect.pipe('b', EffectString.repeat(40))}-direct`,
       total: 5,
     };
     const configuredProject = {
@@ -914,8 +1029,8 @@ describe('manager graph focus', () => {
     expect(selected.jobs).toHaveLength(2);
     expect(selected.total).toBe(2);
     expect(selected.hiddenCount).toBe(0);
-    expect(selected.jobs.map(job => job.state)).not.toContain('completed');
-    expect(selected.jobs.map(job => job.buildId)).not.toContain('expired-failed');
+    expect(EffectArray.map(selected.jobs, job => job.state)).not.toContain('completed');
+    expect(EffectArray.map(selected.jobs, job => job.buildId)).not.toContain('expired-failed');
     expect(selected.jobs[0]?.buildId).toBe('running');
 
     const neverResolves = () => new Promise<never>(() => undefined);
@@ -931,7 +1046,13 @@ describe('manager graph focus', () => {
         onRefresh: () => undefined,
       }),
     );
-    expect(markup.match(/class="graph-build-card/g)).toHaveLength(2);
+    expect(
+      Effect.pipe(
+        markup,
+        EffectString.match(/class="graph-build-card/g),
+        Effect.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(2);
     expect(markup).not.toContain('older build notices are summarized.');
     expect(markup).toContain('aria-label="2 status notices"');
   });
@@ -942,7 +1063,7 @@ describe('manager graph focus', () => {
     const otherScopeWaiter = {
       ...waiter,
       buildId: 'other-scope-waiter',
-      identity: {...waiter.identity, scopeId: `code-graph-scope:${'a'.repeat(64)}`},
+      identity: {...waiter.identity, scopeId: `code-graph-scope:${Effect.pipe('a', EffectString.repeat(64))}`},
     };
     const selection = graphAdministrationJobSelection([owner], [waiter]);
 
@@ -1048,7 +1169,7 @@ describe('manager graph focus', () => {
     expect(graphDiagnosticsRequiresCatalogRefresh('revision-after-removal', 'revision-after-removal')).toBe(false);
     expect(
       graphDiagnosticsRequiresCatalogRefresh('revision-before-removal', 'revision-after-removal', {
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect.pipe('a', EffectString.repeat(64)),
         completed: 0,
         operation: 'graph-maintenance',
         phase: 'working',
@@ -1083,34 +1204,74 @@ describe('manager graph focus', () => {
   });
 
   it('uses configured project names for scoped repository labels with a bounded identity fallback', () => {
-    const scopeId = `code-graph-scope:${'a'.repeat(64)}`;
+    const scopeId = `code-graph-scope:${Effect.pipe('a', EffectString.repeat(64))}`;
     expect(graphRepositoryScopeLabel('acme/platform', scopeId, [{name: 'mobile', scopeId}])).toBe(
       'acme/platform: mobile',
     );
     expect(graphRepositoryScopeLabel('acme/platform', scopeId)).toBe('acme/platform: scope aaaaaaaa');
     expect(graphRepositoryScopeLabel('acme/platform', undefined)).toBe('acme/platform');
-    expect(
-      graphRepositoryGroupScopeId({
-        views: [{scopeId}] as never,
-        viewsTruncated: false,
-      }),
-    ).toBe(scopeId);
-    expect(
-      graphRepositoryGroupScopeId({
-        views: [{scopeId}] as never,
-        viewsTruncated: true,
-      }),
-    ).toBeUndefined();
+    const group = repositoryGroup('acme/platform', ['view-a'], 'view-a');
+    const scopedGroup = {...group, views: EffectArray.map(group.views, view => ({...view, scopeId}))};
+    expect(graphRepositoryGroupScopeId(scopedGroup)).toBe(scopeId);
+    expect(graphRepositoryGroupScopeId({...scopedGroup, viewsTruncated: true})).toBeUndefined();
   });
 
   it('matches administration jobs to the exact worktree scope', () => {
-    const worktreeId = 'b'.repeat(64);
-    const firstScope = `code-graph-scope:${'1'.repeat(64)}`;
-    const secondScope = `code-graph-scope:${'2'.repeat(64)}`;
+    const worktreeId = Effect.pipe('b', EffectString.repeat(64));
+    const firstScope = `code-graph-scope:${Effect.pipe('1', EffectString.repeat(64))}`;
+    const secondScope = `code-graph-scope:${Effect.pipe('2', EffectString.repeat(64))}`;
     const views = [
-      {viewScopeId: firstScope, viewWorktreeId: worktreeId},
-      {viewScopeId: secondScope, viewWorktreeId: worktreeId},
-    ] as never;
+      {
+        localAssociation: {available: false, state: 'legacy-unknown' as const},
+        managementAvailable: false,
+        metrics: 'complete' as const,
+        model: 'workspace' as const,
+        projectCount: 0,
+        projectsTruncated: false,
+        repository: {displayName: 'repo', repositoryId: 'repository'},
+        snapshot: {
+          commit: 'commit',
+          dirty: false,
+          edgeCount: 0,
+          extractorSet: 'test',
+          fileCount: 0,
+          id: 'snapshot-a',
+          repositoryId: 'repository',
+          state: 'ready' as const,
+          symbolCount: 0,
+          worktreeId,
+        },
+        viewScopeId: firstScope,
+        viewWorktreeId: worktreeId,
+        workspaceCount: 0,
+        workspacesTruncated: false,
+      },
+      {
+        localAssociation: {available: false, state: 'legacy-unknown' as const},
+        managementAvailable: false,
+        metrics: 'complete' as const,
+        model: 'workspace' as const,
+        projectCount: 0,
+        projectsTruncated: false,
+        repository: {displayName: 'repo', repositoryId: 'repository'},
+        snapshot: {
+          commit: 'commit',
+          dirty: false,
+          edgeCount: 0,
+          extractorSet: 'test',
+          fileCount: 0,
+          id: 'snapshot-b',
+          repositoryId: 'repository',
+          state: 'ready' as const,
+          symbolCount: 0,
+          worktreeId,
+        },
+        viewScopeId: secondScope,
+        viewWorktreeId: worktreeId,
+        workspaceCount: 0,
+        workspacesTruncated: false,
+      },
+    ];
     expect(
       graphAdministrationJobView(views, {
         identity: {
@@ -1128,7 +1289,7 @@ describe('manager graph focus', () => {
     const baseRepository = repositoryGroup('repo-a', ['view-a'], 'view-a');
     const repository = {
       ...baseRepository,
-      views: baseRepository.views.map(view => ({
+      views: EffectArray.map(baseRepository.views, view => ({
         ...view,
         localAssociation: {
           available: true,
@@ -1158,7 +1319,7 @@ describe('manager graph focus', () => {
       repositoryLabel: 'repo-a',
       worktreeLabel: 'view-a',
     });
-    const scopeId = `code-graph-scope:${'a'.repeat(64)}`;
+    const scopeId = `code-graph-scope:${Effect.pipe('a', EffectString.repeat(64))}`;
     expect(
       graphBuildTarget(
         {...build, identity: {...build.identity, scopeId}},
@@ -1184,12 +1345,12 @@ describe('manager graph focus', () => {
 
   it('shows graph scope names in first-build progress and indexed snapshot selectors', () => {
     const neverResolves = () => new Promise<never>(() => undefined);
-    const docsScopeId = `code-graph-scope:${'a'.repeat(64)}`;
-    const mobileScopeId = `code-graph-scope:${'b'.repeat(64)}`;
+    const docsScopeId = `code-graph-scope:${Effect.pipe('a', EffectString.repeat(64))}`;
+    const mobileScopeId = `code-graph-scope:${Effect.pipe('b', EffectString.repeat(64))}`;
     const baseRepository = repositoryGroup('acme/platform', ['docs-view', 'mobile-view'], 'docs-view');
     const repository = {
       ...baseRepository,
-      views: baseRepository.views.map((view, index) => ({
+      views: EffectArray.map(baseRepository.views, (view, index) => ({
         ...view,
         checkoutId: 'checkout',
         scopeId: index === 0 ? docsScopeId : mobileScopeId,
@@ -1258,7 +1419,7 @@ describe('manager graph focus', () => {
     expect(managerGraphQueryCandidate('   ')).toBeUndefined();
     expect(managerGraphDebouncedQueryCandidate('ab')).toBeUndefined();
     expect(managerGraphDebouncedQueryCandidate(' api ')).toBe('api');
-    expect(managerGraphQueryCandidate('x'.repeat(513))).toBeUndefined();
+    expect(managerGraphQueryCandidate(Effect.pipe('x', EffectString.repeat(513)))).toBeUndefined();
   });
 
   it('rejects cancelled or stale code-query responses across rapid input and snapshot changes', () => {
@@ -1438,14 +1599,18 @@ describe('manager graph focus', () => {
       edge('unrelated', 'other', 'another', 'calls'),
     ];
 
-    expect(graphDisplayEdges(edges, 'selected', 'incoming', 'all').map(item => item.id)).toEqual(['incoming-call']);
-    expect(graphDisplayEdges(edges, 'selected', 'outgoing', 'calls').map(item => item.id)).toEqual(['outgoing-call']);
-    expect(graphDisplayEdges(edges, 'selected', 'neighbors', 'all').map(item => item.id)).toEqual([
+    expect(EffectArray.map(graphDisplayEdges(edges, 'selected', 'incoming', 'all'), item => item.id)).toEqual([
+      'incoming-call',
+    ]);
+    expect(EffectArray.map(graphDisplayEdges(edges, 'selected', 'outgoing', 'calls'), item => item.id)).toEqual([
+      'outgoing-call',
+    ]);
+    expect(EffectArray.map(graphDisplayEdges(edges, 'selected', 'neighbors', 'all'), item => item.id)).toEqual([
       'incoming-call',
       'outgoing-call',
       'outgoing-import',
     ]);
-    expect(graphDisplayEdges(edges, undefined, 'neighbors', 'imports').map(item => item.id)).toEqual([
+    expect(EffectArray.map(graphDisplayEdges(edges, undefined, 'neighbors', 'imports'), item => item.id)).toEqual([
       'outgoing-import',
     ]);
   });
@@ -1458,18 +1623,18 @@ describe('manager graph focus', () => {
       edge('a-d-call', 'a', 'd', 'calls'),
     ];
 
-    expect(Object.fromEntries(graphNodeSizeValues(edges, 'connections'))).toEqual({
+    expect(EffectRecord.fromEntries(graphNodeSizeValues(edges, 'connections'))).toEqual({
       a: 3,
       b: 1,
       c: 1,
       d: 1,
     });
-    expect(Object.fromEntries(graphNodeSizeValues(edges, 'incoming'))).toEqual({
+    expect(EffectRecord.fromEntries(graphNodeSizeValues(edges, 'incoming'))).toEqual({
       a: 1,
       b: 1,
       d: 1,
     });
-    expect(Object.fromEntries(graphNodeSizeValues(edges, 'outgoing'))).toEqual({
+    expect(EffectRecord.fromEntries(graphNodeSizeValues(edges, 'outgoing'))).toEqual({
       a: 2,
       c: 1,
     });
@@ -1486,7 +1651,7 @@ describe('manager graph focus', () => {
     expect(
       graphOverviewSizeLabel({
         ...overview,
-        nodes: overview.nodes.map(({symbolCount: _symbolCount, ...node}) => node),
+        nodes: EffectArray.map(overview.nodes, ({symbolCount: _symbolCount, ...node}) => node),
         repository: {...overview.repository, metrics: 'deferred'},
       }),
     ).toBe('Visible relationship degree');
@@ -1524,8 +1689,20 @@ describe('manager graph focus', () => {
       views: [{...continued.views[0], projects: [project], projectsTruncated: false}],
     };
     const merged = mergeGraphRepositoryGroups([{...initial, viewsTruncated: true}], [continuation]);
-    expect(merged[0]?.views.map(view => view.id)).toEqual(['view-00', 'view-01']);
-    expect(merged[0]?.views.find(view => view.id === 'view-01')?.projects).toContainEqual(project);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(merged[0]?.views), __effectOptionalArrayReceiver =>
+          EffectArray.map(__effectOptionalArrayReceiver, view => view.id),
+        ),
+      ),
+    ).toEqual(['view-00', 'view-01']);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.flatMap(EffectOption.fromNullishOr(merged[0]?.views), __effectOptionalArrayReceiver =>
+          EffectArray.findFirst(__effectOptionalArrayReceiver, view => view.id === 'view-01'),
+        ),
+      )?.projects,
+    ).toContainEqual(project);
     expect(merged[0]?.viewsTruncated).toBe(true);
 
     const refreshed = repositoryGroup('repo', ['view-00'], 'view-00');
@@ -1640,7 +1817,7 @@ describe('manager graph focus', () => {
     const matchingView = {
       ...group.views[1],
       label: 'feature/mobile-auth',
-      scopeId: `code-graph-scope:${'a'.repeat(64)}`,
+      scopeId: `code-graph-scope:${Effect.pipe('a', EffectString.repeat(64))}`,
       localAssociation: {
         available: true,
         displayPath: '~/src/mobile-auth',
@@ -1651,7 +1828,7 @@ describe('manager graph focus', () => {
 
     const configuredProjects = [
       {name: 'mobile', scopeId: matchingView.scopeId},
-      {name: 'mobile-admin', scopeId: `code-graph-scope:${'b'.repeat(64)}`},
+      {name: 'mobile-admin', scopeId: `code-graph-scope:${Effect.pipe('b', EffectString.repeat(64))}`},
       {name: 'full-repository'},
     ];
     const result = graphCatalogSearchOptions(currentView, [{...group, views: [matchingView]}], configuredProjects);
@@ -1674,15 +1851,15 @@ describe('manager graph focus', () => {
     ]);
     expect(graphConfiguredProjectScopeIds('MOBILE', configuredProjects)).toEqual([
       matchingView.scopeId,
-      `code-graph-scope:${'b'.repeat(64)}`,
+      `code-graph-scope:${Effect.pipe('b', EffectString.repeat(64))}`,
     ]);
     expect(graphConfiguredProjectScopeIds('full', configuredProjects)).toEqual([]);
     const broadMatches = Array.from({length: 40}, (_, index) => ({
-      name: `mobile-${index.toString().padStart(2, '0')}`,
-      scopeId: `code-graph-scope:${index.toString(16).padStart(64, '0')}`,
+      name: `mobile-${Effect.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
+      scopeId: `code-graph-scope:${Effect.pipe(index.toString(16), EffectString.padStart(64, '0'))}`,
     }));
     expect(graphConfiguredProjectScopeIds('mobile', broadMatches)).toEqual(
-      broadMatches.slice(0, 32).map(project => project.scopeId),
+      EffectArray.map(broadMatches.slice(0, 32), project => project.scopeId),
     );
   });
 
@@ -1697,19 +1874,19 @@ describe('manager graph focus', () => {
         y: 2,
       })),
     ];
-    const edges = nodes
-      .slice(1)
-      .flatMap((node, index) => [
-        edge(`edge-${index}`, 'selected', node.id, 'calls'),
-        edge(`duplicate-${index}`, 'selected', node.id, 'imports'),
-      ]);
-    const labelSizes = new Map(nodes.map(node => [node.id, {height: node.id === 'selected' ? 24 : 15, width: 170}]));
+    const edges = EffectArray.flatMap(nodes.slice(1), (node, index) => [
+      edge(`edge-${index}`, 'selected', node.id, 'calls'),
+      edge(`duplicate-${index}`, 'selected', node.id, 'imports'),
+    ]);
+    const labelSizes = new Map(
+      EffectArray.map(nodes, node => [node.id, {height: node.id === 'selected' ? 24 : 15, width: 170}]),
+    );
 
     const targets = graphFocusLayoutTargets(nodes, 'selected', edges, labelSizes, 2.8);
 
     expect(targets.get('selected')).toEqual({x: 0, y: 0});
     expect(targets.size).toBe(nodes.length);
-    const targetLabels = nodes.map(node => {
+    const targetLabels = EffectArray.map(nodes, node => {
       const position = targets.get(node.id)!;
       const size = labelSizes.get(node.id)!;
       return {
@@ -1757,15 +1934,15 @@ describe('manager graph focus', () => {
     const targets = graphFocusLayoutTargets(
       nodes,
       'selected',
-      nodes.slice(1).map((node, index) => edge(`edge-${index}`, 'selected', node.id, 'calls')),
+      EffectArray.map(nodes.slice(1), (node, index) => edge(`edge-${index}`, 'selected', node.id, 'calls')),
     );
 
     expect(
       Math.max(
-        ...nodes
-          .slice(1)
-          .map(node => targets.get(node.id)!)
-          .map(position => Math.hypot(position.x, position.y)),
+        ...EffectArray.map(
+          EffectArray.map(nodes.slice(1), node => targets.get(node.id)!),
+          position => Math.hypot(position.x, position.y),
+        ),
       ),
     ).toBeLessThan(100);
   });
@@ -1848,19 +2025,21 @@ describe('manager graph focus', () => {
 
     const expanded = graphWithNodeNeighborhood(graph, detail);
 
-    expect(expanded.nodes.map(node => node.id)).toEqual([
+    expect(EffectArray.map(expanded.nodes, node => node.id)).toEqual([
       'selected',
       'existing',
       'unrelated',
       'missing-in',
       'missing-out',
     ]);
-    expect(expanded.edges.map(item => [item.id, item.sourceId, item.targetId])).toEqual([
+    expect(EffectArray.map(expanded.edges, item => [item.id, item.sourceId, item.targetId])).toEqual([
       ['selected-existing', 'selected', 'existing'],
       ['incoming-missing', 'missing-in', 'selected'],
       ['outgoing-missing', 'selected', 'missing-out'],
     ]);
-    expect(expanded.nodes.find(node => node.id === 'selected')?.degree).toBe(3);
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(expanded.nodes, node => node.id === 'selected'))?.degree,
+    ).toBe(3);
     expect(expanded.stats).toMatchObject({renderedEdges: 3, renderedNodes: 5});
     expect(expanded.warnings.at(-1)).toBe('Loaded 2 direct neighbors for withExclusiveFileLock.');
     expect(graph.nodes).toHaveLength(3);
@@ -1943,7 +2122,7 @@ function repositoryGroup(id: string, viewIds: readonly string[], defaultViewId: 
     id,
     repositoryId: id,
     viewsTruncated: false,
-    views: viewIds.map(viewId => ({
+    views: EffectArray.map(viewIds, viewId => ({
       accounting: {
         attributedSymbols: 0,
         componentSymbols: 0,
@@ -1992,10 +2171,16 @@ function graphBuildStatus(state: 'completed' | 'failed' | 'queued' | 'running') 
       heartbeatAgeMilliseconds: 0,
       liveness: state === 'completed' ? ('completed' as const) : ('active' as const),
     },
-    owner: {processId: 42},
+    owner: {processId: 42, runtime: 'bun', runtimeVersion: 'test'},
     phase: state === 'queued' ? 'waiting' : 'scanning',
     state,
-    timestamps: {heartbeatAt: timestamp, lastProgressAt: timestamp, startedAt: timestamp},
+    timestamps: {
+      heartbeatAt: timestamp,
+      lastProgressAt: timestamp,
+      phaseStartedAt: timestamp,
+      startedAt: timestamp,
+      updatedAt: timestamp,
+    },
   };
 }
 
@@ -2039,14 +2224,14 @@ function nodeDetail(id: string, label: string, relationships: ReturnType<typeof 
     relationships,
     snapshotId: 'snapshot',
     stats: {
-      incoming: relationships.filter(item => item.direction === 'incoming').length,
-      outgoing: relationships.filter(item => item.direction === 'outgoing').length,
+      incoming: EffectArray.filter(relationships, item => item.direction === 'incoming').length,
+      outgoing: EffectArray.filter(relationships, item => item.direction === 'outgoing').length,
       provenances: [{count: relationships.length, provenance: 'resolved'}],
       relations: [
         {
           count: relationships.length,
-          incoming: relationships.filter(item => item.direction === 'incoming').length,
-          outgoing: relationships.filter(item => item.direction === 'outgoing').length,
+          incoming: EffectArray.filter(relationships, item => item.direction === 'incoming').length,
+          outgoing: EffectArray.filter(relationships, item => item.direction === 'outgoing').length,
           relation: 'calls',
         },
       ],

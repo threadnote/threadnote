@@ -9,6 +9,8 @@ import {readGraphShareEnrolledProfile} from '@threadnote/graph/sharing/profile/s
 import {casProfilePointer, defaultGraphShareProfile, ociProfilePointer} from '@threadnote/graph/sharing/profile';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {FileSystem} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const registryReference = 'oci://registry.example.test/acme/canonical';
 const profile = {
@@ -17,7 +19,7 @@ const profile = {
     canonicalRemote: 'github.com/acme/example',
     organization: 'acme',
     publisherKeyFingerprint: sha256Digest('publisher'),
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
   }),
   registry: {canonical: registryReference, worker: 'oci://registry.example.test/acme/worker'},
 };
@@ -50,7 +52,9 @@ effectIt.effect('reads both legacy CAS and v2 OCI profiles but refuses an unveri
         ._tag,
     ).toBe('Failure');
     expect(
-      (yield* Effect.result(readGraphShareEnrolledProfile(cas, {...enrollment, repositoryId: 'b'.repeat(64)})))._tag,
+      (yield* Effect.result(
+        readGraphShareEnrolledProfile(cas, {...enrollment, repositoryId: Effect2.pipe('b', EffectString.repeat(64))}),
+      ))._tag,
     ).toBe('Failure');
     for (const changed of ['oci://other.example.test/acme/canonical', 'oci://registry.example.test/acme/other']) {
       const wrong = {...enrollment, profile: ociProfilePointer(changed, artifact.manifestDigest)};

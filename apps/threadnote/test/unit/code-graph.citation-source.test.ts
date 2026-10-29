@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {describe, expect} from 'vitest';
@@ -7,6 +8,8 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {StandaloneBrokerLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const encoder = new TextEncoder();
 
@@ -23,7 +26,7 @@ describe('code graph citation source reads', () => {
       yield* fs.writeFile(path.join(root, 'src', 'value.ts'), checkout);
       const expectedContentHash = codeGraphCommittedFileContentHash('sha1', committed);
       const blobId = gitBlobId('sha1', committed);
-      const sourceCommit = '1'.repeat(40);
+      const sourceCommit = Effect2.pipe('1', EffectString.repeat(40));
       const base = yield* CommandExecutor;
       let gitReads = 0;
       const observed = CommandExecutor.of({
@@ -85,7 +88,7 @@ describe('code graph citation source reads', () => {
       const fs = yield* FileSystem.FileSystem;
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-citation-missing-'});
       const repositoryRoot = yield* fs.realPath(root);
-      const sourceCommit = '2'.repeat(40);
+      const sourceCommit = Effect2.pipe('2', EffectString.repeat(40));
       const source = {
         expectedContentHash: codeGraphCommittedFileContentHash('sha1', encoder.encode('missing\n')),
         repositoryPath: 'src/missing.ts',
@@ -124,14 +127,17 @@ describe('code graph citation source reads', () => {
       const fs = yield* FileSystem.FileSystem;
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-citation-long-missing-'});
       const repositoryRoot = yield* fs.realPath(root);
-      const sourceCommit = '4'.repeat(40);
+      const sourceCommit = Effect2.pipe('4', EffectString.repeat(40));
       const sources = Array.from({length: 32}, (_, index) => ({
-        expectedContentHash: 'a'.repeat(64),
-        repositoryPath: `src/${String(index).padStart(2, '0')}-${'x'.repeat(2_800)}.ts`,
+        expectedContentHash: Effect2.pipe('a', EffectString.repeat(64)),
+        repositoryPath: `src/${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}-${Effect2.pipe('x', EffectString.repeat(2_800))}.ts`,
         requireBytes: false,
       }));
       const stdout = encoder.encode(
-        sources.map(source => `${sourceCommit}:${source.repositoryPath} missing\n`).join(''),
+        EffectArray.join(
+          EffectArray.map(sources, source => `${sourceCommit}:${source.repositoryPath} missing\n`),
+          '',
+        ),
       );
       const base = yield* CommandExecutor;
       const observed = CommandExecutor.of({
@@ -164,13 +170,13 @@ describe('code graph citation source reads', () => {
       yield* fs.writeFile(path.join(root, 'src', 'a.ts'), encoder.encode('x'));
       yield* fs.writeFile(path.join(root, 'src', 'b.ts'), encoder.encode('y'));
       const committed = [encoder.encode('abc'), encoder.encode('def')];
-      const sourceCommit = '3'.repeat(40);
-      const sources = committed.map((bytes, index) => ({
+      const sourceCommit = Effect2.pipe('3', EffectString.repeat(40));
+      const sources = EffectArray.map(committed, (bytes, index) => ({
         expectedContentHash: codeGraphCommittedFileContentHash('sha1', bytes),
         repositoryPath: `src/${index === 0 ? 'a' : 'b'}.ts`,
         requireBytes: true,
       }));
-      const blobIds = committed.map(bytes => gitBlobId('sha1', bytes));
+      const blobIds = EffectArray.map(committed, bytes => gitBlobId('sha1', bytes));
       const base = yield* CommandExecutor;
       const observed = CommandExecutor.of({
         ...base,
@@ -178,12 +184,22 @@ describe('code graph citation source reads', () => {
           Effect.sync(() => {
             if (args.includes('--batch-check')) {
               expect(options?.input).toEqual(
-                encoder.encode(sources.map(source => `${sourceCommit}:${source.repositoryPath}\0`).join('')),
+                encoder.encode(
+                  EffectArray.join(
+                    EffectArray.map(sources, source => `${sourceCommit}:${source.repositoryPath}\0`),
+                    '',
+                  ),
+                ),
               );
               return {
                 exitCode: 0,
                 stderr: '',
-                stdout: encoder.encode(blobIds.map(blobId => `${blobId} blob 3\n`).join('')),
+                stdout: encoder.encode(
+                  EffectArray.join(
+                    EffectArray.map(blobIds, blobId => `${blobId} blob 3\n`),
+                    '',
+                  ),
+                ),
               };
             }
             expect(args).toContain('--batch');

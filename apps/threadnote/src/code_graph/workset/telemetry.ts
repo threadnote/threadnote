@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Effect} from 'effect';
 import {
   emitAnonymousTelemetryEvent,
@@ -57,7 +58,9 @@ export const makeCodeGraphWorksetTelemetryReporter = Effect.fn('codeGraph.makeWo
       Effect.suspend(() => {
         if (terminalEmitted) return Effect.void;
         terminalEmitted = true;
-        const failure = result.members.find(member => member.state === 'failed');
+        const failure = EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.members, member => member.state === 'failed'),
+        );
         const diagnostic = failure === undefined ? undefined : worksetFailureDiagnostic(failure.detail);
         const outcome = result.state === 'failed' ? 'failure' : result.coverage.complete ? 'success' : 'unavailable';
         return emitAnonymousTelemetryEvent({
@@ -147,7 +150,9 @@ function worksetTelemetryPhaseFields(progress: CodeGraphWorksetPrepareProgressV1
 }
 
 function worksetFailureDiagnostic(detail: CodeGraphWorksetPrepareFailureDetailV1): AnonymousTelemetryDiagnostic {
-  const storageCode = [...STORE_FAILURE_CODES].find(code => code === detail.code);
+  const storageCode = EffectOption.getOrUndefined(
+    EffectArray.findFirst([...STORE_FAILURE_CODES], code => code === detail.code),
+  );
   return {
     ...(storageCode === undefined ? {} : {code: storageCode, domain: 'code-graph-storage' as const}),
     errorType: detail.errorType,

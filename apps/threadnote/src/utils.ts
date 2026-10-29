@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 export {
   InvalidRecallScoreThreshold,
   recallScoreThreshold,
@@ -27,6 +28,8 @@ import {compareVersions} from './release/version/compare.js';
 import {findWorkspaceComponentManifest} from './workspace_component.js';
 
 import {UtilityOperationError} from '@threadnote/platform/errors';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {formatShellCommand, shellQuote, withoutGitEnvironment} from '@threadnote/platform/command';
 export {compareVersions} from './release/version/compare.js';
@@ -127,15 +130,20 @@ function executablePathCandidatesForCommand(
   pathService: Path.Path,
   system: SystemInfoShape,
 ): readonly string[] {
-  return pathService.isAbsolute(command) || command.includes('/') || command.includes('\\')
+  return pathService.isAbsolute(command) ||
+    Effect2.pipe(command, EffectString.includes('/')) ||
+    Effect2.pipe(command, EffectString.includes('\\'))
     ? executableNames(command, system.platform, system.environment().PATHEXT)
     : executablePathCandidates(command, pathService, system);
 }
 
 function executablePathCandidates(command: string, pathService: Path.Path, system: SystemInfoShape): readonly string[] {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const pathDirectories = (system.environment().PATH ?? '').split(system.pathDelimiter);
   const names = executableNames(command, system.platform, system.environment().PATHEXT);
-  return pathDirectories.flatMap(directory => names.map(name => pathService.join(directory || '.', name)));
+  return EffectArray.flatMap(pathDirectories, directory =>
+    EffectArray.map(names, name => pathService.join(directory || '.', name)),
+  );
 }
 
 export function executableNames(
@@ -146,15 +154,21 @@ export function executableNames(
   if (currentPlatform !== 'win32') {
     return [command];
   }
-  const extensions = pathExt
-    .split(';')
-    .map(extension => extension.trim())
-    .filter(Boolean);
-  const lowerCommand = command.toLowerCase();
-  if (extensions.some(extension => lowerCommand.endsWith(extension.toLowerCase()))) {
+  const extensions = EffectArray.filter(
+    EffectArray.map(Effect2.pipe(pathExt, EffectString.split(';')), extension =>
+      Effect2.pipe(extension, EffectString.trim),
+    ),
+    Boolean,
+  );
+  const lowerCommand = Effect2.pipe(command, EffectString.toLowerCase);
+  if (
+    EffectArray.some(extensions, extension =>
+      Effect2.pipe(lowerCommand, EffectString.endsWith(Effect2.pipe(extension, EffectString.toLowerCase))),
+    )
+  ) {
     return [command];
   }
-  return [...extensions.map(extension => `${command}${extension}`), command];
+  return [...EffectArray.map(extensions, extension => `${command}${extension}`), command];
 }
 
 export const maybeRun = Effect.fn('utils.maybeRun')(function* (
@@ -209,7 +223,7 @@ export const gitValue = Effect.fn('utils.gitValue')(function* (args: readonly st
   if (result.exitCode !== 0) {
     return undefined;
   }
-  return result.stdout.trim();
+  return Effect2.pipe(result.stdout, EffectString.trim);
 });
 
 /**
@@ -245,7 +259,7 @@ export const resolveRepoFolderName = Effect.fn('utils.resolveRepoFolderName')(fu
     const absoluteCommonDir = pathService.isAbsolute(commonDir) ? commonDir : pathService.resolve(repoRoot, commonDir);
     const primaryRoot =
       pathService.basename(absoluteCommonDir) === '.git' ? pathService.dirname(absoluteCommonDir) : absoluteCommonDir;
-    const name = pathService.basename(primaryRoot).replace(/\.git$/, '');
+    const name = Effect2.pipe(pathService.basename(primaryRoot), EffectString.replace(/\.git$/, ''));
     if (name && name !== '.') {
       return name;
     }
@@ -260,10 +274,21 @@ export const resolveGitRemoteRepoName = Effect.fn('utils.resolveGitRemoteRepoNam
     return originName;
   }
   const remotes = yield* gitValue(['remote'], repoRoot);
-  const remote = remotes
-    ?.split(/\r?\n/)
-    .map(name => name.trim())
-    .find(name => name.length > 0);
+  const remote = Option.getOrUndefined(
+    Option.map(
+      Option.fromNullishOr(
+        Option.getOrUndefined(
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional chaining through line splitting and filtering.
+          Option.map(Option.fromNullishOr(remotes?.split(/\r?\n/)), __effectArrayReceiver =>
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional chaining through line splitting and filtering.
+            EffectArray.map(__effectArrayReceiver, name => name.trim()),
+          ),
+        ),
+      ),
+      __effectArrayReceiver2 =>
+        Option.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver2, name => name.length > 0)),
+    ),
+  );
   if (!remote) {
     return undefined;
   }
@@ -272,24 +297,32 @@ export const resolveGitRemoteRepoName = Effect.fn('utils.resolveGitRemoteRepoNam
 });
 
 function gitRemoteRepoName(remoteUrl: string): string | undefined {
-  const trimmed = remoteUrl.trim();
+  const trimmed = Effect2.pipe(remoteUrl, EffectString.trim);
   if (!trimmed) {
     return undefined;
   }
   const parsedUrlPath = parseUrlPath(trimmed);
-  let remotePath = Option.getOrUndefined(parsedUrlPath) ?? trimmed.replace(/[?#].*$/, '');
+  let remotePath = Option.getOrUndefined(parsedUrlPath) ?? Effect2.pipe(trimmed, EffectString.replace(/[?#].*$/, ''));
   if (Option.isNone(parsedUrlPath)) {
-    const scpLike = trimmed.match(/^[^@\s/]+@[^:\s]+:(.+)$/);
+    const scpLike = Effect2.pipe(
+      trimmed,
+      EffectString.match(/^[^@\s/]+@[^:\s]+:(.+)$/),
+      Effect2.Option.getOrElse(() => null),
+    );
     if (scpLike?.[1]) {
       remotePath = scpLike[1];
     }
   }
-  const name = remotePath
-    .replace(/[\\/]+$/, '')
-    .split(/[\\/:]/)
-    .filter(Boolean)
-    .pop()
-    ?.replace(/\.git$/i, '');
+  const name = Effect2.pipe(
+    EffectArray.filter(
+      Effect2.pipe(remotePath, EffectString.replace(/[\\/]+$/, ''), EffectString.split(/[\\/:]/)),
+      Boolean,
+    ).pop(),
+    effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.replace(/\.git$/i, '')),
+  );
   return name && name !== '.' && name !== '..' ? name : undefined;
 }
 
@@ -391,13 +424,13 @@ export const isExecutable = Effect.fn('utils.isExecutable')(function* (path: str
 
 export function suggestedShellRc(shellPath: string | undefined, currentPlatform: NodeJS.Platform): string {
   const shell = shellPath ?? '';
-  if (shell.endsWith('/zsh')) {
+  if (Effect2.pipe(shell, EffectString.endsWith('/zsh'))) {
     return '~/.zshrc';
   }
-  if (shell.endsWith('/bash')) {
+  if (Effect2.pipe(shell, EffectString.endsWith('/bash'))) {
     return currentPlatform === 'darwin' ? '~/.bash_profile' : '~/.bashrc';
   }
-  if (shell.endsWith('/fish')) {
+  if (Effect2.pipe(shell, EffectString.endsWith('/fish'))) {
     return '~/.config/fish/config.fish';
   }
   return 'your shell rc';
@@ -474,7 +507,8 @@ export const assertSafeThreadnoteHomeForErase = Effect.fn('utils.assertSafeThrea
   const system = yield* SystemInfo;
   const resolvedPath = pathService.resolve(home);
   const resolvedUserHome = pathService.resolve(system.homeDirectory);
-  const comparable = (value: string) => (system.platform === 'win32' ? value.toLowerCase() : value);
+  const comparable = (value: string) =>
+    system.platform === 'win32' ? Effect2.pipe(value, EffectString.toLowerCase) : value;
   if (
     comparable(resolvedPath) === comparable(pathService.parse(resolvedPath).root) ||
     comparable(resolvedPath) === comparable(resolvedUserHome) ||
@@ -532,17 +566,14 @@ export const portablePath = Effect.fn('utils.portablePath')(function* (path: str
   if (resolvedPath === home) {
     return '~';
   }
-  if (resolvedPath.startsWith(`${home}${pathService.sep}`)) {
-    return `~/${resolvedPath
-      .slice(home.length + 1)
-      .split(pathService.sep)
-      .join('/')}`;
+  if (Effect2.pipe(resolvedPath, EffectString.startsWith(`${home}${pathService.sep}`))) {
+    return `~/${EffectArray.join(Effect2.pipe(resolvedPath, EffectString.slice(home.length + 1), EffectString.split(pathService.sep)), '/')}`;
   }
   return resolvedPath;
 });
 
 export function recallQueryRequestsWorkspaceContext(query: string): boolean {
-  const normalized = query.toLowerCase();
+  const normalized = Effect2.pipe(query, EffectString.toLowerCase);
   return /\b(?:this|current)\s+(?:app|branch|component|package|project|repo|repository|workspace|worktree)\b/.test(
     normalized,
   );
@@ -596,7 +627,11 @@ export const resolveWorkspaceBranch = Effect.fn('utils.resolveWorkspaceBranch')(
   if (!cwd || !pathService.isAbsolute(cwd)) return undefined;
   const repoRoot = yield* gitValue(['rev-parse', '--show-toplevel'], cwd);
   if (!repoRoot) return undefined;
-  return (yield* gitValue(['branch', '--show-current'], repoRoot))?.trim() || undefined;
+  return (
+    Effect2.pipe(yield* gitValue(['branch', '--show-current'], repoRoot), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || undefined
+  );
 });
 
 export interface WorkspaceComponentContext {
@@ -631,8 +666,19 @@ const enrichRecallQueryWithWorkspaceTerms = Effect.fn('utils.enrichRecallQueryWi
     return query;
   }
   const workspace = yield* currentWorkspaceRecallTerms(options, policy);
-  const additions = workspace.terms.filter(term => !query.toLowerCase().includes(term.toLowerCase()));
-  return additions.length > 0 ? `${query} ${additions.join(' ')}` : query;
+  const additions = EffectArray.filter(
+    workspace.terms,
+    term =>
+      !Effect2.pipe(query, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.toLowerCase);
+        const __effectPipeStage1 = Effect2.pipe(
+          __effectPipeStage0,
+          EffectString.includes(Effect2.pipe(term, EffectString.toLowerCase)),
+        );
+        return __effectPipeStage1;
+      }),
+  );
+  return additions.length > 0 ? `${query} ${EffectArray.join(additions, ' ')}` : query;
 });
 
 const currentWorkspaceRecallTerms = Effect.fn('utils.currentWorkspaceRecallTerms')(function* (
@@ -665,7 +711,7 @@ const currentWorkspaceRecallTerms = Effect.fn('utils.currentWorkspaceRecallTerms
       {source: 'branch', value: policy.includeBranch ? branch : undefined},
       {source: 'path', value: repoName},
       {source: 'path', value: parent === system.homeDirectory ? undefined : pathService.basename(parent)},
-      ...componentTerms.map(value => ({source: 'path' as const, value})),
+      ...EffectArray.map(componentTerms, value => ({source: 'path' as const, value})),
     ]),
   };
 });
@@ -683,7 +729,7 @@ const nestedWorkspaceComponentContext = Effect.fn('utils.nestedWorkspaceComponen
   );
   let current = yield* fs.realPath(logicalCurrent).pipe(Effect.orElseSucceed(() => logicalCurrent));
   const relativeCwd = pathService.relative(resolvedRoot, current);
-  if (relativeCwd.startsWith('..') || pathService.isAbsolute(relativeCwd)) {
+  if (Effect2.pipe(relativeCwd, EffectString.startsWith('..')) || pathService.isAbsolute(relativeCwd)) {
     return undefined;
   }
   while (current !== resolvedRoot) {
@@ -691,6 +737,7 @@ const nestedWorkspaceComponentContext = Effect.fn('utils.nestedWorkspaceComponen
     if (manifest) {
       const relativeRoot = toPosixPath(pathService.relative(resolvedRoot, current));
       const declaredName = manifest.declaredName;
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional-chain narrowing through the split and final at call.
       const unscopedName = declaredName?.startsWith('@') ? declaredName.split('/').at(-1) : undefined;
       return {
         repoRoot: resolvedRoot,
@@ -730,8 +777,12 @@ export function uniqueUsefulWorkspaceTerms(
   const seen = new Set<string>();
   const terms: string[] = [];
   for (const {source, value} of values) {
-    const term = value?.trim();
-    const normalized = term?.toLowerCase();
+    const term = Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    );
+    const normalized = Effect2.pipe(term, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+    );
     const tooShort = source === 'branch' ? false : (term?.length ?? 0) < 4;
     if (!term || !normalized || tooShort || ignored.has(normalized) || seen.has(normalized)) {
       continue;
@@ -743,17 +794,23 @@ export function uniqueUsefulWorkspaceTerms(
 }
 
 export function toPosixPath(path: string): string {
-  return path.replaceAll('\\', '/');
+  return Effect2.pipe(path, EffectString.replaceAll('\\', '/'));
 }
 
 export function trimTrailingSlash(value: string): string {
-  return value.endsWith('/') ? value.slice(0, -1) : value;
+  return Effect2.pipe(value, EffectString.endsWith('/')) ? Effect2.pipe(value, EffectString.slice(0, -1)) : value;
 }
 
 export function parentResourceUri(uri: string): string {
   const trimmedUri = trimTrailingSlash(uri);
-  const slashIndex = trimmedUri.lastIndexOf('/');
-  return slashIndex <= 'threadnote://'.length ? trimmedUri : trimmedUri.slice(0, slashIndex);
+  const slashIndex = Effect2.pipe(
+    trimmedUri,
+    EffectString.lastIndexOf('/'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return slashIndex <= 'threadnote://'.length
+    ? trimmedUri
+    : Effect2.pipe(trimmedUri, EffectString.slice(0, slashIndex));
 }
 
 export const sha256 = sha256Hex;
@@ -785,11 +842,15 @@ export {
 export type {ExactScopeIntent, ExactMatch, RecallCategory, RecallHit, RecallSections} from '@threadnote/recall/results';
 
 export function safeTimestamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, '-');
+  return Effect2.pipe(new Date().toISOString(), EffectString.replace(/[:.]/g, '-'));
 }
 
 export function firstLine(value: string): string {
-  return value.split('\n')[0]?.trim() ?? '';
+  return (
+    Effect2.pipe(Effect2.pipe(value, EffectString.split('\n'))[0], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ?? ''
+  );
 }
 
 export function formatStatus(status: CommandStatus): string {

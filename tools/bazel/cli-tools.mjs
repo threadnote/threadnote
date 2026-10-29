@@ -1,6 +1,8 @@
 /* oxlint-disable effecttsgo/node-builtin-import -- Verified tool bootstrap runs before npm installation. */
 import {chmodSync, existsSync, mkdirSync, renameSync, rmSync} from 'node:fs';
 import {dirname, resolve} from 'node:path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const bazelVersion = '9.2.0';
 const bazelHashes = {
@@ -41,7 +43,7 @@ async function download(root, name, url, digest) {
 export async function bazelPath(root) {
   const digest = bazelHashes[platform];
   if (!digest) throw new Error(`Bazel compatibility gate does not support ${platform}`);
-  const configured = (await Bun.file(resolve(root, '.bazelversion')).text()).trim();
+  const configured = Effect.pipe(await Bun.file(resolve(root, '.bazelversion')).text(), EffectString.trim);
   if (configured !== bazelVersion) throw new Error('Update Bazel bootstrap hashes together with .bazelversion');
   const asset = `bazel-${bazelVersion}-${process.platform}-${process.arch === 'x64' ? 'x86_64' : process.arch}`;
   return download(

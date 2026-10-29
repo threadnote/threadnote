@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import type {RemoteMemoryReceiptV1} from '@threadnote/memory/remote/receipts';
 import {projectRemoteRecallResponse} from '@threadnote/remote-memory/recall/projection';
 import type {RemoteMemoryRecallResult} from '@threadnote/remote-memory/postgres/repository';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const receipt: RemoteMemoryReceiptV1 = {
   consistency: 'current',
@@ -31,16 +34,27 @@ describe('remote recall projection', () => {
             Buffer.byteLength(JSON.stringify(projected.structuredContent), 'utf8');
           expect(responseBytes).toBeLessThanOrEqual(budgetTokens * 3);
           expect(projected.structuredContent.estimatedTokens).toBe(Math.ceil(responseBytes / 3));
-          expect(projected.structuredContent.results.map(result => result.uri)).toEqual(
-            results.slice(0, projected.structuredContent.results.length).map(result => result.uri),
+          expect(EffectArray.map(projected.structuredContent.results, result => result.uri)).toEqual(
+            EffectArray.map(results.slice(0, projected.structuredContent.results.length), result => result.uri),
           );
           expect(projectRemoteRecallResponse({receipt, results}, {budgetTokens, explain})).toEqual(projected);
-          const textEvidence = JSON.parse(projected.text.slice(projected.text.indexOf('\n') + 1));
+          const textEvidence = JSON.parse(
+            Effect.pipe(
+              projected.text,
+              EffectString.slice(
+                Effect.pipe(
+                  projected.text,
+                  EffectString.indexOf('\n'),
+                  Effect.Option.getOrElse(() => -1),
+                ) + 1,
+              ),
+            ),
+          );
           expect(textEvidence.nextAction).toEqual(projected.structuredContent.nextAction);
           expect(textEvidence.results).toEqual(projected.structuredContent.results);
           expect(textEvidence.omittedResults).toBe(projected.structuredContent.omittedResults);
           if (!explain) {
-            expect(projected.structuredContent.results.every(result => !('excerpt' in result))).toBe(true);
+            expect(EffectArray.every(projected.structuredContent.results, result => !('excerpt' in result))).toBe(true);
           }
         },
       ),
@@ -50,7 +64,7 @@ describe('remote recall projection', () => {
 });
 
 function recallResults(excerpts: readonly string[]): RemoteMemoryRecallResult[] {
-  return excerpts.map((excerpt, index) => ({
+  return EffectArray.map(excerpts, (excerpt, index) => ({
     excerpt,
     kind: index % 2 === 0 ? 'durable' : 'handoff',
     project: 'threadnote',

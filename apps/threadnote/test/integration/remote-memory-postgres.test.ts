@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import type {Sql, TransactionSql} from 'postgres';
 import {afterAll, beforeAll, describe, expect, it} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -33,6 +34,8 @@ import {
   createRemoteMemoryPostgresFixture,
   type RemoteMemoryPostgresFixture,
 } from '../helpers/remote-memory-postgres.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const TEST_DATABASE_URL = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const postgresDescribe = TEST_DATABASE_URL ? describe : describe.skip;
@@ -164,7 +167,7 @@ postgresDescribe('remote memory PostgreSQL service', () => {
     const before = await fixture.migratorSql<{checksum: string; version: number}[]>`
       SELECT version, checksum FROM remote_memory.schema_migrations ORDER BY version
     `;
-    expect(before.map(migration => migration.version)).toEqual(remoteMemoryMigrationVersions());
+    expect(EffectArray.map(before, migration => migration.version)).toEqual(remoteMemoryMigrationVersions());
     expect(before[0]?.checksum).toMatch(/^[a-f0-9]{64}$/u);
 
     await migrateRemoteMemoryDatabase(fixture.migratorSql);
@@ -196,8 +199,8 @@ postgresDescribe('remote memory PostgreSQL service', () => {
         AND c.relname = ANY(${fixture.sql.array([...tenantScopedTableNames])})
       ORDER BY c.relname
     `;
-    expect(policies.map(row => row.relname)).toEqual([...tenantScopedTableNames].sort());
-    expect(policies.every(row => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
+    expect(EffectArray.map(policies, row => row.relname)).toEqual([...tenantScopedTableNames].sort());
+    expect(EffectArray.every(policies, row => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
   });
 
   it('denies runtime DDL, migration, control-plane, import, and immutable-record mutation privileges', async () => {
@@ -377,9 +380,9 @@ postgresDescribe('remote memory PostgreSQL service', () => {
     }));
     expect(tenantAMetadata.tenants).toEqual([{id: TENANT_A}]);
     expect(tenantAMetadata.identities.length).toBeGreaterThan(0);
-    expect(tenantAMetadata.identities.every(row => row.tenant_id === TENANT_A)).toBe(true);
+    expect(EffectArray.every(tenantAMetadata.identities, row => row.tenant_id === TENANT_A)).toBe(true);
     expect(tenantAMetadata.principals.length).toBeGreaterThan(0);
-    expect(tenantAMetadata.principals.every(row => row.tenant_id === TENANT_A)).toBe(true);
+    expect(EffectArray.every(tenantAMetadata.principals, row => row.tenant_id === TENANT_A)).toBe(true);
     await expect(
       control.tenantForIdentity({issuer: ISSUER, requestedShareId: SHARE_A, subject: 'subject-alpha'}),
     ).resolves.toBe(TENANT_A);
@@ -649,7 +652,7 @@ postgresDescribe('remote memory PostgreSQL service', () => {
     const input = {
       aliasCompatibilityEndsAt: '2099-01-01T00:00:00.000Z',
       planDigest,
-      planId: `tnmi_${planDigest.slice(0, 32)}`,
+      planId: `tnmi_${Effect.pipe(planDigest, EffectString.slice(0, 32))}`,
       records: [
         {
           aliases: [`threadnote://user/import/memories/shared/team/durable/projects/${PROJECT}/${topic}.md`],
@@ -698,7 +701,9 @@ postgresDescribe('remote memory PostgreSQL service', () => {
       {sourceUri: clean.aliases[0], status: 'imported', targetUri: clean.uri, version: 1},
     ]);
     const exported = await operator.exportRecords(SHARE_A_MULTI_MEMBER);
-    const exportedClean = exported.find(record => record.uri === clean.uri);
+    const exportedClean = EffectOption.getOrUndefined(
+      EffectArray.findFirst(exported, record => record.uri === clean.uri),
+    );
     expect(exportedClean).toEqual(clean);
     expect(parseMemoryDocument(clean.uri, exportedClean!.canonicalContent)?.metadata).toMatchObject({
       codeCitations: [operatorCitation()],
@@ -744,7 +749,7 @@ postgresDescribe('remote memory PostgreSQL service', () => {
   it('builds canonical PostgreSQL graph-linked briefs and repairs their bounded backlink projection', async () => {
     const operator = new PostgresRemoteMemoryOperatorAdapter(fixture.migratorSql);
     const suffix = randomUuidV4();
-    const repositoryId = 'e'.repeat(64);
+    const repositoryId = Effect.pipe('e', EffectString.repeat(64));
     const firstPath = `src/remote_memory/brief-${suffix}.ts`;
     const secondPath = `src/remote_memory/brief-helper-${suffix}.ts`;
     const citations = [
@@ -784,12 +789,12 @@ postgresDescribe('remote memory PostgreSQL service', () => {
       `request-brief-pre-index-${suffix}`,
     );
     expect(immediate).toMatchObject({directSearchComplete: true, matchedAnchorOrdinals: [0, 1]});
-    expect(immediate.results.filter(result => result.uri === record.uri)).toHaveLength(1);
+    expect(EffectArray.filter(immediate.results, result => result.uri === record.uri)).toHaveLength(1);
     expect(await indexer.runPass({batchSize: 1_000})).toMatchObject({failed: 0});
 
     const initial = await repository.contextBrief(principalAMultiPrimary, input, `request-brief-${suffix}`);
     expect(initial).toMatchObject({directSearchTruncated: false, matchedAnchorOrdinals: [0, 1]});
-    expect(initial.results.filter(result => result.uri === record.uri)).toEqual([
+    expect(EffectArray.filter(initial.results, result => result.uri === record.uri)).toEqual([
       expect.objectContaining({anchorOrdinals: [0, 1], evidence: 'anchor'}),
     ]);
     const otherProject = await repository.contextBrief(
@@ -827,7 +832,7 @@ postgresDescribe('remote memory PostgreSQL service', () => {
     const racingRepository = new RaceOnceRepository(fixture.sql);
     const fenced = await racingRepository.contextBrief(principalAMultiPrimary, input, `request-brief-fenced-${suffix}`);
     expect(racingRepository.raced).toBe(true);
-    expect(fenced.results.filter(result => result.uri === record.uri)).toEqual([
+    expect(EffectArray.filter(fenced.results, result => result.uri === record.uri)).toEqual([
       expect.objectContaining({anchorOrdinals: [0, 1], evidence: 'anchor'}),
     ]);
     expect(fenced.receipt.shareGeneration).toBeGreaterThan(initial.receipt.shareGeneration);
@@ -858,8 +863,8 @@ postgresDescribe('remote memory PostgreSQL service', () => {
       `;
     });
     const verified = await repository.contextBrief(principalAMultiPrimary, input, `request-brief-verified-${suffix}`);
-    expect(verified.results.some(result => result.uri === forgedUri)).toBe(false);
-    expect(verified.results.filter(result => result.uri === record.uri)).toHaveLength(1);
+    expect(EffectArray.some(verified.results, result => result.uri === forgedUri)).toBe(false);
+    expect(EffectArray.filter(verified.results, result => result.uri === record.uri)).toHaveLength(1);
 
     const projectionState = await withTenant(fixture.migratorSql, TENANT_A, async transaction => {
       const rows = await transaction<
@@ -904,7 +909,7 @@ postgresDescribe('remote memory PostgreSQL service', () => {
     expect(await indexer.runPass({batchSize: 1_000})).toMatchObject({failed: 0});
     const repaired = await repository.contextBrief(principalAMultiPrimary, input, `request-brief-repaired-${suffix}`);
     expect(repaired.directSearchComplete).toBe(true);
-    expect(repaired.results.filter(result => result.uri === record.uri)).toHaveLength(1);
+    expect(EffectArray.filter(repaired.results, result => result.uri === record.uri)).toHaveLength(1);
     expect(repaired.matchedAnchorOrdinals).toEqual([0, 1]);
   });
 
@@ -995,8 +1000,8 @@ postgresDescribe('remote memory PostgreSQL service', () => {
         'request-contender-beta',
       ),
     ]);
-    const winners = contenders.filter(result => result.status === 'fulfilled');
-    const conflicts = contenders.filter(result => result.status === 'rejected');
+    const winners = EffectArray.filter(contenders, result => result.status === 'fulfilled');
+    const conflicts = EffectArray.filter(contenders, result => result.status === 'rejected');
     expect(winners).toHaveLength(1);
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0]).toMatchObject({reason: {code: 'conflict', name: 'RemoteMemoryError'}});
@@ -1456,11 +1461,11 @@ postgresDescribe('remote memory PostgreSQL service', () => {
       return {aliases, directCrossTenant, documents, heads};
     });
     expect(tenantAView.heads.length).toBeGreaterThan(0);
-    expect(tenantAView.heads.every(row => row.tenant_id === TENANT_A)).toBe(true);
+    expect(EffectArray.every(tenantAView.heads, row => row.tenant_id === TENANT_A)).toBe(true);
     expect(tenantAView.aliases).toContainEqual({alias_uri: aliasA, tenant_id: TENANT_A});
-    expect(tenantAView.aliases.every(row => row.tenant_id === TENANT_A)).toBe(true);
+    expect(EffectArray.every(tenantAView.aliases, row => row.tenant_id === TENANT_A)).toBe(true);
     expect(tenantAView.documents.length).toBeGreaterThan(0);
-    expect(tenantAView.documents.every(row => row.tenant_id === TENANT_A)).toBe(true);
+    expect(EffectArray.every(tenantAView.documents, row => row.tenant_id === TENANT_A)).toBe(true);
     expect(tenantAView.directCrossTenant).toEqual([]);
 
     await expect(repository.read(principalA, {uri: aliasA, version: 1}, 'request-alias-alpha')).resolves.toMatchObject({
@@ -1534,8 +1539,8 @@ postgresDescribe('remote memory PostgreSQL service', () => {
 
     const contender = new RemoteMemoryIndexer(fixture.sql);
     const results = await Promise.all([indexer.runPass({batchSize: 1}), contender.runPass({batchSize: 1})]);
-    expect(results.map(result => result.failed)).toEqual([0, 0]);
-    expect(results.map(result => result.processed).sort()).toEqual([0, 1]);
+    expect(EffectArray.map(results, result => result.failed)).toEqual([0, 0]);
+    expect(EffectArray.map(results, result => result.processed).sort()).toEqual([0, 1]);
 
     const projected = await withTenant(
       fixture.sql,
@@ -2020,13 +2025,13 @@ function operatorCitation(
 ) {
   return createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
     path: overrides.path ?? 'src/remote_memory/operator/postgres.ts',
-    repositoryId: overrides.repositoryId ?? 'b'.repeat(64),
+    repositoryId: overrides.repositoryId ?? Effect.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: overrides.repositoryIdentityKind ?? 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect.pipe('c', EffectString.repeat(40)),
     sourceDirty: overrides.sourceDirty ?? false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });
@@ -2050,21 +2055,24 @@ function operatorCitationContent(topic: string, citation: ReturnType<typeof oper
 }
 
 function operatorMalformedCitationContent(topic: string): string {
-  return formatMemoryDocument(
-    'MEMORY',
-    {
-      kind: 'durable',
-      project: PROJECT,
-      schemaVersion: MEMORY_SCHEMA_VERSION,
-      sourceAgentClient: 'codex',
-      status: 'active',
-      timestamp: '2026-08-26T20:00:00.000Z',
-      topic,
-    },
-    'Malformed citation metadata must not cross the direct operator boundary.',
-  ).replace(
-    `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-    `schema_version: ${MEMORY_SCHEMA_VERSION}\n  code_citation: {not-json}`,
+  return Effect.pipe(
+    formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        project: PROJECT,
+        schemaVersion: MEMORY_SCHEMA_VERSION,
+        sourceAgentClient: 'codex',
+        status: 'active',
+        timestamp: '2026-08-26T20:00:00.000Z',
+        topic,
+      },
+      'Malformed citation metadata must not cross the direct operator boundary.',
+    ),
+    EffectString.replace(
+      `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+      `schema_version: ${MEMORY_SCHEMA_VERSION}\n  code_citation: {not-json}`,
+    ),
   );
 }
 
@@ -2090,7 +2098,7 @@ function operatorImportInput(record: RemoteMemoryPortableRecordV1, shareId: stri
   return {
     aliasCompatibilityEndsAt: '2099-01-01T00:00:00.000Z',
     planDigest,
-    planId: `tnmi_${planDigest.slice(0, 32)}`,
+    planId: `tnmi_${Effect.pipe(planDigest, EffectString.slice(0, 32))}`,
     records: [record],
     shareId,
   };
@@ -2141,10 +2149,12 @@ async function insertForgedPortableRow(
 }
 
 async function withTenant<A>(sql: Sql, tenantId: string, use: (transaction: TransactionSql) => Promise<A>): Promise<A> {
-  return (await sql.begin(async transaction => {
-    await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
-    return use(transaction);
-  })) as A;
+  return sql
+    .begin(async transaction => {
+      await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
+      return {result: await use(transaction)};
+    })
+    .then(({result}) => result);
 }
 
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMilliseconds = 2_000): Promise<void> {
@@ -2180,7 +2190,8 @@ function isPrivilegeOrImmutableRejection(cause: unknown): boolean {
   const record = cause as {code?: unknown; message?: unknown};
   return (
     record.code === '42501' ||
-    (typeof record.message === 'string' && record.message.includes('immutable record cannot be updated or deleted'))
+    (typeof record.message === 'string' &&
+      Effect.pipe(record.message, EffectString.includes('immutable record cannot be updated or deleted')))
   );
 }
 
@@ -2189,7 +2200,9 @@ function isRevisionHeadGuardRejection(cause: unknown): boolean {
   const record = cause as {code?: unknown; message?: unknown};
   return (
     record.code === '23503' ||
-    (record.code === 'P0001' && typeof record.message === 'string' && record.message.includes('revision'))
+    (record.code === 'P0001' &&
+      typeof record.message === 'string' &&
+      Effect.pipe(record.message, EffectString.includes('revision')))
   );
 }
 
@@ -2199,6 +2212,6 @@ function isAttestationMinimizationRejection(cause: unknown): boolean {
   return (
     record.code === 'P0001' &&
     typeof record.message === 'string' &&
-    record.message.includes('may only minimize expired attribution')
+    Effect.pipe(record.message, EffectString.includes('may only minimize expired attribution'))
   );
 }

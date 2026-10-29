@@ -1,16 +1,20 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Console, Crypto, DateTime, Effect, Exit, FileSystem, Option, Path, Schema} from 'effect';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {observeProcessInstanceIdentity, processInstanceIdentityMatches} from './process_identity.js';
 import {compareVersions} from '../release/version/compare.js';
 import {createMissingProcessFile} from './owned_file.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class StandaloneProcessLeaseError extends Schema.TaggedError<StandaloneProcessLeaseError>()(
-  'StandaloneProcessLeaseError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class StandaloneProcessLeaseError extends Schema.TaggedError<
+  StandaloneProcessLeaseError,
+  {readonly brand: unique symbol}
+>()('StandaloneProcessLeaseError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const THREADNOTE_COMMAND = 'threadnote';
 const PROCESS_LEASE_HEARTBEAT_MILLISECONDS = 30_000;
@@ -78,7 +82,9 @@ export interface SupersededStandaloneProcessTermination {
 }
 
 export function installationRoot(path: Path.Path, system: SystemInfoShape): string {
-  const configured = system.environment().THREADNOTE_INSTALL_ROOT?.trim();
+  const configured = Effect2.pipe(system.environment().THREADNOTE_INSTALL_ROOT, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (configured) return path.resolve(configured);
   const currentRoot = path.dirname(system.executablePath);
   if (path.basename(path.dirname(currentRoot)) === 'versions') {
@@ -167,7 +173,9 @@ export function readValidatedRelease(
     const [realInstallRoot, resolvedRoot] = yield* Effect.all([fs.realPath(installRoot), fs.realPath(releaseRoot)]);
     const expectedRoot = path.join(realInstallRoot, 'versions', value.version);
     const normalize = (candidate: string) =>
-      path.sep === '\\' ? path.resolve(candidate).toLocaleLowerCase('en-US') : path.resolve(candidate);
+      path.sep === '\\'
+        ? Effect2.pipe(path.resolve(candidate), EffectString.toLocaleLowerCase('en-US'))
+        : path.resolve(candidate);
     return normalize(expectedRoot) === normalize(resolvedRoot)
       ? ({releaseRoot: resolvedRoot, version: value.version} satisfies StandaloneActiveRelease)
       : undefined;
@@ -189,9 +197,12 @@ export const readLiveStandaloneProcessLeases = Effect.fn('installations.readLive
   // Pruning remains conservative when identity lookup is unavailable, but a
   // user-facing diagnostic must not label an unrelated reused PID as
   // Threadnote without a verified start identity.
-  for (const lease of scan.leases
-    .filter(lease => lease.identityVerified)
-    .sort((left, right) => compareVersions(right.version, left.version))) {
+  for (const lease of EffectArrayPipe(scan.leases, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (lease, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && lease.identityVerified,
+    ),
+  ).sort((left, right) => compareVersions(right.version, left.version))) {
     if (!unique.has(lease.processId)) unique.set(lease.processId, lease);
   }
   return {
@@ -221,8 +232,15 @@ export const readStandaloneProcessLeaseVerification = Effect.fn('installations.r
     };
     return {
       truncated: scan.truncated,
-      unverified: unique(scan.leases.filter(lease => !lease.identityVerified)),
-      verified: unique(scan.leases.filter(lease => lease.identityVerified)),
+      unverified: unique(EffectArray.filter(scan.leases, lease => !lease.identityVerified)),
+      verified: unique(
+        EffectArrayPipe(scan.leases, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (lease, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && lease.identityVerified,
+          ),
+        ),
+      ),
     } satisfies StandaloneProcessLeaseVerification;
   },
 );
@@ -245,7 +263,7 @@ export const liveReleaseLeaseVersions = Effect.fn('installations.liveLeaseVersio
       message: 'Standalone release pruning could not completely inspect the live process leases.',
     });
   }
-  return [...new Set(scan.leases.map(lease => lease.version))];
+  return [...new Set(EffectArray.map(scan.leases, lease => lease.version))];
 });
 
 /**
@@ -276,7 +294,8 @@ export const terminateSupersededStandaloneProcesses = Effect.fn('installations.t
         message: 'Cannot terminate superseded processes because live lease inspection was incomplete.',
       });
     }
-    const superseded = scan.leases.filter(
+    const superseded = EffectArray.filter(
+      scan.leases,
       lease => lease.version !== activeVersion && lease.processId !== system.processId,
     );
     // The stable broker is explicitly session-pinned, but its versioned MCP
@@ -284,15 +303,19 @@ export const terminateSupersededStandaloneProcesses = Effect.fn('installations.t
     // maintenance cleanup must therefore preserve only leases that opted in,
     // rather than treating every descendant of the broker as pinned too.
     const preservedIds = explicitlyPreservedStandaloneProcessIds(superseded);
-    const preserved = superseded.filter(lease => preservedIds.has(lease.processId));
-    const eligible = superseded.filter(lease => !preservedIds.has(lease.processId));
-    const verified = eligible.filter(lease => lease.identityVerified);
-    const skippedUnverified = eligible.filter(lease => !lease.identityVerified).map(publicLease);
-    const candidateIds = new Set(verified.map(lease => lease.processId));
-    const roots = verified.filter(
+    const preserved = EffectArray.filter(superseded, lease => preservedIds.has(lease.processId));
+    const eligible = EffectArray.filter(superseded, lease => !preservedIds.has(lease.processId));
+    const verified = EffectArray.filter(eligible, lease => lease.identityVerified);
+    const skippedUnverified = EffectArray.map(
+      EffectArray.filter(eligible, lease => !lease.identityVerified),
+      publicLease,
+    );
+    const candidateIds = new Set(EffectArray.map(verified, lease => lease.processId));
+    const roots = EffectArray.filter(
+      verified,
       lease => Option.isNone(lease.parentProcessId) || !candidateIds.has(lease.parentProcessId.value),
     );
-    const descendants = verified.filter(lease => !roots.includes(lease));
+    const descendants = EffectArray.filter(verified, lease => !roots.includes(lease));
     const signaled = new Map<number, StandaloneProcessLease>();
     for (const lease of roots) {
       if (yield* signalLeaseIfStillOwned(system, lease, 'SIGTERM')) {
@@ -313,8 +336,11 @@ export const terminateSupersededStandaloneProcesses = Effect.fn('installations.t
     }
     yield* waitForLeasesToExit(system, verified, 1_000);
     return {
-      preserved: preserved.map(publicLease).sort((left, right) => left.processId - right.processId),
-      remaining: verified.filter(lease => system.isProcessRunning(lease.processId)).map(publicLease),
+      preserved: EffectArray.map(preserved, publicLease).sort((left, right) => left.processId - right.processId),
+      remaining: EffectArray.map(
+        EffectArray.filter(verified, lease => system.isProcessRunning(lease.processId)),
+        publicLease,
+      ),
       signaled: [...signaled.values()].sort((left, right) => left.processId - right.processId),
       skippedUnverified: skippedUnverified.sort((left, right) => left.processId - right.processId),
     } satisfies SupersededStandaloneProcessTermination;
@@ -440,7 +466,12 @@ export function preservedStandaloneProcessIds(
 export function explicitlyPreservedStandaloneProcessIds(
   leases: readonly Pick<StandaloneProcessLease, 'processId' | 'retirementPolicy'>[],
 ): ReadonlySet<number> {
-  return new Set(leases.filter(lease => lease.retirementPolicy === 'preserve-session').map(lease => lease.processId));
+  return new Set(
+    EffectArray.map(
+      EffectArray.filter(leases, lease => lease.retirementPolicy === 'preserve-session'),
+      lease => lease.processId,
+    ),
+  );
 }
 
 function signalLeaseIfStillOwned(
@@ -470,7 +501,7 @@ function waitForLeasesToExit(
   return Effect.gen(function* () {
     const iterations = Math.ceil(waitMilliseconds / 100);
     for (let iteration = 0; iteration < iterations; iteration += 1) {
-      if (leases.every(lease => !system.isProcessRunning(lease.processId))) return;
+      if (EffectArray.every(leases, lease => !system.isProcessRunning(lease.processId))) return;
       yield* Effect.sleep(100);
     }
   });

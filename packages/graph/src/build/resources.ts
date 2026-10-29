@@ -32,7 +32,7 @@ export const EMPTY_CODE_GRAPH_BUILD_RESOURCE_STATE: CodeGraphBuildResourceState 
   writer: false,
 };
 
-export class CodeGraphBuildResourceOrderError extends Schema.TaggedError<CodeGraphBuildResourceOrderError>()(
+export class CodeGraphBuildResourceOrderError extends Schema.TaggedError<CodeGraphBuildResourceOrderError, {readonly brand: unique symbol}>()(
   'CodeGraphBuildResourceOrderError',
   {message: Schema.String},
 ) {}

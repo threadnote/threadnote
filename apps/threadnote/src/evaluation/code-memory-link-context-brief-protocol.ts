@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseContextBriefV1, renderContextBriefText} from '@threadnote/context/projector';
 import {
@@ -5,6 +6,7 @@ import {
   compareStrings,
   exactKeys,
   hashArray,
+  isCanonicalJsonRecord,
   invalid,
   literal,
   matchingHash,
@@ -16,6 +18,9 @@ import {
   unique,
   type CanonicalJsonValue,
 } from './code-memory-link-agent-protocol-primitives.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type CodeMemoryLinkContextBriefProxyDecisionV1 =
   | {
@@ -140,7 +145,10 @@ export function canonicalizeCodeMemoryLinkContextBriefResultV1(
   readonly structuredContent: Readonly<Record<string, CanonicalJsonValue>>;
 } {
   const normalized = normalizeJsonValue(structuredInput, 'Context Brief structured content');
-  const brief = record(normalized, 'Context Brief structured content') as Record<string, CanonicalJsonValue>;
+  if (!isCanonicalJsonRecord(normalized)) {
+    invalid('Context Brief structured content must be an object');
+  }
+  const brief = normalized;
   let responseClass: CodeMemoryLinkContextBriefResponseClassV1;
   if (brief.type === 'code-memory-link-context-brief-proxy') {
     if (brief.version !== 1 || brief.state !== 'empty' || brief.evidenceCount !== 0) {
@@ -159,7 +167,7 @@ export function canonicalizeCodeMemoryLinkContextBriefResultV1(
   const selectedMemories: CodeMemoryLinkSelectedMemoryReceiptV1[] = [];
   const anchoredCitationStatuses = new Map<string, CodeMemoryLinkContextBriefCitationStatusV1>();
   if (responseClass !== 'empty-v1') {
-    if (!Array.isArray(brief.durableDecisions) || !Array.isArray(brief.activeHandoffs)) {
+    if (!EffectArray.isArray(brief.durableDecisions) || !EffectArray.isArray(brief.activeHandoffs)) {
       invalid('Context Brief result is missing its memory evidence arrays');
     }
     const memories = [...brief.durableDecisions, ...brief.activeHandoffs];
@@ -167,17 +175,18 @@ export function canonicalizeCodeMemoryLinkContextBriefResultV1(
     for (const [index, candidate] of memories.entries()) {
       const memory = record(candidate, `Context Brief memory ${index + 1}`);
       const uri = boundedText(memory.uri, 'Context Brief memory URI', 2_048);
-      if (!uri.startsWith('threadnote://')) invalid('Context Brief memory identity is not a Threadnote URI');
+      if (!Effect.pipe(uri, EffectString.startsWith('threadnote://')))
+        invalid('Context Brief memory identity is not a Threadnote URI');
       const excerpt = boundedText(memory.excerpt, 'Context Brief memory excerpt', 16 * 1_024);
       selectedMemories.push({
         contentSha256: sha256HexSync(excerpt),
         memoryIdDigest: protocolDigest('selected-memory-id', uri),
       });
       const receipts = memory.citationReceipts;
-      if (receipts !== undefined && (!Array.isArray(receipts) || receipts.length > 64)) {
+      if (receipts !== undefined && (!EffectArray.isArray(receipts) || receipts.length > 64)) {
         invalid('Context Brief memory citation receipts must be a bounded array');
       }
-      const receiptClaims = (receipts ?? []).map((candidateReceipt, receiptIndex) => {
+      const receiptClaims = EffectArray.map(receipts ?? [], (candidateReceipt, receiptIndex) => {
         const receipt = record(candidateReceipt, `Context Brief citation receipt ${receiptIndex + 1}`);
         return {
           citationId: boundedText(receipt.citationId, 'Context Brief citation id', 256),
@@ -193,16 +202,19 @@ export function canonicalizeCodeMemoryLinkContextBriefResultV1(
           recordCodeMemoryLinkContextBriefCitationStatus(anchoredCitationStatuses, receipt.citationId, receipt.status);
         }
       }
-      const currentReceipts = receiptClaims.filter(
+      const currentReceipts = EffectArray.filter(
+        receiptClaims,
         receipt => receipt.status === 'exact' || receipt.status === 'relocated',
       );
-      citationDigests.push(...currentReceipts.map(receipt => codeMemoryLinkGoldCitationDigest(receipt.citationId)));
+      citationDigests.push(
+        ...EffectArray.map(currentReceipts, receipt => codeMemoryLinkGoldCitationDigest(receipt.citationId)),
+      );
       if (responseClass === 'task-v2' && memory.selectionBasis === 'code-citation') {
         invalid('task-only Context Brief v2 cannot contain code-selected memory');
       }
       if (responseClass === 'anchored-v3' && memory.selectionBasis === 'code-citation') {
         if (
-          !Array.isArray(memory.codeRelations) ||
+          !EffectArray.isArray(memory.codeRelations) ||
           memory.codeRelations.length === 0 ||
           memory.codeRelations.length > 8
         ) {
@@ -231,7 +243,7 @@ export function canonicalizeCodeMemoryLinkContextBriefResultV1(
         : compareStrings(left.contentSha256, right.contentSha256),
   );
   unique(
-    selectedMemories.map(memory => memory.memoryIdDigest),
+    EffectArray.map(selectedMemories, memory => memory.memoryIdDigest),
     'Context Brief selected memory identities',
   );
   return {
@@ -297,10 +309,10 @@ export function parseCodeMemoryLinkContextBriefResponseReceiptV1(
     ],
     'Context Brief response receipt',
   );
-  if (!Array.isArray(receipt.selectedMemories) || receipt.selectedMemories.length > 24) {
+  if (!EffectArray.isArray(receipt.selectedMemories) || receipt.selectedMemories.length > 24) {
     invalid('Context Brief selected-memory receipt roster is invalid');
   }
-  const selectedMemories = receipt.selectedMemories.map((value, index) => {
+  const selectedMemories = EffectArray.map(receipt.selectedMemories, (value, index) => {
     const memory = record(value, `Context Brief selected-memory receipt ${index + 1}`);
     exactKeys(memory, ['contentSha256', 'memoryIdDigest'], `Context Brief selected-memory receipt ${index + 1}`);
     return {
@@ -309,7 +321,8 @@ export function parseCodeMemoryLinkContextBriefResponseReceiptV1(
     };
   });
   if (
-    selectedMemories.some(
+    EffectArray.some(
+      selectedMemories,
       (entry, index) =>
         index > 0 &&
         (selectedMemories[index - 1].memoryIdDigest > entry.memoryIdDigest ||
@@ -320,7 +333,7 @@ export function parseCodeMemoryLinkContextBriefResponseReceiptV1(
     invalid('Context Brief selected-memory receipt roster is not unique canonical order');
   }
   unique(
-    selectedMemories.map(memory => memory.memoryIdDigest),
+    EffectArray.map(selectedMemories, memory => memory.memoryIdDigest),
     'Context Brief selected-memory receipt identities',
   );
   return {
@@ -360,7 +373,7 @@ export function projectParsedCodeMemoryLinkContextBriefRequestV1(input: {
   }
   const forwarded =
     input.policy === 'task-only'
-      ? Object.fromEntries(Object.entries(request).filter(([key]) => key !== 'codeRefs'))
+      ? EffectRecord.fromEntries(EffectArray.filter(EffectRecord.toEntries(request), ([key]) => key !== 'codeRefs'))
       : request;
   return {
     action: 'forward',

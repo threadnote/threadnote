@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Exit, Ref} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -27,11 +28,13 @@ import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-g
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
 });
 
 describe('code graph reference-resolution progress', () => {
@@ -72,8 +75,8 @@ describe('code graph reference-resolution progress', () => {
               yield* store.stageActivationFacts(
                 fixture.databasePath,
                 [caller],
-                references.map(entry => entry.edge),
-                references.map(entry => entry.reference),
+                EffectArray.map(references, entry => entry.edge),
+                EffectArray.map(references, entry => entry.reference),
               );
               return yield* store.resolveStagedReferences(fixture.databasePath, onProgress);
             }),
@@ -85,16 +88,20 @@ describe('code graph reference-resolution progress', () => {
       ),
     );
 
-    expect(observations.map(progress => progress.pageCompleted)).toEqual([0, 0, 1, 2, 3]);
-    expect(observations.map(progress => progress.referencesCompleted)).toEqual([0, 0, 500, 1_000, 1_201]);
-    expect(observations.every(progress => progress.pageTotal === 3 && progress.referencesTotal === 1_201)).toBe(true);
+    expect(EffectArray.map(observations, progress => progress.pageCompleted)).toEqual([0, 0, 1, 2, 3]);
+    expect(EffectArray.map(observations, progress => progress.referencesCompleted)).toEqual([0, 0, 500, 1_000, 1_201]);
+    expect(
+      EffectArray.every(observations, progress => progress.pageTotal === 3 && progress.referencesTotal === 1_201),
+    ).toBe(true);
     expect(observations.at(-1)).toMatchObject({
       pagesCompleted: 3,
       pass: 1,
       referencesExamined: 1_201,
       resolved: 0,
     });
-    expect(observations.every(progress => progress.elapsedMilliseconds >= progress.matchingMilliseconds)).toBe(true);
+    expect(
+      EffectArray.every(observations, progress => progress.elapsedMilliseconds >= progress.matchingMilliseconds),
+    ).toBe(true);
     expect(result.summary).toMatchObject({
       pagesCompleted: 3,
       passesCompleted: 1,
@@ -112,10 +119,12 @@ describe('code graph reference-resolution progress', () => {
         const fixture = yield* Effect.promise(() => resolutionFixture());
         const target = symbol('bulk-target', 'bulkTarget');
         const callers = Array.from({length: 5_001}, (_, index) => {
-          const suffix = String(index).padStart(4, '0');
+          const suffix = Effect2.pipe(String(index), EffectString.padStart(4, '0'));
           return symbol(`bulk-caller-${suffix}`, `bulkCaller${suffix}`);
         });
-        const unresolved = callers.map((caller, index) => resolvableReference(fixture.file, caller, target, index));
+        const unresolved = EffectArray.map(callers, (caller, index) =>
+          resolvableReference(fixture.file, caller, target, index),
+        );
         const snapshot = persistentSnapshot(fixture.identity, callers.length + 1, unresolved.length);
         const observations: CodeGraphResolutionActivity[] = [];
         const capacityBoundaries: Array<{readonly finalFactBytes: number; readonly rowCount: number}> = [];
@@ -132,8 +141,8 @@ describe('code graph reference-resolution progress', () => {
             yield* store.stageActivationFacts(
               fixture.databasePath,
               [target, ...callers],
-              unresolved.map(entry => entry.edge),
-              unresolved.map(entry => entry.reference),
+              EffectArray.map(unresolved, entry => entry.edge),
+              EffectArray.map(unresolved, entry => entry.reference),
               undefined,
               0,
             );
@@ -169,17 +178,23 @@ describe('code graph reference-resolution progress', () => {
           referencesCompleted: 0,
           referencesTotal: 5_001,
         });
-        expect(observations.map(progress => progress.pageCompleted)).toEqual([0, 0, 0, 1, 1, 2, 2]);
+        expect(EffectArray.map(observations, progress => progress.pageCompleted)).toEqual([0, 0, 0, 1, 1, 2, 2]);
         expect(observations.at(-2)).toMatchObject({resolved: 0});
         expect(observations.at(-1)).toMatchObject({resolved: 5_001});
         expect(observations.at(-1)?.longestTransactionMilliseconds).toBe(
           result.resolution.longestTransactionMilliseconds,
         );
         expect(result.graph.edges).toHaveLength(5_001);
-        expect(result.graph.edges.every(edge => edge.targetId === target.id)).toBe(true);
+        expect(EffectArray.every(result.graph.edges, edge => edge.targetId === target.id)).toBe(true);
         const semanticDigest = sha256HexSync(
           JSON.stringify(
-            result.graph.edges.map(edge => [edge.id, edge.sourceId, edge.relation, edge.targetId, edge.provenance]),
+            EffectArray.map(result.graph.edges, edge => [
+              edge.id,
+              edge.sourceId,
+              edge.relation,
+              edge.targetId,
+              edge.provenance,
+            ]),
           ),
         );
         expect(semanticDigest).toBe('db81d8f0de093727cacb3d934d779743287400d78764fafd2386d029a0bafba4');
@@ -196,7 +211,9 @@ describe('code graph reference-resolution progress', () => {
         const callers = Array.from({length: 17}, (_, index) =>
           symbol(`window-caller-${index}`, `windowCaller${index}`),
         );
-        const unresolved = callers.map((caller, index) => resolvableReference(fixture.file, caller, target, index));
+        const unresolved = EffectArray.map(callers, (caller, index) =>
+          resolvableReference(fixture.file, caller, target, index),
+        );
         const snapshot = persistentSnapshot(fixture.identity, callers.length + 1, unresolved.length);
         const firstCapacityRows: number[] = [];
         const firstProgress: CodeGraphResolutionActivity[] = [];
@@ -216,8 +233,8 @@ describe('code graph reference-resolution progress', () => {
             yield* store.stageActivationFacts(
               fixture.databasePath,
               [target, ...callers],
-              unresolved.map(entry => entry.edge),
-              unresolved.map(entry => entry.reference),
+              EffectArray.map(unresolved, entry => entry.edge),
+              EffectArray.map(unresolved, entry => entry.reference),
               undefined,
               0,
             );
@@ -288,7 +305,7 @@ describe('code graph reference-resolution progress', () => {
         expect(result.resumed).toMatchObject({pagesCompleted: 13, referencesExamined: 13, resolved: 13});
         expect(result.afterResume).toEqual({remaining: 0, resolved: 17});
         expect(result.graph.edges).toHaveLength(17);
-        expect(result.graph.edges.every(edge => edge.targetId === target.id)).toBe(true);
+        expect(EffectArray.every(result.graph.edges, edge => edge.targetId === target.id)).toBe(true);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     30_000,
   );
@@ -300,9 +317,14 @@ describe('code graph reference-resolution progress', () => {
         const fixture = yield* Effect.promise(() => resolutionFixture());
         const referenceCount = 1_501;
         const callers = Array.from({length: referenceCount}, (_, index) =>
-          symbol(`deferred-caller-${String(index).padStart(4, '0')}`, `deferredCaller${index}`),
+          symbol(
+            `deferred-caller-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
+            `deferredCaller${index}`,
+          ),
         );
-        const unresolved = callers.map((caller, index) => unresolvedReference(fixture.file, caller, index));
+        const unresolved = EffectArray.map(callers, (caller, index) =>
+          unresolvedReference(fixture.file, caller, index),
+        );
         const snapshot = persistentSnapshot(fixture.identity, callers.length, unresolved.length);
         const firstCapacityRows: number[] = [];
         const resumedCapacityRows: number[] = [];
@@ -321,8 +343,8 @@ describe('code graph reference-resolution progress', () => {
             yield* store.stageActivationFacts(
               fixture.databasePath,
               callers,
-              unresolved.map(entry => entry.edge),
-              unresolved.map(entry => entry.reference),
+              EffectArray.map(unresolved, entry => entry.edge),
+              EffectArray.map(unresolved, entry => entry.reference),
               undefined,
               0,
             );
@@ -382,21 +404,21 @@ describe('code graph reference-resolution progress', () => {
         expect(result.resumed).toMatchObject({passesCompleted: 1, referencesExamined: 1, resolved: 0});
         expect(result.afterResume).toEqual({remaining: 0, unresolved: referenceCount});
         const semanticRows = (edges: readonly CodeGraphEdge[]) =>
-          edges
-            .map(edge => [
-              edge.id,
-              edge.sourceId,
-              edge.sourceName,
-              edge.relation,
-              edge.targetId,
-              edge.targetName,
-              edge.provenance,
-              edge.confidence,
-              edge.evidencePath,
-              edge.evidenceSpan,
-            ])
-            .sort((left, right) => compareCodeUnits(String(left[0]), String(right[0])));
-        expect(semanticRows(result.graph.edges)).toEqual(semanticRows(unresolved.map(entry => entry.edge)));
+          EffectArray.map(edges, edge => [
+            edge.id,
+            edge.sourceId,
+            edge.sourceName,
+            edge.relation,
+            edge.targetId,
+            edge.targetName,
+            edge.provenance,
+            edge.confidence,
+            edge.evidencePath,
+            edge.evidenceSpan,
+          ]).sort((left, right) => compareCodeUnits(String(left[0]), String(right[0])));
+        expect(semanticRows(result.graph.edges)).toEqual(
+          semanticRows(EffectArray.map(unresolved, entry => entry.edge)),
+        );
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     30_000,
   );
@@ -405,7 +427,9 @@ describe('code graph reference-resolution progress', () => {
     const fixture = await resolutionFixture();
     const targets = Array.from({length: 600}, (_, index) => symbol(`target-${index}`, `target${index}`));
     const callers = Array.from({length: targets.length}, (_, index) => symbol(`caller-${index}`, `caller${index}`));
-    const unresolved = callers.map((caller, index) => resolvableReference(fixture.file, caller, targets[index], index));
+    const unresolved = EffectArray.map(callers, (caller, index) =>
+      resolvableReference(fixture.file, caller, targets[index], index),
+    );
     const snapshot = persistentSnapshot(fixture.identity, targets.length + callers.length, unresolved.length);
     const observations: CodeGraphResolutionActivity[] = [];
 
@@ -423,8 +447,8 @@ describe('code graph reference-resolution progress', () => {
             yield* store.stageActivationFacts(
               fixture.databasePath,
               [...targets, ...callers],
-              unresolved.map(entry => entry.edge),
-              unresolved.map(entry => entry.reference),
+              EffectArray.map(unresolved, entry => entry.edge),
+              EffectArray.map(unresolved, entry => entry.reference),
               undefined,
               0,
             );
@@ -448,14 +472,24 @@ describe('code graph reference-resolution progress', () => {
     });
     // Two phase-start observations plus three 256-key lookup-summary batches
     // keep the heartbeat live before the page can report completed references.
-    expect(observations.filter(progress => progress.pageCompleted === 0)).toHaveLength(5);
+    expect(EffectArray.filter(observations, progress => progress.pageCompleted === 0)).toHaveLength(5);
     expect(observations.at(-1)).toMatchObject({
       pageCompleted: 1,
       referencesCompleted: targets.length,
       resolved: targets.length,
     });
     expect(result.graph.edges).toHaveLength(targets.length);
-    expect(result.graph.edges.every(edge => edge.targetId?.startsWith('target-') === true)).toBe(true);
+    expect(
+      EffectArray.every(
+        result.graph.edges,
+        edge =>
+          Effect2.pipe(edge.targetId, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect2.pipe(effectOptionalString, EffectString.startsWith('target-')),
+          ) === true,
+      ),
+    ).toBe(true);
   }, 30_000);
 });
 
@@ -464,18 +498,18 @@ async function resolutionFixture() {
   temporaryRoots.push(root);
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'resolution-progress-fixture',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
   const file: CodeGraphInventoryFile = {
-    blobId: 'b'.repeat(40),
-    contentHash: 'h'.repeat(64),
+    blobId: Effect2.pipe('b', EffectString.repeat(40)),
+    contentHash: Effect2.pipe('h', EffectString.repeat(64)),
     language: 'typescript',
     mode: '100644',
     path: 'src/resolution.ts',
@@ -506,7 +540,7 @@ function unresolvedReference(
   caller: CodeGraphSymbol,
   index: number,
 ): {readonly edge: CodeGraphEdge; readonly reference: CodeGraphReference} {
-  const suffix = String(index).padStart(4, '0');
+  const suffix = Effect2.pipe(String(index), EffectString.padStart(4, '0'));
   const edge: CodeGraphEdge = {
     confidence: 0.7,
     evidencePath: file.path,
@@ -541,7 +575,7 @@ function resolvableReference(
   target: CodeGraphSymbol,
   index: number,
 ): {readonly edge: CodeGraphEdge; readonly reference: CodeGraphReference} {
-  const suffix = String(index).padStart(4, '0');
+  const suffix = Effect2.pipe(String(index), EffectString.padStart(4, '0'));
   const edge: CodeGraphEdge = {
     confidence: 0.7,
     evidencePath: file.path,

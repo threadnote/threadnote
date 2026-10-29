@@ -1,12 +1,20 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {Effect, Schema} from 'effect';
-class ScriptError extends Schema.TaggedError<ScriptError>()('ScriptError', {
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+class ScriptError extends Schema.TaggedError<ScriptError, {readonly brand: unique symbol}>()('ScriptError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
 
-class GrafanaHttpError extends Schema.TaggedError<GrafanaHttpError>()('GrafanaHttpError', {
-  status: Schema.Finite,
-}) {
+class GrafanaHttpError extends Schema.TaggedError<GrafanaHttpError, {readonly brand: unique symbol}>()(
+  'GrafanaHttpError',
+  {
+    status: Schema.Finite,
+  },
+) {
   override get message(): string {
     return this.status === 401
       ? 'Grafana API request failed with HTTP 401; the service-account token is invalid or expired.'
@@ -18,11 +26,14 @@ class GrafanaHttpError extends Schema.TaggedError<GrafanaHttpError>()('GrafanaHt
   }
 }
 
-class GrafanaTransportError extends Schema.TaggedError<GrafanaTransportError>()('GrafanaTransportError', {
-  message: Schema.String.pipe(
-    Schema.withConstructorDefault(Effect.succeed('Grafana API request failed before receiving a response.')),
-  ),
-}) {
+class GrafanaTransportError extends Schema.TaggedError<GrafanaTransportError, {readonly brand: unique symbol}>()(
+  'GrafanaTransportError',
+  {
+    message: Schema.String.pipe(
+      Schema.withConstructorDefault(Effect.succeed('Grafana API request failed before receiving a response.')),
+    ),
+  },
+) {
   static of(): GrafanaTransportError {
     return GrafanaTransportError.make({});
   }
@@ -45,7 +56,11 @@ interface JsonArray extends ReadonlyArray<JsonValue> {
 interface JsonObject {
   readonly [key: string]: JsonValue;
 }
-export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
+export type JsonValue = JsonPrimitive | JsonArray | JsonObject;
+
+function isJsonObjectValue(value: JsonValue): value is JsonObject {
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
+}
 
 export type DashboardArtifact = Readonly<{
   dashboardUid: typeof telemetryDashboardUid;
@@ -70,10 +85,30 @@ const folderApiVersion = 'folder.grafana.app/v1';
 const grafanaSharedWithMeFolderScope = 'folders:uid:sharedwithme';
 
 function record(value: unknown, path: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+  if (!Predicate.isObject(value)) {
     throw ScriptError.make({message: `${path} must be an object.`});
   }
-  return value as Record<string, unknown>;
+  return Schema.decodeSync(Schema.Record(Schema.String, Schema.Unknown))(value);
+}
+
+function jsonRecord(value: unknown, path: string): JsonObject {
+  try {
+    const cloned = cloneJson(value, path);
+    if (!isJsonObjectValue(cloned)) throw new Error('not a JSON object');
+    return cloned;
+  } catch {
+    throw ScriptError.make({message: `${path} must contain only JSON values.`});
+  }
+}
+
+function recordArray(value: unknown, path: string): readonly JsonObject[] {
+  if (!EffectArray.isArray(value)) throw ScriptError.make({message: `${path} must be an array.`});
+  return EffectArray.map(value, (item, index) => jsonRecord(item, `${path}[${index}]`));
+}
+
+function requiredString(value: unknown, path: string): string {
+  if (typeof value !== 'string') throw ScriptError.make({message: `${path} must be a string.`});
+  return value;
 }
 
 function optionalRecord(value: unknown, path: string): Record<string, unknown> {
@@ -103,17 +138,20 @@ function cloneResolvingDatasource(value: unknown, path: string, replacements: {c
       replacements.count += 1;
       return telemetryDashboardDatasourceUid;
     }
-    if (value.includes(datasourcePlaceholder)) {
+    if (Effect2.pipe(value, EffectString.includes(datasourcePlaceholder))) {
       throw ScriptError.make({message: `${path} embeds the Tempo data-source placeholder in an unsupported string.`});
     }
     return value;
   }
-  if (Array.isArray(value)) {
-    return value.map((item, index) => cloneResolvingDatasource(item, `${path}[${index}]`, replacements));
+  if (EffectArray.isArray(value)) {
+    return EffectArray.map(value, (item, index) => cloneResolvingDatasource(item, `${path}[${index}]`, replacements));
   }
   if (typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneResolvingDatasource(item, `${path}.${key}`, replacements)]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(value), ([key, item]) => [
+        key,
+        cloneResolvingDatasource(item, `${path}.${key}`, replacements),
+      ]),
     );
   }
   throw ScriptError.make({message: `${path} contains a value that JSON cannot represent.`});
@@ -123,20 +161,27 @@ function cloneJson(value: unknown, path: string): JsonValue {
   if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
     return value;
   }
-  if (Array.isArray(value)) return value.map((item, index) => cloneJson(item, `${path}[${index}]`));
+  if (EffectArray.isArray(value)) return EffectArray.map(value, (item, index) => cloneJson(item, `${path}[${index}]`));
   if (typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneJson(item, `${path}.${key}`)]));
+    return EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(value), ([key, item]) => [key, cloneJson(item, `${path}.${key}`)]),
+    );
   }
   throw ScriptError.make({message: `${path} contains a value that JSON cannot represent.`});
 }
 
+function isJsonValueArray(value: JsonValue): value is readonly JsonValue[] {
+  return EffectArray.isArray(value);
+}
+
 function sortedJson(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) return value.map(sortedJson);
+  if (isJsonValueArray(value)) return EffectArray.map(value, sortedJson);
   if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, sortedJson(item)]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectRecord.toEntries(value).sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+        ([key, item]) => [key, sortedJson(item)],
+      ),
     );
   }
   return value;
@@ -150,7 +195,7 @@ function validateImportContract(source: Record<string, unknown>): void {
   if (source.uid !== telemetryDashboardUid)
     throw ScriptError.make({message: `Dashboard uid must remain ${telemetryDashboardUid}.`});
   const inputs = source.__inputs;
-  if (!Array.isArray(inputs) || inputs.length !== 1) {
+  if (!EffectArray.isArray(inputs) || inputs.length !== 1) {
     throw ScriptError.make({message: 'Dashboard import source must declare exactly one Tempo input.'});
   }
   const input = record(inputs[0], 'dashboard.__inputs[0]');
@@ -163,7 +208,7 @@ export function renderDashboardArtifact(source: unknown): DashboardArtifact {
   const sourceRecord = record(source, 'dashboard');
   validateImportContract(sourceRecord);
   const replacements = {count: 0};
-  const resolved = record(cloneResolvingDatasource(sourceRecord, 'dashboard', replacements), 'dashboard');
+  const resolved = {...jsonRecord(cloneResolvingDatasource(sourceRecord, 'dashboard', replacements), 'dashboard')};
   if (replacements.count === 0)
     throw ScriptError.make({message: 'Dashboard import source does not use the DS_TEMPO placeholder.'});
   for (const key of ['__inputs', '__requires', ...serverOwnedDashboardKeys]) delete resolved[key];
@@ -171,7 +216,7 @@ export function renderDashboardArtifact(source: unknown): DashboardArtifact {
   const artifact: DashboardArtifact = {
     dashboardUid: telemetryDashboardUid,
     folderUid: telemetryDashboardFolderUid,
-    spec: resolved as Readonly<Record<string, JsonValue>>,
+    spec: resolved,
   };
   validateDashboardArtifact(artifact);
   return artifact;
@@ -186,19 +231,19 @@ type TempoQuery = Readonly<{
 
 export function collectTempoQueries(resource: DashboardArtifact): readonly TempoQuery[] {
   const panels = resource.spec.panels;
-  if (!Array.isArray(panels) || panels.length === 0)
+  if (!EffectArray.isArray(panels) || panels.length === 0)
     throw ScriptError.make({message: 'Dashboard artifact has no panels.'});
   const queries: TempoQuery[] = [];
   for (const [panelIndex, panelValue] of panels.entries()) {
     const panel = record(panelValue, `dashboard.panels[${panelIndex}]`);
-    if (!Number.isInteger(panel.id))
+    if (typeof panel.id !== 'number' || !Number.isInteger(panel.id))
       throw ScriptError.make({message: `dashboard.panels[${panelIndex}].id must be an integer.`});
-    const panelId = panel.id as number;
+    const panelId = panel.id;
     const panelDatasource = record(panel.datasource, `dashboard.panels[${panelIndex}].datasource`);
     if (panelDatasource.type !== 'tempo' || panelDatasource.uid !== telemetryDashboardDatasourceUid) {
       throw ScriptError.make({message: `Dashboard panel ${panelId} must use the production Tempo data source.`});
     }
-    if (!Array.isArray(panel.targets) || panel.targets.length === 0) {
+    if (!EffectArray.isArray(panel.targets) || panel.targets.length === 0) {
       throw ScriptError.make({message: `Dashboard panel ${panelId} has no query targets.`});
     }
     for (const [targetIndex, targetValue] of panel.targets.entries()) {
@@ -223,12 +268,17 @@ export function collectTempoQueries(resource: DashboardArtifact): readonly Tempo
           message: `Dashboard panel ${panelId} target ${targetIndex} exceeds the ${telemetryDashboardQueryLengthLimit}-character Tempo query limit.`,
         });
       }
-      if (!target.query.includes(telemetryDashboardSyntheticCanaryExclusion)) {
+      if (!Effect2.pipe(target.query, EffectString.includes(telemetryDashboardSyntheticCanaryExclusion))) {
         throw ScriptError.make({
           message: `Dashboard panel ${panelId} target ${targetIndex} does not exclude synthetic canaries.`,
         });
       }
-      queries.push({panelId, query: target.query, target: target as Readonly<Record<string, JsonValue>>, targetIndex});
+      queries.push({
+        panelId,
+        query: target.query,
+        target: jsonRecord(target, `dashboard.panels[${panelIndex}].targets[${targetIndex}]`),
+        targetIndex,
+      });
     }
   }
   if (queries.length === 0) throw ScriptError.make({message: 'Dashboard artifact has no Tempo queries.'});
@@ -237,12 +287,12 @@ export function collectTempoQueries(resource: DashboardArtifact): readonly Tempo
 
 function unexpectedFullBuildExpressionTarget(resource: DashboardArtifact): Readonly<Record<string, JsonValue>> {
   const panels = resource.spec.panels;
-  if (!Array.isArray(panels)) throw ScriptError.make({message: 'Dashboard artifact has no panels.'});
-  const matches = panels.filter(panelValue => isObject(panelValue) && panelValue.id === 13);
+  if (!EffectArray.isArray(panels)) throw ScriptError.make({message: 'Dashboard artifact has no panels.'});
+  const matches = EffectArray.filter(panels, panelValue => isObject(panelValue) && panelValue.id === 13);
   if (matches.length !== 1)
     throw ScriptError.make({message: 'Dashboard must contain exactly one unexpected-full percentage panel.'});
   const panel = record(matches[0], 'dashboard panel 13');
-  if (!Array.isArray(panel.targets) || panel.targets.length !== 3) {
+  if (!EffectArray.isArray(panel.targets) || panel.targets.length !== 3) {
     throw ScriptError.make({message: 'Dashboard panel 13 must contain numerator, denominator, and math targets.'});
   }
   const [numeratorValue, denominatorValue, expressionValue] = panel.targets;
@@ -263,17 +313,17 @@ function unexpectedFullBuildExpressionTarget(resource: DashboardArtifact): Reado
   ) {
     throw ScriptError.make({message: 'Dashboard panel 13 must use the guarded executable A/B percentage expression.'});
   }
-  return expression as Readonly<Record<string, JsonValue>>;
+  return jsonRecord(expression, 'dashboard panel 13 expression');
 }
 
 function validateGraphQueryStageTargets(resource: DashboardArtifact): void {
   const panels = resource.spec.panels;
-  if (!Array.isArray(panels)) throw ScriptError.make({message: 'Dashboard artifact has no panels.'});
-  const matches = panels.filter(panelValue => isObject(panelValue) && panelValue.id === 23);
+  if (!EffectArray.isArray(panels)) throw ScriptError.make({message: 'Dashboard artifact has no panels.'});
+  const matches = EffectArray.filter(panels, panelValue => isObject(panelValue) && panelValue.id === 23);
   if (matches.length !== 1)
     throw ScriptError.make({message: 'Dashboard must contain exactly one graph-query stage panel.'});
   const panel = record(matches[0], 'dashboard panel 23');
-  if (!Array.isArray(panel.targets) || panel.targets.length !== 2) {
+  if (!EffectArray.isArray(panel.targets) || panel.targets.length !== 2) {
     throw ScriptError.make({message: 'Dashboard panel 23 must contain separate outer-phase and fine-stage targets.'});
   }
   const [phaseValue, stageValue] = panel.targets;
@@ -283,15 +333,21 @@ function validateGraphQueryStageTargets(resource: DashboardArtifact): void {
     phase.refId !== 'A' ||
     phase.metricsQueryType !== 'instant' ||
     typeof phase.query !== 'string' ||
-    !phase.query.includes('span.threadnote.phase =~ "graph.query.*"') ||
-    !phase.query.includes('span.threadnote.stage = nil') ||
-    !phase.query.includes('by (span.threadnote.graph.request_kind, span.threadnote.phase)') ||
+    !Effect2.pipe(phase.query, EffectString.includes('span.threadnote.phase =~ "graph.query.*"')) ||
+    !Effect2.pipe(phase.query, EffectString.includes('span.threadnote.stage = nil')) ||
+    !Effect2.pipe(
+      phase.query,
+      EffectString.includes('by (span.threadnote.graph.request_kind, span.threadnote.phase)'),
+    ) ||
     stage.refId !== 'B' ||
     stage.metricsQueryType !== 'instant' ||
     typeof stage.query !== 'string' ||
-    !stage.query.includes('span.threadnote.phase =~ "graph.query.*"') ||
-    !stage.query.includes('span.threadnote.stage =~ "query-.*"') ||
-    !stage.query.includes('by (span.threadnote.graph.request_kind, span.threadnote.stage, span.threadnote.subphase)')
+    !Effect2.pipe(stage.query, EffectString.includes('span.threadnote.phase =~ "graph.query.*"')) ||
+    !Effect2.pipe(stage.query, EffectString.includes('span.threadnote.stage =~ "query-.*"')) ||
+    !Effect2.pipe(
+      stage.query,
+      EffectString.includes('by (span.threadnote.graph.request_kind, span.threadnote.stage, span.threadnote.subphase)'),
+    )
   ) {
     throw ScriptError.make({
       message: 'Dashboard panel 23 must keep outer phases separate and group fine stages by closed labels.',
@@ -301,14 +357,14 @@ function validateGraphQueryStageTargets(resource: DashboardArtifact): void {
 
 export function validateDashboardArtifact(value: unknown): DashboardArtifact {
   const artifact = validateHistoricalDashboardArtifact(value);
-  const artifactRecord = artifact as Readonly<Record<string, JsonValue>>;
+  const artifactRecord = record(artifact, 'dashboard artifact');
   const spec = artifact.spec;
   const rendered = canonicalJson(cloneJson(artifactRecord, 'dashboard artifact'));
-  if (rendered.includes(datasourcePlaceholder)) {
+  if (Effect2.pipe(rendered, EffectString.includes(datasourcePlaceholder))) {
     throw ScriptError.make({message: 'Dashboard artifact still contains an unresolved Tempo data-source placeholder.'});
   }
   for (const key of ['__inputs', '__requires', ...serverOwnedDashboardKeys]) {
-    if (Object.hasOwn(spec, key))
+    if (EffectRecord.has(spec, key))
       throw ScriptError.make({message: `Dashboard artifact retains server-owned field ${key}.`});
   }
   collectTempoQueries(artifact);
@@ -323,48 +379,54 @@ export function validateHistoricalDashboardArtifact(value: unknown): DashboardAr
   if (
     artifactRecord.dashboardUid !== telemetryDashboardUid ||
     artifactRecord.folderUid !== telemetryDashboardFolderUid ||
-    Object.keys(artifactRecord).length !== 3 ||
-    Object.keys(artifactRecord).some(key => !['dashboardUid', 'folderUid', 'spec'].includes(key))
+    EffectRecord.keys(artifactRecord).length !== 3 ||
+    EffectArray.some(EffectRecord.keys(artifactRecord), key => !['dashboardUid', 'folderUid', 'spec'].includes(key))
   ) {
     throw ScriptError.make({message: 'Dashboard artifact must retain its exact dashboard and folder identity.'});
   }
   cloneJson(artifactRecord, 'dashboard artifact');
-  return value as DashboardArtifact;
+  return {
+    dashboardUid: telemetryDashboardUid,
+    folderUid: telemetryDashboardFolderUid,
+    spec: jsonRecord(artifactRecord.spec, 'dashboard artifact.spec'),
+  };
 }
 
 function isMigrationEmptyFieldConfig(value: unknown): boolean {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const fieldConfig = value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) return false;
+  const fieldConfig = value;
   const defaults = fieldConfig.defaults;
   return (
-    Object.keys(fieldConfig).length === 2 &&
+    EffectRecord.keys(fieldConfig).length === 2 &&
     defaults !== null &&
     typeof defaults === 'object' &&
-    !Array.isArray(defaults) &&
-    Object.keys(defaults).length === 0 &&
-    Array.isArray(fieldConfig.overrides) &&
+    !EffectArray.isArray(defaults) &&
+    EffectRecord.keys(defaults).length === 0 &&
+    EffectArray.isArray(fieldConfig.overrides) &&
     fieldConfig.overrides.length === 0
   );
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
 }
 
 function isExactStringArray(value: unknown, expected: readonly string[]): boolean {
   return (
-    Array.isArray(value) && value.length === expected.length && value.every((item, index) => item === expected[index])
+    EffectArray.isArray(value) &&
+    value.length === expected.length &&
+    EffectArray.every(value, (item, index) => item === expected[index])
   );
 }
 
 function isDatasource(value: unknown, type: string, uid: string): boolean {
-  return isObject(value) && Object.keys(value).length === 2 && value.type === type && value.uid === uid;
+  return isObject(value) && EffectRecord.keys(value).length === 2 && value.type === type && value.uid === uid;
 }
 
 function exactTempoDatasourceUid(value: unknown): string | undefined {
   if (
     !isObject(value) ||
-    Object.keys(value).length !== 2 ||
+    EffectRecord.keys(value).length !== 2 ||
     value.type !== 'tempo' ||
     typeof value.uid !== 'string' ||
     value.uid.length === 0
@@ -375,7 +437,7 @@ function exactTempoDatasourceUid(value: unknown): string | undefined {
 }
 
 function mixedTempoExpressionTargetDatasourceUid(panel: Record<string, unknown>): string | undefined {
-  if (panel.id !== 13 || !Array.isArray(panel.targets) || panel.targets.length !== 3) return undefined;
+  if (panel.id !== 13 || !EffectArray.isArray(panel.targets) || panel.targets.length !== 3) return undefined;
   const [left, right, expression] = panel.targets;
   if (!isObject(left) || !isObject(right) || !isObject(expression)) return undefined;
   const leftDatasourceUid = exactTempoDatasourceUid(left.datasource);
@@ -413,16 +475,16 @@ function normalizePanelMigrationNoise(panel: Record<string, unknown>): void {
   if (isObject(fieldConfig.defaults)) {
     if (
       migrationEmptyMappingsPanelIds.has(panel.id) &&
-      Array.isArray(fieldConfig.defaults.mappings) &&
+      EffectArray.isArray(fieldConfig.defaults.mappings) &&
       fieldConfig.defaults.mappings.length === 0
     ) {
       delete fieldConfig.defaults.mappings;
     }
-    if (panel.id === 20 && Object.keys(fieldConfig.defaults).length === 0) delete fieldConfig.defaults;
+    if (panel.id === 20 && EffectRecord.keys(fieldConfig.defaults).length === 0) delete fieldConfig.defaults;
   }
   if (
     migrationEmptyOverridesPanelIds.has(panel.id) &&
-    Array.isArray(fieldConfig.overrides) &&
+    EffectArray.isArray(fieldConfig.overrides) &&
     fieldConfig.overrides.length === 0
   ) {
     delete fieldConfig.overrides;
@@ -436,8 +498,8 @@ export function canonicalDashboardSemantics(value: unknown): string {
   if (dashboard.weekStart === '') delete dashboard.weekStart;
   if (
     isObject(dashboard.templating) &&
-    Object.keys(dashboard.templating).length === 1 &&
-    Array.isArray(dashboard.templating.list) &&
+    EffectRecord.keys(dashboard.templating).length === 1 &&
+    EffectArray.isArray(dashboard.templating.list) &&
     dashboard.templating.list.length === 0
   ) {
     delete dashboard.templating;
@@ -448,14 +510,14 @@ export function canonicalDashboardSemantics(value: unknown): string {
   ) {
     delete dashboard.timepicker.refresh_intervals;
   }
-  if (Array.isArray(dashboard.panels)) {
-    dashboard.panels = dashboard.panels.map((panelValue, index) => {
+  if (EffectArray.isArray(dashboard.panels)) {
+    dashboard.panels = EffectArray.map(dashboard.panels, (panelValue, index) => {
       const panel = record(panelValue, `dashboard spec.panels[${index}]`);
       normalizePanelMigrationNoise(panel);
       return panel;
     });
   }
-  return canonicalJson(dashboard as JsonObject);
+  return canonicalJson(jsonRecord(dashboard, 'dashboard'));
 }
 
 export function assessDashboardThreeWay(
@@ -494,7 +556,11 @@ export function buildTempoQueryRequests(resource: DashboardArtifact, now = Date.
   expressionQueries.push({
     ...expression,
     datasource: {type: '__expr__', uid: '__expr__'},
-    expression: telemetryDashboardUnexpectedFullBuildExpression.replaceAll('$A', '$P13T0').replaceAll('$B', '$P13T1'),
+    expression: Effect2.pipe(
+      telemetryDashboardUnexpectedFullBuildExpression,
+      EffectString.replaceAll('$A', '$P13T0'),
+      EffectString.replaceAll('$B', '$P13T1'),
+    ),
     refId: 'P13T2',
   });
   const from = String(now - 5 * 60_000);
@@ -512,7 +578,7 @@ function grafanaUrl(baseUrl: string, path: string): URL {
   } catch {
     throw ScriptError.make({message: 'THREADNOTE_TELEMETRY_GRAFANA_URL must be an absolute HTTPS URL.'});
   }
-  const labels = base.hostname.split('.');
+  const labels = Effect2.pipe(base.hostname, EffectString.split('.'));
   if (
     base.protocol !== 'https:' ||
     base.username ||
@@ -522,8 +588,8 @@ function grafanaUrl(baseUrl: string, path: string): URL {
     base.search ||
     base.hash ||
     base.hostname === 'grafana.net' ||
-    !base.hostname.endsWith('.grafana.net') ||
-    labels.some(label => label.length === 0)
+    !Effect2.pipe(base.hostname, EffectString.endsWith('.grafana.net')) ||
+    EffectArray.some(labels, label => label.length === 0)
   ) {
     throw ScriptError.make({
       message: 'THREADNOTE_TELEMETRY_GRAFANA_URL must be an uncredentialed Grafana Cloud HTTPS origin.',
@@ -593,12 +659,12 @@ function rejectManagedResource(metadata: Record<string, unknown>): void {
   const annotations = annotationsFromMetadata(metadata, 'Grafana resource metadata');
   const labels = optionalRecord(metadata.labels, 'Grafana resource metadata.labels');
   const isReservedProvenanceKey = (key: string): boolean =>
-    key.startsWith('grafana.app/managed') ||
-    key.startsWith('grafana.app/manager') ||
-    key.startsWith('grafana.app/repo') ||
-    key.startsWith('grafana.app/source') ||
-    key.startsWith('provisioning.grafana.app/');
-  if ([...Object.keys(annotations), ...Object.keys(labels)].some(isReservedProvenanceKey)) {
+    Effect2.pipe(key, EffectString.startsWith('grafana.app/managed')) ||
+    Effect2.pipe(key, EffectString.startsWith('grafana.app/manager')) ||
+    Effect2.pipe(key, EffectString.startsWith('grafana.app/repo')) ||
+    Effect2.pipe(key, EffectString.startsWith('grafana.app/source')) ||
+    Effect2.pipe(key, EffectString.startsWith('provisioning.grafana.app/'));
+  if (EffectArray.some([...EffectRecord.keys(annotations), ...EffectRecord.keys(labels)], isReservedProvenanceKey)) {
     throw ScriptError.make({
       message: 'Direct dashboard provisioning refuses a managed or provisioned Grafana resource.',
     });
@@ -609,7 +675,7 @@ function parseLiveDashboard(value: unknown, namespace: string): LiveDashboard {
   const resource = record(value, 'Grafana dashboard response');
   const metadata = record(resource.metadata, 'Grafana dashboard response.metadata');
   const annotations = annotationsFromMetadata(metadata, 'Grafana dashboard response.metadata');
-  const spec = record(resource.spec, 'Grafana dashboard response.spec');
+  const spec = jsonRecord(resource.spec, 'Grafana dashboard response.spec');
   rejectManagedResource(metadata);
   if (
     resource.apiVersion !== dashboardApiVersion ||
@@ -628,19 +694,25 @@ function parseLiveDashboard(value: unknown, namespace: string): LiveDashboard {
   if (typeof metadata.uid !== 'string' || metadata.uid.length === 0) {
     throw ScriptError.make({message: 'Grafana dashboard response is missing its immutable metadata.uid.'});
   }
-  if (!Number.isInteger(spec.schemaVersion) || (spec.schemaVersion as number) < 1) {
+  if (typeof spec.schemaVersion !== 'number' || !Number.isInteger(spec.schemaVersion) || spec.schemaVersion < 1) {
     throw ScriptError.make({message: 'Grafana dashboard response is missing a valid server schemaVersion.'});
   }
   return {
-    annotations: cloneJson(annotations, 'Grafana dashboard response.metadata.annotations') as JsonObject,
+    annotations: jsonRecord(
+      cloneJson(annotations, 'Grafana dashboard response.metadata.annotations'),
+      'Grafana dashboard response.metadata.annotations',
+    ),
     internalUid: metadata.uid,
-    labels: cloneJson(
-      optionalRecord(metadata.labels, 'Grafana dashboard response.metadata.labels'),
+    labels: jsonRecord(
+      cloneJson(
+        optionalRecord(metadata.labels, 'Grafana dashboard response.metadata.labels'),
+        'Grafana dashboard response.metadata.labels',
+      ),
       'Grafana dashboard response.metadata.labels',
-    ) as JsonObject,
+    ),
     namespace,
     resourceVersion: metadata.resourceVersion,
-    schemaVersion: spec.schemaVersion as number,
+    schemaVersion: spec.schemaVersion,
     spec,
   };
 }
@@ -657,7 +729,7 @@ function validateLiveFolder(value: unknown, namespace: string): void {
     metadata.name !== telemetryDashboardFolderUid ||
     metadata.namespace !== namespace ||
     spec.title !== telemetryDashboardFolderTitle ||
-    Object.hasOwn(annotations, 'grafana.app/folder')
+    EffectRecord.has(annotations, 'grafana.app/folder')
   ) {
     throw ScriptError.make({
       message: 'Grafana private folder identity or title does not match the fixed deployment target.',
@@ -666,10 +738,11 @@ function validateLiveFolder(value: unknown, namespace: string): void {
 }
 
 function validatePrivateFolderPermissions(value: unknown): void {
-  if (!Array.isArray(value)) throw ScriptError.make({message: 'Grafana folder permissions response must be an array.'});
+  if (!EffectArray.isArray(value))
+    throw ScriptError.make({message: 'Grafana folder permissions response must be an array.'});
   for (const [index, item] of value.entries()) {
     const permission = record(item, `Grafana folder permissions response[${index}]`);
-    const role = typeof permission.role === 'string' ? permission.role.toLowerCase() : '';
+    const role = typeof permission.role === 'string' ? Effect2.pipe(permission.role, EffectString.toLowerCase) : '';
     if (role === 'viewer' || role === 'editor' || permission.folderId === -1 || permission.dashboardId === -1) {
       throw ScriptError.make({message: 'Grafana private folder still grants broad default Viewer or Editor access.'});
     }
@@ -682,12 +755,19 @@ function validateExactPermissions(
   exactScopes: Readonly<Record<string, readonly string[]>>,
 ): void {
   const permissions = record(value, 'Grafana effective permissions response');
-  for (const [action, scopesValue] of Object.entries(permissions)) {
-    if (!Array.isArray(scopesValue) || scopesValue.some(scope => typeof scope !== 'string')) {
+  for (const [action, scopesValue] of EffectRecord.toEntries(permissions)) {
+    if (!EffectArray.isArray(scopesValue) || EffectArray.some(scopesValue, scope => typeof scope !== 'string')) {
       throw ScriptError.make({message: 'Grafana effective permissions response has an invalid scope list.'});
     }
-    const scopes = scopesValue as string[];
-    if (!Object.hasOwn(exactScopes, action) || scopes.some(scope => scope === '*' || scope.endsWith(':*'))) {
+    const scopes = EffectArray.map(scopesValue, scope => {
+      if (typeof scope !== 'string')
+        throw ScriptError.make({message: 'Grafana effective permissions response has an invalid scope list.'});
+      return scope;
+    });
+    if (
+      !EffectRecord.has(exactScopes, action) ||
+      EffectArray.some(scopes, scope => scope === '*' || Effect2.pipe(scope, EffectString.endsWith(':*')))
+    ) {
       throw ScriptError.make({message: `Grafana dashboard ${actor} has a forbidden permission action or scope.`});
     }
     const expectedScopes = exactScopes[action];
@@ -695,19 +775,19 @@ function validateExactPermissions(
       expectedScopes === undefined ||
       scopes.length !== expectedScopes.length ||
       new Set(scopes).size !== scopes.length ||
-      expectedScopes.some(scope => !scopes.includes(scope))
+      EffectArray.some(expectedScopes, scope => !scopes.includes(scope))
     ) {
       throw ScriptError.make({message: `Grafana dashboard ${actor} is not restricted to the exact allowed targets.`});
     }
   }
-  for (const [action, expectedScopes] of Object.entries(exactScopes)) {
+  for (const [action, expectedScopes] of EffectRecord.toEntries(exactScopes)) {
     const scopes = permissions[action];
     if (
-      !Array.isArray(scopes) ||
-      scopes.some(scope => typeof scope !== 'string') ||
+      !EffectArray.isArray(scopes) ||
+      EffectArray.some(scopes, scope => typeof scope !== 'string') ||
       scopes.length !== expectedScopes.length ||
       new Set(scopes).size !== scopes.length ||
-      expectedScopes.some(scope => !scopes.includes(scope))
+      EffectArray.some(expectedScopes, scope => !scopes.includes(scope))
     ) {
       throw ScriptError.make({message: `Grafana dashboard ${actor} is missing a required exact-target permission.`});
     }
@@ -738,7 +818,7 @@ function queryErrors(value: unknown, expectedReferenceIds: readonly string[]): r
   const results = record(response.results, 'Grafana query response.results');
   const errors: string[] = [];
   for (const referenceId of expectedReferenceIds) {
-    if (!Object.hasOwn(results, referenceId)) {
+    if (!EffectRecord.has(results, referenceId)) {
       errors.push(`${referenceId}:missing`);
       continue;
     }
@@ -746,7 +826,7 @@ function queryErrors(value: unknown, expectedReferenceIds: readonly string[]): r
     if (typeof result.error === 'string' && result.error.length > 0) errors.push(`${referenceId}:error`);
     const status = typeof result.status === 'string' || typeof result.status === 'number' ? Number(result.status) : 200;
     if (!Number.isFinite(status) || status >= 400) errors.push(`${referenceId}:status`);
-    if (!Array.isArray(result.frames)) errors.push(`${referenceId}:frames`);
+    if (!EffectArray.isArray(result.frames)) errors.push(`${referenceId}:frames`);
   }
   return errors;
 }
@@ -798,14 +878,14 @@ async function verifyTempoQueries(
       200,
     );
     const requestRecord = record(request, 'Grafana query request');
-    const queries = requestRecord.queries as readonly Readonly<Record<string, JsonValue>>[];
+    const queries = recordArray(requestRecord.queries, 'Grafana query request.queries');
     const errors = queryErrors(
       response,
-      queries.map(query => query.refId as string),
+      EffectArray.map(queries, query => requiredString(query.refId, 'Grafana query request query.refId')),
     );
     if (errors.length > 0) {
       throw ScriptError.make({
-        message: `Grafana rejected ${errors.length} bounded dashboard query checks (${errors.join(', ')}).`,
+        message: `Grafana rejected ${errors.length} bounded dashboard query checks (${EffectArray.join(errors, ', ')}).`,
       });
     }
   }
@@ -820,7 +900,7 @@ export async function verifyLiveDashboard(
     token: string;
   }>,
 ): Promise<void> {
-  if (options.token.trim().length === 0) {
+  if (Effect2.pipe(options.token, EffectString.trim).length === 0) {
     throw ScriptError.make({
       message: 'THREADNOTE_TELEMETRY_GRAFANA_READ_TOKEN is required when live verification is enabled.',
     });
@@ -891,7 +971,7 @@ export async function deployDashboard(
     token: string;
   }>,
 ): Promise<DashboardDeploymentDecision> {
-  if (options.token.trim().length === 0) {
+  if (Effect2.pipe(options.token, EffectString.trim).length === 0) {
     throw ScriptError.make({
       message: 'THREADNOTE_TELEMETRY_GRAFANA_WRITE_TOKEN is required when direct deployment is enabled.',
     });
@@ -915,7 +995,7 @@ export async function deployDashboard(
   const live = parseLiveDashboard(await fetchJson(fetcher, url, options.token, undefined, 200), namespace);
   const decision = assessDashboardThreeWay({
     current: canonicalDashboardSemantics(options.current.spec),
-    historical: options.historical.map(artifact => canonicalDashboardSemantics(artifact.spec)),
+    historical: EffectArray.map(options.historical, artifact => canonicalDashboardSemantics(artifact.spec)),
     live: canonicalDashboardSemantics(live.spec),
   });
   if (decision === 'noop') return decision;
@@ -967,7 +1047,7 @@ async function tryRunGit(repositoryRoot: string, args: readonly string[]): Promi
   const child = Bun.spawn(['git', ...args], {cwd: repositoryRoot, stderr: 'ignore', stdout: 'pipe'});
   const output = await new Response(child.stdout).text();
   if ((await child.exited) !== 0) return undefined;
-  return output.trim();
+  return Effect2.pipe(output, EffectString.trim);
 }
 
 async function runGit(repositoryRoot: string, args: readonly string[]): Promise<string> {
@@ -994,10 +1074,10 @@ export async function loadHistoricalArtifacts(
   ]);
   if (history === undefined)
     throw ScriptError.make({message: 'Git history does not contain the required deployment baseline.'});
-  const revisions = history
-    .split('\n')
-    .filter(revision => revision.length > 0 && revision !== currentSha)
-    .slice(0, 64);
+  const revisions = EffectArray.filter(
+    Effect2.pipe(history, EffectString.split('\n')),
+    revision => revision.length > 0 && revision !== currentSha,
+  ).slice(0, 64);
   const artifacts: DashboardArtifact[] = [];
   for (const revision of revisions) {
     const json = await readGit(['show', `${revision}:${telemetryDashboardArtifactPath}`]);
@@ -1041,7 +1121,7 @@ async function run(command: string | undefined): Promise<void> {
     return;
   }
   const resource = await loadArtifact(repositoryRoot);
-  if (canonicalJson(resource) !== canonicalJson(JSON.parse(rendered) as JsonValue)) {
+  if (canonicalJson(resource) !== canonicalJson(cloneJson(JSON.parse(rendered), 'rendered dashboard'))) {
     throw ScriptError.make({message: `Dashboard artifact is stale; run bun scripts/telemetry-dashboard.ts render.`});
   }
   if (command === 'check') {
@@ -1052,17 +1132,32 @@ async function run(command: string | undefined): Promise<void> {
     process.stdout.write(`Verified ${telemetryDashboardArtifactPath}\n`);
     return;
   }
-  const baseUrl = Bun.env.THREADNOTE_TELEMETRY_GRAFANA_URL?.trim() ?? '';
-  const namespace = Bun.env.THREADNOTE_TELEMETRY_GRAFANA_NAMESPACE?.trim() ?? '';
+  const baseUrl =
+    Effect2.pipe(Bun.env.THREADNOTE_TELEMETRY_GRAFANA_URL, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ?? '';
+  const namespace =
+    Effect2.pipe(Bun.env.THREADNOTE_TELEMETRY_GRAFANA_NAMESPACE, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) ?? '';
   if (command === 'verify-live') {
-    const token = Bun.env.THREADNOTE_TELEMETRY_GRAFANA_READ_TOKEN?.trim() ?? '';
+    const token =
+      Effect2.pipe(Bun.env.THREADNOTE_TELEMETRY_GRAFANA_READ_TOKEN, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) ?? '';
     await verifyLiveDashboard({baseUrl, namespace, resource, token});
     process.stdout.write(`Verified Grafana dashboard ${telemetryDashboardUid} and its bounded Tempo queries.\n`);
     return;
   }
   if (command === 'deploy') {
-    const currentSha = Bun.env.THREADNOTE_TELEMETRY_DASHBOARD_CURRENT_SHA?.trim() ?? '';
-    const token = Bun.env.THREADNOTE_TELEMETRY_GRAFANA_WRITE_TOKEN?.trim() ?? '';
+    const currentSha =
+      Effect2.pipe(Bun.env.THREADNOTE_TELEMETRY_DASHBOARD_CURRENT_SHA, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) ?? '';
+    const token =
+      Effect2.pipe(Bun.env.THREADNOTE_TELEMETRY_GRAFANA_WRITE_TOKEN, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) ?? '';
     validateGitCommit(currentSha, 'THREADNOTE_TELEMETRY_DASHBOARD_CURRENT_SHA');
     if ((await runGit(repositoryRoot, ['rev-parse', 'HEAD'])) !== currentSha) {
       throw ScriptError.make({message: 'Checked-out HEAD does not match the requested dashboard deployment commit.'});

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
@@ -5,7 +6,9 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import * as FC from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
-import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {SystemInfo} from '@threadnote/platform/system';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
+import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {resolveSelectedLocalModel} from '@threadnote/inference/models/inference';
@@ -20,6 +23,8 @@ import {
   updateModelSetup,
   type ModelSetupFence,
 } from '@threadnote/inference/models/setup';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const manifest: LocalModelManifest = {
   architecture: 'fixture',
@@ -30,10 +35,10 @@ const manifest: LocalModelManifest = {
   minimumRamBytes: 1,
   quantization: 'Q4_0',
   repository: 'fixture/model',
-  revision: 'a'.repeat(40),
+  revision: Effect2.pipe('a', EffectString.repeat(40)),
   role: 'generation',
   runtime: {nodeLlamaCpp: '3.22.1'},
-  sha256: 'b'.repeat(64),
+  sha256: Effect2.pipe('b', EffectString.repeat(64)),
   size: 4,
   version: 1,
 };
@@ -44,14 +49,33 @@ const platform = Layer.mergeAll(
   BunFileSystem.layer,
   BunPath.layer,
   BunCrypto.layer,
-  Layer.succeed(SystemInfo, {
-    platform: process.platform,
-    processId: process.pid,
-    isProcessRunning: () => true,
-    environment: () => ({}),
-    processStartIdentity: () => Effect.succeed('fixture-process'),
-    canonicalProcessStartIdentity: () => Effect.succeed('fixture-process'),
-  } as unknown as SystemInfoShape),
+  Layer.effect(
+    SystemInfo,
+    Effect.gen(function* () {
+      const system = yield* SystemInfo;
+      return SystemInfo.of({
+        ...system,
+        canonicalProcessStartIdentity: () => Effect.succeed('fixture-process'),
+        environment: () => ({}),
+        isProcessRunning: () => true,
+        processStartIdentity: () => Effect.succeed('fixture-process'),
+      });
+    }),
+  ).pipe(
+    Layer.provide(
+      SystemInfo.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(RuntimeEntrypoint, {developmentEntrypoint: import.meta.path}),
+            Layer.succeed(ChildEnvironmentPolicy, {
+              preserveIntendedChild: environment => environment,
+              sanitizeExternal: environment => environment,
+            }),
+          ),
+        ),
+      ),
+    ),
+  ),
 );
 const catalogLayer = LocalModelCatalog.layer([manifest, other, missing, reranker]);
 
@@ -109,8 +133,10 @@ describe('home-scoped model setup policy', () => {
           updateModelSetup(f.home, manifest, {type: 'policy', policy: 'off'}, {expectedEpoch: 0}).pipe(Effect.result),
         {concurrency: 'unbounded'},
       ).pipe(TestClock.withLive);
-      expect(outcomes.filter(result => result._tag === 'Success')).toHaveLength(1);
-      const conflict = outcomes.find(result => result._tag === 'Failure');
+      expect(EffectArray.filter(outcomes, result => result._tag === 'Success')).toHaveLength(1);
+      const conflict = EffectOption.getOrUndefined(
+        EffectArray.findFirst(outcomes, result => result._tag === 'Failure'),
+      );
       expect(conflict?._tag === 'Failure' && Schema.is(ModelSetupConflict)(conflict.failure)).toBe(true);
       const before = yield* f.fs.readFileString(f.setupFile);
       const stale = yield* updateModelSetup(f.home, manifest, {type: 'policy', policy: 'off'}, {expectedEpoch: 0}).pipe(
@@ -237,9 +263,9 @@ describe('home-scoped model setup policy', () => {
       const parsed = parseModelSetup(raw);
       if (parsed.status !== 'valid') return yield* Effect.die('Expected ready state');
       for (const patch of [
-        {job: {...parsed.state.job, revision: 'c'.repeat(40)}},
+        {job: {...parsed.state.job, revision: Effect2.pipe('c', EffectString.repeat(40))}},
         {job: {...parsed.state.job, home: `${f.home}-other`}},
-        {receipt: {...parsed.state.receipt!, sha256: 'c'.repeat(64)}},
+        {receipt: {...parsed.state.receipt!, sha256: Effect2.pipe('c', EffectString.repeat(64))}},
         {receipt: {...parsed.state.receipt!, fileIdentity: {...parsed.state.receipt!.fileIdentity, inode: '0'}}},
       ]) {
         yield* f.fs.writeFileString(f.setupFile, JSON.stringify({...parsed.state, ...patch}));

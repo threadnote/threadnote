@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import type {
   ContextBriefCitationValidationReceiptV2,
   ContextBriefMemoryCitationValidationV2,
@@ -24,6 +25,8 @@ import {
   type ContextHealthMaintenanceSummaryV2,
 } from './health_maintenance.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_HEALTH_REPORT_VERSION = 1 as const;
 export const DEFAULT_CONTEXT_HEALTH_FINDING_LIMIT = 100 as const;
@@ -156,40 +159,46 @@ export function nextContextHealthChangeAt(
 
 /** A pure, evidence-driven maintenance planner. It only describes reviewable repairs. */
 export function buildContextHealthReport(input: ContextHealthReportInputV1): ContextHealthReportV1 {
-  const records = input.records
-    .filter(record => record.metadata.status === 'active' && record.metadata.project === input.project)
-    .sort(compareRecords);
+  const records = EffectArray.filter(
+    input.records,
+    record => record.metadata.status === 'active' && record.metadata.project === input.project,
+  ).sort(compareRecords);
   const includeFindingCategories =
     input.includeFindingCategories === undefined ? undefined : new Set(input.includeFindingCategories);
   const includeFindingUris = input.includeFindingUris === undefined ? undefined : new Set(input.includeFindingUris);
   const semanticAnalysis = analyzeContextHealthSemantics({project: input.project, records});
   const reviewedSemanticIds = new Set(input.reviewedSemanticContradictionIds ?? []);
-  const duplicateCorpus = (input.duplicateCorpus ?? records)
-    .filter(record => record.metadata.status === 'active' && record.metadata.project === input.project)
-    .sort(compareRecords);
-  const findings = deduplicateFindings(
-    [
-      ...validityFindings(records, input.now),
-      ...reviewFindings(records, input.now),
-      ...citationFindings(input.citationValidations ?? [], records, input.includeCitationCoverageFindings ?? false),
-      ...relationFindings(input.relationEvidence ?? [], records),
-      ...duplicateFindings(duplicateCorpus, input.project, input.now),
-      ...candidateFindings(input.candidateEvidence ?? [], input.project),
-      ...guidanceFindings(input.guidanceEvidence ?? []),
-      ...semanticFindings(
-        semanticAnalysis.contradictions.filter(item => !reviewedSemanticIds.has(item.contradictionId)),
+  const duplicateCorpus = EffectArray.filter(
+    input.duplicateCorpus ?? records,
+    record => record.metadata.status === 'active' && record.metadata.project === input.project,
+  ).sort(compareRecords);
+  const findings = EffectArray.filter(
+    EffectArray.map(
+      deduplicateFindings(
+        [
+          ...validityFindings(records, input.now),
+          ...reviewFindings(records, input.now),
+          ...citationFindings(input.citationValidations ?? [], records, input.includeCitationCoverageFindings ?? false),
+          ...relationFindings(input.relationEvidence ?? [], records),
+          ...duplicateFindings(duplicateCorpus, input.project, input.now),
+          ...candidateFindings(input.candidateEvidence ?? [], input.project),
+          ...guidanceFindings(input.guidanceEvidence ?? []),
+          ...semanticFindings(
+            EffectArray.filter(semanticAnalysis.contradictions, item => !reviewedSemanticIds.has(item.contradictionId)),
+          ),
+        ].sort(compareFindings),
       ),
-    ].sort(compareFindings),
-  )
-    .map(finding => projectFinding(finding, input.project, input.records))
-    .filter(finding => {
+      finding => projectFinding(finding, input.project, input.records),
+    ),
+    finding => {
       const categoryMatches = includeFindingCategories?.has(finding.category);
       const uriMatches =
         includeFindingUris === undefined ? undefined : findingMatchesSelectedUris(finding, includeFindingUris);
       if (categoryMatches === undefined) return uriMatches ?? true;
       if (uriMatches === undefined) return categoryMatches;
       return input.includeFindingCombination === 'all' ? categoryMatches && uriMatches : categoryMatches || uriMatches;
-    });
+    },
+  );
   const citationCoverage =
     input.citationCoverage ?? contextHealthCitationCoverageV2({records, validations: input.citationValidations ?? []});
   const maintenance = summarizeContextHealthMaintenanceV2({
@@ -230,12 +239,12 @@ export function buildContextHealthReport(input: ContextHealthReportInputV1): Con
 
 function findingMatchesSelectedUris(finding: ContextHealthFindingV1, includeFindingUris: ReadonlySet<string>): boolean {
   return finding.repair.subjectUri === undefined
-    ? finding.uris.some(uri => includeFindingUris.has(uri))
+    ? EffectArray.some(finding.uris, uri => includeFindingUris.has(uri))
     : includeFindingUris.has(finding.repair.subjectUri);
 }
 
 function contextHealthCursor(position: number, digest: string): string {
-  return `hcx1_${position.toString(36)}_${digest.slice(0, 40)}`;
+  return `hcx1_${position.toString(36)}_${Effect.pipe(digest, EffectString.slice(0, 40))}`;
 }
 
 function contextHealthCursorStart(after: string | undefined, findingCount: number, digest: string): number {
@@ -246,7 +255,7 @@ function contextHealthCursorStart(after: string | undefined, findingCount: numbe
     !Number.isSafeInteger(position) ||
     position <= 0 ||
     position >= findingCount ||
-    match?.[2] !== digest.slice(0, 40)
+    match?.[2] !== Effect.pipe(digest, EffectString.slice(0, 40))
   ) {
     throw new Error('Context-health continuation cursor is invalid or stale; rerun the first page.');
   }
@@ -259,10 +268,10 @@ function contextHealthCursorDigest(
 ): string {
   return sha256HexSync(
     JSON.stringify({
-      findings: findings.map(finding => finding.id),
-      records: records
-        .map(record => ({contentHash: sha256HexSync(record.content), uri: record.uri}))
-        .sort((left, right) => compareText(`${left.uri}\0${left.contentHash}`, `${right.uri}\0${right.contentHash}`)),
+      findings: EffectArray.map(findings, finding => finding.id),
+      records: EffectArray.map(records, record => ({contentHash: sha256HexSync(record.content), uri: record.uri})).sort(
+        (left, right) => compareText(`${left.uri}\0${left.contentHash}`, `${right.uri}\0${right.contentHash}`),
+      ),
       version: CONTEXT_HEALTH_REPORT_VERSION,
     }),
   );
@@ -271,7 +280,7 @@ function contextHealthCursorDigest(
 export function semanticFindings(
   contradictions: readonly ContextHealthSemanticContradictionV2[],
 ): readonly ContextHealthFindingV1[] {
-  return contradictions.map(semanticEvidence => ({
+  return EffectArray.map(contradictions, semanticEvidence => ({
     ...finding(
       'semantic-contradiction',
       [semanticEvidence.left.recordUri, semanticEvidence.right.recordUri],
@@ -303,7 +312,7 @@ function semanticReviewSummary(evidence: ContextHealthSemanticContradictionV2): 
 }
 
 function guidanceFindings(evidence: readonly ContextHealthGuidanceEvidenceV1[]): readonly ContextHealthFindingV1[] {
-  return evidence.flatMap(item => {
+  return EffectArray.flatMap(evidence, item => {
     const uris = [...new Set(item.sourceUris)].sort(compareText);
     if (uris.length === 0) return [];
     return [
@@ -321,7 +330,8 @@ function guidanceFindings(evidence: readonly ContextHealthGuidanceEvidenceV1[]):
 function validityFindings(records: readonly MemoryRecord[], now: Date): readonly ContextHealthFindingV1[] {
   const nowMilliseconds = now.getTime();
   if (!Number.isFinite(nowMilliseconds)) return [];
-  return records.flatMap(record => {
+  return EffectArray.flatMap(records, (record, __effectFlatMapIndex) => {
+    if (!(__effectFlatMapIndex in records)) return [];
     const validTo = timestamp(record.metadata.validTo);
     if (validTo === undefined || validTo > nowMilliseconds) return [];
     return [
@@ -339,7 +349,8 @@ function validityFindings(records: readonly MemoryRecord[], now: Date): readonly
 
 function reviewFindings(records: readonly MemoryRecord[], now: Date): readonly ContextHealthFindingV1[] {
   const nowMilliseconds = now.getTime();
-  return records.flatMap(record => {
+  return EffectArray.flatMap(records, (record, __effectFlatMapIndex) => {
+    if (!(__effectFlatMapIndex in records)) return [];
     const reviewAfter = record.metadata.reviewAfter;
     const reviewAfterMilliseconds = timestamp(reviewAfter) ?? timestamp(`${reviewAfter}T00:00:00.000Z`);
     if (reviewAfterMilliseconds === undefined || reviewAfterMilliseconds > nowMilliseconds) return [];
@@ -361,25 +372,31 @@ function citationFindings(
   records: readonly MemoryRecord[],
   includeCoverageFindings: boolean,
 ): readonly ContextHealthFindingV1[] {
-  const retainedByUri = new Map(records.map(record => [record.uri, retainedTopicCitationIds(record)]));
+  const retainedByUri = new Map(EffectArray.map(records, record => [record.uri, retainedTopicCitationIds(record)]));
   const currentByUri = new Map(
-    records
-      .filter(
+    EffectArray.map(
+      EffectArray.filter(
+        records,
         record => record.metadata.reviewedSupport !== undefined || record.metadata.reviewedSupportError !== undefined,
-      )
-      .map(record => [record.uri, new Set(currentMemoryCodeCitations(record).map(citation => citation.id))]),
+      ),
+      record => [record.uri, new Set(EffectArray.map(currentMemoryCodeCitations(record), citation => citation.id))],
+    ),
   );
-  return validations
-    .filter(validation => retainedByUri.has(validation.uri))
-    .flatMap(validation =>
-      validation.receipts.flatMap(receipt =>
+  return EffectArray.flatMap(
+    EffectArray.filter(
+      validations,
+      (validation: (typeof validations)[number], __effectArrayIndex) =>
+        __effectArrayIndex in validations && retainedByUri.has(validation.uri),
+    ),
+    (validation: (typeof validations)[number]) =>
+      EffectArray.flatMap(validation.receipts, receipt =>
         (currentByUri.has(validation.uri) && !currentByUri.get(validation.uri)!.has(receipt.citationId)) ||
         ((receipt.status === 'changed' || receipt.status === 'deleted') &&
           retainedByUri.get(validation.uri)!.has(receipt.citationId))
           ? []
           : citationFinding(validation.uri, receipt, includeCoverageFindings),
       ),
-    );
+  );
 }
 
 /** Retained pins are immutable history; only the reviewed accepted vector claims current support. */
@@ -390,8 +407,13 @@ function retainedTopicCitationIds(record: MemoryRecord): ReadonlySet<string> {
   try {
     const validated = validateTopicMaintenanceManifest(manifest, record);
     if (validated.version === 1 || (validated.version === 3 && validated.sourceKind !== 'code')) return new Set();
-    const active = new Set(validated.acceptedSources.map(source => source.acceptedCitationId));
-    return new Set((record.metadata.codeCitations ?? []).filter(citation => !active.has(citation.id)).map(c => c.id));
+    const active = new Set(EffectArray.map(validated.acceptedSources, source => source.acceptedCitationId));
+    return new Set(
+      EffectArray.map(
+        EffectArray.filter(record.metadata.codeCitations ?? [], citation => !active.has(citation.id)),
+        c => c.id,
+      ),
+    );
   } catch {
     return new Set();
   }
@@ -455,38 +477,51 @@ function relationFindings(
   evidence: readonly ContextHealthRelationEvidenceV1[],
   records: readonly MemoryRecord[],
 ): readonly ContextHealthFindingV1[] {
-  const relationsBySource = new Map(records.map(record => [record.uri, record.metadata.relations ?? []]));
-  return evidence
-    .filter(
-      item =>
-        !isAgentArtifactUri(item.targetUri) &&
-        item.status !== 'active' &&
-        relationsBySource.get(item.sourceUri)?.some(relation => relation.uri === item.targetUri) === true,
-    )
-    .map(item => {
-      const historical =
-        item.status === 'inactive' &&
-        relationsBySource
-          .get(item.sourceUri)
-          ?.filter(relation => relation.uri === item.targetUri)
-          .every(relation => relation.type !== 'depends_on') === true;
-      const category = `relation-target-${item.status}` as Extract<
-        ContextHealthFindingCategoryV1,
-        `relation-target-${string}`
-      >;
-      return {
-        ...finding(category, [item.sourceUri, item.targetUri], `relation target is ${item.status}`, {
-          confidence: item.status === 'conflicted' ? 'medium' : 'high',
-          kind: 'repair-relation',
-          repairability: item.status === 'conflicted' ? 'manual-review' : 'reviewable',
-          severity: 'high',
-          subjectUri: item.sourceUri,
-          summary: `Review the relation target ${item.targetUri}.`,
-          targetUri: item.targetUri,
-        }),
-        ...(historical ? {classification: 'historical' as const} : {}),
-      };
-    });
+  const relationsBySource = new Map(EffectArray.map(records, record => [record.uri, record.metadata.relations ?? []]));
+  const relevant = EffectArray.filter(
+    evidence,
+    (
+      item,
+    ): item is ContextHealthRelationEvidenceV1 & {
+      readonly status: Exclude<ContextHealthRelationEvidenceV1['status'], 'active'>;
+    } =>
+      !isAgentArtifactUri(item.targetUri) &&
+      item.status !== 'active' &&
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(relationsBySource.get(item.sourceUri)), relations =>
+          EffectArray.some(relations, relation => relation.uri === item.targetUri),
+        ),
+      ) === true,
+  );
+  return EffectArray.map(relevant, item => {
+    const historical =
+      item.status === 'inactive' &&
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(relationsBySource.get(item.sourceUri)), relations =>
+          EffectArray.every(
+            EffectArray.filter(
+              relations,
+              (relation, __effectArrayIndex) => __effectArrayIndex in relations && relation.uri === item.targetUri,
+            ),
+            relation => relation.type !== 'depends_on',
+          ),
+        ),
+      ) === true;
+    const category: Extract<ContextHealthFindingCategoryV1, `relation-target-${string}`> =
+      `relation-target-${item.status}`;
+    return {
+      ...finding(category, [item.sourceUri, item.targetUri], `relation target is ${item.status}`, {
+        confidence: item.status === 'conflicted' ? 'medium' : 'high',
+        kind: 'repair-relation',
+        repairability: item.status === 'conflicted' ? 'manual-review' : 'reviewable',
+        severity: 'high',
+        subjectUri: item.sourceUri,
+        summary: `Review the relation target ${item.targetUri}.`,
+        targetUri: item.targetUri,
+      }),
+      ...(historical ? {classification: 'historical' as const} : {}),
+    };
+  });
 }
 
 function duplicateFindings(
@@ -495,9 +530,9 @@ function duplicateFindings(
   now: Date,
 ): readonly ContextHealthFindingV1[] {
   const plan = buildCompactPlan(records, {now, project});
-  return plan.forgets.flatMap(action => {
-    if (!action.reason.startsWith('exact duplicate of ')) return [];
-    const survivor = action.reason.slice('exact duplicate of '.length);
+  return EffectArray.flatMap(plan.forgets, action => {
+    if (!Effect.pipe(action.reason, EffectString.startsWith('exact duplicate of '))) return [];
+    const survivor = Effect.pipe(action.reason, EffectString.slice('exact duplicate of '.length));
     return [
       finding('exact-duplicate', [action.uri, survivor], `exact duplicate of ${survivor}`, {
         confidence: 'high',
@@ -516,27 +551,34 @@ function candidateFindings(
   evidence: readonly ContextHealthCandidateEvidenceV1[],
   project: string,
 ): readonly ContextHealthFindingV1[] {
-  return evidence
-    .filter(
+  return EffectArray.map(
+    EffectArray.filter(
+      evidence,
       item =>
         item.project === project && (item.comparison === 'contradiction' || item.comparison === 'possible_duplicate'),
-    )
-    .map(item => {
+    ),
+    item => {
       const category = item.comparison === 'contradiction' ? 'candidate-contradiction' : 'candidate-possible-duplicate';
       const uris = item.targetUri === undefined ? [] : [item.targetUri];
       return {
-        ...finding(category, uris, `candidate ${item.candidateId} is ${item.comparison.replace('_', ' ')}`, {
-          confidence: 'medium',
-          kind: 'review-candidate',
-          repairability: 'manual-review',
-          severity: 'medium',
-          summary: `Review candidate ${item.candidateId} before applying it.`,
-          ...(item.targetUri === undefined ? {} : {targetUri: item.targetUri}),
-        }),
+        ...finding(
+          category,
+          uris,
+          `candidate ${item.candidateId} is ${Effect.pipe(item.comparison, EffectString.replace('_', ' '))}`,
+          {
+            confidence: 'medium',
+            kind: 'review-candidate',
+            repairability: 'manual-review',
+            severity: 'medium',
+            summary: `Review candidate ${item.candidateId} before applying it.`,
+            ...(item.targetUri === undefined ? {} : {targetUri: item.targetUri}),
+          },
+        ),
         caseIdentity: {project, memoryId: 'candidate', family: 'candidate', slot: item.candidateId},
         caseId: contextHealthCaseIdV2({project, memoryId: 'candidate', family: 'candidate', slot: item.candidateId}),
       };
-    });
+    },
+  );
 }
 
 function finding(
@@ -554,7 +596,7 @@ function finding(
   return {
     category,
     confidence: repair.confidence,
-    id: [category, ...canonicalUris, summary].join('\u0000'),
+    id: EffectArray.join([category, ...canonicalUris, summary], '\u0000'),
     repair: {
       kind: repair.kind,
       ...(repair.subjectUri === undefined ? {} : {subjectUri: repair.subjectUri}),
@@ -574,7 +616,7 @@ function projectFinding(
   records: readonly MemoryRecord[],
 ): ContextHealthFindingV1 {
   const subjectUri = finding.repair.subjectUri ?? finding.uris[0];
-  const subject = records.find(record => record.uri === subjectUri);
+  const subject = EffectOption.getOrUndefined(EffectArray.findFirst(records, record => record.uri === subjectUri));
   const caseIdentity = contextHealthFindingCaseIdentityV2({project, finding, records});
   return {
     ...finding,
@@ -602,7 +644,7 @@ function compareFindings(left: ContextHealthFindingV1, right: ContextHealthFindi
 }
 
 function deduplicateFindings(findings: readonly ContextHealthFindingV1[]): readonly ContextHealthFindingV1[] {
-  return [...new Map(findings.map(finding => [finding.id, finding])).values()];
+  return [...new Map(EffectArray.map(findings, finding => [finding.id, finding])).values()];
 }
 
 function severityRank(severity: ContextHealthSeverityV1): number {

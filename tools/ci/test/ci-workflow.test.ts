@@ -1,8 +1,13 @@
+import {Schema} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {parse} from 'yaml';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface Step {
   readonly env?: Readonly<Record<string, string>>;
@@ -25,7 +30,7 @@ interface Job {
   readonly 'timeout-minutes'?: number;
   readonly strategy?: {
     readonly 'fail-fast'?: boolean;
-    readonly matrix?: {readonly shard?: readonly string[]};
+    readonly matrix?: string | {readonly shard?: readonly string[]};
   };
   readonly uses?: string;
 }
@@ -38,13 +43,55 @@ interface Workflow {
     };
   };
 }
+const StepSchema = Schema.Struct({
+  env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  id: Schema.optionalKey(Schema.String),
+  if: Schema.optionalKey(Schema.String),
+  name: Schema.optionalKey(Schema.String),
+  run: Schema.optionalKey(Schema.String),
+  shell: Schema.optionalKey(Schema.String),
+  'timeout-minutes': Schema.optionalKey(Schema.Finite),
+  uses: Schema.optionalKey(Schema.String),
+});
+const JobSchema = Schema.Struct({
+  name: Schema.optionalKey(Schema.String),
+  if: Schema.optionalKey(Schema.String),
+  needs: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
+  outputs: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  services: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+  steps: Schema.optionalKey(Schema.Array(StepSchema)),
+  'timeout-minutes': Schema.optionalKey(Schema.Finite),
+  strategy: Schema.optionalKey(
+    Schema.Struct({
+      'fail-fast': Schema.optionalKey(Schema.Boolean),
+      matrix: Schema.optionalKey(
+        Schema.Union([Schema.String, Schema.Struct({shard: Schema.optionalKey(Schema.Array(Schema.String))})]),
+      ),
+    }),
+  ),
+  uses: Schema.optionalKey(Schema.String),
+});
+const WorkflowSchema = Schema.Struct({
+  jobs: Schema.optionalKey(Schema.Record(Schema.String, JobSchema)),
+  on: Schema.optionalKey(
+    Schema.Struct({
+      pull_request: Schema.optionalKey(Schema.Struct({branches: Schema.optionalKey(Schema.Array(Schema.String))})),
+    }),
+  ),
+});
 
 const workflowPath = '.github/workflows/ci.yml';
-const workflow = parse(readFileSync(workflowPath, 'utf8')) as Workflow;
+const rawWorkflow: unknown = parse(readFileSync(workflowPath, 'utf8'));
+if (!Schema.is(WorkflowSchema)(rawWorkflow)) throw new Error('Invalid CI workflow.');
+const workflow: Workflow = rawWorkflow;
 const jobs = workflow.jobs ?? {};
 
 function step(job: Job | undefined, name: string): Step | undefined {
-  return job?.steps?.find(candidate => candidate.name === name);
+  return EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(job?.steps), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, candidate => candidate.name === name)),
+    ),
+  );
 }
 
 it('runs affected-target Bazel CI for every maintained pull-request base', () => {
@@ -53,9 +100,9 @@ it('runs affected-target Bazel CI for every maintained pull-request base', () =>
 
 it('uses one authoritative Bazel plan and parallel execution matrix', async () => {
   expect(await Bun.file('.github/workflows/bazel.yml').exists()).toBe(false);
-  expect(Object.keys(jobs)).toContain('bazel-plan');
-  expect(Object.keys(jobs)).toContain('bazel-plan-validation');
-  expect(Object.keys(jobs)).toContain('bazel-shards');
+  expect(EffectRecord.keys(jobs)).toContain('bazel-plan');
+  expect(EffectRecord.keys(jobs)).toContain('bazel-plan-validation');
+  expect(EffectRecord.keys(jobs)).toContain('bazel-shards');
   expect(step(jobs['bazel-plan-validation'], 'Verify generated Bazel declarations')?.run).toBe(
     'bun tools/bazel/generate.mjs --check',
   );
@@ -188,9 +235,31 @@ it('partitions the complete serialized Windows inventory with two native shards 
   expect(windows?.name).toBe('Bun unit smoke · Windows · ${{ matrix.shard }}');
   expect(windows?.['timeout-minutes']).toBe(60);
   expect(windows?.strategy).toEqual({'fail-fast': false, matrix: {shard: ['1/2', '2/2']}});
-  const runs = windows?.steps?.filter(candidate => candidate.run?.includes('vitest run --no-file-parallelism'));
+  const steps = windows?.steps;
+  const runs = steps
+    ? EffectArray.filter(
+        steps,
+        (candidate, index) =>
+          index in steps &&
+          Boolean(
+            Effect.pipe(candidate.run, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('vitest run --no-file-parallelism')),
+            ),
+          ),
+      )
+    : undefined;
   expect(runs).toHaveLength(1);
-  expect(runs?.[0].run?.trim().split(/\s+/u)).toEqual([
+  expect(
+    Effect.pipe(
+      runs?.[0].run,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.split(/\s+/u)),
+    ),
+  ).toEqual([
     'bun',
     '--bun',
     'vitest',
@@ -222,7 +291,11 @@ it('runs the original graph repair smoke exactly once without sharding or changi
     if: "matrix.shard == '1/2'",
     run: 'bun --bun vitest run apps/threadnote/test/unit/code-graph.maintenance-bounded.test.ts -t "removes a database-less orphan spool"',
   });
-  expect(jobs['windows-smoke']?.strategy?.matrix?.shard?.filter(shard => shard === '1/2')).toHaveLength(1);
+  const matrix = jobs['windows-smoke']?.strategy?.matrix;
+  const shards = typeof matrix === 'object' ? matrix.shard : undefined;
+  expect(
+    shards ? EffectArray.filter(shards, (shard, index) => index in shards && shard === '1/2') : undefined,
+  ).toHaveLength(1);
 });
 
 it.each(['success', 'failure', 'cancelled', 'skipped'])(
@@ -268,10 +341,16 @@ it.each(['windows-smoke', 'self-contained-distribution'])(
     });
     const steps = job?.steps ?? [];
     expect(steps.indexOf(setup!)).toBeGreaterThan(
-      steps.findIndex(candidate => candidate.uses === 'oven-sh/setup-bun@v2'),
+      EffectOption.getOrElse(
+        EffectArray.findFirstIndex(steps, candidate => candidate.uses === 'oven-sh/setup-bun@v2'),
+        () => -1,
+      ),
     );
     expect(steps.indexOf(setup!)).toBeGreaterThan(
-      steps.findIndex(candidate => candidate.run === 'bun install --frozen-lockfile'),
+      EffectOption.getOrElse(
+        EffectArray.findFirstIndex(steps, candidate => candidate.run === 'bun install --frozen-lockfile'),
+        () => -1,
+      ),
     );
     expect(job?.['timeout-minutes']).toBe(name === 'windows-smoke' ? 60 : 45);
     expect(job?.strategy?.['fail-fast']).toBe(false);

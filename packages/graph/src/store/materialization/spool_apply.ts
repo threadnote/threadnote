@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect} from 'effect';
 import type * as SqlClient from 'effect/sql/SqlClient';
 import {codeGraphMaterializationApplyPages} from '../../materialization/spool.js';
@@ -55,8 +56,11 @@ export const registerCodeGraphMaterializationSpoolApply = Effect.fn('codeGraph.r
           `INSERT INTO building_materialization_spool_surfaces (
            snapshot_id, surface_index, spool_identity, surface_name, row_count,
            next_page_index, applied_row_count, complete
-         ) VALUES ${surfaces.map(() => '(?, ?, ?, ?, ?, 0, 0, ?)').join(', ')}`,
-          surfaces.flatMap((surface, index) => [
+         ) VALUES ${EffectArray.join(
+           EffectArray.map(surfaces, () => '(?, ?, ?, ?, ?, 0, 0, ?)'),
+           ', ',
+         )}`,
+          EffectArray.flatMap(surfaces, (surface, index) => [
             snapshotId,
             index,
             spoolIdentity,
@@ -103,8 +107,8 @@ export const applyCodeGraphMaterializationSpoolSurfacePage = Effect.fn(
         current.surface_index !== surfaceIndex ||
         current.surface_name !== expected.name ||
         current.spool_identity !== spoolIdentity ||
-        rows.some(row => row.spool_identity !== spoolIdentity) ||
-        rows.slice(0, surfaceIndex).some(row => row.complete !== 1)
+        EffectArray.some(rows, row => row.spool_identity !== spoolIdentity) ||
+        EffectArray.some(rows.slice(0, surfaceIndex), row => row.complete !== 1)
       ) {
         return yield* CodeGraphStoreError.of('Persistent materialization spool apply state is invalid.');
       }
@@ -299,7 +303,8 @@ export const assertCodeGraphMaterializationSpoolApplyComplete = Effect.fn(
   const rows = yield* readSurfaceRows(sql, snapshotId);
   if (
     rows.length !== CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES.length ||
-    rows.some(
+    EffectArray.some(
+      rows,
       (row, index) =>
         row.surface_index !== index ||
         row.surface_name !== CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES[index].name ||
@@ -497,7 +502,8 @@ function validateSurfacePlan(
   surfaces: readonly CodeGraphMaterializationSpoolSurfacePlan[],
 ): Effect.Effect<void, CodeGraphStoreFailure> {
   return surfaces.length !== CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES.length ||
-    surfaces.some(
+    EffectArray.some(
+      surfaces,
       (surface, index) =>
         surface.name !== CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES[index].name ||
         !Number.isSafeInteger(surface.rowCount) ||
@@ -514,7 +520,8 @@ function surfaceRowsMatch(
 ): boolean {
   return (
     rows.length === surfaces.length &&
-    rows.every(
+    EffectArray.every(
+      rows,
       (row, index) =>
         row.surface_index === index &&
         row.spool_identity === spoolIdentity &&

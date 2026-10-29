@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Redacted} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {probeGitHubSource} from '../../../../scripts/probe-github-source.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const token = Redacted.make('synthetic-probe-token');
 const date = '2026-10-08T00:00:00Z';
@@ -33,7 +36,7 @@ describe('GitHub contract probe', () => {
     expect(result.conversation).toMatchObject({kind: 'issue', observedStable: true, comments: 0});
     expect(result.inventory.scope).toBe('first-page-sample');
     expect(result.externalMutations).toBe(false);
-    expect(calls.every(call => call.startsWith('GET '))).toBe(true);
+    expect(EffectArray.every(calls, call => Effect.pipe(call, EffectString.startsWith('GET ')))).toBe(true);
     const serialized = JSON.stringify(result);
     for (const privateValue of [issue.title, issue.body, issue.user.login, Redacted.value(token)])
       expect(serialized).not.toContain(privateValue);

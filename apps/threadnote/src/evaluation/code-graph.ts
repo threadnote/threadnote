@@ -1,5 +1,10 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const CODE_GRAPH_EVALUATION_VERSION = 1 as const;
 export const CODE_GRAPH_BASELINE_VERSION = 1 as const;
@@ -165,7 +170,7 @@ export const CodeGraphEvaluationBaselineSchemaV1 = Schema.Struct({
 
 export function parseCodeGraphEvaluationFixtureV1(value: unknown): CodeGraphEvaluationFixtureV1 {
   const fixture = Schema.decodeUnknownSync(CodeGraphEvaluationFixtureSchemaV1)(value);
-  const ids = fixture.queries.map(query => query.id);
+  const ids = EffectArray.map(fixture.queries, query => query.id);
   if (new Set(ids).size !== ids.length) {
     throw new Error('Code graph evaluation query IDs must be unique.');
   }
@@ -180,7 +185,7 @@ export function parseCodeGraphEvaluationFixtureV1(value: unknown): CodeGraphEval
       throw new Error(`No-answer code graph query ${query.id} cannot declare relevant results.`);
     }
   }
-  const allowedEdges = new Set(fixture.allowedAuthoritativeEdges.map(codeGraphEdgeKey));
+  const allowedEdges = new Set(EffectArray.map(fixture.allowedAuthoritativeEdges, codeGraphEdgeKey));
   for (const edge of fixture.expectedEdges) {
     if (!allowedEdges.has(codeGraphEdgeKey(edge))) {
       throw new Error('Every expected code graph edge must also appear in allowedAuthoritativeEdges.');
@@ -201,7 +206,7 @@ export function serializeCodeGraphEvaluationFixtureIdentity(fixture: CodeGraphEv
       expectedSymbols: [...fixture.expectedSymbols].sort(compareJson),
       id: fixture.id,
       languages: [...fixture.languages].sort(),
-      queries: [...fixture.queries].sort((left, right) => left.id.localeCompare(right.id)),
+      queries: [...fixture.queries].sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id))),
       repositoryRoot: fixture.repositoryRoot,
       version: fixture.version,
       worktreeContracts: [...fixture.worktreeContracts].sort(compareJson),
@@ -235,7 +240,7 @@ export function evaluateCodeGraphObservations(
     readonly worktreeObservationCount: number;
   },
 ): CodeGraphEvaluationMetrics {
-  const byQuery = new Map(observations.map(observation => [observation.queryId, observation]));
+  const byQuery = new Map(EffectArray.map(observations, observation => [observation.queryId, observation]));
   let reciprocalRank = 0;
   let relevantSymbols = 0;
   let hitSymbols = 0;
@@ -248,8 +253,17 @@ export function evaluateCodeGraphObservations(
     const orderedHits = [...observation.symbolHits, ...observation.pathHits];
     const relevant = new Set([...(query.relevantSymbols ?? []), ...(query.relevantPaths ?? [])]);
     relevantSymbols += relevant.size;
-    hitSymbols += [...relevant].filter(expected => orderedHits.some(hit => matchesExpected(hit, expected))).length;
-    const firstRelevant = orderedHits.findIndex(hit => [...relevant].some(expected => matchesExpected(hit, expected)));
+    hitSymbols += EffectArray.filter([...relevant], expected =>
+      EffectArray.some(orderedHits, hit => matchesExpected(hit, expected)),
+    ).length;
+    const firstRelevant = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        orderedHits,
+        __effectArrayValue =>
+          !!(hit => EffectArray.some([...relevant], expected => matchesExpected(hit, expected)))(__effectArrayValue),
+      ),
+      () => -1,
+    );
     if (query.answerable && firstRelevant >= 0) reciprocalRank += 1 / (firstRelevant + 1);
     const noAnswer = orderedHits.length === 0;
     if (noAnswer) predictedNoAnswer += 1;
@@ -259,15 +273,20 @@ export function evaluateCodeGraphObservations(
     }
   }
 
-  const expectedEdgeKeys = new Set(fixture.expectedEdges.map(codeGraphEdgeKey));
+  const expectedEdgeKeys = new Set(EffectArray.map(fixture.expectedEdges, codeGraphEdgeKey));
   const observedEdgeKeys = new Set(
-    options.extractedEdgeKeys ?? observations.flatMap(observation => observation.edgeKeys),
+    options.extractedEdgeKeys ?? EffectArray.flatMap(observations, observation => observation.edgeKeys),
   );
-  const edgeHits = [...expectedEdgeKeys].filter(key => observedEdgeKeys.has(key)).length;
+  const edgeHits = EffectArray.filter([...expectedEdgeKeys], key => observedEdgeKeys.has(key)).length;
   const actualAuthoritative = options.actualAuthoritativeEdges ?? [...observedEdgeKeys];
   const allowedAuthoritative = new Set(options.allowedAuthoritativeEdgeKeys ?? expectedEdgeKeys);
-  const falseAuthoritativeEdges = actualAuthoritative.filter(key => !allowedAuthoritative.has(key)).length;
-  const answerableQueries = fixture.queries.filter(query => query.answerable).length;
+  const falseAuthoritativeEdges = EffectArray.filter(actualAuthoritative, key => !allowedAuthoritative.has(key)).length;
+  const answerableQueries = EffectArrayPipe(fixture.queries, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (query, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && query.answerable,
+    ),
+  ).length;
   return {
     answerableQueries,
     authoritativeFalseEdgeRate: failureRate(falseAuthoritativeEdges, actualAuthoritative.length),
@@ -290,9 +309,13 @@ function failureRate(numerator: number, denominator: number): number {
 }
 
 function matchesExpected(actual: string, expected: string): boolean {
-  return actual === expected || actual.endsWith(`/${expected}`) || actual.includes(expected);
+  return (
+    actual === expected ||
+    Effect.pipe(actual, EffectString.endsWith(`/${expected}`)) ||
+    Effect.pipe(actual, EffectString.includes(expected))
+  );
 }
 
 function compareJson(left: unknown, right: unknown): number {
-  return JSON.stringify(left).localeCompare(JSON.stringify(right));
+  return Effect.pipe(JSON.stringify(left), EffectString.localeCompare(JSON.stringify(right)));
 }

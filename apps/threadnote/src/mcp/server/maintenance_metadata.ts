@@ -4,9 +4,13 @@ import {
   applyMaintenanceMetadata,
   previewMaintenanceMetadata,
   renderMaintenanceMetadata,
+  type MetadataApplyOptionsV1,
+  type MetadataMutationOptionsV1,
 } from '../../memory/maintenance/metadata_commands.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {argumentError, mcpErrorResult, optionalResourceUri, requiredText} from './common.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Registration is intentionally separate; server/index.ts owns top-level tool wiring. */
 export function registerMaintenanceMetadataTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
@@ -51,29 +55,38 @@ function metadataInputSchema() {
 }
 
 function metadataToolEffect(name: string, input: Record<string, unknown>, apply: boolean, config: RuntimeConfig) {
-  const parsed = parseInput(name, input, apply);
+  if (apply) {
+    const parsed = parseInput(name, input, true);
+    if (!parsed.ok) return parsed.error;
+    return Effect.gen(function* () {
+      const result = yield* applyMaintenanceMetadata(config, parsed.value);
+      return {content: [{type: 'text' as const, text: renderMaintenanceMetadata(result)}], structuredContent: result};
+    }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error))));
+  }
+  const parsed = parseInput(name, input, false);
   if (!parsed.ok) return parsed.error;
   return Effect.gen(function* () {
-    const result = apply
-      ? yield* applyMaintenanceMetadata(
-          config,
-          parsed.value as unknown as Parameters<typeof applyMaintenanceMetadata>[1],
-        )
-      : yield* previewMaintenanceMetadata(config, parsed.value);
+    const result = yield* previewMaintenanceMetadata(config, parsed.value);
     return {content: [{type: 'text' as const, text: renderMaintenanceMetadata(result)}], structuredContent: result};
   }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error))));
 }
 
+type ParseResult<Value> =
+  {readonly ok: true; readonly value: Value} | {readonly ok: false; readonly error: ReturnType<typeof argumentError>};
+
+function parseInput(name: string, input: Record<string, unknown>, apply: true): ParseResult<MetadataApplyOptionsV1>;
+function parseInput(name: string, input: Record<string, unknown>, apply: false): ParseResult<MetadataMutationOptionsV1>;
 function parseInput(
   name: string,
   input: Record<string, unknown>,
   apply: boolean,
-):
-  | {readonly ok: true; readonly value: Record<string, unknown>}
-  | {readonly ok: false; readonly error: ReturnType<typeof argumentError>} {
+): ParseResult<MetadataApplyOptionsV1 | MetadataMutationOptionsV1> {
   const uri = optionalResourceUri(typeof input.uri === 'string' ? input.uri : undefined, name);
   if (!uri.ok) return uri;
-  const memoryId = typeof input.memoryId === 'string' && input.memoryId.trim() ? input.memoryId.trim() : undefined;
+  const memoryId =
+    typeof input.memoryId === 'string' && Effect2.pipe(input.memoryId, EffectString.trim)
+      ? Effect2.pipe(input.memoryId, EffectString.trim)
+      : undefined;
   if ((uri.value === undefined) === (memoryId === undefined))
     return {ok: false, error: argumentError(`${name} requires exactly one uri or memoryId.`)};
   const patch = patchField(name, input, 'owner', 'clearOwner', true);
@@ -82,7 +95,7 @@ function parseInput(
   if (!reviewAfter.ok) return reviewAfter;
   const validTo = patchField(name, input, 'validTo', 'clearValidTo', false);
   if (!validTo.ok) return validTo;
-  const value: Record<string, unknown> = {
+  const value: MetadataMutationOptionsV1 = {
     ...(uri.value === undefined ? {} : {uri: uri.value}),
     ...(memoryId === undefined ? {} : {memoryId}),
     ...(patch.value === undefined ? {} : {owner: patch.value}),
@@ -95,16 +108,16 @@ function parseInput(
     typeof input.expectedContentHash === 'string' ? input.expectedContentHash : undefined,
     name,
     'expectedContentHash',
-    {expectedContentHash: '0'.repeat(64)},
+    {expectedContentHash: Effect2.pipe('0', EffectString.repeat(64))},
   );
   const proposalId = requiredText(
     typeof input.proposalId === 'string' ? input.proposalId : undefined,
     name,
     'proposalId',
-    {proposalId: 'maintenance-metadata-'.concat('0'.repeat(40))},
+    {proposalId: EffectString.concat('maintenance-metadata-', Effect2.pipe('0', EffectString.repeat(40)))},
   );
   const revision = requiredText(typeof input.revision === 'string' ? input.revision : undefined, name, 'revision', {
-    revision: '0'.repeat(64),
+    revision: Effect2.pipe('0', EffectString.repeat(64)),
   });
   if (!expectedContentHash.ok) return expectedContentHash;
   if (!proposalId.ok) return proposalId;
@@ -131,7 +144,8 @@ function patchField(
   | {readonly ok: true; readonly value: string | null | undefined}
   | {readonly ok: false; readonly error: ReturnType<typeof argumentError>} {
   const rawValue = typeof input[valueName] === 'string' ? input[valueName] : undefined;
-  const value = rawValue === undefined ? undefined : normalize ? rawValue.trim() || undefined : rawValue;
+  const value =
+    rawValue === undefined ? undefined : normalize ? Effect2.pipe(rawValue, EffectString.trim) || undefined : rawValue;
   if (input[clearName] === true && value !== undefined)
     return {ok: false, error: argumentError(`${name} cannot combine ${valueName} with ${clearName}=true.`)};
   return {ok: true, value: input[clearName] === true ? null : value};

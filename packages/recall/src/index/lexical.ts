@@ -1,7 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {recallDocumentTerms, type RecallCandidate, type RecallCorpusStatistics} from '../rank.js';
 import {casedCodeIdentifiers} from '../identifier.js';
 import {recallLexicalTerms, recallTokens} from '../tokenize.js';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface RecallIndexPosting {
   readonly documentLength: number;
@@ -33,7 +37,7 @@ export function candidatePostings(candidate: RecallCandidate): ReadonlyMap<strin
     if (value === undefined) {
       return;
     }
-    for (const term of new Set(indexTerms(typeof value === 'string' ? value : value.join(' ')))) {
+    for (const term of new Set(indexTerms(typeof value === 'string' ? value : EffectArray.join(value, ' ')))) {
       weights.set(term, Math.max(weight, weights.get(term) ?? 0));
     }
   };
@@ -50,7 +54,7 @@ export function candidatePostings(candidate: RecallCandidate): ReadonlyMap<strin
     termFrequencies.set(term, (termFrequencies.get(term) ?? 0) + 1);
   }
   return new Map(
-    [...weights].map(([term, fieldWeight]) => [
+    EffectArray.map([...weights], ([term, fieldWeight]) => [
       term,
       {
         documentLength: documentTerms.length,
@@ -91,23 +95,30 @@ export function postingInverseDocumentFrequency(term: string, corpusStatistics: 
 
 export function selectQueryTerms(terms: readonly string[], statistics: RecallQueryTermStatistics): readonly string[] {
   const documentCount = Math.max(1, statistics.documentCount);
-  return [...new Set(terms)]
-    .map(term => ({frequency: ownRecordValue(statistics.documentFrequency, term) ?? 0, term}))
-    .filter(item => item.frequency > 0)
-    .sort((left, right) => {
-      const leftIdf = Math.log(
-        1 +
-          (documentCount - left.frequency + POSTING_BM25_IDF_SMOOTHING) / (left.frequency + POSTING_BM25_IDF_SMOOTHING),
-      );
-      const rightIdf = Math.log(
-        1 +
-          (documentCount - right.frequency + POSTING_BM25_IDF_SMOOTHING) /
-            (right.frequency + POSTING_BM25_IDF_SMOOTHING),
-      );
-      return rightIdf - leftIdf || left.term.localeCompare(right.term);
-    })
-    .slice(0, MAX_QUERY_TERMS)
-    .map(item => item.term);
+  return EffectArray.map(
+    EffectArray.filter(
+      EffectArray.map([...new Set(terms)], term => ({
+        frequency: ownRecordValue(statistics.documentFrequency, term) ?? 0,
+        term,
+      })),
+      item => item.frequency > 0,
+    )
+      .sort((left, right) => {
+        const leftIdf = Math.log(
+          1 +
+            (documentCount - left.frequency + POSTING_BM25_IDF_SMOOTHING) /
+              (left.frequency + POSTING_BM25_IDF_SMOOTHING),
+        );
+        const rightIdf = Math.log(
+          1 +
+            (documentCount - right.frequency + POSTING_BM25_IDF_SMOOTHING) /
+              (right.frequency + POSTING_BM25_IDF_SMOOTHING),
+        );
+        return rightIdf - leftIdf || Effect.pipe(left.term, EffectString.localeCompare(right.term));
+      })
+      .slice(0, MAX_QUERY_TERMS),
+    item => item.term,
+  );
 }
 
 export function stripRecallAnchor(uri: string): string {
@@ -119,12 +130,13 @@ export function indexTerms(value: string): readonly string[] {
 }
 
 export function identifiers(value: string): readonly string[] {
-  const structuredIdentifiers = recallTokens(value)
-    .map(term => recallLexicalTerms(term)[0])
-    .filter((term): term is string => term !== undefined && /[\p{N}_.-]/u.test(term));
+  const structuredIdentifiers = EffectArray.filter(
+    EffectArray.map(recallTokens(value), term => recallLexicalTerms(term)[0]),
+    (term): term is string => term !== undefined && /[\p{N}_.-]/u.test(term),
+  );
   return [...new Set([...structuredIdentifiers, ...casedCodeIdentifiers(value)])].slice(0, 64);
 }
 
 function ownRecordValue<Value>(record: Readonly<Record<string, Value>>, key: string): Value | undefined {
-  return Object.hasOwn(record, key) ? record[key] : undefined;
+  return EffectRecord.has(record, key) ? record[key] : undefined;
 }

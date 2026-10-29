@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -17,6 +18,8 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {resolveContextBriefFinalFenceOverlay} from '@threadnote/context/citation_validation';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph inventory admission policy', () => {
   const roots: string[] = [];
@@ -30,7 +33,7 @@ describe('code graph inventory admission policy', () => {
       const root = mkdtempSync(join(tmpdir(), 'threadnote-inventory-policy-'));
       roots.push(root);
       const excludedPaths = createInventoryPolicyFixture(root);
-      const excludedBlobIds = new Set(excludedPaths.map(path => git(root, ['rev-parse', `HEAD:${path}`])));
+      const excludedBlobIds = new Set(EffectArray.map(excludedPaths, path => git(root, ['rev-parse', `HEAD:${path}`])));
       const requestedBlobIds: string[] = [];
 
       const identity = yield* resolveRepositoryIdentity(root);
@@ -40,17 +43,30 @@ describe('code graph inventory admission policy', () => {
         executeBytes: (executable, args, options) => {
           if (executable === 'git' && args.includes('cat-file') && args.includes('--batch')) {
             const input = new TextDecoder().decode(options?.input ?? new Uint8Array());
-            requestedBlobIds.push(...input.split('\n').filter(Boolean));
+            requestedBlobIds.push(...EffectArray.filter(Effect2.pipe(input, EffectString.split('\n')), Boolean));
           }
           return command.executeBytes!(executable, args, options);
         },
       });
       const clean = yield* inventoryRepository(identity).pipe(Effect.provideService(CommandExecutor, wrappedCommand));
 
-      expect(clean.files.map(file => file.path)).toEqual(['data/small.json', 'package.json', 'src/index.ts']);
-      expect(requestedBlobIds.filter(blobId => excludedBlobIds.has(blobId))).toEqual([]);
+      expect(EffectArray.map(clean.files, file => file.path)).toEqual([
+        'data/small.json',
+        'package.json',
+        'src/index.ts',
+      ]);
+      expect(
+        EffectArray.filter(
+          requestedBlobIds,
+          __effectArrayValue => !!(blobId => excludedBlobIds.has(blobId))(__effectArrayValue),
+        ),
+      ).toEqual([]);
       expect(clean.skipped).toBe(4);
-      const cleanExcludedBytes = excludedPaths.reduce((total, path) => total + statSync(join(root, path)).size, 0);
+      const cleanExcludedBytes = EffectArray.reduce(
+        excludedPaths,
+        0,
+        (total, path) => total + statSync(join(root, path)).size,
+      );
       expect(clean.policyExclusions).toEqual({
         bytes: cleanExcludedBytes,
         files: 4,
@@ -78,10 +94,12 @@ describe('code graph inventory admission policy', () => {
       const excludedOnlyOpened: string[] = [];
       const excludedOnly = yield* inventoryWithObservedOpensEffect(root, excludedOnlyOpened);
 
-      expect(excludedOnlyOpened.some(path => path.endsWith('/.git/info/exclude'))).toBe(true);
+      expect(
+        EffectArray.some(excludedOnlyOpened, path => Effect2.pipe(path, EffectString.endsWith('/.git/info/exclude'))),
+      ).toBe(true);
       for (const path of excludedPaths) {
         expect(
-          excludedOnlyOpened.some(opened => opened.endsWith(`/${path}`)),
+          EffectArray.some(excludedOnlyOpened, opened => Effect2.pipe(opened, EffectString.endsWith(`/${path}`))),
           path,
         ).toBe(false);
       }
@@ -93,17 +111,23 @@ describe('code graph inventory admission policy', () => {
           Effect.flatMap(identity => resolveContextBriefFinalFenceOverlay(identity, undefined)),
         ),
       ).toEqual({dirty: false, fingerprint: undefined});
-      expect(excludedOnly.files.map(file => file.path)).toEqual(clean.files.map(file => file.path));
+      expect(EffectArray.map(excludedOnly.files, file => file.path)).toEqual(
+        EffectArray.map(clean.files, file => file.path),
+      );
       expect(excludedOnly.skipped).toBe(5);
       expect(excludedOnly.policyExclusions?.files).toBe(5);
       expect(excludedOnly.policyExclusions?.bytes).toBe(
-        [
-          'assets/logo.SVG',
-          'SCHEMAS/__SNAPSHOTS__/PROJECT.JSON',
-          'data/events.jsonc',
-          'apps/mobile/project.json',
-          'assets/untracked.svg',
-        ].reduce((total, path) => total + statSync(join(root, path)).size, 0),
+        EffectArray.reduce(
+          [
+            'assets/logo.SVG',
+            'SCHEMAS/__SNAPSHOTS__/PROJECT.JSON',
+            'data/events.jsonc',
+            'apps/mobile/project.json',
+            'assets/untracked.svg',
+          ],
+          0,
+          (total, path) => total + statSync(join(root, path)).size,
+        ),
       );
 
       writeFileSync(join(root, 'apps', 'mobile', 'project.json'), '{}\n');
@@ -118,13 +142,21 @@ describe('code graph inventory admission policy', () => {
           Effect.flatMap(identity => resolveContextBriefFinalFenceOverlay(identity, undefined)),
         ),
       ).toMatchObject({dirty: true, fingerprint: expect.any(String)});
-      expect(admitted.files.find(file => file.path === 'apps/mobile/project.json')).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(admitted.files, file => file.path === 'apps/mobile/project.json'),
+        ),
+      ).toMatchObject({
         path: 'apps/mobile/project.json',
         size: 3,
         source: 'worktree',
       });
       expect(admitted.policyExclusions?.files).toBe(4);
-      expect(admittedOpened.some(path => path.endsWith('/apps/mobile/project.json'))).toBe(true);
+      expect(
+        EffectArray.some(admittedOpened, path =>
+          Effect2.pipe(path, EffectString.endsWith('/apps/mobile/project.json')),
+        ),
+      ).toBe(true);
       for (const path of [
         'assets/logo.SVG',
         'SCHEMAS/__SNAPSHOTS__/PROJECT.JSON',
@@ -132,7 +164,7 @@ describe('code graph inventory admission policy', () => {
         'assets/untracked.svg',
       ]) {
         expect(
-          admittedOpened.some(opened => opened.endsWith(`/${path}`)),
+          EffectArray.some(admittedOpened, opened => Effect2.pipe(opened, EffectString.endsWith(`/${path}`))),
           path,
         ).toBe(false);
       }
@@ -178,10 +210,10 @@ describe('code graph inventory admission policy', () => {
         executeBytes: (executable, args, options) => {
           if (executable === 'git' && args.includes('cat-file') && args.includes('--batch')) {
             requestedBlobIds.push(
-              ...new TextDecoder()
-                .decode(options?.input ?? new Uint8Array())
-                .split('\n')
-                .filter(Boolean),
+              ...EffectArray.filter(
+                Effect2.pipe(new TextDecoder().decode(options?.input ?? new Uint8Array()), EffectString.split('\n')),
+                Boolean,
+              ),
             );
           }
           return command.executeBytes!(executable, args, options);
@@ -191,9 +223,19 @@ describe('code graph inventory admission policy', () => {
         Effect.provideService(CommandExecutor, observedCommand),
       );
       const group = (reason: string, language: string) =>
-        preview.groups.find(candidate => candidate.reason === reason && candidate.language === language);
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            preview.groups,
+            candidate => candidate.reason === reason && candidate.language === language,
+          ),
+        );
 
-      expect(requestedBlobIds.filter(blobId => excludedBlobIds.has(blobId))).toEqual([]);
+      expect(
+        EffectArray.filter(
+          requestedBlobIds,
+          __effectArrayValue => !!(blobId => excludedBlobIds.has(blobId))(__effectArrayValue),
+        ),
+      ).toEqual([]);
       expect(preview).toMatchObject({dirty: false, policyVersion: 2, scope: 'head-and-worktree'});
       expect(group('svg', 'document')).toMatchObject({classifier: 'corpus', disposition: 'skipped'});
       expect(group('generic-json-size', 'json')).toMatchObject({classifier: 'schemas', disposition: 'skipped'});
@@ -236,17 +278,23 @@ describe('code graph inventory admission policy', () => {
 
       const identity = yield* resolveRepositoryIdentity(root);
       const preview = yield* previewCodeGraphInventory(identity);
-      const ignored = preview.groups.find(
-        candidate => candidate.reason === 'threadnote-ignore' && candidate.language === 'typescript',
+      const ignored = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          preview.groups,
+          candidate => candidate.reason === 'threadnote-ignore' && candidate.language === 'typescript',
+        ),
       );
-      const admitted = preview.groups.find(
-        candidate => candidate.reason === 'admitted' && candidate.language === 'typescript',
+      const admitted = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          preview.groups,
+          candidate => candidate.reason === 'admitted' && candidate.language === 'typescript',
+        ),
       );
       expect(ignored).toMatchObject({disposition: 'skipped', files: 2});
       expect(admitted).toMatchObject({disposition: 'eligible', files: 1});
 
       const inventoried = yield* inventoryRepository(identity);
-      expect(inventoried.files.map(file => file.path)).toEqual(['src/c.ts']);
+      expect(EffectArray.map(inventoried.files, file => file.path)).toEqual(['src/c.ts']);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
@@ -257,7 +305,7 @@ describe('code graph inventory admission policy', () => {
     mkdirSync(join(root, 'src'), {recursive: true});
     for (let index = 0; index < 512; index += 1) {
       writeFileSync(
-        join(root, 'src', `file-${String(index).padStart(3, '0')}.ts`),
+        join(root, 'src', `file-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`),
         `export const value${index} = ${index};\n`,
       );
     }
@@ -292,10 +340,10 @@ describe('code graph inventory admission policy', () => {
           execute: (executable, args, options) => {
             if (executable === 'git' && args.includes('check-ignore')) {
               checkIgnoreInputs.push(
-                new TextDecoder()
-                  .decode(options?.input ?? new Uint8Array())
-                  .split('\0')
-                  .filter(Boolean),
+                EffectArray.filter(
+                  Effect2.pipe(new TextDecoder().decode(options?.input ?? new Uint8Array()), EffectString.split('\0')),
+                  Boolean,
+                ),
               );
             }
             return command.execute(executable, args, options);
@@ -321,9 +369,9 @@ describe('code graph inventory admission policy', () => {
 
     expect(state.dirty).toBe(true);
     expect(checkIgnoreInputs).toEqual([['src/file-000.ts']]);
-    expect(statPaths.some(path => path.endsWith('/artifact.bin'))).toBe(false);
-    expect(statPaths.some(path => path.endsWith('/ignored.ts'))).toBe(false);
-    expect(openedPaths.some(path => path.endsWith('/ignored.ts'))).toBe(false);
+    expect(EffectArray.some(statPaths, path => Effect2.pipe(path, EffectString.endsWith('/artifact.bin')))).toBe(false);
+    expect(EffectArray.some(statPaths, path => Effect2.pipe(path, EffectString.endsWith('/ignored.ts')))).toBe(false);
+    expect(EffectArray.some(openedPaths, path => Effect2.pipe(path, EffectString.endsWith('/ignored.ts')))).toBe(false);
 
     writeFileSync(join(root, 'src', 'file-000.ts'), 'export const value0 = 0;\n');
     writeFileSync(join(root, 'artifact.bin'), new Uint8Array([0, 1, 2, 3]));
@@ -387,7 +435,7 @@ describe('code graph inventory admission policy', () => {
       expect(ignored.dirty, ignoreFile).toBe(false);
       expect(ignored.overlayFingerprint, ignoreFile).toBeUndefined();
       expect(
-        opened.some(path => path.endsWith('/ignored.json')),
+        EffectArray.some(opened, path => Effect2.pipe(path, EffectString.endsWith('/ignored.json'))),
         ignoreFile,
       ).toBe(false);
       expect(await observedOverlayState(root), ignoreFile).toEqual({dirty: false, fingerprint: undefined});
@@ -465,5 +513,5 @@ function createSingleExcludedFixture(prefix: string, roots: string[]): string {
 }
 
 function git(root: string, args: readonly string[]): string {
-  return execFileSync('git', ['-C', root, ...args], {encoding: 'utf8'}).trim();
+  return Effect2.pipe(execFileSync('git', ['-C', root, ...args], {encoding: 'utf8'}), EffectString.trim);
 }

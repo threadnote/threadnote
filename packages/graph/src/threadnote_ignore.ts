@@ -1,6 +1,8 @@
 import {Effect, FileSystem, Path} from 'effect';
 import {trimBoundaryCharacters} from '@threadnote/platform/string-boundaries';
 import {readOptionalText} from './inventory/contained_file.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const THREADNOTE_IGNORE_FILE = '.threadnoteignore';
 export const THREADNOTE_IGNORE_LOCAL_FILE = '.threadnoteignore.local';
@@ -62,11 +64,11 @@ export function emptyThreadnoteIgnoreAdmissionPath(repositoryPath: string, sourc
 
 function compileIgnoreContent(content: string, source: CompiledIgnoreRule['source']): readonly CompiledIgnoreRule[] {
   const rules: CompiledIgnoreRule[] = [];
-  for (const rawLine of content.split(/\r?\n/)) {
-    const trimmed = rawLine.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const negated = trimmed.startsWith('!');
-    const pattern = normalizeRepositoryPath(negated ? trimmed.slice(1) : trimmed);
+  for (const rawLine of Effect2.pipe(content, EffectString.split(/\r?\n/))) {
+    const trimmed = Effect2.pipe(rawLine, EffectString.trim);
+    if (!trimmed || Effect2.pipe(trimmed, EffectString.startsWith('#'))) continue;
+    const negated = Effect2.pipe(trimmed, EffectString.startsWith('!'));
+    const pattern = normalizeRepositoryPath(negated ? Effect2.pipe(trimmed, EffectString.slice(1)) : trimmed);
     if (!pattern) continue;
     const compiled = compileIgnorePattern(pattern);
     if (compiled) rules.push({ignored: !negated, pattern: compiled, source});
@@ -75,20 +77,22 @@ function compileIgnoreContent(content: string, source: CompiledIgnoreRule['sourc
 }
 
 function compileIgnorePattern(pattern: string): RegExp | undefined {
-  const directoryPattern = pattern.endsWith('/');
+  const directoryPattern = Effect2.pipe(pattern, EffectString.endsWith('/'));
   const normalized = trimBoundaryCharacters(pattern, '/');
   if (!normalized) return undefined;
-  const escaped = normalized
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replaceAll('**', '\u0000')
-    .replaceAll('*', '[^/]*')
-    .replaceAll('?', '[^/]')
-    .replaceAll('\u0000', '.*');
-  const prefix = normalized.includes('/') ? '^' : '(?:^|/)';
+  const escaped = Effect2.pipe(
+    normalized,
+    EffectString.replace(/[.+^${}()|[\]\\]/g, '\\$&'),
+    EffectString.replaceAll('**', '\u0000'),
+    EffectString.replaceAll('*', '[^/]*'),
+    EffectString.replaceAll('?', '[^/]'),
+    EffectString.replaceAll('\u0000', '.*'),
+  );
+  const prefix = Effect2.pipe(normalized, EffectString.includes('/')) ? '^' : '(?:^|/)';
   const suffix = directoryPattern ? '(?:/|$)' : '$';
   return new RegExp(`${prefix}${escaped}${suffix}`, 'i');
 }
 
 function normalizeRepositoryPath(value: string): string {
-  return value.replace(/^\.\/+/, '');
+  return Effect2.pipe(value, EffectString.replace(/^\.\/+/, ''));
 }

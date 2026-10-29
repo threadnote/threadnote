@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {Schema} from 'effect';
 import {JSON_SCHEMA, load} from 'js-yaml';
@@ -224,31 +226,35 @@ describe('hosted Windows 10k scheduler-tail calibration', () => {
 
     expect(calibration.observations).toHaveLength(calibration.derivation.observationCount);
     expect(prior).toHaveLength(calibration.derivation.priorObservationCount);
-    expect(new Set(calibration.observations.map(observation => observation.artifactId)).size).toBe(25);
-    expect(new Set(calibration.observations.map(observation => observation.runId)).size).toBe(25);
-    expect(new Set(calibration.observations.map(observation => observation.archiveDigest)).size).toBe(25);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.artifactId)).size).toBe(25);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.runId)).size).toBe(25);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.archiveDigest)).size).toBe(25);
     expect(
-      calibration.observations.every(
-        (observation, index, observations) =>
-          index === 0 || Date.parse(required(observations[index - 1]).createdAt) >= Date.parse(observation.createdAt),
+      EffectArrayPipe(calibration.observations, __effectNativeArray =>
+        EffectArray.every(
+          __effectNativeArray,
+          (observation, index) =>
+            index === 0 ||
+            Date.parse(required(__effectNativeArray[index - 1]).createdAt) >= Date.parse(observation.createdAt),
+        ),
       ),
     ).toBe(true);
 
     expect(
       summary(
-        prior.map(observation => observation.measurements.hotQueryP50Milliseconds),
+        EffectArray.map(prior, observation => observation.measurements.hotQueryP50Milliseconds),
         750,
       ),
     ).toEqual(calibration.derivation.priorHotQueryP50);
     expect(
       summary(
-        prior.map(observation => observation.measurements.hotQueryP95Milliseconds),
+        EffectArray.map(prior, observation => observation.measurements.hotQueryP95Milliseconds),
         1_000,
       ),
     ).toEqual(calibration.derivation.priorHotQueryP95);
     expect(
       summary(
-        prior.map(observation => observation.measurements.hotQueryProcessCpuP95Milliseconds),
+        EffectArray.map(prior, observation => observation.measurements.hotQueryProcessCpuP95Milliseconds),
         500,
       ),
     ).toEqual(calibration.derivation.priorHotQueryProcessCpuP95);
@@ -274,13 +280,22 @@ describe('hosted Windows 10k scheduler-tail calibration', () => {
   it('binds the failure to hosted wall delay while the independent CPU guard stayed green', () => {
     const candidate = required(calibration.observations[0]);
     const predecessor = required(
-      calibration.observations.find(observation => observation.artifactId === 9_779_699_070),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(calibration.observations, observation => observation.artifactId === 9_779_699_070),
+      ),
     );
     const checkout = required(
-      calibration.candidateWorkflow.steps.find(step => step.name === 'Run actions/checkout@v7'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(calibration.candidateWorkflow.steps, step => step.name === 'Run actions/checkout@v7'),
+      ),
     );
     const install = required(
-      calibration.candidateWorkflow.steps.find(step => step.name === 'Run bun install --frozen-lockfile'),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          calibration.candidateWorkflow.steps,
+          step => step.name === 'Run bun install --frozen-lockfile',
+        ),
+      ),
     );
 
     expect(candidate.headSha).toBe(calibration.candidateCommit);
@@ -303,8 +318,14 @@ describe('hosted Windows 10k scheduler-tail calibration', () => {
 
   it('fixes provenance, increases the sample count, and keeps the override runner-scoped', () => {
     const job = benchmarkWorkflow.jobs['code-graph-10k'];
-    const capture = required(job.steps.find(step => step.name === 'Gate 10k-symbol indexing and queries'));
-    const upload = required(job.steps.find(step => step.uses === 'actions/upload-artifact@v7'));
+    const capture = required(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(job.steps, step => step.name === 'Gate 10k-symbol indexing and queries'),
+      ),
+    );
+    const upload = required(
+      EffectOption.getOrUndefined(EffectArray.findFirst(job.steps, step => step.uses === 'actions/upload-artifact@v7')),
+    );
 
     expect(capture.env).toEqual({
       THREADNOTE_BENCHMARK_RUNNER_CLASS: 'github-hosted-${{ matrix.os }}-${{ runner.arch }}',
@@ -366,7 +387,7 @@ describe('hosted Windows 10k scheduler-tail calibration', () => {
       const artifact = candidateArtifact({runnerClass: 'github-hosted-windows-x64', samples: 100});
       return parseBenchmarkArtifactV1({
         ...artifact,
-        measurements: artifact.measurements.map(candidate =>
+        measurements: EffectArray.map(artifact.measurements, candidate =>
           candidate.name === 'hot-exact-lexical-query' ? measurement : candidate,
         ),
       });
@@ -483,7 +504,7 @@ function summary(values: readonly number[], maximum: number) {
   const sorted = [...values].sort((left, right) => left - right);
   const percentile = (ratio: number) => required(sorted[Math.max(0, Math.ceil(ratio * sorted.length) - 1)]);
   return {
-    breaches: sorted.filter(value => value > maximum).length,
+    breaches: EffectArray.filter(sorted, value => value > maximum).length,
     maximum: required(sorted.at(-1)),
     minimum: required(sorted[0]),
     p50: percentile(0.5),
@@ -507,7 +528,7 @@ function candidateArtifact(input: {
       ...calibration.candidateBudgetArtifact.environment,
       architecture: input.architecture ?? calibration.candidateBudgetArtifact.environment.architecture,
     },
-    measurements: calibration.candidateBudgetArtifact.measurements.map(measurement =>
+    measurements: EffectArray.map(calibration.candidateBudgetArtifact.measurements, measurement =>
       measurement.name === 'hot-exact-lexical-query' || measurement.name === 'hot-query-process-cpu'
         ? {...measurement, samples: input.samples}
         : measurement,
@@ -526,7 +547,7 @@ function replaceHotQueryStatistics(
 ): BenchmarkArtifactV1 {
   return parseBenchmarkArtifactV1({
     ...artifact,
-    measurements: artifact.measurements.map(measurement => {
+    measurements: EffectArray.map(artifact.measurements, measurement => {
       if (measurement.name === 'hot-exact-lexical-query') {
         const maximum = Math.max(values.p50, values.p95);
         return {...measurement, maximum, p50: values.p50, p95: maximum, p99: maximum};

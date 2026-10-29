@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -9,6 +10,8 @@ import {Effect, Layer, Option} from 'effect';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface LocalDeclarationFixture {
   readonly expectedQualifiedName: string;
@@ -29,88 +32,106 @@ const fixtures: readonly LocalDeclarationFixture[] = [
     language: 'java',
     path: 'src/acme/Host.java',
     render: (arities, revision, leadingComments) =>
-      [
-        ...Array.from({length: leadingComments}, () => '// harmless leading layout'),
-        'package acme;',
-        'class Host {',
-        ...arities.flatMap(arity => [
-          `  void run(${javaParameters(arity)}) {`,
-          `    int revision = ${revision};`,
-          '    class Local {}',
-          '  }',
-        ]),
-        '}',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          ...Array.from({length: leadingComments}, () => '// harmless leading layout'),
+          'package acme;',
+          'class Host {',
+          ...EffectArray.flatMap(arities, arity => [
+            `  void run(${javaParameters(arity)}) {`,
+            `    int revision = ${revision};`,
+            '    class Local {}',
+            '  }',
+          ]),
+          '}',
+          '',
+        ],
+        '\n',
+      ),
     renderCalls: arities =>
-      [
-        'package acme;',
-        'class Host {',
-        ...arities.map(arity => `  void run(${javaParameters(arity)}) {}`),
-        '  void caller() {',
-        ...arities.map(arity => `    run(${callArguments(arity)});`),
-        '  }',
-        '}',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'package acme;',
+          'class Host {',
+          ...EffectArray.map(arities, arity => `  void run(${javaParameters(arity)}) {}`),
+          '  void caller() {',
+          ...EffectArray.map(arities, arity => `    run(${callArguments(arity)});`),
+          '  }',
+          '}',
+          '',
+        ],
+        '\n',
+      ),
   },
   {
     expectedQualifiedName: 'acme.Host.run.Local',
     language: 'kotlin',
     path: 'src/acme/Host.kt',
     render: (arities, revision, leadingComments) =>
-      [
-        ...Array.from({length: leadingComments}, () => '// harmless leading layout'),
-        'package acme',
-        'class Host {',
-        ...arities.flatMap(arity => [
-          `  fun run(${kotlinParameters(arity)}) {`,
-          `    val revision = ${revision}`,
-          '    class Local {}',
-          '  }',
-        ]),
-        '}',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          ...Array.from({length: leadingComments}, () => '// harmless leading layout'),
+          'package acme',
+          'class Host {',
+          ...EffectArray.flatMap(arities, arity => [
+            `  fun run(${kotlinParameters(arity)}) {`,
+            `    val revision = ${revision}`,
+            '    class Local {}',
+            '  }',
+          ]),
+          '}',
+          '',
+        ],
+        '\n',
+      ),
     renderCalls: arities =>
-      [
-        'package acme',
-        'class Host {',
-        ...arities.map(arity => `  fun run(${kotlinParameters(arity)}) {}`),
-        '  fun caller() {',
-        ...arities.map(arity => `    run(${callArguments(arity)})`),
-        '  }',
-        '}',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'package acme',
+          'class Host {',
+          ...EffectArray.map(arities, arity => `  fun run(${kotlinParameters(arity)}) {}`),
+          '  fun caller() {',
+          ...EffectArray.map(arities, arity => `    run(${callArguments(arity)})`),
+          '  }',
+          '}',
+          '',
+        ],
+        '\n',
+      ),
   },
   {
     expectedQualifiedName: 'Host.run.Local',
     language: 'swift',
     path: 'Sources/Core/Host.swift',
     render: (arities, revision, leadingComments) =>
-      [
-        ...Array.from({length: leadingComments}, () => '// harmless leading layout'),
-        'struct Host {',
-        ...arities.flatMap(arity => [
-          `  func run(${swiftParameters(arity)}) {`,
-          `    let revision = ${revision}`,
-          '    struct Local {}',
-          '  }',
-        ]),
-        '}',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          ...Array.from({length: leadingComments}, () => '// harmless leading layout'),
+          'struct Host {',
+          ...EffectArray.flatMap(arities, arity => [
+            `  func run(${swiftParameters(arity)}) {`,
+            `    let revision = ${revision}`,
+            '    struct Local {}',
+            '  }',
+          ]),
+          '}',
+          '',
+        ],
+        '\n',
+      ),
     renderCalls: arities =>
-      [
-        'struct Host {',
-        ...arities.map(arity => `  func run(${swiftParameters(arity)}) {}`),
-        '  func caller() {',
-        ...arities.map(arity => `    run(${callArguments(arity)})`),
-        '  }',
-        '}',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'struct Host {',
+          ...EffectArray.map(arities, arity => `  func run(${swiftParameters(arity)}) {}`),
+          '  func caller() {',
+          ...EffectArray.map(arities, arity => `    run(${callArguments(arity)})`),
+          '  }',
+          '}',
+          '',
+        ],
+        '\n',
+      ),
   },
 ];
 
@@ -165,21 +186,24 @@ describe('Tree-sitter symbol identity properties', () => {
             const facts = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractFile(
               inventoryFile(fixture.path, fixture.renderCalls(arities)),
             );
-            const references = (facts.references ?? []).filter(
+            const references = EffectArray.filter(
+              facts.references ?? [],
               reference =>
                 reference.relation === 'calls' && reference.sourceName === 'caller' && reference.targetName === 'run',
             );
-            const sortedReferenceArities = references
-              .map(reference => reference.arity)
-              .sort((left, right) => (left ?? -1) - (right ?? -1));
+            const sortedReferenceArities = EffectArray.map(references, reference => reference.arity).sort(
+              (left, right) => (left ?? -1) - (right ?? -1),
+            );
 
             expect(sortedReferenceArities, fixture.language).toEqual(arities);
-            expect(new Set(references.map(reference => reference.edgeId)).size, fixture.language).toBe(
+            expect(new Set(EffectArray.map(references, reference => reference.edgeId)).size, fixture.language).toBe(
               references.length,
             );
             expect(
-              references.every(reference =>
-                reference.lookupTiers.flat().some(key => key.endsWith(`#${reference.arity}`)),
+              EffectArray.every(references, reference =>
+                EffectArray.some(reference.lookupTiers.flat(), key =>
+                  Effect2.pipe(key, EffectString.endsWith(`#${reference.arity}`)),
+                ),
               ),
               fixture.language,
             ).toBe(true);
@@ -208,34 +232,56 @@ function assertLocalIdentities(
   facts: CodeGraphFileFacts,
   expectedCount: number,
 ): void {
-  const locals = facts.symbols.filter(
+  const locals = EffectArray.filter(
+    facts.symbols,
     symbol => symbol.name === 'Local' && symbol.qualifiedName === fixture.expectedQualifiedName,
   );
   expect(locals, fixture.language).toHaveLength(expectedCount);
-  expect(new Set(locals.map(symbol => symbol.id)).size, fixture.language).toBe(expectedCount);
-  expect(new Set(facts.symbols.map(symbol => symbol.id)).size, fixture.language).toBe(facts.symbols.length);
+  expect(new Set(EffectArray.map(locals, symbol => symbol.id)).size, fixture.language).toBe(expectedCount);
+  expect(new Set(EffectArray.map(facts.symbols, symbol => symbol.id)).size, fixture.language).toBe(
+    facts.symbols.length,
+  );
 }
 
 function localIdentityProjection(fixture: LocalDeclarationFixture, facts: CodeGraphFileFacts) {
-  return facts.symbols
-    .filter(symbol => symbol.name === 'Local' && symbol.qualifiedName === fixture.expectedQualifiedName)
-    .map(symbol => ({id: symbol.id, kind: symbol.kind, name: symbol.name, qualifiedName: symbol.qualifiedName}));
+  return EffectArray.map(
+    EffectArray.filter(
+      facts.symbols,
+      symbol => symbol.name === 'Local' && symbol.qualifiedName === fixture.expectedQualifiedName,
+    ),
+    symbol => ({id: symbol.id, kind: symbol.kind, name: symbol.name, qualifiedName: symbol.qualifiedName}),
+  );
 }
 
 function javaParameters(arity: number): string {
-  return Array.from({length: arity}, (_, index) => `int value${index}`).join(', ');
+  return EffectArray.join(
+    Array.from({length: arity}, (_, index) => `int value${index}`),
+    ', ',
+  );
 }
 
 function kotlinParameters(arity: number): string {
-  return Array.from({length: arity}, (_, index) => `value${index}: Int`).join(', ');
+  return EffectArray.join(
+    Array.from({length: arity}, (_, index) => `value${index}: Int`),
+    ', ',
+  );
 }
 
 function swiftParameters(arity: number): string {
-  return Array.from({length: arity}, (_, index) => `_ value${index}: Int`).join(', ');
+  return EffectArray.join(
+    Array.from({length: arity}, (_, index) => `_ value${index}: Int`),
+    ', ',
+  );
 }
 
 function callArguments(arity: number): string {
-  return Array.from({length: arity}, (_, index) => index).join(', ');
+  return EffectArray.join(
+    EffectArray.map(
+      Array.from({length: arity}, (_, index) => index),
+      item => (item === null || item === undefined ? '' : String(item)),
+    ),
+    ', ',
+  );
 }
 
 function inventoryFile(path: string, content: string): CodeGraphInventoryFile {

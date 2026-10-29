@@ -1,6 +1,8 @@
 import {Effect} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import type {SystemInfoShape} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PRE_CANONICAL_DARWIN_PROCESS_IDENTITY = /^darwin:(?!v2:)./;
 
@@ -28,7 +30,7 @@ function isPreCanonicalDarwinProcessIdentity(identity: string): boolean {
 }
 
 function isCanonicalDarwinProcessIdentity(identity: string): boolean {
-  return identity.startsWith('darwin-v2:');
+  return Effect2.pipe(identity, EffectString.startsWith('darwin-v2:'));
 }
 
 export function processInstanceIdentityMatches(stored: string | undefined, observed: string | undefined): boolean {

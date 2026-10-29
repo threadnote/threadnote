@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {compareCodeUnits} from '../../ordering.js';
 import type {GraphWorkerAdmissionReceiptV2, GraphWorkerAdmissionView} from './admission_state.js';
 
@@ -20,7 +21,10 @@ export function selectGraphWorkerReceiptsForSource(
 } {
   const requested = source.actionKeys.length === 0 ? undefined : new Set(source.actionKeys);
   const quarantined = new Set(
-    store.quarantine.filter(item => item.repositoryId === source.repositoryId).map(item => item.actionKey),
+    EffectArray.map(
+      EffectArray.filter(store.quarantine, item => item.repositoryId === source.repositoryId),
+      item => item.actionKey,
+    ),
   );
   const byAction = new Map<string, GraphWorkerAdmissionReceiptV2[]>();
   const skippedLate: GraphWorkerAdmissionReceiptV2[] = [];
@@ -39,14 +43,15 @@ export function selectGraphWorkerReceiptsForSource(
   }
   return {
     quarantined: [...quarantined].sort(compareCodeUnits),
-    candidateGroups: [...byAction.entries()]
-      .sort(([left], [right]) => compareCodeUnits(left, right))
-      .map(([actionKey, alternatives]) => ({
+    candidateGroups: EffectArray.map(
+      [...byAction.entries()].sort(([left], [right]) => compareCodeUnits(left, right)),
+      ([actionKey, alternatives]) => ({
         actionKey,
         alternatives: alternatives.sort((a, b) =>
           compareCodeUnits(a.announcement.body.idempotencyKey, b.announcement.body.idempotencyKey),
         ),
-      })),
+      }),
+    ),
     skippedLate: skippedLate.sort((a, b) =>
       compareCodeUnits(a.announcement.body.idempotencyKey, b.announcement.body.idempotencyKey),
     ),

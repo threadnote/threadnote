@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {DateTime, Effect, FileSystem, Path} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {
@@ -72,6 +74,11 @@ import {
   historicalSnapshotCitationMatches,
   type ContextHealthCitationSourceExcerptV1,
 } from './citation/evidence_excerpt.js';
+import * as EffectString from 'effect/String';
+import {unknownReceipt, receipt, type ReceiptObservation} from './citation/receipt.js';
+import {validateContextBriefFileCitation} from './citation/file_validation.js';
+export {validateContextBriefFileCitation} from './citation/file_validation.js';
+import * as Effect2 from 'effect';
 
 const RELOCATION_MATCH_LIMIT = 2;
 const VALIDATION_CONCURRENCY = 4;
@@ -91,8 +98,9 @@ export const validateContextBriefMemoryCitations = Effect.fn('contextBrief.valid
 ) {
   const direct = yield* validateBoundedMemoryCitations(config, scope, candidates, fence);
   if (scope.kind !== 'repository' || fence?.kind === 'workset') return direct;
-  const eligible = direct.flatMap(validation => {
-    const receipts = validation.receipts.filter(
+  const eligible = EffectArray.flatMap(direct, validation => {
+    const receipts = EffectArray.filter(
+      validation.receipts,
       receipt =>
         receipt.status === 'unknown' &&
         (receipt.reason === 'repository-unavailable' ||
@@ -102,24 +110,40 @@ export const validateContextBriefMemoryCitations = Effect.fn('contextBrief.valid
   });
   if (eligible.length === 0) return direct;
   const eligibleByUri = new Map(
-    eligible.map(validation => [validation.uri, new Set(validation.receipts.map(receipt => receipt.citationId))]),
+    EffectArray.map(eligible, validation => [
+      validation.uri,
+      new Set(EffectArray.map(validation.receipts, receipt => receipt.citationId)),
+    ]),
   );
-  const selected = candidates.flatMap(candidate => {
+  const selected = EffectArray.flatMap(candidates, candidate => {
     const ids = eligibleByUri.get(candidate.uri);
     return ids === undefined
       ? []
-      : [{...candidate, codeCitations: candidate.codeCitations.filter(citation => ids.has(citation.id))}];
+      : [
+          {
+            ...candidate,
+            codeCitations: EffectArrayPipe(candidate.codeCitations, __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (citation, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && ids.has(citation.id),
+              ),
+            ),
+          },
+        ];
   });
   const recovered = yield* recoverContextHealthCitationEvidence(config, scope, selected, eligible, 'brief', fence);
   const byUri = new Map(
-    recovered.map(validation => [
+    EffectArray.map(recovered, validation => [
       validation.uri,
-      new Map(validation.receipts.map(receipt => [receipt.citationId, receipt])),
+      new Map(EffectArray.map(validation.receipts, receipt => [receipt.citationId, receipt])),
     ]),
   );
-  return direct.map(validation => ({
+  return EffectArray.map(direct, validation => ({
     ...validation,
-    receipts: validation.receipts.map(receipt => byUri.get(validation.uri)?.get(receipt.citationId) ?? receipt),
+    receipts: EffectArray.map(
+      validation.receipts,
+      receipt => byUri.get(validation.uri)?.get(receipt.citationId) ?? receipt,
+    ),
   }));
 });
 
@@ -149,19 +173,17 @@ export function planContextHealthCitationBatch(
   const maximum = Math.min(requested, CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS);
   const key = (identity: {readonly uri: string; readonly citationId: string}) =>
     `${identity.uri}\0${identity.citationId}`;
-  const tasks = candidates
-    .flatMap(candidate =>
-      candidate.codeCitations.map(citation => ({
-        candidate,
-        citation,
-        identity: {uri: candidate.uri, citationId: citation.id},
-      })),
-    )
-    .sort((left, right) =>
-      key(left.identity) < key(right.identity) ? -1 : key(left.identity) > key(right.identity) ? 1 : 0,
-    );
+  const tasks = EffectArray.flatMap(candidates, candidate =>
+    EffectArray.map(candidate.codeCitations, citation => ({
+      candidate,
+      citation,
+      identity: {uri: candidate.uri, citationId: citation.id},
+    })),
+  ).sort((left, right) =>
+    key(left.identity) < key(right.identity) ? -1 : key(left.identity) > key(right.identity) ? 1 : 0,
+  );
   const remaining =
-    options.after === undefined ? tasks : tasks.filter(task => key(task.identity) > key(options.after!));
+    options.after === undefined ? tasks : EffectArray.filter(tasks, task => key(task.identity) > key(options.after!));
   const selected: typeof tasks = [];
   const repositories = new Set<string>();
   for (const task of remaining) {
@@ -217,7 +239,7 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
   fence?: ContextBriefCitationValidationFenceV2,
 ) {
   const query = yield* CodeGraphQueryService;
-  const byUri = new Map(candidates.map(candidate => [candidate.uri, candidate]));
+  const byUri = new Map(EffectArray.map(candidates, candidate => [candidate.uri, candidate]));
   const resolve = yield* makeCodeGraphCitationRepositoryRouteObservation({
     threadnoteHome: config.agentContextHome,
     ...(scope.kind === 'repository' ? {callerCwd: scope.callerCwd} : {}),
@@ -230,7 +252,7 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
     validation =>
       Effect.gen(function* () {
         const candidate = byUri.get(validation.uri)!;
-        const citations = new Map(candidate.codeCitations.map(citation => [citation.id, citation]));
+        const citations = new Map(EffectArray.map(candidate.codeCitations, citation => [citation.id, citation]));
         const receipts: ContextBriefCitationValidationReceiptV2[] = [];
         for (const original of validation.receipts) {
           if (original.status !== 'unknown' || !['repository-unavailable', 'graph-stale'].includes(original.reason)) {
@@ -307,10 +329,11 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
                 const routeKey = `${route.identity.repoRoot}\0${citation.repositoryId}\0${status.readySnapshot.id}`;
                 let checkedById = routeReceipts.get(routeKey);
                 if (checkedById === undefined) {
-                  const repositoryTasks = candidates.flatMap(value =>
-                    value.codeCitations
-                      .filter(anchor => anchor.repositoryId === citation.repositoryId)
-                      .map((anchor, index) => ({citation: anchor, index, uri: value.uri})),
+                  const repositoryTasks = EffectArray.flatMap(candidates, value =>
+                    EffectArray.map(
+                      EffectArray.filter(value.codeCitations, anchor => anchor.repositoryId === citation.repositoryId),
+                      (anchor, index) => ({citation: anchor, index, uri: value.uri}),
+                    ),
                   );
                   const checked = yield* validateRepositoryTasks(
                     {
@@ -325,7 +348,7 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
                           revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route),
                         ],
                         {concurrency: 2},
-                      ).pipe(Effect.map(results => results.every(Boolean))),
+                      ).pipe(Effect.map(results => EffectArray.every(results, Boolean))),
                       objectFormat: status.identity.objectFormat,
                       repositoryId: status.identity.repositoryId,
                       ...(policy === 'health'
@@ -338,7 +361,7 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
                     repositoryTasks,
                     original.observedAt,
                   );
-                  checkedById = new Map(checked.map(value => [value.receipt.citationId, value.receipt]));
+                  checkedById = new Map(EffectArray.map(checked, value => [value.receipt.citationId, value.receipt]));
                   routeReceipts.set(routeKey, checkedById);
                 }
                 const checked = checkedById.get(citation.id)!;
@@ -398,7 +421,7 @@ const retainCitationEvidenceUnderLease = Effect.fn('contextHealth.retainCitation
     captures.values(),
     capturedTasks =>
       Effect.gen(function* () {
-        const sources = capturedTasks.map(task => ({
+        const sources = EffectArray.map(capturedTasks, task => ({
           expectedContentHash: task.citation.fileContentHash.value,
           repositoryPath: task.citation.path,
           requireBytes: true,
@@ -410,7 +433,7 @@ const retainCitationEvidenceUnderLease = Effect.fn('contextHealth.retainCitation
           sourceCommit: capturedTasks[0].citation.sourceCommit,
           sources,
         });
-        return capturedTasks.flatMap((task, index) => {
+        return EffectArray.flatMap(capturedTasks, (task, index) => {
           const retained = bytes.get(codeGraphCitationSourceKey(sources[index]));
           return retained === undefined ? [] : [{bytes: retained, task}];
         });
@@ -542,7 +565,9 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
             const evidence = yield* store.effectiveSnapshotCitationEvidence(status.databasePath, snapshot.id, {
               paths: [observedPath],
             });
-            const file = evidence.filesByPaths.find(value => value.path === observedPath)?.file;
+            const file = EffectOption.getOrUndefined(
+              EffectArray.findFirst(evidence.filesByPaths, value => value.path === observedPath),
+            )?.file;
             if (file === undefined) return undefined;
             const request = {expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: true};
             const sources = yield* readCodeGraphCitationSources({
@@ -898,8 +923,8 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
   fence?: ContextBriefCitationValidationFenceV2,
   retentionHome?: string,
 ) {
-  const allTasks = candidates.flatMap(candidate =>
-    candidate.codeCitations.map((citation, index) => ({citation, index, uri: candidate.uri})),
+  const allTasks = EffectArray.flatMap(candidates, candidate =>
+    EffectArray.map(candidate.codeCitations, (citation, index) => ({citation, index, uri: candidate.uri})),
   );
   if (allTasks.length === 0) return [] as readonly ContextBriefMemoryCitationValidationV2[];
   const observedAt = DateTime.formatIso(yield* DateTime.now);
@@ -909,7 +934,7 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
   ): ContextBriefCitationValidationReceiptV2 => unknownReceipt(citation, reason, observedAt);
   const admitted = allTasks.slice(0, CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS);
   const deferred = allTasks.slice(CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS);
-  const repositoryIds = [...new Set(admitted.map(task => task.citation.repositoryId))];
+  const repositoryIds = [...new Set(EffectArray.map(admitted, task => task.citation.repositoryId))];
   const admittedRepositoryIds = new Set(repositoryIds.slice(0, CONTEXT_BRIEF_MAXIMUM_CITED_REPOSITORIES));
   const overflowRepositoryIds = new Set(repositoryIds.slice(CONTEXT_BRIEF_MAXIMUM_CITED_REPOSITORIES));
   const resolution: ValidationScopeResolution = yield* validationScopeTargets(
@@ -929,9 +954,13 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
   const eligibleByRepository = new Map<string, CitationTask[]>();
   for (const [repositoryId, tasks] of byRepository) {
     if (overflowRepositoryIds.has(repositoryId)) {
-      validated.push(...tasks.map(task => [task, unknown(task.citation, 'citation-limit'), false] as const));
+      validated.push(
+        ...EffectArray.map(tasks, task => [task, unknown(task.citation, 'citation-limit'), false] as const),
+      );
     } else if (resolution.ambiguousRepositoryIds.has(repositoryId)) {
-      validated.push(...tasks.map(task => [task, unknown(task.citation, 'repository-ambiguous'), false] as const));
+      validated.push(
+        ...EffectArray.map(tasks, task => [task, unknown(task.citation, 'repository-ambiguous'), false] as const),
+      );
     } else {
       eligibleByRepository.set(repositoryId, tasks);
     }
@@ -956,7 +985,7 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
         if (status.readySnapshot === undefined || status.stale || status.freshness !== 'current') {
           return Effect.succeed({
             repositoryId,
-            tuples: tasks.map(task => [task, unknown(task.citation, 'graph-stale'), false] as const),
+            tuples: EffectArray.map(tasks, task => [task, unknown(task.citation, 'graph-stale'), false] as const),
           });
         }
         return validateRepositoryTasks(
@@ -977,11 +1006,14 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
         ).pipe(
           Effect.map(results => ({
             repositoryId,
-            tuples: tasks.map((task, index) => [task, results[index].receipt, results[index].cacheHit] as const),
+            tuples: EffectArray.map(
+              tasks,
+              (task, index) => [task, results[index].receipt, results[index].cacheHit] as const,
+            ),
           })),
           Effect.orElseSucceed(() => ({
             repositoryId,
-            tuples: tasks.map(task => [task, unknown(task.citation, 'validation-error'), false] as const),
+            tuples: EffectArray.map(tasks, task => [task, unknown(task.citation, 'validation-error'), false] as const),
           })),
         );
       };
@@ -995,7 +1027,7 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
         const repositoryId = target.published.repositoryId;
         const tasks = eligibleByRepository.get(repositoryId);
         if (tasks === undefined) return Effect.succeedNone;
-        if (retentionHome !== undefined || !tasks.every(task => task.citation.target.kind === 'file'))
+        if (retentionHome !== undefined || !EffectArray.every(tasks, task => task.citation.target.kind === 'file'))
           return statusAndValidate.pipe(Effect.option);
         return validatePublishedRepositoryTasks(
           config,
@@ -1011,7 +1043,10 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
               ? statusAndValidate
               : Effect.succeed({
                   repositoryId,
-                  tuples: tasks.map((task, index) => [task, results[index].receipt, results[index].cacheHit] as const),
+                  tuples: EffectArray.map(
+                    tasks,
+                    (task, index) => [task, results[index].receipt, results[index].cacheHit] as const,
+                  ),
                 }),
           ),
           Effect.option,
@@ -1030,7 +1065,8 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
   for (const [repositoryId, tasks] of eligibleByRepository) {
     if (matchedRepositoryIds.has(repositoryId)) continue;
     validated.push(
-      ...tasks.map(
+      ...EffectArray.map(
+        tasks,
         task =>
           [
             task,
@@ -1058,26 +1094,28 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
     resolution.worksetGeneration !== undefined &&
     !(yield* worksetGenerationIsStillPublished(config, resolution.worksetGeneration))
   ) {
-    const staleValidations: readonly ContextBriefMemoryCitationValidationV2[] = candidates.flatMap(candidate =>
-      candidate.codeCitations.length === 0
-        ? []
-        : [
-            {
-              receipts: candidate.codeCitations.map(citation => unknown(citation, 'graph-stale')),
-              uri: candidate.uri,
-            },
-          ],
+    const staleValidations: readonly ContextBriefMemoryCitationValidationV2[] = EffectArray.flatMap(
+      candidates,
+      candidate =>
+        candidate.codeCitations.length === 0
+          ? []
+          : [
+              {
+                receipts: EffectArray.map(candidate.codeCitations, citation => unknown(citation, 'graph-stale')),
+                uri: candidate.uri,
+              },
+            ],
     );
     return staleValidations;
   }
-  const validations: readonly ContextBriefMemoryCitationValidationV2[] = candidates.flatMap(candidate => {
+  const validations: readonly ContextBriefMemoryCitationValidationV2[] = EffectArray.flatMap(candidates, candidate => {
     const receipts = receiptsByUri.get(candidate.uri);
     if (!receipts) return [];
-    const byId = new Map(receipts.map(receipt => [receipt.citationId, receipt]));
+    const byId = new Map(EffectArray.map(receipts, receipt => [receipt.citationId, receipt]));
     return [
       {
         ...(cacheHitsByUri.has(candidate.uri) ? {cacheHits: cacheHitsByUri.get(candidate.uri)!} : {}),
-        receipts: candidate.codeCitations.flatMap(citation => {
+        receipts: EffectArray.flatMap(candidate.codeCitations, citation => {
           const receipt = byId.get(citation.id);
           return receipt ? [receipt] : [];
         }),
@@ -1111,7 +1149,7 @@ const validatePublishedRepositoryTasks = Effect.fn('contextBrief.validatePublish
           ? yield* codeGraphSnapshotRuntimeCurrent(store, layout.databasePath, snapshot, languagePacks)
           : false;
       if (snapshot === undefined || !cleanPublishedCatalogSnapshotMatches(published, snapshot) || !runtimeCurrent) {
-        return tasks.map(task => ({
+        return EffectArray.map(tasks, task => ({
           cacheHit: false,
           receipt: unknownReceipt(task.citation, 'graph-stale', observedAt),
         })) satisfies readonly ValidatedCitation[];
@@ -1225,40 +1263,45 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
       yield* Effect.acquireRelease(store.acquireSnapshotLease(repository.databasePath, snapshot.id, 60_000), token =>
         store.releaseSnapshotLease(repository.databasePath, token).pipe(Effect.ignore),
       );
-      const cacheKeys = tasks.map(task =>
+      const cacheKeys = EffectArray.map(tasks, task =>
         validationCacheKey(repository.repositoryId, repository.worktreeId, snapshot.id, task.citation.id),
       );
-      const cached = cacheKeys.map(validationCacheGet);
-      const uncachedTasks = tasks.filter((_, index) => cached[index] === undefined);
+      const cached = EffectArray.map(cacheKeys, validationCacheGet);
+      const uncachedTasks = EffectArray.filter(tasks, (_, index) => cached[index] === undefined);
       const computed = new Map<CitationTask, ContextBriefCitationValidationReceiptV2>();
 
       if (uncachedTasks.length > 0) {
-        const citations = uncachedTasks.map(task => task.citation);
-        const symbolCitations = citations.filter(
+        const citations = EffectArray.map(uncachedTasks, task => task.citation);
+        const symbolCitations = EffectArray.filter(
+          citations,
           (
             citation,
           ): citation is MemoryCodeCitationV1 & {
             readonly target: Extract<MemoryCodeCitationV1['target'], {readonly kind: 'symbol'}>;
           } => citation.target.kind === 'symbol',
         );
-        const locators = symbolCitations.map(symbolLocator);
+        const locators = EffectArray.map(symbolCitations, symbolLocator);
         const evidence = yield* store.effectiveSnapshotCitationEvidence(repository.databasePath, snapshot.id, {
-          fileRelocationFallbacks: citations.map(citation => ({
+          fileRelocationFallbacks: EffectArray.map(citations, citation => ({
             contentHash: citation.fileContentHash.value,
             path: citation.path,
           })),
           limitPerContentHash: RELOCATION_MATCH_LIMIT,
           limitPerSemanticLocator: RELOCATION_MATCH_LIMIT,
           semanticLocators: locators,
-          symbolIds: symbolCitations.flatMap(citation =>
+          symbolIds: EffectArray.flatMap(symbolCitations, citation =>
             citation.target.kind === 'symbol' ? [citation.target.nodeId] : [],
           ),
         });
-        const pathByPath = new Map(evidence.filesByPaths.map(observation => [observation.path, observation]));
-        const hashesByHash = new Map(evidence.filesByContentHashes.map(matches => [matches.contentHash, matches]));
-        const exactById = new Map(evidence.symbolsByIds.map(symbol => [symbol.id, symbol]));
+        const pathByPath = new Map(
+          EffectArray.map(evidence.filesByPaths, observation => [observation.path, observation]),
+        );
+        const hashesByHash = new Map(
+          EffectArray.map(evidence.filesByContentHashes, matches => [matches.contentHash, matches]),
+        );
+        const exactById = new Map(EffectArray.map(evidence.symbolsByIds, symbol => [symbol.id, symbol]));
         const locatorsByKey = new Map(
-          evidence.symbolsBySemanticLocators.map(matches => [locatorKey(matches.locator), matches]),
+          EffectArray.map(evidence.symbolsBySemanticLocators, matches => [locatorKey(matches.locator), matches]),
         );
         // Validation is deliberately snapshot-local. Only the persisted receipt
         // may prove inventory completeness; a live preview would rescan the
@@ -1274,17 +1317,20 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
                     objectFormat: repository.objectFormat,
                     repositoryRoot,
                     sourceCommit: snapshot.commit,
-                    sources: symbolCitations.flatMap(citation =>
-                      symbolCitationSourceCandidates(
-                        citation,
-                        exactById.get(citation.target.nodeId),
-                        locatorsByKey.get(locatorKey(symbolLocator(citation))),
-                        snapshot,
-                      ).map(symbol => ({
-                        expectedContentHash: symbol.contentHash,
-                        repositoryPath: symbol.path,
-                        requireBytes: true,
-                      })),
+                    sources: EffectArray.flatMap(symbolCitations, citation =>
+                      EffectArray.map(
+                        symbolCitationSourceCandidates(
+                          citation,
+                          exactById.get(citation.target.nodeId),
+                          locatorsByKey.get(locatorKey(symbolLocator(citation))),
+                          snapshot,
+                        ),
+                        symbol => ({
+                          expectedContentHash: symbol.contentHash,
+                          repositoryPath: symbol.path,
+                          requireBytes: true,
+                        }),
+                      ),
                     ),
                   }),
                 ),
@@ -1312,7 +1358,8 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
           uncachedTasks,
           task => {
             const citation = task.citation;
-            if (citation.target.kind === 'file') {
+            const target = citation.target;
+            if (target.kind === 'file') {
               return Effect.succeed(
                 validateContextBriefFileCitation(
                   citation,
@@ -1324,12 +1371,11 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
                 ),
               );
             }
+            const symbolCitation = {...citation, target};
             return validateContextBriefSymbolCitation(
-              citation as MemoryCodeCitationV1 & {
-                readonly target: Extract<MemoryCodeCitationV1['target'], {readonly kind: 'symbol'}>;
-              },
-              exactById.get(citation.target.nodeId),
-              locatorsByKey.get(locatorKey(symbolLocator(citation))),
+              symbolCitation,
+              exactById.get(target.nodeId),
+              locatorsByKey.get(locatorKey(symbolLocator(symbolCitation))),
               pathByPath.get(citation.path),
               hashesByHash.get(citation.fileContentHash.value),
               snapshot,
@@ -1343,7 +1389,7 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
         for (const [index, task] of uncachedTasks.entries()) computed.set(task, receipts[index]);
       }
 
-      const results = tasks.map((task, index) => {
+      const results = EffectArray.map(tasks, (task, index) => {
         const cachedReceipt = cached[index];
         return cachedReceipt === undefined
           ? {cacheHit: false, receipt: computed.get(task)!}
@@ -1352,14 +1398,15 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
       if (repository.retention !== undefined) {
         yield* retainCitationEvidenceUnderLease(
           {...repository, retention: repository.retention},
-          tasks.filter(
+          EffectArray.filter(
+            tasks,
             (_, index) => results[index].receipt.status === 'exact' || results[index].receipt.status === 'relocated',
           ),
         ).pipe(Effect.ignore);
       }
       const fenceCurrent = yield* repository.finalFence.pipe(Effect.orElseSucceed(() => false));
       if (!fenceCurrent) {
-        return tasks.map(task => ({
+        return EffectArray.map(tasks, task => ({
           cacheHit: false,
           receipt: unknownReceipt(task.citation, 'graph-stale', observedAt),
         })) satisfies readonly ValidatedCitation[];
@@ -1372,77 +1419,6 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
     }),
   );
 });
-
-export function validateContextBriefFileCitation(
-  citation: MemoryCodeCitationV1,
-  pathObservation: CodeGraphEffectiveFilePathObservation | undefined,
-  relocation: CodeGraphEffectiveFileHashMatches | undefined,
-  snapshot: NonNullable<CodeGraphStatus['readySnapshot']>,
-  observedAt: string,
-  fileInventoryCoverage: CodeGraphEffectiveSnapshotCitationEvidence['fileInventoryCoverage'] = 'incomplete',
-): ContextBriefCitationValidationReceiptV2 {
-  const result = (
-    status: ContextBriefCitationValidationReceiptV2['status'],
-    reason: ContextBriefCitationValidationReceiptV2['reason'],
-    observation: ReceiptObservation,
-  ) => receipt(citation, snapshot, status, reason, observation, observedAt);
-  const exactFile = pathObservation?.file;
-  if (
-    exactFile?.contentHash === citation.fileContentHash.value ||
-    exactFile?.rawContentHash === citation.fileContentHash.value
-  ) {
-    return result('exact', 'exact', {
-      candidateCount: 1,
-      coverage: 'current-complete',
-      observedPath: exactFile.path,
-      strategy: 'file-path',
-    });
-  }
-  // An occupied original locator with different bytes is changed. A duplicate
-  // elsewhere must never rescue it into a false-fresh relocation.
-  if (exactFile) {
-    return result('changed', 'source-changed', {
-      candidateCount: 1,
-      coverage: 'current-complete',
-      observedPath: exactFile.path,
-      strategy: 'file-path',
-    });
-  }
-  const matches = relocation?.files ?? [];
-  if (relocation?.truncated || matches.length > 1) {
-    return result('unknown', 'ambiguous-relocation', {
-      candidateCount: matches.length,
-      coverage: 'current-complete',
-      strategy: 'content-hash',
-    });
-  }
-  if (matches.length === 1) {
-    return result(
-      matches[0].path === citation.path ? 'exact' : 'relocated',
-      matches[0].path === citation.path ? 'exact' : 'relocated',
-      {
-        candidateCount: 1,
-        coverage: 'current-complete',
-        observedPath: matches[0].path,
-        strategy: 'content-hash',
-      },
-    );
-  }
-  if (fileInventoryCoverage === 'complete') {
-    return result('deleted', 'source-deleted', {
-      candidateCount: 0,
-      coverage: 'current-complete',
-      strategy: 'content-hash',
-    });
-  }
-  // The graph intentionally excludes unsupported/ignored/generated paths, so
-  // absence from its inventory is not repository-wide deletion proof.
-  return result('unknown', 'graph-incomplete', {
-    candidateCount: 0,
-    coverage: 'incomplete',
-    strategy: 'content-hash',
-  });
-}
 
 export const validateContextBriefSymbolCitation = Effect.fn('contextBrief.validateSymbolCitation')(function* (
   citation: MemoryCodeCitationV1 & {
@@ -1513,7 +1489,8 @@ export const validateContextBriefSymbolCitation = Effect.fn('contextBrief.valida
   const candidates = new Map<string, CodeGraphSymbol>();
   for (const symbol of locatorMatches?.symbols ?? []) candidates.set(symbol.id, symbol);
   const exactFile = pathObservation?.file;
-  const originalLocatorCandidates = [...candidates.values()].filter(
+  const originalLocatorCandidates = EffectArray.filter(
+    [...candidates.values()],
     symbol => symbol.path === citation.path && sameSpan(symbol.span, citation.target.span),
   );
   if (originalLocatorCandidates.length === 1) {
@@ -1564,7 +1541,7 @@ export const validateContextBriefSymbolCitation = Effect.fn('contextBrief.valida
     if (observation === undefined) readFailed = true;
     else observed.push(observation);
   }
-  const matching = observed.filter(item => item.fragmentMatches && item.signatureMatches);
+  const matching = EffectArray.filter(observed, item => item.fragmentMatches && item.signatureMatches);
   if (readFailed) {
     return result('unknown', 'validation-error', {
       candidateCount: candidates.size,
@@ -1641,7 +1618,8 @@ function symbolCitationSourceCandidates(
   }
   const candidates = new Map<string, CodeGraphSymbol>();
   for (const symbol of locatorMatches?.symbols ?? []) candidates.set(symbol.id, symbol);
-  const originalLocatorCandidates = [...candidates.values()].filter(
+  const originalLocatorCandidates = EffectArray.filter(
+    [...candidates.values()],
     symbol => symbol.path === citation.path && sameSpan(symbol.span, citation.target.span),
   );
   if (originalLocatorCandidates.length === 1) return originalLocatorCandidates;
@@ -1687,16 +1665,6 @@ function locatorKey(locator: CodeGraphSymbolSemanticLocatorV1): string {
   return JSON.stringify([locator.version, locator.language, locator.kind, locator.name, locator.qualifiedName]);
 }
 
-interface ReceiptObservation {
-  readonly candidateCount: number;
-  readonly coverage: ContextBriefCitationValidationReceiptV2['coverage'];
-  readonly observedLocator?: ContextBriefCitationValidationReceiptV2['observedLocator'];
-  readonly observedNodeId?: string;
-  readonly observedPath?: string;
-  readonly observedSpan?: CodeGraphSymbol['span'];
-  readonly strategy: ContextBriefCitationValidationReceiptV2['strategy'];
-}
-
 function symbolObservation(
   symbol: CodeGraphSymbol,
   candidateCount: number,
@@ -1711,59 +1679,6 @@ function symbolObservation(
     observedPath: symbol.path,
     observedSpan: symbol.span,
     strategy,
-  };
-}
-
-function receipt(
-  citation: MemoryCodeCitationV1,
-  snapshot: NonNullable<CodeGraphStatus['readySnapshot']>,
-  status: ContextBriefCitationValidationReceiptV2['status'],
-  reason: ContextBriefCitationValidationReceiptV2['reason'],
-  observation: ReceiptObservation,
-  observedAt: string,
-): ContextBriefCitationValidationReceiptV2 {
-  return {
-    candidateCount: observation.candidateCount,
-    citationId: citation.id,
-    coverage: observation.coverage,
-    kind: citation.target.kind,
-    observedAt,
-    ...(observation.observedLocator === undefined ? {} : {observedLocator: observation.observedLocator}),
-    ...(observation.observedNodeId === undefined ? {} : {observedNodeId: observation.observedNodeId}),
-    ...(observation.observedPath === undefined ? {} : {observedPath: observation.observedPath}),
-    ...(observation.observedSpan === undefined ? {} : {observedSpan: observation.observedSpan}),
-    reason,
-    repositoryId: citation.repositoryId,
-    snapshotCommit: snapshot.commit,
-    ...(snapshot.completedAt === undefined ? {} : {snapshotCompletedAt: snapshot.completedAt}),
-    snapshotId: snapshot.id,
-    sourcePath: citation.path,
-    status,
-    strategy: observation.strategy,
-    validatorVersion: 1,
-  };
-}
-
-function unknownReceipt(
-  citation: MemoryCodeCitationV1,
-  reason: Extract<
-    ContextBriefCitationValidationReceiptV2['reason'],
-    'citation-limit' | 'graph-stale' | 'repository-ambiguous' | 'repository-unavailable' | 'validation-error'
-  >,
-  observedAt: string,
-): ContextBriefCitationValidationReceiptV2 {
-  return {
-    candidateCount: 0,
-    citationId: citation.id,
-    coverage: 'incomplete',
-    kind: citation.target.kind,
-    observedAt,
-    reason,
-    repositoryId: citation.repositoryId,
-    sourcePath: citation.path,
-    status: 'unknown',
-    strategy: 'none',
-    validatorVersion: 1,
   };
 }
 
@@ -1817,7 +1732,7 @@ const validationScopeTargets = Effect.fn('contextBrief.validationScopeTargets')(
   );
   return {
     ambiguousRepositoryIds: route.ambiguousRepositoryIds,
-    targets: expanded.flatMap(target => (target._tag === 'Some' ? [target.value] : [])),
+    targets: EffectArray.flatMap(expanded, target => (target._tag === 'Some' ? [target.value] : [])),
     unavailableReason: route.stale ? 'graph-stale' : 'repository-unavailable',
     ...(route.generation === undefined ? {} : {worksetGeneration: {...route.generation, workset: workset.name}}),
   } satisfies ValidationScopeResolution;
@@ -1843,7 +1758,9 @@ export function routeContextBriefWorksetValidation(
   ) {
     return {ambiguousRepositoryIds: new Set<string>(), members: [], stale: true};
   }
-  const projectsByKey = new Map(workset.projects.map(project => [worksetRepositoryKey(project.name), project]));
+  const projectsByKey = new Map(
+    EffectArray.map(workset.projects, project => [worksetRepositoryKey(project.name), project]),
+  );
   const routedByRepository = new Map<
     string,
     {readonly projectPath: string; readonly published: CodeGraphWorksetCatalogPublishedMemberV1}[]
@@ -1888,8 +1805,8 @@ const worksetGenerationIsStillPublished = Effect.fn('contextBrief.worksetGenerat
 });
 
 function worksetRepositoryKey(value: string): string {
-  const normalized = value.replace(/[\r\n\t\0]/gu, ' ').trim();
-  return normalized.slice(0, 256) || 'unknown';
+  const normalized = Effect2.pipe(value, EffectString.replace(/[\r\n\t\0]/gu, ' '), EffectString.trim);
+  return Effect2.pipe(normalized, EffectString.slice(0, 256)) || 'unknown';
 }
 
 function sameExactSnapshot(before: CodeGraphStatus, after: CodeGraphStatus): boolean {

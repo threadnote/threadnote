@@ -1,4 +1,5 @@
-import type {TransactionSql} from 'postgres';
+import {Array as EffectArray} from 'effect';
+import type {ISql} from 'postgres';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {parseMemoryDocument} from '@threadnote/memory/document';
@@ -9,6 +10,7 @@ import {assertRemoteBodyReplacementSupported} from './document_compatibility.js'
 import {remoteMemoryError} from './errors.js';
 import {gitCanonicalSharePath, type GitCanonicalMemoryStore} from './git/canonical_store.js';
 import {requireActiveProject, requirePrincipalProject} from './repository_policy.js';
+import {Option as EffectOption} from 'effect';
 
 export interface ResolvedRemoteCitationSources {
   readonly citations: readonly MemoryCodeCitationV1[];
@@ -16,14 +18,14 @@ export interface ResolvedRemoteCitationSources {
 }
 
 export async function resolveRemoteCitationSources(
-  transaction: TransactionSql,
+  transaction: ISql,
   principal: AuthorizedRemotePrincipal,
   sources: readonly RemoteCitationSource[],
   gitStore: GitCanonicalMemoryStore | undefined,
 ): Promise<ResolvedRemoteCitationSources> {
   const citations = new Map<string, MemoryCodeCitationV1>();
   const expectedSourceHashes = [];
-  for (const uri of new Set(sources.map(source => source.uri))) {
+  for (const uri of new Set(EffectArray.map(sources, source => source.uri))) {
     const address = parseRemoteShareAddress(uri);
     requirePrincipalProject(principal, address.project);
     await requireActiveProject(transaction, principal, address.project);
@@ -50,7 +52,7 @@ export async function resolveRemoteCitationSources(
     for (const citation of selectRemoteCanonicalCitations(
       uri,
       content,
-      sources.filter(source => source.uri === uri),
+      EffectArray.filter(sources, source => source.uri === uri),
     )) {
       citations.set(citation.id, citation);
     }
@@ -79,8 +81,14 @@ export function selectRemoteCanonicalCitations(
       'The citation source metadata does not identify an active donor memory.',
     );
   }
-  return sources.map(source => {
-    const citation = record.metadata.codeCitations?.find(candidate => candidate.id === source.citationId);
+  return EffectArray.map(sources, source => {
+    const citation = EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(record.metadata.codeCitations), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, candidate => candidate.id === source.citationId),
+        ),
+      ),
+    );
     if (!citation)
       throw remoteMemoryError('invalid_request', 'The selected canonical citation does not exist in the donor memory.');
     return citation;

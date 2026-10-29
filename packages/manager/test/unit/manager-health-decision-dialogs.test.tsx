@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -8,12 +9,16 @@ import {HealthDetail} from '../../src/attention_details.js';
 import type {
   ManagerContextMaintenanceCaseV2,
   ManagerContextMaintenancePacketV2,
+  ManagerContextMaintenanceStatusV2,
 } from '../../src/attention/contracts.js';
 import type {ManagerTopicReviewV1} from '../../src/attention/topic_contracts.js';
 import {ManagerApiError} from '../../src/ui/support.js';
 import {evidenceReadError, maintenanceEvidenceBusy} from '../../src/attention/evidence_refresh.js';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import type {MemoryRecord} from '@threadnote/memory/document';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 let root: Root;
 const memoryUri = 'threadnote://user/tester/memories/durable/projects/threadnote/runtime-boundaries.md';
@@ -33,6 +38,17 @@ const item: ManagerContextMaintenanceCaseV2 = {
   attemptCount: 1,
   events: [],
 };
+function maintenanceStatus(cases: readonly ManagerContextMaintenanceCaseV2[]): ManagerContextMaintenanceStatusV2 {
+  return {
+    version: 2,
+    paused: false,
+    state: 'needs-decision',
+    generation: 'fixture-generation',
+    projects: [],
+    cases,
+    receipts: [],
+  };
+}
 const packet = {
   version: 2,
   project: 'threadnote',
@@ -55,7 +71,9 @@ const packet = {
         supportsCitation: false,
         excerptHash: 'current',
         startLine: 1,
-        source: {path: 'src/current.ts'},
+        endLine: 1,
+        fileBytesHash: 'current-file',
+        source: {path: 'src/current.ts', sourceCommit: 'current-commit', sourceSnapshotId: 'current-snapshot'},
       },
       {
         content: 'historical declaration',
@@ -63,7 +81,9 @@ const packet = {
         supportsCitation: true,
         excerptHash: 'historical',
         startLine: 1,
-        source: {path: 'src/current.ts'},
+        endLine: 1,
+        fileBytesHash: 'historical-file',
+        source: {path: 'src/current.ts', sourceCommit: 'historical-commit', sourceSnapshotId: 'historical-snapshot'},
       },
     ],
   },
@@ -78,7 +98,7 @@ const base = {
 };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), {status});
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) {
     this.open = true;
   });
@@ -100,17 +120,23 @@ async function render(node: React.ReactElement) {
   await act(async () => root.render(node));
 }
 async function click(label: string) {
-  const button = [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(
-    value => value.textContent?.trim() === label,
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('dialog button')],
+      value =>
+        Effect.pipe(value.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
   );
   expect(button).toBeDefined();
   await act(async () => button!.click());
 }
 function serveCase(readPacket: () => Promise<Response>) {
   const fetch = vi.fn(async (input: string, _init?: RequestInit) => {
-    if (input.startsWith('/api/memory?'))
+    if (Effect.pipe(input, EffectString.startsWith('/api/memory?')))
       return response({content: 'MEMORY\nkind: durable\n\n# Stored claim\nKeep ownership explicit.'});
-    if (input.includes('view=status')) return response({version: 2, cases: [item]});
+    if (Effect.pipe(input, EffectString.includes('view=status'))) return response(maintenanceStatus([item]));
     const result = await readPacket();
     return _init?.method === 'POST' && result.ok
       ? response({outcome: 'ready', item, packet: await result.json()})
@@ -149,7 +175,7 @@ it('opens immediately while loading, then compares the memory and current/histor
   expect(document.querySelector('dialog')?.textContent).toContain('current declaration');
   expect(document.querySelector('dialog')?.textContent).toContain('historical declaration');
   expect(document.querySelector('dialog')?.textContent).toContain('does not verify today');
-  expect(fetch.mock.calls.every(([, init]) => init === undefined || init.method !== 'POST')).toBe(true);
+  expect(EffectArray.every(fetch.mock.calls, ([, init]) => init === undefined || init.method !== 'POST')).toBe(true);
   await click('Edit or archive in Library');
   expect(open).toHaveBeenCalledWith(memoryUri);
 });
@@ -188,10 +214,15 @@ it('keeps preview and confirmation with the agent action in one conflict-resolut
     records: [memory('a', 'Timeout is 60 seconds.'), memory('b', 'Timeout must be 30 seconds.')],
     now: new Date('2026-06-01'),
   }).findings[0].semanticEvidence!;
+  function requestBodyText(init: RequestInit | undefined): string {
+    if (typeof init?.body !== 'string') throw new Error('Expected a JSON string request body.');
+    return init.body;
+  }
+
   const semanticCase = {...item, family: 'semantic-contradiction'};
   const fetch = vi.fn(async (path: string, init?: RequestInit) => {
-    if (path.endsWith('/preview')) {
-      expect(JSON.parse(init!.body as string).choice).toBe('both');
+    if (Effect.pipe(path, EffectString.endsWith('/preview'))) {
+      expect(JSON.parse(requestBodyText(init)).choice).toBe('both');
       return response({
         preview: {
           previewId: 'preview',
@@ -199,25 +230,32 @@ it('keeps preview and confirmation with the agent action in one conflict-resolut
           choice: 'both',
           mode: 'keep-both',
           summary: 'Both memories stay current.',
+          constraints: [],
         },
       });
     }
-    if (path.endsWith('/apply')) {
-      expect(JSON.parse(init!.body as string)).toEqual({
+    if (Effect.pipe(path, EffectString.endsWith('/apply'))) {
+      expect(JSON.parse(requestBodyText(init))).toEqual({
         project: 'threadnote',
         previewId: 'preview',
         revision: 'exact-revision',
         approved: true,
       });
-      return response({result: {status: 'applied'}});
+      return response({result: {status: 'applied', choice: 'both'}});
     }
-    if (path.includes('view=status')) return response({version: 2, cases: [semanticCase]});
+    if (Effect.pipe(path, EffectString.includes('view=status'))) return response(maintenanceStatus([semanticCase]));
     return response({
       ...packet,
       family: semanticCase.family,
       semanticEvidence: evidence,
       evidence: undefined,
-      ownerProposal: {selectedEdits: [], publication: {instructions: 'The shared owner must review canonical edits.'}},
+      ownerProposal: {
+        proposalRevision: 'proposal-revision',
+        expectedContentHash: 'hash',
+        selectedEdits: [],
+        omittedEdits: 0,
+        publication: {instructions: 'The shared owner must review canonical edits.'},
+      },
     });
   });
   vi.stubGlobal('fetch', fetch);
@@ -233,7 +271,7 @@ it('keeps preview and confirmation with the agent action in one conflict-resolut
   expect(footer?.querySelector<HTMLButtonElement>('button.primary')?.textContent).toBe('Preview my choice');
   expect(footer?.querySelector<HTMLButtonElement>('button.primary')?.disabled).toBe(true);
   await act(async () => document.querySelector<HTMLInputElement>('input[value="both"]')!.click());
-  expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0);
+  expect(EffectArray.filter(fetch.mock.calls, ([, init]) => init?.method === 'POST')).toHaveLength(0);
   expect(footer?.querySelector('[role="status"]')?.textContent).toBe('Both memories selected');
   await click('Preview my choice');
   expect(document.activeElement?.getAttribute('aria-label')).toBe('Review your choice');
@@ -245,7 +283,12 @@ it('keeps preview and confirmation with the agent action in one conflict-resolut
   await click('Confirm both apply');
   expect(changed).toHaveBeenCalledOnce();
   expect(close).toHaveBeenCalledOnce();
-  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/apply'))).toHaveLength(1);
+  expect(
+    EffectArray.filter(
+      fetch.mock.calls,
+      ([path], index) => index in fetch.mock.calls && Effect.pipe(path, EffectString.endsWith('/apply')),
+    ),
+  ).toHaveLength(1);
 });
 
 it('uses the existing conflict-action footer for a health finding during stale review', async () => {
@@ -346,7 +389,7 @@ it('switches checks inside the same review and ignores the previous check’s la
       const url = new URL(input, 'http://manager.test');
       if (url.pathname === '/api/memory') return response({content: '# Stored claim'});
       const next = url.searchParams.get('caseId') === second.caseId;
-      if (url.searchParams.get('view') === 'status') return response({version: 2, cases: [next ? second : item]});
+      if (url.searchParams.get('view') === 'status') return response(maintenanceStatus([next ? second : item]));
       return next
         ? response({...packet, caseId: second.caseId, choices: ['Second check choice'], evidence: undefined})
         : await pending.promise;
@@ -367,10 +410,10 @@ it('switches checks inside the same review and ignores the previous check’s la
 
 it('explains source-changed ownership and offers a direct supported review step', async () => {
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) =>
-    String(input).includes('/api/memory?')
+    Effect.pipe(String(input), EffectString.includes('/api/memory?'))
       ? response({content: '# Stored advice'})
-      : String(input).includes('view=status')
-        ? response({version: 2, project: 'threadnote', cases: [item]})
+      : Effect.pipe(String(input), EffectString.includes('view=status'))
+        ? response(maintenanceStatus([item]))
         : response(packet),
   );
   await render(<MaintenanceCaseDialog {...base} />);
@@ -393,7 +436,7 @@ it('retries an initial busy evidence read without a manual click or displaying t
   await act(async () => vi.advanceTimersByTimeAsync(1500));
   expect(attempts).toBe(3);
   expect(document.querySelector('dialog')?.textContent).toContain('current declaration');
-  expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
+  expect(EffectArray.every(fetch.mock.calls, ([, init]) => init?.method !== 'POST')).toBe(true);
 });
 
 it('retains stored memory and evidence nodes and scroll during a busy background refresh', async () => {
@@ -420,21 +463,21 @@ it('retains stored memory and evidence nodes and scroll during a busy background
 });
 
 it('redacts the previous stored memory synchronously when selecting another source URI and ignores its late read', async () => {
-  const nextUri = memoryUri.replace('runtime-boundaries.md', 'another-source.md');
+  const nextUri = EffectString.replace('runtime-boundaries.md', 'another-source.md')(memoryUri);
   const pending = Promise.withResolvers<Response>();
   const lateOld = Promise.withResolvers<Response>();
   let firstReads = 0;
   vi.stubGlobal(
     'fetch',
     vi.fn(async (path: string) => {
-      if (path.startsWith('/api/memory?')) {
+      if (EffectString.startsWith('/api/memory?')(path)) {
         const uri = new URL(path, 'http://manager.test').searchParams.get('uri');
         if (uri === nextUri) return pending.promise;
         return ++firstReads === 1
           ? response({content: 'MEMORY\nkind: durable\n\n# Previous private source\nOld retained content.'})
           : lateOld.promise;
       }
-      return response(path.includes('view=status') ? {version: 2, cases: [item]} : packet);
+      return response(EffectString.includes('view=status')(path) ? maintenanceStatus([item]) : packet);
     }),
   );
   await render(<MaintenanceCaseDialog {...base} memoryUri={memoryUri} />);
@@ -453,7 +496,7 @@ it('redacts the previous stored memory synchronously when selecting another sour
 });
 
 async function privateTopicBusyFixture() {
-  const hash = 'a'.repeat(64);
+  const hash = EffectString.repeat(64)('a');
   const selected = {...item, family: 'topic-maintenance', slot: 'declared-support'};
   const selectedPacket: ManagerContextMaintenancePacketV2 = {
     ...packet,
@@ -548,14 +591,14 @@ async function privateTopicBusyFixture() {
         : new URL(path, 'http://manager.test').searchParams.get('project');
     if (project && project !== 'threadnote')
       return response({error: 'This scope no longer authorizes the review.'}, 403);
-    if (path.startsWith('/api/consolidation-models')) return response({models: []});
-    if (path.startsWith('/api/attention/topic-review')) {
+    if (EffectString.startsWith('/api/consolidation-models')(path)) return response({models: []});
+    if (EffectString.startsWith('/api/attention/topic-review')(path)) {
       if (init?.method === 'POST') throw new Error('This observation test must not mutate a topic review.');
       return reviewFailure
         ? response({error: 'Later source review refused.', code: reviewFailure.code}, reviewFailure.status)
         : response(review);
     }
-    if (path.startsWith('/api/memory?')) return response({content: 'PRIVATE ACCEPTED CLAIM'});
+    if (EffectString.startsWith('/api/memory?')(path)) return response({content: 'PRIVATE ACCEPTED CLAIM'});
     if (init?.method === 'POST' && held) {
       const pending = held;
       held = undefined;
@@ -569,7 +612,7 @@ async function privateTopicBusyFixture() {
             failure.status,
           )
         : response({outcome: 'ready', item: selected, packet: selectedPacket});
-    return response(path.includes('view=status') ? {version: 2, cases: [selected]} : selectedPacket);
+    return response(EffectString.includes('view=status')(path) ? maintenanceStatus([selected]) : selectedPacket);
   });
   vi.stubGlobal('fetch', fetch);
   const element = (stale = false, project = 'threadnote') => (
@@ -600,8 +643,14 @@ it('keeps a private prepared comparison through exact maintenance busy and resum
   vi.useFakeTimers();
   const fixture = await privateTopicBusyFixture();
   const content = document.querySelector('.topic-review-content');
-  const apply = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-    button => button.textContent?.trim() === 'Confirm unchanged',
+  const apply = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      button =>
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+        ) === 'Confirm unchanged',
+    ),
   );
   expect(apply?.disabled).toBe(false);
   expect(content?.textContent).toContain('PRIVATE PREPARED COMPARISON');
@@ -613,7 +662,7 @@ it('keeps a private prepared comparison through exact maintenance busy and resum
   expect(apply?.disabled).toBe(true);
   expect(document.body.textContent).toContain('Maintenance is busy. Check current evidence to try again.');
   expect(document.body.textContent).not.toContain('Untrusted backend detail');
-  const posts = () => fixture.fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+  const posts = () => EffectArray.filter(fixture.fetch.mock.calls, ([, init]) => init?.method === 'POST');
   expect(posts()).toHaveLength(3);
   await act(async () => vi.advanceTimersByTimeAsync(30_000));
   expect(posts()).toHaveLength(3);
@@ -622,7 +671,7 @@ it('keeps a private prepared comparison through exact maintenance busy and resum
   expect(document.querySelector('.topic-review-content')).toBe(content);
   expect(apply?.disabled).toBe(false);
   expect(posts()).toHaveLength(4);
-  expect(posts().every(([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case')).toBe(true);
+  expect(EffectArray.every(posts(), ([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case')).toBe(true);
 });
 
 it.each([
@@ -642,7 +691,7 @@ it.each([
   expect(document.body.textContent).not.toContain('PRIVATE PREPARED COMPARISON');
   expect(document.body.textContent).not.toContain('Maintenance is busy.');
   expect(maintenanceEvidenceBusy(ManagerApiError.of('Synthetic refusal.', status, code))).toBe(false);
-  const posts = fixture.fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+  const posts = EffectArray.filter(fixture.fetch.mock.calls, ([, init]) => init?.method === 'POST');
   expect(posts).toHaveLength([401, 403, 404].includes(status) ? 1 : 3);
 });
 
@@ -665,8 +714,14 @@ it('keeps a private prepared comparison when the topic review’s own refresh re
   expect(document.body.textContent).toContain('PRIVATE PREPARED COMPARISON');
   expect(document.body.textContent).toContain('Maintenance is busy. Check current evidence to try again.');
   expect(
-    [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-      button => button.textContent?.trim() === 'Confirm unchanged',
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        button =>
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+          ) === 'Confirm unchanged',
+      ),
     )?.disabled,
   ).toBe(true);
 });
@@ -688,8 +743,12 @@ it.each([503, 401, 403, 404])(
     expect(document.body.textContent).not.toContain('Maintenance is busy. Check current evidence');
     expect(document.body.textContent).toContain('Later source review refused.');
     expect(
-      [...document.querySelectorAll<HTMLButtonElement>('.topic-review-content button')].filter(button =>
-        ['Apply update', 'Confirm unchanged'].includes(button.textContent?.trim() ?? ''),
+      EffectArray.filter([...document.querySelectorAll<HTMLButtonElement>('.topic-review-content button')], button =>
+        ['Apply update', 'Confirm unchanged'].includes(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+          ) ?? '',
+        ),
       ),
     ).toHaveLength(0);
   },
@@ -719,7 +778,7 @@ it('preserves the chosen semantic outcome and prepared preview through busy whil
   const selectedPacket = {...packet, family: selected.family, semanticEvidence: semantic, evidence: undefined};
   let busy = false;
   const fetch = vi.fn(async (path: string, init?: RequestInit) => {
-    if (path.endsWith('/preview'))
+    if (EffectString.endsWith('/preview')(path))
       return response({
         preview: {
           previewId: 'selected-preview',
@@ -727,22 +786,29 @@ it('preserves the chosen semantic outcome and prepared preview through busy whil
           choice: 'both',
           mode: 'keep-both',
           summary: 'Both memories remain current.',
+          constraints: [],
         },
       });
-    if (path.endsWith('/apply')) throw new Error('Busy/recovery must not apply a saved choice.');
+    if (EffectString.endsWith('/apply')(path)) throw new Error('Busy/recovery must not apply a saved choice.');
     if (init?.method === 'POST')
       return busy
         ? response({code: 'context-maintenance-busy', error: 'Do not display a lock path /private/lock.'}, 503)
         : response({outcome: 'ready', item: selected, packet: selectedPacket});
-    return response(path.includes('view=status') ? {version: 2, cases: [selected]} : selectedPacket);
+    return response(EffectString.includes('view=status')(path) ? maintenanceStatus([selected]) : selectedPacket);
   });
   vi.stubGlobal('fetch', fetch);
   await render(<MaintenanceCaseDialog {...base} initialCase={selected} />);
   await act(async () => document.querySelector<HTMLInputElement>('input[value="both"]')!.click());
   await click('Preview my choice');
   const comparison = document.querySelector('[aria-label="Review your choice"]');
-  const confirm = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
-    button => button.textContent?.trim() === 'Confirm both apply',
+  const confirm = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      button =>
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+        ) === 'Confirm both apply',
+    ),
   )!;
   expect(confirm.disabled).toBe(false);
   busy = true;
@@ -756,8 +822,8 @@ it('preserves the chosen semantic outcome and prepared preview through busy whil
   await click('Check current evidence');
   expect(document.querySelector<HTMLInputElement>('input[value="both"]')?.checked).toBe(true);
   expect(confirm.disabled).toBe(false);
-  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/preview'))).toHaveLength(1);
-  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/apply'))).toHaveLength(0);
+  expect(EffectArray.filter(fetch.mock.calls, ([path]) => EffectString.endsWith('/preview')(path))).toHaveLength(1);
+  expect(EffectArray.filter(fetch.mock.calls, ([path]) => EffectString.endsWith('/apply')(path))).toHaveLength(0);
 });
 
 it('never restores an old private review across bounded observation-completion and scope-change orders', async () => {
@@ -842,7 +908,8 @@ it.each(['relation', 'shared-owner-proposal'])(
     };
     let busy = true;
     const fetch = vi.fn(async (path: string, init?: RequestInit) => {
-      if (path.startsWith('/api/memory?')) return response({content: 'Selected canonical relation subject.'});
+      if (EffectString.startsWith('/api/memory?')(path))
+        return response({content: 'Selected canonical relation subject.'});
       if (init?.method === 'POST')
         return busy
           ? response({code: 'context-maintenance-busy', error: 'Controlled acquisition busy.'}, 503)
@@ -851,7 +918,7 @@ it.each(['relation', 'shared-owner-proposal'])(
               item: {...selected, evidenceRevision: 'current-selected-revision'},
               packet: fresh,
             });
-      return response(path.includes('view=status') ? {version: 2, cases: [selected]} : fresh);
+      return response(EffectString.includes('view=status')(path) ? maintenanceStatus([selected]) : fresh);
     });
     vi.stubGlobal('fetch', fetch);
     await render(<MaintenanceCaseDialog {...base} initialCase={selected} stale />);
@@ -863,12 +930,16 @@ it.each(['relation', 'shared-owner-proposal'])(
     expect(document.body.textContent).toContain(instructions);
     if (family === 'shared-owner-proposal')
       expect(document.body.textContent).toContain('The shared owner must verify team authority');
-    const posts = fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
+    const posts = EffectArray.filter(fetch.mock.calls, ([, init]) => init?.method === 'POST');
     expect(posts).toHaveLength(4);
-    expect(posts.every(([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case')).toBe(true);
+    expect(EffectArray.every(posts, ([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case')).toBe(true);
     expect(
-      [...document.querySelectorAll<HTMLButtonElement>('button')].some(
-        button => button.textContent?.trim() === 'Apply update',
+      EffectArray.some(
+        [...document.querySelectorAll<HTMLButtonElement>('button')],
+        button =>
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(button.textContent), text => EffectString.trim(text)),
+          ) === 'Apply update',
       ),
     ).toBe(false);
   },

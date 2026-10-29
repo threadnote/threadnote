@@ -9,9 +9,10 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import {SourceConfigurationStore} from '@threadnote/integration-core/config';
 import {SourceCoordinator, SourceCoordinatorError} from '@threadnote/integration-core/source-coordinator';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import type {LinearSourceConfig} from '../src/config.js';
 import {linearSourceWork, runLinearSourceSync} from '../src/source.js';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
 const source: LinearSourceConfig = {
   type: 'linear',
@@ -58,11 +59,11 @@ describe('Linear coordinator boundary', () => {
   effectIt.effect('explicit sync delegates once and preserves its provider result without a network call', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const config = {
+      const config = runtimeConfigForTest({
         agentContextHome: yield* fs.makeTempDirectoryScoped(),
         account: 'local',
         user: 'tester',
-      } as RuntimeConfig;
+      });
       const value = {sourceId: source.id, syncedDocuments: ['document'], warnings: []};
       let calls = 0;
       const result = yield* withSources(
@@ -103,7 +104,7 @@ describe('Linear coordinator boundary', () => {
     ({suffix}) =>
       Effect.gen(function* () {
         const system = yield* SystemInfo;
-        const config = {agentContextHome: '/unused', account: 'local', user: 'tester'} as RuntimeConfig;
+        const config = runtimeConfigForTest({agentContextHome: '/unused', account: 'local', user: 'tester'});
         const token = 'lin_api_synthetic_work_key_' + suffix;
         const sources = [source, {...source, id: 'source-two'}, {...source, id: 'disabled', enabled: false}];
         const list = (credential: string) =>

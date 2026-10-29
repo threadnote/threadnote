@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {printJson, scriptArguments} from './effect/script.js';
@@ -11,6 +12,8 @@ import {
   summarizeReleaseNote,
 } from '@threadnote/website/release-notes';
 import {isSupportedReleaseVersion} from './release-version.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {isSupportedReleaseVersion} from './release-version.js';
 
@@ -50,7 +53,7 @@ export function parsePrepareReleaseArguments(arguments_: readonly string[]): Pre
     else if (argument === '--patch') patch = true;
     else if (argument === '--version') {
       const value = arguments_[index + 1];
-      if (value === undefined || value.startsWith('--')) {
+      if (value === undefined || Effect2.pipe(value, EffectString.startsWith('--'))) {
         throw ScriptError.make({message: `--version requires ${releaseVersionExpectation()}.`});
       }
       version = value;
@@ -78,7 +81,7 @@ export function releaseNotesPathForVersion(version: string): string {
 }
 
 export function replacePackageVersion(manifest: unknown, version: string): {readonly source: string} {
-  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
+  if (typeof manifest !== 'object' || manifest === null || EffectArray.isArray(manifest)) {
     throw ScriptError.make({message: 'package.json must be a JSON object.'});
   }
   if (!('version' in manifest) || typeof manifest.version !== 'string' || manifest.version.length === 0) {
@@ -94,8 +97,8 @@ export function validateReleaseNotes(
   if (!isSupportedReleaseVersion(version)) {
     throw ScriptError.make({message: `Release version must be ${releaseVersionExpectation()}, got ${version}.`});
   }
-  const normalized = markdown.replace(/\r\n?/g, '\n');
-  if (!normalized.startsWith(`${RELEASE_NOTES_HEADING}\n`)) {
+  const normalized = Effect2.pipe(markdown, EffectString.replace(/\r\n?/g, '\n'));
+  if (!Effect2.pipe(normalized, EffectString.startsWith(`${RELEASE_NOTES_HEADING}\n`))) {
     throw ScriptError.make({
       message: `${releaseNotesPathForVersion(version)} must start with ${RELEASE_NOTES_HEADING}.`,
     });
@@ -118,12 +121,18 @@ export const prepareRelease = Effect.fn('prepareRelease.run')(function* (
   const manifest = yield* fs.readFileString(packageFile).pipe(
     Effect.flatMap(source =>
       Effect.try({
-        try: () => JSON.parse(source) as {readonly version?: unknown},
+        try: (): unknown => JSON.parse(source),
         catch: cause => ScriptError.make({message: 'Could not parse package.json.', cause}),
       }),
     ),
   );
-  if (typeof manifest.version !== 'string' || manifest.version.length === 0) {
+  if (
+    typeof manifest !== 'object' ||
+    manifest === null ||
+    !('version' in manifest) ||
+    typeof manifest.version !== 'string' ||
+    manifest.version.length === 0
+  ) {
     return yield* ScriptError.make({message: 'package.json does not declare a version.'});
   }
   const version = options.patch ? nextPatchVersion(manifest.version) : options.version;

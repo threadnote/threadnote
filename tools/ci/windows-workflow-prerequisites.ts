@@ -1,6 +1,9 @@
 import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {Effect, FileSystem, Path} from 'effect';
 import {unzipSync} from 'fflate';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 // This standalone CI entrypoint owns its Bun platform services.
 // oxlint-disable-next-line effecttsgo/strict-effect-provide
@@ -36,7 +39,7 @@ export function usable(executable: string | null, timeout = PROBE_TIMEOUT_MS): b
       timeout,
       maxBuffer: 64 * 1024,
     });
-    return result.success && result.stdout.toString().startsWith('ripgrep ');
+    return result.success && Effect2.pipe(result.stdout.toString(), EffectString.startsWith('ripgrep '));
   } catch {
     return false;
   }
@@ -84,8 +87,11 @@ export async function ensureRipgrep(
   const existing = options.which(environment.PATH ?? '');
   if (existing && options.probe(existing, PROBE_TIMEOUT_MS)) return existing;
   // Normalize the runner architecture aliases for the pinned Windows assets.
-  const normalizedArchitecture = architecture.toLowerCase() === 'x64' ? 'amd64' : architecture.toLowerCase();
-  if (!Object.hasOwn(options.assets, normalizedArchitecture)) {
+  const normalizedArchitecture =
+    Effect2.pipe(architecture, EffectString.toLowerCase) === 'x64'
+      ? 'amd64'
+      : Effect2.pipe(architecture, EffectString.toLowerCase);
+  if (!EffectRecord.has(options.assets, normalizedArchitecture)) {
     throw new Error(`Unsupported Windows architecture: ${architecture}`);
   }
   const asset = options.assets[normalizedArchitecture];

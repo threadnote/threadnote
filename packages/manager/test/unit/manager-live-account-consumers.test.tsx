@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -10,6 +11,9 @@ import {useNavigationAttention} from '../../src/navigation_attention.js';
 import {RuntimeUpdatesPanel} from '../../src/runtime_updates_view.js';
 import {useManagerRuntimeConnection} from '../../src/ui/live.js';
 import {FakeManagerSocket} from './live-consumer-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 let root: Root | undefined;
 let reads: Map<string, number>;
@@ -75,7 +79,7 @@ async function flush() {
   });
 }
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   FakeManagerSocket.instances = [];
   reads = new Map();
@@ -91,12 +95,40 @@ beforeEach(() => {
         return new Response(JSON.stringify({ticket: 'fixture'}));
       }
       reads.set(url, (reads.get(url) ?? 0) + 1);
-      if (url === '/api/processes') return new Response(JSON.stringify({processes: []}));
-      if (url === '/api/shares/conflicts') return new Response(JSON.stringify({conflicts: [{id: 'one'}]}));
-      if (url.startsWith('/api/attention/context-maintenance'))
-        return new Response(JSON.stringify({counts: {decisionMemories: 2}}));
+      if (url === '/api/processes')
+        return new Response(JSON.stringify({processes: [], schemaVersion: 1, truncated: false}));
+      if (url === '/api/shares/conflicts')
+        return new Response(
+          JSON.stringify({
+            conflicts: [
+              {
+                id: 'one',
+                team: 'fixture',
+                uri: 'threadnote://memory/one',
+                relativePath: 'one.md',
+                reason: 'fixture-conflict',
+                status: 'conflict',
+                hasLocalContent: true,
+                hasSharedContent: true,
+              },
+            ],
+          }),
+        );
+      if (Effect.pipe(url, EffectString.startsWith('/api/attention/context-maintenance')))
+        return new Response(
+          JSON.stringify({
+            version: 2,
+            paused: false,
+            state: 'idle',
+            generation: 'fixture',
+            projects: [],
+            cases: [],
+            receipts: [],
+            counts: {decisionMemories: 2},
+          }),
+        );
       if (url === '/api/models/setup') return new Response(JSON.stringify(setup));
-      if (url.startsWith('/api/runtime/updates'))
+      if (Effect.pipe(url, EffectString.startsWith('/api/runtime/updates')))
         return new Response(
           JSON.stringify({
             ...updates,
@@ -154,12 +186,12 @@ it('shares a socket and suppresses process, shares, maintenance, model and updat
     {topic: 'model-setup', scope: 'account'},
     {topic: 'runtime-updates', scope: 'account'},
   ]) {
-    const beforeCount = [...reads.values()].reduce((sum, count) => sum + count, 0);
+    const beforeCount = EffectArray.reduce([...reads.values()], 0, (sum, count) => sum + count);
     await act(async () => {
       for (let index = 0; index < 100; index++) socket.invalidate(++sequence, resource);
     });
     await flush();
-    const afterCount = [...reads.values()].reduce((sum, count) => sum + count, 0);
+    const afterCount = EffectArray.reduce([...reads.values()], 0, (sum, count) => sum + count);
     expect(afterCount - beforeCount).toBeLessThanOrEqual(2);
   }
   expect(tickets).toBe(1);
@@ -253,9 +285,18 @@ it('clears model setup state and aborts an old account command before accepting 
     first.ack();
   });
   await flush();
-  const setupButton = [...document.querySelectorAll('button')].find(button =>
-    button.textContent?.includes('Set up local model'),
-  ) as HTMLButtonElement;
+  const setupButton = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('button')],
+      __effectArrayValue =>
+        !!(button =>
+          Effect.pipe(button.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('Set up local model')),
+          ))(__effectArrayValue),
+    ),
+  )!;
   await act(async () => setupButton.click());
   expect(oldSignal).toBeDefined();
   activeAccount = 'two';
@@ -306,7 +347,18 @@ it.each(['success', 'failure'])('resumes fallback when coverage is lost during c
   await flush();
   expect(gets).toBe(1);
   await act(async () =>
-    [...document.querySelectorAll('button')].find(b => b.textContent?.includes('Set up local model'))?.click(),
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        [...document.querySelectorAll('button')],
+        __effectArrayValue =>
+          !!(b =>
+            Effect.pipe(b.textContent, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.includes('Set up local model')),
+            ))(__effectArrayValue),
+      ),
+    )?.click(),
   );
   await act(async () =>
     socket.emit(
@@ -314,7 +366,7 @@ it.each(['success', 'failure'])('resumes fallback when coverage is lost during c
         type: 'availability',
         version: 1,
         epoch: 'epoch-one',
-        generation: socket.sent.filter(f => f.type === 'subscribe').at(-1)?.generation,
+        generation: EffectArray.filter(socket.sent, f => f.type === 'subscribe').at(-1)?.generation,
         sequence: 1,
         resource: {topic: 'model-setup', scope: 'account'},
         available: false,

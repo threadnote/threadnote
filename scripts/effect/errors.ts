@@ -3,7 +3,7 @@ import {Effect, Layer, Schema} from 'effect';
 import {telemetryChildEnvironmentPolicyLayer} from '@threadnote/threadnote/telemetry/session';
 
 /** Typed failure used at executable-script Effect boundaries. */
-export class ScriptError extends Schema.TaggedError<ScriptError>()('ScriptError', {
+export class ScriptError extends Schema.TaggedError<ScriptError, {readonly brand: unique symbol}>()('ScriptError', {
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}

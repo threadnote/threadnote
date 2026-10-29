@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Icon} from '../components/Icons';
 import {SiteShell} from '../components/SiteShell';
 import {
@@ -7,6 +8,8 @@ import {
 } from '../content/graphifyComparison';
 import {performanceEvidence} from '../content/performanceEvidence';
 import {docsArticleHref, setDocumentMeta, siteHref} from '../lib/site';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const integerFormatter = new Intl.NumberFormat('en-US');
 const threadnoteComparator = {
@@ -54,7 +57,9 @@ export default function GraphifyPerformancePage() {
         <div className="subpage-hero__metric">
           <strong>{graphifyReviewedSource.version}</strong>
           <span>Graphify source reviewed</span>
-          <small>Exact commit {graphifyReviewedSource.commit.slice(0, 12)} · 25 August 2026</small>
+          <small>
+            Exact commit {Effect.pipe(graphifyReviewedSource.commit, EffectString.slice(0, 12))} · 25 August 2026
+          </small>
         </div>
       </section>
 
@@ -70,7 +75,7 @@ export default function GraphifyPerformancePage() {
           </p>
         </header>
         <div className="performance-proof-grid">
-          {graphifySharedCapabilities.map(capability => (
+          {EffectArray.map(graphifySharedCapabilities, capability => (
             <article key={capability.title}>
               <span className="performance-check performance-check--passed" />
               <small>available in both</small>
@@ -126,7 +131,7 @@ export default function GraphifyPerformancePage() {
               </tr>
             </thead>
             <tbody>
-              {graphifyVerifiedDifferences.map(row => (
+              {EffectArray.map(graphifyVerifiedDifferences, row => (
                 <tr key={row.dimension}>
                   <th>{row.dimension}</th>
                   <td>{row.threadnote}</td>
@@ -139,7 +144,8 @@ export default function GraphifyPerformancePage() {
         <p className="comparison-note">
           Graphify descriptions were reviewed against the published{' '}
           <a href={graphifyReviewedSource.sourceUrl} target="_blank" rel="noreferrer">
-            {graphifyReviewedSource.version} source at {graphifyReviewedSource.commit.slice(0, 12)}
+            {graphifyReviewedSource.version} source at{' '}
+            {Effect.pipe(graphifyReviewedSource.commit, EffectString.slice(0, 12))}
             <span aria-hidden="true"> ↗</span>
           </a>{' '}
           and its{' '}

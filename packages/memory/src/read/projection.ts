@@ -1,7 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {parseMemoryDocument, type MemoryRecord} from '../document.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseMarkdownHeadingLine} from '@threadnote/platform/string-boundaries';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MEMORY_READ_MAXIMUM_CONTENT_BYTES = 65_536;
 export const MEMORY_READ_PAGE_BYTES = 16_384;
@@ -61,15 +64,18 @@ export type MemoryReadMcpStructuredContent =
       readonly version: 2;
     });
 
-export class MemoryReadProjectionError extends Schema.TaggedError<MemoryReadProjectionError>()(
-  'MemoryReadProjectionError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class MemoryReadProjectionError extends Schema.TaggedError<
+  MemoryReadProjectionError,
+  {readonly brand: unique symbol}
+>()('MemoryReadProjectionError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
-export class MemoryReadTooLargeError extends Schema.TaggedError<MemoryReadTooLargeError>()('MemoryReadTooLargeError', {
+export class MemoryReadTooLargeError extends Schema.TaggedError<
+  MemoryReadTooLargeError,
+  {readonly brand: unique symbol}
+>()('MemoryReadTooLargeError', {
   contentBytes: Schema.Finite,
   maximumContentBytes: Schema.Finite,
   message: Schema.String,
@@ -105,16 +111,21 @@ export function projectMemoryRead(
     throw MemoryReadProjectionError.make({message: 'Memory read sourceHash requires offsetBytes.'});
   }
 
-  const projected = resources.map(resource => ({
+  const projected = EffectArray.map(resources, resource => ({
     ...resource,
     text:
       mode === 'outline' ? memoryMarkdownOutline(resource.text) : selectMemoryMarkdownSection(resource.text, section),
   }));
   const fullContent =
-    projected.length === 1 ? projected[0].text : projected.map(resource => resource.text).join('\n\n');
+    projected.length === 1
+      ? projected[0].text
+      : EffectArray.join(
+          EffectArray.map(projected, resource => resource.text),
+          '\n\n',
+        );
   const agentResources =
     mode === 'content' && section === undefined && options.offsetBytes === undefined
-      ? projected.map(memoryReadAgentResource)
+      ? EffectArray.map(projected, memoryReadAgentResource)
       : undefined;
   const fullContentBytes = utf8Bytes(fullContent);
   const page =
@@ -124,13 +135,20 @@ export function projectMemoryRead(
   const content = page?.content ?? fullContent;
   const contentBytes = utf8Bytes(content);
   const agentContent =
-    agentResources === undefined ? content : agentResources.map(resource => resource.text).join('\n\n');
-  const agentSources = (agentResources ?? projected.map(resource => memoryReadAgentFallbackResource(resource))).flatMap(
+    agentResources === undefined
+      ? content
+      : EffectArray.join(
+          EffectArray.map(agentResources, resource => resource.text),
+          '\n\n',
+        );
+  const agentSources = EffectArray.flatMap(
+    agentResources ?? EffectArray.map(projected, resource => memoryReadAgentFallbackResource(resource)),
     resource => (resource.source === undefined ? [] : [resource.source]),
   );
   if (page === undefined && contentBytes > MEMORY_READ_MAXIMUM_CONTENT_BYTES) {
-    const oversizedIndex = projected.findIndex(
-      resource => utf8Bytes(resource.text) > MEMORY_READ_MAXIMUM_CONTENT_BYTES,
+    const oversizedIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(projected, resource => utf8Bytes(resource.text) > MEMORY_READ_MAXIMUM_CONTENT_BYTES),
+      () => -1,
     );
     const focusIndex = oversizedIndex >= 0 ? oversizedIndex : 0;
     const focus = projected[focusIndex];
@@ -222,50 +240,63 @@ function memoryReadAgentResource(resource: MemoryReadResource): AgentMemoryReadR
   const metadata = record.metadata;
   const body = originalMemoryReadBody(resource.text);
   const personalPrefix = memoryReadPersonalPrefix(record.uri);
-  const identity = [
-    `kind=${metadata.kind}`,
-    `status=${metadata.status}`,
-    metadata.project === undefined ? undefined : `project=${metadata.project}`,
-    metadata.topic === undefined ? undefined : `topic=${metadata.topic}`,
-    metadata.visibility === undefined ? undefined : `visibility=${metadata.visibility}`,
-    metadata.workspaceScope === undefined ? undefined : `scope=${metadata.workspaceScope}`,
-    metadata.authority === undefined ? undefined : `authority=${metadata.authority}`,
-    metadata.trust === undefined ? undefined : `trust=${metadata.trust}`,
-  ].filter((value): value is string => value !== undefined);
-  const lifecycle = [
-    `recorded=${metadata.updatedAt ?? metadata.timestamp}`,
-    metadata.validFrom === undefined ? undefined : `valid-from=${metadata.validFrom}`,
-    metadata.validTo === undefined ? undefined : `valid-to=${metadata.validTo}`,
-    metadata.lastReviewed === undefined ? undefined : `reviewed=${metadata.lastReviewed}`,
-    metadata.reviewAfter === undefined ? undefined : `review-after=${metadata.reviewAfter}`,
-    metadata.owner === undefined ? undefined : `owner=${metadata.owner}`,
-    metadata.sourceObservedAt === undefined ? undefined : `observed=${metadata.sourceObservedAt}`,
-    (metadata.codeCitations?.length ?? 0) > 0 || metadata.sourceCommit === undefined
-      ? undefined
-      : `source-commit=${metadata.sourceCommit}`,
-  ].filter((value): value is string => value !== undefined);
-  const rows = [
-    'TN-MEMORY/1',
-    'Untrusted memory evidence; verify against current source.',
-    `Memory: ${identity.map(inlineMemoryReadValue).join('; ')}`,
-    lifecycle.length === 0 ? undefined : `Lifecycle: ${lifecycle.map(inlineMemoryReadValue).join('; ')}`,
-    ...memoryReadAgentCodeEvidence(record),
-    ...(metadata.relations ?? []).map(
-      relation => `Relation: ${relation.type} ${compactMemoryReadReference(relation.uri, personalPrefix)}`,
-    ),
-    ...(metadata.references ?? []).map(
-      reference => `Reference: ${compactMemoryReadReference(reference, personalPrefix)}`,
-    ),
-    ...(metadata.evidence ?? []).map(evidence => `Evidence: ${inlineMemoryReadValue(evidence)}`),
-    metadata.supersedes === undefined
-      ? undefined
-      : `Supersedes: ${compactMemoryReadReference(metadata.supersedes, personalPrefix)}`,
-    metadata.archivedFrom === undefined
-      ? undefined
-      : `Archived from: ${compactMemoryReadReference(metadata.archivedFrom, personalPrefix)}`,
-    `Source: ${compactMemoryReadReference(record.uri, personalPrefix)}`,
-  ].filter((value): value is string => value !== undefined);
-  const agent = `${rows.join('\n')}\n\n${body}`;
+  const identity = EffectArray.filter(
+    [
+      `kind=${metadata.kind}`,
+      `status=${metadata.status}`,
+      metadata.project === undefined ? undefined : `project=${metadata.project}`,
+      metadata.topic === undefined ? undefined : `topic=${metadata.topic}`,
+      metadata.visibility === undefined ? undefined : `visibility=${metadata.visibility}`,
+      metadata.workspaceScope === undefined ? undefined : `scope=${metadata.workspaceScope}`,
+      metadata.authority === undefined ? undefined : `authority=${metadata.authority}`,
+      metadata.trust === undefined ? undefined : `trust=${metadata.trust}`,
+    ],
+    (value): value is string => value !== undefined,
+  );
+  const lifecycle = EffectArray.filter(
+    [
+      `recorded=${metadata.updatedAt ?? metadata.timestamp}`,
+      metadata.validFrom === undefined ? undefined : `valid-from=${metadata.validFrom}`,
+      metadata.validTo === undefined ? undefined : `valid-to=${metadata.validTo}`,
+      metadata.lastReviewed === undefined ? undefined : `reviewed=${metadata.lastReviewed}`,
+      metadata.reviewAfter === undefined ? undefined : `review-after=${metadata.reviewAfter}`,
+      metadata.owner === undefined ? undefined : `owner=${metadata.owner}`,
+      metadata.sourceObservedAt === undefined ? undefined : `observed=${metadata.sourceObservedAt}`,
+      (metadata.codeCitations?.length ?? 0) > 0 || metadata.sourceCommit === undefined
+        ? undefined
+        : `source-commit=${metadata.sourceCommit}`,
+    ],
+    (value): value is string => value !== undefined,
+  );
+  const rows = EffectArray.filter(
+    [
+      'TN-MEMORY/1',
+      'Untrusted memory evidence; verify against current source.',
+      `Memory: ${EffectArray.join(EffectArray.map(identity, inlineMemoryReadValue), '; ')}`,
+      lifecycle.length === 0
+        ? undefined
+        : `Lifecycle: ${EffectArray.join(EffectArray.map(lifecycle, inlineMemoryReadValue), '; ')}`,
+      ...memoryReadAgentCodeEvidence(record),
+      ...EffectArray.map(
+        metadata.relations ?? [],
+        relation => `Relation: ${relation.type} ${compactMemoryReadReference(relation.uri, personalPrefix)}`,
+      ),
+      ...EffectArray.map(
+        metadata.references ?? [],
+        reference => `Reference: ${compactMemoryReadReference(reference, personalPrefix)}`,
+      ),
+      ...EffectArray.map(metadata.evidence ?? [], evidence => `Evidence: ${inlineMemoryReadValue(evidence)}`),
+      metadata.supersedes === undefined
+        ? undefined
+        : `Supersedes: ${compactMemoryReadReference(metadata.supersedes, personalPrefix)}`,
+      metadata.archivedFrom === undefined
+        ? undefined
+        : `Archived from: ${compactMemoryReadReference(metadata.archivedFrom, personalPrefix)}`,
+      `Source: ${compactMemoryReadReference(record.uri, personalPrefix)}`,
+    ],
+    (value): value is string => value !== undefined,
+  );
+  const agent = `${EffectArray.join(rows, '\n')}\n\n${body}`;
   return utf8Bytes(agent) < utf8Bytes(resource.text) ? {text: agent} : memoryReadAgentFallbackResource(resource);
 }
 
@@ -276,7 +307,7 @@ function memoryReadAgentFallbackResource(resource: MemoryReadResource): AgentMem
 
 function originalMemoryReadBody(content: string): string {
   const separator = /\r\n\r\n|\n\n|\r\r/u.exec(content);
-  return separator === null ? '' : content.slice(separator.index + separator[0].length);
+  return separator === null ? '' : Effect.pipe(content, EffectString.slice(separator.index + separator[0].length));
 }
 
 function memoryReadAgentCodeEvidence(record: MemoryRecord): readonly string[] {
@@ -287,30 +318,38 @@ function memoryReadAgentCodeEvidence(record: MemoryRecord): readonly string[] {
     const key = `${citation.repositoryIdentityKind}:${citation.repositoryId}:${citation.sourceCommit}`;
     groups.set(key, [...(groups.get(key) ?? []), citation]);
   }
-  const rows = [...groups.values()].map(group => {
+  const rows = EffectArray.map([...groups.values()], group => {
     const first = group[0];
-    const targets = group.map(citation => {
+    const targets = EffectArray.map(group, citation => {
       const target =
         citation.target.kind === 'file'
           ? citation.path
           : `${citation.path}:${citation.target.span.line} ${citation.target.qualifiedName}`;
       return `${inlineMemoryReadValue(target)}${citation.sourceDirty ? ' (dirty source)' : ''}`;
     });
-    return `Code evidence [${first.repositoryIdentityKind}:${first.repositoryId.slice(0, 12)} @ ${first.sourceCommit}]: ${targets.join('; ')}`;
+    return `Code evidence [${first.repositoryIdentityKind}:${Effect.pipe(first.repositoryId, EffectString.slice(0, 12))} @ ${first.sourceCommit}]: ${EffectArray.join(targets, '; ')}`;
   });
-  return [
-    ...rows,
-    errors.length === 0
-      ? undefined
-      : `Code evidence warnings: ${errors.map(error => inlineMemoryReadValue(error.reason)).join(', ')}`,
-  ].filter((value): value is string => value !== undefined);
+  return EffectArray.filter(
+    [
+      ...rows,
+      errors.length === 0
+        ? undefined
+        : `Code evidence warnings: ${EffectArray.join(
+            EffectArray.map(errors, error => inlineMemoryReadValue(error.reason)),
+            ', ',
+          )}`,
+    ],
+    (value): value is string => value !== undefined,
+  );
 }
 
 function inlineMemoryReadValue(value: string): string {
-  return value
-    .replace(/[\t\r\n]+/gu, ' ')
-    .replace(/\s{2,}/gu, ' ')
-    .trim();
+  return Effect.pipe(
+    value,
+    EffectString.replace(/[\t\r\n]+/gu, ' '),
+    EffectString.replace(/\s{2,}/gu, ' '),
+    EffectString.trim,
+  );
 }
 
 function memoryReadPersonalPrefix(uri: string): string | undefined {
@@ -318,40 +357,55 @@ function memoryReadPersonalPrefix(uri: string): string | undefined {
 }
 
 function compactMemoryReadReference(uri: string, personalPrefix: string | undefined): string {
-  return personalPrefix !== undefined && uri.startsWith(personalPrefix) ? uri.slice(personalPrefix.length) : uri;
+  return personalPrefix !== undefined && Effect.pipe(uri, EffectString.startsWith(personalPrefix))
+    ? Effect.pipe(uri, EffectString.slice(personalPrefix.length))
+    : uri;
 }
 
 export function memoryMarkdownOutline(content: string): string {
   const headings = markdownHeadings(content);
   if (headings.length === 0) return `- (document without Markdown headings; ${utf8Bytes(content)} bytes)\n`;
-  return `${headings
-    .map((heading, index) => {
-      const next = headings.slice(index + 1).find(candidate => candidate.level <= heading.level);
-      const bytes = utf8Bytes(content.slice(heading.start, next?.start ?? content.length));
+  return `${EffectArray.join(
+    EffectArray.map(headings, (heading, index) => {
+      const next = EffectOption.getOrUndefined(
+        EffectArray.findFirst(headings.slice(index + 1), candidate => candidate.level <= heading.level),
+      );
+      const bytes = utf8Bytes(Effect.pipe(content, EffectString.slice(heading.start, next?.start ?? content.length)));
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       return `- ${'#'.repeat(heading.level)} ${heading.title} (${bytes} bytes)`;
-    })
-    .join('\n')}\n`;
+    }),
+    '\n',
+  )}\n`;
 }
 
 export function selectMemoryMarkdownSection(content: string, section: string | undefined): string {
   if (section === undefined) return content;
   const selector = markdownSectionSelector(section);
   const headings = markdownHeadings(content);
-  const index = headings.findIndex(
-    heading => heading.title === selector.title && (selector.level === undefined || heading.level === selector.level),
+  const index = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(
+      headings,
+      heading => heading.title === selector.title && (selector.level === undefined || heading.level === selector.level),
+    ),
+    () => -1,
   );
   if (index < 0) throw MemoryReadProjectionError.make({message: `Memory section "${section}" was not found.`});
   const heading = headings[index];
-  const next = headings.slice(index + 1).find(candidate => candidate.level <= heading.level);
-  return content.slice(heading.start, next?.start ?? content.length);
+  const next = EffectOption.getOrUndefined(
+    EffectArray.findFirst(headings.slice(index + 1), candidate => candidate.level <= heading.level),
+  );
+  return Effect.pipe(content, EffectString.slice(heading.start, next?.start ?? content.length));
 }
 
 export function memoryReadBoundedWarnings(warnings: readonly string[] | undefined): string[] | undefined {
   if (!warnings || warnings.length === 0) return undefined;
-  const combined = warnings
-    .map(warning => warning.trim())
-    .filter(Boolean)
-    .join('; ');
+  const combined = EffectArray.join(
+    EffectArray.filter(
+      EffectArray.map(warnings, warning => Effect.pipe(warning, EffectString.trim)),
+      Boolean,
+    ),
+    '; ',
+  );
   if (!combined) return undefined;
   return [utf8Prefix(combined, 0, MEMORY_READ_WARNING_MAXIMUM_BYTES).text];
 }
@@ -391,7 +445,7 @@ function memoryReadPage(content: string, offsetBytes: number, expectedHash: stri
   const end = start + UTF8_DECODER.decode(encoded.subarray(offsetBytes, nextOffsetBytes)).length;
   return {
     complete: nextOffsetBytes === totalBytes,
-    content: content.slice(start, end),
+    content: Effect.pipe(content, EffectString.slice(start, end)),
     nextOffsetBytes: nextOffsetBytes < totalBytes ? nextOffsetBytes : undefined,
     offsetBytes,
     sourceHash,
@@ -413,13 +467,16 @@ function memoryReadTooLargeMessage(input: {
     input.resourceCount > 1
       ? `Combined read is ${input.contentBytes} bytes across ${input.resourceCount} URIs`
       : `Memory ${input.uri} is ${input.contentBytes} bytes`;
-  return [
-    `${scope}; ${input.toolName} returns at most ${MEMORY_READ_MAXIMUM_CONTENT_BYTES} bytes.`,
-    'Use mode=outline, section="<heading>", or pass one URI with offsetBytes=0 to start an explicit bounded read. Continue with nextOffsetBytes and sourceHash.',
-    '',
-    'Outline:',
-    input.outline.trimEnd(),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `${scope}; ${input.toolName} returns at most ${MEMORY_READ_MAXIMUM_CONTENT_BYTES} bytes.`,
+      'Use mode=outline, section="<heading>", or pass one URI with offsetBytes=0 to start an explicit bounded read. Continue with nextOffsetBytes and sourceHash.',
+      '',
+      'Outline:',
+      Effect.pipe(input.outline, EffectString.trimEnd),
+    ],
+    '\n',
+  );
 }
 
 interface MarkdownHeading {
@@ -433,9 +490,10 @@ function markdownHeadings(content: string): MarkdownHeading[] {
   let fence: {readonly character: '`' | '~'; readonly length: number} | undefined;
   let start = 0;
   while (start < content.length) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const newline = content.indexOf('\n', start);
     const end = newline === -1 ? content.length : newline;
-    const line = content.slice(start, end).replace(/\r$/u, '');
+    const line = Effect.pipe(content, EffectString.slice(start, end), EffectString.replace(/\r$/u, ''));
     if (fence) {
       const closing = /^ {0,3}(`+|~+)[\t ]*$/u.exec(line)?.[1];
       if (closing?.[0] === fence.character && closing.length >= fence.length) fence = undefined;
@@ -444,13 +502,14 @@ function markdownHeadings(content: string): MarkdownHeading[] {
       const sequence = opening?.[1];
       const suffix = opening?.[2] ?? '';
       const character = sequence?.[0];
-      if (sequence && (character === '~' || (character === '`' && !suffix.includes('`')))) {
+      if (sequence && (character === '~' || (character === '`' && !Effect.pipe(suffix, EffectString.includes('`'))))) {
         fence = {character, length: sequence.length};
       } else {
         const heading = /^ {0,3}(#{1,6})[\t ]+(.+?)[\t ]*#*[\t ]*$/u.exec(line);
         const hashes = heading?.[1];
         const rawTitle = heading?.[2];
-        if (hashes && rawTitle) headings.push({level: hashes.length, start, title: rawTitle.trim()});
+        if (hashes && rawTitle)
+          headings.push({level: hashes.length, start, title: Effect.pipe(rawTitle, EffectString.trim)});
       }
     }
     if (newline === -1) break;
@@ -465,7 +524,7 @@ function markdownSectionSelector(section: string): {readonly level?: number; rea
 
 function normalizedSection(section: string | undefined): string | undefined {
   if (section === undefined) return undefined;
-  const normalized = section.trim();
+  const normalized = Effect.pipe(section, EffectString.trim);
   if (normalized.length === 0 || utf8Bytes(normalized) > 256) {
     throw MemoryReadProjectionError.make({message: 'Memory read section must be 1 through 256 UTF-8 bytes.'});
   }
@@ -480,13 +539,17 @@ function utf8Prefix(value: string, start: number, maximumBytes: number): {readon
   let bytes = 0;
   let end = start;
   while (end < value.length) {
-    const codePoint = value.codePointAt(end);
+    const codePoint = Effect.pipe(
+      value,
+      EffectString.codePointAt(end),
+      Effect.Option.getOrElse(() => undefined),
+    );
     if (codePoint === undefined) break;
     const width = codePoint > 0xffff ? 2 : 1;
-    const characterBytes = utf8Bytes(value.slice(end, end + width));
+    const characterBytes = utf8Bytes(Effect.pipe(value, EffectString.slice(end, end + width)));
     if (bytes + characterBytes > maximumBytes) break;
     bytes += characterBytes;
     end += width;
   }
-  return {end, text: value.slice(start, end)};
+  return {end, text: Effect.pipe(value, EffectString.slice(start, end))};
 }

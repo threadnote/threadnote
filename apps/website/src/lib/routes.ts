@@ -1,3 +1,8 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export const sitePagePaths = {
   home: '',
   performance: 'performance',
@@ -18,23 +23,23 @@ export interface SitePageModuleCache<T> {
 }
 
 const pagesByPath = new Map<string, SitePage>(
-  Object.entries(sitePagePaths).map(([page, path]) => [path, page as SitePage]),
+  EffectArray.map(EffectRecord.toEntries(sitePagePaths), ([page, path]) => [path, page]),
 );
 
 function normalizedBasePath(basePath: string): string {
-  const withLeadingSlash = basePath.startsWith('/') ? basePath : `/${basePath}`;
-  return withLeadingSlash.endsWith('/') ? withLeadingSlash : `${withLeadingSlash}/`;
+  const withLeadingSlash = Effect.pipe(basePath, EffectString.startsWith('/')) ? basePath : `/${basePath}`;
+  return Effect.pipe(withLeadingSlash, EffectString.endsWith('/')) ? withLeadingSlash : `${withLeadingSlash}/`;
 }
 
 function siteRelativePathname(pathname: string, basePath: string): string | undefined {
   const base = normalizedBasePath(basePath);
-  const baseWithoutTrailingSlash = base === '/' ? '' : base.slice(0, -1);
+  const baseWithoutTrailingSlash = base === '/' ? '' : Effect.pipe(base, EffectString.slice(0, -1));
 
   if (pathname === baseWithoutTrailingSlash || pathname === base) {
     return '';
   }
-  if (!pathname.startsWith(base)) return undefined;
-  return pathname.slice(base.length).replace(/\/+$/, '');
+  if (!Effect.pipe(pathname, EffectString.startsWith(base))) return undefined;
+  return Effect.pipe(pathname, EffectString.slice(base.length), EffectString.replace(/\/+$/, ''));
 }
 
 export function docsArticlePath(articleId: string): string {
@@ -51,11 +56,19 @@ export function whatsNewReleasePath(version: string): string {
 
 export function docsArticleIdForPathname(pathname: string, basePath: string): string | undefined {
   const relativePath = siteRelativePathname(pathname, basePath);
-  const match = relativePath?.match(/^docs\/([^/]+)$/);
+  const match = Effect.pipe(relativePath, effectOptionalString =>
+    effectOptionalString == null
+      ? undefined
+      : Effect.pipe(
+          effectOptionalString,
+          EffectString.match(/^docs\/([^/]+)$/),
+          Effect.Option.getOrElse(() => null),
+        ),
+  );
   if (!match?.[1]) return undefined;
   try {
     const articleId = decodeURIComponent(match[1]);
-    return articleId.includes('/') ? undefined : articleId;
+    return Effect.pipe(articleId, EffectString.includes('/')) ? undefined : articleId;
   } catch {
     return undefined;
   }
@@ -72,7 +85,15 @@ export function whatsNewIndexViewForSearch(search: string): WhatsNewIndexView {
 
 export function whatsNewPostForPathname(pathname: string, basePath: string): WhatsNewPostRoute | undefined {
   const relativePath = siteRelativePathname(pathname, basePath);
-  const match = relativePath?.match(/^whats-new\/(articles|releases)\/([^/]+)$/);
+  const match = Effect.pipe(relativePath, effectOptionalString =>
+    effectOptionalString == null
+      ? undefined
+      : Effect.pipe(
+          effectOptionalString,
+          EffectString.match(/^whats-new\/(articles|releases)\/([^/]+)$/),
+          Effect.Option.getOrElse(() => null),
+        ),
+  );
   if (!match?.[1] || !match[2]) return undefined;
   try {
     const id = decodeURIComponent(match[2]);

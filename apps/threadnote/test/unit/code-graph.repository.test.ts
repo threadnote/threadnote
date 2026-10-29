@@ -16,6 +16,8 @@ import {
 import {CommandExecutor} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph repository identity', () => {
   it('rejects branch labels containing bidirectional display controls', () => {
@@ -49,7 +51,9 @@ describe('code graph repository identity', () => {
     const identity = await runEffect(resolveRepositoryIdentity(root));
 
     expect(identity.branch).toBe('unborn-work');
-    expect(identity.headCommit).toBe('0'.repeat(identity.objectFormat === 'sha256' ? 64 : 40));
+    expect(identity.headCommit).toBe(
+      Effect2.pipe('0', EffectString.repeat(identity.objectFormat === 'sha256' ? 64 : 40)),
+    );
   });
 
   it('shares one bounded directory command without serializing git-dir into public identity', async () => {
@@ -118,7 +122,11 @@ describe('code graph repository identity', () => {
   });
 
   it('requires every Manager graph identity component to match', () => {
-    const expected = {checkoutId: 'a'.repeat(64), repositoryId: 'b'.repeat(64), worktreeId: 'c'.repeat(64)};
+    const expected = {
+      checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+      repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+      worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
+    };
     expect(repositoryIdentityMatchesExpectation(expected, expected)).toBe(true);
     for (const component of ['checkoutId', 'repositoryId', 'worktreeId'] as const) {
       expect(
@@ -183,5 +191,5 @@ function git(cwd: string, args: readonly string[]): void {
 }
 
 function differentGraphId(value: string): string {
-  return `${value.startsWith('f') ? 'e' : 'f'}${value.slice(1)}`;
+  return `${Effect2.pipe(value, EffectString.startsWith('f')) ? 'e' : 'f'}${Effect2.pipe(value, EffectString.slice(1))}`;
 }

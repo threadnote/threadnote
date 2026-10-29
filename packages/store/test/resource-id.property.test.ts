@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+import {Schema} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -9,6 +11,8 @@ import {
   resourceIdIsWithin,
   resourceIdWithoutAnchor,
 } from '@threadnote/store/resource-id';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const segmentBoundaryArbitrary = FC.constantFrom('a', 'Z', '0', '-', '_', '+', 'é', '中', 'क', '😀');
 const segmentMiddleArbitrary = FC.constantFrom(
@@ -44,14 +48,14 @@ const segmentMiddleArbitrary = FC.constantFrom(
 const portableSegmentArbitrary = FC.oneof(
   FC.constantFrom('a', 'Z', '0', 'é', '中', 'क', '😀'),
   FC.tuple(FC.array(segmentMiddleArbitrary, {maxLength: 12}), segmentBoundaryArbitrary).map(
-    ([middle, finalCharacter]) => `seg-${middle.join('')}${finalCharacter}`,
+    ([middle, finalCharacter]) => `seg-${EffectArray.join(middle, '')}${finalCharacter}`,
   ),
 );
 
 const anchorArbitrary = FC.array(
   FC.constantFrom('a', 'Z', '0', ' ', '.', '/', '?', '#', '%', '@', '&', '=', '+', 'é', '中', 'क', '😀', 'e\u0301'),
   {maxLength: 16, minLength: 1},
-).map(parts => parts.join(''));
+).map(parts => EffectArray.join(parts, ''));
 
 const optionalAnchorArbitrary = FC.option(anchorArbitrary, {nil: undefined});
 
@@ -163,7 +167,7 @@ describe('ResourceId properties', () => {
       segments: FC.array(portableSegmentArbitrary, {maxLength: 6}),
     },
     ({anchor, namespace, segments}) => {
-      const encodedPath = segments.map(percentEncodeEveryByte).join('/');
+      const encodedPath = EffectArray.join(EffectArray.map(segments, percentEncodeEveryByte), '/');
       const legacyUri = `ViKiNg://${percentEncodeEveryByte(namespace)}/${encodedPath}${
         segments.length > 0 ? '/' : ''
       }${anchor === undefined ? '' : `#${percentEncodeEveryByte(anchor)}`}`;
@@ -225,7 +229,13 @@ describe('ResourceId properties', () => {
 });
 
 function percentEncodeEveryByte(value: string): string {
-  return [...Buffer.from(value, 'utf8')].map(byte => `%${byte.toString(16).padStart(2, '0')}`).join('');
+  return EffectArray.join(
+    EffectArray.map(
+      [...Buffer.from(value, 'utf8')],
+      byte => `%${Effect.pipe(byte.toString(16), EffectString.padStart(2, '0'))}`,
+    ),
+    '',
+  );
 }
 
 function invalidUriFor(mutation: InvalidUriMutation, namespace: string, segment: string): string {
@@ -266,7 +276,7 @@ function invalidSegmentFor(mutation: InvalidSegmentMutation, segment: string): s
     case 'reserved_name':
       return 'CON.txt';
     case 'too_long':
-      return 'a'.repeat(256);
+      return Effect.pipe('a', EffectString.repeat(256));
     case 'trailing_dot':
       return `${segment}.`;
   }
@@ -281,7 +291,7 @@ describe('local ResourceId scope parsing', () => {
     expect(Object.isFrozen(parsed)).toBe(true);
     expect(Object.isFrozen(parsed.segments)).toBe(true);
     expect(() => Object.assign(parsed, {namespace: 'share'})).toThrow();
-    expect(() => (parsed.segments as string[]).push('escape')).toThrow();
+    expect(() => Reflect.apply(Array.prototype.push, parsed.segments, ['escape'])).toThrow();
     expect(checker.isWithin(uri, 'threadnote://user/tester/memories/team-a')).toBe(true);
     expect(checker.isWithin(uri, 'threadnote://user/tester/memories/team-b')).toBe(false);
     expect(makeResourceIdScopeChecker().parse(uri)).not.toBe(parsed);
@@ -290,11 +300,11 @@ describe('local ResourceId scope parsing', () => {
   it('keys aliases separately and compares the currently supplied scopes after mutation', () => {
     const checker = makeResourceIdScopeChecker();
     const uri = 'threadnote://user/tester/memories/team-a/plan.md';
-    const alias = uri.replace('threadnote://', 'ViKiNg://');
+    const alias = Effect.pipe(uri, EffectString.replace('threadnote://', 'ViKiNg://'));
     expect(checker.parse(alias).inputScheme).toBe('viking');
     expect(checker.parse(uri).inputScheme).toBe('threadnote');
     const scopes = ['threadnote://user/tester/memories/team-a'];
-    const allowed = () => scopes.some(scope => checker.isWithin(uri, scope));
+    const allowed = () => EffectArray.some(scopes, scope => checker.isWithin(uri, scope));
     expect(allowed()).toBe(true);
     scopes[0] = 'threadnote://user/tester/memories/team-b';
     expect(allowed()).toBe(false);
@@ -310,7 +320,8 @@ describe('local ResourceId scope parsing', () => {
         throw new Error('Expected invalid URI');
       } catch (error) {
         expect(error).toBeInstanceOf(InvalidResourceId);
-        return error as InvalidResourceId;
+        if (!Schema.is(InvalidResourceId)(error)) throw error;
+        return error;
       }
     };
     expect(failure('bad-candidate', 'bad-root').input).toBe('bad-candidate');
@@ -318,10 +329,10 @@ describe('local ResourceId scope parsing', () => {
     const first = failure(valid, 'bad-root');
     expect(first.input).toBe('bad-root');
     expect(failure(valid, 'bad-root')).not.toBe(first);
-    expect([valid, 'bad-unused-root'].some(root => checker.isWithin(valid, root))).toBe(true);
-    expect(() => ['threadnote://share/other', 'bad-root', valid].some(root => checker.isWithin(valid, root))).toThrow(
-      InvalidResourceId,
-    );
+    expect(EffectArray.some([valid, 'bad-unused-root'], root => checker.isWithin(valid, root))).toBe(true);
+    expect(() =>
+      EffectArray.some(['threadnote://share/other', 'bad-root', valid], root => checker.isWithin(valid, root)),
+    ).toThrow(InvalidResourceId);
   });
 
   it('bounds retained entries and keeps uncached overflow values equivalent', () => {
@@ -336,7 +347,7 @@ describe('local ResourceId scope parsing', () => {
 
   it('bounds retained characters independently of the entry limit', () => {
     const checker = makeResourceIdScopeChecker();
-    const longPath = Array.from({length: 64}, () => 'a'.repeat(200));
+    const longPath = Array.from({length: 64}, () => Effect.pipe('a', EffectString.repeat(200)));
     const firstUri = canonicalResourceUri('user', [...longPath, 'first']);
     const first = checker.parse(firstUri);
     for (let index = 0; index < 40; index++)
@@ -360,7 +371,7 @@ describe('local ResourceId scope parsing', () => {
       const checker = makeResourceIdScopeChecker();
       const root = canonicalResourceUri(namespace, rootSegments, anchor);
       const candidate = canonicalResourceUri(namespace, [...rootSegments, ...childSegments], anchor);
-      const inputs = [root, candidate, candidate.replace('threadnote://', 'ViKiNg://')];
+      const inputs = [root, candidate, Effect.pipe(candidate, EffectString.replace('threadnote://', 'ViKiNg://'))];
       for (const input of inputs) {
         expect(checker.parse(input)).toEqual(parseResourceId(input));
         for (const scope of inputs) expect(checker.isWithin(input, scope)).toBe(resourceIdIsWithin(input, scope));

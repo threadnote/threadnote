@@ -13,6 +13,8 @@ import {
   sortCodeGraphMaterializationSpoolSurface,
 } from '@threadnote/graph/materialization/spool/surfaces';
 import {codeGraphSqliteGet} from '@threadnote/graph/sqlite_statement';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph spool sort physical capacity', () => {
   for (const fixture of [
@@ -32,8 +34,8 @@ describe('code graph spool sort physical capacity', () => {
         database.transaction(() => {
           for (let index = 0; index < 10_000; index += 1) {
             insert.run(
-              `t${String(index).padStart(fixture.termBytes - 1, '0')}`,
-              `s${String(10_000 - index).padStart(fixture.symbolBytes - 1, '0')}`,
+              `t${Effect.pipe(String(index), EffectString.padStart(fixture.termBytes - 1, '0'))}`,
+              `s${Effect.pipe(String(10_000 - index), EffectString.padStart(fixture.symbolBytes - 1, '0'))}`,
               1.0,
             );
           }

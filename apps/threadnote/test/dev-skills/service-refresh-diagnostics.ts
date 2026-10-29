@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Exit} from 'effect';
 
 type Phase =
@@ -108,8 +109,8 @@ export const refreshDiagnostics = (
         phase,
         phaseElapsedMs: at - phaseStart,
         activeEvaluation: active ? {...active, elapsedMs: at - active.startedMs} : null,
-        phases: phases.map(entry => ({...entry})),
-        recent: recent.map(entry => ({...entry})),
+        phases: EffectArray.map(phases, entry => ({...entry})),
+        recent: EffectArray.map(recent, entry => ({...entry})),
       };
     },
   };

@@ -1,6 +1,11 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {benchmarkMeasurement, type BenchmarkMeasurementV1} from '@threadnote/evidence/benchmark';
 import {Predicate} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_SCALE_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_SCALE_ID = 'code-memory-link-inverse-scale-v1' as const;
@@ -35,16 +40,16 @@ export type CodeMemoryLinkScaleGitHubRepository = (typeof CODE_MEMORY_LINK_SCALE
 export function isCodeMemoryLinkScaleGitHubRepository(
   repository: string,
 ): repository is CodeMemoryLinkScaleGitHubRepository {
-  return CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORIES.some(candidate => candidate === repository);
+  return EffectArray.some(CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORIES, candidate => candidate === repository);
 }
 
 export type CodeMemoryLinkScaleScenarioId = (typeof CODE_MEMORY_LINK_SCALE_SCENARIOS)[number];
 export type CodeMemoryLinkScaleEvidenceClass = 'development-smoke' | 'release-scale';
 
 export const CODE_MEMORY_LINK_SCALE_FIXTURE = Object.freeze({
-  foreignRepositoryId: 'b'.repeat(64),
+  foreignRepositoryId: Effect.pipe('b', EffectString.repeat(64)),
   project: 'threadnote-inverse-scale',
-  repositoryId: 'a'.repeat(64),
+  repositoryId: Effect.pipe('a', EffectString.repeat(64)),
   seed: CODE_MEMORY_LINK_SCALE_SEED,
   scenarios: [
     {
@@ -58,14 +63,17 @@ export const CODE_MEMORY_LINK_SCALE_FIXTURE = Object.freeze({
       expectedMemoryPaths: ['direct/direct-symbol.md'],
       expectedTruncatedSelectorCount: 0,
       id: 'symbol-backlink',
-      nodeId: `cgs_${'c'.repeat(32)}`,
+      nodeId: `cgs_${Effect.pipe('c', EffectString.repeat(32))}`,
     },
     {
       codePath: 'src/scale/dense-shared-selector.ts',
-      expectedMemoryPaths: Array.from({length: 8}, (_, index) => `noise/000/${String(index).padStart(6, '0')}.md`),
+      expectedMemoryPaths: Array.from(
+        {length: 8},
+        (_, index) => `noise/000/${Effect.pipe(String(index), EffectString.padStart(6, '0'))}.md`,
+      ),
       expectedTruncatedSelectorCount: 2,
       id: 'dense-shared-selector',
-      nodeId: `cgs_${'d'.repeat(32)}`,
+      nodeId: `cgs_${Effect.pipe('d', EffectString.repeat(32))}`,
     },
     {
       codePath: 'src/scale/no-answer.ts',
@@ -253,14 +261,17 @@ export function codeMemoryLinkScaleCandidateBindingV1(
   const candidateVersion = nonEmptyString(manifest.version, 'candidate package version');
   if (!PACKAGE_VERSION.test(candidateVersion)) invalid('candidate package version must be an explicit SemVer');
   const packageManager = nonEmptyString(manifest.packageManager, 'candidate package manager');
-  if (!packageManager.startsWith('bun@') || !PACKAGE_VERSION.test(packageManager.slice('bun@'.length))) {
+  if (
+    !Effect.pipe(packageManager, EffectString.startsWith('bun@')) ||
+    !PACKAGE_VERSION.test(Effect.pipe(packageManager, EffectString.slice('bun@'.length)))
+  ) {
     invalid('candidate package manager must pin an explicit Bun version');
   }
   return {
     candidateCommit: normalizedCommit,
     candidateVersion,
     packageManager,
-    runtime: `bun/${packageManager.slice('bun@'.length)}`,
+    runtime: `bun/${Effect.pipe(packageManager, EffectString.slice('bun@'.length))}`,
     sourceVersion: `threadnote-${candidateVersion}`,
   };
 }
@@ -308,16 +319,20 @@ export function codeMemoryLinkScaleArtifactPath(sha256: string): string {
 }
 
 export function codeMemoryLinkScaleExpectedUris(id: CodeMemoryLinkScaleScenarioId): readonly string[] {
-  const scenario = CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios.find(candidate => candidate.id === id)!;
-  return scenario.expectedMemoryPaths.map(
+  const scenario = EffectOption.getOrUndefined(
+    EffectArray.findFirst(CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios, candidate => candidate.id === id),
+  )!;
+  return EffectArray.map(
+    scenario.expectedMemoryPaths,
     memoryPath =>
       `threadnote://user/${CODE_MEMORY_LINK_SCALE_FIXTURE.user}/memories/durable/projects/${CODE_MEMORY_LINK_SCALE_FIXTURE.project}/${memoryPath}`,
   );
 }
 
 export function codeMemoryLinkScaleExpectedTruncatedSelectorCount(id: CodeMemoryLinkScaleScenarioId): number {
-  return CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios.find(candidate => candidate.id === id)!
-    .expectedTruncatedSelectorCount;
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(CODE_MEMORY_LINK_SCALE_FIXTURE.scenarios, candidate => candidate.id === id),
+  )!.expectedTruncatedSelectorCount;
 }
 
 export function codeMemoryLinkScaleBudgetHash(input: CodeMemoryLinkScaleBudgetV1): string {
@@ -327,8 +342,8 @@ export function codeMemoryLinkScaleBudgetHash(input: CodeMemoryLinkScaleBudgetV1
 /** Reject threshold, corpus, seed, or query-bound weakening. */
 export function parseCodeMemoryLinkScaleBudgetV1(value: unknown): CodeMemoryLinkScaleBudgetV1 {
   const budget = record(value, 'budget');
-  exactKeys(budget, Object.keys(CODE_MEMORY_LINK_SCALE_APPROVED_BUDGET));
-  for (const [key, expected] of Object.entries(CODE_MEMORY_LINK_SCALE_APPROVED_BUDGET)) {
+  exactKeys(budget, EffectRecord.keys(CODE_MEMORY_LINK_SCALE_APPROVED_BUDGET));
+  for (const [key, expected] of EffectRecord.toEntries(CODE_MEMORY_LINK_SCALE_APPROVED_BUDGET)) {
     if (budget[key] !== expected) invalid(`budget ${key} does not match the reviewed value ${expected}`);
   }
   return {...CODE_MEMORY_LINK_SCALE_APPROVED_BUDGET};
@@ -356,7 +371,8 @@ export function evaluateCodeMemoryLinkScaleCapture(input: {
     capture.fixtureHash === fixtureHash &&
     capture.corpus.materializedMemoryCount === budget.corpusMemoryCount &&
     capture.corpus.indexedMemoryCount === budget.corpusMemoryCount &&
-    capture.scenarios.every(
+    EffectArray.every(
+      capture.scenarios,
       scenario =>
         scenario.warmups.length === budget.minimumWarmups && scenario.samples.length === budget.minimumSamples,
     );
@@ -415,7 +431,7 @@ export function parseCodeMemoryLinkScaleArtifactV1(
     if (runnerBinding === undefined)
       invalid('release-scale artifacts require an independently supplied runner binding');
     const failures = runnerBindingFailures(claimedIdentity, runnerBinding);
-    if (failures.length > 0) invalid(failures.join('; '));
+    if (failures.length > 0) invalid(EffectArray.join(failures, '; '));
   }
   const expected = evaluateCodeMemoryLinkScaleCapture({
     budget: budgetInput,
@@ -469,43 +485,76 @@ function computeMetrics(
   capture: CodeMemoryLinkScaleRuntimeCaptureV1,
   queryLimit: number,
 ): CodeMemoryLinkScaleMetricsV1 {
-  const all = capture.scenarios.flatMap(scenario => [scenario.cold, ...scenario.warmups, ...scenario.samples]);
-  const measured = capture.scenarios.flatMap(scenario => scenario.samples);
-  const positive = capture.scenarios.filter(scenario => scenario.expectedUris.length > 0);
-  const noAnswer = capture.scenarios.filter(scenario => scenario.expectedUris.length === 0);
-  const positiveObservations = positive.flatMap(scenario =>
-    [scenario.cold, ...scenario.warmups, ...scenario.samples].map(observation => ({observation, scenario})),
+  const all = EffectArray.flatMap(capture.scenarios, scenario => [
+    scenario.cold,
+    ...scenario.warmups,
+    ...scenario.samples,
+  ]);
+  const measured = EffectArray.flatMap(capture.scenarios, scenario => scenario.samples);
+  const positive = EffectArray.filter(capture.scenarios, scenario => scenario.expectedUris.length > 0);
+  const noAnswer = EffectArray.filter(capture.scenarios, scenario => scenario.expectedUris.length === 0);
+  const positiveObservations = EffectArray.flatMap(positive, scenario =>
+    EffectArray.map([scenario.cold, ...scenario.warmups, ...scenario.samples], observation => ({
+      observation,
+      scenario,
+    })),
   );
-  const noAnswerObservations = noAnswer.flatMap(scenario => [scenario.cold, ...scenario.warmups, ...scenario.samples]);
-  const expectedPairs = positiveObservations.reduce((total, {scenario}) => total + scenario.expectedUris.length, 0);
-  const returnedExpected = positiveObservations.reduce(
+  const noAnswerObservations = EffectArray.flatMap(noAnswer, scenario => [
+    scenario.cold,
+    ...scenario.warmups,
+    ...scenario.samples,
+  ]);
+  const expectedPairs = EffectArray.reduce(
+    positiveObservations,
+    0,
+    (total, {scenario}) => total + scenario.expectedUris.length,
+  );
+  const returnedExpected = EffectArray.reduce(
+    positiveObservations,
+    0,
     (total, {observation, scenario}) =>
-      total + observation.returnedUris.filter(uri => scenario.expectedUris.includes(uri)).length,
-    0,
+      total +
+      EffectArrayPipe(observation.returnedUris, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (uri, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && scenario.expectedUris.includes(uri),
+        ),
+      ).length,
   );
-  const returnedPositive = positiveObservations.reduce(
+  const returnedPositive = EffectArray.reduce(
+    positiveObservations,
+    0,
     (total, {observation}) => total + observation.returnedUris.length,
-    0,
   );
-  const unexpectedResultCount = capture.scenarios.reduce(
+  const unexpectedResultCount = EffectArray.reduce(
+    capture.scenarios,
+    0,
     (total, scenario) =>
       total +
-      [scenario.cold, ...scenario.warmups, ...scenario.samples].reduce(
-        (scenarioTotal, observation) =>
-          scenarioTotal + observation.returnedUris.filter(uri => !scenario.expectedUris.includes(uri)).length,
+      EffectArray.reduce(
+        [scenario.cold, ...scenario.warmups, ...scenario.samples],
         0,
+        (scenarioTotal, observation) =>
+          scenarioTotal +
+          EffectArray.filter(observation.returnedUris, uri => !scenario.expectedUris.includes(uri)).length,
       ),
-    0,
   );
-  const duplicateResultCount = all.reduce(
-    (total, observation) => total + observation.returnedUris.length - new Set(observation.returnedUris).size,
+  const duplicateResultCount = EffectArray.reduce(
+    all,
     0,
+    (total, observation) => total + observation.returnedUris.length - new Set(observation.returnedUris).size,
   );
   return {
-    boundedResultAccuracy: mean(all.map(observation => (observation.returnedUris.length <= queryLimit ? 1 : 0))),
-    canonicalMismatchCount: all.reduce((total, observation) => total + observation.canonicalMismatchCount, 0),
+    boundedResultAccuracy: mean(
+      EffectArray.map(all, observation => (observation.returnedUris.length <= queryLimit ? 1 : 0)),
+    ),
+    canonicalMismatchCount: EffectArray.reduce(
+      all,
+      0,
+      (total, observation) => total + observation.canonicalMismatchCount,
+    ),
     directFirstRate: mean(
-      positiveObservations.map(({observation, scenario}) =>
+      EffectArray.map(positiveObservations, ({observation, scenario}) =>
         observation.returnedUris[0] !== undefined && scenario.expectedUris.includes(observation.returnedUris[0])
           ? 1
           : 0,
@@ -517,22 +566,28 @@ function computeMetrics(
     lookupMilliseconds: benchmarkMeasurement(
       'code-memory-link-inverse-selector',
       'milliseconds',
-      measured.map(observation => observation.milliseconds),
+      EffectArray.map(measured, observation => observation.milliseconds),
     ),
-    maximumReturnedMemories: Math.max(0, ...all.map(observation => observation.returnedUris.length)),
-    noAnswerAccuracy: mean(noAnswerObservations.map(observation => (observation.returnedUris.length === 0 ? 1 : 0))),
+    maximumReturnedMemories: Math.max(0, ...EffectArray.map(all, observation => observation.returnedUris.length)),
+    noAnswerAccuracy: mean(
+      EffectArray.map(noAnswerObservations, observation => (observation.returnedUris.length === 0 ? 1 : 0)),
+    ),
     queryCount: all.length,
-    scenarioLookupMilliseconds: capture.scenarios.map(scenario => ({
+    scenarioLookupMilliseconds: EffectArray.map(capture.scenarios, scenario => ({
       id: scenario.id,
       measurement: benchmarkMeasurement(
         `code-memory-link-inverse-selector-${scenario.id}`,
         'milliseconds',
-        scenario.samples.map(observation => observation.milliseconds),
+        EffectArray.map(scenario.samples, observation => observation.milliseconds),
       ),
     })),
-    truncatedSelectorCount: all.reduce((total, observation) => total + observation.truncatedSelectorCount, 0),
+    truncatedSelectorCount: EffectArray.reduce(
+      all,
+      0,
+      (total, observation) => total + observation.truncatedSelectorCount,
+    ),
     unexpectedResultCount,
-    warmupCountMinimum: Math.min(...capture.scenarios.map(scenario => scenario.warmups.length)),
+    warmupCountMinimum: Math.min(...EffectArray.map(capture.scenarios, scenario => scenario.warmups.length)),
   };
 }
 
@@ -578,9 +633,9 @@ function gateFailures(
     corpus.noiseMemoryCount,
     budget.corpusMemoryCount - budget.directBacklinkMemoryCount - budget.isolationDecoyMemoryCount,
   );
-  const scenarios = capture.scenarios.map(scenario => scenario.id);
+  const scenarios = EffectArray.map(capture.scenarios, scenario => scenario.id);
   if (JSON.stringify(scenarios) !== JSON.stringify(CODE_MEMORY_LINK_SCALE_SCENARIOS)) {
-    failures.push(`scenarios must execute ${CODE_MEMORY_LINK_SCALE_SCENARIOS.join(', ')} in order`);
+    failures.push(`scenarios must execute ${EffectArray.join(CODE_MEMORY_LINK_SCALE_SCENARIOS, ', ')} in order`);
   }
   for (const scenario of capture.scenarios) {
     if (JSON.stringify(scenario.expectedUris) !== JSON.stringify(codeMemoryLinkScaleExpectedUris(scenario.id))) {
@@ -591,7 +646,8 @@ function gateFailures(
       failures.push(`${scenario.id} expected truncation truth does not match the frozen fixture`);
     }
     if (
-      [scenario.cold, ...scenario.warmups, ...scenario.samples].some(
+      EffectArray.some(
+        [scenario.cold, ...scenario.warmups, ...scenario.samples],
         observation => observation.truncatedSelectorCount !== expectedTruncatedSelectorCount,
       )
     ) {
@@ -600,7 +656,7 @@ function gateFailures(
       );
     }
   }
-  if (capture.scenarios.some(scenario => scenario.samples.length < budget.minimumSamples)) {
+  if (EffectArray.some(capture.scenarios, scenario => scenario.samples.length < budget.minimumSamples)) {
     failures.push(`every scenario requires at least ${budget.minimumSamples} measured samples`);
   }
   if (metrics.warmupCountMinimum < budget.minimumWarmups) {
@@ -694,11 +750,11 @@ function parseCapture(value: unknown, mode: CodeMemoryLinkScaleEvidenceClass): C
     'recallDatabaseBytes',
     'recallStorageBytes',
   ]);
-  if (!Array.isArray(capture.scenarios)) invalid('capture scenarios must be an array');
+  if (!EffectArray.isArray(capture.scenarios)) invalid('capture scenarios must be an array');
   if (capture.scenarios.length === 0) invalid('capture scenarios must be non-empty');
-  const scenarios = capture.scenarios.map(value => parseScenario(value, mode));
+  const scenarios = EffectArray.map(capture.scenarios, value => parseScenario(value, mode));
   assertUnique(
-    scenarios.map(scenario => scenario.id),
+    EffectArray.map(scenarios, scenario => scenario.id),
     'scenario ids',
   );
   return {
@@ -734,10 +790,10 @@ function parseScenario(value: unknown, mode: CodeMemoryLinkScaleEvidenceClass): 
   if (!isCodeMemoryLinkScaleScenarioId(scenario.id)) {
     invalid(`unsupported scenario ${String(scenario.id)}`);
   }
-  if (!Array.isArray(scenario.expectedUris)) invalid('scenario expectedUris must be an array');
-  if (!Array.isArray(scenario.samples)) invalid('scenario samples must be an array');
+  if (!EffectArray.isArray(scenario.expectedUris)) invalid('scenario expectedUris must be an array');
+  if (!EffectArray.isArray(scenario.samples)) invalid('scenario samples must be an array');
   if (scenario.samples.length === 0) invalid('scenario samples must be non-empty');
-  if (!Array.isArray(scenario.warmups)) invalid('scenario warmups must be an array');
+  if (!EffectArray.isArray(scenario.warmups)) invalid('scenario warmups must be an array');
   if (mode === 'release-scale') {
     if (
       scenario.samples.length !== CODE_MEMORY_LINK_SCALE_APPROVED_BUDGET.minimumSamples ||
@@ -751,7 +807,9 @@ function parseScenario(value: unknown, mode: CodeMemoryLinkScaleEvidenceClass): 
   ) {
     invalid('development observation count exceeds the maximum 25 samples or 5 warmups');
   }
-  const expectedUris = scenario.expectedUris.map((uri, index) => nonEmptyString(uri, `expectedUris[${index}]`));
+  const expectedUris = EffectArray.map(scenario.expectedUris, (uri, index) =>
+    nonEmptyString(uri, `expectedUris[${index}]`),
+  );
   assertUnique(expectedUris, 'expected URIs');
   return {
     cold: parseObservation(scenario.cold),
@@ -761,19 +819,21 @@ function parseScenario(value: unknown, mode: CodeMemoryLinkScaleEvidenceClass): 
     ),
     expectedUris,
     id: scenario.id,
-    samples: scenario.samples.map(parseObservation),
-    warmups: scenario.warmups.map(parseObservation),
+    samples: EffectArray.map(scenario.samples, parseObservation),
+    warmups: EffectArray.map(scenario.warmups, parseObservation),
   };
 }
 
 function parseObservation(value: unknown): CodeMemoryLinkScaleLookupObservationV1 {
   const observation = record(value, 'lookup observation');
   exactKeys(observation, ['canonicalMismatchCount', 'milliseconds', 'returnedUris', 'truncatedSelectorCount']);
-  if (!Array.isArray(observation.returnedUris)) invalid('returnedUris must be an array');
+  if (!EffectArray.isArray(observation.returnedUris)) invalid('returnedUris must be an array');
   return {
     canonicalMismatchCount: nonNegativeInteger(observation.canonicalMismatchCount, 'canonical mismatch count'),
     milliseconds: nonNegativeFinite(observation.milliseconds, 'lookup milliseconds'),
-    returnedUris: observation.returnedUris.map((uri, index) => nonEmptyString(uri, `returnedUris[${index}]`)),
+    returnedUris: EffectArray.map(observation.returnedUris, (uri, index) =>
+      nonEmptyString(uri, `returnedUris[${index}]`),
+    ),
     truncatedSelectorCount: nonNegativeInteger(observation.truncatedSelectorCount, 'truncated selector count'),
   };
 }
@@ -875,68 +935,71 @@ export function codeMemoryLinkScaleReleaseClaimFailures(
   candidate?: CodeMemoryLinkScaleCandidateBindingV1,
 ): readonly string[] {
   const github = identity.github;
-  return [
-    candidate === undefined ? 'release-scale evidence requires an independently derived candidate binding' : '',
-    candidate === undefined || identity.candidateCommit === candidate.candidateCommit
-      ? ''
-      : `claimed candidate ${identity.candidateCommit}; required reviewed candidate ${candidate.candidateCommit}`,
-    candidate === undefined || identity.candidateVersion === candidate.candidateVersion
-      ? ''
-      : `candidate version ${identity.candidateVersion}; required ${candidate.candidateVersion}`,
-    candidate === undefined || identity.packageManager === candidate.packageManager
-      ? ''
-      : `package manager ${identity.packageManager}; required ${candidate.packageManager}`,
-    candidate === undefined || identity.runtime === candidate.runtime
-      ? ''
-      : `runtime ${identity.runtime}; required ${candidate.runtime}`,
-    candidate === undefined || identity.sourceVersion === candidate.sourceVersion
-      ? ''
-      : `source version ${identity.sourceVersion}; required ${candidate.sourceVersion}`,
-    identity.observedCommit === identity.candidateCommit
-      ? ''
-      : `observed commit ${identity.observedCommit}; required candidate ${identity.candidateCommit}`,
-    identity.dirty ? 'candidate checkout is dirty; required dirty=false' : '',
-    identity.gitStatusObserved ? '' : 'candidate Git status could not be observed',
-    github.actions ? '' : 'release evidence was not produced by GitHub Actions',
-    isCodeMemoryLinkScaleGitHubRepository(github.repository)
-      ? ''
-      : `GitHub repository ${github.repository}; required one of ${CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORIES.join(', ')}`,
-    github.repositoryId === CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORY_ID
-      ? ''
-      : `GitHub repository ID ${github.repositoryId}; required ${CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORY_ID}`,
-    github.job === CODE_MEMORY_LINK_SCALE_GITHUB_JOB
-      ? ''
-      : `GitHub job ${github.job}; required ${CODE_MEMORY_LINK_SCALE_GITHUB_JOB}`,
-    github.eventName === 'schedule' || github.eventName === 'workflow_dispatch'
-      ? ''
-      : `GitHub event ${github.eventName}; required schedule or workflow_dispatch`,
-    github.sha === identity.candidateCommit
-      ? ''
-      : `GitHub SHA ${github.sha}; required candidate ${identity.candidateCommit}`,
-    github.workflowSha === identity.candidateCommit
-      ? ''
-      : `GitHub workflow SHA ${github.workflowSha}; required candidate ${identity.candidateCommit}`,
-    github.workflowRef === `${github.repository}/${CODE_MEMORY_LINK_SCALE_GITHUB_WORKFLOW_PATH}@${github.ref}`
-      ? ''
-      : 'GitHub workflow ref does not identify the governed benchmarks workflow at the claimed ref',
-    identity.runnerClass === CODE_MEMORY_LINK_SCALE_RELEASE_RUNNER_CLASS
-      ? ''
-      : `runner class ${identity.runnerClass}; required ${CODE_MEMORY_LINK_SCALE_RELEASE_RUNNER_CLASS}`,
-    identity.runnerArchitecture === 'ARM64'
-      ? ''
-      : `runner architecture label ${identity.runnerArchitecture}; required ARM64`,
-    identity.runnerEnvironment === 'github-hosted'
-      ? ''
-      : `runner environment ${identity.runnerEnvironment}; required github-hosted`,
-    identity.runnerOperatingSystem === 'macOS'
-      ? ''
-      : `runner operating system label ${identity.runnerOperatingSystem}; required macOS`,
-    identity.architecture === 'arm64' ? '' : `runner architecture ${identity.architecture}; required arm64`,
-    /^Apple M1(?:$|\s)/u.test(identity.cpu) ? '' : `runner CPU ${identity.cpu}; required Apple M1 class`,
-    identity.operatingSystem.startsWith('macOS ')
-      ? ''
-      : `runner operating system ${identity.operatingSystem}; required macOS`,
-  ].filter(Boolean);
+  return EffectArray.filter(
+    [
+      candidate === undefined ? 'release-scale evidence requires an independently derived candidate binding' : '',
+      candidate === undefined || identity.candidateCommit === candidate.candidateCommit
+        ? ''
+        : `claimed candidate ${identity.candidateCommit}; required reviewed candidate ${candidate.candidateCommit}`,
+      candidate === undefined || identity.candidateVersion === candidate.candidateVersion
+        ? ''
+        : `candidate version ${identity.candidateVersion}; required ${candidate.candidateVersion}`,
+      candidate === undefined || identity.packageManager === candidate.packageManager
+        ? ''
+        : `package manager ${identity.packageManager}; required ${candidate.packageManager}`,
+      candidate === undefined || identity.runtime === candidate.runtime
+        ? ''
+        : `runtime ${identity.runtime}; required ${candidate.runtime}`,
+      candidate === undefined || identity.sourceVersion === candidate.sourceVersion
+        ? ''
+        : `source version ${identity.sourceVersion}; required ${candidate.sourceVersion}`,
+      identity.observedCommit === identity.candidateCommit
+        ? ''
+        : `observed commit ${identity.observedCommit}; required candidate ${identity.candidateCommit}`,
+      identity.dirty ? 'candidate checkout is dirty; required dirty=false' : '',
+      identity.gitStatusObserved ? '' : 'candidate Git status could not be observed',
+      github.actions ? '' : 'release evidence was not produced by GitHub Actions',
+      isCodeMemoryLinkScaleGitHubRepository(github.repository)
+        ? ''
+        : `GitHub repository ${github.repository}; required one of ${EffectArray.join(CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORIES, ', ')}`,
+      github.repositoryId === CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORY_ID
+        ? ''
+        : `GitHub repository ID ${github.repositoryId}; required ${CODE_MEMORY_LINK_SCALE_GITHUB_REPOSITORY_ID}`,
+      github.job === CODE_MEMORY_LINK_SCALE_GITHUB_JOB
+        ? ''
+        : `GitHub job ${github.job}; required ${CODE_MEMORY_LINK_SCALE_GITHUB_JOB}`,
+      github.eventName === 'schedule' || github.eventName === 'workflow_dispatch'
+        ? ''
+        : `GitHub event ${github.eventName}; required schedule or workflow_dispatch`,
+      github.sha === identity.candidateCommit
+        ? ''
+        : `GitHub SHA ${github.sha}; required candidate ${identity.candidateCommit}`,
+      github.workflowSha === identity.candidateCommit
+        ? ''
+        : `GitHub workflow SHA ${github.workflowSha}; required candidate ${identity.candidateCommit}`,
+      github.workflowRef === `${github.repository}/${CODE_MEMORY_LINK_SCALE_GITHUB_WORKFLOW_PATH}@${github.ref}`
+        ? ''
+        : 'GitHub workflow ref does not identify the governed benchmarks workflow at the claimed ref',
+      identity.runnerClass === CODE_MEMORY_LINK_SCALE_RELEASE_RUNNER_CLASS
+        ? ''
+        : `runner class ${identity.runnerClass}; required ${CODE_MEMORY_LINK_SCALE_RELEASE_RUNNER_CLASS}`,
+      identity.runnerArchitecture === 'ARM64'
+        ? ''
+        : `runner architecture label ${identity.runnerArchitecture}; required ARM64`,
+      identity.runnerEnvironment === 'github-hosted'
+        ? ''
+        : `runner environment ${identity.runnerEnvironment}; required github-hosted`,
+      identity.runnerOperatingSystem === 'macOS'
+        ? ''
+        : `runner operating system label ${identity.runnerOperatingSystem}; required macOS`,
+      identity.architecture === 'arm64' ? '' : `runner architecture ${identity.architecture}; required arm64`,
+      /^Apple M1(?:$|\s)/u.test(identity.cpu) ? '' : `runner CPU ${identity.cpu}; required Apple M1 class`,
+      Effect.pipe(identity.operatingSystem, EffectString.startsWith('macOS '))
+        ? ''
+        : `runner operating system ${identity.operatingSystem}; required macOS`,
+    ],
+    Boolean,
+  );
 }
 
 function runnerBindingFailures(
@@ -946,7 +1009,7 @@ function runnerBindingFailures(
   if (runner === undefined) return ['release-scale evidence requires an independently supplied runner binding'];
   const expected = parseCodeMemoryLinkScaleRunnerBindingV1(runner);
   const failures: string[] = [];
-  for (const key of Object.keys(expected.github) as (keyof CodeMemoryLinkScaleGithubProvenanceV1)[]) {
+  for (const key of EffectRecord.keys(expected.github) as (keyof CodeMemoryLinkScaleGithubProvenanceV1)[]) {
     if (identity.github[key] !== expected.github[key])
       failures.push(`GitHub ${key} differs from the trusted runner binding`);
   }
@@ -973,11 +1036,13 @@ function ratio(numerator: number, denominator: number, empty: number): number {
 }
 
 function mean(values: readonly number[]): number {
-  return values.length === 0 ? 0 : values.reduce((total, value) => total + value, 0) / values.length;
+  return values.length === 0 ? 0 : EffectArray.reduce(values, 0, (total, value) => total + value) / values.length;
 }
 
 function formatMetric(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(6).replace(/0+$/u, '').replace(/\.$/u, '');
+  return Number.isInteger(value)
+    ? String(value)
+    : Effect.pipe(value.toFixed(6), EffectString.replace(/0+$/u, ''), EffectString.replace(/\.$/u, ''));
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -986,9 +1051,9 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
-  const actual = Object.keys(value).sort(compareText);
+  const actual = EffectRecord.keys(value).sort(compareText);
   const expected = [...keys].sort(compareText);
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) invalid(`unexpected keys ${actual.join(', ')}`);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) invalid(`unexpected keys ${EffectArray.join(actual, ', ')}`);
 }
 
 function positiveInteger(value: unknown, label: string): number {
@@ -1028,7 +1093,7 @@ function lowercaseHex(value: unknown, length: number, label: string): string {
 
 function nonEmptyString(value: unknown, label: string): string {
   const parsed = stringValue(value, label);
-  if (!parsed.trim()) invalid(`${label} must be non-empty`);
+  if (!Effect.pipe(parsed, EffectString.trim)) invalid(`${label} must be non-empty`);
   return parsed;
 }
 

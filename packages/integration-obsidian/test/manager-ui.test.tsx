@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -5,6 +6,9 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {ManagerDialogProvider} from '@threadnote/manager/dialog';
 import {IntegrationsPanel} from '@threadnote/manager/integrations-view';
 import {obsidianIntegration} from '../src/manager-ui/index.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 let root: Root | undefined;
 afterEach(async () => {
@@ -15,14 +19,29 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 async function render(node: React.ReactNode): Promise<void> {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
   await act(async () => root?.render(<ManagerDialogProvider>{node}</ManagerDialogProvider>));
 }
 function button(label: string): HTMLButtonElement {
-  const match = [...document.querySelectorAll('button')].find(item => item.textContent?.trim().startsWith(label));
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(
+            item.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!match) throw new Error('Button not found: ' + label);
   return match;
 }
@@ -78,8 +97,21 @@ describe('Obsidian integrations', () => {
       />,
     );
     await act(async () => {
-      const action = [...document.querySelectorAll<HTMLButtonElement>('.integration-row-actions button')].find(item =>
-        item.textContent?.trim().startsWith(label),
+      const action = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          [...document.querySelectorAll<HTMLButtonElement>('.integration-row-actions button')],
+          __effectArrayValue =>
+            !!(item =>
+              Effect.pipe(
+                item.textContent,
+                effectOptionalString =>
+                  effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+                effectOptionalString =>
+                  effectOptionalString == null
+                    ? undefined
+                    : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+              ))(__effectArrayValue),
+        ),
       );
       if (!action) throw new Error('Connection action not found: ' + label);
       action.click();
@@ -98,9 +130,9 @@ describe('Obsidian integrations', () => {
       expect(calls).toEqual([{action, id, apply: true, confirm: true}]);
       expect(document.body.textContent).not.toContain('Preview only.');
     }
-    expect(Array.from(document.querySelectorAll('button')).some(item => item.textContent === 'Apply changes')).toBe(
-      false,
-    );
+    expect(
+      EffectArray.some(Array.from(document.querySelectorAll('button')), item => item.textContent === 'Apply changes'),
+    ).toBe(false);
     expect(document.body.textContent).toContain('Engineering/Architecture.md');
     expect(button('Done').disabled).toBe(false);
     expect(document.body.textContent).toContain('Completed.');

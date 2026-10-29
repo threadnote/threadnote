@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {scriptError, ScriptError} from '../effect/errors.js';
 import {Clock, Effect} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
@@ -43,6 +45,8 @@ import {
   type MaterializedCodeGraphWorksetFixtureRepository,
   type PreparedCodeGraphWorksetFixture,
 } from './code-graph-workset-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
@@ -107,20 +111,47 @@ export function buildCodeGraphWorksetEvaluationFixture(
   requestedSizes: readonly CodeGraphWorksetFixtureSize[],
 ): CodeGraphWorksetEvaluationFixtureV1 {
   const sizes = [...requestedSizes];
-  const usedArchetypes = new Set(plan.members.map(member => member.archetypeId));
+  const usedArchetypes = new Set(EffectArray.map(plan.members, member => member.archetypeId));
   const searchableMembers = new Set(
-    plan.members
-      .filter(member => member.expectedState === 'current' || member.expectedState === 'stale')
-      .map(member => member.id),
+    EffectArray.map(
+      EffectArray.filter(
+        plan.members,
+        member => member.expectedState === 'current' || member.expectedState === 'stale',
+      ),
+      member => member.id,
+    ),
   );
-  const queries = plan.queries.flatMap(query => {
-    const applicableSizes = query.sizes.filter(size => sizes.includes(size));
-    if (applicableSizes.length === 0) return [];
-    const expectedEdges = query.expectedEdges.filter(
-      edge => searchableMembers.has(edge.source.repositoryId) && searchableMembers.has(edge.target.repositoryId),
+  const queries = EffectArray.flatMap(plan.queries, query => {
+    const applicableSizes = EffectArrayPipe(query.sizes, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (size, __effectArrayIndex2) => __effectArrayIndex2 in __effectArrayValues && sizes.includes(size),
+      ),
     );
-    const expectedRepositories = query.expectedRepositories.filter(repositoryId => searchableMembers.has(repositoryId));
-    const expectedSymbols = query.expectedSymbols.filter(symbol => searchableMembers.has(symbol.repositoryId));
+    if (applicableSizes.length === 0) return [];
+    const expectedEdges = EffectArrayPipe(query.expectedEdges, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (edge, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues &&
+          searchableMembers.has(edge.source.repositoryId) &&
+          searchableMembers.has(edge.target.repositoryId),
+      ),
+    );
+    const expectedRepositories = EffectArrayPipe(query.expectedRepositories, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (repositoryId, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues && searchableMembers.has(repositoryId),
+      ),
+    );
+    const expectedSymbols = EffectArrayPipe(query.expectedSymbols, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (symbol, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues && searchableMembers.has(symbol.repositoryId),
+      ),
+    );
     return [
       {
         answerable: query.answerable,
@@ -138,7 +169,12 @@ export function buildCodeGraphWorksetEvaluationFixture(
   return parseCodeGraphWorksetEvaluationFixtureV1({
     allowedAuthoritativeEdges: plan.allowedAuthoritativeEdges,
     generator: {
-      archetypes: CODE_GRAPH_WORKSET_FIXTURE_ARCHETYPES.filter(archetype => usedArchetypes.has(archetype.id)).map(
+      archetypes: EffectArray.map(
+        EffectArray.filter(
+          CODE_GRAPH_WORKSET_FIXTURE_ARCHETYPES,
+          (archetype, __effectArrayIndex) =>
+            __effectArrayIndex in CODE_GRAPH_WORKSET_FIXTURE_ARCHETYPES && usedArchetypes.has(archetype.id),
+        ),
         ({id, sha256}) => ({id, sha256}),
       ),
       name: plan.identity.generator,
@@ -190,11 +226,11 @@ const publishIndexedCodeGraphWorksetCatalogScoped = Effect.fn('codeGraphWorksetH
       {concurrency: 1},
     );
     const stagedByProject = new Map(
-      staged.flatMap(value => (value === undefined ? [] : [[value.project, value] as const])),
+      EffectArray.flatMap(staged, value => (value === undefined ? [] : [[value.project, value] as const])),
     );
     for (const worksetName of worksetNames) {
       const workset = yield* requireWorkset(config.manifestPath, worksetName);
-      const members = workset.projects.flatMap(project => {
+      const members = EffectArray.flatMap(workset.projects, project => {
         const stagedMember = stagedByProject.get(project.name);
         return stagedMember === undefined
           ? []
@@ -215,7 +251,7 @@ const publishIndexedCodeGraphWorksetCatalogScoped = Effect.fn('codeGraphWorksetH
         members,
         worksetName,
       });
-      const bridgeMembers = workset.projects.flatMap(project => {
+      const bridgeMembers = EffectArray.flatMap(workset.projects, project => {
         const stagedMember = stagedByProject.get(project.name);
         return stagedMember === undefined
           ? []
@@ -232,7 +268,7 @@ const publishIndexedCodeGraphWorksetCatalogScoped = Effect.fn('codeGraphWorksetH
       yield* prepareCodeGraphWorksetBridgesForGeneration(config, stagedGeneration.id, bridgeMembers);
       const assertLeases = () =>
         Effect.all(
-          workset.projects.flatMap(project => {
+          EffectArray.flatMap(workset.projects, project => {
             const stagedMember = stagedByProject.get(project.name);
             return stagedMember === undefined ? [] : [stagedMember.built.assertLease];
           }),
@@ -333,7 +369,7 @@ export function codeGraphWorksetObservationFromQuery(
   const repositoryHits: string[] = [];
   const symbolHits: CodeGraphWorksetSymbolRefV1[] = [];
   const edges: CodeGraphWorksetExpectedEdgeV1[] = [];
-  const cardsByRef = new Map(measured.result.cards.map(card => [card.ref, card] as const));
+  const cardsByRef = new Map(EffectArray.map(measured.result.cards, card => [card.ref, card] as const));
   // Relevance is scored over the persisted globally ranked sequence; response
   // bytes and delivered-card count are measured separately on the compact
   // first page. This keeps breadth quality independent from token envelope.
@@ -366,7 +402,10 @@ export function codeGraphWorksetObservationFromQuery(
   }
   const deliveredEdges = uniqueEdges(edges);
   return {
-    authoritativeEdges: deliveredEdges.filter(edge => edge.provenance === 'declared' || edge.provenance === 'resolved'),
+    authoritativeEdges: EffectArray.filter(
+      deliveredEdges,
+      edge => edge.provenance === 'declared' || edge.provenance === 'resolved',
+    ),
     coverage: codeGraphWorksetCoverage(fixture, worksetSize, measured.result),
     edges: deliveredEdges,
     execution: 'executed',
@@ -407,13 +446,15 @@ export function unsupportedCodeGraphWorksetObservation(
   };
 }
 
+export type CodeGraphWorksetCoverageResult = Pick<CodeGraphWorksetQueryResultV2, 'repositories'>;
+
 export function codeGraphWorksetCoverage(
   fixture: CodeGraphWorksetEvaluationFixtureV1,
   worksetSize: number,
-  result: CodeGraphWorksetQueryResultV2,
+  result: CodeGraphWorksetCoverageResult,
 ): readonly CodeGraphWorksetCoverageObservationV1[] {
-  const activeMembers = fixture.members.filter(member => member.ordinal <= worksetSize);
-  return activeMembers.flatMap(member => {
+  const activeMembers = EffectArray.filter(fixture.members, member => member.ordinal <= worksetSize);
+  return EffectArray.flatMap(activeMembers, member => {
     const project = `workset-${member.id}`;
     const observed = result.repositories[project];
     return observed === undefined ? [] : [{repositoryId: member.id, state: memberState(observed.state)}];
@@ -447,66 +488,68 @@ export function codeGraphWorksetBenchmarkSample(
 export function codeGraphWorksetBenchmarkMeasurements(
   samples: readonly CodeGraphWorksetBenchmarkSample[],
 ): readonly BenchmarkMeasurementV1[] {
-  const sizes = [...new Set(samples.map(sample => sample.worksetSize))].sort((left, right) => left - right);
+  const sizes = [...new Set(EffectArray.map(samples, sample => sample.worksetSize))].sort(
+    (left, right) => left - right,
+  );
   const measurements: BenchmarkMeasurementV1[] = [benchmarkMeasurement('workset-current-repository-cap', 'count', [0])];
   for (const size of sizes) {
-    const selected = samples.filter(sample => sample.worksetSize === size);
+    const selected = EffectArray.filter(samples, sample => sample.worksetSize === size);
     const prefix = `workset-${size}`;
     measurements.push(
       benchmarkMeasurement(
         `${prefix}-completion`,
         'milliseconds',
-        selected.map(value => value.completionMilliseconds),
+        EffectArray.map(selected, value => value.completionMilliseconds),
       ),
       benchmarkMeasurement(
         `${prefix}-delivered-time-to-first-evidence-buffered`,
         'milliseconds',
-        selected.map(value => value.timeToFirstEvidenceMilliseconds),
+        EffectArray.map(selected, value => value.timeToFirstEvidenceMilliseconds),
       ),
       benchmarkMeasurement(
         `${prefix}-mcp-structured-response`,
         'bytes',
-        selected.map(value => value.structuredResponseUtf8Bytes),
+        EffectArray.map(selected, value => value.structuredResponseUtf8Bytes),
       ),
       benchmarkMeasurement(
         `${prefix}-mcp-text-response`,
         'bytes',
-        selected.map(value => value.textResponseUtf8Bytes),
+        EffectArray.map(selected, value => value.textResponseUtf8Bytes),
       ),
       benchmarkMeasurement(
         `${prefix}-total-agent-output`,
         'bytes',
-        selected.map(value => value.responseUtf8Bytes),
+        EffectArray.map(selected, value => value.responseUtf8Bytes),
       ),
       benchmarkMeasurement(
         `${prefix}-estimated-agent-tokens`,
         'count',
-        selected.map(value => value.estimatedTokenCount),
+        EffectArray.map(selected, value => value.estimatedTokenCount),
       ),
       benchmarkMeasurement(
         `${prefix}-requested-repositories`,
         'count',
-        selected.map(value => value.requestedRepositories),
+        EffectArray.map(selected, value => value.requestedRepositories),
       ),
       benchmarkMeasurement(
         `${prefix}-considered-repositories`,
         'count',
-        selected.map(value => value.repositoriesConsidered),
+        EffectArray.map(selected, value => value.repositoriesConsidered),
       ),
       benchmarkMeasurement(
         `${prefix}-deep-queried-repositories`,
         'count',
-        selected.map(value => value.repositoriesDeepQueried),
+        EffectArray.map(selected, value => value.repositoriesDeepQueried),
       ),
       benchmarkMeasurement(
         `${prefix}-opened-repository-databases`,
         'count',
-        selected.map(value => value.repositoryDatabasesOpened),
+        EffectArray.map(selected, value => value.repositoryDatabasesOpened),
       ),
       benchmarkMeasurement(
         `${prefix}-delivered-v2-evidence-cards`,
         'count',
-        selected.map(value => value.evidenceItemCount),
+        EffectArray.map(selected, value => value.evidenceItemCount),
       ),
     );
   }
@@ -517,7 +560,7 @@ export function codeGraphWorksetBenchmarkBudgetFailures(
   measurements: readonly BenchmarkMeasurementV1[],
   requestedSizes: readonly number[],
 ): readonly string[] {
-  const byName = new Map(measurements.map(measurement => [measurement.name, measurement]));
+  const byName = new Map(EffectArray.map(measurements, measurement => [measurement.name, measurement]));
   const failures: string[] = [];
   const p95 = (name: string, maximum: number) => {
     const measurement = byName.get(name);
@@ -576,7 +619,7 @@ function returnedEvidenceItemCount(response: ProjectedCodeGraphWorksetEvidenceV1
 
 function uniqueSymbols(symbols: readonly CodeGraphWorksetSymbolRefV1[]): readonly CodeGraphWorksetSymbolRefV1[] {
   const seen = new Set<string>();
-  return symbols.filter(symbol => {
+  return EffectArray.filter(symbols, symbol => {
     const key = `${symbol.repositoryId}\u0000${symbol.symbol}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -586,7 +629,7 @@ function uniqueSymbols(symbols: readonly CodeGraphWorksetSymbolRefV1[]): readonl
 
 function uniqueEdges(edges: readonly CodeGraphWorksetExpectedEdgeV1[]): readonly CodeGraphWorksetExpectedEdgeV1[] {
   const seen = new Set<string>();
-  return edges.filter(edge => {
+  return EffectArray.filter(edges, edge => {
     const key = codeGraphWorksetEdgeKey(edge);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -608,8 +651,10 @@ function deliveredRelationshipEndpoint(
 }
 
 function fixtureRepositoryId(fixture: CodeGraphWorksetEvaluationFixtureV1, repositoryKey: string): string | undefined {
-  const id = repositoryKey.startsWith('workset-') ? repositoryKey.slice('workset-'.length) : '';
-  return fixture.members.some(member => member.id === id) ? id : undefined;
+  const id = Effect2.pipe(repositoryKey, EffectString.startsWith('workset-'))
+    ? Effect2.pipe(repositoryKey, EffectString.slice('workset-'.length))
+    : '';
+  return EffectArray.some(fixture.members, member => member.id === id) ? id : undefined;
 }
 
 function assertNonNegativeInteger(value: number, label: string): void {

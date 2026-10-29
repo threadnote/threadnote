@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
 import {Effect, FileSystem, Layer, Path} from 'effect';
@@ -15,6 +16,8 @@ import type {
   RepositoryIdentity,
 } from '@threadnote/graph/types';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = CodeGraphStore.layer.pipe(Layer.provideMerge(citationPlatformLayer));
 
@@ -51,8 +54,8 @@ function temporaryResolution(ids: readonly number[], delta = false, reexport = f
     const store = yield* CodeGraphStore;
     yield* store.initialize(databasePath);
     const file: CodeGraphInventoryFile = {
-      blobId: 'b'.repeat(40),
-      contentHash: 'c'.repeat(64),
+      blobId: Effect2.pipe('b', EffectString.repeat(40)),
+      contentHash: Effect2.pipe('c', EffectString.repeat(64)),
       language: 'typescript',
       mode: '100644',
       path: 'src/references.ts',
@@ -62,8 +65,8 @@ function temporaryResolution(ids: readonly number[], delta = false, reexport = f
     const input = [...ids];
     const caller = symbol('caller', file.path);
     const catalog = {...file, path: 'src/catalog.ts'};
-    const targets = ids.map(id => symbol(`target${id}`, catalog.path));
-    const references: CodeGraphReference[] = targets.map((target, index) => ({
+    const targets = EffectArray.map(ids, id => symbol(`target${id}`, catalog.path));
+    const references: CodeGraphReference[] = EffectArray.map(targets, (target, index) => ({
       aliasLookupKeys: [`typescript:name:alias${index}`],
       edgeId: `unresolved-${index}`,
       evidencePath: file.path,
@@ -80,7 +83,7 @@ function temporaryResolution(ids: readonly number[], delta = false, reexport = f
       databasePath,
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        const edges = references.map(reference => ({
+        const edges = EffectArray.map(references, reference => ({
           confidence: 0.7,
           evidencePath: file.path,
           evidenceSpan: caller.span,
@@ -94,14 +97,14 @@ function temporaryResolution(ids: readonly number[], delta = false, reexport = f
         if (delta) {
           const identity: RepositoryIdentity = {
             caseMode: 'sensitive',
-            checkoutId: 'c'.repeat(64),
+            checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
             displayName: 'temporary-resolution',
             gitCommonDirectory: directory,
-            headCommit: '1'.repeat(40),
+            headCommit: Effect2.pipe('1', EffectString.repeat(40)),
             objectFormat: 'sha1',
             repoRoot: directory,
-            repositoryId: 'r'.repeat(64),
-            worktreeId: 'w'.repeat(64),
+            repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
           };
           const snapshot: CodeGraphSnapshot = {
             commit: identity.headCommit,
@@ -163,9 +166,9 @@ function temporaryResolution(ids: readonly number[], delta = false, reexport = f
               }>`SELECT target_id, provenance FROM activation_edges ORDER BY target_id`;
               expect(summary.resolved).toBe(ids.length);
               expect(edges).toEqual(
-                targets
-                  .map(target => ({target_id: target.id, provenance: 'resolved'}))
-                  .sort((left, right) => left.target_id.localeCompare(right.target_id)),
+                EffectArray.map(targets, target => ({target_id: target.id, provenance: 'resolved'})).sort(
+                  (left, right) => Effect2.pipe(left.target_id, EffectString.localeCompare(right.target_id)),
+                ),
               );
               expect(ids).toEqual(input);
               if (reexport) {

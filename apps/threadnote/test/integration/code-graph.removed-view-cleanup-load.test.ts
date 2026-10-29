@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {createHash} from '@threadnote/testing/node-crypto';
@@ -19,11 +20,13 @@ import {CODE_GRAPH_EXTRACTOR_GENERATION, CodeGraphStoreError} from '@threadnote/
 import {inspectPersistentExtensionTables} from '@threadnote/graph/store/schema/inspection';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {legacyCodeGraphAuthorityStatements} from '@threadnote/graph/test/helpers/code-graph-legacy-authority';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const REPOSITORY_ID = 'b'.repeat(64);
-const ANCHOR_WORKTREE_ID = 'f'.repeat(64);
-const ANCHOR_SNAPSHOT_ID = `cgsn_${'f'.repeat(40)}`;
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
+const ANCHOR_WORKTREE_ID = Effect2.pipe('f', EffectString.repeat(64));
+const ANCHOR_SNAPSHOT_ID = `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`;
 const REMOVED_AT = new Date(0).toISOString();
 const LOAD_ROWS = 10_000;
 const MIGRATION_ROWS = 73_000;
@@ -57,7 +60,7 @@ describe('removed code graph view cleanup load and migration', () => {
             );
             expect(oversizedPage).toHaveLength(CODE_GRAPH_REMOVED_VIEW_CLEANUP_PAGE_ROWS);
             const firstPass = [
-              ...oversizedPage.map(entry => entry.worktreeId),
+              ...EffectArray.map(oversizedPage, entry => entry.worktreeId),
               ...(yield* drainDueClaims(store, databasePath, now)),
             ];
             expect(firstPass).toHaveLength(LOAD_ROWS);
@@ -81,7 +84,9 @@ describe('removed code graph view cleanup load and migration', () => {
               ),
               {concurrency: 'unbounded'},
             );
-            const concurrentIds = concurrent.flatMap(entries => entries.map(entry => entry.worktreeId));
+            const concurrentIds = EffectArray.flatMap(concurrent, entries =>
+              EffectArray.map(entries, entry => entry.worktreeId),
+            );
             expect(concurrentIds).toHaveLength(4 * CODE_GRAPH_REMOVED_VIEW_CLEANUP_PAGE_ROWS);
             expect(new Set(concurrentIds)).toHaveLength(concurrentIds.length);
             const secondPass = [...concurrentIds, ...(yield* drainDueClaims(store, databasePath, wrapNow))];
@@ -251,7 +256,9 @@ describe('removed code graph view cleanup load and migration', () => {
               }),
               {readOnly: true},
             );
-            expect(extensionInspections.filter(inspection => !inspection.exists || !inspection.compatible)).toEqual([]);
+            expect(
+              EffectArray.filter(extensionInspections, inspection => !inspection.exists || !inspection.compatible),
+            ).toEqual([]);
 
             const reopenPhases: CodeGraphPersistentSchemaMigrationPhase[] = [];
             yield* store.withSession(databasePath, store.initialize(databasePath), {
@@ -403,8 +410,8 @@ function seedAnchorAuthority(databasePath: string): void {
         ANCHOR_SNAPSHOT_ID,
         REPOSITORY_ID,
         ANCHOR_WORKTREE_ID,
-        '1'.repeat(40),
-        `cgc_${'f'.repeat(40)}`,
+        Effect2.pipe('1', EffectString.repeat(40)),
+        `cgc_${Effect2.pipe('f', EffectString.repeat(40))}`,
         REMOVED_AT,
         REMOVED_AT,
       );
@@ -443,7 +450,7 @@ function drainDueClaims(store: typeof CodeGraphStore.Service, databasePath: stri
       const page = yield* store.claimRemovedViewCleanupCandidates(databasePath, now, 32);
       if (page.length === 0) return claimed;
       expect(page.length).toBeLessThanOrEqual(CODE_GRAPH_REMOVED_VIEW_CLEANUP_PAGE_ROWS);
-      claimed.push(...page.map(entry => entry.worktreeId));
+      claimed.push(...EffectArray.map(page, entry => entry.worktreeId));
     }
   });
 }
@@ -487,18 +494,20 @@ function metadataValue(database: Database, key: string): string | undefined {
 function readCleanupObjectNames(databasePath: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query<{readonly name: string}, []>(
-        `SELECT name FROM sqlite_master
+    return EffectArray.map(
+      database
+        .query<{readonly name: string}, []>(
+          `SELECT name FROM sqlite_master
          WHERE name IN (
            'removed_view_cleanup', 'removed_view_cleanup_due',
            'removed_views_cleanup_revoke_delete', 'removed_views_cleanup_revoke_insert',
            'removed_views_cleanup_revoke_update'
          )
          ORDER BY name`,
-      )
-      .all()
-      .map(row => row.name);
+        )
+        .all(),
+      row => row.name,
+    );
   } finally {
     database.close(false);
   }
@@ -587,9 +596,9 @@ function observedFileSize(path: string): number {
 }
 
 function worktreeId(index: number): string {
-  return index.toString(16).padStart(64, '0');
+  return Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'));
 }
 
 function snapshotId(index: number): string {
-  return `cgsn_${index.toString(16).padStart(40, '0')}`;
+  return `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`;
 }

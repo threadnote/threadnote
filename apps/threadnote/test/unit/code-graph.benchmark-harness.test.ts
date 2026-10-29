@@ -1,10 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
-import {Database} from 'bun:sqlite';
-import {Clock, DateTime, Effect, FileSystem, Path, PlatformError, Schedule, Schema} from 'effect';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
+import {ByteSize, Clock, DateTime, Effect, FileSystem, Option, Path, PlatformError, Schedule, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -38,7 +39,10 @@ import {
   validateSqliteWriterSettingsEvidence,
   vectorSemanticControlMinimumScore,
 } from '../../../../scripts/benchmark-code-graph.js';
-import type {CodeGraphBenchmarkSamplerArtifact} from '../../../../scripts/code-graph-benchmark-sampler.js';
+import type {
+  CodeGraphBenchmarkSamplerArtifact,
+  CodeGraphBenchmarkSamplerPhase,
+} from '../../../../scripts/code-graph-benchmark-sampler.js';
 import {
   embeddingContextBenchmarkSchedule,
   parseEmbeddingContextBenchmarkArguments,
@@ -50,6 +54,61 @@ import {CodeGraphStore} from '@threadnote/graph/store';
 import {CodeGraphStoreBusyError, type CodeGraphQueryResult, type RepositoryIdentity} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {benchmarkMeasurement, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+function samplerPhase(databasePeakBytes: number): CodeGraphBenchmarkSamplerPhase {
+  return {
+    databasePeakBytes,
+    samples: 1,
+    shmPeakBytes: 0,
+    temporaryPeakBytes: 0,
+    walPeakBytes: 0,
+  };
+}
+
+function samplerArtifact(
+  phases: Readonly<Record<string, CodeGraphBenchmarkSamplerPhase>>,
+): CodeGraphBenchmarkSamplerArtifact {
+  return {
+    intervalMilliseconds: 1000,
+    phases,
+    platform: 'linux',
+    processTelemetry: {
+      availability: 'unavailable',
+      parentIdentityValidation: 'process-liveness-only',
+      reason: 'unsupported-platform',
+      source: 'none',
+    },
+    samples: 1,
+    version: 4,
+  };
+}
+
+function fileInfo(size: number): FileSystem.File.Info {
+  return {
+    type: 'File',
+    mtime: Option.none(),
+    atime: Option.none(),
+    birthtime: Option.none(),
+    dev: 0n,
+    ino: Option.none(),
+    mode: 0,
+    nlink: Option.none(),
+    uid: Option.none(),
+    gid: Option.none(),
+    rdev: Option.none(),
+    size: ByteSize.bytes(size),
+    blksize: Option.none(),
+    blocks: Option.none(),
+  };
+}
 
 const CONTROL = JSON.stringify({
   expectedLanguage: 'typescript',
@@ -65,12 +124,10 @@ describe('code graph external benchmark harness', () => {
         fc.integer({max: Number.MAX_SAFE_INTEGER, min: 0}),
         fc.integer({max: Number.MAX_SAFE_INTEGER, min: 0}),
         (boundaryBytes, scanningBytes, resolvingBytes) => {
-          const sampler = {
-            phases: {
-              resolving: {databasePeakBytes: resolvingBytes},
-              scanning: {databasePeakBytes: scanningBytes},
-            },
-          } as unknown as CodeGraphBenchmarkSamplerArtifact;
+          const sampler = samplerArtifact({
+            resolving: samplerPhase(resolvingBytes),
+            scanning: samplerPhase(scanningBytes),
+          });
           expect(codeGraphBenchmarkSqlitePeak(boundaryBytes, sampler, 'databasePeakBytes')).toBe(
             Math.max(boundaryBytes, scanningBytes, resolvingBytes),
           );
@@ -144,7 +201,7 @@ describe('code graph external benchmark harness', () => {
             ? Effect.succeed(['vectors-v1.sqlite', '.cursor.tmp'])
             : fileSystem.readDirectory(target),
         stat: target =>
-          String(target).endsWith('.cursor.tmp')
+          Effect2.pipe(String(target), EffectString.endsWith('.cursor.tmp'))
             ? Effect.fail(
                 PlatformError.systemError({
                   _tag: 'NotFound',
@@ -154,8 +211,8 @@ describe('code graph external benchmark harness', () => {
                   pathOrDescriptor: String(target),
                 }),
               )
-            : String(target).endsWith('vectors-v1.sqlite')
-              ? Effect.succeed({size: 42, type: 'File'} as unknown as FileSystem.File.Info)
+            : Effect2.pipe(String(target), EffectString.endsWith('vectors-v1.sqlite'))
+              ? Effect.succeed(fileInfo(42))
               : fileSystem.stat(target),
       });
 
@@ -204,7 +261,7 @@ describe('code graph external benchmark harness', () => {
         expect(before[0]?.[1]).toMatchObject({
           count: durations.length,
           maximumWallMilliseconds: Math.max(...durations),
-          wallMilliseconds: durations.reduce((total, duration) => total + duration, 0),
+          wallMilliseconds: EffectArray.reduce(durations, 0, (total, duration) => total + duration),
         });
         Object.assign(before[0][1], {wallMilliseconds: -1});
         expect(timings.observations()[0]?.[1].wallMilliseconds).toBeGreaterThanOrEqual(0);
@@ -238,7 +295,10 @@ describe('code graph external benchmark harness', () => {
           at += durations[3];
           timeline.finish(BigInt(at) * 1_000_000n, telemetry);
           const measurements = new Map(
-            indexPhaseMeasurements('one-file-reindex', timeline, false).map(value => [value.name, value.maximum]),
+            EffectArray.map(indexPhaseMeasurements('one-file-reindex', timeline, false), value => [
+              value.name,
+              value.maximum,
+            ]),
           );
           expect(measurements.get('one-file-reindex-activation-lexical-only')).toBe(at);
           expect(measurements.get('one-file-reindex-post-activation-completion')).toBe(durations[3]);
@@ -269,7 +329,10 @@ describe('code graph external benchmark harness', () => {
       }
       timeline.finish(19_000_000n, telemetry);
       const measurements = new Map(
-        indexPhaseMeasurements('one-file-reindex', timeline, false).map(value => [value.name, value.maximum]),
+        EffectArray.map(indexPhaseMeasurements('one-file-reindex', timeline, false), value => [
+          value.name,
+          value.maximum,
+        ]),
       );
       expect(measurements.get('one-file-reindex-completion-snapshot-lease-release-count-n1')).toBe(1);
       expect(measurements.get('one-file-reindex-completion-snapshot-lease-release-after-complete-count-n1')).toBe(2);
@@ -316,7 +379,7 @@ describe('code graph external benchmark harness', () => {
   effectIt.effect('samples only index work between overlay setup and restore', () =>
     Effect.gen(function* () {
       const events: string[] = [];
-      const telemetry = {} as CodeGraphBenchmarkSamplerArtifact;
+      const telemetry = samplerArtifact({index: samplerPhase(0)});
       const sampled = yield* Effect.acquireUseRelease(
         Effect.sync(() => events.push('overlay-applied')),
         () =>
@@ -367,7 +430,7 @@ describe('code graph external benchmark harness', () => {
   effectIt.effect('aborts the sampler before restoring an overlay when indexing fails', () =>
     Effect.gen(function* () {
       const events: string[] = [];
-      const telemetry = {} as CodeGraphBenchmarkSamplerArtifact;
+      const telemetry = samplerArtifact({index: samplerPhase(0)});
       const exit = yield* Effect.exit(
         Effect.acquireUseRelease(
           Effect.sync(() => events.push('overlay-applied')),
@@ -450,8 +513,20 @@ describe('code graph external benchmark harness', () => {
     expect(source).toContain('checkpointedEvidenceRun && options.outputPath');
     expect(source).toContain('const mcpOperationMatrix = largeEvidenceRun');
     expect(source).toContain('Math.min(options.samples, largeEvidenceRun ? 3 : 10)');
-    expect(source.match(/sampleProcessTree\s*\? startExternalSampler/g)).toHaveLength(3);
-    expect(source.match(/sampler\s*\? Effect\.void\s*:\s*observeSqliteStoragePeak/g)).toHaveLength(3);
+    expect(
+      Effect2.pipe(
+        source,
+        EffectString.match(/sampleProcessTree\s*\? startExternalSampler/g),
+        Effect2.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
+    expect(
+      Effect2.pipe(
+        source,
+        EffectString.match(/sampler\s*\? Effect\.void\s*:\s*observeSqliteStoragePeak/g),
+        Effect2.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(3);
   });
 
   it('uses the centralized process maxRSS byte normalizer', () => {
@@ -624,7 +699,7 @@ describe('code graph external benchmark harness', () => {
   });
 
   it('selects explicit SQLite writer candidates without exposing production environment knobs', () => {
-    for (const profile of Object.keys(CODE_GRAPH_SQLITE_WRITER_PROFILES)) {
+    for (const profile of EffectRecord.keys(CODE_GRAPH_SQLITE_WRITER_PROFILES)) {
       expect(parseCodeGraphBenchmarkArguments(['--sqlite-writer-profile', profile]).sqliteWriterProfile).toBe(profile);
     }
     expect(() => parseCodeGraphBenchmarkArguments(['--sqlite-writer-profile', 'unknown'])).toThrow(
@@ -648,7 +723,13 @@ describe('code graph external benchmark harness', () => {
 
   it('governs both generated production homes before preparing the measured runtime', () => {
     const source = readFileSync('scripts/benchmark-code-graph.ts', 'utf8');
-    expect(source.match(/const sameOverlayReferenceHome/g)).toHaveLength(1);
+    expect(
+      Effect2.pipe(
+        source,
+        EffectString.match(/const sameOverlayReferenceHome/g),
+        Effect2.Option.getOrElse(() => null),
+      ),
+    ).toHaveLength(1);
     expectInOrder(source, [
       'const sameOverlayReferenceHome',
       'productionBenchmarkGovernance(',
@@ -767,16 +848,16 @@ describe('code graph external benchmark harness', () => {
     for (const rounds of [4, 8, 12, 16]) {
       const balanced = embeddingContextBenchmarkSchedule(rounds);
       for (const contexts of [1, 2, 4, 8] as const) {
-        expect(balanced.flat().filter(candidate => candidate === contexts)).toHaveLength(rounds);
+        expect(EffectArray.filter(balanced.flat(), candidate => candidate === contexts)).toHaveLength(rounds);
         for (let position = 0; position < 4; position += 1) {
-          expect(balanced.filter(order => order[position] === contexts)).toHaveLength(rounds / 4);
+          expect(EffectArray.filter(balanced, order => order[position] === contexts)).toHaveLength(rounds / 4);
         }
       }
     }
 
     const vectorMilliseconds = {1: 100, 2: 75, 4: 50, 8: 65} as const;
-    const artifacts = schedule.flatMap((order, round) =>
-      order.map((contexts, position) => ({
+    const artifacts = EffectArray.flatMap(schedule, (order, round) =>
+      EffectArray.map(order, (contexts, position) => ({
         artifact: embeddingContextArtifact(
           contexts,
           vectorMilliseconds[contexts] + round,
@@ -801,16 +882,22 @@ describe('code graph external benchmark harness', () => {
         const second = yield* prepareGeneratedCodeGraphFixture(10, true);
         const firstDependencySurface = yield* prepareGeneratedCodeGraphFixture(10, false, false, true);
         const secondDependencySurface = yield* prepareGeneratedCodeGraphFixture(10, false, false, true);
-        const firstCommit = (yield* git(first.repository, ['rev-parse', 'HEAD'])).stdout.trim();
-        const secondCommit = (yield* git(second.repository, ['rev-parse', 'HEAD'])).stdout.trim();
-        const firstDependencySurfaceCommit = (yield* git(firstDependencySurface.repository, [
-          'rev-parse',
-          'HEAD',
-        ])).stdout.trim();
-        const secondDependencySurfaceCommit = (yield* git(secondDependencySurface.repository, [
-          'rev-parse',
-          'HEAD',
-        ])).stdout.trim();
+        const firstCommit = Effect2.pipe(
+          (yield* git(first.repository, ['rev-parse', 'HEAD'])).stdout,
+          EffectString.trim,
+        );
+        const secondCommit = Effect2.pipe(
+          (yield* git(second.repository, ['rev-parse', 'HEAD'])).stdout,
+          EffectString.trim,
+        );
+        const firstDependencySurfaceCommit = Effect2.pipe(
+          (yield* git(firstDependencySurface.repository, ['rev-parse', 'HEAD'])).stdout,
+          EffectString.trim,
+        );
+        const secondDependencySurfaceCommit = Effect2.pipe(
+          (yield* git(secondDependencySurface.repository, ['rev-parse', 'HEAD'])).stdout,
+          EffectString.trim,
+        );
         expect(firstCommit).toMatch(/^[0-9a-f]{40}$/);
         expect(secondCommit).toBe(firstCommit);
         expect(firstDependencySurface.incrementalSourcePath).toBe('packages/surface-core/src/index.ts');
@@ -823,14 +910,14 @@ describe('code graph external benchmark harness', () => {
 
   it('rejects dirty, clamped, unsampled, or vector-mismatched embedding evidence', () => {
     const schedule = embeddingContextBenchmarkSchedule(4);
-    const artifacts = schedule.flatMap((order, round) =>
-      order.map((contexts, position) => ({
+    const artifacts = EffectArray.flatMap(schedule, (order, round) =>
+      EffectArray.map(order, (contexts, position) => ({
         artifact: embeddingContextArtifact(contexts, 100 - contexts, 1_000),
         artifactPath: `/evidence/round-${round + 1}-position-${position + 1}.json`,
       })),
     );
     const replace = (index: number, artifact: BenchmarkArtifactV1) =>
-      artifacts.map((item, itemIndex) => (itemIndex === index ? {...item, artifact} : item));
+      EffectArray.map(artifacts, (item, itemIndex) => (itemIndex === index ? {...item, artifact} : item));
     expect(() =>
       summarizeEmbeddingContextArtifacts(
         replace(0, {...artifacts[0].artifact, environment: {...artifacts[0].artifact.environment, dirty: true}}),
@@ -859,7 +946,7 @@ describe('code graph external benchmark harness', () => {
       summarizeEmbeddingContextArtifacts(
         replace(3, {
           ...artifacts[3].artifact,
-          measurements: artifacts[3].artifact.measurements.map(item =>
+          measurements: EffectArray.map(artifacts[3].artifact.measurements, item =>
             item.name === 'cold-external-process-tree-failures-n1'
               ? benchmarkMeasurement(item.name, 'count', [1])
               : item,
@@ -918,15 +1005,15 @@ describe('code graph external benchmark harness', () => {
     expect(() =>
       validateSqliteWriterSettingsEvidence(
         'building-normal-full-publication',
-        evidence.filter(settings => settings.phase !== 'publication'),
+        EffectArray.filter(evidence, settings => settings.phase !== 'publication'),
       ),
     ).toThrow('did not restore FULL after NORMAL');
     expect(() =>
       validateSqliteWriterSettingsEvidence('current', [
-        ...evidence
-          .filter(settings => settings.phase === 'connection')
-          .slice(0, 2)
-          .map(settings => ({...settings, cacheSizePragma: -(32 * 1_024)})),
+        ...EffectArray.map(
+          EffectArray.filter(evidence, settings => settings.phase === 'connection').slice(0, 2),
+          settings => ({...settings, cacheSizePragma: -(32 * 1_024)}),
+        ),
         {
           ...connection('same-overlay-reference'),
           cacheSizePragma: -(32 * 1_024),
@@ -975,7 +1062,7 @@ describe('code graph external benchmark harness', () => {
   it('preserves CRLF and inserts Java imports after the package declaration', () => {
     const overlaid = semanticBenchmarkOverlay('Source.java', 'package example;\r\n\r\nfinal class Source {}\r\n');
     expect(overlaid).toBe('package example;\r\nimport threadnote.benchmark.Overlay;\r\n\r\nfinal class Source {}\r\n');
-    expect(overlaid.replaceAll('\r\n', '')).not.toContain('\n');
+    expect(Effect2.pipe(overlaid, EffectString.replaceAll('\r\n', ''))).not.toContain('\n');
   });
 
   it('rejects unsupported benchmark platforms before external evidence work starts', () => {
@@ -1144,12 +1231,13 @@ describe('code graph external benchmark harness', () => {
         fc.uniqueArray(fc.stringMatching(/^[a-z]{1,6}$/)),
         (base, current, changedPaths, deletedSymbolIds) => {
           const actual = structuralDigestLookupRows({base, changedPaths, current, deletedSymbolIds});
-          const currentKeys = new Set(current.map(row => `${row.lookup_key}\0${row.symbol_id}`));
+          const currentKeys = new Set(EffectArray.map(current, row => `${row.lookup_key}\0${row.symbol_id}`));
           const deleted = new Set(deletedSymbolIds);
           const changed = new Set(changedPaths);
           const expected = [
             ...current,
-            ...base.filter(
+            ...EffectArray.filter(
+              base,
               row =>
                 !currentKeys.has(`${row.lookup_key}\0${row.symbol_id}`) &&
                 !deleted.has(row.symbol_id) &&
@@ -1174,18 +1262,18 @@ describe('code graph external benchmark harness', () => {
           const databasePath = path.join(root, 'graph-v3.sqlite');
           const identity: RepositoryIdentity = {
             caseMode: 'sensitive',
-            checkoutId: 'c'.repeat(64),
+            checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
             displayName: 'structural-digest-fixture',
             gitCommonDirectory: root,
-            headCommit: '1'.repeat(40),
+            headCommit: Effect2.pipe('1', EffectString.repeat(40)),
             objectFormat: 'sha1',
             repoRoot: root,
-            repositoryId: 'r'.repeat(64),
-            worktreeId: 'w'.repeat(64),
+            repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
           };
-          const baseSnapshotId = `cgsn_${'0'.repeat(40)}`;
-          const firstSnapshotId = `cgsn_${'1'.repeat(40)}`;
-          const replacementSnapshotId = `cgsn_${'2'.repeat(40)}`;
+          const baseSnapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
+          const firstSnapshotId = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+          const replacementSnapshotId = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
           const privatePath = 'src/private-customer-secret.ts';
 
           yield* store.initialize(databasePath);
@@ -1232,7 +1320,9 @@ describe('code graph external benchmark harness', () => {
               const writer = new Database(databasePath, {strict: true});
               try {
                 writer.run('PRAGMA busy_timeout = 5000');
-                writer.query('UPDATE snapshots SET commit_id = ? WHERE id = ?').run('3'.repeat(40), firstSnapshotId);
+                writer
+                  .query('UPDATE snapshots SET commit_id = ? WHERE id = ?')
+                  .run(Effect2.pipe('3', EffectString.repeat(40)), firstSnapshotId);
                 during = structuralDigestInterlockState(writer, baseSnapshotId, firstSnapshotId, identity.worktreeId);
               } finally {
                 writer.close(false);
@@ -1251,15 +1341,20 @@ describe('code graph external benchmark harness', () => {
           const finalDatabase = new Database(databasePath, {readonly: true, strict: true});
           try {
             const protectedSnapshotRows = Number(
-              (
+              requiredRow(
                 finalDatabase
-                  .query('SELECT COUNT(*) AS count FROM snapshots WHERE id IN (?, ?)')
-                  .get(baseSnapshotId, firstSnapshotId) as {readonly count: number}
+                  .query<{readonly count: number}, SQLQueryBindings[]>(
+                    'SELECT COUNT(*) AS count FROM snapshots WHERE id IN (?, ?)',
+                  )
+                  .get(baseSnapshotId, firstSnapshotId),
               ).count,
             );
             const leaseRows = Number(
-              (finalDatabase.query('SELECT COUNT(*) AS count FROM snapshot_leases').get() as {readonly count: number})
-                .count,
+              requiredRow(
+                finalDatabase
+                  .query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM snapshot_leases')
+                  .get(),
+              ).count,
             );
             return {
               after,
@@ -1281,22 +1376,26 @@ describe('code graph external benchmark harness', () => {
       ).pipe(provideTestLayer(ApplicationLayer));
 
       expect(result.pinned).toEqual(result.before);
-      expect(result.before.streams.find(stream => stream.name === 'symbol-terms')?.rowCount).toBe(1);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.before.streams, stream => stream.name === 'symbol-terms'),
+        )?.rowCount,
+      ).toBe(1);
       expect(result.after.digest).not.toBe(result.before.digest);
       expect(result.during).toEqual({
-        activeSnapshotId: `cgsn_${'2'.repeat(40)}`,
+        activeSnapshotId: `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`,
         baseFileRows: 1,
         baseState: 'ready',
         firstState: 'ready',
         leaseRows: 1,
       });
-      expect(result.mismatch.mismatchedStreams.map(stream => stream.name)).toEqual(['snapshot']);
+      expect(EffectArray.map(result.mismatch.mismatchedStreams, stream => stream.name)).toEqual(['snapshot']);
       expect(result.leaseRenewals).toBeGreaterThanOrEqual(1);
       expect(result.failureMessage).toMatch(
         /^Structural graph digest parity failed: snapshot incremental\(count=1,sha256=[0-9a-f]{64}\) same-overlay-full\(count=1,sha256=[0-9a-f]{64}\)\.$/,
       );
       expect(result.privacySafeEvidence).not.toContain(result.privatePath);
-      expect(result.privacySafeEvidence).not.toContain('3'.repeat(40));
+      expect(result.privacySafeEvidence).not.toContain(Effect2.pipe('3', EffectString.repeat(40)));
       expect(result.failureMessage).not.toContain(result.privatePath);
       // Clean displaced snapshots remain warm after their last reader exits;
       // retaining the overlay also retains its physical base.
@@ -1316,18 +1415,18 @@ describe('code graph external benchmark harness', () => {
           const databasePath = path.join(root, 'graph-v3.sqlite');
           const identity: RepositoryIdentity = {
             caseMode: 'sensitive',
-            checkoutId: 'c'.repeat(64),
+            checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
             displayName: 'structural-digest-summary-fixture',
             gitCommonDirectory: root,
-            headCommit: '1'.repeat(40),
+            headCommit: Effect2.pipe('1', EffectString.repeat(40)),
             objectFormat: 'sha1',
             repoRoot: root,
-            repositoryId: 'r'.repeat(64),
-            worktreeId: 'w'.repeat(64),
+            repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
           };
-          const baseSnapshotId = `cgsn_${'0'.repeat(40)}`;
-          const snapshotId = `cgsn_${'1'.repeat(40)}`;
-          const replacementSnapshotId = `cgsn_${'2'.repeat(40)}`;
+          const baseSnapshotId = `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`;
+          const snapshotId = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+          const replacementSnapshotId = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
 
           yield* store.initialize(databasePath);
           seedStructuralDigestInterlockDatabase(
@@ -1370,7 +1469,7 @@ describe('code graph external benchmark harness', () => {
                    snapshot_id, version, symbol_count, edge_count, digest, created_at
                  ) VALUES (?, 1, 1, 1, ?, ?)`,
               )
-              .run(snapshotId, 'd'.repeat(64), now);
+              .run(snapshotId, Effect2.pipe('d', EffectString.repeat(64)), now);
           } finally {
             writer.close(false);
           }
@@ -1391,7 +1490,7 @@ function benchmarkQueryResult(
   firstScore = 1,
 ): CodeGraphQueryResult {
   return {
-    edges: edgeIds.map(id => ({
+    edges: EffectArray.map(edgeIds, id => ({
       confidence: 1,
       evidencePath: 'private/evidence.ts',
       evidenceSpan: {column: 1, endColumn: 2, endLine: 1, line: 1},
@@ -1402,7 +1501,7 @@ function benchmarkQueryResult(
       targetName: 'target',
     })),
     freshness: 'current',
-    nodes: nodeIds.map(id => ({
+    nodes: EffectArray.map(nodeIds, id => ({
       contentHash: `private-content-${id}`,
       exported: true,
       id,
@@ -1417,7 +1516,7 @@ function benchmarkQueryResult(
     operation: 'query',
     repository: {displayName: 'private-repository', repositoryId: 'private-repository-id'},
     snapshot: {
-      commit: '1'.repeat(40),
+      commit: Effect2.pipe('1', EffectString.repeat(40)),
       dirty: true,
       id: 'private-snapshot',
       worktreeId: 'private-worktree',
@@ -1438,7 +1537,9 @@ describe('code graph benchmark query parity diagnostics', () => {
     const rescored = benchmarkQueryResult(['private-node-a', 'private-node-b'], ['private-edge-a'], [], 0.25);
     const payloadChanged = {
       ...baseline,
-      nodes: baseline.nodes.map((node, index) => (index === 0 ? {...node, name: 'private-renamed-node'} : node)),
+      nodes: EffectArray.map(baseline.nodes, (node, index) =>
+        index === 0 ? {...node, name: 'private-renamed-node'} : node,
+      ),
     } satisfies CodeGraphQueryResult;
     const missing = benchmarkQueryResult(['private-node-a'], ['private-edge-a']);
     const timedOut = {
@@ -1579,15 +1680,18 @@ function structuralDigestLookupRows(input: {
     );
     for (const symbolId of new Set(input.deletedSymbolIds)) insertDeleted.run('current', symbolId);
     const statement = codeGraphStructuralDigestSymbolLookupStatement('current', 'base');
-    return (database.query(statement.text).all(...statement.parameters) as StructuralLookupRow[]).map(row => ({
-      ...(row.evidence_edge_id === null ? {} : {evidence_edge_id: row.evidence_edge_id}),
-      ...(row.evidence_path === null ? {} : {evidence_path: row.evidence_path}),
-      exported: Number(row.exported),
-      lookup_key: row.lookup_key,
-      provenance: row.provenance,
-      resolution_domain: row.resolution_domain,
-      symbol_id: row.symbol_id,
-    }));
+    return EffectArray.map(
+      database.query<StructuralLookupRow, SQLQueryBindings[]>(statement.text).all(...statement.parameters),
+      row => ({
+        ...(row.evidence_edge_id === null ? {} : {evidence_edge_id: row.evidence_edge_id}),
+        ...(row.evidence_path === null ? {} : {evidence_path: row.evidence_path}),
+        exported: Number(row.exported),
+        lookup_key: row.lookup_key,
+        provenance: row.provenance,
+        resolution_domain: row.resolution_domain,
+        symbol_id: row.symbol_id,
+      }),
+    );
   } finally {
     database.close(false);
   }
@@ -1602,7 +1706,7 @@ function embeddingContextArtifact(
     createdAt: '2026-08-14T00:00:00.000Z',
     environment: {
       architecture: 'arm64',
-      commit: 'a'.repeat(40),
+      commit: Effect2.pipe('a', EffectString.repeat(40)),
       cpu: 'test cpu',
       dirty: false,
       fixtureHash: 'generated-code-graph-vectors-v2:10000',
@@ -1638,7 +1742,12 @@ function embeddingContextArtifact(
       embeddingContextPoolSizeEffective: contexts,
       embeddingContextPoolSizeRequested: contexts,
       embeddingContextThreadCounts:
-        contexts === 1 ? 'upstream-default' : Array.from({length: contexts}, () => String(8 / contexts)).join(','),
+        contexts === 1
+          ? 'upstream-default'
+          : EffectArray.join(
+              Array.from({length: contexts}, () => String(8 / contexts)),
+              ',',
+            ),
       embeddingModelGpuLayers: 0,
       environmentOverrides: JSON.stringify({THREADNOTE_EMBEDDING_CONTEXTS: String(contexts)}),
       runnerClass: 'test-runner-class',
@@ -1656,20 +1765,29 @@ function embeddingContextArtifact(
 }
 
 function compareLookupRows(left: StructuralLookupRow, right: StructuralLookupRow): number {
-  return left.lookup_key.localeCompare(right.lookup_key) || left.symbol_id.localeCompare(right.symbol_id);
+  return (
+    Effect2.pipe(left.lookup_key, EffectString.localeCompare(right.lookup_key)) ||
+    Effect2.pipe(left.symbol_id, EffectString.localeCompare(right.symbol_id))
+  );
 }
 
 function sourceSlice(source: string, from: string, to: string): string {
-  const start = source.indexOf(from);
+  const start = Effect2.pipe(
+    source,
+    EffectString.indexOf(from),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
   const end = source.indexOf(to, start + from.length);
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
-  return source.slice(start, end);
+  return Effect2.pipe(source, EffectString.slice(start, end));
 }
 
 function expectInOrder(source: string, markers: readonly string[]): void {
   let cursor = -1;
   for (const marker of markers) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     const next = source.indexOf(marker, cursor + 1);
     expect(next, `missing or out-of-order benchmark marker: ${marker}`).toBeGreaterThan(cursor);
     cursor = next;
@@ -1734,11 +1852,13 @@ function seedStructuralDigestInterlockDatabase(
       now,
     );
     database.query("UPDATE snapshots SET state = 'building' WHERE id = ?").run(replacementSnapshotId);
-    const minimum = database
-      .query(
-        "SELECT CAST(value AS INTEGER) AS generation FROM schema_metadata WHERE key = 'minimum_extractor_generation'",
-      )
-      .get() as {readonly generation: number};
+    const minimum = requiredRow(
+      database
+        .query<{readonly generation: number}, SQLQueryBindings[]>(
+          "SELECT CAST(value AS INTEGER) AS generation FROM schema_metadata WHERE key = 'minimum_extractor_generation'",
+        )
+        .get(),
+    );
     const insertGeneration = database.query(
       'INSERT INTO snapshot_extractor_generations (snapshot_id, generation) VALUES (?, ?)',
     );
@@ -1751,23 +1871,35 @@ function seedStructuralDigestInterlockDatabase(
           snapshot_id, path, content_hash, language, mode, size, source
         ) VALUES (?, ?, ?, 'typescript', '100644', 32, 'commit')`,
       )
-      .run(baseSnapshotId, privatePath, 'f'.repeat(64));
+      .run(baseSnapshotId, privatePath, Effect2.pipe('f', EffectString.repeat(64)));
     database.query('INSERT INTO lexical_compact_snapshots (snapshot_id) VALUES (?)').run(baseSnapshotId);
-    const lexicalSnapshot = database
-      .query('SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ?')
-      .get(baseSnapshotId) as {readonly snapshot_key: number};
+    const lexicalSnapshot = requiredRow(
+      database
+        .query<{readonly snapshot_key: number}, SQLQueryBindings[]>(
+          'SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ?',
+        )
+        .get(baseSnapshotId),
+    );
     database
       .query('INSERT INTO lexical_compact_terms (snapshot_key, term) VALUES (?, ?)')
       .run(lexicalSnapshot.snapshot_key, 'private');
     database
       .query('INSERT INTO lexical_compact_symbols (snapshot_key, symbol_id) VALUES (?, ?)')
       .run(lexicalSnapshot.snapshot_key, 'private-symbol');
-    const lexicalTerm = database
-      .query('SELECT term_key FROM lexical_compact_terms WHERE snapshot_key = ?')
-      .get(lexicalSnapshot.snapshot_key) as {readonly term_key: number};
-    const lexicalSymbol = database
-      .query('SELECT symbol_key FROM lexical_compact_symbols WHERE snapshot_key = ?')
-      .get(lexicalSnapshot.snapshot_key) as {readonly symbol_key: number};
+    const lexicalTerm = requiredRow(
+      database
+        .query<{readonly term_key: number}, SQLQueryBindings[]>(
+          'SELECT term_key FROM lexical_compact_terms WHERE snapshot_key = ?',
+        )
+        .get(lexicalSnapshot.snapshot_key),
+    );
+    const lexicalSymbol = requiredRow(
+      database
+        .query<{readonly symbol_key: number}, SQLQueryBindings[]>(
+          'SELECT symbol_key FROM lexical_compact_symbols WHERE snapshot_key = ?',
+        )
+        .get(lexicalSnapshot.snapshot_key),
+    );
     database
       .query(
         `INSERT INTO lexical_compact_postings (snapshot_key, term_key, symbol_key, weight)
@@ -1798,22 +1930,27 @@ function structuralDigestInterlockState(
   readonly firstState: string;
   readonly leaseRows: number;
 } {
-  const state = database
-    .query(
-      `SELECT
+  const state = requiredRow(
+    database
+      .query<
+        {
+          readonly active_snapshot_id: string;
+          readonly base_file_rows: number;
+          readonly base_state: string;
+          readonly first_state: string;
+          readonly lease_rows: number;
+        },
+        SQLQueryBindings[]
+      >(
+        `SELECT
         (SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ?) AS active_snapshot_id,
         (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_id = ?) AS base_file_rows,
         (SELECT state FROM snapshots WHERE id = ?) AS base_state,
         (SELECT state FROM snapshots WHERE id = ?) AS first_state,
         (SELECT COUNT(*) FROM snapshot_leases WHERE snapshot_id = ?) AS lease_rows`,
-    )
-    .get(worktreeId, baseSnapshotId, baseSnapshotId, firstSnapshotId, firstSnapshotId) as {
-    readonly active_snapshot_id: string;
-    readonly base_file_rows: number;
-    readonly base_state: string;
-    readonly first_state: string;
-    readonly lease_rows: number;
-  };
+      )
+      .get(worktreeId, baseSnapshotId, baseSnapshotId, firstSnapshotId, firstSnapshotId),
+  );
   return {
     activeSnapshotId: state.active_snapshot_id,
     baseFileRows: Number(state.base_file_rows),

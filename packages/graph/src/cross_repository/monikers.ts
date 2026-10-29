@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {compareCodeUnits} from '../ordering.js';
@@ -11,6 +12,9 @@ import {
   type CodeGraphProtobufMonikerKind,
   type CodeGraphProtobufMonikerV1,
 } from './types.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const MONIKER_ID = /^cgm_[0-9a-f]{64}$/u;
 const COMPONENT_ID = /^cgp_[0-9a-f]{32}$/u;
@@ -41,7 +45,7 @@ export interface CodeGraphProtobufMonikerInput {
 }
 
 export function normalizeNpmPackageName(value: string): string {
-  const normalized = value.normalize('NFKC').trim().toLowerCase();
+  const normalized = Effect.pipe(value, EffectString.normalize('NFKC'), EffectString.trim, EffectString.toLowerCase);
   if (normalized.length > 214 || !NPM_PACKAGE.test(normalized)) {
     throw new Error('Code graph npm package name is invalid.');
   }
@@ -49,15 +53,34 @@ export function normalizeNpmPackageName(value: string): string {
 }
 
 export function normalizeProtobufImportPath(value: string): string {
-  const normalized = value.normalize('NFKC').trim().replaceAll('\\', '/').replace(/^\.\//u, '');
-  const segments = normalized.split('/');
+  const normalized = Effect.pipe(
+    value,
+    EffectString.normalize('NFKC'),
+    EffectString.trim,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/^\.\//u, ''),
+  );
+  const segments = Effect.pipe(normalized, EffectString.split('/'));
   if (
     !normalized ||
     normalized.length > MAX_EVIDENCE_PATH_LENGTH ||
-    normalized.startsWith('/') ||
-    !normalized.endsWith('.proto') ||
-    [...normalized].some(character => character.codePointAt(0)! < 32 || character.codePointAt(0) === 127) ||
-    segments.some(segment => !segment || segment === '.' || segment === '..')
+    Effect.pipe(normalized, EffectString.startsWith('/')) ||
+    !Effect.pipe(normalized, EffectString.endsWith('.proto')) ||
+    EffectArray.some(
+      [...normalized],
+      character =>
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        )! < 32 ||
+        Effect.pipe(
+          character,
+          EffectString.codePointAt(0),
+          Effect.Option.getOrElse(() => undefined),
+        ) === 127,
+    ) ||
+    EffectArray.some(segments, segment => !segment || segment === '.' || segment === '..')
   ) {
     throw new Error('Code graph protobuf import path is invalid.');
   }
@@ -65,7 +88,12 @@ export function normalizeProtobufImportPath(value: string): string {
 }
 
 export function normalizeProtobufName(value: string): string {
-  const normalized = value.normalize('NFKC').trim().replace(/^\./u, '');
+  const normalized = Effect.pipe(
+    value,
+    EffectString.normalize('NFKC'),
+    EffectString.trim,
+    EffectString.replace(/^\./u, ''),
+  );
   if (normalized.length > MAX_MONIKER_IDENTITY_LENGTH || !PROTOBUF_NAME.test(normalized)) {
     throw new Error('Code graph protobuf identity is invalid.');
   }
@@ -127,7 +155,7 @@ export function codeGraphProtobufMoniker(input: CodeGraphProtobufMonikerInput): 
     packageName !== undefined &&
     qualifiedName !== undefined &&
     qualifiedName !== packageName &&
-    !qualifiedName.startsWith(`${packageName}.`)
+    !Effect.pipe(qualifiedName, EffectString.startsWith(`${packageName}.`))
   ) {
     throw new Error('Code graph protobuf declaration is outside its package identity.');
   }
@@ -181,17 +209,25 @@ export function compareCodeGraphMonikers(left: CodeGraphMonikerV1, right: CodeGr
 }
 
 function normalizedEvidence(evidence: {readonly path: string; readonly span: CodeGraphSpan}) {
-  const path = evidence.path.normalize('NFC').replaceAll('\\', '/').replace(/^\.\//u, '');
+  const path = Effect.pipe(
+    evidence.path,
+    EffectString.normalize('NFC'),
+    EffectString.replaceAll('\\', '/'),
+    EffectString.replace(/^\.\//u, ''),
+  );
   if (
     !path ||
     path.length > MAX_EVIDENCE_PATH_LENGTH ||
-    path.startsWith('/') ||
-    path.split('/').some(segment => !segment || segment === '.' || segment === '..')
+    Effect.pipe(path, EffectString.startsWith('/')) ||
+    EffectArray.some(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => !segment || segment === '.' || segment === '..',
+    )
   )
     throw new Error('Code graph moniker path is invalid.');
   const span = evidence.span;
   if (
-    ![span.line, span.column, span.endLine, span.endColumn].every(Number.isSafeInteger) ||
+    !EffectArray.every([span.line, span.column, span.endLine, span.endColumn], Number.isSafeInteger) ||
     span.line < 1 ||
     span.column < 1 ||
     span.endLine < span.line ||
@@ -205,26 +241,26 @@ function normalizedEvidence(evidence: {readonly path: string; readonly span: Cod
 function structurallyEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (typeof left !== 'object' || left === null || typeof right !== 'object' || right === null) return false;
-  if (Array.isArray(left) || Array.isArray(right)) {
+  if (EffectArray.isArray(left) || EffectArray.isArray(right)) {
     return (
-      Array.isArray(left) &&
-      Array.isArray(right) &&
+      EffectArray.isArray(left) &&
+      EffectArray.isArray(right) &&
       left.length === right.length &&
-      left.every((value, index) => structurallyEqual(value, right[index]))
+      EffectArray.every(left, (value, index) => structurallyEqual(value, right[index]))
     );
   }
   if (!Predicate.isObject(left) || !Predicate.isObject(right)) return false;
-  const leftKeys = Object.keys(left).sort(compareCodeUnits);
-  const rightKeys = Object.keys(right).sort(compareCodeUnits);
+  const leftKeys = EffectRecord.keys(left).sort(compareCodeUnits);
+  const rightKeys = EffectRecord.keys(right).sort(compareCodeUnits);
   return (
     leftKeys.length === rightKeys.length &&
-    leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual(left[key], right[key]))
+    EffectArray.every(leftKeys, (key, index) => key === rightKeys[index] && structurallyEqual(left[key], right[key]))
   );
 }
 
 function optionalNonEmpty(value: string | undefined, label: string): string | undefined {
   if (value === undefined) return undefined;
-  const normalized = value.normalize('NFKC').trim();
+  const normalized = Effect.pipe(value, EffectString.normalize('NFKC'), EffectString.trim);
   if (!normalized || normalized.length > MAX_PACKAGE_VERSION_LENGTH) {
     throw new Error(`Code graph ${label} is invalid.`);
   }
@@ -234,25 +270,28 @@ function optionalNonEmpty(value: string | undefined, label: string): string | un
 function monikerId(moniker: Omit<CodeGraphMonikerV1, 'id'> & {readonly id?: string}): string {
   const evidence = moniker.evidence;
   return `cgm_${sha256HexSync(
-    [
-      'threadnote-code-graph-moniker-v1',
-      moniker.scheme,
-      moniker.resolutionDomain,
-      moniker.identity,
-      moniker.role,
-      moniker.kind,
-      'packageName' in moniker ? (moniker.packageName ?? '') : '',
-      'packageVersion' in moniker ? (moniker.packageVersion ?? '') : '',
-      'dependencyKind' in moniker ? (moniker.dependencyKind ?? '') : '',
-      'importPath' in moniker ? (moniker.importPath ?? '') : '',
-      'qualifiedName' in moniker ? (moniker.qualifiedName ?? '') : '',
-      'componentId' in moniker ? (moniker.componentId ?? '') : '',
-      'symbolId' in moniker ? (moniker.symbolId ?? '') : '',
-      evidence.path,
-      evidence.span.line,
-      evidence.span.column,
-      evidence.span.endLine,
-      evidence.span.endColumn,
-    ].join('\0'),
+    EffectArray.join(
+      [
+        'threadnote-code-graph-moniker-v1',
+        moniker.scheme,
+        moniker.resolutionDomain,
+        moniker.identity,
+        moniker.role,
+        moniker.kind,
+        'packageName' in moniker ? String(moniker.packageName ?? '') : '',
+        'packageVersion' in moniker ? String(moniker.packageVersion ?? '') : '',
+        'dependencyKind' in moniker ? String(moniker.dependencyKind ?? '') : '',
+        'importPath' in moniker ? String(moniker.importPath ?? '') : '',
+        'qualifiedName' in moniker ? String(moniker.qualifiedName ?? '') : '',
+        'componentId' in moniker ? String(moniker.componentId ?? '') : '',
+        'symbolId' in moniker ? String(moniker.symbolId ?? '') : '',
+        evidence.path,
+        String(evidence.span.line),
+        String(evidence.span.column),
+        String(evidence.span.endLine),
+        String(evidence.span.endColumn),
+      ],
+      '\0',
+    ),
   )}`;
 }

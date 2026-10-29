@@ -6,6 +6,7 @@ import {
   parseAuth0M2MPublisherRegistryCredentialConfig,
   runAuth0M2MPublisherRegistryCredentialHelper,
 } from '@threadnote/graph/sharing/auth0/m2m_registry_credential';
+import * as EffectRecord from 'effect/Record';
 
 const now = Math.floor(Date.now() / 1000);
 const origin = 'https://registry.threadnote.test';
@@ -34,7 +35,7 @@ describe('Auth0 M2M Zot publisher Docker helper', () => {
       now: () => now * 1000,
       fetch: async (url, init) => {
         expect(String(url)).toBe(`${issuer}oauth/token`);
-        expect(Object.fromEntries(new URLSearchParams(String(init.body)))).toEqual({
+        expect(EffectRecord.fromEntries(new URLSearchParams(String(init.body)))).toEqual({
           audience: origin,
           client_id: environment.THREADNOTE_AUTH0_PUBLISHER_M2M_CLIENT_ID,
           client_secret: environment.THREADNOTE_AUTH0_PUBLISHER_M2M_CLIENT_SECRET,

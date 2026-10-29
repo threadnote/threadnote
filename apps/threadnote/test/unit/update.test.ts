@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
@@ -84,6 +85,36 @@ import * as utils from '@threadnote/threadnote/utils';
 import * as version from '@threadnote/workspace/runtime-version';
 import * as installation from '@threadnote/workspace/installation';
 import {LEGACY_GITHUB_RELEASES_URL, TRANSFERRED_GITHUB_RELEASES_URL} from '@threadnote/threadnote/release/github_auth';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const UpdateCacheSchema = Schema.StructWithRest(
+  Schema.Struct({latestVersion: Schema.String, version: Schema.optionalKey(Schema.Finite)}),
+  [JsonRecordSchema],
+);
+const ActiveReleaseSchema = Schema.StructWithRest(Schema.Struct({version: Schema.String}), [JsonRecordSchema]);
+const PostUpdateStateSchema = Schema.StructWithRest(Schema.Struct({handledMigrationIds: Schema.Array(Schema.String)}), [
+  JsonRecordSchema,
+]);
+const GrammarMetadataSchema = Schema.StructWithRest(
+  Schema.Struct({
+    builderLicense: Schema.optionalKey(Schema.String),
+    license: Schema.String,
+    licensePackagePath: Schema.optionalKey(Schema.String),
+    packagePath: Schema.optionalKey(Schema.String),
+    path: Schema.String,
+  }),
+  [JsonRecordSchema],
+);
+const CodeGraphManifestSchema = Schema.StructWithRest(
+  Schema.Struct({grammars: Schema.Record(Schema.String, GrammarMetadataSchema)}),
+  [JsonRecordSchema],
+);
+function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown): S['Type'] {
+  return Schema.decodeUnknownSync(schema)(value);
+}
 
 const OFFICIAL_RELEASE_SOURCE = 'https://api.github.com/repos/threadnote/threadnote/releases?per_page=100';
 const RELEASE_VERSION = '4.0.0';
@@ -132,7 +163,9 @@ describe('standalone release selection', () => {
         fc.boolean(),
         fc.boolean(),
         (preferInstalledVersion, standaloneBuild, developmentBuild, runningInstalledRelease) => {
-          const packageVersion = developmentBuild ? `4.4.1-local.g${'a'.repeat(40)}` : '4.4.1';
+          const packageVersion = developmentBuild
+            ? `4.4.1-local.g${Effect2.pipe('a', EffectString.repeat(40))}`
+            : '4.4.1';
           expect(
             shouldPreferActiveInstalledVersion({
               packageVersion,
@@ -283,7 +316,7 @@ describe('standalone release selection', () => {
 
   it('validates checksum documents and target names', () => {
     const artifact = 'threadnote-darwin-arm64.tar.gz';
-    const checksum = 'a'.repeat(64);
+    const checksum = Effect2.pipe('a', EffectString.repeat(64));
     expect(parseReleaseChecksum(`${checksum}  ${artifact}\n`, artifact)).toBe(checksum);
     expect(() => parseReleaseChecksum(`${checksum}  another.tar.gz\n`, artifact)).toThrow(/Invalid checksum/);
     expect(() => parseReleaseChecksum('not-a-checksum', artifact)).toThrow(/Invalid checksum/);
@@ -312,7 +345,7 @@ describe('standalone release selection', () => {
           const commandExecutor = CommandExecutor.of({
             execute: (command, args) =>
               Effect.sync(() => {
-                recorded.push([command, ...args].join(' '));
+                recorded.push(EffectArray.join([command, ...args], ' '));
                 return {
                   exitCode: 0,
                   stderr: '',
@@ -338,12 +371,14 @@ describe('standalone release selection', () => {
         }),
       ).pipe(provideTestLayer(ApplicationLayer));
 
-      const codesignCommands = commands.filter(command => command.startsWith('codesign '));
-      expect(commands.join('\n')).toContain('file --brief');
-      expect(codesignCommands.join('\n')).toContain('libfixture.so');
-      expect(codesignCommands.join('\n')).toContain('threadnote');
-      expect(codesignCommands.join('\n')).not.toContain('metadata.txt');
-      expect(commands.join('\n')).not.toContain('spctl');
+      const codesignCommands = EffectArray.filter(commands, command =>
+        Effect2.pipe(command, EffectString.startsWith('codesign ')),
+      );
+      expect(EffectArray.join(commands, '\n')).toContain('file --brief');
+      expect(EffectArray.join(codesignCommands, '\n')).toContain('libfixture.so');
+      expect(EffectArray.join(codesignCommands, '\n')).toContain('threadnote');
+      expect(EffectArray.join(codesignCommands, '\n')).not.toContain('metadata.txt');
+      expect(EffectArray.join(commands, '\n')).not.toContain('spctl');
     }),
   );
 
@@ -430,10 +465,10 @@ describe('update notifications', () => {
             ),
           );
           return {
-            cache: JSON.parse(yield* fs.readFileString(path.join(config.agentContextHome, 'update-check.json'))) as {
-              readonly latestVersion: string;
-              readonly version?: number;
-            },
+            cache: decodeJson(
+              UpdateCacheSchema,
+              JSON.parse(yield* fs.readFileString(path.join(config.agentContextHome, 'update-check.json'))),
+            ),
             output: captured.output,
             requests,
           };
@@ -521,7 +556,9 @@ describe('update notifications', () => {
 
   effectIt.effect('does not check or announce updates for an exact local development build', () =>
     Effect.gen(function* () {
-      vi.mocked(utils.currentPackageVersion).mockReturnValue(Effect.succeed(`4.0.0-local.g${'a'.repeat(40)}`));
+      vi.mocked(utils.currentPackageVersion).mockReturnValue(
+        Effect.succeed(`4.0.0-local.g${Effect2.pipe('a', EffectString.repeat(40))}`),
+      );
       let requests = 0;
       const http = HttpService.of({
         downloadToFile: () => Effect.die('not used'),
@@ -548,7 +585,7 @@ describe('standalone updater', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const releaseVersion = '4.4.1';
-        const activeVersion = `4.4.1-local.g${'b'.repeat(40)}`;
+        const activeVersion = `4.4.1-local.g${Effect2.pipe('b', EffectString.repeat(40))}`;
         vi.mocked(utils.currentPackageVersion).mockReturnValue(Effect.succeed(releaseVersion));
         vi.mocked(version.isStandaloneThreadnoteBuild).mockReturnValue(true);
         const fs = yield* FileSystem.FileSystem;
@@ -769,7 +806,10 @@ describe('standalone updater', () => {
         ).pipe(Effect.exit);
         expect(Exit.isFailure(exit)).toBe(true);
         if (Exit.isFailure(exit)) {
-          const defects = exit.cause.reasons.filter(Cause.isDieReason).map(reason => reason.defect);
+          const defects = EffectArray.map(
+            EffectArray.filter(exit.cause.reasons, Cause.isDieReason),
+            reason => reason.defect,
+          );
           expect(defects).toHaveLength(1);
           expect(defects[0]).toMatchObject({actual: categories, expected: []});
         }
@@ -875,9 +915,10 @@ describe('standalone updater', () => {
         yield* Deferred.succeed(allowSelection, undefined);
 
         const failure = yield* Fiber.join(updater);
-        const active = JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))) as {
-          version: string;
-        };
+        const active = decodeJson(
+          ActiveReleaseSchema,
+          JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))),
+        );
         expect(String(failure)).toContain(
           `Refusing to downgrade Threadnote ${concurrentlyActivatedVersion} to ${selectedVersion}`,
         );
@@ -1025,9 +1066,10 @@ describe('standalone updater', () => {
           );
           const launcher = path.join(binRoot, baseSystem.platform === 'win32' ? 'threadnote.cmd' : 'threadnote');
           return {
-            active: JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))) as {
-              version: string;
-            },
+            active: decodeJson(
+              ActiveReleaseSchema,
+              JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))),
+            ),
             captured,
             launcher: yield* fs.readFileString(launcher),
           };
@@ -1186,11 +1228,19 @@ describe('standalone updater', () => {
           const commandExecutor = CommandExecutor.of({
             execute: (executable, args) =>
               Effect.sync(() => {
-                signatureCommands.push([executable, ...args].join(' '));
+                signatureCommands.push(EffectArray.join([executable, ...args], ' '));
                 return {
                   exitCode: 0,
                   stderr: '',
-                  stdout: executable === 'file' && args.at(-1)?.endsWith('.so') ? 'Mach-O 64-bit bundle\n' : '',
+                  stdout:
+                    executable === 'file' &&
+                    Effect2.pipe(args.at(-1), effectOptionalString =>
+                      effectOptionalString == null
+                        ? undefined
+                        : Effect2.pipe(effectOptionalString, EffectString.endsWith('.so')),
+                    )
+                      ? 'Mach-O 64-bit bundle\n'
+                      : '',
                 };
               }),
             executeStreaming: () => Effect.die('not used'),
@@ -1274,12 +1324,14 @@ describe('standalone updater', () => {
       expect(result.corruptContentsExist).toBe(false);
       expect(JSON.parse(result.activeRelease)).toMatchObject({version: RELEASE_VERSION});
       expect(JSON.parse(result.releaseMetadata)).toMatchObject({version: RELEASE_VERSION});
-      expect(result.launcher).toContain(`versions/${RELEASE_VERSION}/threadnote`.replaceAll('/', pathSeparator()));
+      expect(result.launcher).toContain(
+        Effect2.pipe(`versions/${RELEASE_VERSION}/threadnote`, EffectString.replaceAll('/', pathSeparator())),
+      );
       expect(result.mcpLauncher).toContain('mcp-broker');
       if (result.platform === 'darwin') {
-        expect(result.signatureCommands.join('\n')).toContain('codesign --verify --strict --verbose=2');
-        expect(result.signatureCommands.join('\n')).toContain('libfixture.so');
-        expect(result.signatureCommands.join('\n')).not.toContain('spctl');
+        expect(EffectArray.join(result.signatureCommands, '\n')).toContain('codesign --verify --strict --verbose=2');
+        expect(EffectArray.join(result.signatureCommands, '\n')).toContain('libfixture.so');
+        expect(EffectArray.join(result.signatureCommands, '\n')).not.toContain('spctl');
       }
       if (result.platform === 'win32') {
         expect(result.signatureCommands).toHaveLength(0);
@@ -1307,7 +1359,9 @@ describe('standalone updater', () => {
           const executableName = baseSystem.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
           yield* writeReleaseArchive(archivePath, artifactName, executableName, RELEASE_VERSION);
           const release = releaseResponse(RELEASE_VERSION, false, artifactName);
-          const http = updateHttpService(fs, archivePath, '0'.repeat(64), artifactName, [release]);
+          const http = updateHttpService(fs, archivePath, Effect2.pipe('0', EffectString.repeat(64)), artifactName, [
+            release,
+          ]);
           const testSystem = SystemInfo.of({
             ...baseSystem,
             environment: () => ({
@@ -1463,8 +1517,16 @@ describe('standalone updater', () => {
         );
       }).pipe(provideTestLayer(ApplicationLayer));
 
-      const postUpdate = captured.output.indexOf('post-update --from-version');
-      const repair = captured.output.indexOf('repair --no-post-update');
+      const postUpdate = Effect2.pipe(
+        captured.output,
+        EffectString.indexOf('post-update --from-version'),
+        Effect2.Option.getOrElse(() => -1),
+      );
+      const repair = Effect2.pipe(
+        captured.output,
+        EffectString.indexOf('repair --no-post-update'),
+        Effect2.Option.getOrElse(() => -1),
+      );
       expect(postUpdate).toBeGreaterThan(0);
       expect(repair).toBeGreaterThan(postUpdate);
     }),
@@ -1499,7 +1561,15 @@ describe('standalone updater', () => {
               Effect.sync(() => ({
                 exitCode: 0,
                 stderr: '',
-                stdout: executable === 'file' && args.at(-1)?.endsWith('.so') ? 'Mach-O 64-bit bundle\n' : '',
+                stdout:
+                  executable === 'file' &&
+                  Effect2.pipe(args.at(-1), effectOptionalString =>
+                    effectOptionalString == null
+                      ? undefined
+                      : Effect2.pipe(effectOptionalString, EffectString.endsWith('.so')),
+                  )
+                    ? 'Mach-O 64-bit bundle\n'
+                    : '',
               })),
             executeStreaming: (_executable, args, options) =>
               Effect.sync(() => {
@@ -1539,9 +1609,9 @@ describe('standalone updater', () => {
         }),
       ).pipe(provideTestLayer(ApplicationLayer));
 
-      expect(result.streaming.map(entry => entry.args[0])).toEqual(['post-update', 'repair']);
-      expect(result.streaming.every(entry => entry.inheritOutput === false)).toBe(true);
-      expect(result.streaming.every(entry => entry.inheritStdin === false)).toBe(true);
+      expect(EffectArray.map(result.streaming, entry => entry.args[0])).toEqual(['post-update', 'repair']);
+      expect(EffectArray.every(result.streaming, entry => entry.inheritOutput === false)).toBe(true);
+      expect(EffectArray.every(result.streaming, entry => entry.inheritStdin === false)).toBe(true);
       expect(result.captured.output).toContain('Post-update did not finish. Continuing with local setup repair.');
       expect(result.captured.output).toContain('Repairing local Threadnote setup after standalone update.');
       expect(result.captured.output).not.toContain('Update complete.');
@@ -2199,11 +2269,13 @@ describe('post-update validation', () => {
             toVersion: RELEASE_VERSION,
             yes: true,
           }).pipe(Effect.provideService(CommandExecutor, commandExecutor), Effect.flip);
-          const firstState = JSON.parse(yield* fs.readFileString(path.join(home, 'post-update-state.json'))) as {
-            handledMigrationIds: string[];
-          };
-          const temporaryStateFiles = (yield* fs.readDirectory(home)).filter(name =>
-            /^\.post-update-state\.json\..+\.tmp$/.test(name),
+          const firstState = decodeJson(
+            PostUpdateStateSchema,
+            JSON.parse(yield* fs.readFileString(path.join(home, 'post-update-state.json'))),
+          );
+          const temporaryStateFiles = EffectArray.filter(
+            yield* fs.readDirectory(home),
+            __effectArrayValue => !!(name => /^\.post-update-state\.json\..+\.tmp$/.test(name))(__effectArrayValue),
           );
 
           failSecond = false;
@@ -2213,9 +2285,10 @@ describe('post-update validation', () => {
             toVersion: RELEASE_VERSION,
             yes: true,
           }).pipe(Effect.provideService(CommandExecutor, commandExecutor));
-          const finalState = JSON.parse(yield* fs.readFileString(path.join(home, 'post-update-state.json'))) as {
-            handledMigrationIds: string[];
-          };
+          const finalState = decodeJson(
+            PostUpdateStateSchema,
+            JSON.parse(yield* fs.readFileString(path.join(home, 'post-update-state.json'))),
+          );
           return {
             finalState,
             firstFailure: String(firstFailure),
@@ -2346,7 +2419,8 @@ describe('streaming subcommand failure messages', () => {
       Effect.sync(() => {
         const overflow = extra > 0;
         const body = overflow
-          ? `UNIQUEHEAD${'m'.repeat(STREAMING_SUBCOMMAND_FAILURE_DETAIL_LIMIT + extra)}UNIQUETAIL`
+          ? // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
+            `UNIQUEHEAD${'m'.repeat(STREAMING_SUBCOMMAND_FAILURE_DETAIL_LIMIT + extra)}UNIQUETAIL`
           : 'ok-detail';
         const stderr = stream === 'stderr' ? body : '';
         const stdout = stream === 'stdout' ? body : 'ignored-stdout-noise';
@@ -2356,7 +2430,7 @@ describe('streaming subcommand failure messages', () => {
           stdout,
         });
         expect(message).toContain(`exited with ${exitCode}.`);
-        const preferred = stderr.trim() || stdout.trim();
+        const preferred = Effect2.pipe(stderr, EffectString.trim) || Effect2.pipe(stdout, EffectString.trim);
         if (overflow) {
           expect(message).toContain('…');
           expect(message).toContain('UNIQUETAIL');
@@ -2446,7 +2520,9 @@ function captureDryRunUpdateSelection(
       downloadToFile: () => Effect.die('dry run must not download'),
       getJson: () =>
         Effect.succeed({
-          body: releases.map(([version, prerelease]) => releaseResponse(version, prerelease, artifactName)),
+          body: EffectArray.map(releases, ([version, prerelease]) =>
+            releaseResponse(version, prerelease, artifactName),
+          ),
           status: 200,
         }),
       getStatus: () => Effect.die('not used'),
@@ -2549,32 +2625,24 @@ function writeReleaseArchive(
 ) {
   return Effect.tryPromise({
     try: async () => {
-      const manifest = JSON.parse(await Bun.file('assets/code-graph/manifest.json').text()) as {
-        readonly grammars: Readonly<
-          Record<
-            string,
-            {
-              readonly builderLicense?: string;
-              readonly license: string;
-              readonly licensePackagePath?: string;
-              readonly packagePath?: string;
-              readonly path: string;
-            }
-          >
-        >;
-      };
-      const grammarMetadata = Object.values(manifest.grammars);
+      const manifest = decodeJson(
+        CodeGraphManifestSchema,
+        JSON.parse(await Bun.file('assets/code-graph/manifest.json').text()),
+      );
+      const grammarMetadata = EffectRecord.values(manifest.grammars);
       const assetPaths = [
         'manifest.json',
         'runtime/web-tree-sitter.wasm',
         'licenses/web-tree-sitter.LICENSE',
-        ...grammarMetadata.map(asset => asset.path),
-        ...grammarMetadata.map(asset => asset.license),
-        ...grammarMetadata.flatMap(asset => (asset.builderLicense ? [asset.builderLicense] : [])),
-      ].filter((value, index, values) => values.indexOf(value) === index);
+        ...EffectArray.map(grammarMetadata, asset => asset.path),
+        ...EffectArray.map(grammarMetadata, asset => asset.license),
+        ...EffectArray.flatMap(grammarMetadata, asset => (asset.builderLicense ? [asset.builderLicense] : [])),
+      ];
+      const uniqueAssetPaths = EffectArray.dedupe(assetPaths);
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
       const assets = Object.fromEntries(
         await Promise.all(
-          assetPaths.map(async asset => [
+          EffectArray.map(uniqueAssetPaths, async asset => [
             `assets/code-graph/${asset}`,
             await codeGraphFixtureAsset(asset, grammarMetadata),
           ]),
@@ -2588,17 +2656,18 @@ function writeReleaseArchive(
         'CHANGELOG.md',
         'LICENSE',
       ];
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
       const cursorPluginAssets = Object.fromEntries(
         await Promise.all(
-          cursorPluginPaths.map(async asset => [
+          EffectArray.map(cursorPluginPaths, async asset => [
             `cursor-plugin/${asset}`,
             await Bun.file(`cursor-plugin/${asset}`).bytes(),
           ]),
         ),
       );
       if (options.tamperCodeGraphAsset) {
-        const firstGrammar = Object.entries(manifest.grammars).sort(([left], [right]) =>
-          left.localeCompare(right),
+        const firstGrammar = EffectRecord.toEntries(manifest.grammars).sort(([left], [right]) =>
+          Effect2.pipe(left, EffectString.localeCompare(right)),
         )[0]?.[1];
         if (firstGrammar === undefined) throw TestError.make({message: 'Code graph fixture manifest has no grammars.'});
         assets[`assets/code-graph/${firstGrammar.path}`] = new TextEncoder().encode('tampered grammar');
@@ -2649,9 +2718,9 @@ async function codeGraphFixtureAsset(
 ): Promise<Uint8Array> {
   const bundled = Bun.file(`assets/code-graph/${asset}`);
   if (await bundled.exists()) return bundled.bytes();
-  const grammar = grammars.find(value => value.path === asset);
+  const grammar = EffectOption.getOrUndefined(EffectArray.findFirst(grammars, value => value.path === asset));
   if (grammar?.packagePath) return Bun.file(grammar.packagePath).bytes();
-  const license = grammars.find(value => value.license === asset);
+  const license = EffectOption.getOrUndefined(EffectArray.findFirst(grammars, value => value.license === asset));
   if (license?.licensePackagePath) return Bun.file(license.licensePackagePath).bytes();
   throw TestError.make({message: `Missing code graph fixture asset: ${asset}`});
 }

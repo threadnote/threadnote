@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -12,6 +13,7 @@ import {
   validateRemoteMemoryProvisioningInput,
   type RemoteMemoryProvisioningInput,
 } from '@threadnote/remote-memory/postgres/control_plane';
+import * as EffectRecord from 'effect/Record';
 
 const validProvisioning: RemoteMemoryProvisioningInput = {
   allowedProjects: ['threadnote'],
@@ -113,6 +115,7 @@ describe('remote memory provisioning boundary', () => {
     });
   });
 
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   it.each([undefined, null, {}, '', 'not-json', '[]', `{"value":"${'a'.repeat(STORED_SHARE_POLICY_MAX_BYTES)}"}`])(
     'rejects an unsafe stored share-policy representation %#',
     stored => {
@@ -151,13 +154,15 @@ describe('remote memory provisioning boundary', () => {
     });
     fc.assert(
       fc.property(fc.uniqueArray(entry, {maxLength: 8, selector: value => value.project}), entries => {
-        const inputBindings = Object.fromEntries(entries.map(value => [value.project, value.repositories]));
-        const storedBindings = Object.fromEntries(
-          [...entries].reverse().map(value => [value.project, [...value.repositories].sort()] as const),
+        const inputBindings = EffectRecord.fromEntries(
+          EffectArray.map(entries, value => [value.project, value.repositories]),
+        );
+        const storedBindings = EffectRecord.fromEntries(
+          EffectArray.map([...entries].reverse(), value => [value.project, [...value.repositories].sort()] as const),
         );
         const input: RemoteMemoryProvisioningInput = {
           ...validProvisioning,
-          projects: entries.map(value => value.project),
+          projects: EffectArray.map(entries, value => value.project),
           repositoryBindings: inputBindings,
         };
 
@@ -176,7 +181,7 @@ function storedSharePolicy(
     cursorTeamId: input.cursorTeamId ?? null,
     displayName: input.displayName,
     featureFlags: [...new Set(input.featureFlags ?? ['remote_memory_read'])].sort(),
-    projects: [...new Set(input.projects ?? Object.keys(repositoryBindings))].sort(),
+    projects: [...new Set(input.projects ?? EffectRecord.keys(repositoryBindings))].sort(),
     repositoryBindings,
   };
 }

@@ -68,9 +68,16 @@ function harness(input: {ready: boolean; stale: boolean; failRefresh?: boolean; 
         expect(options.project).toEqual(project);
         if (input.failRefresh) return yield* CodeGraphDiskCapacityPressureError.of('reserve graph write');
         selected = {...selected, readySnapshot: snapshot, freshness: 'current', stale: false};
-        return {};
+        return {
+          diagnostics: [],
+          durationMs: 0,
+          identity: status.identity,
+          reusedFiles: 0,
+          skippedFiles: 0,
+          snapshot,
+        };
       }),
-  } as CodeGraphIndexerShape;
+  };
   const analysis = CodeGraphAnalysis.of({
     analyze: options =>
       Effect.gen(function* () {
@@ -84,7 +91,7 @@ function harness(input: {ready: boolean; stale: boolean; failRefresh?: boolean; 
     layer: Layer.mergeAll(
       Layer.succeed(CodeGraphQueryService, query),
       Layer.succeed(CodeGraphAnalysis, analysis),
-      Layer.succeed(CodeGraphIndexer, indexer),
+      Layer.mock(CodeGraphIndexer, {index: indexer.index}),
     ),
   };
 }

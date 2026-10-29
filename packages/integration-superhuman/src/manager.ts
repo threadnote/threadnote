@@ -1,3 +1,5 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
 import {isSuperhumanSource} from './config.js';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
@@ -33,13 +35,14 @@ import {
 import {resolveSuperhumanCredential, superhumanCredentialConfigured, SuperhumanCredentialError} from './credentials.js';
 import {reusableExternalCredential} from '@threadnote/integration-core/external-credentials';
 import type {ManagerIntegrationApiRequest} from '@threadnote/integration-core/manager-http';
+import * as EffectRecord from 'effect/Record';
 
 function invalid(message: string): never {
-  throw new ManagerSuperhumanError({status: 400, message});
+  throw ManagerSuperhumanError.make({status: 400, message});
 }
 
 function conflict(message: string): never {
-  throw new ManagerSuperhumanError({status: 409, message});
+  throw ManagerSuperhumanError.make({status: 409, message});
 }
 
 function identifier(value: unknown, label: string, validate: (value: string) => string): string {
@@ -75,25 +78,27 @@ function environmentToken(config: RuntimeConfig, name: string) {
     maxStaleHours: 24,
   };
   return resolveSuperhumanCredential(config, source).pipe(
-    Effect.mapError(
-      () => new ManagerSuperhumanError({status: 400, message: 'The selected environment credential is unavailable.'}),
+    Effect.mapError(() =>
+      ManagerSuperhumanError.make({status: 400, message: 'The selected environment credential is unavailable.'}),
     ),
   );
 }
 
 function selectedDocuments(value: unknown): readonly SuperhumanDocumentConfig[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 64) invalid('Choose 1 to 64 Superhuman documents.');
+  if (!EffectArray.isArray(value) || value.length < 1 || value.length > 64)
+    invalid('Choose 1 to 64 Superhuman documents.');
   const seen = new Set<string>();
-  return value.map(item => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) invalid('Choose valid Superhuman documents.');
-    const document = item as Record<string, unknown>;
-    const id = identifier(document.id, 'document ID', validateSuperhumanDocumentId);
+  return EffectArray.map(value, item => {
+    if (!item || typeof item !== 'object' || EffectArray.isArray(item)) invalid('Choose valid Superhuman documents.');
+    const idValue = 'id' in item ? item.id : undefined;
+    const pagesValue = 'pages' in item ? item.pages : undefined;
+    const id = identifier(idValue, 'document ID', validateSuperhumanDocumentId);
     if (seen.has(id)) invalid('Each Superhuman document must be selected once.');
     seen.add(id);
-    if (document.pages === undefined) return {id};
-    if (!Array.isArray(document.pages) || document.pages.length < 1 || document.pages.length > 256)
+    if (pagesValue === undefined) return {id};
+    if (!EffectArray.isArray(pagesValue) || pagesValue.length < 1 || pagesValue.length > 256)
       invalid('Choose 1 to 256 pages, or select the whole document.');
-    const pages = document.pages.map(page => identifier(page, 'page ID', validateSuperhumanPageId));
+    const pages = EffectArray.map(pagesValue, page => identifier(page, 'page ID', validateSuperhumanPageId));
     if (new Set(pages).size !== pages.length) invalid('Each Superhuman page must be selected once.');
     return {id, pages};
   });
@@ -103,8 +108,8 @@ function safeErrorResponse(error: unknown) {
   if (Schema.is(SuperhumanSourceConflictError)(error))
     return {status: 409, body: {error: 'This connection changed. Refresh connections before saving.'}};
   if (Schema.is(SuperhumanCredentialError)(error)) return {status: 409, body: {error: error.message}};
-  if (error instanceof ManagerSuperhumanError) return {status: error.status, body: {error: error.message}};
-  if (error instanceof SuperhumanClientError) {
+  if (Schema.is(ManagerSuperhumanError)(error)) return {status: error.status, body: {error: error.message}};
+  if (Schema.is(SuperhumanClientError)(error)) {
     const errors: Partial<Record<SuperhumanClientError['code'], string>> = {
       'authentication-rejected': 'Superhuman rejected the credential.',
       'access-rejected': 'Superhuman denied access to the selected document.',
@@ -161,7 +166,7 @@ export const listSuperhumanIntegrations = Effect.fn('manager.superhumanList')(fu
         if (manifest?.status === 'quarantined' || manifest?.status === 'pending') attention = true;
         continue;
       }
-      chunks += Object.keys(manifest.chunks).length;
+      chunks += EffectRecord.keys(manifest.chunks).length;
       lastSyncedAt = Math.max(lastSyncedAt ?? 0, manifest.fetchedAt);
     }
     sources.push({
@@ -198,22 +203,33 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
     const selection = yield* fromPromiseInterruptible(
       signal => describeSuperhumanSelection(source.documents, token, {signal, fetch}),
       error =>
-        error instanceof ManagerSuperhumanError || error instanceof SuperhumanClientError
+        Schema.is(ManagerSuperhumanError)(error) || Schema.is(SuperhumanClientError)(error)
           ? error
-          : new ManagerSuperhumanError({status: 409, message: 'Superhuman could not load the saved selection titles.'}),
+          : ManagerSuperhumanError.make({
+              status: 409,
+              message: 'Superhuman could not load the saved selection titles.',
+            }),
     );
     return {status: 200, body: selection};
   }
   if (action === 'resolve-links') {
-    if (!Array.isArray(body.links) || !body.links.every(link => typeof link === 'string'))
+    if (
+      !EffectArray.isArray(body.links) ||
+      !EffectArray.every(body.links, (link): link is string => typeof link === 'string')
+    )
       invalid('Choose Superhuman Docs links.');
+    const links = body.links;
     const env = credentialEnv(body.credentialEnv);
     const suppliedToken =
       typeof body.token === 'string' && body.token.length > 0 ? Redacted.make(body.token) : undefined;
     if (suppliedToken && env) invalid('Choose a token or an environment credential.');
     const configuration = yield* readSourceConfiguration(request.config);
     const existing =
-      body.id === undefined ? undefined : configuration.sources.find(item => item.id === sourceId(body.id));
+      body.id === undefined
+        ? undefined
+        : EffectOption.getOrUndefined(
+            EffectArray.findFirst(configuration.sources, item => item.id === sourceId(body.id)),
+          );
     const reuse =
       !existing && !suppliedToken && !env
         ? yield* reusableExternalCredential(request.config, configuration.sources, 'superhuman', '')
@@ -228,11 +244,11 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
     if (token === undefined) invalid('Provide a Superhuman Docs API token or environment credential.');
     const fetch = yield* admittedSourceFetch('superhuman', token, undefined, request.config);
     const resolved = yield* fromPromiseInterruptible(
-      signal => resolveSuperhumanBrowserLinks(body.links as string[], token, {signal, fetch}),
+      signal => resolveSuperhumanBrowserLinks(links, token, {signal, fetch}),
       error =>
-        error instanceof ManagerSuperhumanError || error instanceof SuperhumanClientError
+        Schema.is(ManagerSuperhumanError)(error) || Schema.is(SuperhumanClientError)(error)
           ? error
-          : new ManagerSuperhumanError({status: 409, message: 'Superhuman could not resolve the selected links.'}),
+          : ManagerSuperhumanError.make({status: 409, message: 'Superhuman could not resolve the selected links.'}),
     );
     return {status: 200, body: resolved};
   }
@@ -244,7 +260,9 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
       switch (action) {
         case 'save-source': {
           const configuration = yield* readSourceConfiguration(request.config);
-          const existing = configuration.sources.find(source => source.id === id);
+          const existing = EffectOption.getOrUndefined(
+            EffectArray.findFirst(configuration.sources, source => source.id === id),
+          );
           if (existing && !isSuperhumanSource(existing)) conflict('Another connection already uses this name.');
           if (!!existing !== (body.editing === true))
             conflict(existing ? 'Open this source to edit it.' : 'This source no longer exists. Refresh connections.');
@@ -264,20 +282,20 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
             invalid('Choose a project or projectless source.');
           if (
             typeof body.includeHidden !== 'boolean' ||
-            !Number.isSafeInteger(body.refreshIntervalMinutes) ||
-            !Number.isSafeInteger(body.maxStaleHours)
+            !checkedIsSafeInteger(body.refreshIntervalMinutes) ||
+            !checkedIsSafeInteger(body.maxStaleHours)
           )
             invalid('Choose valid Superhuman source settings.');
           yield* runSuperhumanSourceAdd(request.config, {
             id,
             apply,
-            documents: documents.map(document => document.id),
+            documents: EffectArray.map(documents, document => document.id),
             documentSelection: documents,
             project: body.project ?? undefined,
             projectless: body.project === null,
             includeHidden: body.includeHidden,
-            refreshIntervalMinutes: body.refreshIntervalMinutes as number,
-            maxStaleHours: body.maxStaleHours as number,
+            refreshIntervalMinutes: body.refreshIntervalMinutes,
+            maxStaleHours: body.maxStaleHours,
             credentialEnv:
               env ?? (existing !== undefined && isSuperhumanSource(existing) ? existing.credentialEnv : undefined),
             credentialStorage:
@@ -304,7 +322,7 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
             output: apply
               ? `${synced.syncedDocuments.length} selected document(s) refreshed.`
               : 'Superhuman source is ready to refresh.',
-            warnings: synced.warnings.map(() => 'A selected document could not be refreshed.'),
+            warnings: EffectArray.map(synced.warnings, () => 'A selected document could not be refreshed.'),
           };
         }
         case 'set-enabled': {

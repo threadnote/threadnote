@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} from 'effect';
 import fc from 'fast-check';
@@ -13,6 +14,9 @@ import {
   WORKFLOW_EXECUTION_PHASES,
   type WorkflowExecutionDiagnostics,
 } from './workflow-execution-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const lifecycle = () => {
   const controller = new AbortController();
@@ -34,7 +38,8 @@ const lifecycle = () => {
     },
   };
 };
-const parse = (line: string) => JSON.parse(line.slice('WORKFLOW_PROPERTY_DIAGNOSTICS '.length));
+const parse = (line: string) =>
+  JSON.parse(Effect2.pipe(line, EffectString.slice('WORKFLOW_PROPERTY_DIAGNOSTICS '.length)));
 
 effectIt.effect('preserves values, failure identities, defects and interruption without their private payloads', () =>
   Effect.gen(function* () {
@@ -50,13 +55,13 @@ effectIt.effect('preserves values, failure identities, defects and interruption 
     expect(Exit.hasInterrupts(yield* diagnostics.observe(4, Effect.interrupt).pipe(Effect.exit))).toBe(true);
     const snapshot = diagnostics.snapshot();
     expect(snapshot).toMatchObject({startedEvaluations: 4, completedEvaluations: 4, successfulEvaluations: 1});
-    expect(snapshot.recent.filter(record => record.event === 'evaluation-exit')).toMatchObject([
+    expect(EffectArray.filter(snapshot.recent, record => record.event === 'evaluation-exit')).toMatchObject([
       {ordinal: 1, input: 1, outcome: 'Success', interrupted: false},
       {ordinal: 2, input: 2, outcome: 'Failure', interrupted: false},
       {ordinal: 3, input: 3, outcome: 'Failure', interrupted: false},
       {ordinal: 4, input: 4, outcome: 'Failure', interrupted: true},
     ]);
-    for (const text of Object.values(privateValue)) expect(JSON.stringify(snapshot)).not.toContain(text);
+    for (const text of EffectRecord.values(privateValue)) expect(JSON.stringify(snapshot)).not.toContain(text);
   }),
 );
 
@@ -160,7 +165,7 @@ effectIt.effect('registers once and reports abort before cleanup and an idempote
       successfulEvaluations: 0,
       activeEvaluation: null,
     });
-    expect(writes.join('')).not.toContain('private-abort-reason');
+    expect(EffectArray.join(writes, '')).not.toContain('private-abort-reason');
   }),
 );
 
@@ -260,7 +265,7 @@ effectIt.effect.prop(
       let time = 0;
       const diagnostics = workflowDiagnostics(setup ? 'setup-opt-out' : 'workflow-retirement', () => time);
       const initial = diagnostics.snapshot();
-      const frozen = Object.freeze(evaluations.map(value => Object.freeze({...value})));
+      const frozen = Object.freeze(EffectArray.map(evaluations, value => Object.freeze({...value})));
       const inputBefore = JSON.stringify(evaluations);
       const expectedEvents: string[] = [];
       let successes = 0;
@@ -305,9 +310,9 @@ effectIt.effect.prop(
           activeEvaluation: null,
           loopIndex: null,
         });
-        expect(after.recent.map(record => (record.event === 'phase' ? 'phase:' + record.phase : record.event))).toEqual(
-          expectedEvents.slice(-16),
-        );
+        expect(
+          EffectArray.map(after.recent, record => (record.event === 'phase' ? 'phase:' + record.phase : record.event)),
+        ).toEqual(expectedEvents.slice(-16));
         expect(after.recent.length).toBeLessThanOrEqual(16);
         expect(after.recent.at(-1)).toMatchObject({
           event: 'evaluation-exit',
@@ -375,7 +380,7 @@ effectIt.effect('reports shared namespace access mode before abort cleanup and a
       successfulEvaluations: 0,
       activeEvaluation: null,
     });
-    for (const value of Object.values(original)) expect(writes.join('')).not.toContain(value);
+    for (const value of EffectRecord.values(original)) expect(EffectArray.join(writes, '')).not.toContain(value);
     const closed = lifecycle();
     const silent = workflowPropertyDiagnostics(closed.context, 'shared-context-namespace', {
       write: () => {
@@ -432,7 +437,7 @@ effectIt.effect.prop(
       let successes = 0;
       const diagnostics = workflowDiagnostics('shared-context-namespace', () => time);
       const originalInput = JSON.stringify(evaluations);
-      const frozen = Object.freeze(evaluations.map(value => Object.freeze({...value})));
+      const frozen = Object.freeze(EffectArray.map(evaluations, value => Object.freeze({...value})));
       const expectedEvents: string[] = [];
       const privateValue = {body: 'private-shared-body', uri: 'threadnote://private/shared-context'};
       for (const [index, evaluation] of frozen.entries()) {
@@ -496,9 +501,9 @@ effectIt.effect.prop(
           phase: 'between-evaluations',
           inputName: 'accessMode',
         });
-        expect(after.recent.map(record => (record.event === 'phase' ? 'phase:' + record.phase : record.event))).toEqual(
-          expectedEvents.slice(-16),
-        );
+        expect(
+          EffectArray.map(after.recent, record => (record.event === 'phase' ? 'phase:' + record.phase : record.event)),
+        ).toEqual(expectedEvents.slice(-16));
         expect(after.recent.at(-1)).toMatchObject({
           event: 'evaluation-exit',
           ordinal: index + 1,
@@ -512,7 +517,7 @@ effectIt.effect.prop(
         after.recent[0].startedMs = -1;
         expect(JSON.stringify(diagnostics.snapshot())).toBe(afterText);
         expect(Buffer.byteLength(afterText, 'utf8')).toBeLessThan(8192);
-        for (const value of Object.values(privateValue)) expect(afterText).not.toContain(value);
+        for (const value of EffectRecord.values(privateValue)) expect(afterText).not.toContain(value);
       }
       expect(JSON.stringify(evaluations)).toBe(originalInput);
     }),
@@ -538,12 +543,14 @@ describe('workflow execution diagnostics', () => {
       onTestFinished: (callback: () => void) => {
         finished.push(callback);
       },
-      finish: () => finished.forEach(callback => callback()),
+      finish: () => EffectArray.forEach(finished, callback => callback()),
       controller,
     };
   };
   const packets = (lines: readonly string[]) =>
-    lines.map(line => JSON.parse(line.slice('WORKFLOW_EXECUTION_DIAGNOSTICS '.length)));
+    EffectArray.map(lines, line =>
+      JSON.parse(Effect2.pipe(line, EffectString.slice('WORKFLOW_EXECUTION_DIAGNOSTICS '.length))),
+    );
 
   class Dependency extends Context.Service<Dependency, {readonly value: object}>()(
     '@threadnote/threadnote/test/dev-skills/workflow-property-diagnostics.test/Dependency',
@@ -717,15 +724,15 @@ describe('workflow execution diagnostics', () => {
         yield* Deferred.await(entered);
         context.controller.abort();
         yield* Deferred.await(cleanupEntered);
-        expect(packets(lines).map(packet => packet.event)).toEqual(['aborted']);
+        expect(EffectArray.map(packets(lines), packet => packet.event)).toEqual(['aborted']);
         expect(packets(lines)[0]).toMatchObject({phase: 'archive', programCompleted: false});
         yield* Deferred.succeed(releaseCleanup, undefined);
         expect(Exit.isFailure(yield* Fiber.await(child))).toBe(true);
-        expect(packets(lines).map(packet => packet.event)).toEqual(['aborted', 'effect-exit']);
+        expect(EffectArray.map(packets(lines), packet => packet.event)).toEqual(['aborted', 'effect-exit']);
         expect(packets(lines)[1]).toMatchObject({programCompleted: true, programOutcome: 'Failure'});
         context.finish();
         context.finish();
-        expect(packets(lines).map(packet => packet.event)).toEqual(['aborted', 'effect-exit', 'finished']);
+        expect(EffectArray.map(packets(lines), packet => packet.event)).toEqual(['aborted', 'effect-exit', 'finished']);
       }).pipe(
         Effect.ensuring(Deferred.succeed(releaseCleanup, undefined).pipe(Effect.andThen(Fiber.interrupt(child)))),
       );
@@ -799,10 +806,10 @@ describe('workflow execution diagnostics', () => {
     expect(add).toHaveBeenCalledTimes(1);
     expect(remove).toHaveBeenCalledExactlyOnceWith('abort', add.mock.calls[0][1]);
     context.controller.abort();
-    expect(packets(lines).map(packet => packet.event)).toEqual(['finished']);
+    expect(EffectArray.map(packets(lines), packet => packet.event)).toEqual(['finished']);
     const retry = workflowExecutionDiagnostics(context, {write: line => lines.push(line)});
     expect(retry).not.toBe(diagnostics);
-    expect(packets(lines).map(packet => packet.event)).toEqual(['finished', 'aborted']);
+    expect(EffectArray.map(packets(lines), packet => packet.event)).toEqual(['finished', 'aborted']);
     context.finish();
     const broken = {
       signal: new AbortController().signal,
@@ -916,7 +923,7 @@ describe('workflow execution diagnostics', () => {
             child.measured.end(0n, Exit.void);
             if (child.observed && !completed.has(event.target)) {
               completed.set(event.target, event.success);
-              const ordinal = started.slice(0, event.target + 1).filter(value => value.observed).length;
+              const ordinal = EffectArray.filter(started.slice(0, event.target + 1), value => value.observed).length;
               modelRecent.push({
                 event: 'command-exit',
                 sequence: ordinal,
@@ -933,13 +940,13 @@ describe('workflow execution diagnostics', () => {
         expect(snapshot).toMatchObject({
           commandCount: sequence,
           completedCommands: completed.size,
-          successfulCommands: [...completed.values()].filter(Boolean).length,
+          successfulCommands: EffectArray.filter([...completed.values()], Boolean).length,
           activeCount: sequence - completed.size,
           phase,
         });
         const expected = modelRecent.slice(-16);
         expect(
-          snapshot.recent.map(entry =>
+          EffectArray.map(snapshot.recent, entry =>
             entry.event === 'phase'
               ? {event: entry.event, phase: entry.phase}
               : {event: entry.event, sequence: entry.sequence, outcome: entry.outcome},
@@ -961,10 +968,10 @@ describe('workflow execution diagnostics', () => {
         context.finish();
         context.finish();
         context.controller.abort();
-        expect(packets(lines).map(packet => packet.event)).toEqual(
+        expect(EffectArray.map(packets(lines), packet => packet.event)).toEqual(
           input.abortFirst ? ['effect-exit', 'aborted', 'finished'] : ['effect-exit', 'finished'],
         );
-        expect(packets(lines).every(packet => packet.programCompleted)).toBe(true);
+        expect(EffectArray.every(packets(lines), packet => packet.programCompleted)).toBe(true);
         expect(workflowExecutionDiagnostics(context, {write: () => {}})).not.toBe(diagnostics);
         context.finish();
         expect(input).toEqual(before);

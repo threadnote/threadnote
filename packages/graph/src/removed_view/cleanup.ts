@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {
   CODE_GRAPH_REMOVED_VIEW_CLEANUP_PHASES,
@@ -259,8 +260,8 @@ function cleanupPage(
   if (entry.phase === 'build-status') return dependencies.cleanupBuildStatusUnit(input, entry);
   if (entry.phase === 'provenance') {
     const evidenceFields = [entry.repositoryId, entry.provenanceRecordDigest, entry.provenanceRecordIdentity] as const;
-    if (evidenceFields.every(value => value === undefined)) return Effect.succeed({state: 'complete'});
-    if (evidenceFields.some(value => value === undefined)) {
+    if (EffectArray.every(evidenceFields, value => value === undefined)) return Effect.succeed({state: 'complete'});
+    if (EffectArray.some(evidenceFields, value => value === undefined)) {
       return Effect.succeed(invalidSidecarPage());
     }
     return dependencies.cleanupProvenanceUnit(input, entry);

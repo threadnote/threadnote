@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {UtilityOperationError} from '@threadnote/platform/errors';
 import {Effect, Option} from 'effect';
 import {
@@ -24,6 +26,9 @@ import {isExternalResourceUri, type ExternalProvider} from '@threadnote/store/ex
 import {isJsonObject} from '@threadnote/platform/json';
 import {escapeRegExp} from '@threadnote/platform/glob';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 const parseJson = Option.liftThrowable((content: string): unknown => JSON.parse(content));
 
 export function exactRecallTerms(query: string): readonly string[] {
@@ -79,11 +84,20 @@ export function exactRecallTerms(query: string): readonly string[] {
   const terms: string[] = [];
   for (const term of recallTokens(query)) {
     const length = [...term].length;
-    const shortDistinctive = length === 3 && ((term.match(/\p{Lu}/gu) ?? []).length >= 2 || /\p{N}/u.test(term));
+    const shortDistinctive =
+      length === 3 &&
+      ((
+        Effect2.pipe(
+          term,
+          EffectString.match(/\p{Lu}/gu),
+          Effect2.Option.getOrElse(() => null),
+        ) ?? []
+      ).length >= 2 ||
+        /\p{N}/u.test(term));
     if (length < 4 && !shortDistinctive) {
       continue;
     }
-    const normalized = term.toLowerCase();
+    const normalized = Effect2.pipe(term, EffectString.toLowerCase);
     if (stopWords.has(normalized) || seen.has(normalized)) {
       continue;
     }
@@ -95,7 +109,9 @@ export function exactRecallTerms(query: string): readonly string[] {
 
 export function grepOutputHasMatches(output: string): boolean {
   return (
-    !output.includes('matches        []') && !output.includes('"matches":[]') && !output.includes('match_count    0')
+    !Effect2.pipe(output, EffectString.includes('matches        []')) &&
+    !Effect2.pipe(output, EffectString.includes('"matches":[]')) &&
+    !Effect2.pipe(output, EffectString.includes('match_count    0'))
   );
 }
 
@@ -178,14 +194,18 @@ export function isExcludedRecallUri(uri: string): boolean {
  */
 export function memoryUriProjectSegment(uri: string): string | undefined {
   const marker = '/memories/';
-  const at = uri.indexOf(marker);
+  const at = Effect2.pipe(
+    uri,
+    EffectString.indexOf(marker),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (at < 0) {
     return undefined;
   }
-  let segments = stripAnchor(uri)
-    .slice(at + marker.length)
-    .split('/')
-    .filter(Boolean);
+  let segments = EffectArray.filter(
+    Effect2.pipe(stripAnchor(uri), EffectString.slice(at + marker.length), EffectString.split('/')),
+    Boolean,
+  );
   if (segments[0] === 'shared') {
     segments = segments.slice(2); // drop "shared" and the team name
   }
@@ -204,11 +224,23 @@ export function memoryUriProjectSegment(uri: string): string | undefined {
  * text before the first blank line). Returns undefined when the field is absent.
  */
 export function memoryFrontmatterField(content: string, field: string): string | undefined {
-  const blankLine = content.indexOf('\n\n');
-  const header = blankLine < 0 ? content : content.slice(0, blankLine);
+  const blankLine = Effect2.pipe(
+    content,
+    EffectString.indexOf('\n\n'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const header = blankLine < 0 ? content : Effect2.pipe(content, EffectString.slice(0, blankLine));
   // `[ \t]*` (not `\s*`) so the value cannot span into the next header line.
-  const match = header.match(new RegExp(`^${escapeRegExp(field)}:[ \\t]*(.+)$`, 'm'));
-  return match?.[1]?.trim() || undefined;
+  const match = Effect2.pipe(
+    header,
+    EffectString.match(new RegExp(`^${escapeRegExp(field)}:[ \\t]*(.+)$`, 'm')),
+    Effect2.Option.getOrElse(() => null),
+  );
+  return (
+    Effect2.pipe(match?.[1], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || undefined
+  );
 }
 
 /**
@@ -218,14 +250,18 @@ export function memoryFrontmatterField(content: string, field: string): string |
  * banner). Returns [] on any shape mismatch — exact matches are best-effort.
  */
 export function grepUrisFromJson(output: string): readonly string[] {
-  const start = output.search(/^\{/m);
+  const start = Effect2.pipe(
+    output,
+    EffectString.search(/^\{/m),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (start < 0) {
     return [];
   }
-  const parsed = Option.getOrUndefined(parseJson(output.slice(start)));
+  const parsed = Option.getOrUndefined(parseJson(Effect2.pipe(output, EffectString.slice(start))));
   const result = isJsonObject(parsed) ? parsed.result : undefined;
   const matches = isJsonObject(result) ? result.matches : undefined;
-  if (!Array.isArray(matches)) {
+  if (!EffectArray.isArray(matches)) {
     return [];
   }
   const uris: string[] = [];
@@ -296,12 +332,12 @@ function recallSnippet(value: unknown): string {
   if (typeof value !== 'string') {
     return '';
   }
-  const oneLine = value.replace(/\s+/g, ' ').trim();
-  return oneLine.length > 180 ? `${oneLine.slice(0, 180)}…` : oneLine;
+  const oneLine = Effect2.pipe(value, EffectString.replace(/\s+/g, ' '), EffectString.trim);
+  return oneLine.length > 180 ? `${Effect2.pipe(oneLine, EffectString.slice(0, 180))}…` : oneLine;
 }
 
 function isArchivedMemoryUri(uri: string): boolean {
-  const documentUri = uri.replace(/#.*$/, '');
+  const documentUri = Effect2.pipe(uri, EffectString.replace(/#.*$/, ''));
   return /^threadnote:\/\/user\/[^/]+\/memories\/(?:durable|handoffs|incidents|preferences|smoke)\/archived(?:\/|$)/.test(
     documentUri,
   );
@@ -314,11 +350,15 @@ function isArchivedMemoryUri(uri: string): boolean {
  * shape drift; returns [] on parse failure.
  */
 export function parseRecallHits(output: string, options: ParseRecallHitsOptions = {}): readonly RecallHit[] {
-  const start = output.search(/^\{/m);
+  const start = Effect2.pipe(
+    output,
+    EffectString.search(/^\{/m),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (start < 0) {
     return [];
   }
-  const parsed = Option.getOrUndefined(parseJson(output.slice(start)));
+  const parsed = Option.getOrUndefined(parseJson(Effect2.pipe(output, EffectString.slice(start))));
   const result = isJsonObject(parsed) ? parsed.result : undefined;
   if (!isJsonObject(result)) {
     return [];
@@ -326,7 +366,7 @@ export function parseRecallHits(output: string, options: ParseRecallHitsOptions 
   const hits: RecallHit[] = [];
   for (const key of RECALL_CATEGORY_ORDER) {
     const items = result[key];
-    if (!Array.isArray(items)) {
+    if (!EffectArray.isArray(items)) {
       continue;
     }
     for (const item of items) {
@@ -390,14 +430,12 @@ export function mergeRecallHits(passes: ReadonlyArray<readonly RecallHit[]>): re
       }
     }
   }
-  return [...byDocument.entries()]
-    .map(([documentUri, hit]) => ({...hit, uri: documentUri}))
-    .sort(
-      (left, right) =>
-        recallCategoryRank(left.category) - recallCategoryRank(right.category) ||
-        right.score - left.score ||
-        compareCodeUnits(left.uri, right.uri),
-    );
+  return EffectArray.map([...byDocument.entries()], ([documentUri, hit]) => ({...hit, uri: documentUri})).sort(
+    (left, right) =>
+      recallCategoryRank(left.category) - recallCategoryRank(right.category) ||
+      right.score - left.score ||
+      compareCodeUnits(left.uri, right.uri),
+  );
 }
 
 /**
@@ -450,13 +488,13 @@ export function categoryForUri(uri: string): RecallCategory {
   // Shared agent artifacts live under `.../memories/.../agent-artifacts/` but
   // are tooling, not personal knowledge — keep them out of the leading memory
   // band. (Pack machinery is dropped entirely upstream; only skills reach here.)
-  if (uri.includes('/agent-artifacts/')) {
+  if (Effect2.pipe(uri, EffectString.includes('/agent-artifacts/'))) {
     return 'skills';
   }
-  if (uri.includes('/memories/')) {
+  if (Effect2.pipe(uri, EffectString.includes('/memories/'))) {
     return 'memories';
   }
-  if (uri.startsWith('threadnote://resources/agent-skills/')) {
+  if (Effect2.pipe(uri, EffectString.startsWith('threadnote://resources/agent-skills/'))) {
     return 'skills';
   }
   return 'resources';
@@ -483,8 +521,21 @@ const RECALL_EXACT_SLUG_BONUS = 4;
  * lowercased. For a memory this is its topic (`mobile-observability-alerting-spec`),
  * for a resource its filename. */
 function uriSlug(uri: string): string {
-  const withoutExtension = stripAnchor(uri).replace(/\.[a-z0-9]+$/i, '');
-  return withoutExtension.slice(withoutExtension.lastIndexOf('/') + 1).toLowerCase();
+  const withoutExtension = Effect2.pipe(stripAnchor(uri), EffectString.replace(/\.[a-z0-9]+$/i, ''));
+  return Effect2.pipe(withoutExtension, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(
+      __effectPipeInput,
+      EffectString.slice(
+        Effect2.pipe(
+          withoutExtension,
+          EffectString.lastIndexOf('/'),
+          Effect2.Option.getOrElse(() => -1),
+        ) + 1,
+      ),
+    );
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.toLowerCase);
+    return __effectPipeStage1;
+  });
 }
 
 /**
@@ -497,7 +548,7 @@ function uriSlug(uri: string): string {
 function exactTermDocumentFrequency(matches: readonly ExactMatch[]): Map<string, number> {
   const frequency = new Map<string, number>();
   for (const match of matches) {
-    for (const term of new Set(match.terms.map(term => term.toLowerCase()))) {
+    for (const term of new Set(EffectArray.map(match.terms, term => Effect2.pipe(term, EffectString.toLowerCase)))) {
       frequency.set(term, (frequency.get(term) ?? 0) + 1);
     }
   }
@@ -530,7 +581,7 @@ function exactMatchStrength(hit: RecallHit, documentFrequency: ReadonlyMap<strin
   const slug = uriSlug(hit.uri);
   let strength = 0;
   for (const term of hit.exactTerms) {
-    const normalized = term.toLowerCase();
+    const normalized = Effect2.pipe(term, EffectString.toLowerCase);
     // `?? 1` is defensive only: exactTerms is always a subset of the terms the
     // documentFrequency map was built from, so the lookup resolves in practice.
     const rarity = 1 / (documentFrequency.get(normalized) ?? 1);
@@ -564,15 +615,15 @@ export function applyExactMatchBoost(
   if (exactMatches.length === 0) {
     return hits;
   }
-  const termsByUri = new Map(exactMatches.map(match => [stripAnchor(match.uri), match.terms]));
-  const annotated = hits.map(hit => {
+  const termsByUri = new Map(EffectArray.map(exactMatches, match => [stripAnchor(match.uri), match.terms]));
+  const annotated = EffectArray.map(hits, hit => {
     const terms = termsByUri.get(stripAnchor(hit.uri));
     return terms ? {...hit, exactTerms: terms} : hit;
   });
-  const present = new Set(annotated.map(hit => stripAnchor(hit.uri)));
-  const promoted: RecallHit[] = [...termsByUri.keys()]
-    .filter(uri => !present.has(uri))
-    .map(uri => {
+  const present = new Set(EffectArray.map(annotated, hit => stripAnchor(hit.uri)));
+  const promoted: RecallHit[] = EffectArray.map(
+    EffectArray.filter([...termsByUri.keys()], uri => !present.has(uri)),
+    uri => {
       const category = categoryForUri(uri);
       return {
         category,
@@ -582,7 +633,8 @@ export function applyExactMatchBoost(
         snippet: '',
         uri,
       };
-    });
+    },
+  );
   const documentFrequency = exactTermDocumentFrequency(exactMatches);
   const merged = [...annotated, ...promoted];
   // Hoist the blended relevance (exact strength + semantic score) into an O(n)
@@ -636,40 +688,52 @@ function renderRecallHits(
       ? `⚠ Recall confidence: no answer (${confidence.score.toFixed(2)}) — ${confidence.reason}`
       : undefined;
   }
-  const lines = shown.flatMap((hit, index) => {
+  const lines = EffectArray.flatMap(shown, (hit, index) => {
     const finalScorePart = hit.finalScore === undefined ? undefined : `rank ${hit.finalScore.toFixed(2)}`;
     const scorePart = hit.score > 0 ? `score ${hit.score.toFixed(2)}` : undefined;
     const exactLabel = hit.score > 0 ? 'exact' : 'keyword-only';
-    const exactPart = hit.exactTerms?.length ? `${exactLabel}: ${hit.exactTerms.join(', ')}` : undefined;
-    const head = `${index + 1}. ${[hit.contextType, finalScorePart, scorePart, exactPart].filter(Boolean).join(' · ')} · ${hit.uri}`;
+    const exactPart = hit.exactTerms?.length ? `${exactLabel}: ${EffectArray.join(hit.exactTerms, ', ')}` : undefined;
+    const head = `${index + 1}. ${EffectArray.join(
+      EffectArray.map(EffectArray.filter([hit.contextType, finalScorePart, scorePart, exactPart], Boolean), item =>
+        item === null || item === undefined ? '' : String(item),
+      ),
+      ' · ',
+    )} · ${hit.uri}`;
     const explanation = hit.rankReasons?.length
-      ? `   why: ${hit.rankReasons
-          .slice(0, 3)
-          .map(reason => `${reason.code} ${reason.contribution >= 0 ? '+' : ''}${reason.contribution.toFixed(2)}`)
-          .join('; ')}`
+      ? `   why: ${EffectArray.join(
+          EffectArray.map(
+            hit.rankReasons.slice(0, 3),
+            reason => `${reason.code} ${reason.contribution >= 0 ? '+' : ''}${reason.contribution.toFixed(2)}`,
+          ),
+          '; ',
+        )}`
       : undefined;
-    const warnings = hit.rankWarnings?.length ? `   warning: ${hit.rankWarnings.join('; ')}` : undefined;
+    const warnings = hit.rankWarnings?.length ? `   warning: ${EffectArray.join(hit.rankWarnings, '; ')}` : undefined;
     const externalWarning = isExternalResourceUri(hit.uri)
       ? '   warning: untrusted external evidence; verify the source before using it as guidance.'
       : undefined;
-    return [head, externalWarning, hit.snippet ? `   ${hit.snippet}` : undefined, explanation, warnings].filter(
+    return EffectArray.filter(
+      [head, externalWarning, hit.snippet ? `   ${hit.snippet}` : undefined, explanation, warnings],
       (line): line is string => line !== undefined,
     );
   });
   if (overflow > 0) {
     lines.push(`(+${overflow} more — refine the query or read a URI above)`);
   }
-  const noSemanticMatch = shown.every(hit => hit.score === 0);
+  const noSemanticMatch = EffectArray.every(shown, hit => hit.score === 0);
   const showLowConfidenceNote =
     noSemanticMatch && (confidence === undefined || confidence.level === 'low' || confidence.level === 'no_answer');
   const confidenceLine = confidence
-    ? `Recall confidence: ${confidence.level.replace('_', ' ')} (${confidence.score.toFixed(2)}) — ${confidence.reason}`
+    ? `Recall confidence: ${Effect2.pipe(confidence.level, EffectString.replace('_', ' '))} (${confidence.score.toFixed(2)}) — ${confidence.reason}`
     : undefined;
-  return [
-    ...(confidenceLine ? [confidenceLine] : []),
-    ...(showLowConfidenceNote ? [RECALL_LOW_CONFIDENCE_NOTE] : []),
-    ...lines,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      ...(confidenceLine ? [confidenceLine] : []),
+      ...(showLowConfidenceNote ? [RECALL_LOW_CONFIDENCE_NOTE] : []),
+      ...lines,
+    ],
+    '\n',
+  );
 }
 
 export interface RecallSections {
@@ -741,7 +805,7 @@ function selectShownHits(ranked: readonly RecallHit[], limit: number, reserve: n
     }
     selected.add(hit.uri);
   }
-  return ranked.filter(hit => selected.has(hit.uri));
+  return EffectArray.filter(ranked, (hit, __effectArrayIndex) => __effectArrayIndex in ranked && selected.has(hit.uri));
 }
 
 /**
@@ -759,23 +823,35 @@ export function buildRecallSections(
   ranking?: HybridRecallOptions,
 ): RecallSections {
   const scopedExactMatches = ranking
-    ? exactMatches.filter(match => uriMatchesRecallScopes(match.uri, ranking.allowedUriScopes))
+    ? EffectArray.filter(
+        exactMatches,
+        (match, __effectArrayIndex2) =>
+          __effectArrayIndex2 in exactMatches && uriMatchesRecallScopes(match.uri, ranking.allowedUriScopes),
+      )
     : exactMatches;
   const legacyRanked = dedupeByContent(
     applyExactMatchBoost(
-      mergeRecallHits(passes).filter(hit => uriMatchesRecallScopes(hit.uri, ranking?.allowedUriScopes)),
+      EffectArrayPipe(mergeRecallHits(passes), __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (hit, __effectArrayIndex2) =>
+            __effectArrayIndex2 in __effectArrayValues && uriMatchesRecallScopes(hit.uri, ranking?.allowedUriScopes),
+        ),
+      ),
       scopedExactMatches,
     ),
   );
   const hybrid = ranking ? hybridRankRecallHits(ranking.query, legacyRanked, ranking, limit) : undefined;
   const ranked = hybrid?.ranked ?? legacyRanked;
   const shown = hybrid ? ranked.slice(0, limit) : selectShownHits(ranked, limit, RECALL_CATEGORY_RESERVE);
-  const shownUris = new Set(shown.map(hit => stripAnchor(hit.uri)));
+  const shownUris = new Set(EffectArray.map(shown, hit => stripAnchor(hit.uri)));
   return {
     confidence: hybrid?.confidence,
     exactTail: hybrid
       ? undefined
-      : formatExactMatchPointers(scopedExactMatches.filter(match => !shownUris.has(stripAnchor(match.uri)))),
+      : formatExactMatchPointers(
+          EffectArray.filter(scopedExactMatches, match => !shownUris.has(stripAnchor(match.uri))),
+        ),
     ranked,
     semanticSection: renderRecallHits(shown, ranked.length - shown.length, hybrid?.confidence),
   };
@@ -787,25 +863,44 @@ function hybridRankRecallHits(
   context: HybridRecallOptions,
   resultLimit: number,
 ): {readonly confidence: RecallConfidence; readonly ranked: readonly RecallHit[]} {
-  const candidateUris = context.candidateUris ? new Set(context.candidateUris.map(uri => stripAnchor(uri))) : undefined;
-  const protectedUris = new Set((context.protectedUris ?? []).map(uri => stripAnchor(uri)));
+  const candidateUris = context.candidateUris
+    ? new Set(EffectArray.map(context.candidateUris, uri => stripAnchor(uri)))
+    : undefined;
+  const protectedUris = new Set(EffectArray.map(context.protectedUris ?? [], uri => stripAnchor(uri)));
   const allowedByCandidateSelection = (uri: string) =>
     candidateUris === undefined || candidateUris.has(stripAnchor(uri)) || protectedUris.has(stripAnchor(uri));
-  const eligibleHits = hits.filter(hit => allowedByCandidateSelection(hit.uri));
-  const byUri = new Map(eligibleHits.map(hit => [stripAnchor(hit.uri), hit]));
+  const eligibleHits = EffectArray.filter(hits, hit => allowedByCandidateSelection(hit.uri));
+  const byUri = new Map(EffectArray.map(eligibleHits, hit => [stripAnchor(hit.uri), hit]));
   const recordsByUri = new Map(
-    (context.records ?? [])
-      .filter(record => uriMatchesRecallScopes(record.uri, context.allowedUriScopes))
-      .map(record => [stripAnchor(record.uri), record]),
+    EffectArray.map(
+      EffectArrayPipe(context.records ?? [], __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (record, __effectArrayIndex2) =>
+            __effectArrayIndex2 in __effectArrayValues && uriMatchesRecallScopes(record.uri, context.allowedUriScopes),
+        ),
+      ),
+      record => [stripAnchor(record.uri), record],
+    ),
   );
-  const scopedIndexedCandidates = boundedRecallIndexCandidates(
-    context.indexedCandidates ?? [],
-    context.allowedUriScopes,
-    resultLimit,
-    context.eligibility,
-  ).filter(candidate => allowedByCandidateSelection(candidate.uri));
-  const indexedByUri = new Map(scopedIndexedCandidates.map(candidate => [stripAnchor(candidate.uri), candidate]));
-  const hitCandidates = eligibleHits.map(hit => {
+  const scopedIndexedCandidates = EffectArrayPipe(
+    boundedRecallIndexCandidates(
+      context.indexedCandidates ?? [],
+      context.allowedUriScopes,
+      resultLimit,
+      context.eligibility,
+    ),
+    __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (candidate, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues && allowedByCandidateSelection(candidate.uri),
+      ),
+  );
+  const indexedByUri = new Map(
+    EffectArray.map(scopedIndexedCandidates, candidate => [stripAnchor(candidate.uri), candidate]),
+  );
+  const hitCandidates = EffectArray.map(eligibleHits, hit => {
     const uri = stripAnchor(hit.uri);
     const record = recordsByUri.get(uri);
     const indexed = indexedByUri.get(uri);
@@ -824,7 +919,7 @@ function hybridRankRecallHits(
           indexed?.fields?.project ??
           memoryUriProjectSegment(hit.uri) ??
           resourceProjectFromUri(hit.uri),
-        title: indexed?.fields?.title ?? uri.split('/').at(-1) ?? uri,
+        title: indexed?.fields?.title ?? Effect2.pipe(uri, EffectString.split('/')).at(-1) ?? uri,
         topic: record?.metadata.topic ?? indexed?.fields?.topic ?? uriSlug(hit.uri),
         workspaceScope: record?.metadata.workspaceScope ?? indexed?.fields?.workspaceScope,
       },
@@ -854,29 +949,34 @@ function hybridRankRecallHits(
   // Empty `records` is an unchecked load (stubs, or hydration that returned
   // nothing). Only a non-empty loaded set can prove a memory URI was absent,
   // unless extra hydration already requested that URI and missed.
-  const absentMemoryUris = new Set((context.absentMemoryUris ?? []).map(uri => stripAnchor(uri)));
+  const absentMemoryUris = new Set(EffectArray.map(context.absentMemoryUris ?? [], uri => stripAnchor(uri)));
   const liveRecordsProvided = (context.records?.length ?? 0) > 0;
   const hasLiveMemoryRecord = (uri: string, equivalentUris?: readonly string[]) => {
     const candidateUris = [uri, ...(equivalentUris ?? [])];
-    if (candidateUris.some(candidateUri => recordsByUri.has(stripAnchor(candidateUri)))) {
+    if (EffectArray.some(candidateUris, candidateUri => recordsByUri.has(stripAnchor(candidateUri)))) {
       return true;
     }
-    if (candidateUris.some(candidateUri => absentMemoryUris.has(stripAnchor(candidateUri)))) {
+    if (EffectArray.some(candidateUris, candidateUri => absentMemoryUris.has(stripAnchor(candidateUri)))) {
       return false;
     }
-    return !liveRecordsProvided || !uri.includes('/memories/');
+    return !liveRecordsProvided || !Effect2.pipe(uri, EffectString.includes('/memories/'));
   };
-  const hitUris = new Set(hitCandidates.map(candidate => candidate.uri));
-  const candidates = [
-    ...hitCandidates,
-    ...scopedIndexedCandidates
-      .filter(candidate => !hitUris.has(stripAnchor(candidate.uri)))
-      .map(candidate => ({
-        ...candidate,
-        feedback: context.feedbackByUri?.get(stripAnchor(candidate.uri)),
-        uri: stripAnchor(candidate.uri),
-      })),
-  ].filter(candidate => hasLiveMemoryRecord(candidate.uri, candidate.equivalentUris));
+  const hitUris = new Set(EffectArray.map(hitCandidates, candidate => candidate.uri));
+  const candidates = EffectArray.filter(
+    [
+      ...hitCandidates,
+      ...EffectArray.map(
+        EffectArray.filter(scopedIndexedCandidates, candidate => !hitUris.has(stripAnchor(candidate.uri))),
+        candidate => ({
+          ...candidate,
+          feedback: context.feedbackByUri?.get(stripAnchor(candidate.uri)),
+          uri: stripAnchor(candidate.uri),
+        }),
+      ),
+    ],
+    __effectArrayValue =>
+      !!(candidate => hasLiveMemoryRecord(candidate.uri, candidate.equivalentUris))(__effectArrayValue),
+  );
   for (const candidate of candidates) {
     if (!byUri.has(candidate.uri)) {
       const category = categoryForUri(candidate.uri);
@@ -895,7 +995,7 @@ function hybridRankRecallHits(
     ranked:
       result.confidence.level === 'no_answer' && protectedUris.size === 0
         ? []
-        : result.results.map(ranked => {
+        : EffectArray.map(result.results, ranked => {
             const hit = byUri.get(ranked.candidate.uri);
             if (!hit) {
               throw UtilityOperationError.make({
@@ -932,9 +1032,9 @@ function uriMatchesRecallScopes(uri: string, scopes: readonly string[] | undefin
     return true;
   }
   const documentUri = stripAnchor(uri);
-  return scopes.some(scope => {
-    const normalizedScope = stripAnchor(scope).replace(/\/+$/, '');
-    return documentUri === normalizedScope || documentUri.startsWith(`${normalizedScope}/`);
+  return EffectArray.some(scopes, scope => {
+    const normalizedScope = Effect2.pipe(stripAnchor(scope), EffectString.replace(/\/+$/, ''));
+    return documentUri === normalizedScope || Effect2.pipe(documentUri, EffectString.startsWith(`${normalizedScope}/`));
   });
 }
 
@@ -946,7 +1046,8 @@ function boundedRecallIndexCandidates(
 ): readonly RecallCandidate[] {
   const preselectionLimit = recallIndexPreselectionLimit(resultLimit);
   return deduplicateLogicalRecallCandidates(
-    candidates.filter(
+    EffectArray.filter(
+      candidates,
       candidate =>
         uriMatchesRecallScopes(candidate.uri, allowedUriScopes) &&
         (eligibility === undefined || recallRankCandidateIsEligible(eligibility, candidate)),
@@ -978,13 +1079,13 @@ function memoryKindFromUri(uri: string): 'durable' | 'handoff' | 'incident' | 'p
 }
 
 function memoryStatusFromUri(uri: string): 'active' | 'archived' | 'expired' | 'superseded' | undefined {
-  return uri.includes('/archived/')
+  return Effect2.pipe(uri, EffectString.includes('/archived/'))
     ? 'archived'
-    : uri.includes('/expired/')
+    : Effect2.pipe(uri, EffectString.includes('/expired/'))
       ? 'expired'
-      : uri.includes('/superseded/')
+      : Effect2.pipe(uri, EffectString.includes('/superseded/'))
         ? 'superseded'
-        : uri.includes('/memories/')
+        : Effect2.pipe(uri, EffectString.includes('/memories/'))
           ? 'active'
           : undefined;
 }
@@ -996,10 +1097,18 @@ function resourceProjectFromUri(uri: string): string | undefined {
 function recallRelations(record: MemoryRecord, seedUris: readonly string[]): readonly MemoryRelation[] {
   return [
     ...(record.metadata.relations ?? []),
-    ...(record.metadata.references ?? []).map(uri => ({type: 'references' as const, uri})),
-    ...(record.metadata.evidence ?? [])
-      .filter(evidence => evidence.startsWith('threadnote://'))
-      .map(uri => ({type: 'evidence_for' as const, uri})),
+    ...EffectArray.map(record.metadata.references ?? [], uri => ({type: 'references' as const, uri})),
+    ...EffectArray.map(
+      EffectArrayPipe(record.metadata.evidence ?? [], __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (evidence, __effectArrayIndex2) =>
+            __effectArrayIndex2 in __effectArrayValues &&
+            Effect2.pipe(evidence, EffectString.startsWith('threadnote://')),
+        ),
+      ),
+      uri => ({type: 'evidence_for' as const, uri}),
+    ),
     ...(record.metadata.supersedes ? [{type: 'supersedes' as const, uri: record.metadata.supersedes}] : []),
     ...containmentRelations(record.uri, seedUris),
   ];
@@ -1009,9 +1118,15 @@ function containmentRelations(
   uri: string,
   seedUris: readonly string[],
 ): readonly {readonly type: 'related_to'; readonly uri: string}[] {
-  return seedUris
-    .filter(seedUri => uri.startsWith(`${seedUri.replace(/\/$/, '')}/`))
-    .map(seedUri => ({type: 'related_to' as const, uri: seedUri}));
+  return EffectArray.map(
+    EffectArray.filter(
+      seedUris,
+      (seedUri, __effectArrayIndex2) =>
+        __effectArrayIndex2 in seedUris &&
+        Effect2.pipe(uri, EffectString.startsWith(`${Effect2.pipe(seedUri, EffectString.replace(/\/$/, ''))}/`)),
+    ),
+    seedUri => ({type: 'related_to' as const, uri: seedUri}),
+  );
 }
 
 /**
@@ -1097,7 +1212,7 @@ export const collectExactMatches = Effect.fn('utils.collectExactMatches')(functi
 ) {
   // Run all term×scope greps concurrently, then fold the results in a fixed
   // order so dedup ranking stays deterministic regardless of completion order.
-  const pairs = terms.flatMap(term => scopes.map(scope => ({scope, term})));
+  const pairs = EffectArray.flatMap(terms, term => EffectArray.map(scopes, scope => ({scope, term})));
   const outputs = yield* Effect.forEach(pairs, pair => runGrep(pair.term, pair.scope), {
     concurrency: 'unbounded',
   });
@@ -1109,7 +1224,7 @@ export const collectExactMatches = Effect.fn('utils.collectExactMatches')(functi
       continue;
     }
     for (const raw of grepUrisFromJson(json)) {
-      const uri = raw.replace(/#.*$/, '');
+      const uri = Effect2.pipe(raw, EffectString.replace(/#.*$/, ''));
       const existing = byUri.get(uri);
       if (existing) {
         existing.terms.add(pair.term);
@@ -1118,9 +1233,12 @@ export const collectExactMatches = Effect.fn('utils.collectExactMatches')(functi
       }
     }
   }
-  return [...byUri.entries()]
-    .sort((left, right) => right[1].terms.size - left[1].terms.size || left[1].order - right[1].order)
-    .map(([uri, value]) => ({terms: [...value.terms], uri}));
+  return EffectArray.map(
+    [...byUri.entries()].sort(
+      (left, right) => right[1].terms.size - left[1].terms.size || left[1].order - right[1].order,
+    ),
+    ([uri, value]) => ({terms: [...value.terms], uri}),
+  );
 });
 
 export function formatExactMatchPointers(matches: readonly ExactMatch[], maxUris = 8): string | undefined {
@@ -1128,11 +1246,11 @@ export function formatExactMatchPointers(matches: readonly ExactMatch[], maxUris
     return undefined;
   }
   const shown = matches.slice(0, maxUris);
-  const lines = shown.map(match => `- ${match.uri} (${match.terms.join(', ')})`);
+  const lines = EffectArray.map(shown, match => `- ${match.uri} (${EffectArray.join(match.terms, ', ')})`);
   if (matches.length > maxUris) {
     lines.push(`(+${matches.length - maxUris} more exact matches — refine the query to narrow)`);
   }
-  return ['Exact term matches (read the URI for full content):', ...lines].join('\n');
+  return EffectArray.join(['Exact term matches (read the URI for full content):', ...lines], '\n');
 }
 
 function exactRecallTermScore(term: string): number {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
@@ -19,6 +20,8 @@ import {
 } from '@threadnote/graph/maintenance/coordinator';
 import type {CodeGraphRoutineMaintenanceResult} from '@threadnote/graph/store';
 import {CodeGraphStoreError, type RepositoryIdentity} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type CompletedMaintenanceResult = Extract<CodeGraphRoutineMaintenanceResult, {readonly state: 'completed'}>;
 
@@ -219,7 +222,10 @@ describe('code graph maintenance lanes', () => {
         input =>
           Ref.updateAndGet(calls, current => [...current, input.databasePath]).pipe(
             Effect.flatMap(current => {
-              const databaseCalls = current.filter(databasePath => databasePath === input.databasePath).length;
+              const databaseCalls = EffectArray.filter(
+                current,
+                databasePath => databasePath === input.databasePath,
+              ).length;
               const barrier =
                 input.databasePath === '/database/A' && databaseCalls === 1
                   ? Deferred.succeed(firstStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseFirst)))
@@ -251,7 +257,7 @@ describe('code graph maintenance lanes', () => {
       const observed = yield* Ref.get(calls);
       expect(observed[0]).toBe('/database/A');
       expect(observed[1]).toBe('/database/B');
-      expect(observed.filter(databasePath => databasePath === '/database/A')).toHaveLength(
+      expect(EffectArray.filter(observed, databasePath => databasePath === '/database/A')).toHaveLength(
         CODE_GRAPH_MAINTENANCE_AUTOMATIC_TAIL_UNITS,
       );
     }),
@@ -305,7 +311,7 @@ describe('code graph maintenance lanes', () => {
       const results = yield* Effect.forEach(Array.from({length: 6}), () => run(tick('/home', '/database/A')));
 
       expect(yield* Ref.get(calls)).toEqual(['vector', 'routine', 'vector', 'routine', 'vector', 'routine']);
-      expect(results.every(result => result.state === 'completed' && result.remaining)).toBe(true);
+      expect(EffectArray.every(results, result => result.state === 'completed' && result.remaining)).toBe(true);
     }),
   );
 
@@ -324,7 +330,7 @@ describe('code graph maintenance lanes', () => {
       const results = yield* Effect.forEach(Array.from({length: 6}), () => run(tick('/home', '/database/A')));
 
       expect(yield* Ref.get(calls)).toEqual(['vector', 'routine', 'vector', 'routine', 'vector', 'routine']);
-      expect(results.every(result => result.state === 'completed' && result.remaining)).toBe(true);
+      expect(EffectArray.every(results, result => result.state === 'completed' && result.remaining)).toBe(true);
     }),
   );
 
@@ -530,7 +536,7 @@ describe('code graph maintenance lanes', () => {
           (_name: CodeGraphMaintenanceLane): CodeGraphRoutineMaintenanceRun =>
           input =>
             Effect.gen(function* () {
-              const index = Number(input.databasePath.slice('/database/'.length));
+              const index = Number(Effect2.pipe(input.databasePath, EffectString.slice('/database/'.length)));
               if (index === activeLimit) {
                 if (!(yield* Ref.get(capacityOpened))) return completed();
                 yield* Deferred.succeed(admittedAfterCapacity, undefined);
@@ -625,7 +631,7 @@ describe('code graph maintenance lanes', () => {
         yield* Effect.forEach(homes, (home, index) => run(tick(home, `/database/${index}`)));
 
         const visits = new Map<string, number>();
-        const expected = homes.map(home => {
+        const expected = EffectArray.map(homes, home => {
           const visit = visits.get(home) ?? 0;
           visits.set(home, visit + 1);
           const lane = CODE_GRAPH_MAINTENANCE_LANES[visit % CODE_GRAPH_MAINTENANCE_LANES.length];
@@ -661,13 +667,13 @@ function identity(name: string): RepositoryIdentity {
   const fill = name === 'active' ? 'a' : 'b';
   return {
     caseMode: 'sensitive',
-    checkoutId: fill.repeat(64),
+    checkoutId: Effect2.pipe(fill, EffectString.repeat(64)),
     displayName: name,
     gitCommonDirectory: `/${name}/common`,
-    headCommit: fill.repeat(40),
+    headCommit: Effect2.pipe(fill, EffectString.repeat(40)),
     objectFormat: 'sha1',
-    repositoryId: fill.repeat(64),
+    repositoryId: Effect2.pipe(fill, EffectString.repeat(64)),
     repoRoot: `/${name}/root`,
-    worktreeId: fill.repeat(64),
+    worktreeId: Effect2.pipe(fill, EffectString.repeat(64)),
   };
 }

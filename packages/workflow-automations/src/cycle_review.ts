@@ -1,6 +1,12 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {WorkflowAutomationError} from './contracts.js';
 import {nativeCycleHasControl} from './cycle.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
 const text = (maximum = 4096) => Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maximum));
@@ -73,8 +79,8 @@ const safePath = (value: string) =>
   value.length > 0 &&
   !/[\\:]/u.test(value) &&
   !nativeCycleHasControl(value) &&
-  !value.startsWith('/') &&
-  value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
+  !Effect.pipe(value, EffectString.startsWith('/')) &&
+  EffectArray.every(Effect.pipe(value, EffectString.split('/')), part => part !== '' && part !== '.' && part !== '..');
 
 export const nativeCycleOrchestratorLane = 'orchestrator';
 
@@ -109,14 +115,14 @@ export function validateNativeCycleReviewHistory(
   )
     fail('Review source or mode does not match its immutable snapshot.');
   const selected = new Set(review.selected),
-    lanes = new Set(review.lanes.map(lane => lane.name));
+    lanes = new Set(EffectArray.map(review.lanes, lane => lane.name));
   if (!selected.has(nativeCycleOrchestratorLane))
     fail('Select the required orchestrator review lane and include its complete report.');
   if (
     selected.size !== review.selected.length ||
     lanes.size !== review.lanes.length ||
     selected.size !== lanes.size ||
-    [...selected].some(name => !lanes.has(name))
+    EffectArray.some([...selected], name => !lanes.has(name))
   )
     fail('Selected and completed review lanes differ.');
   if ((snapshot.previous || snapshot.supersedes) && !previous) fail('Prior review evidence is required.');
@@ -134,20 +140,31 @@ export function validateNativeCycleReviewHistory(
       (snapshot.head !== previous.snapshot.head && snapshot.acceptedHead !== snapshot.head))
   )
     fail('Review history does not match the source predecessor.');
-  const prior = new Map(previous?.review.findings.map(finding => [finding.id, finding]) ?? []);
+  const prior = new Map(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(previous?.review.findings), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, finding => [finding.id, finding]),
+      ),
+    ) ?? [],
+  );
   const seen = new Set<string>();
   for (const finding of review.findings) {
     if (
       seen.has(finding.id) ||
       !safePath(finding.file) ||
-      [finding.body, finding.trigger, finding.impact, finding.evidence].some(value => !value.trim())
+      EffectArray.some(
+        [finding.body, finding.trigger, finding.impact, finding.evidence],
+        value => !Effect.pipe(value, EffectString.trim),
+      )
     )
       fail('Findings require unique IDs, relative locations and concrete evidence.');
     seen.add(finding.id);
     const old = prior.get(finding.id);
     if (
       (['resolved', 'rejected'].includes(finding.state) || (old && blocking(old) && !blocking(finding))) &&
-      !finding.reason?.trim()
+      !Effect.pipe(finding.reason, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+      )
     )
       fail('Resolving, rejecting or downgrading a finding requires evidence.');
     if ((['resolved', 'carried'].includes(finding.state) && !old) || (finding.state === 'new' && old))
@@ -155,21 +172,30 @@ export function validateNativeCycleReviewHistory(
   }
   for (const finding of prior.values())
     if (blocking(finding) && !seen.has(finding.id)) fail('A prior blocker disappeared without a disposition.');
-  const active = review.findings.filter(finding => ['new', 'carried'].includes(finding.state));
+  const active = EffectArrayPipe(review.findings, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (finding, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues && ['new', 'carried'].includes(finding.state),
+    ),
+  );
   return {
     review,
     summary: {
       snapshotId: snapshot.snapshotId,
       snapshotTree: snapshot.tree,
       phaseHash: snapshot.phaseHash,
-      blockingIssueCount: active.filter(blocking).length,
-      counts: Object.fromEntries(
-        ['critical', 'important', 'minor', 'informational'].map(severity => [
+      blockingIssueCount: EffectArray.filter(active, blocking).length,
+      counts: EffectRecord.fromEntries(
+        EffectArray.map(['critical', 'important', 'minor', 'informational'], severity => [
           severity,
-          active.filter(finding => finding.severity === severity).length,
+          EffectArray.filter(active, finding => finding.severity === severity).length,
         ]),
       ),
-      resolved: review.findings.filter(finding => finding.state === 'resolved').map(finding => finding.id),
+      resolved: EffectArray.map(
+        EffectArray.filter(review.findings, finding => finding.state === 'resolved'),
+        finding => finding.id,
+      ),
     },
   };
 }

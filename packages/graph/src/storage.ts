@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -19,13 +20,13 @@ import {
   type CodeGraphStorageSemanticAttribution,
 } from './storage/attribution.js';
 
-class CodeGraphStorageOperationError extends Schema.TaggedError<CodeGraphStorageOperationError>()(
-  'CodeGraphStorageOperationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphStorageOperationError extends Schema.TaggedError<
+  CodeGraphStorageOperationError,
+  {readonly brand: unique symbol}
+>()('CodeGraphStorageOperationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const CODE_GRAPH_COMPACTION_MIN_RECLAIMABLE_BYTES = 512 * 1024 * 1024;
 export const CODE_GRAPH_COMPACTION_MIN_RECLAIMABLE_RATIO = 0.2;
@@ -692,7 +693,7 @@ function readStorageAttribution(
         LIMIT ?`,
     )
     .all(CODE_GRAPH_STORAGE_SEMANTIC_OBJECT_LIMIT + 1);
-  const semanticRows = rows.slice(0, CODE_GRAPH_STORAGE_SEMANTIC_OBJECT_LIMIT).map(row => ({
+  const semanticRows = EffectArray.map(rows.slice(0, CODE_GRAPH_STORAGE_SEMANTIC_OBJECT_LIMIT), row => ({
     bytes: safeCount(row.bytes, `storage object ${safeStorageObjectName(row.name)} bytes`),
     name: safeStorageObjectName(row.name),
     pages: safeCount(row.pages, `storage object ${safeStorageObjectName(row.name)} pages`),
@@ -701,7 +702,7 @@ function readStorageAttribution(
   const fragmentedBytes = safeCount(rows[0]?.total_unused_bytes ?? 0, 'fragmented storage bytes');
   const objectCount = safeCount(rows[0]?.object_count ?? 0, 'attributed storage objects');
   const objectsTruncated = objectCount > CODE_GRAPH_STORAGE_ATTRIBUTION_OBJECT_LIMIT;
-  const objects = rows.slice(0, CODE_GRAPH_STORAGE_ATTRIBUTION_OBJECT_LIMIT).map(row => ({
+  const objects = EffectArray.map(rows.slice(0, CODE_GRAPH_STORAGE_ATTRIBUTION_OBJECT_LIMIT), row => ({
     bytes: safeCount(row.bytes, `storage object ${safeStorageObjectName(row.name)} bytes`),
     kind: row.kind,
     name: safeStorageObjectName(row.name),

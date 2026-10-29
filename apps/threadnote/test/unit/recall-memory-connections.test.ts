@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -17,6 +18,8 @@ import {loadRecallIndexData, loadRecallMemoryLinks} from '@threadnote/recall/ind
 import {rankRecallCandidates, type RecallCandidate} from '@threadnote/recall/rank';
 import {prepareRecallSections} from '@threadnote/recall/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CURRENT = new Date('2026-08-31T12:00:00.000Z');
 
@@ -95,7 +98,7 @@ describe('recall memory connections', () => {
       seedUris: ['threadnote://memory/tn_seed'],
     });
 
-    expect(ranked.results.map(result => result.candidate.uri)).toEqual([direct.uri, topical.uri]);
+    expect(EffectArray.map(ranked.results, result => result.candidate.uri)).toEqual([direct.uri, topical.uri]);
     expect(ranked.results[0]?.passedRelevanceGate).toBe(false);
   });
 
@@ -123,7 +126,12 @@ describe('recall memory connections', () => {
         memorySeeds: [{memoryId: 'tn_seed', requestedOrdinal: 0}],
       });
       expect(
-        selected.map(link => [link.direction, link.relationType, link.sourceMemoryId, link.targetMemoryId]),
+        EffectArray.map(selected, link => [
+          link.direction,
+          link.relationType,
+          link.sourceMemoryId,
+          link.targetMemoryId,
+        ]),
       ).toEqual([
         ['incoming', 'evidence_for', 'tn_incoming', 'tn_seed'],
         ['outgoing', 'depends_on', 'tn_seed', 'tn_target'],
@@ -138,7 +146,12 @@ describe('recall memory connections', () => {
         ],
       });
       expect(
-        sharedOrdinal.map(link => [link.direction, link.relationType, link.sourceMemoryId, link.targetMemoryId]),
+        EffectArray.map(sharedOrdinal, link => [
+          link.direction,
+          link.relationType,
+          link.sourceMemoryId,
+          link.targetMemoryId,
+        ]),
       ).toEqual([
         ['incoming', 'depends_on', 'tn_seed', 'tn_target'],
         ['incoming', 'evidence_for', 'tn_incoming', 'tn_seed'],
@@ -154,13 +167,15 @@ describe('recall memory connections', () => {
       expect(result.premises).toEqual([
         expect.objectContaining({memoryId: 'tn_seed', requestedOrdinal: 0, state: 'current'}),
       ]);
-      expect(result.candidates.map(candidate => candidate.memoryId)).toEqual(['tn_incoming', 'tn_target']);
-      expect(result.connections.map(connection => [connection.direction, connection.relationType])).toEqual([
+      expect(EffectArray.map(result.candidates, candidate => candidate.memoryId)).toEqual(['tn_incoming', 'tn_target']);
+      expect(
+        EffectArray.map(result.connections, connection => [connection.direction, connection.relationType]),
+      ).toEqual([
         ['incoming', 'evidence_for'],
         ['outgoing', 'depends_on'],
       ]);
       expect(result.diagnostics).toMatchObject({canonicalRereads: 4, rawLinkRows: 2});
-      expect(result.candidates.map(candidate => candidate.memoryId)).not.toContain('tn_second_hop');
+      expect(EffectArray.map(result.candidates, candidate => candidate.memoryId)).not.toContain('tn_second_hop');
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -203,7 +218,12 @@ describe('recall memory connections', () => {
           toUri: currentUri,
         });
         yield* store.remove(location, formerUri);
-        yield* store.write(location, currentUri, content.replace(`memory_id: ${memoryId}\n`, ''), {mode: 'upsert'});
+        yield* store.write(
+          location,
+          currentUri,
+          Effect2.pipe(content, EffectString.replace(`memory_id: ${memoryId}\n`, '')),
+          {mode: 'upsert'},
+        );
         yield* writeMemory(fs, path, config, 'relocation-neighbor', neighborMemoryId, [
           {type: 'related_to', uri: alias},
         ]);
@@ -218,7 +238,7 @@ describe('recall memory connections', () => {
           expect(result.premises).toEqual([
             expect.objectContaining({memoryId, requestedRef: memoryRef, state: 'current', uri: currentUri}),
           ]);
-          expect(result.candidates.map(candidate => candidate.memoryId)).toEqual([neighborMemoryId]);
+          expect(EffectArray.map(result.candidates, candidate => candidate.memoryId)).toEqual([neighborMemoryId]);
           expect(result.connections).toHaveLength(2);
           expect(result.connections).toEqual(
             expect.arrayContaining([
@@ -237,25 +257,28 @@ describe('recall memory connections', () => {
           expect.objectContaining({memoryId, requestedOrdinal: 0, requestedRef: alias, state: 'current'}),
         ]);
 
-        const superseding = formatMemoryDocument(
-          'MEMORY',
-          {
-            kind: 'durable',
-            memoryId,
-            project: 'threadnote',
-            relations: [
-              {type: 'related_to', uri: memoryIdentityAlias(neighborMemoryId)},
-              {type: 'supersedes', uri: memoryIdentityAlias(neighborMemoryId)},
-            ],
-            schemaVersion: MEMORY_SCHEMA_VERSION,
-            sourceAgentClient: 'codex',
-            status: 'active',
-            timestamp: '2026-08-31T00:00:00.000Z',
-            topic: 'relocated-connection-seed',
-            visibility: 'shared',
-          },
-          'Relocated connection seed.',
-        ).replace(`memory_id: ${memoryId}\n`, '');
+        const superseding = Effect2.pipe(
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              memoryId,
+              project: 'threadnote',
+              relations: [
+                {type: 'related_to', uri: memoryIdentityAlias(neighborMemoryId)},
+                {type: 'supersedes', uri: memoryIdentityAlias(neighborMemoryId)},
+              ],
+              schemaVersion: MEMORY_SCHEMA_VERSION,
+              sourceAgentClient: 'codex',
+              status: 'active',
+              timestamp: '2026-08-31T00:00:00.000Z',
+              topic: 'relocated-connection-seed',
+              visibility: 'shared',
+            },
+            'Relocated connection seed.',
+          ),
+          EffectString.replace(`memory_id: ${memoryId}\n`, ''),
+        );
         yield* store.write(location, currentUri, superseding, {mode: 'upsert'});
         yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
         for (const memoryRef of [alias, currentUri, formerUri]) {
@@ -266,10 +289,10 @@ describe('recall memory connections', () => {
             readRecords: uris => readMemoryRecordsByUri(config, uris),
             relationTypes: ['related_to'],
           });
-          expect(historical.candidates.map(candidate => candidate.memoryId)).toEqual([neighborMemoryId]);
+          expect(EffectArray.map(historical.candidates, candidate => candidate.memoryId)).toEqual([neighborMemoryId]);
           expect(historical.connections).not.toHaveLength(0);
           expect(historical.connections).toEqual(
-            historical.connections.map(() =>
+            EffectArray.map(historical.connections, () =>
               expect.objectContaining({currentness: 'historical', relationType: 'related_to'}),
             ),
           );
@@ -284,7 +307,10 @@ describe('recall memory connections', () => {
           expect(omitted.connections).toEqual([]);
         }
 
-        const conflicting = content.replace(`memory_id: ${memoryId}\n`, 'memory_id: tn_other_live_identity\n');
+        const conflicting = Effect2.pipe(
+          content,
+          EffectString.replace(`memory_id: ${memoryId}\n`, 'memory_id: tn_other_live_identity\n'),
+        );
         yield* store.write(location, currentUri, conflicting, {mode: 'upsert'});
         yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: true});
         const rejected = yield* retrieveRecallMemoryConnections(config, {
@@ -376,7 +402,7 @@ describe('recall memory connections', () => {
         readRecords: uris => readMemoryRecordsByUri(config, uris),
       });
       expect(result.premises[0]?.state).toBe('historical');
-      expect(result.candidates.map(candidate => candidate.memoryId)).toEqual(['tn_new']);
+      expect(EffectArray.map(result.candidates, candidate => candidate.memoryId)).toEqual(['tn_new']);
       expect(JSON.stringify(result)).not.toContain('tn_foreign');
       expect(result.connections).toEqual([
         expect.objectContaining({
@@ -546,8 +572,8 @@ describe('recall memory connections', () => {
             fs,
             path,
             config,
-            `incoming-${String(index).padStart(2, '0')}`,
-            `tn_backfill_${String(index).padStart(2, '0')}`,
+            `incoming-${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
+            `tn_backfill_${Effect2.pipe(String(index), EffectString.padStart(2, '0'))}`,
             [{type: 'related_to', uri: 'threadnote://memory/tn_backfill_seed'}],
             index < 32 ? {status: 'archived'} : {},
           ),
@@ -561,7 +587,7 @@ describe('recall memory connections', () => {
         readRecords: uris => readMemoryRecordsByUri(config, uris),
       });
 
-      expect(result.candidates.map(candidate => candidate.memoryId)).toEqual(
+      expect(EffectArray.map(result.candidates, candidate => candidate.memoryId)).toEqual(
         Array.from({length: 8}, (_, index) => `tn_backfill_${index + 32}`),
       );
       expect(result.coverage.truncated).toBe(true);
@@ -588,7 +614,7 @@ describe('recall memory connections', () => {
             fs,
             path,
             config,
-            `incoming-${seedIndex}-${String(laneIndex).padStart(2, '0')}`,
+            `incoming-${seedIndex}-${Effect2.pipe(String(laneIndex), EffectString.padStart(2, '0'))}`,
             `tn_multi_incoming_${seedIndex}_${laneIndex}`,
             [{type: 'related_to', uri: `threadnote://memory/tn_multi_seed_${seedIndex}`}],
             laneIndex < 8 ? {status: 'archived'} : {},
@@ -625,7 +651,7 @@ describe('recall memory connections', () => {
         config,
         'seed',
         'tn_currentness_seed',
-        targetIds.map(memoryId => ({type: 'related_to' as const, uri: `threadnote://memory/${memoryId}`})),
+        EffectArray.map(targetIds, memoryId => ({type: 'related_to' as const, uri: `threadnote://memory/${memoryId}`})),
       );
       yield* Effect.forEach(
         targetIds,
@@ -721,14 +747,20 @@ describe('recall memory connections', () => {
       expect(prepared.memoryConnections?.premises).toEqual([
         expect.objectContaining({memoryId: 'tn_cross_project_seed', state: 'current'}),
       ]);
-      expect(prepared.memoryConnections?.candidates.map(candidate => candidate.uri)).toEqual([target]);
+      expect(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(prepared.memoryConnections?.candidates), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, candidate => candidate.uri),
+          ),
+        ),
+      ).toEqual([target]);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 });
 
 function candidate(uri: string, text: string, overrides: Partial<RecallCandidate> = {}): RecallCandidate {
   return {
-    fields: {project: 'threadnote', topic: uri.split('/').at(-1)},
+    fields: {project: 'threadnote', topic: Effect2.pipe(uri, EffectString.split('/')).at(-1)},
     kind: 'durable',
     status: 'active',
     text,

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {DateTime, Effect, Exit, FileSystem, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -42,6 +43,8 @@ import {
   type CodeGraphWorksetRoutingSymbolV1,
   type CodeGraphWorksetRoutingTermV1,
 } from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const CATALOG_LOCK_OPTIONS = {
   heartbeatIntervalMilliseconds: 10_000,
@@ -183,11 +186,16 @@ export function withCatalogWriter<A, E, R>(
 }
 
 function removeObsoleteCatalogFiles(fs: FileSystem.FileSystem, path: Path.Path, threadnoteHome: string) {
-  const obsoleteDatabases = [2, 3].map(version =>
+  const obsoleteDatabases = EffectArray.map([2, 3], version =>
     path.join(threadnoteHome, 'indexes', 'code-graph', 'worksets', `catalog-v${String(version)}.sqlite`),
   );
   return Effect.forEach(
-    obsoleteDatabases.flatMap(database => [database, `${database}-journal`, `${database}-shm`, `${database}-wal`]),
+    EffectArray.flatMap(obsoleteDatabases, database => [
+      database,
+      `${database}-journal`,
+      `${database}-shm`,
+      `${database}-wal`,
+    ]),
     candidate => fs.remove(candidate, {force: true}),
     {concurrency: 1, discard: true},
   );
@@ -449,8 +457,11 @@ export function loadAndValidateProjection(sql: SqlClient.SqlClient, projectionDi
         [projectionDigest, afterNodeId, PROJECTION_INSERT_BATCH_SIZE],
       );
       if (symbolRows.length === 0) break;
-      const nodeIds = symbolRows.map(row => requiredText(row.node_id, 'node identity'));
-      const placeholders = nodeIds.map(() => '?').join(', ');
+      const nodeIds = EffectArray.map(symbolRows, row => requiredText(row.node_id, 'node identity'));
+      const placeholders = EffectArray.join(
+        EffectArray.map(nodeIds, () => '?'),
+        ', ',
+      );
       const termRows = yield* sql.unsafe<RoutingTermRow>(
         `SELECT node_id, term, weight FROM routing_terms
          WHERE projection_digest = ? AND node_id IN (${placeholders})
@@ -504,7 +515,10 @@ export function loadAndValidateProjection(sql: SqlClient.SqlClient, projectionDi
       for (const row of symbolRows) {
         const nodeId = requiredText(row.node_id, 'node identity');
         const symbol = yield* decodeRoutingSymbol(row, lookupKeys.get(nodeId) ?? [], terms.get(nodeId) ?? []);
-        const expectedExactKeys = codeGraphWorksetRoutingExactKeys(symbol).map(key => `${key.kind}\0${key.exactKey}`);
+        const expectedExactKeys = EffectArray.map(
+          codeGraphWorksetRoutingExactKeys(symbol),
+          key => `${key.kind}\0${key.exactKey}`,
+        );
         if (JSON.stringify(exactKeys.get(nodeId) ?? []) !== JSON.stringify(expectedExactKeys)) {
           return yield* corrupt('Routing projection normalized exact-key validation failed.');
         }
@@ -550,7 +564,7 @@ export function decodeProjectionMetadata(row: ProjectionRow) {
     const extractorGeneration = requiredInteger(row.extractor_generation, 'extractor generation');
     const symbolCount = requiredInteger(row.symbol_count, 'symbol count');
     if (
-      ![projectionDigest, repositoryId, checkoutId, worktreeId, snapshotDigest].every(value =>
+      !EffectArray.every([projectionDigest, repositoryId, checkoutId, worktreeId, snapshotDigest], value =>
         /^[0-9a-f]{64}$/u.test(value),
       ) ||
       !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(commitId) ||
@@ -641,7 +655,7 @@ export function validateGenerationIdentity(generation: {readonly digest: string;
   if (
     !GENERATION_ID.test(generation.id) ||
     !SHA256_HEX.test(generation.digest) ||
-    generation.id !== `cgwg_${generation.digest.slice(0, 40)}`
+    generation.id !== `cgwg_${Effect2.pipe(generation.digest, EffectString.slice(0, 40))}`
   ) {
     throw invalid('Workset catalog generation identity is invalid.');
   }
@@ -680,7 +694,7 @@ export function validateResultSetReferences(
 ) {
   return Effect.gen(function* () {
     const members = yield* loadGenerationMembers(sql, generationId);
-    const membersByKey = new Map(members.map(member => [member.repository_key, member] as const));
+    const membersByKey = new Map(EffectArray.map(members, member => [member.repository_key, member] as const));
     const expectedOwners = new Map<string, Set<string>>();
     for (const prepared of sequence.cards) {
       const member = membersByKey.get(prepared.card.repositoryKey);
@@ -710,7 +724,10 @@ export function validateResultSetReferences(
       const rows = yield* sql.unsafe<QualifiedRefRow>(
         `SELECT ref, repository_id, node_id, created_at
          FROM qualified_refs
-         WHERE ref IN (${page.map(() => '?').join(', ')})
+         WHERE ref IN (${EffectArray.join(
+           EffectArray.map(page, () => '?'),
+           ', ',
+         )})
          ORDER BY ref`,
         page,
       );
@@ -815,7 +832,7 @@ export function storedResultSetSequenceReceipt(sql: SqlClient.SqlClient, resultS
       }
       let bytes = 0;
       const digests: string[] = [];
-      rows.forEach((row, ordinal) => {
+      EffectArray.forEach(rows, (row, ordinal) => {
         if (requiredInteger(row.ordinal, 'result card ordinal') !== ordinal) {
           throw corrupt('Stored workset result-set ordinals are not contiguous.');
         }
@@ -905,7 +922,7 @@ export function loadGenerationMembers(sql: SqlClient.SqlClient, generationId: st
     .pipe(
       Effect.flatMap(rows =>
         validateStored(() =>
-          rows.map((row, index) => {
+          EffectArray.map(rows, (row, index) => {
             if (rows.length > CODE_GRAPH_WORKSET_CATALOG_LIMITS.membersPerGeneration) {
               throw corrupt('Workset generation member count exceeds the supported bound.');
             }
@@ -1203,7 +1220,11 @@ export function assertInputText(value: string, label: string, maximumBytes: numb
 
 export function containsControlCharacter(value: string): boolean {
   for (const character of value) {
-    const code = character.codePointAt(0)!;
+    const code = Effect2.pipe(
+      character,
+      EffectString.codePointAt(0),
+      Effect2.Option.getOrElse(() => undefined),
+    )!;
     if (code <= 0x1f || code === 0x7f) return true;
   }
   return false;
@@ -1257,13 +1278,18 @@ export function mapCatalogError(operation: string) {
 }
 
 export function storageCauseCategory(cause: unknown): 'busy' | 'corrupt' | 'storage' {
-  const detail = String(cause).toLowerCase();
-  if (detail.includes('locked') || detail.includes('busy') || detail.includes('filelocktimeout')) return 'busy';
+  const detail = Effect2.pipe(String(cause), EffectString.toLowerCase);
   if (
-    detail.includes('malformed') ||
-    detail.includes('not a database') ||
-    detail.includes('no such table') ||
-    detail.includes('database disk image is malformed')
+    Effect2.pipe(detail, EffectString.includes('locked')) ||
+    Effect2.pipe(detail, EffectString.includes('busy')) ||
+    Effect2.pipe(detail, EffectString.includes('filelocktimeout'))
+  )
+    return 'busy';
+  if (
+    Effect2.pipe(detail, EffectString.includes('malformed')) ||
+    Effect2.pipe(detail, EffectString.includes('not a database')) ||
+    Effect2.pipe(detail, EffectString.includes('no such table')) ||
+    Effect2.pipe(detail, EffectString.includes('database disk image is malformed'))
   ) {
     return 'corrupt';
   }

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Record as EffectRecord} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {chmod, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -27,12 +28,14 @@ import {
   syncSharedReposBeforeAgentRead as syncSharedReposBeforeAgentReadEffect,
 } from '@threadnote/threadnote/effect/share';
 import {runForget as runForgetEffect} from '@threadnote/threadnote/memory/commands';
-import type {ShareRuntime, ShareTeamsFile} from '@threadnote/threadnote/types';
+import type {ShareRuntime, ShareTeamConfig, ShareTeamsFile} from '@threadnote/threadnote/types';
 import {runCommand} from '@threadnote/threadnote/utils';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const runShareInit = (...args: Parameters<typeof runShareInitEffect>) => runEffect(runShareInitEffect(...args));
 const runSharePublish = (...args: Parameters<typeof runSharePublishEffect>) =>
@@ -82,11 +85,20 @@ async function git(args: readonly string[], cwd?: string): Promise<void> {
 
 async function gitOutput(args: readonly string[], cwd?: string): Promise<string> {
   const result = await runEffect(runCommand('git', args, {cwd}));
-  return result.stdout.trim();
+  return Effect2.pipe(result.stdout, EffectString.trim);
 }
 
 function canonicalResourceFile(home: string, uri: string): string {
-  return join(home, 'data', 'local', ...uri.slice('threadnote://'.length).split('/'));
+  return join(
+    home,
+    'data',
+    'local',
+    ...Effect2.pipe(uri, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice('threadnote://'.length));
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split('/'));
+      return __effectPipeStage1;
+    }),
+  );
 }
 
 async function writeCanonicalResource(home: string, uri: string, content: string, _encoding = 'utf8'): Promise<void> {
@@ -119,9 +131,13 @@ async function makeDroppedIdentityFixture(
   const relativePath = `durable/projects/threadnote/${topic}.md`;
   const id = `default:${relativePath}`;
   const uri = `threadnote://user/denys/memories/shared/default/${relativePath}`;
-  const memoryId = `tn_${topic.replaceAll('-', '_')}`;
+  const memoryId = `tn_${Effect2.pipe(topic, EffectString.replaceAll('-', '_'))}`;
   const original = `MEMORY\nkind: durable\nstatus: active\nproject: threadnote\ntopic: ${topic}\nmemory_id: ${memoryId}\n\nOriginal body.`;
-  const droppedIdentity = original.replace(`memory_id: ${memoryId}\n`, '').replace('Original body.', 'Remote body.');
+  const droppedIdentity = Effect2.pipe(original, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.replace(`memory_id: ${memoryId}\n`, ''));
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.replace('Original body.', 'Remote body.'));
+    return __effectPipeStage1;
+  });
   await mkdir(dirname(join(repo.seed, relativePath)), {recursive: true});
   await writeFile(join(repo.seed, relativePath), `${original}\n`, 'utf8');
   await git(['add', relativePath], repo.seed);
@@ -223,7 +239,7 @@ async function addShareTeam(repo: TestShareRepo, name: string): Promise<TestShar
   await git(['config', 'user.name', 'Threadnote Test'], worktree);
 
   const teamsPath = join(repo.home, 'share', 'teams.json');
-  const existingTeams = JSON.parse(await readFile(teamsPath, 'utf8')) as ShareTeamsFile;
+  const existingTeams = decodeShareTeamsFile(await readFile(teamsPath, 'utf8'));
   const teams: ShareTeamsFile = {
     ...existingTeams,
     teams: {
@@ -266,7 +282,10 @@ async function makeIdentityRestorationFixture(topic: string) {
   const uri = `threadnote://user/denys/memories/shared/default/${relativePath}`;
   const established = `MEMORY\nkind: durable\nstatus: active\nvisibility: shared\nproject: threadnote\ntopic: ${topic}\nmemory_id: tn_established_identity\n\nOriginal reviewed body.\n`;
   const transient = `MEMORY\nkind: durable\nstatus: active\nvisibility: shared\nproject: threadnote\ntopic: ${topic}\nmemory_id: tn_transient_republish\n\nReplacement body.\n`;
-  const restored = established.replace('Original reviewed body.', 'Corrected replacement body.');
+  const restored = Effect2.pipe(
+    established,
+    EffectString.replace('Original reviewed body.', 'Corrected replacement body.'),
+  );
   await mkdir(dirname(join(repo.seed, relativePath)), {recursive: true});
   await writeFile(join(repo.seed, relativePath), established, 'utf8');
   await git(['add', relativePath], repo.seed);
@@ -294,7 +313,7 @@ describe('share sync git handling', () => {
 
   afterEach(async () => {
     clearAutoShareStateForTest();
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
     for (const key of GIT_ENV_KEYS) {
       const value = savedGitEnv.get(key);
       if (value === undefined) {
@@ -337,7 +356,11 @@ describe('share sync git handling', () => {
           });
           yield* runShareSyncEffect(repo.config, {push: false});
           yield* Effect.promise(() =>
-            writeFile(join(repo.worktree, relativePath), original.replace('Original body.', 'Edited locally.'), 'utf8'),
+            writeFile(
+              join(repo.worktree, relativePath),
+              Effect2.pipe(original, EffectString.replace('Original body.', 'Edited locally.')),
+              'utf8',
+            ),
           );
 
           yield* runShareSyncEffect(repo.config, {message: 'sync local edit'});
@@ -534,9 +557,11 @@ describe('share sync git handling', () => {
     const worktreePath = join(worktree, relativePath);
     const previousContent =
       'MEMORY\nkind: durable\nstatus: active\nvisibility: shared\nproject: threadnote\ntopic: deleted-replacement\nmemory_id: tn_deleted_replacement\n\nPrevious body.\n';
-    const replacementContent = previousContent
-      .replace('visibility: shared', 'visibility: personal')
-      .replace('Previous body.', 'Replacement body.');
+    const replacementContent = Effect2.pipe(
+      previousContent,
+      EffectString.replace('visibility: shared', 'visibility: personal'),
+      EffectString.replace('Previous body.', 'Replacement body.'),
+    );
     await writeCanonicalResource(home, sourceUri, replacementContent);
     await writeCanonicalResource(home, targetUri, previousContent);
     await mkdir(dirname(worktreePath), {recursive: true});
@@ -570,9 +595,11 @@ describe('share sync git handling', () => {
     const worktreePath = join(worktree, relativePath);
     const previousContent =
       'MEMORY\nkind: durable\nstatus: active\nvisibility: shared\nproject: threadnote\ntopic: operation-replacement\nmemory_id: tn_operation_replacement\n\nPrevious body.\n';
-    const replacementContent = previousContent
-      .replace('visibility: shared', 'visibility: personal')
-      .replace('Previous body.', 'Replacement body.');
+    const replacementContent = Effect2.pipe(
+      previousContent,
+      EffectString.replace('visibility: shared', 'visibility: personal'),
+      EffectString.replace('Previous body.', 'Replacement body.'),
+    );
     await writeCanonicalResource(home, sourceUri, replacementContent);
     await writeCanonicalResource(home, targetUri, previousContent);
     await mkdir(dirname(worktreePath), {recursive: true});
@@ -753,13 +780,16 @@ describe('share sync git handling', () => {
     await mkdir(join(seed, 'durable', 'projects', 'threadnote'), {recursive: true});
     await writeFile(
       join(seed, relativePath),
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        '',
-        ['aws_session_token=', 'abcdefghijklmnopqrstuvwxyz0123456789ABCD'].join(''),
-      ].join('\n') + '\n',
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          '',
+          EffectArray.join(['aws_session_token=', 'abcdefghijklmnopqrstuvwxyz0123456789ABCD'], ''),
+        ],
+        '\n',
+      ) + '\n',
       'utf8',
     );
     await git(['add', relativePath], seed);
@@ -779,20 +809,23 @@ describe('share sync git handling', () => {
     await mkdir(join(seed, 'durable', 'projects', 'threadnote'), {recursive: true});
     await writeFile(
       join(seed, relativePath),
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'references: threadnote://user/alice/memories/durable/projects/threadnote/local.md',
-        '',
-        'shared body',
-        '',
-        '<!-- MEMORY_FIELDS',
-        '{',
-        '  "version": 1',
-        '}',
-        '-->',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'references: threadnote://user/alice/memories/durable/projects/threadnote/local.md',
+          '',
+          'shared body',
+          '',
+          '<!-- MEMORY_FIELDS',
+          '{',
+          '  "version": 1',
+          '}',
+          '-->',
+        ],
+        '\n',
+      ),
       'utf8',
     );
     await git(['add', relativePath], seed);
@@ -802,7 +835,7 @@ describe('share sync git handling', () => {
     await runShareSync(config, {push: false});
 
     await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(
-      ['MEMORY', 'kind: durable', 'status: active', '', 'shared body'].join('\n'),
+      EffectArray.join(['MEMORY', 'kind: durable', 'status: active', '', 'shared body'], '\n'),
     );
   });
 
@@ -1148,7 +1181,10 @@ describe('share sync git handling', () => {
         message: 'portable remote repository identity',
       },
       {
-        content: ['not a memory', '  code_citation: {not-json}', '', 'malformed CR-only inbound'].join('\r'),
+        content: EffectArray.join(
+          ['not a memory', '  code_citation: {not-json}', '', 'malformed CR-only inbound'],
+          '\r',
+        ),
         message: 'malformed code citation metadata',
       },
     ];
@@ -1184,7 +1220,10 @@ describe('share sync git handling', () => {
     expect(mcpList.content[0]?.type === 'text' ? mcpList.content[0].text : '').toContain('"take":"shared"');
     expect(mcpShow.content[0]?.type === 'text' ? mcpShow.content[0].text : '').toContain('"take":"shared"');
     await resolveShareConflict(config, id, {take: 'shared', push: false});
-    const repaired = droppedIdentity.replace('\n\n', '\nmemory_id: tn_shared_identity_continuity\n\n');
+    const repaired = Effect2.pipe(
+      droppedIdentity,
+      EffectString.replace('\n\n', '\nmemory_id: tn_shared_identity_continuity\n\n'),
+    );
     await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(repaired);
     await expect(readFile(join(worktree, relativePath), 'utf8')).resolves.toBe(repaired);
     await expect(readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8')).rejects.toMatchObject({
@@ -1200,7 +1239,10 @@ describe('share sync git handling', () => {
 
     await resolveShareConflict(config, id, {push: false, take: 'shared'});
 
-    const expected = droppedIdentity.replace('\n\n', '\nmemory_id: tn_previous_identity\n\n');
+    const expected = Effect2.pipe(
+      droppedIdentity,
+      EffectString.replace('\n\n', '\nmemory_id: tn_previous_identity\n\n'),
+    );
     await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(expected);
     await expect(readFile(join(worktree, relativePath), 'utf8')).resolves.toBe(expected);
     expect(expected).not.toBe(original);
@@ -1240,7 +1282,7 @@ describe('share sync git handling', () => {
   it('rejects staged identity-repair targets in both preview and apply mode', async () => {
     const {config, droppedIdentity, home, id, relativePath, store, uri, worktree} =
       await makeDroppedIdentityFixture('staged-identity-repair');
-    const staged = droppedIdentity.replace('Remote body.', 'Unreviewed staged body.');
+    const staged = Effect2.pipe(droppedIdentity, EffectString.replace('Remote body.', 'Unreviewed staged body.'));
     await writeFile(join(worktree, relativePath), staged, 'utf8');
     await git(['add', relativePath], worktree);
     const before = {
@@ -1298,11 +1340,11 @@ describe('share sync git handling', () => {
     const {config, home, id, relativePath, store, uri, worktree} =
       await makeDroppedIdentityFixture('read-only-identity-repair');
     const teamsPath = join(home, 'share', 'teams.json');
-    const teams = JSON.parse(await readFile(teamsPath, 'utf8')) as {
-      teams: {default: {access?: string}};
-    };
-    teams.teams.default.access = 'read-only';
-    await writeFile(teamsPath, `${JSON.stringify(teams, undefined, 2)}\n`, 'utf8');
+    const teams = decodeShareTeamsFile(await readFile(teamsPath, 'utf8'));
+    const defaultTeam = teams.teams.default;
+    if (defaultTeam === undefined) throw new Error('Expected a default share team.');
+    const readOnlyTeams = {...teams, teams: {...teams.teams, default: {...defaultTeam, access: 'read-only'}}};
+    await writeFile(teamsPath, `${JSON.stringify(readOnlyTeams, undefined, 2)}\n`, 'utf8');
     const before = {
       canonical: await readFile(canonicalResourceFile(store, uri), 'utf8'),
       head: await gitOutput(['rev-parse', 'HEAD'], worktree),
@@ -1340,7 +1382,10 @@ describe('share sync git handling', () => {
 
     await rm(temporaryPath, {recursive: true});
     await resolveShareConflict(config, id, {push: false, take: 'shared'});
-    const repaired = droppedIdentity.replace('\n\n', '\nmemory_id: tn_atomic_identity_repair\n\n');
+    const repaired = Effect2.pipe(
+      droppedIdentity,
+      EffectString.replace('\n\n', '\nmemory_id: tn_atomic_identity_repair\n\n'),
+    );
     await expect(readFile(target, 'utf8')).resolves.toBe(repaired);
     await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(repaired);
   }, 20000);
@@ -1379,10 +1424,7 @@ describe('share sync git handling', () => {
     await git(['add', duplicatePath], worktree);
     await git(['commit', '-m', 'add pending duplicate identity owner'], worktree);
     const pendingPath = join(home, 'share', 'auto-sync-pending-reindexes.json');
-    const pending = JSON.parse(await readFile(pendingPath, 'utf8')) as {
-      teams: {default: Array<{path: string; relativePath: string; status: string}>};
-      version: number;
-    };
+    const pending = decodePendingReindexes(await readFile(pendingPath, 'utf8'));
     pending.teams.default.push({
       path: join(worktree, duplicatePath),
       relativePath: duplicatePath,
@@ -1418,7 +1460,10 @@ describe('share sync git handling', () => {
     await git(['remote', 'set-url', 'origin', missingRemote], worktree);
 
     await expect(resolveShareConflict(config, id, {take: 'shared'})).rejects.toThrow('git push failed');
-    const repaired = droppedIdentity.replace('\n\n', '\nmemory_id: tn_push_retry_identity\n\n');
+    const repaired = Effect2.pipe(
+      droppedIdentity,
+      EffectString.replace('\n\n', '\nmemory_id: tn_push_retry_identity\n\n'),
+    );
     await expect(readFile(join(worktree, relativePath), 'utf8')).resolves.toBe(repaired);
     await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(repaired);
     await expect(readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8')).resolves.toContain(
@@ -1441,7 +1486,7 @@ describe('share sync git handling', () => {
   it('fails closed when upstream diverges after an identity-repair push rejection', async () => {
     const {config, droppedIdentity, home, id, relativePath, seed, store, uri, worktree} =
       await makeDroppedIdentityFixture('diverged-push-retry-identity');
-    const newerUpstream = `${droppedIdentity.replace('Remote body.', 'Newer remote body.')}\n`;
+    const newerUpstream = `${Effect2.pipe(droppedIdentity, EffectString.replace('Remote body.', 'Newer remote body.'))}\n`;
     await writeFile(join(seed, relativePath), newerUpstream, 'utf8');
     await git(['add', relativePath], seed);
     await git(['commit', '-m', 'advance remote during identity repair'], seed);
@@ -1471,7 +1516,7 @@ describe('share sync git handling', () => {
       worktree: await readFile(join(worktree, relativePath), 'utf8'),
     }).toEqual(before);
     expect(await gitOutput(['--git-dir', join(seed, '.git'), 'show', `origin/main:${relativePath}`])).toBe(
-      newerUpstream.trim(),
+      Effect2.pipe(newerUpstream, EffectString.trim),
     );
   }, 30000);
 
@@ -1482,9 +1527,11 @@ describe('share sync git handling', () => {
     const id = `default:${relativePath}`;
     const uri = `threadnote://user/denys/memories/shared/default/${relativePath}`;
     const original = 'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_original_identity\n\nOriginal body.\n';
-    const changed = original
-      .replace('tn_original_identity', 'tn_replacement_identity')
-      .replace('Original body.', 'Changed body.');
+    const changed = Effect2.pipe(
+      original,
+      EffectString.replace('tn_original_identity', 'tn_replacement_identity'),
+      EffectString.replace('Original body.', 'Changed body.'),
+    );
     await mkdir(dirname(join(seed, relativePath)), {recursive: true});
     await writeFile(join(seed, relativePath), original, 'utf8');
     await git(['add', relativePath], seed);
@@ -1539,9 +1586,12 @@ describe('share sync git handling', () => {
         expect(reconciled).toBe(`MEMORY\nkind: durable\nstatus: active\nmemory_id: ${establishedId}\n\n${body}\n`);
         expect(parseMemoryDocument(uri, reconciled)?.metadata.memoryId).toBe(establishedId);
         expect(reconcileMissingSharedMemoryIdentity(uri, reconciled, reconciled)).toBe(reconciled);
-        expect(reconciled.endsWith(`\n\n${body}\n`)).toBe(true);
+        expect(Effect2.pipe(reconciled, EffectString.endsWith(`\n\n${body}\n`))).toBe(true);
 
-        const changedIdentity = shared.replace('\n\n', '\nmemory_id: tn_other_identity\n\n');
+        const changedIdentity = Effect2.pipe(
+          shared,
+          EffectString.replace('\n\n', '\nmemory_id: tn_other_identity\n\n'),
+        );
         expect(() => reconcileMissingSharedMemoryIdentity(uri, local, changedIdentity)).toThrow(
           'changed stable memory_id',
         );
@@ -1557,9 +1607,11 @@ describe('share sync git handling', () => {
     const id = `default:${relativePath}`;
     const uri = `threadnote://user/denys/memories/shared/default/${relativePath}`;
     const original = 'MEMORY\nkind: durable\nstatus: active\nmemory_id: tn_merge_identity\n\nOriginal body.\n';
-    const droppedIdentity = original
-      .replace('memory_id: tn_merge_identity\n', '')
-      .replace('Original body.', 'Merged body.');
+    const droppedIdentity = Effect2.pipe(
+      original,
+      EffectString.replace('memory_id: tn_merge_identity\n', ''),
+      EffectString.replace('Original body.', 'Merged body.'),
+    );
     await mkdir(dirname(join(seed, relativePath)), {recursive: true});
     await writeFile(join(seed, relativePath), original, 'utf8');
     await git(['add', relativePath], seed);
@@ -1574,7 +1626,9 @@ describe('share sync git handling', () => {
     await expect(resolveShareConflict(config, id, {mergedContent: droppedIdentity})).rejects.toThrow(
       'stable memory_id',
     );
-    await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(original.trimEnd());
+    await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(
+      Effect2.pipe(original, EffectString.trimEnd),
+    );
     await expect(readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8')).resolves.toContain(
       relativePath,
     );
@@ -1590,7 +1644,9 @@ describe('share sync git handling', () => {
 
     await runShareSync(config, {push: false});
 
-    await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(restored.trim());
+    await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toBe(
+      Effect2.pipe(restored, EffectString.trim),
+    );
     await expect(runEffect(listShareConflicts(config, {team: 'default'}))).resolves.toEqual([]);
   }, 20000);
 
@@ -2003,7 +2059,11 @@ describe('share sync git handling', () => {
     const firstResult = await syncSharedReposBeforeAgentRead(config);
 
     expect(firstResult.syncedTeams).toEqual(['default']);
-    expect(firstResult.warnings.some(warning => warning.includes('1 pending shared memory ingest failure'))).toBe(true);
+    expect(
+      EffectArray.some(firstResult.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('1 pending shared memory ingest failure')),
+      ),
+    ).toBe(true);
     await chmod(failureDirectory, 0o700);
     await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toContain('old shared');
     const pendingPath = join(home, 'share', 'auto-sync-pending-reindexes.json');
@@ -2055,7 +2115,11 @@ describe('share sync git handling', () => {
     const result = await syncSharedReposBeforeAgentRead(config);
 
     expect(result.syncedTeams).toEqual(['default']);
-    expect(result.warnings.some(warning => warning.includes('restored 1 tracked shared file'))).toBe(true);
+    expect(
+      EffectArray.some(result.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('restored 1 tracked shared file')),
+      ),
+    ).toBe(true);
     await expect(readFile(join(worktree, relativePath), 'utf8')).resolves.toBe(remoteContent);
     await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toContain('remote body');
     await expect(readFile(pendingPath, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
@@ -2066,14 +2130,19 @@ describe('share sync git handling', () => {
     const {store} = await nativeStoreFixture(root);
     const relativePath = 'durable/projects/threadnote/shared.md';
     const uri = 'threadnote://user/denys/memories/shared/default/durable/projects/threadnote/shared.md';
-    const trailer = ['<!-- MEMORY_FIELDS', '{', '  "version": 1', '}', '-->'].join('\n');
+    const trailer = EffectArray.join(['<!-- MEMORY_FIELDS', '{', '  "version": 1', '}', '-->'], '\n');
     const remoteContent = `MEMORY\nkind: durable\nstatus: active\n\nremote body\n\n${trailer}\n`;
     await mkdir(dirname(join(seed, relativePath)), {recursive: true});
     await writeFile(join(seed, relativePath), remoteContent, 'utf8');
     await git(['add', relativePath], seed);
     await git(['commit', '-m', 'add shared memory'], seed);
     await git(['push', 'origin', 'main'], seed);
-    await writeCanonicalResource(store, uri, `${remoteContent.trim()}\n\n${trailer}\n`, 'utf8');
+    await writeCanonicalResource(
+      store,
+      uri,
+      `${Effect2.pipe(remoteContent, EffectString.trim)}\n\n${trailer}\n`,
+      'utf8',
+    );
 
     const result = await syncSharedReposBeforeAgentRead(config);
 
@@ -2088,7 +2157,7 @@ describe('share sync git handling', () => {
     const {store} = await nativeStoreFixture(root);
     const relativePath = 'durable/projects/threadnote/shared.md';
     const uri = 'threadnote://user/denys/memories/shared/default/durable/projects/threadnote/shared.md';
-    const trailer = ['<!-- MEMORY_FIELDS', '{', '  "version": 1', '}', '-->'].join('\n');
+    const trailer = EffectArray.join(['<!-- MEMORY_FIELDS', '{', '  "version": 1', '}', '-->'], '\n');
     const remoteContent = `MEMORY\nkind: durable\nstatus: active\n\nremote body\n\n${trailer}\n`;
     await mkdir(dirname(join(seed, relativePath)), {recursive: true});
     await writeFile(join(seed, relativePath), remoteContent, 'utf8');
@@ -2129,7 +2198,11 @@ describe('share sync git handling', () => {
     const result = await syncSharedReposBeforeAgentRead(config);
 
     expect(result.syncedTeams).toEqual(['default']);
-    expect(result.warnings.some(warning => warning.includes('restored 1 tracked shared file'))).toBe(true);
+    expect(
+      EffectArray.some(result.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('restored 1 tracked shared file')),
+      ),
+    ).toBe(true);
     await expect(gitOutput(['status', '--porcelain'], worktree)).resolves.toBe('');
     await expect(readFile(join(worktree, relativePath), 'utf8')).resolves.toContain('remote update');
     await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).resolves.toContain('remote update');
@@ -2279,8 +2352,16 @@ describe('share sync git handling', () => {
     const result = await syncSharedReposBeforeAgentRead(config);
 
     expect(result.syncedTeams).toEqual([]);
-    expect(result.warnings.some(warning => warning.includes('Git operation already in progress'))).toBe(true);
-    expect(result.warnings.some(warning => warning.includes('continued for other remote changes'))).toBe(false);
+    expect(
+      EffectArray.some(result.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('Git operation already in progress')),
+      ),
+    ).toBe(true);
+    expect(
+      EffectArray.some(result.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('continued for other remote changes')),
+      ),
+    ).toBe(false);
     await expect(gitOutput(['status', '--porcelain'], worktree)).resolves.toBe(statusBefore);
     await expect(gitOutput(['ls-files', '-u'], worktree)).resolves.toBe(indexBefore);
     await expect(readFile(join(worktree, relativePath), 'utf8')).resolves.toBe(contentBefore);
@@ -2303,7 +2384,11 @@ describe('share sync git handling', () => {
     const result = await syncSharedReposBeforeAgentRead(config);
 
     expect(result.syncedTeams).toEqual([]);
-    expect(result.warnings.some(warning => warning.includes('Git operation already in progress'))).toBe(true);
+    expect(
+      EffectArray.some(result.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('Git operation already in progress')),
+      ),
+    ).toBe(true);
     await expect(gitOutput(['status', '--porcelain'], worktree)).resolves.toBe(statusBefore);
     await expect(gitOutput(['diff', '--cached', '--binary'], worktree)).resolves.toBe(indexBefore);
     await expect(readFile(join(worktree, relativePath), 'utf8')).resolves.toBe(contentBefore);
@@ -2322,7 +2407,11 @@ describe('share sync git handling', () => {
     const result = await syncSharedReposBeforeAgentRead(config);
 
     expect(result.syncedTeams).toEqual([]);
-    expect(result.warnings.some(warning => warning.includes('untracked or unmanaged changes'))).toBe(true);
+    expect(
+      EffectArray.some(result.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('untracked or unmanaged changes')),
+      ),
+    ).toBe(true);
     await expect(readFile(join(worktree, 'local.txt'), 'utf8')).resolves.toBe('local only\n');
     await expect(gitOutput(['rev-parse', 'HEAD'], worktree)).resolves.not.toBe(
       await gitOutput(['rev-parse', 'origin/main'], worktree),
@@ -2338,13 +2427,16 @@ describe('share sync git handling', () => {
     await mkdir(join(seed, 'durable', 'projects', 'threadnote'), {recursive: true});
     await writeFile(
       join(seed, blockedPath),
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        '',
-        ['aws_session_token=', 'abcdefghijklmnopqrstuvwxyz0123456789ABCD'].join(''),
-      ].join('\n') + '\n',
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          '',
+          EffectArray.join(['aws_session_token=', 'abcdefghijklmnopqrstuvwxyz0123456789ABCD'], ''),
+        ],
+        '\n',
+      ) + '\n',
       'utf8',
     );
     await git(['add', blockedPath], seed);
@@ -2354,7 +2446,11 @@ describe('share sync git handling', () => {
     const firstResult = await syncSharedReposBeforeAgentRead(config);
 
     expect(firstResult.syncedTeams).toEqual(['default']);
-    expect(firstResult.warnings.some(warning => warning.includes('1 pending shared memory ingest failure'))).toBe(true);
+    expect(
+      EffectArray.some(firstResult.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('1 pending shared memory ingest failure')),
+      ),
+    ).toBe(true);
 
     await writeFile(join(seed, safePath), 'MEMORY\nkind: durable\nstatus: active\n\nsafe body\n', 'utf8');
     await git(['add', safePath], seed);
@@ -2365,11 +2461,15 @@ describe('share sync git handling', () => {
     const secondResult = await syncSharedReposBeforeAgentRead(config);
 
     expect(secondResult.syncedTeams).toEqual(['default']);
-    expect(secondResult.warnings.some(warning => warning.includes('1 pending shared memory ingest failure'))).toBe(
-      true,
-    );
     expect(
-      secondResult.warnings.some(warning => warning.includes('Automatic sync continued for other remote changes')),
+      EffectArray.some(secondResult.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('1 pending shared memory ingest failure')),
+      ),
+    ).toBe(true);
+    expect(
+      EffectArray.some(secondResult.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('Automatic sync continued for other remote changes')),
+      ),
     ).toBe(true);
     await expect(readFile(canonicalResourceFile(store, safeUri), 'utf8')).resolves.toContain('safe body');
     await expect(gitOutput(['rev-parse', 'HEAD'], worktree)).resolves.toBe(
@@ -2394,13 +2494,16 @@ describe('share sync git handling', () => {
 
     await writeFile(
       join(seed, relativePath),
-      [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        '',
-        ['aws_session_token=', 'abcdefghijklmnopqrstuvwxyz0123456789ABCD'].join(''),
-      ].join('\n') + '\n',
+      EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          '',
+          EffectArray.join(['aws_session_token=', 'abcdefghijklmnopqrstuvwxyz0123456789ABCD'], ''),
+        ],
+        '\n',
+      ) + '\n',
       'utf8',
     );
     await git(['add', relativePath], seed);
@@ -2409,14 +2512,101 @@ describe('share sync git handling', () => {
 
     const result = await syncSharedReposBeforeAgentRead(config);
 
-    expect(result.warnings.some(warning => warning.includes('1 pending shared memory ingest failure'))).toBe(true);
-    const pending = JSON.parse(await readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8')) as {
-      teams: {default: Array<{previousContent?: string; previousRevision?: string}>};
-    };
+    expect(
+      EffectArray.some(result.warnings, warning =>
+        Effect2.pipe(warning, EffectString.includes('1 pending shared memory ingest failure')),
+      ),
+    ).toBe(true);
+    const pending = decodePendingReindexes(
+      await readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8'),
+    );
     expect(pending.teams.default[0]?.previousContent).toBe(oldContent);
     expect(pending.teams.default[0]?.previousRevision).toBeUndefined();
   });
 });
+
+type TestPendingReindexEntry = {
+  readonly path?: string;
+  readonly relativePath?: string;
+  readonly status?: string;
+  readonly previousContent?: string;
+  readonly previousRevision?: string;
+};
+
+type TestPendingReindexes = {
+  readonly version: number;
+  readonly teams: Record<string, unknown> & {default: TestPendingReindexEntry[]};
+};
+
+function decodeShareTeamsFile(text: string): ShareTeamsFile {
+  const value: unknown = JSON.parse(text);
+  if (
+    !Effect2.Predicate.isObject(value) ||
+    !Effect2.Predicate.isObject(value.teams) ||
+    typeof value.version !== 'number'
+  ) {
+    throw new Error('Expected a valid share teams file.');
+  }
+  if (value.defaultTeam !== undefined && typeof value.defaultTeam !== 'string') {
+    throw new Error('Expected defaultTeam to be a string when present.');
+  }
+  const teams: Record<string, ShareTeamConfig> = {};
+  for (const [name, entry] of EffectRecord.toEntries(value.teams)) {
+    if (
+      !Effect2.Predicate.isObject(entry) ||
+      typeof entry.addedAt !== 'string' ||
+      typeof entry.gitdir !== 'string' ||
+      typeof entry.name !== 'string' ||
+      typeof entry.remote !== 'string' ||
+      typeof entry.worktree !== 'string' ||
+      (entry.access !== undefined && entry.access !== 'read-only' && entry.access !== 'read-write')
+    ) {
+      throw new Error(`Expected share team ${name} to contain its required fields.`);
+    }
+    teams[name] = {
+      ...entry,
+      addedAt: entry.addedAt,
+      gitdir: entry.gitdir,
+      name: entry.name,
+      remote: entry.remote,
+      worktree: entry.worktree,
+    };
+  }
+  return {
+    ...(value.defaultTeam === undefined ? {} : {defaultTeam: value.defaultTeam}),
+    teams,
+    version: value.version,
+  };
+}
+
+function decodePendingReindexes(text: string): TestPendingReindexes {
+  const value: unknown = JSON.parse(text);
+  if (
+    !Effect2.Predicate.isObject(value) ||
+    !Effect2.Predicate.isObject(value.teams) ||
+    typeof value.version !== 'number'
+  ) {
+    throw new Error('Expected a valid pending reindex file.');
+  }
+  if (!EffectArray.isArray(value.teams.default)) throw new Error('Expected pending reindexes for the default team.');
+  const entries = EffectArray.map(value.teams.default, (entry, index): TestPendingReindexEntry => {
+    if (!Effect2.Predicate.isObject(entry)) throw new Error(`Expected pending reindex ${index} to be an object.`);
+    for (const field of ['path', 'relativePath', 'status', 'previousContent', 'previousRevision'] as const) {
+      if (entry[field] !== undefined && typeof entry[field] !== 'string') {
+        throw new Error(`Expected pending reindex ${index} field ${field} to be a string.`);
+      }
+    }
+    return {
+      ...entry,
+      ...(typeof entry.path === 'string' ? {path: entry.path} : {}),
+      ...(typeof entry.relativePath === 'string' ? {relativePath: entry.relativePath} : {}),
+      ...(typeof entry.status === 'string' ? {status: entry.status} : {}),
+      ...(typeof entry.previousContent === 'string' ? {previousContent: entry.previousContent} : {}),
+      ...(typeof entry.previousRevision === 'string' ? {previousRevision: entry.previousRevision} : {}),
+    };
+  });
+  return {version: value.version, teams: {...value.teams, default: entries}};
+}
 
 function citedMemory(
   body: string,
@@ -2424,13 +2614,13 @@ function citedMemory(
 ): string {
   const citation = createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
     path: 'src/share_conflicts.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: overrides.repositoryIdentityKind ?? 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
     sourceDirty: overrides.sourceDirty ?? false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });
@@ -2451,17 +2641,20 @@ function citedMemory(
 }
 
 function malformedCitedMemory(body: string): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    'topic: share-conflict-citations',
-    'source_agent_client: codex',
-    'timestamp: 2026-08-26T20:00:00.000Z',
-    `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-    '  code_citation: {not-json}',
-    '',
-    body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      'topic: share-conflict-citations',
+      'source_agent_client: codex',
+      'timestamp: 2026-08-26T20:00:00.000Z',
+      `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+      '  code_citation: {not-json}',
+      '',
+      body,
+    ],
+    '\n',
+  );
 }

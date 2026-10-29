@@ -1,8 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Result, Schema} from 'effect';
 import {describe, expect} from 'vitest';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {
   LINEAR_MAX_RETAINED_OBJECTS,
   LINEAR_MAX_SYNC_STATE_BYTES,
@@ -11,12 +12,15 @@ import {
   type LinearSyncState,
 } from '../src/state.js';
 import {uuid} from './fixtures.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
-const retainedId = (n: number) => `document-${n.toString(16).padStart(40, '0')}`;
+const retainedId = (n: number) => `document-${Effect2.pipe(n.toString(16), EffectString.padStart(40, '0'))}`;
 const checkpoint = (retained: readonly string[]): LinearSyncState => ({
   version: 1,
-  fingerprint: 'a'.repeat(64),
-  accessEpoch: 'b'.repeat(64),
+  fingerprint: Effect2.pipe('a', EffectString.repeat(64)),
+  accessEpoch: Effect2.pipe('b', EffectString.repeat(64)),
   projectIndex: 64,
   issueIds: [],
   enumerated: true,
@@ -27,7 +31,7 @@ const checkpoint = (retained: readonly string[]): LinearSyncState => ({
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'linear-state-'}));
-  return {fs, config: {agentContextHome: home} as RuntimeConfig};
+  return {fs, config: runtimeConfigForTest({agentContextHome: home})};
 });
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(BunServices.layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
@@ -50,9 +54,9 @@ describe('Linear checkpoint persistence', () => {
     ([input]) =>
       Effect.gen(function* () {
         const {config} = yield* fixture;
-        const issueIds = [...new Set(input.issueNumbers)].map(uuid);
+        const issueIds = EffectArray.map([...new Set(input.issueNumbers)], uuid);
         const state: LinearSyncState = {
-          ...checkpoint([...new Set(input.retainedNumbers)].map(retainedId)),
+          ...checkpoint(EffectArray.map([...new Set(input.retainedNumbers)], retainedId)),
           projectIndex: input.projects,
           issueIds,
           offset: input.enumerated ? issueIds.length + input.projects : 0,
@@ -103,6 +107,7 @@ describe('Linear checkpoint persistence', () => {
       for (const invalid of [
         {...state, retained: [retainedId(1), retainedId(1)]},
         {...state, issueIds: ['not-a-uuid']},
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         {...state, extra: 'x'.repeat(LINEAR_MAX_SYNC_STATE_BYTES)},
       ]) {
         const result = yield* writeLinearSyncState(config, 'protected', invalid, Effect.void).pipe(Effect.result);

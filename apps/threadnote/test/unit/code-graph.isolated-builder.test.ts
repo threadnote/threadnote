@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV, CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -44,6 +45,35 @@ import {
   CODE_GRAPH_REFRESH_DEMAND_SUPERSEDED_EXIT_CODE,
   CodeGraphRefreshDemandSuperseded,
 } from '@threadnote/graph/refresh/demand';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function observedStatus(overrides: Partial<ObservedCodeGraphBuildStatus>): ObservedCodeGraphBuildStatus {
+  const timestamp = '2026-01-01T00:00:00.000Z';
+  return {
+    buildId: 'fixture-build',
+    counters: {},
+    identity: {
+      checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+      commit: Effect2.pipe('b', EffectString.repeat(40)),
+      repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+      worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
+    },
+    observation: {heartbeatAgeMilliseconds: 0, liveness: 'active'},
+    owner: {processId: 1, runtime: 'bun', runtimeVersion: '1'},
+    phase: 'registering',
+    schemaVersion: 1,
+    state: 'running',
+    timestamps: {
+      heartbeatAt: timestamp,
+      lastProgressAt: timestamp,
+      phaseStartedAt: timestamp,
+      startedAt: timestamp,
+      updatedAt: timestamp,
+    },
+    ...overrides,
+  };
+}
 
 function systemInfoStub(overrides: Partial<SystemInfoShape>): SystemInfoShape {
   return {
@@ -150,7 +180,7 @@ describe('isolated code-graph builder spawn plan', () => {
   });
 
   it('reuses completed results only for exact request-key equality', () => {
-    const status = {request: {key: 'request-a'}} as ObservedCodeGraphBuildStatus;
+    const status = observedStatus({request: {key: 'request-a'}});
     expect(isolatedBuilderRequestMatches(status, 'request-a')).toBe(true);
     expect(isolatedBuilderRequestMatches(status, 'request-b')).toBe(false);
     expect(isolatedBuilderRequestMatches(status, undefined)).toBe(false);
@@ -163,22 +193,25 @@ describe('isolated code-graph builder spawn plan', () => {
       mode: 'starting',
       priorBuildId: 'prior-build',
     });
-    expect(
-      isolatedBuilderOwnedAdmission({buildId: 'owned-build'} as ObservedCodeGraphBuildStatus, child, 'prior-build'),
-    ).toEqual({child, mode: 'spawned', observedBuildId: 'owned-build', priorBuildId: 'prior-build'});
+    expect(isolatedBuilderOwnedAdmission(observedStatus({buildId: 'owned-build'}), child, 'prior-build')).toEqual({
+      child,
+      mode: 'spawned',
+      observedBuildId: 'owned-build',
+      priorBuildId: 'prior-build',
+    });
   });
 
   it('checks runtime compatibility before observing or spawning a child', async () => {
     const identity: RepositoryIdentity = {
       caseMode: 'sensitive',
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
       displayName: 'fixture/repository',
       gitCommonDirectory: '/fixture/repository/.git',
-      headCommit: 'b'.repeat(40),
+      headCommit: Effect2.pipe('b', EffectString.repeat(40)),
       objectFormat: 'sha1',
       repoRoot: '/fixture/repository',
-      repositoryId: 'c'.repeat(64),
-      worktreeId: 'd'.repeat(64),
+      repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+      worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
     };
     const failure = CodeGraphRuntimeReconnectRequiredError.of();
     let spawnCalls = 0;
@@ -272,11 +305,13 @@ describe('isolated code-graph builder spawn plan', () => {
       cwd: '/repo/worktree',
       project: 'docs',
       manifestPath: '/synthetic/selected manifest.yaml',
-      manifestRevision: 'a'.repeat(64),
+      manifestRevision: Effect2.pipe('a', EffectString.repeat(64)),
       full: true,
       threadnoteHome: '/home/.threadnote',
     });
-    expect(plan.environment[CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV]).toBe('a'.repeat(64));
+    expect(plan.environment[CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV]).toBe(
+      Effect2.pipe('a', EffectString.repeat(64)),
+    );
     expect(plan.arguments).toEqual([
       '--home',
       '/home/.threadnote',
@@ -534,15 +569,17 @@ describe('shouldAwaitExistingBuilder and statusBelongsToChild', () => {
             continue;
           }
           owners += 1;
-          status = {
+          status = observedStatus({
             observation: {heartbeatAgeMilliseconds: 0, liveness: 'active'},
             owner: {processId, runtime: 'bun', runtimeVersion: '1'},
-          } as ObservedCodeGraphBuildStatus;
+          });
         }
 
         expect(owners).toBe(1);
         const completedSnapshotId = 'owner-snapshot';
-        expect(waiters.map(() => completedSnapshotId)).toEqual(callers.slice(1).map(() => completedSnapshotId));
+        expect(EffectArray.map(waiters, () => completedSnapshotId)).toEqual(
+          EffectArray.map(callers.slice(1), () => completedSnapshotId),
+        );
       }),
       {numRuns: 100},
     );
@@ -552,10 +589,10 @@ describe('shouldAwaitExistingBuilder and statusBelongsToChild', () => {
     const livenessValues = ['abandoned', 'active', 'completed', 'failed', 'stalled'] as const;
     fc.assert(
       fc.property(fc.constantFrom(...livenessValues), fc.integer({min: 1, max: 1000}), (liveness, ownerPid) => {
-        const status = {
+        const status = observedStatus({
           observation: {heartbeatAgeMilliseconds: 0, liveness},
-          owner: {processId: ownerPid, runtime: 'bun' as const, runtimeVersion: '1'},
-        } as ObservedCodeGraphBuildStatus;
+          owner: {processId: ownerPid, runtime: 'bun', runtimeVersion: '1'},
+        });
         expect(shouldAwaitExistingBuilder(status, 99)).toBe(
           (liveness === 'active' || liveness === 'stalled') && ownerPid !== 99,
         );
@@ -565,10 +602,10 @@ describe('shouldAwaitExistingBuilder and statusBelongsToChild', () => {
   });
 
   it('matches child ownership by pid and rejects the prior build id', () => {
-    const status = {
+    const status = observedStatus({
       buildId: 'old-build',
-      owner: {processId: 7, runtime: 'bun' as const, runtimeVersion: '1'},
-    } as ObservedCodeGraphBuildStatus;
+      owner: {processId: 7, runtime: 'bun', runtimeVersion: '1'},
+    });
     expect(statusBelongsToChild(status, 7, 'old-build')).toBe(false);
     expect(statusBelongsToChild({...status, buildId: 'new-build'}, 7, 'old-build')).toBe(true);
     expect(statusBelongsToChild({...status, buildId: 'old-build'}, 8, 'old-build')).toBe(false);
@@ -625,14 +662,14 @@ describe('isolated builder exit contracts', () => {
 
   effectIt.effect('waits for the exact owned result during a bounded post-exit grace', () =>
     Effect.gen(function* () {
-      const ownedPending = {
+      const ownedPending = observedStatus({
         buildId: 'owned-build',
-        owner: {processId: 7, runtime: 'bun' as const, runtimeVersion: '1'},
-      } as ObservedCodeGraphBuildStatus;
-      const ownedCompleted = {
+        owner: {processId: 7, runtime: 'bun', runtimeVersion: '1'},
+      });
+      const ownedCompleted = observedStatus({
         ...ownedPending,
         result: {dirty: false, edges: 41, files: 3, snapshotId: 'snapshot', symbols: 29},
-      } as ObservedCodeGraphBuildStatus;
+      });
       const statuses = [undefined, ownedPending, ownedCompleted] as const;
       let reads = 0;
       const result = yield* awaitOwnedIsolatedBuilderResult(
@@ -659,11 +696,11 @@ describe('isolated builder exit contracts', () => {
   effectIt.effect('fails at the grace deadline when only unrelated results are visible', () =>
     Effect.gen(function* () {
       let reads = 0;
-      const unrelated = {
+      const unrelated = observedStatus({
         buildId: 'other-build',
-        owner: {processId: 8, runtime: 'bun' as const, runtimeVersion: '1'},
+        owner: {processId: 8, runtime: 'bun', runtimeVersion: '1'},
         result: {dirty: false, edges: 999, files: 1, snapshotId: 'other', symbols: 999},
-      } as ObservedCodeGraphBuildStatus;
+      });
       const outcome = yield* awaitOwnedIsolatedBuilderResult(
         Effect.sync(() => {
           reads += 1;
@@ -725,20 +762,20 @@ describe('isolated builder exit contracts', () => {
           const buildId =
             kind === 'prior' ? 'prior-build' : kind === 'different-build' ? 'different-build' : 'owned-build';
           const processId = kind === 'foreign' ? 8 : 7;
-          return {
+          return observedStatus({
             buildId,
-            owner: {processId, runtime: 'bun' as const, runtimeVersion: '1'},
+            owner: {processId, runtime: 'bun', runtimeVersion: '1'},
             ...(kind === 'owned-pending'
               ? {}
               : {result: {dirty: false, edges: 999, files: 1, snapshotId: kind, symbols: 999}}),
-          } as ObservedCodeGraphBuildStatus;
+          });
         };
-        const ownedCompleted = {
+        const ownedCompleted = observedStatus({
           buildId: 'owned-build',
-          owner: {processId: 7, runtime: 'bun' as const, runtimeVersion: '1'},
+          owner: {processId: 7, runtime: 'bun', runtimeVersion: '1'},
           result: {dirty: false, edges: 41, files: 3, snapshotId: 'owned', symbols: 29},
-        } as ObservedCodeGraphBuildStatus;
-        const statuses = [...sequence.map(statusFor), ownedCompleted];
+        });
+        const statuses = [...EffectArray.map(sequence, statusFor), ownedCompleted];
         let reads = 0;
 
         expect(
@@ -765,14 +802,14 @@ describe('isolated builder cross-host spawn admission', () => {
           Effect.gen(function* () {
             const identity: RepositoryIdentity = {
               caseMode: 'sensitive',
-              checkoutId: 'a'.repeat(64),
+              checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
               displayName: 'fixture/repository',
               gitCommonDirectory: '/fixture/repository/.git',
-              headCommit: 'b'.repeat(40),
+              headCommit: Effect2.pipe('b', EffectString.repeat(40)),
               objectFormat: 'sha1',
               repoRoot: '/fixture/repository',
-              repositoryId: 'c'.repeat(64),
-              worktreeId: 'd'.repeat(64),
+              repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+              worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
             };
             const failure = yield* Effect.flip(
               runIsolatedCodeGraphIndex({
@@ -813,14 +850,14 @@ describe('isolated builder cross-host spawn admission', () => {
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-isolated-writer-progress-'});
           const identity: RepositoryIdentity = {
             caseMode: 'sensitive',
-            checkoutId: 'a'.repeat(64),
+            checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
             displayName: 'fixture/repository',
             gitCommonDirectory: '/fixture/repository/.git',
-            headCommit: 'b'.repeat(40),
+            headCommit: Effect2.pipe('b', EffectString.repeat(40)),
             objectFormat: 'sha1',
             repoRoot: '/fixture/repository',
-            repositoryId: 'c'.repeat(64),
-            worktreeId: 'd'.repeat(64),
+            repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
           };
           const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
           yield* fs.makeDirectory(path.dirname(layout.databaseWriteLockPath), {recursive: true});
@@ -842,7 +879,7 @@ describe('isolated builder cross-host spawn admission', () => {
           );
           yield* Deferred.await(acquired);
           const timestamp = DateTime.formatIso(yield* DateTime.now);
-          const activeStatus = {
+          const activeStatus = observedStatus({
             buildId: 'owned-build',
             counters: {},
             identity: {
@@ -854,8 +891,7 @@ describe('isolated builder cross-host spawn admission', () => {
             observation: {heartbeatAgeMilliseconds: 0, liveness: 'active'},
             owner: {processId: childProcessId, runtime: 'bun' as const, runtimeVersion: '1'},
             phase: 'registering' as const,
-            schemaVersion: 2,
-            state: 'running' as const,
+            state: 'running',
             timestamps: {
               heartbeatAt: timestamp,
               lastProgressAt: timestamp,
@@ -863,7 +899,7 @@ describe('isolated builder cross-host spawn admission', () => {
               startedAt: timestamp,
               updatedAt: timestamp,
             },
-          } as unknown as ObservedCodeGraphBuildStatus;
+          });
           let spawned = false;
           let supplied = false;
           const child = yield* runIsolatedCodeGraphIndex({
@@ -906,20 +942,20 @@ describe('isolated builder cross-host spawn admission', () => {
           Effect.gen(function* () {
             const identity: RepositoryIdentity = {
               caseMode: 'sensitive',
-              checkoutId: 'a'.repeat(64),
+              checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
               displayName: 'fixture/repository',
               gitCommonDirectory: '/fixture/repository/.git',
-              headCommit: 'b'.repeat(40),
+              headCommit: Effect2.pipe('b', EffectString.repeat(40)),
               objectFormat: 'sha1',
               repoRoot: '/fixture/repository',
-              repositoryId: 'c'.repeat(64),
-              worktreeId: 'd'.repeat(64),
+              repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+              worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
             };
             let status: ObservedCodeGraphBuildStatus | undefined;
             let resolveExit: ((code: number) => void) | undefined;
             let spawnCalls = 0;
             const waiterAttached = yield* Deferred.make<void>();
-            const activeStatus = {
+            const activeStatus = observedStatus({
               buildId: 'owned-build',
               counters: {},
               identity: {
@@ -932,8 +968,7 @@ describe('isolated builder cross-host spawn admission', () => {
               owner: {processId: 77, runtime: 'bun' as const, runtimeVersion: '1'},
               phase: 'registering' as const,
               request: {key: 'request-a'},
-              schemaVersion: 2,
-              state: 'running' as const,
+              state: 'running',
               timestamps: {
                 heartbeatAt: DateTime.formatIso(yield* DateTime.now),
                 lastProgressAt: DateTime.formatIso(yield* DateTime.now),
@@ -941,7 +976,7 @@ describe('isolated builder cross-host spawn admission', () => {
                 startedAt: DateTime.formatIso(yield* DateTime.now),
                 updatedAt: DateTime.formatIso(yield* DateTime.now),
               },
-            } as unknown as ObservedCodeGraphBuildStatus;
+            });
             const options = {
               assertRuntimeSchemaCompatible: () => Effect.void,
               cwd: identity.repoRoot,
@@ -1013,20 +1048,20 @@ describe('isolated builder cross-host spawn admission', () => {
           Effect.gen(function* () {
             const identity: RepositoryIdentity = {
               caseMode: 'sensitive',
-              checkoutId: 'a'.repeat(64),
+              checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
               displayName: 'fixture/repository',
               gitCommonDirectory: '/fixture/repository/.git',
-              headCommit: 'b'.repeat(40),
+              headCommit: Effect2.pipe('b', EffectString.repeat(40)),
               objectFormat: 'sha1',
               repoRoot: '/fixture/repository',
-              repositoryId: 'c'.repeat(64),
-              worktreeId: 'd'.repeat(64),
+              repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+              worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
             };
             let status: ObservedCodeGraphBuildStatus | undefined;
             const exits: Array<(code: number) => void> = [];
             let spawnCalls = 0;
             const runningStatus = (ordinal: number) =>
-              ({
+              observedStatus({
                 buildId: `owned-build-${ordinal}`,
                 counters: {},
                 identity: {
@@ -1039,8 +1074,7 @@ describe('isolated builder cross-host spawn admission', () => {
                 owner: {processId: 77 + ordinal, runtime: 'bun' as const, runtimeVersion: '1'},
                 phase: 'registering' as const,
                 request: {key: ordinal === 0 ? 'request-a' : 'request-b'},
-                schemaVersion: 2,
-                state: 'running' as const,
+                state: 'running',
                 timestamps: {
                   heartbeatAt: new Date().toISOString(),
                   lastProgressAt: new Date().toISOString(),
@@ -1048,7 +1082,7 @@ describe('isolated builder cross-host spawn admission', () => {
                   startedAt: new Date().toISOString(),
                   updatedAt: new Date().toISOString(),
                 },
-              }) as unknown as ObservedCodeGraphBuildStatus;
+              });
             const common = {
               assertRuntimeSchemaCompatible: () => Effect.void,
               cwd: identity.repoRoot,
@@ -1119,26 +1153,26 @@ effectIt.effect('resolves a fast keyless forced child by its new owned receipt w
     const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-fast-forced-child-'});
     const identity: RepositoryIdentity = {
       caseMode: 'sensitive',
-      checkoutId: 'a'.repeat(64),
+      checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
       displayName: 'fixture/repository',
       gitCommonDirectory: '/fixture/repository/.git',
-      headCommit: 'b'.repeat(40),
+      headCommit: Effect2.pipe('b', EffectString.repeat(40)),
       objectFormat: 'sha1',
       repoRoot: '/fixture/repository',
-      repositoryId: 'c'.repeat(64),
-      worktreeId: 'd'.repeat(64),
+      repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+      worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
     };
     const childProcessId = 77;
     const completed = (buildId: string, snapshotId: string) =>
-      ({
+      observedStatus({
         buildId,
-        owner: {processId: childProcessId},
+        owner: {processId: childProcessId, runtime: 'bun', runtimeVersion: '1'},
         observation: {heartbeatAgeMilliseconds: 0, liveness: 'completed'},
         state: 'completed',
         result: {dirty: false, edges: 2, files: 1, symbols: 3, snapshotId},
-      }) as unknown as ObservedCodeGraphBuildStatus;
-    const prior = completed('prior-build', `cgsn_${'e'.repeat(40)}`);
-    const owned = completed('owned-build', `cgsn_${'f'.repeat(40)}`);
+      });
+    const prior = completed('prior-build', `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`);
+    const owned = completed('owned-build', `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`);
     let reads = 0;
     let spawns = 0;
     const result = yield* runIsolatedCodeGraphIndex({

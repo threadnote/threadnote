@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {reviewedMemorySupportDigest, validateReviewedMemorySupport} from '@threadnote/memory/reviewed-support';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -98,7 +99,10 @@ export function prepareMemoryMaintenanceBasis(
   const evidence: AutomaticMaintenanceEvidenceV1[] = [];
   const add = (item: AutomaticMaintenanceEvidenceV1) => {
     assertAutomaticMaintenanceEvidence(item);
-    const prior = evidence.findIndex(entry => entry.id === item.id);
+    const prior = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(evidence, entry => entry.id === item.id),
+      () => -1,
+    );
     if (prior < 0) evidence.push(item);
     else {
       if (item.authority === 'provisional' && evidence[prior].authority !== 'provisional')
@@ -116,7 +120,7 @@ export function prepareMemoryMaintenanceBasis(
   if (evidence.length > (reviewed ? MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE : MAX_MEMORY_CODE_CITATIONS))
     throw new Error('Automatic maintenance evidence exceeds the existing source budget.');
   const byCitationId = new Map(
-    evidence.flatMap(item =>
+    EffectArray.flatMap(evidence, item =>
       item.source.kind === 'code'
         ? [[item.source.citation.id, item.id] as const]
         : item.source.kind === 'obsidian'
@@ -131,16 +135,19 @@ export function prepareMemoryMaintenanceBasis(
   };
   const inferences = options.inferences ?? [];
   if (
-    new Set(inferences.map(item => item.ordinal)).size !== inferences.length ||
-    inferences.some(
+    new Set(EffectArray.map(inferences, item => item.ordinal)).size !== inferences.length ||
+    EffectArray.some(
+      inferences,
       item => !Number.isSafeInteger(item.ordinal) || item.ordinal < 0 || item.ordinal >= (sections?.length ?? 0),
     )
   )
     throw new Error('Inference paragraph identity is invalid.');
   const paragraphs: AutomaticMaintenanceParagraph[] = overflow
     ? []
-    : sections.map((section, ordinal) => {
-        const inferred = inferences.find(item => item.ordinal === ordinal);
+    : EffectArray.map(sections, (section, ordinal) => {
+        const inferred = EffectOption.getOrUndefined(
+          EffectArray.findFirst(inferences, item => item.ordinal === ordinal),
+        );
         const approved = manifest?.paragraphs[ordinal];
         const currentEvidenceIds = inferred?.currentEvidenceIds ?? [];
         const currentSupport = inferred?.support ?? 'unresolved';
@@ -162,16 +169,18 @@ export function prepareMemoryMaintenanceBasis(
             ...(approvedReviewed.validity === undefined ? {} : {validity: approvedReviewed.validity}),
           };
         if (approved) {
-          const historicalEvidenceIds = approved.citationIds.map(resolve);
+          const historicalEvidenceIds = EffectArray.map(approved.citationIds, resolve);
           const acceptedEvidenceIds = [
             ...new Set(
-              approved.citationIds.map(id => {
+              EffectArray.map(approved.citationIds, id => {
                 if (!isCodeTopicMaintenanceManifest(manifest))
                   return resolve(topicMaintenanceObsidianCitationId(manifest.activeEvidence));
                 return resolve(
                   manifest.version === 1
                     ? id
-                    : manifest.acceptedSources.find(entry => entry.citationId === id)!.acceptedCitationId,
+                    : EffectOption.getOrUndefined(
+                        EffectArray.findFirst(manifest.acceptedSources, entry => entry.citationId === id),
+                      )!.acceptedCitationId,
                 );
               }),
             ),
@@ -228,7 +237,7 @@ export function prepareMemoryMaintenanceBasis(
   };
   if (overflow && coverage.outcome === 'complete')
     throw new Error('An oversized target cannot have complete coverage.');
-  const assessment: AutomaticMaintenanceAssessment = {
+  const assessment = {
     version: reviewed ? 2 : 1,
     preparation: reviewed
       ? {version: 2, kind: 'reviewed-support', supportDigest: reviewedMemorySupportDigest(reviewed)}
@@ -244,10 +253,14 @@ export function prepareMemoryMaintenanceBasis(
     paragraphs,
     evidence,
     dependencies:
-      manifest?.additionalDependencies.map(item => ({kind: item.kind, evidenceId: resolve(item.citationId)})) ?? [],
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(manifest?.additionalDependencies), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, item => ({kind: item.kind, evidenceId: resolve(item.citationId)})),
+        ),
+      ) ?? [],
     coverage,
     capabilities: automaticMaintenanceCapabilities(target, paragraphs, evidence, coverage),
-  } as AutomaticMaintenanceAssessment;
+  };
   assertAutomaticMaintenanceAssessment(assessment);
   return {version: 1, assessment, record};
 }
@@ -262,6 +275,7 @@ export function memoryMaintenanceFragmentSource(
     throw new Error('Memory fragment is outside canonical paragraph bounds.');
   let startOffset = 0;
   for (let index = 0; index <= ordinal; index++) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
     startOffset = record.body.indexOf(sections[index], startOffset);
     if (startOffset < 0) throw new Error('Memory fragment cannot be located in canonical body.');
     if (index < ordinal) startOffset += sections[index].length;

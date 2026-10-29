@@ -1,4 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 // Focused admission screen for the largest materialized lookup surface. It
 // compares today's locally sorted multirow inserts with an unindexed durable
@@ -34,9 +38,9 @@ const rows = function* () {
     const lookupOrdinal = (symbolOrdinal * 2_654_435_761 + variant * 40_503) % (symbolCount * 2);
     yield {
       exported: canonical % 7 === 0 ? 1 : 0,
-      lookupKey: `lookup-${String(variant).padStart(2, '0')}-${String(lookupOrdinal).padStart(9, '0')}`,
+      lookupKey: `lookup-${Effect.pipe(String(variant), EffectString.padStart(2, '0'))}-${Effect.pipe(String(lookupOrdinal), EffectString.padStart(9, '0'))}`,
       resolutionDomain: `domain-${canonical % 97}`,
-      symbolId: `symbol-${String(symbolOrdinal).padStart(8, '0')}`,
+      symbolId: `symbol-${Effect.pipe(String(symbolOrdinal), EffectString.padStart(8, '0'))}`,
     };
   }
 };
@@ -223,8 +227,11 @@ function insertRows(database: Database, table: string, batch: readonly LookupRow
   const columns = final
     ? 'snapshot_id, lookup_key, symbol_id, resolution_domain, exported, provenance, evidence_edge_id, evidence_path'
     : 'lookup_key, symbol_id, resolution_domain, exported, provenance, evidence_edge_id, evidence_path';
-  const values = batch.map(() => (final ? '(?, ?, ?, ?, ?, ?, ?, ?)' : '(?, ?, ?, ?, ?, ?, ?)')).join(', ');
-  const parameters = batch.flatMap(row =>
+  const values = EffectArray.join(
+    EffectArray.map(batch, () => (final ? '(?, ?, ?, ?, ?, ?, ?, ?)' : '(?, ?, ?, ?, ?, ?, ?)')),
+    ', ',
+  );
+  const parameters = EffectArray.flatMap(batch, row =>
     final
       ? ['snapshot', row.lookupKey, row.symbolId, row.resolutionDomain, row.exported, 'symbol', null, null]
       : [row.lookupKey, row.symbolId, row.resolutionDomain, row.exported, 'symbol', null, null],
@@ -243,7 +250,25 @@ function compareText(left: string, right: string): number {
 }
 
 function countRows(database: Database, table: string): number {
-  return Number((database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as {readonly count: number}).count);
+  const row = database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get();
+  if (typeof row !== 'object' || row === null || !('count' in row)) {
+    throw new Error(`COUNT query for ${table} returned an invalid row.`);
+  }
+  return Number(row.count);
+}
+
+function isSqlRecord(value: unknown): value is Readonly<Record<string, string | number | null>> {
+  return (
+    isRecord(value) &&
+    EffectArray.every(
+      EffectRecord.values(value),
+      entry => entry === null || typeof entry === 'string' || typeof entry === 'number',
+    )
+  );
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function digestRows(database: Database): string {
@@ -255,9 +280,10 @@ function digestRows(database: Database): string {
        FROM snapshot_symbol_lookup
        ORDER BY snapshot_id, lookup_key, symbol_id`,
     )
-    .iterate() as Iterable<Readonly<Record<string, string | number | null>>>;
+    .iterate();
   for (const row of rows) {
-    for (const value of Object.values(row)) hash.update(`${value === null ? '\\N' : value}\0`);
+    if (!isSqlRecord(row)) throw new Error('Lexical lookup query returned an invalid row.');
+    for (const value of EffectRecord.values(row)) hash.update(`${value === null ? '\\N' : value}\0`);
     hash.update('\n');
   }
   return hash.digest('hex');
@@ -265,9 +291,11 @@ function digestRows(database: Database): string {
 
 async function sqliteStorage(path: string): Promise<{databaseBytes: number; totalBytes: number}> {
   const sizes = await Promise.all(
-    [path, `${path}-wal`, `${path}-shm`].map(async file => ((await Bun.file(file).exists()) ? Bun.file(file).size : 0)),
+    EffectArray.map([path, `${path}-wal`, `${path}-shm`], async file =>
+      (await Bun.file(file).exists()) ? Bun.file(file).size : 0,
+    ),
   );
-  return {databaseBytes: sizes[0], totalBytes: sizes.reduce((total, size) => total + size, 0)};
+  return {databaseBytes: sizes[0], totalBytes: EffectArray.reduce(sizes, 0, (total, size) => total + size)};
 }
 
 function positiveInteger(value: string, description: string): number {
@@ -288,5 +316,5 @@ function greatestCommonDivisor(left: number, right: number): number {
 }
 
 function sqlString(value: string): string {
-  return value.replaceAll("'", "''");
+  return Effect.pipe(value, EffectString.replaceAll("'", "''"));
 }

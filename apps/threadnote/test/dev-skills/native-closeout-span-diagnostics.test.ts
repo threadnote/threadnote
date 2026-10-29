@@ -1,7 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} from 'effect';
 import {expect} from 'vitest';
 import {closeoutSpanDiagnostics} from './native-closeout-span-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
 
 const options = (name: string, parent: Option.Option<Tracer.AnySpan> = Option.none()) => ({
   name,
@@ -38,7 +40,7 @@ effectIt.effect.prop(
       expect(report.active).toHaveLength(0);
       expect(report.recent).toHaveLength(32);
       expect(report.recentDropped).toBe(8);
-      expect(Object.keys(report.totals)).toEqual(['workflowMemory.persistState']);
+      expect(EffectRecord.keys(report.totals)).toEqual(['workflowMemory.persistState']);
       expect(report.totals['workflowMemory.persistState']).toEqual({
         started: 40,
         ended: 40,
@@ -77,9 +79,11 @@ effectIt.effect('preserves native parent objects through unknown spans and retur
     expect(report.totals['workflowMemory.writeJournalFile'].ended).toBe(1);
     expect(report.totals['workflowMemory.persistState'].ended).toBe(1);
     expect(report.activeCount).toBe(0);
-    expect(report.recent.find(item => item.stage === 'workflowMemory.writeJournalFile')?.parent).toBe(
-      'workflowMemory.persistState',
-    );
+    expect(
+      Option.getOrUndefined(
+        EffectArray.findFirst(report.recent, item => item.stage === 'workflowMemory.writeJournalFile'),
+      )?.parent,
+    ).toBe('workflowMemory.persistState');
     expect(JSON.stringify(report)).not.toContain('private.unknown-parent');
     expect(JSON.stringify(report)).not.toContain('must not appear');
     // Inclusive parent and child durations overlap; there is no combined/exclusive total.

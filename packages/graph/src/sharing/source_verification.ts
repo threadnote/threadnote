@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {canonicalJson} from '../checkpoint/canonical_json.js';
 import {serializeBoundedCodeGraphFact} from '../fact/budget.js';
@@ -8,6 +9,8 @@ import type {Sha256Digest} from './digest.js';
 import {sha256Digest} from './digest.js';
 import {graphSharingFailure} from './errors.js';
 import type {VerifiedGraphShareParseReceipt} from './parse/cache.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface GraphShareSourceUseEvidence {
   readonly consumedActions: number;
@@ -39,7 +42,7 @@ export function makeGraphShareSourceVerification(input: {
       const producingCommit = item.sourceCommit ?? item.announcement.batchId;
       if (
         producingCommit !== input.sourceCommit ||
-        item.announcement.batchId !== producingCommit.slice(0, 40) ||
+        item.announcement.batchId !== Effect2.pipe(producingCommit, EffectString.slice(0, 40)) ||
         item.parsed.repositoryId !== input.repositoryId
       ) {
         throw graphSharingFailure('Contribution does not belong to the exact publication source target.');
@@ -66,7 +69,7 @@ export function makeGraphShareSourceVerification(input: {
     observeParserBatch: group =>
       sourceVerificationAttempt(() => {
         initialize();
-        const factsByPath = new Map(group.facts.map(fact => [fact.facts.path, fact]));
+        const factsByPath = new Map(EffectArray.map(group.facts, fact => [fact.facts.path, fact]));
         for (const file of group.files) {
           const local = factsByPath.get(file.path);
           if (!local || file.source !== 'commit') {

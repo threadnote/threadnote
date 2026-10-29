@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {mkdtemp, mkdir, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {join} from '@threadnote/testing/node-path';
@@ -18,6 +20,10 @@ import {
   runTopicStudyNativeAdapter,
 } from '../../../../scripts/topic-maintenance-longitudinal-native-adapter.js';
 import {appendTopicStudySlotV1} from '../../../../scripts/run-topic-maintenance-longitudinal.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption, Schema} from 'effect';
 
 function publicSourceBrief(sources: readonly {path: string; content: string}[]) {
   return {
@@ -33,13 +39,13 @@ function publicSourceBrief(sources: readonly {path: string; content: string}[]) 
     evidenceState: 'fresh',
     output: {truncated: false},
     graph: {
-      sources: sources.map(source => ({
+      sources: EffectArray.map(sources, source => ({
         ...source,
         id: 'random-source-id',
         repositoryKey: 'random-repository',
         coveredGraphRefs: ['random-graph-ref'],
         startLine: 1,
-        endLine: source.content.split('\n').length,
+        endLine: Effect.pipe(source.content, EffectString.split('\n')).length,
         freshness: 'fresh',
         evidenceKind: 'graph-snapshot',
         snapshotIdentity: 'current-clean',
@@ -87,7 +93,7 @@ async function comparatorFixture(arm: 'scripted-manual' | 'naive-local') {
     generate: async (prompt: string) => {
       prompts.push(prompt);
       const generated = await value.ports.generate();
-      return prompt.startsWith('Rewrite')
+      return Effect.pipe(prompt, EffectString.startsWith('Rewrite'))
         ? {
             ...generated,
             draft: 'intro\n\npolicy\n\nhistory\n\nThe production fixture timeout is 95 seconds.\n\nlater exception',
@@ -127,9 +133,9 @@ async function fixture(
     memoryId: 'tn_fixture',
     repositoryId: 'repo',
     coverage: 'declared-only',
-    bodyHash: sha256HexSync(body.join('\n\n')),
+    bodyHash: sha256HexSync(EffectArray.join(body, '\n\n')),
     additionalDependencies: [],
-    paragraphs: body.map((text, ordinal) => ({
+    paragraphs: EffectArray.map(body, (text, ordinal) => ({
       ordinal,
       hash: sha256HexSync(text),
       role: 'descriptive',
@@ -140,35 +146,44 @@ async function fixture(
   const citation = {
     id: 'original',
     repositoryId: 'repo',
-    sourceCommit: 'a'.repeat(40),
-    fileContentHash: {algorithm: 'sha256', value: 'b'.repeat(64)},
+    sourceCommit: Effect.pipe('a', EffectString.repeat(40)),
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe('b', EffectString.repeat(64))},
   };
-  const accepted = `MEMORY\nkind: durable\nmemory_id: tn_fixture\nproject: fixture\ncode_citation: ${JSON.stringify(citation)}\ntopic_maintenance: ${JSON.stringify(manifest)}\n\n${body.join('\n\n')}`;
+  const accepted = `MEMORY\nkind: durable\nmemory_id: tn_fixture\nproject: fixture\ncode_citation: ${JSON.stringify(citation)}\ntopic_maintenance: ${JSON.stringify(manifest)}\n\n${EffectArray.join(body, '\n\n')}`;
   const nextBody =
     previewBody ??
-    body.map((text, ordinal) =>
+    EffectArray.map(body, (text, ordinal) =>
       badProtectedPreview
         ? ordinal === 0
           ? 'The initial fixture used a 30-second timeout.'
           : text
-        : text.replace('90 seconds', '95 seconds'),
+        : Effect.pipe(text, EffectString.replace('90 seconds', '95 seconds')),
     );
   const nextManifest = {
     ...manifest,
     version: 2,
-    bodyHash: sha256HexSync(nextBody.join('\n\n')),
+    bodyHash: sha256HexSync(EffectArray.join(nextBody, '\n\n')),
     originCitationIds: ['original'],
     acceptedSources: [{citationId: 'original', acceptedCitationId: 'original'}],
-    paragraphs: manifest.paragraphs.map((paragraph, ordinal) => ({
+    paragraphs: EffectArray.map(manifest.paragraphs, (paragraph, ordinal) => ({
       ...paragraph,
       hash: sha256HexSync(nextBody[ordinal]),
     })),
   };
   const preview =
-    accepted.slice(0, accepted.indexOf('topic_maintenance:')) +
-    `topic_maintenance: ${JSON.stringify(nextManifest)}\n\n${nextBody.join('\n\n')}`;
+    Effect.pipe(
+      accepted,
+      EffectString.slice(
+        0,
+        Effect.pipe(
+          accepted,
+          EffectString.indexOf('topic_maintenance:'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ),
+    ) + `topic_maintenance: ${JSON.stringify(nextManifest)}\n\n${EffectArray.join(nextBody, '\n\n')}`;
   const reviewId = 'review-fixture',
-    digest = 'a'.repeat(64);
+    digest = Effect.pipe('a', EffectString.repeat(64));
   await writeFile(join(repository, 'config.ts'), `export const timeoutSeconds = ${badProtectedPreview ? 90 : 95};\n`);
   await writeFile(
     join(repository, 'health.ts'),
@@ -185,9 +200,9 @@ async function fixture(
       lastEvidenceRevision: 'prior',
       reviewId: null,
       reviewRevision: null,
-      naiveBody: body.join('\n\n'),
+      naiveBody: EffectArray.join(body, '\n\n'),
       manualUri: null,
-      manualBody: body.join('\n\n'),
+      manualBody: EffectArray.join(body, '\n\n'),
       lastApplied: {reviewId, revision: 2, digest},
     }),
   );
@@ -198,14 +213,20 @@ async function fixture(
       modelId: 'local',
       alternatePermitted: false,
       alternateModelId: null,
-      verifiedModel: {id: 'local', sha256: 'b'.repeat(64), size: 0, path: 'unused-model-port', stamp: 'unused'},
+      verifiedModel: {
+        id: 'local',
+        sha256: Effect.pipe('b', EffectString.repeat(64)),
+        size: 0,
+        path: 'unused-model-port',
+        stamp: 'unused',
+      },
     }),
   );
   const commands: string[][] = [];
   let currentAccepted = accepted;
   const generation = {
     model: 'local',
-    modelVersion: `actual-v1:${'b'.repeat(64)};maxTokens=4000;seed=0`,
+    modelVersion: `actual-v1:${Effect.pipe('b', EffectString.repeat(64))};maxTokens=4000;seed=0`,
     promptVersion: 'actual-prompt-v1',
     attempts: 2,
     usage: {status: 'unavailable'},
@@ -230,7 +251,7 @@ async function fixture(
     candidates: [{candidateId: `${reviewId}-1`, state: 'pending'}],
     maintenance: {
       basis: {targetUri: 'threadnote://fixture', observationRevision: 'new'},
-      proposal: {body: body.join('\n\n'), draft: {outcome}},
+      proposal: {body: EffectArray.join(body, '\n\n'), draft: {outcome}},
       generation,
     },
     auditEvents: [],
@@ -244,7 +265,7 @@ async function fixture(
       let stdout = '',
         stderr = '',
         exitCode = 0;
-      if (command[0] === 'git') stdout = command[1] === 'status' ? '' : 'a'.repeat(40);
+      if (command[0] === 'git') stdout = command[1] === 'status' ? '' : Effect.pipe('a', EffectString.repeat(40));
       else if (command[1] === 'read') stdout = currentAccepted;
       else if (command.includes('brief')) {
         expect(command).toContain('--home');
@@ -332,7 +353,7 @@ async function fixture(
             applyResponse === 'preview-write'
               ? preview
               : applyResponse === 'altered-write'
-                ? preview.replace('\n\n', '\nlast_reviewed: 2026-10-16T00:00:00Z\n\n')
+                ? Effect.pipe(preview, EffectString.replace('\n\n', '\nlast_reviewed: 2026-10-16T00:00:00Z\n\n'))
                 : accepted;
           stdout = JSON.stringify({
             reviewId,
@@ -373,18 +394,18 @@ async function fixture(
       return {stdout, stderr, exitCode, elapsed: 1};
     },
     generate: async () => ({
-      draft: JSON.stringify(Object.fromEntries(event.probes.map(probe => [probe.id, 'unknown']))),
+      draft: JSON.stringify(EffectRecord.fromEntries(EffectArray.map(event.probes, probe => [probe.id, 'unknown']))),
       elapsedMilliseconds: 1,
       model: {
         backend: 'local-ai',
         id: 'local',
-        digest: 'b'.repeat(64),
+        digest: Effect.pipe('b', EffectString.repeat(64)),
         modelVersion: 'actual-local-v1',
-        settingsHash: 'c'.repeat(64),
+        settingsHash: Effect.pipe('c', EffectString.repeat(64)),
         promptVersion: 'probe-v1',
         attempts: 1,
       },
-      promptHash: 'd'.repeat(64),
+      promptHash: Effect.pipe('d', EffectString.repeat(64)),
       providerInputTokens: null,
       providerOutputTokens: null,
       providerChargeMicros: 0,
@@ -438,7 +459,14 @@ describe('native public CLI longitudinal contract', () => {
         });
         expect(result.status).toBe('observed');
         expect(result.detected).toBe(false);
-        expect(value.commands.filter(command => command.includes('run'))).toHaveLength(1);
+        expect(
+          EffectArrayPipe(value.commands, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (command, __effectArrayIndex2) => __effectArrayIndex2 in __effectArrayValues && command.includes('run'),
+            ),
+          ),
+        ).toHaveLength(1);
       } finally {
         await rm(value.directory, {recursive: true, force: true});
       }
@@ -512,7 +540,14 @@ describe('native public CLI longitudinal contract', () => {
       expect(result.status).toBe('observed');
       expect(result.actualClass).toBe('unchanged');
       expect(result.draftAttempted).toBe(false);
-      expect(value.commands.filter(command => command.includes('run'))).toHaveLength(1);
+      expect(
+        EffectArrayPipe(value.commands, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (command, __effectArrayIndex2) => __effectArrayIndex2 in __effectArrayValues && command.includes('run'),
+          ),
+        ),
+      ).toHaveLength(1);
     } finally {
       await rm(value.directory, {recursive: true, force: true});
     }
@@ -560,7 +595,7 @@ describe('native public CLI longitudinal contract', () => {
       expect(result.reason).toContain('stale-last-checked');
       expect(result.reason).toContain('2000-01-01T00:00:00.000Z');
       expect(generations).toBe(0);
-      expect(value.commands.some(command => command.includes('draft'))).toBe(false);
+      expect(EffectArray.some(value.commands, command => command.includes('draft'))).toBe(false);
     } finally {
       await rm(value.directory, {recursive: true, force: true});
     }
@@ -576,13 +611,26 @@ describe('native public CLI longitudinal contract', () => {
         expect(result.actualClass).toBe(outcome);
         expect(result.targetBeforeHash).toBe(result.targetAfterHash);
         expect(
-          value.commands.some(command => command.includes('draft-preview') || command.includes('draft-apply')),
+          EffectArray.some(
+            value.commands,
+            command => command.includes('draft-preview') || command.includes('draft-apply'),
+          ),
         ).toBe(false);
-        expect(result.model?.modelVersion).toBe(`actual-v1:${'b'.repeat(64)};maxTokens=4000;seed=0`);
+        expect(result.model?.modelVersion).toBe(
+          `actual-v1:${Effect.pipe('b', EffectString.repeat(64))};maxTokens=4000;seed=0`,
+        );
         expect(result.model?.promptVersion).toBe('actual-prompt-v1');
         expect(result.model?.attempts).toBe(2);
         expect(result.promptHash).toBeNull();
-        expect(value.commands.filter(command => command.includes('draft-reject'))).toHaveLength(1);
+        expect(
+          EffectArrayPipe(value.commands, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (command, __effectArrayIndex2) =>
+                __effectArrayIndex2 in __effectArrayValues && command.includes('draft-reject'),
+            ),
+          ),
+        ).toHaveLength(1);
         expect(value.getReview().candidates[0].state).toBe('rejected');
         expect(value.getReview().maintenanceApproval).toBeUndefined();
       } finally {
@@ -600,7 +648,7 @@ describe('native public CLI longitudinal contract', () => {
         expect(result.accepted).toBe(response === 'preview-write');
         expect(result.approved).toBe(response === 'preview-write');
         if (response === 'preview-write')
-          expect(value.commands.some(command => command.includes('draft-reject'))).toBe(false);
+          expect(EffectArray.some(value.commands, command => command.includes('draft-reject'))).toBe(false);
       } finally {
         await rm(value.directory, {recursive: true, force: true});
       }
@@ -653,10 +701,13 @@ describe('native public CLI longitudinal contract', () => {
     const value = await fixture(41, 'propose-revalidation');
     try {
       const statePath = join(value.request.home, 'study-state.json');
-      const state = JSON.parse(await readFile(statePath, 'utf8')) as {manualUri: string | null; manualBody: string};
+      const persistedState: unknown = JSON.parse(await readFile(statePath, 'utf8'));
+      const manualStateSchema = Schema.Struct({manualUri: Schema.NullOr(Schema.String), manualBody: Schema.String});
+      if (!Schema.is(manualStateSchema)(persistedState)) throw new Error('Expected a valid manual staging state.');
+      const state = {...persistedState};
       state.manualUri = 'threadnote://manual';
       state.manualBody =
-        topicStudyBodyV1(value.accepted).replace('90 seconds', '100 seconds') +
+        Effect.pipe(topicStudyBodyV1(value.accepted), EffectString.replace('90 seconds', '100 seconds')) +
         '\n\nThe staging fixture timeout is 45 seconds.';
       await writeFile(statePath, JSON.stringify(state));
       await writeFile(
@@ -687,7 +738,13 @@ describe('native public CLI longitudinal contract', () => {
       expect(manual).not.toContain('production fixture timeout is 50 seconds');
       expect(manual).toContain('history');
       expect(manual).not.toContain('staging fixture timeout is 45 seconds');
-      expect(manual.match(/The staging fixture timeout/g)).toHaveLength(1);
+      expect(
+        Effect.pipe(
+          manual,
+          EffectString.match(/The staging fixture timeout/g),
+          Effect.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(1);
       expect(result.unrelatedBodyPreserved).toBe(true);
     } finally {
       await rm(value.directory, {recursive: true, force: true});
@@ -726,7 +783,12 @@ it('publicly rejects the exact prepared revision after a bad preview and admits 
     expect(first.draftCompleted).toBe(true);
     expect(first.computeMilliseconds).toBe(1);
     expect(first.accepted).toBe(false);
-    const rejected = value.commands.find(command => command.includes('draft-reject'));
+    const rejected = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        value.commands,
+        __effectArrayValue => !!(command => command.includes('draft-reject'))(__effectArrayValue),
+      ),
+    );
     expect(rejected?.[rejected.indexOf('--revision') + 1]).toBe('10');
     expect(rejected?.[rejected.indexOf('--case-id') + 1]).toBe('case-fixture');
     const state = JSON.parse(await readFile(join(value.request.home, 'study-state.json'), 'utf8'));
@@ -752,7 +814,14 @@ it('publicly rejects the exact prepared revision after a bad preview and admits 
       },
     );
     expect(second.draftCompleted).toBe(true);
-    expect(value.commands.filter(command => command.includes('draft'))).toHaveLength(2);
+    expect(
+      EffectArrayPipe(value.commands, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (command, __effectArrayIndex2) => __effectArrayIndex2 in __effectArrayValues && command.includes('draft'),
+        ),
+      ),
+    ).toHaveLength(2);
     expect(second.reason).not.toBe('Draft generation failed.');
   } finally {
     await rm(value.directory, {recursive: true, force: true});
@@ -854,7 +923,13 @@ it.each(['generation-receipt', 'unknown-proposal', 'preview-refusal', 'apply-ref
       expect(result.computeMilliseconds).toBe(1);
       expect(result.targetBeforeHash).toBe(result.targetAfterHash);
       expect(value.getReview().candidates[0].state).toBe('rejected');
-      const rejection = value.commands.filter(command => command.includes('draft-reject'));
+      const rejection = EffectArrayPipe(value.commands, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (command, __effectArrayIndex2) =>
+            __effectArrayIndex2 in __effectArrayValues && command.includes('draft-reject'),
+        ),
+      );
       expect(rejection).toHaveLength(1);
       const expectedRevision =
         failure === 'resumed-check'
@@ -876,10 +951,18 @@ it('keeps the authored rejection as one exact public decision without applying',
     const result = await runTopicStudyNativeAdapter(value.request, value.ports);
     expect(result.status).toBe('observed');
     expect(result.accepted).toBe(false);
-    expect(value.commands.filter(command => command.includes('draft-reject'))).toHaveLength(1);
-    expect(value.commands.some(command => command.includes('draft-apply') && command.includes('--approved'))).toBe(
-      false,
-    );
+    expect(
+      EffectArrayPipe(value.commands, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (command, __effectArrayIndex2) =>
+            __effectArrayIndex2 in __effectArrayValues && command.includes('draft-reject'),
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(
+      EffectArray.some(value.commands, command => command.includes('draft-apply') && command.includes('--approved')),
+    ).toBe(false);
     expect(value.getReview().revision).toBe(11);
     expect(result.targetBeforeHash).toBe(result.targetAfterHash);
   } finally {
@@ -905,7 +988,7 @@ it.each(['draft', 'draft-preview'] as const)(
       expect(result.draftCompleted).toBe(true); // Exit zero records production, independently of envelope validation.
       expect(result.computeMilliseconds).toBe(1);
       expect(result.commandReceiptHashes.length).toBeGreaterThan(0);
-      expect(value.commands.some(command => command.includes('draft-reject'))).toBe(false);
+      expect(EffectArray.some(value.commands, command => command.includes('draft-reject'))).toBe(false);
       expect(value.getReview().candidates[0].state).toBe('pending');
     } finally {
       await rm(value.directory, {recursive: true, force: true});
@@ -1063,28 +1146,49 @@ it.each(['scripted-manual', 'naive-local'] as const)(
       expect(arm === 'scripted-manual' ? state.manualBody : state.naiveBody).toContain(
         'production fixture timeout is 95 seconds',
       );
-      expect(value.commands.some(command => command.includes('packet'))).toBe(false);
+      expect(EffectArray.some(value.commands, command => command.includes('packet'))).toBe(false);
       if (arm === 'scripted-manual') {
         expect(result.accepted).toBe(true);
         expect(
-          value.commands.some(
+          EffectArray.some(
+            value.commands,
             command => command.includes('remember') && command.includes('--require-current-code-refs'),
           ),
         ).toBe(true);
       } else {
         expect(result.draftAttempted).toBe(true);
-        const rewrite = value.prompts.find(prompt => prompt.startsWith('Rewrite'))!;
+        const rewrite = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            value.prompts,
+            __effectArrayValue =>
+              !!(prompt => Effect.pipe(prompt, EffectString.startsWith('Rewrite')))(__effectArrayValue),
+          ),
+        )!;
         expect(rewrite).toContain('export const timeoutSeconds = 95;');
         expect(rewrite).toContain('export const preserveUntilReview = true;');
         expect(rewrite).not.toContain('case-fixture');
         expect(rewrite).not.toContain('Current evidence packet');
-        const before = value.prompts.filter(prompt => prompt.startsWith('Rewrite')).length;
+        const before = EffectArrayPipe(value.prompts, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (prompt, __effectArrayIndex2) =>
+              __effectArrayIndex2 in __effectArrayValues && Effect.pipe(prompt, EffectString.startsWith('Rewrite')),
+          ),
+        ).length;
         const second = await runTopicStudyNativeAdapter(
           {...value.request, event: {...value.request.event, index: 38, indexGraph: false}},
           value.ports,
         );
         expect(second.draftAttempted).toBe(false);
-        expect(value.prompts.filter(prompt => prompt.startsWith('Rewrite'))).toHaveLength(before);
+        expect(
+          EffectArrayPipe(value.prompts, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (prompt, __effectArrayIndex2) =>
+                __effectArrayIndex2 in __effectArrayValues && Effect.pipe(prompt, EffectString.startsWith('Rewrite')),
+            ),
+          ),
+        ).toHaveLength(before);
       }
     } finally {
       await rm(value.directory, {recursive: true, force: true});
@@ -1111,36 +1215,69 @@ it('provides the same common source facts to every arm and the evaluated topic e
           },
         },
       );
-      const answer = prompts.find(prompt => prompt.startsWith('Answer every question'))!;
-      expect(answer.match(/\nintro\n/g)).toHaveLength(1);
+      const answer = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          prompts,
+          __effectArrayValue =>
+            !!(prompt => Effect.pipe(prompt, EffectString.startsWith('Answer every question')))(__effectArrayValue),
+        ),
+      )!;
+      expect(
+        Effect.pipe(
+          answer,
+          EffectString.match(/\nintro\n/g),
+          Effect.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(1);
       expect(answer).not.toContain('threadnote://');
       expect(answer).not.toContain('review-fixture');
       expect(answer).not.toContain('case-fixture');
       expect(answer).not.toContain('random-source-id');
-      const evidence = answer.split('(budget 1500 tokens):\n')[1].split('\n\nQuestions:')[0];
+      const evidence = Effect.pipe(
+        Effect.pipe(answer, EffectString.split('(budget 1500 tokens):\n'))[1],
+        EffectString.split('\n\nQuestions:'),
+      )[0];
       evidences.push(evidence);
       expect(result.retrievalHash).toBe(sha256HexSync(evidence));
       expect(JSON.parse(evidence).refs.map((ref: {path: string}) => ref.path)).toEqual(['health.ts', 'config.ts']);
-      const commonCommands = value.commands.filter(command =>
-        command.includes(join(value.request.home, 'common-source-home')),
+      const commonCommands = EffectArray.filter(
+        value.commands,
+        (command, __effectArrayIndex) =>
+          __effectArrayIndex in value.commands && command.includes(join(value.request.home, 'common-source-home')),
       );
       expect(
-        commonCommands.some(
+        EffectArray.some(
+          commonCommands,
           command => command.includes('brief') && command.includes('--json') && command.includes('1500'),
         ),
       ).toBe(true);
-      expect(commonCommands.every(command => command.includes('index') || command.includes('brief'))).toBe(true);
+      expect(EffectArray.every(commonCommands, command => command.includes('index') || command.includes('brief'))).toBe(
+        true,
+      );
       expect(result.evidenceMilliseconds).toBeGreaterThanOrEqual(1);
-      const trace = (await readFile(join(value.request.home, 'command-trace.jsonl'), 'utf8'))
-        .trim()
-        .split('\n')
-        .map(line => JSON.parse(line));
-      const publicReceipt = trace.find(item => item.command.includes('brief'));
+      const trace = EffectArray.map(
+        Effect.pipe(
+          await readFile(join(value.request.home, 'command-trace.jsonl'), 'utf8'),
+          EffectString.trim,
+          EffectString.split('\n'),
+        ),
+        line => JSON.parse(line),
+      );
+      const publicReceipt = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          trace,
+          __effectArrayValue => !!(item => item.command.includes('brief'))(__effectArrayValue),
+        ),
+      );
       expect(JSON.parse(publicReceipt.stdout).graph.sources[0].id).toBe('random-source-id');
       const reviewerReceipts =
         arm === 'naive-local'
           ? []
-          : (await readFile(join(value.request.home, 'reviewer-expectations.jsonl'), 'utf8')).trim().split('\n');
+          : Effect.pipe(
+              await readFile(join(value.request.home, 'reviewer-expectations.jsonl'), 'utf8'),
+              EffectString.trim,
+              EffectString.split('\n'),
+            );
       expect(result.commandReceiptHashes.length).toBe(trace.length + reviewerReceipts.length);
       expect(result.reviewerExpectation?.before.eligible ?? arm === 'naive-local').toBe(true);
     } finally {
@@ -1191,7 +1328,8 @@ it.each(['dirty', 'missing', 'stale-index', 'over-budget'] as const)(
         const statePath = join(value.request.home, 'study-state.json');
         const before = JSON.parse(await readFile(statePath, 'utf8'));
         if (unavailable === 'missing') await rm(join(value.repository, 'health.ts'));
-        else if (unavailable === 'over-budget') await writeFile(join(value.repository, 'health.ts'), 'x'.repeat(9000));
+        else if (unavailable === 'over-budget')
+          await writeFile(join(value.repository, 'health.ts'), Effect.pipe('x', EffectString.repeat(9000)));
         else await writeFile(join(value.repository, 'config.ts'), 'export const timeoutSeconds = 110;\n');
         const prior = value.commands.length;
         const result = await runTopicStudyNativeAdapter(
@@ -1227,10 +1365,16 @@ it.each(['dirty', 'missing', 'stale-index', 'over-budget'] as const)(
         expect(result.actualClass).toBe('unavailable');
         expect(result.reason).toContain('abstained');
         const later = value.commands.slice(prior);
-        expect(later.some(command => command.includes('remember') || command.includes('packet'))).toBe(false);
-        expect(later.filter(command => command.includes('index') && command.includes('--home'))).toHaveLength(
-          ['missing', 'over-budget'].includes(unavailable) ? 1 : 0,
+        expect(EffectArray.some(later, command => command.includes('remember') || command.includes('packet'))).toBe(
+          false,
         );
+        expect(
+          EffectArray.filter(
+            later,
+            (command, __effectArrayIndex) =>
+              __effectArrayIndex in later && command.includes('index') && command.includes('--home'),
+          ),
+        ).toHaveLength(['missing', 'over-budget'].includes(unavailable) ? 1 : 0);
       } finally {
         await rm(value.directory, {recursive: true, force: true});
       }
@@ -1260,7 +1404,7 @@ it('admits a naive rewrite when the same dirty bytes become clean and explicitly
         ...value.ports,
         generate: async prompt => {
           const generated = await value.ports.generate(prompt);
-          return prompt.startsWith('Rewrite')
+          return Effect.pipe(prompt, EffectString.startsWith('Rewrite'))
             ? {...generated, draft: 'The production fixture timeout is 100 seconds.'}
             : generated;
         },
@@ -1289,7 +1433,9 @@ it.each(['unsupported', 'failed'] as const)(
         {
           ...value.ports,
           generate: async prompt =>
-            prompt.startsWith('Rewrite') && kind === 'failed' ? null : value.ports.generate(prompt),
+            Effect.pipe(prompt, EffectString.startsWith('Rewrite')) && kind === 'failed'
+              ? null
+              : value.ports.generate(prompt),
         },
       );
       expect(result.status).toBe(kind === 'unsupported' ? 'unavailable' : 'failed');
@@ -1379,6 +1525,7 @@ it('projects equivalent source facts independently of private identifiers within
       fc.integer({min: 0, max: 10000}),
       (seconds, id, size) => {
         const brief = publicSourceBrief([
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
           {path: 'health.ts', content: `export const title = "Context Health";\n${'x'.repeat(size)}`},
           {path: 'config.ts', content: `export const timeoutSeconds = ${seconds};`},
         ]);
@@ -1392,7 +1539,7 @@ it('projects equivalent source facts independently of private identifiers within
           hash: id,
           clean: true,
           indexFresh: true,
-          files: ['health.ts', 'config.ts'].map(path => ({path, availability: 'present', content: null})),
+          files: EffectArray.map(['health.ts', 'config.ts'], path => ({path, availability: 'present', content: null})),
         };
         const projected = projectTopicStudySourceBriefV1(brief, declared);
         expect(projectTopicStudySourceBriefV1(changed, declared)).toBe(projected);
@@ -1401,7 +1548,8 @@ it('projects equivalent source facts independently of private identifiers within
         expect(refs.map((ref: {path: string}) => ref.path)).toEqual(['health.ts', 'config.ts']);
         expect(
           refs.every(
-            (ref: {sources: unknown[]; selection: string}) => ref.sources.length || ref.selection.includes('omitted'),
+            (ref: {sources: unknown[]; selection: string}) =>
+              ref.sources.length || Effect.pipe(ref.selection, EffectString.includes('omitted')),
           ),
         ).toBe(true);
       },
@@ -1474,11 +1622,20 @@ it('manual repairs existing direct claims without acquiring newly available stag
     expect(result.reviewerExpectation?.after?.repairOrdinals).toEqual([]);
     expect(value.manual()).toContain('The display heading is Context Health v2.');
     expect(value.manual()).not.toContain('The staging fixture timeout');
-    const receipt = (await readFile(join(value.request.home, 'reviewer-expectations.jsonl'), 'utf8'))
-      .trim()
-      .split('\n')
-      .map(line => JSON.parse(line));
-    expect(receipt.map(item => item.phase)).toEqual(['before', 'manual-preview', 'manual-readback', 'after']);
+    const receipt = EffectArray.map(
+      Effect.pipe(
+        await readFile(join(value.request.home, 'reviewer-expectations.jsonl'), 'utf8'),
+        EffectString.trim,
+        EffectString.split('\n'),
+      ),
+      line => JSON.parse(line),
+    );
+    expect(EffectArray.map(receipt, item => item.phase)).toEqual([
+      'before',
+      'manual-preview',
+      'manual-readback',
+      'after',
+    ]);
     expect(receipt[0].expectation.beforeHash).toBe(result.targetBeforeHash);
   } finally {
     await rm(value.directory, {recursive: true, force: true});
@@ -1509,9 +1666,9 @@ it.each(['none', 'manual-readback', 'after'] as const)(
           }
           return {
             ...response,
-            stdout: response.stdout.replace(
-              'project: fixture',
-              `project: fixture\nsource_commit: ${written ? 'b' : 'a'}`,
+            stdout: Effect.pipe(
+              response.stdout,
+              EffectString.replace('project: fixture', `project: fixture\nsource_commit: ${written ? 'b' : 'a'}`),
             ),
           };
         },
@@ -1528,7 +1685,10 @@ it.each(['none', 'manual-readback', 'after'] as const)(
       expect(result.identityPreserved).toBe(true);
       expect(result.unrelatedBodyPreserved).toBe(true);
       expect(result.targetBeforeHash).not.toBe(result.targetAfterHash);
-      const actualAfter = value.manual().replace('project: fixture', 'project: fixture\nsource_commit: b');
+      const actualAfter = Effect.pipe(
+        value.manual(),
+        EffectString.replace('project: fixture', 'project: fixture\nsource_commit: b'),
+      );
       expect(result.targetAfterHash).toBe(sha256HexSync(actualAfter));
       expect(value.manual()).toContain('The production fixture timeout is 95 seconds.');
       if (failedPhase === 'none') {
@@ -1603,14 +1763,27 @@ it('resumed review uses the same complete current-claim oracle and rejects resid
           if (!command.includes('draft-preview') || ++previews !== 2) return response;
           const preview = JSON.parse(response.stdout);
           const content: string = preview.maintenanceApproval.preview.content;
-          const body = topicStudyBodyV1(content).replace('Context Health v2.', 'Context Health.');
+          const body = Effect.pipe(
+            topicStudyBodyV1(content),
+            EffectString.replace('Context Health v2.', 'Context Health.'),
+          );
           preview.maintenanceApproval.preview.content =
-            content
-              .slice(0, content.indexOf('\n\n') + 2)
+            Effect.pipe(
+              content,
+              EffectString.slice(
+                0,
+                Effect.pipe(
+                  content,
+                  EffectString.indexOf('\n\n'),
+                  Effect.Option.getOrElse(() => -1),
+                ) + 2,
+              ),
+            )
+              // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
               .replace(/^topic_maintenance: (.+)$/mu, (_line: string, json: string) => {
                 const manifest = JSON.parse(json);
                 manifest.bodyHash = sha256HexSync(body);
-                manifest.paragraphs[4].hash = sha256HexSync(body.split('\n\n')[4]);
+                manifest.paragraphs[4].hash = sha256HexSync(Effect.pipe(body, EffectString.split('\n\n'))[4]);
                 return `topic_maintenance: ${JSON.stringify(manifest)}`;
               }) + body;
           return {...response, stdout: JSON.stringify(preview)};
@@ -1634,12 +1807,12 @@ function invalidGenerationObservation(kind: 'malformed' | 'mismatched') {
     ? {version: 1}
     : {
         version: 1,
-        receiptId: 'topic-generation-' + 'a'.repeat(32),
-        caseId: 'health-case-' + 'b'.repeat(40),
-        reviewId: 'review-' + 'c'.repeat(24),
-        targetHash: 'd'.repeat(64),
-        observationRevision: 'e'.repeat(64),
-        packetDigest: 'f'.repeat(64),
+        receiptId: 'topic-generation-' + Effect.pipe('a', EffectString.repeat(32)),
+        caseId: 'health-case-' + Effect.pipe('b', EffectString.repeat(40)),
+        reviewId: 'review-' + Effect.pipe('c', EffectString.repeat(24)),
+        targetHash: Effect.pipe('d', EffectString.repeat(64)),
+        observationRevision: Effect.pipe('e', EffectString.repeat(64)),
+        packetDigest: Effect.pipe('f', EffectString.repeat(64)),
         agent: 'local-ai',
         model: 'local',
         promptVersion: 'actual-prompt-v1',
@@ -1650,7 +1823,7 @@ function invalidGenerationObservation(kind: 'malformed' | 'mismatched') {
         attempts: [
           {
             ordinal: 1,
-            promptHash: 'a'.repeat(64),
+            promptHash: Effect.pipe('a', EffectString.repeat(64)),
             promptBytes: 12,
             status: 'accepted',
             elapsedMilliseconds: 7,
@@ -1707,22 +1880,41 @@ it.each(['malformed', 'mismatched'] as const)(
         expect(result.targetBeforeHash).toBe(result.targetAfterHash);
         expect(value.getReview().candidates[0].state).toBe('rejected');
         expect(value.getReview().revision).toBe(10);
-        const rejected = value.commands.find(command => command.includes('draft-reject'))!;
+        const rejected = EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            value.commands,
+            __effectArrayValue => !!(command => command.includes('draft-reject'))(__effectArrayValue),
+          ),
+        )!;
         expect(rejected[rejected.indexOf('--revision') + 1]).toBe('9');
         expect(rejected[rejected.indexOf('--case-id') + 1]).toBe('case-fixture');
         const state = JSON.parse(await readFile(join(value.request.home, 'study-state.json'), 'utf8'));
         expect(state.reviewRevision).toBe(10);
         expect(state.accepted).toBe(value.accepted);
         expect(
-          value.commands.some(command => command.includes('draft-preview') || command.includes('draft-apply')),
+          EffectArray.some(
+            value.commands,
+            command => command.includes('draft-preview') || command.includes('draft-apply'),
+          ),
         ).toBe(false);
         expect(generations).toBe(0);
-        const trace = (await readFile(join(value.request.home, 'command-trace.jsonl'), 'utf8'))
-          .trim()
-          .split('\n')
-          .map(line => JSON.parse(line));
+        const trace = EffectArray.map(
+          Effect.pipe(
+            await readFile(join(value.request.home, 'command-trace.jsonl'), 'utf8'),
+            EffectString.trim,
+            EffectString.split('\n'),
+          ),
+          line => JSON.parse(line),
+        );
         expect(
-          JSON.parse(trace.find(entry => entry.command.includes('draft')).stdout).maintenance.generation.observation,
+          JSON.parse(
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                trace,
+                __effectArrayValue => !!(entry => entry.command.includes('draft'))(__effectArrayValue),
+              ),
+            ).stdout,
+          ).maintenance.generation.observation,
         ).toEqual(diagnostic);
       } finally {
         await rm(value.directory, {recursive: true, force: true});
@@ -1771,7 +1963,8 @@ it.each(['not-json', 'missing-review-id', 'invalid-revision', 'missing-candidate
       expect(state.reviewRevision).toBeNull();
       expect(value.getReview().candidates[0].state).toBe('pending');
       expect(
-        value.commands.some(
+        EffectArray.some(
+          value.commands,
           command =>
             command.includes('draft-reject') || command.includes('draft-preview') || command.includes('draft-apply'),
         ),
@@ -1830,7 +2023,13 @@ it('rejects produced reviews at their exact arbitrary revision despite invalid o
           expect(result.targetAfterHash).toBe(result.targetBeforeHash);
           expect(value.getReview().candidates[0].state).toBe('rejected');
           expect(value.getReview().revision).toBe(revision + 1);
-          const rejection = value.commands.filter(command => command.includes('draft-reject'));
+          const rejection = EffectArrayPipe(value.commands, __effectArrayValues =>
+            EffectArray.filter(
+              __effectArrayValues,
+              (command, __effectArrayIndex2) =>
+                __effectArrayIndex2 in __effectArrayValues && command.includes('draft-reject'),
+            ),
+          );
           expect(rejection).toHaveLength(1);
           expect(rejection[0][rejection[0].indexOf('--revision') + 1]).toBe(String(revision));
         } finally {

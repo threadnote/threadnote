@@ -7,6 +7,8 @@ import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import type {CodeGraphLayout} from '../layout.js';
 import type {CodeGraphSemanticStatus, CodeGraphSnapshot} from '../types.js';
 import {readCodeGraphEmbeddingDemandLane} from './demand.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_SEMANTIC_STATUS_TIMEOUT_MILLISECONDS = 1000;
 
@@ -110,7 +112,9 @@ export const observeCodeGraphSemanticStatus = Effect.fn('codeGraph.observeSemant
     }
     const now = yield* Clock.currentTimeMillis;
     const timing = {attempt: lane.attempt, ...(lane.notBefore > now ? {retryAt: lane.notBefore} : {})};
-    const reason = lane.reason?.slice(0, 512);
+    const reason = Effect2.pipe(lane.reason, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.slice(0, 512)),
+    );
     if (lane.state === 'blocked')
       return {state: 'blocked', snapshotId: snapshot.id, ...(reason ? {reason} : {})} satisfies CodeGraphSemanticStatus;
     if (check?.state === 'unavailable') return unavailable('selected-model-unavailable');

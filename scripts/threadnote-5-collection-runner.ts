@@ -1,3 +1,5 @@
+import {Predicate} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Private release engineering coordinates bounded OS processes and retained artifacts. */
 import {chmod, copyFile, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile} from 'node:fs/promises';
 import {basename, dirname, isAbsolute, relative, resolve, sep} from 'node:path';
@@ -40,6 +42,9 @@ import {
   readCollectionPayloadIdentity,
   runCollectionProcess,
 } from './threadnote-5-collection-process.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export {assertUniqueNativeIdentities};
 export type {PrivateCollection};
@@ -79,13 +84,14 @@ export function previewThreadnote5Collection(value: unknown) {
     sourceRecordCount: 24,
     retentionHours: plan.retentionHours,
     externalAuthorityRequired: true,
-    scenarios: plan.recipes.map(recipe => ({
+    scenarios: EffectArray.map(plan.recipes, recipe => ({
       scenario: recipe.scenario,
       trials: trialCount(plan, recipe),
       stepCount: recipe.steps.length,
-      mutations: recipe.steps
-        .filter(step => step.type === 'write' || step.type === 'cli' || step.type === 'mcp')
-        .map(step => step.id),
+      mutations: EffectArray.map(
+        EffectArray.filter(recipe.steps, step => step.type === 'write' || step.type === 'cli' || step.type === 'mcp'),
+        step => step.id,
+      ),
     })),
   };
 }
@@ -210,8 +216,8 @@ async function executeTrial(input: {
   const repo = resolve(root, 'repo');
   const secondRepo = resolve(root, 'worktree');
   const remote = resolve(root, 'team.git');
-  await Promise.all([primaryHome, secondaryHome, repo].map(path => mkdir(path, {mode: 0o700})));
-  await Promise.all([primaryHome, secondaryHome].map(home => mkdir(resolve(home, 'tmp'), {mode: 0o700})));
+  await Promise.all(EffectArray.map([primaryHome, secondaryHome, repo], path => mkdir(path, {mode: 0o700})));
+  await Promise.all(EffectArray.map([primaryHome, secondaryHome], home => mkdir(resolve(home, 'tmp'), {mode: 0o700})));
   const env = collectionEnvironment(root, primaryHome);
   for (const argv of [
     ['init', '--bare', remote],
@@ -281,7 +287,7 @@ async function executeTrial(input: {
       } else {
         await observeVerifiedCollectionRuntime(input.launch, input.plan.candidate, cwd, stepEnv);
         if (step.type === 'cli') {
-          const argv = step.argv.map(render);
+          const argv = EffectArray.map(step.argv, render);
           assertIsolatedCollectionArguments(argv, root);
           const result = await runVerifiedCollectionProcess(input.launch, argv, cwd, stepEnv, {
             maximumCaptureBytes: input.captureBudget.remainingBytes,
@@ -312,14 +318,18 @@ async function executeTrial(input: {
             transport.beginCapture(input.captureBudget.remainingBytes);
             await client.connect(transport, {timeout: 120_000});
           }
-          const args = renderNativeArguments(step.arguments, render) as Record<string, unknown>;
+          const renderedArgs = renderNativeArguments(step.arguments, render);
+          if (typeof renderedArgs !== 'object' || renderedArgs === null || EffectArray.isArray(renderedArgs)) {
+            throw new Error('Rendered MCP tool arguments must be an object.');
+          }
+          const args = EffectRecord.fromEntries(EffectRecord.toEntries(renderedArgs));
           assertIsolatedCollectionArguments([JSON.stringify(args)], root);
           transports.get(step.surface)!.beginCapture(input.captureBudget.remainingBytes);
           output = await client.callTool({name: step.tool, arguments: args}, undefined, {timeout: 120_000});
           transports.get(step.surface)!.assertHealthy();
           if (Buffer.byteLength(canonicalJson(output)) > COLLECTION_MAX_BYTES)
             throw new Error('MCP output exceeds its private capture bound.');
-          if ((output as {isError?: boolean}).isError)
+          if (Predicate.isObject(output) && 'isError' in output && output.isError === true)
             throw new Error(`Candidate MCP tool failed in ${input.recipe.scenario}/${step.id}.`);
         }
         await observeVerifiedCollectionRuntime(input.launch, input.plan.candidate, cwd, stepEnv);
@@ -330,8 +340,8 @@ async function executeTrial(input: {
       transcript.push(entry);
     }
   } finally {
-    const cleanup = await Promise.allSettled([...clients.values()].map(client => client.close()));
-    const groups = await Promise.allSettled([...transports.values()].map(transport => transport.close()));
+    const cleanup = await Promise.allSettled(EffectArray.map([...clients.values()], client => client.close()));
+    const groups = await Promise.allSettled(EffectArray.map([...transports.values()], transport => transport.close()));
     await assertCollectionCleanup([...cleanup, ...groups]);
   }
   for (const transport of transports.values()) transport.assertHealthy();
@@ -342,8 +352,9 @@ async function executeTrial(input: {
 }
 
 async function assertCollectionCleanup(results: readonly PromiseSettledResult<unknown>[]): Promise<void> {
-  const errors = results.flatMap(result => (result.status === 'rejected' ? [result.reason] : []));
-  if (errors.length > 0) throw errors.find(collectionCleanupIsUnsafe) ?? errors[0];
+  const errors = EffectArray.flatMap(results, result => (result.status === 'rejected' ? [result.reason] : []));
+  if (errors.length > 0)
+    throw EffectOption.getOrUndefined(EffectArray.findFirst(errors, collectionCleanupIsUnsafe)) ?? errors[0];
 }
 
 function interpolate(
@@ -351,15 +362,16 @@ function interpolate(
   bindings: Readonly<Record<string, string>>,
   outputs: Readonly<Record<string, unknown>>,
 ): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native replacement callbacks receive capture groups and offsets; Effect String accepts replacement strings only.
   return value.replace(/\{\{([^{}]+)\}\}/gu, (_, name: string) => {
-    if (name.startsWith('output:')) {
-      const [step, ...pointer] = name.slice(7).split(':');
-      const result = nativePointer(outputs[step], pointer.join(':'));
+    if (Effect.pipe(name, EffectString.startsWith('output:'))) {
+      const [step, ...pointer] = Effect.pipe(name, EffectString.slice(7), EffectString.split(':'));
+      const result = nativePointer(outputs[step], EffectArray.join(pointer, ':'));
       if (typeof result !== 'string' && typeof result !== 'number')
         throw new Error('Argument selection requires scalar native output.');
       return String(result);
     }
-    if (!Object.hasOwn(bindings, name)) throw new Error('Unknown collection binding.');
+    if (!EffectRecord.has(bindings, name)) throw new Error('Unknown collection binding.');
     return bindings[name];
   });
 }
@@ -369,15 +381,15 @@ export function assertIsolatedCollectionArguments(values: readonly string[], roo
   for (const value of values) {
     const decoded = decodeCollectionArgument(value);
     if (
-      decoded.includes(String.fromCharCode(0)) ||
+      Effect.pipe(decoded, EffectString.includes(String.fromCharCode(0))) ||
       /(?:^|[/\\])\.\.(?=[/\\]|$)/u.test(decoded) ||
       /(?:^|[\s"'=[{(,])~[/\\]/u.test(decoded) ||
       /(?:^|[\s"'=[{(,])(?:file|https?|ssh|git(?:\+ssh)?):/iu.test(decoded) ||
       /git@/u.test(decoded)
     )
       throw new Error('Candidate arguments may not escape the isolated trial.');
-    for (const token of decoded.split(/[\s"'=,:{}()[\],]+/u).filter(Boolean))
-      if (token.startsWith('/') && (resolve(token) !== token || !isWithin(root, token)))
+    for (const token of EffectArray.filter(Effect.pipe(decoded, EffectString.split(/[\s"'=,:{}()[\],]+/u)), Boolean))
+      if (Effect.pipe(token, EffectString.startsWith('/')) && (resolve(token) !== token || !isWithin(root, token)))
         throw new Error('Absolute candidate paths must stay inside the isolated trial.');
   }
 }
@@ -399,7 +411,10 @@ function decodeCollectionArgument(value: string): string {
 
 function isWithin(base: string, path: string): boolean {
   const fromBase = relative(base, path);
-  return fromBase === '' || (fromBase !== '..' && !fromBase.startsWith(`..${sep}`) && !isAbsolute(fromBase));
+  return (
+    fromBase === '' ||
+    (fromBase !== '..' && !Effect.pipe(fromBase, EffectString.startsWith(`..${sep}`)) && !isAbsolute(fromBase))
+  );
 }
 
 const COLLECTION_PROTECTED_PYTHON = '/usr/bin/python3';
@@ -635,11 +650,15 @@ export async function readNativeCollectionJson(
   env: Record<string, string>,
 ): Promise<unknown> {
   const output = await runCollectionFileBroker('read', anchor, base, file, anchorIdentity, env);
-  const newline = output.indexOf('\n');
+  const newline = Effect.pipe(
+    output,
+    EffectString.indexOf('\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (newline < 1) throw new Error('Invalid collection file broker response.');
-  const identity = parseCollectionFileBrokerIdentity(output.slice(0, newline + 1));
+  const identity = parseCollectionFileBrokerIdentity(Effect.pipe(output, EffectString.slice(0, newline + 1)));
   if (syntheticIdentities.has(identity)) throw new Error('Synthetic input cannot be exported as native evidence.');
-  return JSON.parse(output.slice(newline + 1));
+  return JSON.parse(Effect.pipe(output, EffectString.slice(newline + 1)));
 }
 
 async function runCollectionFileBroker(
@@ -700,7 +719,7 @@ async function runCollectionFileBroker(
     const [exitCode] = await Promise.all([owned.done, sent]);
     const errorText = decodeCollectionFileBrokerOutput(Buffer.concat(stderr));
     if (exceeded || exitCode !== 0 || errorText !== '')
-      throw new Error(errorText.trim() || 'Collection file broker failed closed.');
+      throw new Error(Effect.pipe(errorText, EffectString.trim) || 'Collection file broker failed closed.');
     return decodeCollectionFileBrokerOutput(Buffer.concat(stdout));
   } finally {
     clearTimeout(timeout);
@@ -751,20 +770,25 @@ function decodeCollectionFileBrokerOutput(bytes: Uint8Array): string {
 }
 
 function parseCollectionFileBrokerIdentity(output: string): string {
-  const identity = output.trim();
+  const identity = Effect.pipe(output, EffectString.trim);
   if (!/^\d+:\d+$/u.test(identity)) throw new Error('Invalid collection file broker response.');
   return identity;
 }
 
 function trialCount(plan: Threadnote5CollectionPlan, recipe: CollectionRecipe): number {
-  return THREADNOTE_5_COLLECTION_MATRIX.find(item => item[0] === recipe.scenario)![1].some(item => item[1] > 1)
+  return EffectArray.some(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(THREADNOTE_5_COLLECTION_MATRIX, item => item[0] === recipe.scenario),
+    )![1],
+    item => item[1] > 1,
+  )
     ? plan.measuredTrials
     : 1;
 }
 
 async function writePrivate(path: string, value: unknown): Promise<void> {
   const body = `${canonicalJson(value)}\n`;
-  if (Buffer.byteLength(body) > COLLECTION_MAX_BYTES && !path.endsWith('transcripts.json'))
+  if (Buffer.byteLength(body) > COLLECTION_MAX_BYTES && !Effect.pipe(path, EffectString.endsWith('transcripts.json')))
     throw new Error('Private collection artifact exceeds its bound.');
   await writeFile(path, body, {mode: 0o600, flag: 'wx'});
 }
@@ -789,14 +813,16 @@ async function requireAbsent(path: string): Promise<void> {
     await lstat(path);
     throw new Error('Collection output already exists.');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if ((Predicate.hasProperty(error, 'code') ? error.code : undefined) !== 'ENOENT') throw error;
   }
 }
 
 function renderNativeArguments(value: unknown, render: (value: string) => string): unknown {
   if (typeof value === 'string') return render(value);
-  if (Array.isArray(value)) return value.map(item => renderNativeArguments(item, render));
+  if (EffectArray.isArray(value)) return EffectArray.map(value, item => renderNativeArguments(item, render));
   if (value !== null && typeof value === 'object')
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renderNativeArguments(item, render)]));
+    return EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(value), ([key, item]) => [key, renderNativeArguments(item, render)]),
+    );
   return value;
 }

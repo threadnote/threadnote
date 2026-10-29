@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from '../effect/errors.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -30,8 +31,8 @@ export function prepareReviewedRecallRerankerDatasetV1(
 
   const fixture = createRecallEvaluationFixtureV2();
   const forbiddenTexts = [
-    ...fixture.documents.map(document => document.text),
-    ...fixture.queries.map(query => query.query),
+    ...EffectArray.map(fixture.documents, document => document.text),
+    ...EffectArray.map(fixture.queries, query => query.query),
   ];
   return createRecallRerankerDatasetV1(
     {

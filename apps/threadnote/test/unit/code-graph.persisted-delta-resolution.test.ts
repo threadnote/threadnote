@@ -1,4 +1,5 @@
-import {Database} from 'bun:sqlite';
+import {Array as EffectArray} from 'effect';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {Effect} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {CodeGraphStore, codeGraphPersistedDeltaResolutionPageStatement} from '@threadnote/graph/store';
@@ -14,6 +15,8 @@ import type {
 } from '@threadnote/graph/types';
 import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('persisted delta reference resolution', () => {
   it('resolves a tiny dirty overlay against a large base with bounded deterministic progress', async () => {
@@ -64,7 +67,7 @@ describe('persisted delta reference resolution', () => {
         resolved: 1,
       });
       expect(
-        observations.map(progress => ({
+        EffectArray.map(observations, progress => ({
           pageCompleted: progress.pageCompleted,
           pageTotal: progress.pageTotal,
           pass: progress.pass,
@@ -95,12 +98,18 @@ describe('persisted delta reference resolution', () => {
     try {
       createResolutionPlanSchema(database);
       const statement = codeGraphPersistedDeltaResolutionPageStatement('base-snapshot', 'edge-000', 'edge-500');
-      const plan = (
-        database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-          readonly detail: string;
-        }[]
-      ).map(row => row.detail);
-      const output = plan.join('\n');
+      const plan = EffectArray.map(
+        database
+          .query<
+            {
+              readonly detail: string;
+            },
+            SQLQueryBindings[]
+          >(`EXPLAIN QUERY PLAN ${statement.text}`)
+          .all(...statement.parameters),
+        row => row.detail,
+      );
+      const output = EffectArray.join(plan, '\n');
 
       expect(output).toContain('SEARCH candidate USING PRIMARY KEY (edge_id>? AND edge_id<?)');
       expect(output).toContain('SEARCH lookup USING PRIMARY KEY (lookup_key=?)');
@@ -174,14 +183,14 @@ describe('persisted delta reference resolution', () => {
 function persistedDeltaFixture(root: string, noiseSymbolCount: number) {
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'persisted-delta-resolution',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
   const callerFile = inventoryFile('src/caller.ts', 'base-caller-hash');
   const catalogFile = inventoryFile('src/catalog.ts', 'catalog-hash');
@@ -190,8 +199,8 @@ function persistedDeltaFixture(root: string, noiseSymbolCount: number) {
   const target = symbol('target', 'wantedTarget', catalogFile.path, catalogFile.contentHash);
   const noise = Array.from({length: noiseSymbolCount}, (_, index) =>
     symbol(
-      `noise-${String(index).padStart(5, '0')}`,
-      `noise${String(index).padStart(5, '0')}`,
+      `noise-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`,
+      `noise${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`,
       catalogFile.path,
       catalogFile.contentHash,
     ),

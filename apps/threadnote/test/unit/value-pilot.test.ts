@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {aggregateValueReportV1} from '@threadnote/threadnote/value_report/index';
@@ -21,7 +22,7 @@ function pilotSource(windowStart: string, elapsedDays: number, actor: number) {
 }
 
 function reorder<T>(values: readonly T[], order: readonly number[]): T[] {
-  return order.map(index => values[index]);
+  return EffectArray.map(order, index => values[index]);
 }
 
 describe('offline content-free pilot report', () => {
@@ -76,13 +77,13 @@ describe('offline content-free pilot report', () => {
     expect(report.metrics.secondActorReuseWithinSevenDays.positive).toBe('1-2');
     expect(report.metrics.approvedDeltaReuse.positive).toBe('1-2');
     expect(
-      buildPilotReport({...pilotInput(), evidence: evidence.map(e => ({...e, actor: 0}))}).metrics
+      buildPilotReport({...pilotInput(), evidence: EffectArray.map(evidence, e => ({...e, actor: 0}))}).metrics
         .secondActorReuseWithinSevenDays.positive,
     ).toBe('0');
     expect(
       buildPilotReport({
         ...pilotInput(),
-        evidence: evidence.map(e => (e.kind === 'verified-reuse' ? {...e, minute: 10_081} : e)),
+        evidence: EffectArray.map(evidence, e => (e.kind === 'verified-reuse' ? {...e, minute: 10_081} : e)),
       }).metrics.secondActorReuseWithinSevenDays.positive,
     ).toBe('0');
   });
@@ -94,7 +95,7 @@ describe('offline content-free pilot report', () => {
       evidence: [{actor: 0, item: 0, minute: 1, kind: 'verified-brief'}],
     });
     expect(report.metrics.secondActorReuseWithinSevenDays.pending).toBe('1-2');
-    expect(report.weeks.map(week => week.state)).toEqual(['pending', 'pending', 'pending', 'pending']);
+    expect(EffectArray.map(report.weeks, week => week.state)).toEqual(['pending', 'pending', 'pending', 'pending']);
   });
 
   it('keeps the seven-day reuse opportunity pending at its exclusive deadline', () => {
@@ -146,14 +147,14 @@ describe('offline content-free pilot report', () => {
       }
     }
     const report = buildPilotReport({...pilotInput(), evidence, evidenceCoverage: 'complete'});
-    expect(report.weeks.map(week => week.crossActorFullLoopActors)).toEqual(['3-4', '3-4', '3-4', '3-4']);
+    expect(EffectArray.map(report.weeks, week => week.crossActorFullLoopActors)).toEqual(['3-4', '3-4', '3-4', '3-4']);
     expect(report.fourWeekCrossActorRetention).toEqual({state: 'observed', actors: '3-4'});
     expect(report.pilotSuccess).toBe('not-assessed');
     const incomplete = buildPilotReport({
       ...pilotInput(),
-      evidence: evidence.filter(event => event.kind !== 'approved-delta'),
+      evidence: EffectArray.filter(evidence, event => event.kind !== 'approved-delta'),
     });
-    expect(incomplete.weeks.map(week => week.fullLoopActors)).toEqual(['0', '0', '0', '0']);
+    expect(EffectArray.map(incomplete.weeks, week => week.fullLoopActors)).toEqual(['0', '0', '0', '0']);
     const shifted = buildPilotReport({
       ...pilotInput(),
       windowStart: '2026-08-31',
@@ -168,7 +169,7 @@ describe('offline content-free pilot report', () => {
     const report = buildPilotReport(pilotInput());
     expect(() => parsePilotReport({...report, actors: '100+'})).toThrow();
     expect(() => parsePilotReport({...report, userId: 'secret'})).toThrow();
-    expect(report.weeks.every(week => week.retainedFromPriorWeek === null)).toBe(true);
+    expect(EffectArray.every(report.weeks, week => week.retainedFromPriorWeek === null)).toBe(true);
     const complete = buildPilotReport({...pilotInput(), evidenceCoverage: 'complete'});
     expect(complete.metrics.firstSourceVerifiedBrief.state).toBe('observed');
     expect(complete.metrics.firstSourceVerifiedBrief.rate).toBe('0');
@@ -199,11 +200,11 @@ describe('offline content-free pilot report', () => {
           const base = pilotInput();
           const input: PilotInput = {
             ...base,
-            sources: [0, 1, 2].map(actor => ({
+            sources: EffectArray.map([0, 1, 2], actor => ({
               actor,
               value: pilotSource(base.windowStart, base.elapsedDays, actor),
             })),
-            observations: values.map((value, actor) => ({
+            observations: EffectArray.map(values, (value, actor) => ({
               actor,
               sample: 0,
               metric: 'falseCurrentRate',
@@ -224,15 +225,18 @@ describe('offline content-free pilot report', () => {
           const reordered = {
             ...input,
             sources: reorder(
-              input.sources.map(source => ({...source, actor: actorSlots[source.actor]})),
+              EffectArray.map(input.sources, source => ({...source, actor: actorSlots[source.actor]})),
               sourceOrder,
             ),
             observations: reorder(
-              input.observations.map(observation => ({...observation, actor: actorSlots[observation.actor]})),
+              EffectArray.map(input.observations, observation => ({
+                ...observation,
+                actor: actorSlots[observation.actor],
+              })),
               observationOrder,
             ),
             evidence: reorder(
-              input.evidence.map(event => ({...event, actor: actorSlots[event.actor]})),
+              EffectArray.map(input.evidence, event => ({...event, actor: actorSlots[event.actor]})),
               evidenceOrder,
             ),
           };

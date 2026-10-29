@@ -1,10 +1,12 @@
 import {websiteDefaultSiteSocialImage, type WebsiteSocialImage} from '../content/websiteArticles.js';
 import {docsArticlePath, siteCanonicalUrlForPathname, whatsNewArticlePath, whatsNewReleasePath} from './routes.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const base = import.meta.env.BASE_URL ?? '/';
 
 export function siteHref(path = ''): string {
-  const normalized = path.replace(/^\/+/, '');
+  const normalized = Effect.pipe(path, EffectString.replace(/^\/+/, ''));
   return `${base}${normalized}`;
 }
 

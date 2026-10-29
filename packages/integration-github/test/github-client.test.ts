@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
-import {Redacted} from 'effect';
+import {Predicate, Redacted} from 'effect';
 import fc from 'fast-check';
 import {createGitHubClient, githubDocumentId} from '../src/client.js';
 import {renderGitHubConversation} from '../src/render.js';
 import {conversation, json, restItem, timestamp} from './fixtures.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const token = Redacted.make('ghp_synthetic_test_key_only');
 describe('GitHub client', () => {
   it('keeps credentials on the fixed origin and follows bounded repository redirects', async () => {
@@ -18,7 +22,7 @@ describe('GitHub client', () => {
     });
     try {
       expect(await client.repository('owner/repo')).toEqual({id: '7', name: 'owner/renamed', private: true});
-      expect(calls.map(u => u.origin)).toEqual(['https://api.github.com', 'https://api.github.com']);
+      expect(EffectArray.map(calls, u => u.origin)).toEqual(['https://api.github.com', 'https://api.github.com']);
     } finally {
       client.close();
     }
@@ -63,9 +67,10 @@ describe('GitHub client', () => {
             ? json(broken)
             : url.pathname === '/repos/owner/repo'
               ? json({id: 7, full_name: 'owner/repo', private: false})
-              : url.pathname.endsWith('/reviews') || url.pathname.endsWith('/comments')
+              : Effect.pipe(url.pathname, EffectString.endsWith('/reviews')) ||
+                  Effect.pipe(url.pathname, EffectString.endsWith('/comments'))
                 ? json([])
-                : url.pathname.includes('/pulls/')
+                : Effect.pipe(url.pathname, EffectString.includes('/pulls/'))
                   ? json({number: 1, html_url: 'https://github.com/owner/repo/pull/1', merged: false, draft: false})
                   : json(restItem(1, true)),
       });
@@ -107,9 +112,17 @@ describe('GitHub client', () => {
       fetch: async (url, init) => {
         if (url.pathname === '/repos/owner/repo') return json({id: 7, full_name: 'owner/repo', private: false});
         if (url.pathname === '/graphql') {
-          const q = JSON.parse(init.body as string) as {variables: {id?: string}};
-          if (q.variables.id) {
-            nestedCalls.push(q.variables.id);
+          if (typeof init.body !== 'string') throw new Error('Expected a serialized GraphQL request');
+          const requestBody: unknown = JSON.parse(init.body);
+          if (!Predicate.isObject(requestBody) || !Predicate.isObject(requestBody.variables)) {
+            throw new Error('Expected GraphQL request variables');
+          }
+          const requestId = requestBody.variables.id;
+          if (requestId !== undefined && typeof requestId !== 'string') {
+            throw new Error('Expected an optional string GraphQL node id');
+          }
+          if (requestId) {
+            nestedCalls.push(requestId);
             return json({data: {node: thread(conn([comment(101)]))}});
           }
           return json({
@@ -134,7 +147,7 @@ describe('GitHub client', () => {
             },
           });
         }
-        if (url.pathname.endsWith('/reviews'))
+        if (Effect.pipe(url.pathname, EffectString.endsWith('/reviews')))
           return json([
             {id: 2, state: 'PENDING'},
             {
@@ -146,8 +159,8 @@ describe('GitHub client', () => {
               html_url: 'https://github.com/owner/repo/pull/1#pullrequestreview-3',
             },
           ]);
-        if (url.pathname.endsWith('/comments')) return json([]);
-        if (url.pathname.includes('/pulls/'))
+        if (Effect.pipe(url.pathname, EffectString.endsWith('/comments'))) return json([]);
+        if (Effect.pipe(url.pathname, EffectString.includes('/pulls/')))
           return json({number: 1, html_url: 'https://github.com/owner/repo/pull/1', merged: false, draft: false});
         return json(restItem(1, true));
       },
@@ -156,7 +169,7 @@ describe('GitHub client', () => {
       const value = await client.stableConversation(conversation.repository, {id: '11', number: 1, kind: 'pull'});
       expect(value.threads[0].comments).toHaveLength(101);
       expect(value.threads[0]).toMatchObject({resolved: true, outdated: true});
-      expect(value.reviews.map(r => r.id)).toEqual(['3']);
+      expect(EffectArray.map(value.reviews, r => r.id)).toEqual(['3']);
       expect(nestedCalls).toEqual(['thread1', 'thread1']);
     } finally {
       client.close();
@@ -166,14 +179,14 @@ describe('GitHub client', () => {
     const paths: string[] = [];
     const continuation =
       'https://api.github.com/repositories/7/issues?per_page=100&page=2&state=all&sort=created&direction=asc&after=Y3Vyc29yX2FiYw%3D%3D';
-    const namedContinuation = continuation.replace('/repositories/7/', '/repos/owner/Repo/');
+    const namedContinuation = Effect.pipe(continuation, EffectString.replace('/repositories/7/', '/repos/owner/Repo/'));
     const client = createGitHubClient(token, {
       fetch: async url => {
         paths.push(url.pathname + url.search);
         if (url.pathname === '/repos/owner/repo') return json({id: 7, full_name: 'owner/Repo', private: false});
-        if (url.pathname.endsWith('/issues/comments'))
+        if (Effect.pipe(url.pathname, EffectString.endsWith('/issues/comments')))
           return json([{id: 4, issue_url: 'https://api.github.com/repos/owner/Repo/issues/2'}]);
-        if (url.pathname.endsWith('/pulls/comments'))
+        if (Effect.pipe(url.pathname, EffectString.endsWith('/pulls/comments')))
           return json([{id: 5, pull_request_url: 'https://api.github.com/repositories/7/pulls/3'}]);
         return url.searchParams.get('page') === '1'
           ? json([restItem(1)], 200, {link: `<${namedContinuation}>; rel="next"`})
@@ -185,13 +198,13 @@ describe('GitHub client', () => {
       const first = await client.listIssues('owner/repo', 1);
       expect(first.continuation).toBe(namedContinuation);
       expect(
-        (await client.listIssues('owner/repo', 2, undefined, first.continuation)).items.map(i => i.number),
+        EffectArray.map((await client.listIssues('owner/repo', 2, undefined, first.continuation)).items, i => i.number),
       ).toEqual([2]);
       expect(paths.at(-1)).toContain('/repositories/7/issues?');
       expect((await client.listChangedNumbers('owner/repo', 'comments', 1, timestamp)).numbers).toEqual([2]);
       expect((await client.listChangedNumbers('owner/repo', 'review-comments', 1, timestamp)).numbers).toEqual([3]);
       await expect(
-        client.listIssues('owner/repo', 2, undefined, continuation.replace('/7/', '/8/')),
+        client.listIssues('owner/repo', 2, undefined, Effect.pipe(continuation, EffectString.replace('/7/', '/8/'))),
       ).rejects.toMatchObject({code: 'contract-incomplete'});
     } finally {
       client.close();
@@ -221,7 +234,11 @@ describe('GitHub client', () => {
         if (url.pathname === '/repositories/7/issues/2') return json(restItem(2, true));
         if (url.pathname === '/repositories/7/pulls/2')
           return json({number: 2, html_url: 'https://github.com/owner/repo/pull/2', merged: false, draft: false});
-        if (url.pathname.endsWith('/comments') || url.pathname.endsWith('/reviews')) return json([]);
+        if (
+          Effect.pipe(url.pathname, EffectString.endsWith('/comments')) ||
+          Effect.pipe(url.pathname, EffectString.endsWith('/reviews'))
+        )
+          return json([]);
         return json({}, 404);
       },
     });
@@ -238,8 +255,19 @@ describe('GitHub client', () => {
         code: 'access-rejected',
       });
       await expect(client.repository('owner/repo')).rejects.toMatchObject({code: 'access-rejected'});
-      expect(paths.filter(path => path.startsWith('/repos/'))).toEqual(['/repos/owner/repo', '/repos/owner/repo']);
-      expect(paths.filter(path => path.startsWith('/repositories/'))).toEqual([
+      expect(
+        EffectArray.filter(
+          paths,
+          __effectArrayValue => !!(path => Effect.pipe(path, EffectString.startsWith('/repos/')))(__effectArrayValue),
+        ),
+      ).toEqual(['/repos/owner/repo', '/repos/owner/repo']);
+      expect(
+        EffectArray.filter(
+          paths,
+          __effectArrayValue =>
+            !!(path => Effect.pipe(path, EffectString.startsWith('/repositories/')))(__effectArrayValue),
+        ),
+      ).toEqual([
         '/repositories/7/issues',
         '/repositories/7/issues/1',
         '/repositories/7/issues/1',
@@ -266,8 +294,12 @@ describe('GitHub client', () => {
         fetch: async url => {
           if (url.pathname === '/repos/owner/repo') return json({id: 7, full_name: 'owner/repo', private: false});
           if (url.pathname === '/graphql') return json({errors: [{type: 'RATE_LIMITED'}]}, 200, headers);
-          if (url.pathname.endsWith('/comments') || url.pathname.endsWith('/reviews')) return json([]);
-          if (url.pathname.endsWith('/pulls/1'))
+          if (
+            Effect.pipe(url.pathname, EffectString.endsWith('/comments')) ||
+            Effect.pipe(url.pathname, EffectString.endsWith('/reviews'))
+          )
+            return json([]);
+          if (Effect.pipe(url.pathname, EffectString.endsWith('/pulls/1')))
             return json({number: 1, html_url: 'https://github.com/owner/repo/pull/1', merged: false, draft: false});
           return json(restItem(1, true));
         },
@@ -290,7 +322,7 @@ describe('GitHub client', () => {
       fetch: async url =>
         url.pathname === '/repos/owner/repo'
           ? json({id: 7, full_name: 'owner/repo', private: false})
-          : url.pathname.endsWith('/comments')
+          : Effect.pipe(url.pathname, EffectString.endsWith('/comments'))
             ? json([])
             : json({...restItem(1), body: String(++read)}),
     });
@@ -304,9 +336,9 @@ describe('GitHub client', () => {
     const escaped = createGitHubClient(token, {
       fetch: async () =>
         new Response(
-          JSON.stringify({id: 7, full_name: 'owner/repo', private: false, note: Redacted.value(token)}).replaceAll(
-            'ghp_',
-            String.raw`\u0067hp_`,
+          Effect.pipe(
+            JSON.stringify({id: 7, full_name: 'owner/repo', private: false, note: Redacted.value(token)}),
+            EffectString.replaceAll('ghp_', String.raw`\u0067hp_`),
           ),
           {headers: {'content-type': 'application/json'}},
         ),
@@ -328,18 +360,32 @@ describe('GitHub client', () => {
             ...conversation,
             id: String(id),
             repository: {...conversation.repository, id: String(repoId)},
-            body: chars.join(''),
+            body: EffectArray.join(chars, ''),
           };
           const before = JSON.stringify(value);
           const chunks = renderGitHubConversation(value);
           expect(githubDocumentId(String(repoId), value)).toBe(`r-${repoId}-issue-${id}`);
           expect(JSON.stringify(value)).toBe(before);
           expect(renderGitHubConversation(value)).toEqual(chunks);
-          expect(chunks.every(c => Buffer.byteLength(c.body) <= 16 * 1024)).toBe(true);
-          const fragments = chunks
-            .map(c => c.body.slice(c.body.indexOf('\n\n') + 2))
-            .join('')
-            .replace(/^Description by alice\n/, '');
+          expect(EffectArray.every(chunks, c => Buffer.byteLength(c.body) <= 16 * 1024)).toBe(true);
+          const fragments = Effect.pipe(
+            EffectArray.join(
+              EffectArray.map(chunks, c =>
+                Effect.pipe(
+                  c.body,
+                  EffectString.slice(
+                    Effect.pipe(
+                      c.body,
+                      EffectString.indexOf('\n\n'),
+                      Effect.Option.getOrElse(() => -1),
+                    ) + 2,
+                  ),
+                ),
+              ),
+              '',
+            ),
+            EffectString.replace(/^Description by alice\n/, ''),
+          );
           expect(fragments).toBe(value.body || '(empty)');
         },
       ),

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {captureReviewedSupportLegacyOrigin, createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
 import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
@@ -26,11 +27,8 @@ import type {TopicMaintenanceManifestV1} from '@threadnote/memory/topic-maintena
 import {loadCandidateReview, saveCandidateReview} from '@threadnote/memory/candidate';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
-import type {TopicMaintenanceDraftBasisV1} from '@threadnote/memory/topic-maintenance-draft';
-import {
-  verifyTopicMaintenanceGitProposal,
-  type TopicMaintenanceGitProposalV2,
-} from '../../src/git_proposal/topic_maintenance_proposal.js';
+import {validateTopicMaintenanceDraftBasis} from '@threadnote/memory/topic-maintenance-draft';
+import {verifyTopicMaintenanceGitProposal} from '../../src/git_proposal/topic_maintenance_proposal.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {
@@ -41,6 +39,8 @@ import {runKnowledgeDeltaGitProposalMaterialize} from '../../src/git_proposal/co
 import {expectedBranchName, verifyKnowledgeDeltaGitProposalV1} from '../../src/git_proposal/knowledge_delta.js';
 import {prepareSharedInboundContentEffect, stripPersonalProvenanceForSharedPublication} from '../../src/share/core.js';
 import {sharePublishEligibilityError} from '../../src/share/publish_policy.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('reviewed existing shared topic Git proposal', () => {
   effectIt.effect(
@@ -107,7 +107,7 @@ describe('reviewed existing shared topic Git proposal', () => {
         const consolidated = reviewConsolidation(
           body,
           [origin],
-          consolidationSections(body).map((section, fragment) => ({
+          EffectArray.map(consolidationSections(body), (section, fragment) => ({
             section,
             disposition: 'direct',
             supports: [{sourceUri: origin.uri, fragment, citationIds: [citation.id], relationIndexes: [0]}],
@@ -161,7 +161,7 @@ describe('reviewed existing shared topic Git proposal', () => {
           repositoryId: citation.repositoryId,
           bodyHash: sha256HexSync(body),
           coverage: 'declared-only',
-          paragraphs: (['normative', 'descriptive', 'historical'] as const).map((role, ordinal) => ({
+          paragraphs: EffectArray.map(['normative', 'descriptive', 'historical'] as const, (role, ordinal) => ({
             ordinal,
             hash: sha256HexSync(consolidationSections(body)[ordinal]),
             role,
@@ -181,11 +181,11 @@ describe('reviewed existing shared topic Git proposal', () => {
         const targetPath = 'durable/projects/fixture/shared-topic.md';
         const target = path.join(shared, targetPath);
         yield* fs.makeDirectory(path.dirname(target), {recursive: true});
-        const accepted = `${enrolled.content.replace('\n\n', '\nx_contract: preserve this exact header\n\n')}\n\n`;
+        const accepted = `${Effect2.pipe(enrolled.content, EffectString.replace('\n\n', '\nx_contract: preserve this exact header\n\n'))}\n\n`;
         yield* fs.writeFileString(target, accepted);
         yield* git(shared, ['add', '.']);
         yield* git(shared, ['commit', '--quiet', '-m', 'accepted shared topic']);
-        const baseCommit = (yield* git(shared, ['rev-parse', 'HEAD'])).stdout.trim();
+        const baseCommit = Effect2.pipe((yield* git(shared, ['rev-parse', 'HEAD'])).stdout, EffectString.trim);
         const shareDirectory = path.join(home, 'share');
         const teamsPath = path.join(shareDirectory, 'teams.json');
         yield* fs.makeDirectory(shareDirectory);
@@ -225,8 +225,11 @@ describe('reviewed existing shared topic Git proposal', () => {
             maxOutputBytes: 1024 * 1024,
           });
         const topicArgs = ['share', 'topic-propose', '--uri', uri, '--source-cwd', sourceCwd];
-        const packet = JSON.parse((yield* cli(topicArgs)).stdout) as {basis: TopicMaintenanceDraftBasisV1};
-        const basis = packet.basis;
+        const packet: unknown = JSON.parse((yield* cli(topicArgs)).stdout);
+        if (typeof packet !== 'object' || packet === null || !('basis' in packet)) {
+          throw new Error('Shared topic proposal packet had no basis.');
+        }
+        const basis = validateTopicMaintenanceDraftBasis(packet.basis);
         const draft = {
           version: 1,
           targetHash: basis.targetHash,
@@ -276,19 +279,23 @@ describe('reviewed existing shared topic Git proposal', () => {
         });
         expect(final.metadata.codeCitations).toContainEqual(citation);
         expect(final.metadata.codeCitations).toHaveLength(2);
-        expect(final.body).toBe(body.replace('30 seconds', '60 seconds'));
+        expect(final.body).toBe(Effect2.pipe(body, EffectString.replace('30 seconds', '60 seconds')));
         expect(preview.content).toContain('x_contract: preserve this exact header');
         for (const variant of [
           preview.content,
-          preview.content.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:'),
+          Effect2.pipe(preview.content, EffectString.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:')),
         ])
           expect(yield* prepareSharedInboundContentEffect(uri, variant)).toBe(variant);
         expect(() => stripPersonalProvenanceForSharedPublication(accepted)).toThrow(
           /reviewed existing-target Git proposal/,
         );
-        expect(sharePublishEligibilityError(config, uri.replace('/shared/default', ''), accepted)).toContain(
-          'reviewed existing-target Git proposal',
-        );
+        expect(
+          sharePublishEligibilityError(
+            config,
+            Effect2.pipe(uri, EffectString.replace('/shared/default', '')),
+            accepted,
+          ),
+        ).toContain('reviewed existing-target Git proposal');
         const exportArgs = [
           'share',
           'propose',
@@ -299,7 +306,7 @@ describe('reviewed existing shared topic Git proposal', () => {
           '--source-cwd',
           sourceCwd,
         ];
-        const artifact = JSON.parse((yield* cli(exportArgs)).stdout) as TopicMaintenanceGitProposalV2;
+        const artifact = JSON.parse((yield* cli(exportArgs)).stdout);
         verifyTopicMaintenanceGitProposal(artifact);
         const mcp = new EffectMcpServerAdapter('shared-topic-test', '1', 'Shared topic proposal test');
         registerKnowledgeDeltaGitProposalTool(mcp, config);
@@ -341,9 +348,12 @@ describe('reviewed existing shared topic Git proposal', () => {
             }),
           );
         yield* expectFailure([...exportArgs, '--approved'], 'proposalHash');
-        yield* expectFailure([...exportArgs, '--approved', '--approval-digest', 'f'.repeat(64)], 'proposalHash');
         yield* expectFailure(
-          exportArgs.map((value, index) =>
+          [...exportArgs, '--approved', '--approval-digest', Effect2.pipe('f', EffectString.repeat(64))],
+          'proposalHash',
+        );
+        yield* expectFailure(
+          EffectArray.map(exportArgs, (value, index) =>
             exportArgs[index - 1] === '--revision' ? String(review.revision + 1) : value,
           ),
           'revision',
@@ -366,7 +376,7 @@ describe('reviewed existing shared topic Git proposal', () => {
         expect(first.outcome).toBe('applied');
         expect(recovered).toMatchObject({outcome: 'reused', commit: first.commit});
         expect((yield* git(shared, ['show', `${first.commit}:${targetPath}`])).stdout).toBe(preview.content);
-        expect((yield* git(shared, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(baseCommit);
+        expect(Effect2.pipe((yield* git(shared, ['rev-parse', 'HEAD'])).stdout, EffectString.trim)).toBe(baseCommit);
         expect((yield* git(shared, ['status', '--porcelain'])).stdout).toBe('');
         expect(yield* fs.readFileString(target)).toBe(accepted);
         expect(
@@ -383,7 +393,10 @@ describe('reviewed existing shared topic Git proposal', () => {
             }),
           );
         // A coherently rehashed metadata edit still cannot replace the assembled, privately reviewed document.
-        const changedContent = artifact.files[0].content.replace('x_contract: preserve', 'x_contract: injected');
+        const changedContent = Effect2.pipe(
+          artifact.files[0].content,
+          EffectString.replace('x_contract: preserve', 'x_contract: injected'),
+        );
         const changedBinding = {
           ...artifact,
           files: [{...artifact.files[0], content: changedContent, contentHash: sha256HexSync(changedContent)}],
@@ -438,7 +451,10 @@ describe('reviewed existing shared topic Git proposal', () => {
               const mutated = structuredClone(artifact);
               const chars = [...mutated.maintenance.sourceVectorHash];
               chars[offset] = chars[offset] === 'a' ? 'b' : 'a';
-              const altered = {...mutated, maintenance: {...mutated.maintenance, sourceVectorHash: chars.join('')}};
+              const altered = {
+                ...mutated,
+                maintenance: {...mutated.maintenance, sourceVectorHash: EffectArray.join(chars, '')},
+              };
               expect(() => verifyTopicMaintenanceGitProposal(altered)).toThrow();
             }),
             {numRuns: 16},
@@ -457,7 +473,10 @@ describe('reviewed existing shared topic Git proposal', () => {
         yield* fs.writeFileString(source, 'export const timeoutSeconds = 90;\n');
         yield* expectFailure(materialize, 'source');
         yield* git(sourceCwd, ['checkout', '--', 'source.ts']);
-        yield* fs.writeFileString(target, accepted.replace('x_contract: preserve', 'x_contract: changed'));
+        yield* fs.writeFileString(
+          target,
+          Effect2.pipe(accepted, EffectString.replace('x_contract: preserve', 'x_contract: changed')),
+        );
         yield* expectFailure(materialize, 'clean');
         yield* git(shared, ['checkout', '--', targetPath]);
         yield* git(shared, ['commit', '--quiet', '--allow-empty', '-m', 'advanced base']);
@@ -467,10 +486,13 @@ describe('reviewed existing shared topic Git proposal', () => {
         yield* saveCandidateReview(home, staleReview);
         yield* expectFailure(materialize, 'revision');
         yield* saveCandidateReview(home, review);
-        yield* fs.writeFileString(proposalFile, canonicalJson({...artifact, proposalHash: '0'.repeat(64)}));
+        yield* fs.writeFileString(
+          proposalFile,
+          canonicalJson({...artifact, proposalHash: Effect2.pipe('0', EffectString.repeat(64))}),
+        );
         yield* expectFailure(materialize, 'hash');
         expect(yield* fs.readFileString(target)).toBe(accepted);
-        expect((yield* git(shared, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(baseCommit);
+        expect(Effect2.pipe((yield* git(shared, ['rev-parse', 'HEAD'])).stdout, EffectString.trim)).toBe(baseCommit);
       }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
     {timeout: 120_000},
   );
@@ -509,9 +531,9 @@ describe('reviewed ordinary shared memory owner path', () => {
         acceptance: {
           reviewId: 'review-1111111111111111',
           approvedAt: '2026-10-21T00:00:00.000Z',
-          targetBeforeHash: '1'.repeat(64),
-          preparationDigest: '2'.repeat(64),
-          sourceVectorDigest: '3'.repeat(64),
+          targetBeforeHash: Effect2.pipe('1', EffectString.repeat(64)),
+          preparationDigest: Effect2.pipe('2', EffectString.repeat(64)),
+          sourceVectorDigest: Effect2.pipe('3', EffectString.repeat(64)),
         },
       });
       const accepted = formatMemoryDocument(
@@ -592,7 +614,7 @@ describe('reviewed ordinary shared memory owner path', () => {
       expect((yield* git(['show', `${first.commit}:${relative}`])).stdout).toBe(built.proposal.files[0].content);
       const foreignRoute = {
         ...memoryMaintenanceFragmentSource(baseline.record, 0),
-        uri: uri.replace('/tester/', '/other-workstation-user/'),
+        uri: Effect2.pipe(uri, EffectString.replace('/tester/', '/other-workstation-user/')),
       };
       const locator = {repositoryId: baseline.repository.repositoryId, teamId: baseline.team.name, path: baseline.path};
       const resolved = yield* resolveAutomaticSharedMemorySource(config, foreignRoute, locator);
@@ -697,9 +719,9 @@ effectIt.effect('reauthorizes retained initial and legacy provenance and fences 
       acceptance: {
         reviewId: 'review-1111111111111111',
         approvedAt: '2026-10-21T00:00:00.000Z',
-        targetBeforeHash: '1'.repeat(64),
-        preparationDigest: '2'.repeat(64),
-        sourceVectorDigest: '3'.repeat(64),
+        targetBeforeHash: Effect2.pipe('1', EffectString.repeat(64)),
+        preparationDigest: Effect2.pipe('2', EffectString.repeat(64)),
+        sourceVectorDigest: Effect2.pipe('3', EffectString.repeat(64)),
       },
     });
     const captured = captureConsolidationSource({uri: sourceUri, content: original});
@@ -863,6 +885,11 @@ effectIt.effect('reauthorizes retained initial and legacy provenance and fences 
     yield* git(historical, ['commit', '--quiet', '-m', 'revoke public authority']);
     expect((yield* build().pipe(Effect.result))._tag).toBe('Failure');
     expect(yield* fs.readFileString(target)).toBe(accepted);
-    expect((yield* git(shared, ['branch', '--list', 'threadnote/knowledge-delta/*'])).stdout.trim()).toBe('');
+    expect(
+      Effect2.pipe(
+        (yield* git(shared, ['branch', '--list', 'threadnote/knowledge-delta/*'])).stdout,
+        EffectString.trim,
+      ),
+    ).toBe('');
   }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
 );

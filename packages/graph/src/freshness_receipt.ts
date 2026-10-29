@@ -1,4 +1,8 @@
 import {Predicate} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
+
 /**
  * Slice 3 remains gated. This module describes the evidence a future watcher
  * backend must prove before any receipt authority can be implemented.
@@ -223,7 +227,10 @@ export function assessCodeGraphFreshnessReceiptCandidate(input: unknown): CodeGr
     );
     satisfy(satisfied, 'worktree-recursive-change-coverage', coverage?.recursiveWorktree === 'complete');
 
-    const missing = CODE_GRAPH_FRESHNESS_RECEIPT_RUNTIME_PREREQUISITES.filter(item => !satisfied.has(item));
+    const missing = EffectArray.filter(
+      CODE_GRAPH_FRESHNESS_RECEIPT_RUNTIME_PREREQUISITES,
+      item => !satisfied.has(item),
+    );
     return freezeAssessment({
       authorizesCurrentness: false,
       ...(backend === undefined ? {} : {backend}),
@@ -246,7 +253,7 @@ function freezeAssessment(
 }
 
 function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+  return typeof value === 'string' && Effect.pipe(value, EffectString.trim).length > 0 ? value : undefined;
 }
 
 function record(value: unknown): Record<PropertyKey, unknown> | undefined {

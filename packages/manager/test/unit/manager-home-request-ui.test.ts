@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 
 import React, {act} from 'react';
@@ -63,13 +64,13 @@ it('owns at most one active request across project changes and refresh ticks', a
       await mount();
       for (const project of projects) {
         await render(project === 0 ? '' : `synthetic-${project}`);
-        expect(requests.filter(signal => !signal?.aborted)).toHaveLength(1);
+        expect(EffectArray.filter(requests, signal => !signal?.aborted)).toHaveLength(1);
         await act(async () => vi.advanceTimersByTimeAsync(30_000));
-        expect(requests.filter(signal => !signal?.aborted).length).toBeLessThanOrEqual(1);
+        expect(EffectArray.filter(requests, signal => !signal?.aborted).length).toBeLessThanOrEqual(1);
       }
       await act(async () => root?.unmount());
       root = undefined;
-      expect(requests.every(signal => signal?.aborted)).toBe(true);
+      expect(EffectArray.every(requests, signal => signal?.aborted ?? false)).toBe(true);
       document.body.replaceChildren();
     }),
     {numRuns: 12},

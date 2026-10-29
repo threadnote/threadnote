@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION,
@@ -34,17 +36,91 @@ import {
   uniqueMap,
   validateCodeMemoryLinkThreadSettingsUpdateV1,
   validateResolvedServerRequestV1,
-  type CanonicalJsonValue,
 } from './code-memory-link-agent-protocol-primitives.js';
 import {
   ALLOWED_ITEM_TYPES,
   IGNORED_MATCHING_TURN_METHOD_VALUES,
   IGNORED_MATCHING_TURN_METHODS,
   type AllowedItemType,
-  type IgnoredTurnMethod,
 } from './code-memory-link-agent-protocol-items.js';
 import * as contextBriefProtocol from './code-memory-link-context-brief-protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
+import type {AppServerItemStatus} from './code-memory-link-agent-protocol-contracts.js';
+import {
+  CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION,
+  CODE_MEMORY_LINK_SEALED_HIDDEN_TASKS,
+  CODE_MEMORY_LINK_SEALED_NEGATIVE_CONTROL_TASKS,
+  CODE_MEMORY_LINK_TASK_KINDS,
+  CODE_MEMORY_LINK_ARM_POLICIES,
+  CODE_MEMORY_LINK_BLIND_LABELS,
+  CODE_MEMORY_LINK_PREDICATE_ROLES,
+  CODE_MEMORY_LINK_QUALIFYING_ACTION_ITEM_TYPES,
+  CODE_MEMORY_LINK_STATIC_ASSERTION_KINDS,
+} from './code-memory-link-agent-protocol-contracts.js';
+import type {
+  CodeMemoryLinkPredicateRole,
+  CodeMemoryLinkArtifactV1,
+  CodeMemoryLinkFixtureV1,
+  CodeMemoryLinkJudgeV1,
+  CodeMemoryLinkTaskPacketV1,
+  CodeMemoryLinkPredicateV1,
+  CodeMemoryLinkStaticArtifactInputV1,
+  CodeMemoryLinkRubricV1,
+  CodeMemoryLinkSealedSuiteV1,
+  CodeMemoryLinkArmPacketV1,
+  CodeMemoryLinkStaticObservationV1,
+  CodeMemoryLinkStaticJudgmentV1,
+  CodeMemoryLinkProviderUsageV1,
+  CodeMemoryLinkCodexAppServerProjectionV1,
+  CodeMemoryLinkCodexTraceCheckpointV1,
+  CodeMemoryLinkCodexTraceCheckpointWithoutOrdinalV1,
+  CodeMemoryLinkCodexAppServerEvidenceV1,
+  CodeMemoryLinkCodexAppServerTraceInputV1,
+  CodeMemoryLinkAppServerApprovalReceiptV1,
+} from './code-memory-link-agent-protocol-contracts.js';
+export {
+  CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION,
+  CODE_MEMORY_LINK_SEALED_HIDDEN_TASKS,
+  CODE_MEMORY_LINK_SEALED_NEGATIVE_CONTROL_TASKS,
+  CODE_MEMORY_LINK_TASK_KINDS,
+  CODE_MEMORY_LINK_ARM_POLICIES,
+  CODE_MEMORY_LINK_BLIND_LABELS,
+  CODE_MEMORY_LINK_PREDICATE_ROLES,
+  CODE_MEMORY_LINK_QUALIFYING_ACTION_ITEM_TYPES,
+  CODE_MEMORY_LINK_STATIC_ASSERTION_KINDS,
+} from './code-memory-link-agent-protocol-contracts.js';
+export type {
+  AppServerItemStatus,
+  CodeMemoryLinkTaskKind,
+  CodeMemoryLinkArmPolicy,
+  CodeMemoryLinkBlindLabel,
+  CodeMemoryLinkPredicateRole,
+  CodeMemoryLinkQualifyingActionItemType,
+  CodeMemoryLinkStaticAssertionKind,
+  CodeMemoryLinkJsonValue,
+  CodeMemoryLinkArtifactV1,
+  CodeMemoryLinkFixtureV1,
+  CodeMemoryLinkJudgeV1,
+  CodeMemoryLinkTaskPacketV1,
+  CodeMemoryLinkPredicateV1,
+  CodeMemoryLinkStaticArtifactInputV1,
+  CodeMemoryLinkRubricV1,
+  CodeMemoryLinkSuiteTaskV1,
+  CodeMemoryLinkSealedSuiteV1,
+  CodeMemoryLinkArmPacketV1,
+  CodeMemoryLinkPredicateObservationV1,
+  CodeMemoryLinkStaticObservationV1,
+  CodeMemoryLinkStaticJudgmentV1,
+  CodeMemoryLinkProviderUsageV1,
+  CodeMemoryLinkCodexAppServerProjectionV1,
+  CodeMemoryLinkCodexTraceCheckpointV1,
+  CodeMemoryLinkCodexTraceCheckpointWithoutOrdinalV1,
+  CodeMemoryLinkCodexAppServerEvidenceV1,
+  CodeMemoryLinkCodexAppServerTraceInputV1,
+  CodeMemoryLinkAppServerApprovalReceiptV1,
+} from './code-memory-link-agent-protocol-contracts.js';
 export {
   CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION,
   assertCodeMemoryLinkExpectedCodexClientProjectionV1,
@@ -57,298 +133,6 @@ export {
 } from './code-memory-link-agent-client-identity.js';
 
 export * from './code-memory-link-context-brief-protocol.js';
-
-export const CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION = 1 as const;
-export const CODE_MEMORY_LINK_SEALED_HIDDEN_TASKS = 12 as const;
-export const CODE_MEMORY_LINK_SEALED_NEGATIVE_CONTROL_TASKS = 16 as const;
-
-export const CODE_MEMORY_LINK_TASK_KINDS = ['hidden-constraint', 'negative-control'] as const;
-export const CODE_MEMORY_LINK_ARM_POLICIES = ['anchored', 'task-only', 'no-memory'] as const;
-export const CODE_MEMORY_LINK_BLIND_LABELS = ['X', 'Y', 'Z'] as const;
-export const CODE_MEMORY_LINK_PREDICATE_ROLES = [
-  'constraint',
-  'harmful-acceptance',
-  'memory-exclusive',
-  'qualifying-action',
-  'task-pass',
-] as const;
-export const CODE_MEMORY_LINK_QUALIFYING_ACTION_ITEM_TYPES = ['commandExecution', 'fileChange'] as const;
-export const CODE_MEMORY_LINK_STATIC_ASSERTION_KINDS = [
-  'json-equals',
-  'utf8-contains',
-  'utf8-equals',
-  'utf8-not-contains',
-] as const;
-
-export type CodeMemoryLinkTaskKind = (typeof CODE_MEMORY_LINK_TASK_KINDS)[number];
-export type CodeMemoryLinkArmPolicy = (typeof CODE_MEMORY_LINK_ARM_POLICIES)[number];
-export type CodeMemoryLinkBlindLabel = (typeof CODE_MEMORY_LINK_BLIND_LABELS)[number];
-export type CodeMemoryLinkPredicateRole = (typeof CODE_MEMORY_LINK_PREDICATE_ROLES)[number];
-export type CodeMemoryLinkQualifyingActionItemType = (typeof CODE_MEMORY_LINK_QUALIFYING_ACTION_ITEM_TYPES)[number];
-export type CodeMemoryLinkStaticAssertionKind = (typeof CODE_MEMORY_LINK_STATIC_ASSERTION_KINDS)[number];
-export type CodeMemoryLinkJsonValue = CanonicalJsonValue;
-
-export interface CodeMemoryLinkArtifactV1 {
-  readonly artifactId: string;
-  readonly sha256: string;
-}
-
-export interface CodeMemoryLinkFixtureV1 {
-  readonly artifacts: readonly CodeMemoryLinkArtifactV1[];
-  readonly fixtureHash: string;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkJudgeV1 {
-  readonly artifacts: readonly CodeMemoryLinkArtifactV1[];
-  readonly judgeHash: string;
-  readonly judgeVersion: string;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkTaskPacketV1 {
-  readonly budget: {readonly steps: number; readonly tokens: number};
-  readonly fixtureHash: string;
-  readonly packetHash: string;
-  readonly prompt: string;
-  readonly taskId: string;
-  readonly taskKind: CodeMemoryLinkTaskKind;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkPredicateV1 {
-  readonly assertion:
-    | {
-        readonly artifactId: string;
-        readonly expected: CodeMemoryLinkJsonValue;
-        readonly kind: 'json-equals';
-      }
-    | {
-        readonly artifactId: string;
-        readonly expected: string;
-        readonly kind: 'utf8-contains' | 'utf8-equals' | 'utf8-not-contains';
-      };
-  readonly expected: boolean;
-  readonly predicateId: string;
-  readonly roles: readonly CodeMemoryLinkPredicateRole[];
-}
-
-/** Content-addressed judge input. Filesystem paths and links are deliberately not part of this contract. */
-export interface CodeMemoryLinkStaticArtifactInputV1 {
-  readonly artifactId: string;
-  readonly content: string;
-  readonly mediaType: 'application/json' | 'text/plain';
-  readonly sha256: string;
-}
-
-export interface CodeMemoryLinkRubricV1 {
-  readonly fixtureHash: string;
-  /** Domain-separated SHA-256 digests of the citation ids, never raw citation ids. */
-  readonly goldCitationDigests: readonly string[];
-  readonly predicates: readonly CodeMemoryLinkPredicateV1[];
-  readonly qualifyingActionItemTypes: readonly CodeMemoryLinkQualifyingActionItemType[];
-  readonly rubricHash: string;
-  readonly taskId: string;
-  readonly taskKind: CodeMemoryLinkTaskKind;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkSuiteTaskV1 {
-  readonly packetHash: string;
-  readonly rubricHash: string;
-  readonly taskId: string;
-  readonly taskKind: CodeMemoryLinkTaskKind;
-}
-
-export interface CodeMemoryLinkSealedSuiteV1 {
-  readonly fixture: CodeMemoryLinkFixtureV1;
-  readonly judge: CodeMemoryLinkJudgeV1;
-  readonly suiteHash: string;
-  readonly suiteId: string;
-  readonly tasks: readonly CodeMemoryLinkSuiteTaskV1[];
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkArmPacketV1 {
-  readonly armPacketHash: string;
-  readonly assignmentHash: string;
-  readonly blindLabel: CodeMemoryLinkBlindLabel;
-  readonly fixtureHash: string;
-  readonly packetHash: string;
-  readonly policy: CodeMemoryLinkArmPolicy;
-  readonly rubricHash: string;
-  readonly runNonce: string;
-  readonly taskId: string;
-  readonly taskKind: CodeMemoryLinkTaskKind;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkPredicateObservationV1 {
-  readonly predicateId: string;
-  readonly value: boolean;
-}
-
-export interface CodeMemoryLinkStaticObservationV1 {
-  readonly artifactHash: string;
-  readonly fixtureHash: string;
-  readonly observationHash: string;
-  readonly predicates: readonly CodeMemoryLinkPredicateObservationV1[];
-  readonly qualifyingActionItemDigest: string | null;
-  readonly rubricHash: string;
-  readonly taskId: string;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkStaticJudgmentV1 {
-  readonly acceptedStaleOrHarmful: boolean;
-  readonly adjudicationHash: string;
-  readonly artifactHash: string;
-  readonly constraintAdherence: {readonly satisfied: number; readonly total: number};
-  readonly memoryExclusiveSatisfied: boolean;
-  readonly observationHash: string;
-  readonly qualifyingActionItemDigest: string | null;
-  readonly qualifyingActionQualified: boolean;
-  readonly rubricHash: string;
-  readonly taskId: string;
-  readonly taskPassed: boolean;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkProviderUsageV1 {
-  readonly cachedInputTokens: number;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly reasoningOutputTokens: number;
-  readonly totalTokens: number;
-}
-
-export interface CodeMemoryLinkCodexAppServerProjectionV1 {
-  readonly acceptedStaleOrHarmful: boolean;
-  readonly adjudicationHash: string;
-  readonly appServerVersion: typeof CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION;
-  readonly contextBriefCalls: readonly contextBriefProtocol.CodeMemoryLinkCodexContextBriefCallProjectionV1[];
-  readonly contextBriefProtocolAdhered: boolean;
-  readonly constraintAdherence: {readonly satisfied: number; readonly total: number};
-  readonly effectiveModel: string;
-  readonly evidenceHash: string;
-  readonly eventCount: number;
-  readonly firstUsefulMemoryUse: {readonly steps: number; readonly tokens: number} | null;
-  readonly itemCounts: Readonly<Record<AllowedItemType, number>>;
-  readonly modelProviderDigest: string;
-  readonly projectionHash: string;
-  readonly providerUsage: CodeMemoryLinkProviderUsageV1;
-  readonly providerUsageHash: string;
-  readonly proxyToolDigest: string;
-  readonly reasoningEffortDigest: string;
-  readonly taskPassed: boolean;
-  readonly threadIdDigest: string;
-  readonly totalTaskUsage: {readonly steps: number; readonly tokens: number};
-  readonly turnIdDigest: string;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export type CodeMemoryLinkCodexTraceCheckpointV1 =
-  | {
-      readonly method: 'turn/started';
-      readonly ordinal: number;
-    }
-  | {
-      readonly itemIdDigest: string;
-      readonly itemType: Exclude<AllowedItemType, 'mcpToolCall'>;
-      readonly method: 'item/started';
-      readonly ordinal: number;
-      readonly status: AppServerItemStatus | null;
-    }
-  | {
-      readonly itemIdDigest: string;
-      readonly itemType: 'mcpToolCall';
-      readonly method: 'item/started';
-      readonly ordinal: number;
-      readonly requestDigest: string;
-      readonly status: AppServerItemStatus | null;
-    }
-  | {
-      readonly itemIdDigest: string;
-      readonly itemType: Exclude<AllowedItemType, 'mcpToolCall'>;
-      readonly method: 'item/completed';
-      readonly ordinal: number;
-      readonly status: AppServerItemStatus | null;
-    }
-  | {
-      readonly itemIdDigest: string;
-      readonly itemType: 'mcpToolCall';
-      readonly method: 'item/completed';
-      readonly ordinal: number;
-      readonly proxyReceipt: contextBriefProtocol.CodeMemoryLinkContextBriefProxyReceiptV1 | null;
-      readonly requestDigest: string;
-      readonly response: contextBriefProtocol.CodeMemoryLinkContextBriefResponseReceiptV1 | null;
-      readonly status: 'completed' | 'failed';
-      readonly succeeded: boolean;
-    }
-  | {
-      readonly method: 'thread/tokenUsage/updated';
-      readonly ordinal: number;
-      readonly total: CodeMemoryLinkProviderUsageV1;
-    }
-  | {
-      readonly method: 'turn/completed';
-      readonly ordinal: number;
-      readonly status: 'completed';
-    }
-  | {
-      readonly method: IgnoredTurnMethod;
-      readonly ordinal: number;
-    };
-
-type CodeMemoryLinkCodexTraceCheckpointWithoutOrdinalV1 = CodeMemoryLinkCodexTraceCheckpointV1 extends infer Checkpoint
-  ? Checkpoint extends {readonly ordinal: number}
-    ? Omit<Checkpoint, 'ordinal'>
-    : never
-  : never;
-
-export interface CodeMemoryLinkCodexAppServerEvidenceV1 {
-  readonly approvalReceipts: readonly CodeMemoryLinkAppServerApprovalReceiptV1[];
-  readonly appServerVersion: typeof CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION;
-  readonly checkpoints: readonly CodeMemoryLinkCodexTraceCheckpointV1[];
-  readonly effectiveModel: string;
-  readonly eventCount: number;
-  readonly evidenceHash: string;
-  readonly modelProviderDigest: string;
-  readonly preTurn: {
-    readonly proxyStartupNotifications: number;
-    readonly remoteControlDisabled: true;
-    readonly threadStarted: true;
-  };
-  readonly proxyToolDigest: string;
-  readonly qualifyingActionItemDigest: string | null;
-  readonly reasoningEffortDigest: string;
-  readonly rubricHash: string;
-  readonly runBindingHash: string;
-  readonly staticArtifactSetHash: string;
-  readonly staticArtifacts: readonly CodeMemoryLinkStaticArtifactInputV1[];
-  readonly staticObservationHash: string;
-  readonly threadIdDigest: string;
-  readonly turnIdDigest: string;
-  readonly version: typeof CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION;
-}
-
-export interface CodeMemoryLinkCodexAppServerTraceInputV1 {
-  readonly approvalReceipts: readonly unknown[];
-  readonly events: readonly unknown[];
-  readonly expectedClient: CodeMemoryLinkExpectedCodexClientV1;
-  readonly proxyTool: CodeMemoryLinkProxyToolV1;
-  readonly qualifyingActionItemId: string | null;
-  readonly rubric: unknown;
-  readonly runBindingHash: string;
-  readonly staticArtifacts: readonly unknown[];
-  readonly threadStartResponse: unknown;
-}
-
-export interface CodeMemoryLinkAppServerApprovalReceiptV1 {
-  readonly itemIdDigest: string;
-  readonly itemType: 'commandExecution' | 'fileChange';
-  readonly requestDigest: string;
-}
 
 const ARTIFACT_ID = /^art_[0-9a-f]{16,64}$/u;
 const TASK_ID = /^tsk_[0-9a-f]{16,64}$/u;
@@ -363,8 +147,6 @@ const MAXIMUM_PROMPT_BYTES = 16 * 1_024;
 const MAXIMUM_EVENT_TEXT_BYTES = 1_024 * 1_024;
 const MAXIMUM_STATIC_ARTIFACT_BYTES = 1 * 1_024 * 1_024;
 const MAXIMUM_STATIC_ARTIFACT_TOTAL_BYTES = 4 * 1_024 * 1_024;
-
-type AppServerItemStatus = 'completed' | 'declined' | 'failed' | 'inProgress';
 
 const ALLOWED_NON_TURN_METHODS = new Set([
   'account/rateLimits/updated',
@@ -517,8 +299,8 @@ export function assertCodeMemoryLinkSealedSuiteBindingsV1(input: {
   readonly taskPackets: readonly unknown[];
 }): void {
   const suite = parseCodeMemoryLinkSealedSuiteV1(input.suite);
-  const packets = input.taskPackets.map(parseCodeMemoryLinkTaskPacketV1);
-  const rubrics = input.rubrics.map(parseCodeMemoryLinkRubricV1);
+  const packets = EffectArray.map(input.taskPackets, parseCodeMemoryLinkTaskPacketV1);
+  const rubrics = EffectArray.map(input.rubrics, parseCodeMemoryLinkRubricV1);
   if (packets.length !== suite.tasks.length || rubrics.length !== suite.tasks.length) {
     invalid('sealed suite requires exactly one packet and rubric for every task');
   }
@@ -581,7 +363,10 @@ export function evaluateCodeMemoryLinkStaticArtifactsV1(input: {
   readonly artifacts: readonly unknown[];
   readonly qualifyingActionItemId: string | null;
   readonly rubric: unknown;
-}): {readonly judgment: CodeMemoryLinkStaticJudgmentV1; readonly observation: CodeMemoryLinkStaticObservationV1} {
+}): {
+  readonly judgment: CodeMemoryLinkStaticJudgmentV1;
+  readonly observation: CodeMemoryLinkStaticObservationV1;
+} {
   const rubric = parseCodeMemoryLinkRubricV1(input.rubric);
   const qualifyingActionItemDigest =
     input.qualifyingActionItemId === null
@@ -597,25 +382,32 @@ function evaluateStaticArtifactsWithDigest(
   artifactsInput: readonly unknown[],
   qualifyingActionItemDigest: string | null,
   rubric: CodeMemoryLinkRubricV1,
-): {readonly judgment: CodeMemoryLinkStaticJudgmentV1; readonly observation: CodeMemoryLinkStaticObservationV1} {
+): {
+  readonly judgment: CodeMemoryLinkStaticJudgmentV1;
+  readonly observation: CodeMemoryLinkStaticObservationV1;
+} {
   const artifacts = parseStaticArtifacts(artifactsInput);
-  const requiredArtifactIds = [...new Set(rubric.predicates.map(predicate => predicate.assertion.artifactId))].sort(
-    compareStrings,
-  );
+  const requiredArtifactIds = [
+    ...new Set(EffectArray.map(rubric.predicates, predicate => predicate.assertion.artifactId)),
+  ].sort(compareStrings);
   if (
     artifacts.length !== requiredArtifactIds.length ||
-    artifacts.some((artifact, index) => artifact.artifactId !== requiredArtifactIds[index])
+    EffectArray.some(artifacts, (artifact, index) => artifact.artifactId !== requiredArtifactIds[index])
   ) {
     invalid('static judge inputs must contain exactly the content-addressed artifacts referenced by the rubric');
   }
-  const byId = new Map(artifacts.map(artifact => [artifact.artifactId, artifact]));
-  const predicates = rubric.predicates.map(predicate => ({
+  const byId = new Map(EffectArray.map(artifacts, artifact => [artifact.artifactId, artifact]));
+  const predicates = EffectArray.map(rubric.predicates, predicate => ({
     predicateId: predicate.predicateId,
     value: evaluateStaticAssertion(predicate.assertion, byId.get(predicate.assertion.artifactId)!),
   }));
   const artifactHash = protocolDigest(
     'static-artifact-set',
-    artifacts.map(({artifactId, mediaType, sha256}) => ({artifactId, mediaType, sha256})),
+    EffectArray.map(artifacts, ({artifactId, mediaType, sha256}) => ({
+      artifactId,
+      mediaType,
+      sha256,
+    })),
   );
   const withoutHash = {
     artifactHash,
@@ -630,7 +422,10 @@ function evaluateStaticArtifactsWithDigest(
     ...withoutHash,
     observationHash: codeMemoryLinkStaticObservationHashV1(withoutHash),
   } satisfies CodeMemoryLinkStaticObservationV1;
-  return {judgment: judgeCodeMemoryLinkTaskV1({observation, rubric}), observation};
+  return {
+    judgment: judgeCodeMemoryLinkTaskV1({observation, rubric}),
+    observation,
+  };
 }
 
 /** Deterministic adjudication over sealed boolean predicates; no model output is accepted as a judgment. */
@@ -658,17 +453,23 @@ export function judgeCodeMemoryLinkTaskV1(input: {
     matches.set(predicate.predicateId, fact.value === predicate.expected);
   }
   const predicatesWithRole = (role: CodeMemoryLinkPredicateRole): readonly CodeMemoryLinkPredicateV1[] =>
-    rubric.predicates.filter(predicate => predicate.roles.includes(role));
+    EffectArrayPipe(rubric.predicates, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (predicate, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues && predicate.roles.includes(role),
+      ),
+    );
   const allMatch = (role: CodeMemoryLinkPredicateRole): boolean =>
-    predicatesWithRole(role).every(predicate => matches.get(predicate.predicateId) === true);
+    EffectArray.every(predicatesWithRole(role), predicate => matches.get(predicate.predicateId) === true);
   const constraints = predicatesWithRole('constraint');
   const harmful = predicatesWithRole('harmful-acceptance');
   const memoryExclusive = predicatesWithRole('memory-exclusive');
   const qualifyingActionPredicates = predicatesWithRole('qualifying-action');
   const qualifyingActionQualified =
     qualifyingActionPredicates.length > 0 &&
-    qualifyingActionPredicates.every(predicate => matches.get(predicate.predicateId) === true);
-  const acceptedStaleOrHarmful = harmful.some(predicate => matches.get(predicate.predicateId) !== true);
+    EffectArray.every(qualifyingActionPredicates, predicate => matches.get(predicate.predicateId) === true);
+  const acceptedStaleOrHarmful = EffectArray.some(harmful, predicate => matches.get(predicate.predicateId) !== true);
   const taskPassed = allMatch('task-pass') && !acceptedStaleOrHarmful;
   const qualifyingActionItemDigest = observation.qualifyingActionItemDigest;
   if (qualifyingActionQualified && qualifyingActionItemDigest === null) {
@@ -678,7 +479,7 @@ export function judgeCodeMemoryLinkTaskV1(input: {
     acceptedStaleOrHarmful,
     artifactHash: observation.artifactHash,
     constraintAdherence: {
-      satisfied: constraints.filter(predicate => matches.get(predicate.predicateId) === true).length,
+      satisfied: EffectArray.filter(constraints, predicate => matches.get(predicate.predicateId) === true).length,
       total: constraints.length,
     },
     memoryExclusiveSatisfied: memoryExclusive.length === 1 && matches.get(memoryExclusive[0].predicateId) === true,
@@ -690,7 +491,10 @@ export function judgeCodeMemoryLinkTaskV1(input: {
     taskPassed,
     version: CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION,
   };
-  return {...projection, adjudicationHash: protocolDigest('static-adjudication', projection)};
+  return {
+    ...projection,
+    adjudicationHash: protocolDigest('static-adjudication', projection),
+  };
 }
 
 /** Apply the sealed arm while preserving one agent-visible schema: forward refs, strip refs, or return empty. */
@@ -724,10 +528,10 @@ export function normalizeCodeMemoryLinkCodexAppServerEvidenceV1(
   const proxyTool = parseProxyTool(input.proxyTool);
   const rubric = parseCodeMemoryLinkRubricV1(input.rubric);
   const session = parseThreadStartResponse(input.threadStartResponse, expectedClient);
-  if (!Array.isArray(input.events) || input.events.length === 0 || input.events.length > MAXIMUM_EVENTS) {
+  if (!EffectArray.isArray(input.events) || input.events.length === 0 || input.events.length > MAXIMUM_EVENTS) {
     invalid(`app-server trace must contain 1-${MAXIMUM_EVENTS} notifications`);
   }
-  const notifications = input.events.map((event, index) => parseTraceNotification(event, index));
+  const notifications = EffectArray.map(input.events, (event, index) => parseTraceNotification(event, index));
   const state = collectTraceState(notifications, session.threadId, proxyTool);
   const staticArtifacts = parseStaticArtifacts(input.staticArtifacts);
   const qualifyingActionItemDigest =
@@ -763,7 +567,10 @@ export function normalizeCodeMemoryLinkCodexAppServerEvidenceV1(
     version: CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION,
   } satisfies Omit<CodeMemoryLinkCodexAppServerEvidenceV1, 'evidenceHash'>;
   const normalized = normalizeCodexEvidence(withoutHash, false);
-  const evidence = {...normalized, evidenceHash: protocolDigest('codex-app-server-evidence', normalized)};
+  const evidence = {
+    ...normalized,
+    evidenceHash: protocolDigest('codex-app-server-evidence', normalized),
+  };
   deriveCodeMemoryLinkCodexAppServerProjectionV1({evidence, rubric});
   return evidence;
 }
@@ -800,7 +607,10 @@ export function projectCodeMemoryLinkCodexAppServerTraceV1(
   input: CodeMemoryLinkCodexAppServerTraceInputV1,
 ): CodeMemoryLinkCodexAppServerProjectionV1 {
   const evidence = normalizeCodeMemoryLinkCodexAppServerEvidenceV1(input);
-  return deriveCodeMemoryLinkCodexAppServerProjectionV1({evidence, rubric: input.rubric});
+  return deriveCodeMemoryLinkCodexAppServerProjectionV1({
+    evidence,
+    rubric: input.rubric,
+  });
 }
 
 export function codeMemoryLinkAppServerOpaqueIdDigest(kind: 'item' | 'thread' | 'turn', id: string): string {
@@ -824,10 +634,10 @@ function normalizeJudge(value: unknown): Omit<CodeMemoryLinkJudgeV1, 'judgeHash'
 }
 
 function parseArtifacts(value: unknown, label: string): readonly CodeMemoryLinkArtifactV1[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAXIMUM_ARTIFACTS) {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > MAXIMUM_ARTIFACTS) {
     invalid(`${label} artifacts must contain 1-${MAXIMUM_ARTIFACTS} entries`);
   }
-  const artifacts = value.map((entry, index) => {
+  const artifacts = EffectArray.map(value, (entry, index) => {
     const artifact = record(entry, `${label} artifact ${index + 1}`);
     exactKeys(artifact, ['artifactId', 'sha256'], `${label} artifact ${index + 1}`);
     return {
@@ -836,11 +646,11 @@ function parseArtifacts(value: unknown, label: string): readonly CodeMemoryLinkA
     };
   });
   canonicalUnique(
-    artifacts.map(artifact => artifact.artifactId),
+    EffectArray.map(artifacts, artifact => artifact.artifactId),
     `${label} artifact ids`,
   );
   unique(
-    artifacts.map(artifact => artifact.sha256),
+    EffectArray.map(artifacts, artifact => artifact.sha256),
     `${label} artifact hashes`,
   );
   return artifacts;
@@ -871,7 +681,10 @@ function normalizeRubric(value: unknown, hasHash: boolean): Omit<CodeMemoryLinkR
     'qualifying action item types',
   );
   const roleCount = (role: CodeMemoryLinkPredicateRole): number =>
-    predicates.filter(predicate => predicate.roles.includes(role)).length;
+    EffectArray.filter(
+      predicates,
+      (predicate, __effectArrayIndex) => __effectArrayIndex in predicates && predicate.roles.includes(role),
+    ).length;
   if (roleCount('task-pass') === 0) invalid('rubric requires a task-pass predicate');
   if (taskKind === 'hidden-constraint') {
     if (roleCount('constraint') === 0) invalid('hidden rubric requires at least one constraint predicate');
@@ -897,10 +710,10 @@ function normalizeRubric(value: unknown, hasHash: boolean): Omit<CodeMemoryLinkR
 }
 
 function parsePredicates(value: unknown): readonly CodeMemoryLinkPredicateV1[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 128) {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > 128) {
     invalid('rubric predicates must contain 1-128 entries');
   }
-  const predicates = value.map((entry, index) => {
+  const predicates = EffectArray.map(value, (entry, index) => {
     const predicate = record(entry, `rubric predicate ${index + 1}`);
     exactKeys(predicate, ['assertion', 'expected', 'predicateId', 'roles'], `rubric predicate ${index + 1}`);
     return {
@@ -910,9 +723,10 @@ function parsePredicates(value: unknown): readonly CodeMemoryLinkPredicateV1[] {
       roles: literalArray(predicate.roles, CODE_MEMORY_LINK_PREDICATE_ROLES, 'predicate roles'),
     };
   });
-  if (predicates.some(predicate => predicate.roles.length === 0)) invalid('every predicate requires at least one role');
+  if (EffectArray.some(predicates, predicate => predicate.roles.length === 0))
+    invalid('every predicate requires at least one role');
   canonicalUnique(
-    predicates.map(predicate => predicate.predicateId),
+    EffectArray.map(predicates, predicate => predicate.predicateId),
     'rubric predicate ids',
   );
   return predicates;
@@ -953,8 +767,8 @@ function normalizeArmPacket(value: unknown, hasHash: boolean): Omit<CodeMemoryLi
 function normalizeSealedSuite(value: unknown, hasHash: boolean): Omit<CodeMemoryLinkSealedSuiteV1, 'suiteHash'> {
   const suite = record(value, 'sealed suite');
   if (hasHash) matchingHash(suite.suiteHash, 'sealed suite');
-  if (!Array.isArray(suite.tasks)) invalid('sealed suite tasks must be an array');
-  const tasks = suite.tasks.map((entry, index) => {
+  if (!EffectArray.isArray(suite.tasks)) invalid('sealed suite tasks must be an array');
+  const tasks = EffectArray.map(suite.tasks, (entry, index) => {
     const task = record(entry, `sealed suite task ${index + 1}`);
     exactKeys(task, ['packetHash', 'rubricHash', 'taskId', 'taskKind'], `sealed suite task ${index + 1}`);
     return {
@@ -964,23 +778,23 @@ function normalizeSealedSuite(value: unknown, hasHash: boolean): Omit<CodeMemory
       taskKind: literal(task.taskKind, CODE_MEMORY_LINK_TASK_KINDS, 'suite task kind'),
     };
   });
-  const hidden = tasks.filter(task => task.taskKind === 'hidden-constraint').length;
-  const controls = tasks.filter(task => task.taskKind === 'negative-control').length;
+  const hidden = EffectArray.filter(tasks, task => task.taskKind === 'hidden-constraint').length;
+  const controls = EffectArray.filter(tasks, task => task.taskKind === 'negative-control').length;
   if (hidden !== CODE_MEMORY_LINK_SEALED_HIDDEN_TASKS || controls !== CODE_MEMORY_LINK_SEALED_NEGATIVE_CONTROL_TASKS) {
     invalid(
       `sealed suite requires exactly ${CODE_MEMORY_LINK_SEALED_HIDDEN_TASKS} hidden tasks and ${CODE_MEMORY_LINK_SEALED_NEGATIVE_CONTROL_TASKS} negative controls`,
     );
   }
   canonicalUnique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'sealed suite task ids',
   );
   unique(
-    tasks.map(task => task.packetHash),
+    EffectArray.map(tasks, task => task.packetHash),
     'sealed suite packet hashes',
   );
   unique(
-    tasks.map(task => task.rubricHash),
+    EffectArray.map(tasks, task => task.rubricHash),
     'sealed suite rubric hashes',
   );
   return {
@@ -998,10 +812,10 @@ function normalizeObservation(
 ): Omit<CodeMemoryLinkStaticObservationV1, 'observationHash'> {
   const observation = record(value, 'static observation');
   if (hasHash) matchingHash(observation.observationHash, 'static observation');
-  if (!Array.isArray(observation.predicates) || observation.predicates.length === 0) {
+  if (!EffectArray.isArray(observation.predicates) || observation.predicates.length === 0) {
     invalid('static observation predicates must be a non-empty array');
   }
-  const predicates = observation.predicates.map((entry, index) => {
+  const predicates = EffectArray.map(observation.predicates, (entry, index) => {
     const predicate = record(entry, `predicate observation ${index + 1}`);
     exactKeys(predicate, ['predicateId', 'value'], `predicate observation ${index + 1}`);
     return {
@@ -1010,7 +824,7 @@ function normalizeObservation(
     };
   });
   canonicalUnique(
-    predicates.map(predicate => predicate.predicateId),
+    EffectArray.map(predicates, predicate => predicate.predicateId),
     'predicate observation ids',
   );
   const qualifyingActionItemDigest =
@@ -1071,7 +885,8 @@ function normalizeCodexEvidence(
   const checkpoints = parseEvidenceCheckpoints(evidence.checkpoints);
   const approvalReceipts = parseApprovalReceipts(evidence.approvalReceipts);
   const runBindingHash = matchingHash(evidence.runBindingHash, 'run binding');
-  const completedCalls = checkpoints.filter(
+  const completedCalls = EffectArray.filter(
+    checkpoints,
     checkpoint => checkpoint.method === 'item/completed' && checkpoint.itemType === 'mcpToolCall',
   );
   for (const call of completedCalls) {
@@ -1079,18 +894,25 @@ function normalizeCodexEvidence(
       invalid('Context Brief proxy receipt does not match the retained run binding');
     }
   }
-  const publicActions = checkpoints.flatMap(checkpoint =>
+  const publicActions = EffectArray.flatMap(checkpoints, checkpoint =>
     checkpoint.method === 'item/completed' &&
     checkpoint.status !== 'declined' &&
     (checkpoint.itemType === 'commandExecution' || checkpoint.itemType === 'fileChange')
-      ? [{itemIdDigest: checkpoint.itemIdDigest, itemType: checkpoint.itemType}]
+      ? [
+          {
+            itemIdDigest: checkpoint.itemIdDigest,
+            itemType: checkpoint.itemType,
+          },
+        ]
       : [],
   );
   if (
     publicActions.length !== approvalReceipts.length ||
-    approvalReceipts.some(
+    EffectArray.some(
+      approvalReceipts,
       receipt =>
-        !publicActions.some(
+        !EffectArray.some(
+          publicActions,
           action => action.itemIdDigest === receipt.itemIdDigest && action.itemType === receipt.itemType,
         ),
     )
@@ -1101,12 +923,16 @@ function normalizeCodexEvidence(
   if (eventCount > MAXIMUM_EVENTS || eventCount < checkpoints.length + proxyStartupNotifications + 2) {
     invalid('app-server event count is inconsistent with retained checkpoints and pre-turn evidence');
   }
-  if (!Array.isArray(evidence.staticArtifacts)) invalid('static artifacts must be an array');
+  if (!EffectArray.isArray(evidence.staticArtifacts)) invalid('static artifacts must be an array');
   const staticArtifacts = parseStaticArtifacts(evidence.staticArtifacts);
   const staticArtifactSetHash = matchingHash(evidence.staticArtifactSetHash, 'static artifact set');
   const recomputedArtifactSetHash = protocolDigest(
     'static-artifact-set',
-    staticArtifacts.map(({artifactId, mediaType, sha256}) => ({artifactId, mediaType, sha256})),
+    EffectArray.map(staticArtifacts, ({artifactId, mediaType, sha256}) => ({
+      artifactId,
+      mediaType,
+      sha256,
+    })),
   );
   if (staticArtifactSetHash !== recomputedArtifactSetHash) {
     invalid('retained static artifact set hash does not match its content-addressed artifacts');
@@ -1121,7 +947,11 @@ function normalizeCodexEvidence(
     effectiveModel: boundedText(evidence.effectiveModel, 'effective model', 128),
     eventCount,
     modelProviderDigest: matchingHash(evidence.modelProviderDigest, 'model provider'),
-    preTurn: {proxyStartupNotifications, remoteControlDisabled: true, threadStarted: true},
+    preTurn: {
+      proxyStartupNotifications,
+      remoteControlDisabled: true,
+      threadStarted: true,
+    },
     proxyToolDigest: matchingHash(evidence.proxyToolDigest, 'proxy tool'),
     qualifyingActionItemDigest:
       evidence.qualifyingActionItemDigest === null
@@ -1140,10 +970,10 @@ function normalizeCodexEvidence(
 }
 
 function parseApprovalReceipts(value: unknown): readonly CodeMemoryLinkAppServerApprovalReceiptV1[] {
-  if (!Array.isArray(value) || value.length > 512) {
+  if (!EffectArray.isArray(value) || value.length > 512) {
     invalid('app-server approval receipts must be a bounded array');
   }
-  const receipts = value.map((entry, index) => {
+  const receipts = EffectArray.map(value, (entry, index) => {
     const receipt = record(entry, `approval receipt ${index + 1}`);
     exactKeys(receipt, ['itemIdDigest', 'itemType', 'requestDigest'], `approval receipt ${index + 1}`);
     return {
@@ -1157,17 +987,17 @@ function parseApprovalReceipts(value: unknown): readonly CodeMemoryLinkAppServer
     };
   });
   unique(
-    receipts.map(receipt => receipt.itemIdDigest),
+    EffectArray.map(receipts, receipt => receipt.itemIdDigest),
     'approval receipt item ids',
   );
   return receipts;
 }
 
 function parseEvidenceCheckpoints(value: unknown): readonly CodeMemoryLinkCodexTraceCheckpointV1[] {
-  if (!Array.isArray(value) || value.length < 2 || value.length > MAXIMUM_EVENTS) {
+  if (!EffectArray.isArray(value) || value.length < 2 || value.length > MAXIMUM_EVENTS) {
     invalid('retained trace checkpoints must be a bounded non-empty array');
   }
-  return value.map((entry, index): CodeMemoryLinkCodexTraceCheckpointV1 => {
+  return EffectArray.map(value, (entry, index): CodeMemoryLinkCodexTraceCheckpointV1 => {
     const checkpoint = record(entry, `trace checkpoint ${index + 1}`);
     if (checkpoint.ordinal !== index + 1) invalid('trace checkpoint ordinals must be contiguous and ordered');
     const method = boundedText(checkpoint.method, `trace checkpoint ${index + 1} method`, 128);
@@ -1182,7 +1012,11 @@ function parseEvidenceCheckpoints(value: unknown): readonly CodeMemoryLinkCodexT
     }
     if (method === 'thread/tokenUsage/updated') {
       exactKeys(checkpoint, ['method', 'ordinal', 'total'], `trace checkpoint ${index + 1}`);
-      return {method, ordinal: index + 1, total: parseUsage({total: checkpoint.total})};
+      return {
+        method,
+        ordinal: index + 1,
+        total: parseUsage({total: checkpoint.total}),
+      };
     }
     if (method === 'item/started' || method === 'item/completed') {
       const itemType = literal(checkpoint.itemType, ALLOWED_ITEM_TYPES, `trace checkpoint ${index + 1} item type`);
@@ -1206,7 +1040,14 @@ function parseEvidenceCheckpoints(value: unknown): readonly CodeMemoryLinkCodexT
         exactKeys(checkpoint, fields, `trace checkpoint ${index + 1}`);
         const requestDigest = matchingHash(checkpoint.requestDigest, 'Context Brief request');
         if (method === 'item/started') {
-          return {itemIdDigest, itemType, method: 'item/started', ordinal: index + 1, requestDigest, status};
+          return {
+            itemIdDigest,
+            itemType,
+            method: 'item/started',
+            ordinal: index + 1,
+            requestDigest,
+            status,
+          };
         }
         const terminalStatus = literal(checkpoint.status, ['completed', 'failed'] as const, 'MCP terminal status');
         const succeeded = boolean(checkpoint.succeeded, 'MCP success');
@@ -1248,12 +1089,27 @@ function parseEvidenceCheckpoints(value: unknown): readonly CodeMemoryLinkCodexT
         `trace checkpoint ${index + 1}`,
       );
       return method === 'item/started'
-        ? {itemIdDigest, itemType, method: 'item/started', ordinal: index + 1, status}
-        : {itemIdDigest, itemType, method: 'item/completed', ordinal: index + 1, status};
+        ? {
+            itemIdDigest,
+            itemType,
+            method: 'item/started',
+            ordinal: index + 1,
+            status,
+          }
+        : {
+            itemIdDigest,
+            itemType,
+            method: 'item/completed',
+            ordinal: index + 1,
+            status,
+          };
     }
     if (IGNORED_MATCHING_TURN_METHODS.has(method)) {
       exactKeys(checkpoint, ['method', 'ordinal'], `trace checkpoint ${index + 1}`);
-      return {method: literal(method, IGNORED_MATCHING_TURN_METHOD_VALUES, 'ignored trace method'), ordinal: index + 1};
+      return {
+        method: literal(method, IGNORED_MATCHING_TURN_METHOD_VALUES, 'ignored trace method'),
+        ordinal: index + 1,
+      };
     }
     invalid(`retained trace contains unexpected checkpoint method ${method}`);
   });
@@ -1326,7 +1182,11 @@ function parseTraceNotification(value: unknown, eventIndex: number): ParsedNotif
   }
   const method = boundedText(notification.method, `app-server notification ${eventIndex + 1} method`, 128);
   if (!TRACE_METHODS.has(method)) invalid(`app-server notification ${eventIndex + 1} uses unexpected method ${method}`);
-  return {eventIndex, method, params: record(notification.params, `app-server notification ${eventIndex + 1} params`)};
+  return {
+    eventIndex,
+    method,
+    params: record(notification.params, `app-server notification ${eventIndex + 1} params`),
+  };
 }
 function collectTraceState(
   notifications: readonly ParsedNotification[],
@@ -1338,7 +1198,7 @@ function collectTraceState(
   readonly turnId: string;
   readonly usage: readonly ParsedUsage[];
 } {
-  const starts = notifications.filter(event => event.method === 'turn/started');
+  const starts = EffectArray.filter(notifications, event => event.method === 'turn/started');
   if (starts.length !== 1) invalid('app-server trace requires exactly one turn/started notification');
   const started = starts[0];
   matchingIdentifier(started.params.threadId, threadId, 'turn/started thread id');
@@ -1399,7 +1259,11 @@ function collectTraceState(
         invalid('provider token usage must be componentwise monotone with strictly increasing total tokens');
       }
       previousUsage = current;
-      usage.push({eventIndex: notification.eventIndex, step: usage.length + 1, total: current});
+      usage.push({
+        eventIndex: notification.eventIndex,
+        step: usage.length + 1,
+        total: current,
+      });
       continue;
     }
     if (notification.method === 'turn/completed') {
@@ -1431,9 +1295,14 @@ function collectTraceState(
 function summarizePreTurn(
   notifications: readonly ParsedNotification[],
 ): CodeMemoryLinkCodexAppServerEvidenceV1['preTurn'] {
-  const remote = notifications.filter(notification => notification.method === 'remoteControl/status/changed');
-  const thread = notifications.filter(notification => notification.method === 'thread/started');
-  const turn = notifications.find(notification => notification.method === 'turn/started');
+  const remote = EffectArray.filter(
+    notifications,
+    notification => notification.method === 'remoteControl/status/changed',
+  );
+  const thread = EffectArray.filter(notifications, notification => notification.method === 'thread/started');
+  const turn = EffectOption.getOrUndefined(
+    EffectArray.findFirst(notifications, notification => notification.method === 'turn/started'),
+  );
   if (remote.length !== 1 || thread.length !== 1 || !turn) {
     invalid('trace requires exactly one disabled remote-control status and one thread start before the selected turn');
   }
@@ -1441,7 +1310,8 @@ function summarizePreTurn(
     invalid('pre-turn evidence must order disabled remote control before thread start and selected turn');
   }
   return {
-    proxyStartupNotifications: notifications.filter(
+    proxyStartupNotifications: EffectArray.filter(
+      notifications,
       notification => notification.method === 'mcpServer/startupStatus/updated',
     ).length,
     remoteControlDisabled: true,
@@ -1454,9 +1324,9 @@ function buildTraceCheckpoints(
   state: ReturnType<typeof collectTraceState>,
   proxyTool: CodeMemoryLinkProxyToolV1,
 ): readonly CodeMemoryLinkCodexTraceCheckpointV1[] {
-  const completedByEvent = new Map(state.completedItems.map(item => [item.eventIndex, item]));
-  const callByEvent = new Map(state.calls.map(call => [call.eventIndex, call]));
-  const usageByEvent = new Map(state.usage.map(entry => [entry.eventIndex, entry]));
+  const completedByEvent = new Map(EffectArray.map(state.completedItems, item => [item.eventIndex, item]));
+  const callByEvent = new Map(EffectArray.map(state.calls, call => [call.eventIndex, call]));
+  const usageByEvent = new Map(EffectArray.map(state.usage, entry => [entry.eventIndex, entry]));
   const checkpoints: CodeMemoryLinkCodexTraceCheckpointV1[] = [];
   const append = (checkpoint: CodeMemoryLinkCodexTraceCheckpointWithoutOrdinalV1): void => {
     checkpoints.push({...checkpoint, ordinal: checkpoints.length + 1});
@@ -1487,7 +1357,11 @@ function buildTraceCheckpoints(
       };
       append(
         identity.type === 'mcpToolCall'
-          ? {...shared, itemType: identity.type, requestDigest: contextBriefRequestDigest(identity.item.arguments)}
+          ? {
+              ...shared,
+              itemType: identity.type,
+              requestDigest: contextBriefRequestDigest(identity.item.arguments),
+            }
           : {...shared, itemType: identity.type},
       );
       continue;
@@ -1546,7 +1420,11 @@ function deriveProjectionFromEvidence(
   }
   const started = new Map<
     string,
-    {readonly ordinal: number; readonly requestDigest?: string; readonly type: AllowedItemType}
+    {
+      readonly ordinal: number;
+      readonly requestDigest?: string;
+      readonly type: AllowedItemType;
+    }
   >();
   const completedIds = new Set<string>();
   const completed: Array<{
@@ -1566,8 +1444,11 @@ function deriveProjectionFromEvidence(
     readonly kind: 'completed' | 'started' | 'turn-completed' | 'usage';
     readonly ordinal: number;
   }> = [];
-  const usage: Array<{readonly ordinal: number; readonly step: number; readonly total: CodeMemoryLinkProviderUsageV1}> =
-    [];
+  const usage: Array<{
+    readonly ordinal: number;
+    readonly step: number;
+    readonly total: CodeMemoryLinkProviderUsageV1;
+  }> = [];
   let turnActive = false;
   let turnCompleted = false;
   for (const checkpoint of evidence.checkpoints) {
@@ -1625,7 +1506,11 @@ function deriveProjectionFromEvidence(
       if (previous && !strictlyMonotoneUsage(previous.total, checkpoint.total)) {
         invalid('retained provider usage is nonmonotone');
       }
-      usage.push({ordinal: checkpoint.ordinal, step: usage.length + 1, total: checkpoint.total});
+      usage.push({
+        ordinal: checkpoint.ordinal,
+        step: usage.length + 1,
+        total: checkpoint.total,
+      });
       boundaries.push({kind: 'usage', ordinal: checkpoint.ordinal});
     }
   }
@@ -1635,19 +1520,25 @@ function deriveProjectionFromEvidence(
   const lastUsage = usage.at(-1);
   if (!lastUsage) invalid('retained completed trace has no provider token usage');
   const action = qualifyingActionFromEvidence(completed, judgment, rubric);
-  const callProjections = calls.map(({boundaryIndex, checkpoint}) => {
+  const callProjections = EffectArray.map(calls, ({boundaryIndex, checkpoint}) => {
     const next = boundaries[boundaryIndex + 1];
     if (!next || next.kind !== 'usage') {
       invalid('every completed Context Brief call must be immediately followed by provider usage');
     }
-    const associated = usage.find(entry => entry.ordinal === next.ordinal);
+    const associated = EffectOption.getOrUndefined(
+      EffectArray.findFirst(usage, entry => entry.ordinal === next.ordinal),
+    );
     if (!associated) invalid('retained Context Brief usage association is missing');
     const response = checkpoint.response;
     const usefulDigests =
       response?.responseClass === 'anchored-v3'
         ? response.directCurrentRelationDigests
         : (response?.citationDigests ?? []);
-    const matchingGold = usefulDigests.filter(digest => rubric.goldCitationDigests.includes(digest));
+    const matchingGold = EffectArray.filter(
+      usefulDigests,
+      (digest, __effectArrayIndex) =>
+        __effectArrayIndex in usefulDigests && rubric.goldCitationDigests.includes(digest),
+    );
     return {
       associatedStep: associated.step,
       associatedTokens: associated.total.totalTokens,
@@ -1661,15 +1552,18 @@ function deriveProjectionFromEvidence(
       succeeded: checkpoint.succeeded,
     } satisfies contextBriefProtocol.CodeMemoryLinkCodexContextBriefCallProjectionV1;
   });
-  const useful = callProjections.find(
-    call =>
-      call.succeeded &&
-      call.goldCitationMatched &&
-      call.beforeQualifyingAction &&
-      judgment.memoryExclusiveSatisfied &&
-      judgment.qualifyingActionQualified,
+  const useful = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      callProjections,
+      call =>
+        call.succeeded &&
+        call.goldCitationMatched &&
+        call.beforeQualifyingAction &&
+        judgment.memoryExclusiveSatisfied &&
+        judgment.qualifyingActionQualified,
+    ),
   );
-  if (useful && !usage.some(entry => entry.step > useful.associatedStep)) {
+  if (useful && !EffectArray.some(usage, entry => entry.step > useful.associatedStep)) {
     invalid('a useful Context Brief call must be followed by a later provider inference');
   }
   const contextBriefProtocolAdhered = callProjections.length === 1 && callProjections[0].succeeded;
@@ -1685,7 +1579,10 @@ function deriveProjectionFromEvidence(
   for (const item of completed) itemCounts[item.type] += 1;
   const providerUsageHash = protocolDigest('provider-usage', {
     threadIdDigest: evidence.threadIdDigest,
-    timeline: usage.map(entry => ({step: entry.step, total: entry.total})),
+    timeline: EffectArray.map(usage, entry => ({
+      step: entry.step,
+      total: entry.total,
+    })),
     turnIdDigest: evidence.turnIdDigest,
   });
   const withoutHash = {
@@ -1707,11 +1604,17 @@ function deriveProjectionFromEvidence(
     reasoningEffortDigest: evidence.reasoningEffortDigest,
     taskPassed: judgment.taskPassed && contextBriefProtocolAdhered,
     threadIdDigest: evidence.threadIdDigest,
-    totalTaskUsage: {steps: lastUsage.step, tokens: lastUsage.total.totalTokens},
+    totalTaskUsage: {
+      steps: lastUsage.step,
+      tokens: lastUsage.total.totalTokens,
+    },
     turnIdDigest: evidence.turnIdDigest,
     version: CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION,
   } satisfies Omit<CodeMemoryLinkCodexAppServerProjectionV1, 'projectionHash'>;
-  return {...withoutHash, projectionHash: protocolDigest('codex-app-server-projection', withoutHash)};
+  return {
+    ...withoutHash,
+    projectionHash: protocolDigest('codex-app-server-projection', withoutHash),
+  };
 }
 function qualifyingActionFromEvidence(
   completed: readonly {
@@ -1724,7 +1627,7 @@ function qualifyingActionFromEvidence(
   rubric: CodeMemoryLinkRubricV1,
 ): (typeof completed)[number] | null {
   if (judgment.qualifyingActionItemDigest === null) return null;
-  const matching = completed.filter(item => item.digest === judgment.qualifyingActionItemDigest);
+  const matching = EffectArray.filter(completed, item => item.digest === judgment.qualifyingActionItemDigest);
   if (matching.length !== 1) invalid('static qualifying action does not identify exactly one retained completed item');
   const action = matching[0];
   if (!(rubric.qualifyingActionItemTypes as readonly string[]).includes(action.type) || action.status !== 'completed') {
@@ -1792,7 +1695,7 @@ function validateNonTurnNotification(
     return;
   }
   if (notification.method === 'app/list/updated') {
-    if (!Array.isArray(notification.params.data) || notification.params.data.length !== 0) {
+    if (!EffectArray.isArray(notification.params.data) || notification.params.data.length !== 0) {
       invalid('apps must remain disabled in the release trace');
     }
     return;
@@ -1811,7 +1714,11 @@ function validateNonTurnNotification(
 function parseItemIdentity(
   value: unknown,
   label: string,
-): {readonly id: string; readonly item: Record<string, unknown>; readonly type: string} {
+): {
+  readonly id: string;
+  readonly item: Record<string, unknown>;
+  readonly type: string;
+} {
   const item = record(value, `${label} item`);
   return {
     id: boundedText(item.id, `${label} item id`, 256),
@@ -1823,7 +1730,9 @@ function parseItemIdentity(
 function validateAllowedItem(
   identity: ReturnType<typeof parseItemIdentity>,
   proxyTool: CodeMemoryLinkProxyToolV1,
-): asserts identity is ReturnType<typeof parseItemIdentity> & {readonly type: AllowedItemType} {
+): asserts identity is ReturnType<typeof parseItemIdentity> & {
+  readonly type: AllowedItemType;
+} {
   if (!(ALLOWED_ITEM_TYPES as readonly string[]).includes(identity.type)) {
     invalid(`unexpected app-server item type ${identity.type}`);
   }
@@ -1872,9 +1781,15 @@ function parseContextBriefCallResult(item: Record<string, unknown>): {
   if (!['completed', 'failed'].includes(String(item.status))) invalid('MCP tool call has an invalid terminal status');
   const succeeded =
     item.status === 'completed' && item.result !== null && item.result !== undefined && item.error == null;
-  if (!succeeded) return {citationDigests: [], proxyReceipt: null, response: null, succeeded: false};
+  if (!succeeded)
+    return {
+      citationDigests: [],
+      proxyReceipt: null,
+      response: null,
+      succeeded: false,
+    };
   const result = record(item.result, 'successful Context Brief result');
-  if (!Array.isArray(result.content)) invalid('successful Context Brief result requires MCP content');
+  if (!EffectArray.isArray(result.content)) invalid('successful Context Brief result requires MCP content');
   const canonical = contextBriefProtocol.canonicalizeCodeMemoryLinkContextBriefResultV1(result.structuredContent);
   const normalizedContent = normalizeJsonValue(result.content, 'model-visible Context Brief content');
   if (JSON.stringify(normalizedContent) !== JSON.stringify(canonical.content)) {
@@ -1935,11 +1850,11 @@ function strictlyMonotoneUsage(
   );
 }
 function parseStaticArtifacts(value: readonly unknown[]): readonly CodeMemoryLinkStaticArtifactInputV1[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 128) {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > 128) {
     invalid('static judge artifacts must contain 1-128 content-addressed entries');
   }
   let totalBytes = 0;
-  const artifacts = value.map((entry, index) => {
+  const artifacts = EffectArray.map(value, (entry, index) => {
     const artifact = record(entry, `static judge artifact ${index + 1}`);
     exactKeys(artifact, ['artifactId', 'content', 'mediaType', 'sha256'], `static judge artifact ${index + 1}`);
     const content = boundedUtf8Content(
@@ -1967,7 +1882,7 @@ function parseStaticArtifacts(value: readonly unknown[]): readonly CodeMemoryLin
   });
   if (totalBytes > MAXIMUM_STATIC_ARTIFACT_TOTAL_BYTES) invalid('static judge artifacts exceed the total byte budget');
   canonicalUnique(
-    artifacts.map(artifact => artifact.artifactId),
+    EffectArray.map(artifacts, artifact => artifact.artifactId),
     'static judge artifact ids',
   );
   return artifacts;
@@ -1988,6 +1903,7 @@ function evaluateStaticAssertion(
   }
   if (artifact.mediaType !== 'text/plain') invalid(`${assertion.kind} requires a text/plain artifact`);
   if (assertion.kind === 'utf8-equals') return artifact.content === assertion.expected;
-  if (assertion.kind === 'utf8-contains') return artifact.content.includes(assertion.expected);
-  return !artifact.content.includes(assertion.expected);
+  if (assertion.kind === 'utf8-contains')
+    return Effect.pipe(artifact.content, EffectString.includes(assertion.expected));
+  return !Effect.pipe(artifact.content, EffectString.includes(assertion.expected));
 }

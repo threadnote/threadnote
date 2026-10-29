@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {createMemoryCodeCitation} from '../../src/code/citation.js';
@@ -22,23 +23,25 @@ import {
   type TopicDependencyExpansionProof,
   type TopicDependencyExpansionRequest,
 } from '../../src/topic-maintenance-expansion.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/fixture/topic.md';
-const seed = `cgs_${'1'.repeat(32)}`;
-const endpoint = `cgs_${'2'.repeat(32)}`;
+const seed = `cgs_${Effect.pipe('1', EffectString.repeat(32))}`;
+const endpoint = `cgs_${Effect.pipe('2', EffectString.repeat(32))}`;
 const body =
   'The implementation uses a request limit.\n\nChanging the limit requires explicit approval.\n\nHistorically the limit was smaller.';
 function citation(path: string, index = 1) {
   return createMemoryCodeCitation({
     version: 1,
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect.pipe('a', EffectString.repeat(64)),
     repositoryIdentityKind: 'local',
-    sourceCommit: 'b'.repeat(40),
-    sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
-    sourceGraphContentId: `cgc_${'d'.repeat(40)}`,
+    sourceCommit: Effect.pipe('b', EffectString.repeat(40)),
+    sourceSnapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
+    sourceGraphContentId: `cgc_${Effect.pipe('d', EffectString.repeat(40))}`,
     sourceDirty: false,
     extractorSet: 'fixture-extractor',
-    fileContentHash: {algorithm: 'sha256', value: index.toString(16).repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect.pipe(index.toString(16), EffectString.repeat(64))},
     path,
     target: {kind: 'file'},
     evidenceRetention: 'capsule-retained',
@@ -48,24 +51,27 @@ function fixture(extra = 0) {
   const original = citation('src/main.ts');
   const record = parseMemoryDocument(
     uri,
-    formatMemoryDocument(
-      'MEMORY',
-      {
-        kind: 'durable',
-        status: 'active',
-        project: 'fixture',
-        topic: 'limit',
-        memoryId: 'tn_expansion_fixture',
-        sourceAgentClient: 'test',
-        schemaVersion: 10,
-        timestamp: '2026-10-18T00:00:00.000Z',
-        codeCitations: [original, ...Array.from({length: extra}, (_, i) => citation(`src/extra-${i}.ts`))],
-      },
-      body,
-    ).replace('\n\n', '\nopaque_header: retain exactly\n\n'),
+    Effect.pipe(
+      formatMemoryDocument(
+        'MEMORY',
+        {
+          kind: 'durable',
+          status: 'active',
+          project: 'fixture',
+          topic: 'limit',
+          memoryId: 'tn_expansion_fixture',
+          sourceAgentClient: 'test',
+          schemaVersion: 10,
+          timestamp: '2026-10-18T00:00:00.000Z',
+          codeCitations: [original, ...Array.from({length: extra}, (_, i) => citation(`src/extra-${i}.ts`))],
+        },
+        body,
+      ),
+      EffectString.replace('\n\n', '\nopaque_header: retain exactly\n\n'),
+    ),
   )!;
   const enrolled = proposeTopicMaintenanceEnrollment(record, {
-    paragraphs: (['descriptive', 'normative', 'historical'] as const).map(role => ({
+    paragraphs: EffectArray.map(['descriptive', 'normative', 'historical'] as const, role => ({
       role,
       support: 'direct',
       citationIds: [original.id],
@@ -80,7 +86,7 @@ function input(): TopicDependencyExpansionRequest {
     depth: 1,
     project: 'fixture',
     root: '/fixture',
-    configDigest: 'e'.repeat(64),
+    configDigest: Effect.pipe('e', EffectString.repeat(64)),
     seeds: [seed],
     direction: 'outgoing',
     kinds: ['imports'],
@@ -95,29 +101,29 @@ function input(): TopicDependencyExpansionRequest {
 function proof(): TopicDependencyExpansionProof {
   return {
     version: 1,
-    repositoryId: 'a'.repeat(64),
+    repositoryId: Effect.pipe('a', EffectString.repeat(64)),
     worktreeId: 'fixture-worktree',
-    sourceCommit: 'b'.repeat(40),
-    sourceFenceDigest: 'f'.repeat(64),
+    sourceCommit: Effect.pipe('b', EffectString.repeat(40)),
+    sourceFenceDigest: Effect.pipe('f', EffectString.repeat(64)),
     project: 'fixture',
     root: '/fixture',
-    configDigest: 'e'.repeat(64),
+    configDigest: Effect.pipe('e', EffectString.repeat(64)),
     snapshot: {
-      id: `cgsn_${'c'.repeat(40)}`,
-      commit: 'b'.repeat(40),
-      graphContentId: `cgc_${'d'.repeat(40)}`,
+      id: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
+      commit: Effect.pipe('b', EffectString.repeat(40)),
+      graphContentId: `cgc_${Effect.pipe('d', EffectString.repeat(40))}`,
       extractorSet: 'fixture-extractor',
     },
-    profileDigest: 'a'.repeat(64),
-    scopeDigest: 'b'.repeat(64),
+    profileDigest: Effect.pipe('a', EffectString.repeat(64)),
+    scopeDigest: Effect.pipe('b', EffectString.repeat(64)),
     scopeReceiptJson: '{"kind":"full-repository"}',
     completeProject: true,
     reads: [
       {
         seedId: seed,
         nodes: [
-          {id: seed, path: 'src/main.ts', contentHash: '1'.repeat(64)},
-          {id: endpoint, path: 'src/dependency.ts', contentHash: '2'.repeat(64)},
+          {id: seed, path: 'src/main.ts', contentHash: Effect.pipe('1', EffectString.repeat(64))},
+          {id: endpoint, path: 'src/dependency.ts', contentHash: Effect.pipe('2', EffectString.repeat(64))},
         ],
         edges: [
           {
@@ -160,10 +166,13 @@ describe('explicit code dependency extension', () => {
     );
     for (const invalid of [
       {...exact, completeProject: false},
-      {...exact, repositoryId: '0'.repeat(64)},
+      {...exact, repositoryId: Effect.pipe('0', EffectString.repeat(64))},
       {...exact, reads: [{...exact.reads[0], coverage: {...exact.reads[0].coverage, limitsReached: ['edge-limit']}}]},
       {...exact, reads: [{...exact.reads[0], coverage: {...exact.reads[0].coverage, nodeLimit: 1}}]},
-      {...exact, reads: [{...exact.reads[0], edges: exact.reads[0].edges.map(edge => ({...edge, confidence: 0}))}]},
+      {
+        ...exact,
+        reads: [{...exact.reads[0], edges: EffectArray.map(exact.reads[0].edges, edge => ({...edge, confidence: 0}))}],
+      },
     ]) {
       const record = fixture();
       const bytes = record.content;
@@ -200,7 +209,7 @@ describe('explicit code dependency extension', () => {
       kind: 'cycle',
       id: 'edge-import',
     });
-    const second = `cgs_${'3'.repeat(32)}`;
+    const second = `cgs_${Effect.pipe('3', EffectString.repeat(32))}`;
     expect(() =>
       prepareTopicDependencyExpansion(fixture(), '/fixture', {...request, selectedNodeIds: [second]}, p, [
         {kind: 'dependency', ref: second, citation: citation('src/dependency.ts', 2)},
@@ -218,7 +227,7 @@ describe('explicit code dependency extension', () => {
           configurationPaths: reverse ? [...paths].reverse() : paths,
         };
         const p = {...proof(), reads: []};
-        const selected = paths.map((ref, index) => ({
+        const selected = EffectArray.map(paths, (ref, index) => ({
           kind: 'configuration' as const,
           ref,
           citation: citation(ref, index + 3),
@@ -239,8 +248,8 @@ describe('explicit code dependency extension', () => {
         );
         expect(actual.approvalDigest).toBe(expected.approvalDigest);
         expect(actual.content).toBe(expected.content);
-        expect(new Set(actual.manifest.additionalDependencies.map(item => item.citationId))).toEqual(
-          new Set(selected.map(item => item.citation.id)),
+        expect(new Set(EffectArray.map(actual.manifest.additionalDependencies, item => item.citationId))).toEqual(
+          new Set(EffectArray.map(selected, item => item.citation.id)),
         );
       }),
       {numRuns: 24},
@@ -265,7 +274,7 @@ describe('explicit code dependency extension', () => {
       const reviewed = reviewConsolidation(
         body,
         [captured],
-        consolidationSections(body).map((section, index) => ({
+        EffectArray.map(consolidationSections(body), (section, index) => ({
           section,
           disposition: 'direct',
           supports: [
@@ -289,7 +298,7 @@ describe('explicit code dependency extension', () => {
       const manifest = {
         ...old,
         version: 2 as const,
-        originCitationIds: record.metadata.codeCitations!.map(c => c.id).sort(),
+        originCitationIds: EffectArray.map(record.metadata.codeCitations!, c => c.id).sort(),
         acceptedSources: [
           {citationId: record.metadata.codeCitations![0].id, acceptedCitationId: record.metadata.codeCitations![0].id},
         ],
@@ -299,9 +308,9 @@ describe('explicit code dependency extension', () => {
           ? reviewed.provenance
           : buildConsolidationProvenanceV2(reviewed.provenance, body, body, manifest, {
               reviewId: 'review-origin',
-              targetBeforeHash: '1'.repeat(64),
-              packetDigest: '2'.repeat(64),
-              observationRevision: '3'.repeat(64),
+              targetBeforeHash: Effect.pipe('1', EffectString.repeat(64)),
+              packetDigest: Effect.pipe('2', EffectString.repeat(64)),
+              observationRevision: Effect.pipe('3', EffectString.repeat(64)),
             });
       const consolidated = parseMemoryDocument(
         uri,
@@ -322,8 +331,8 @@ describe('explicit code dependency extension', () => {
       expect(receipt.origin).toEqual(reviewed.provenance);
       expect(receipt.originBody).toBe(body);
       if (version === 2) expect(receipt).toEqual(consolidation);
-      expect(receipt.acceptance.paragraphs.map(p => p.citationIds)).toEqual(
-        record.metadata.topicMaintenance!.paragraphs.map(p => p.citationIds),
+      expect(EffectArray.map(receipt.acceptance.paragraphs, p => p.citationIds)).toEqual(
+        EffectArray.map(record.metadata.topicMaintenance!.paragraphs, p => p.citationIds),
       );
     },
   );
@@ -335,11 +344,17 @@ describe('explicit code dependency extension', () => {
     expect(parsed.body).toBe(body);
     expect(parsed.metadata.topicMaintenanceError).toBeUndefined();
     expect(preview.manifest.paragraphs).toEqual(record.metadata.topicMaintenance!.paragraphs);
-    expect(preview.manifest.originCitationIds).toEqual(record.metadata.codeCitations!.map(c => c.id).sort());
-    for (const line of before
-      .split('\n')
-      .filter(line => line.startsWith('code_citation:') || line.startsWith('opaque_header:')))
-      expect(preview.content.split('\n')).toContain(line);
+    expect(preview.manifest.originCitationIds).toEqual(
+      EffectArray.map(record.metadata.codeCitations!, c => c.id).sort(),
+    );
+    for (const line of EffectArray.filter(
+      Effect.pipe(before, EffectString.split('\n')),
+      __effectArrayValue =>
+        !!(line =>
+          Effect.pipe(line, EffectString.startsWith('code_citation:')) ||
+          Effect.pipe(line, EffectString.startsWith('opaque_header:')))(__effectArrayValue),
+    ))
+      expect(Effect.pipe(preview.content, EffectString.split('\n'))).toContain(line);
     expect(preview.manifest.acceptedSources).toContainEqual({
       citationId: record.metadata.codeCitations![0].id,
       acceptedCitationId: record.metadata.codeCitations![0].id,
@@ -374,9 +389,11 @@ describe('explicit code dependency extension', () => {
     )!;
     const preview = prepareTopicDependencyExpansion(v2, '/fixture', input(), proof(), additions());
     expect(preview.manifest.originCitationIds).toEqual(manifest.originCitationIds);
-    expect(preview.manifest.acceptedSources.find(m => m.citationId === oldCitation.id)).toEqual(
-      manifest.acceptedSources[0],
-    );
+    expect(
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(preview.manifest.acceptedSources, m => m.citationId === oldCitation.id),
+      ),
+    ).toEqual(manifest.acceptedSources[0]);
     expect(parseMemoryDocument(uri, preview.content)!.metadata.codeCitations).toEqual([
       ...v2.metadata.codeCitations!,
       additions()[0].citation,
@@ -386,7 +403,7 @@ describe('explicit code dependency extension', () => {
     const preview = prepareTopicDependencyExpansion(fixture(), '/fixture', input(), proof(), additions());
     const review = {
       version: 4,
-      reviewId: `review-${preview.revision.slice(0, 24)}`,
+      reviewId: `review-${Effect.pipe(preview.revision, EffectString.slice(0, 24))}`,
       revision: 1,
       createdAt: '2026-10-18T00:00:00.000Z',
       project: 'fixture',
@@ -447,7 +464,7 @@ describe('explicit code dependency extension', () => {
         for (let generation = 1; generation <= count; generation++) {
           const frozen = JSON.stringify(prior);
           const operation = {
-            id: `00000000-0000-4000-8000-${generation.toString().padStart(12, '0')}`,
+            id: `00000000-0000-4000-8000-${Effect.pipe(generation.toString(), EffectString.padStart(12, '0'))}`,
             generation,
             predecessorRevision: prior.revision,
             predecessorApprovalDigest: prior.approvalDigest,
@@ -475,7 +492,10 @@ describe('explicit code dependency extension', () => {
           expect(validateTopicDependencyExpansionJournal(journal)).toEqual(journal);
           expect(() => validateTopicDependencyExpansionJournal({...journal, stage: 'prepared'})).toThrow();
           expect(() =>
-            restartTopicDependencyExpansionPreview(prior, {...operation, predecessorRevision: '0'.repeat(64)}),
+            restartTopicDependencyExpansionPreview(prior, {
+              ...operation,
+              predecessorRevision: Effect.pipe('0', EffectString.repeat(64)),
+            }),
           ).toThrow();
           expect(JSON.stringify(prior)).toBe(frozen);
           prior = next;
@@ -529,7 +549,7 @@ describe('explicit code dependency extension', () => {
       };
       const read = {
         ...p.reads[0],
-        edges: p.reads[0].edges.map(edge => ({...edge, provenance})),
+        edges: EffectArray.map(p.reads[0].edges, edge => ({...edge, provenance})),
         coverage: {
           ...p.reads[0].coverage,
           allowedProvenances: [...new Set([...p.reads[0].coverage.allowedProvenances, provenance])],
@@ -580,8 +600,28 @@ describe('explicit code dependency extension', () => {
         expect(one.approvalDigest).toBe(expected.approvalDigest);
         expect(one.content).toBe(expected.content);
         expect(one.manifest.paragraphs).toEqual(record.metadata.topicMaintenance!.paragraphs);
-        expect(one.content.slice(one.content.indexOf('\n\n'))).toBe(
-          record.content.slice(record.content.indexOf('\n\n')),
+        expect(
+          Effect.pipe(
+            one.content,
+            EffectString.slice(
+              Effect.pipe(
+                one.content,
+                EffectString.indexOf('\n\n'),
+                Effect.Option.getOrElse(() => -1),
+              ),
+            ),
+          ),
+        ).toBe(
+          Effect.pipe(
+            record.content,
+            EffectString.slice(
+              Effect.pipe(
+                record.content,
+                EffectString.indexOf('\n\n'),
+                Effect.Option.getOrElse(() => -1),
+              ),
+            ),
+          ),
         );
         for (const old of record.metadata.codeCitations!)
           expect(parseMemoryDocument(uri, one.content)!.metadata.codeCitations).toContainEqual(old);
@@ -613,7 +653,7 @@ describe('explicit code dependency extension', () => {
         record,
         '/fixture',
         input(),
-        {...proof(), configDigest: '1'.repeat(64)},
+        {...proof(), configDigest: Effect.pipe('1', EffectString.repeat(64))},
         additions(),
       ),
     ).toThrow();

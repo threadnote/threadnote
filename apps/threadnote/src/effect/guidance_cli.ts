@@ -9,7 +9,7 @@ import {
   runGuidanceRemove,
   runGuidanceStatus,
 } from '../guidance/index.js';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {CliRuntimeRunner} from './cli.js';
 import {boolean, optionalString, repeatedString, requiredString} from './cli/flags.js';
 
 export const guidanceCommandMetadata = {
@@ -18,9 +18,7 @@ export const guidanceCommandMetadata = {
   },
 } as const;
 
-export function makeGuidanceCommand(
-  withRuntime: <E, R>(body: (config: RuntimeConfig) => Effect.Effect<void, E, R>) => Effect.Effect<void, E, R>,
-) {
+export function makeGuidanceCommand(withRuntime: CliRuntimeRunner) {
   const surface = Argument.String('surface').pipe(
     Argument.withDescription('Agent surface from `threadnote agents list`'),
   );

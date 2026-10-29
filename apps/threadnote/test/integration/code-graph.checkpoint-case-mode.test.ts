@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -14,6 +15,8 @@ import {CodeGraphStore} from '@threadnote/graph/store';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('checkpoint portability across Git case settings', () => {
   it.effect(
@@ -54,12 +57,12 @@ describe('checkpoint portability across Git case settings', () => {
           const originalBytes = yield* fs.readFile(artifact);
           const decoded = decodeCodeGraphCheckpointPackV1(originalBytes);
           expect(decoded.header.repository.caseMode).toBe(donorMode === 'true' ? 'insensitive' : 'sensitive');
-          expect(decoded.records.filter(record => record.kind === 'file').map(record => record.path)).toEqual([
-            'package.json',
-            'src/Value.ts',
-            spacedPath,
-            'src/文.ts',
-          ]);
+          expect(
+            EffectArray.map(
+              EffectArray.filter(decoded.records, record => record.kind === 'file'),
+              record => record.path,
+            ),
+          ).toEqual(['package.json', 'src/Value.ts', spacedPath, 'src/文.ts']);
 
           yield* git(repo, ['config', 'core.ignorecase', receiverMode]);
           const imported = yield* importCodeGraphCheckpointSnapshot(config(receiverHome), {
@@ -89,7 +92,10 @@ describe('checkpoint portability across Git case settings', () => {
             ...(decoded.header.reuse === undefined ? {} : {reuse: decoded.header.reuse}),
           };
           const invalid = [
-            {...metadata, repository: {...metadata.repository, repositoryId: '0'.repeat(64)}},
+            {
+              ...metadata,
+              repository: {...metadata.repository, repositoryId: Effect2.pipe('0', EffectString.repeat(64))},
+            },
             {...metadata, repository: {...metadata.repository, objectFormat: 'sha256' as const}},
             {...metadata, abi: {...metadata.abi, inventoryPolicyVersion: metadata.abi.inventoryPolicyVersion - 1}},
           ];
@@ -112,7 +118,9 @@ describe('checkpoint portability across Git case settings', () => {
           const dirty = yield* importCodeGraphCheckpointSnapshot(config(receiverHome), {cwd: repo, input: artifact});
           expect(dirty.result.publication).toBe('stored');
           yield* fs.writeFileString(path.join(repo, 'src/Value.ts'), 'export const value = 1;\n');
-          expect((yield* git(repo, ['config', '--get', 'core.ignorecase'])).stdout.trim()).toBe(receiverMode);
+          expect(
+            Effect2.pipe((yield* git(repo, ['config', '--get', 'core.ignorecase'])).stdout, EffectString.trim),
+          ).toBe(receiverMode);
           expect((yield* git(repo, ['status', '--porcelain'])).stdout).toBe('');
           expect(yield* fs.readFile(artifact)).toEqual(originalBytes);
         }

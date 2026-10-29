@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Clock, Context, Crypto, Deferred, Effect, Exit, FileSystem, Layer, Path, SynchronizedRef, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -39,6 +40,8 @@ import {
 import {inspectCodeGraphViewDatabaseTarget} from '../view_removal.js';
 import {type CodeGraphStoragePressure} from '../storage/pressure.js';
 import {codeGraphAnonymousTelemetryComponent, CodeGraphObservability} from '../runtime_ports.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_GRAPH_MAINTENANCE_PENDING_DATABASE_LIMIT = 128;
 export const CODE_GRAPH_MAINTENANCE_AUTOMATIC_TAIL_MILLISECONDS = 2_000;
@@ -557,7 +560,7 @@ export const makeCodeGraphMaintenanceLaneRunner = Effect.fn('codeGraph.makeMaint
           remaining[laneIndex] = laneRemaining;
           const advanced = (laneIndex + 1) % CODE_GRAPH_MAINTENANCE_LANES.length;
           const completedCycle = advanced === existing.cycleStartIndex;
-          const hasRemaining = remaining.some(Boolean);
+          const hasRemaining = EffectArray.some(remaining, Boolean);
           const nextState: HomeMaintenanceLaneState =
             completedCycle && !hasRemaining
               ? {
@@ -600,7 +603,9 @@ export const makeCodeGraphOrdinaryMaintenanceRunner = Effect.fn('codeGraph.makeO
           if (existing?.activeToken !== undefined) return [undefined, current] as const;
           const next = new Map(current);
           if (existing === undefined && next.size >= CODE_GRAPH_MAINTENANCE_PENDING_DATABASE_LIMIT) {
-            const inactive = [...next.entries()].find(([, entry]) => entry.activeToken === undefined);
+            const inactive = EffectOption.getOrUndefined(
+              EffectArray.findFirst([...next.entries()], ([, entry]) => entry.activeToken === undefined),
+            );
             if (inactive === undefined) return [undefined, current] as const;
             next.delete(inactive[0]);
           }
@@ -672,7 +677,9 @@ function selectMaintenanceLane(
 
   const databaseStates = new Map(current.databaseStates);
   if (existing === undefined && databaseStates.size >= CODE_GRAPH_MAINTENANCE_PENDING_DATABASE_LIMIT) {
-    const inactive = [...databaseStates.entries()].find(([, candidate]) => candidate.cycleStartIndex === undefined);
+    const inactive = EffectOption.getOrUndefined(
+      EffectArray.findFirst([...databaseStates.entries()], ([, candidate]) => candidate.cycleStartIndex === undefined),
+    );
     if (inactive === undefined) return [{state: 'capacity-full'}, current] as const;
     databaseStates.delete(inactive[0]);
   }
@@ -683,11 +690,14 @@ function selectMaintenanceLane(
     homeNextLaneIndexes.size >= CODE_GRAPH_MAINTENANCE_PENDING_DATABASE_LIMIT
   ) {
     const activeHomes = new Set(
-      [...databaseStates.entries()]
-        .filter(([, candidate]) => candidate.cycleStartIndex !== undefined)
-        .map(([key]) => maintenanceLaneHomeFromDatabaseKey(key)),
+      EffectArray.map(
+        EffectArray.filter([...databaseStates.entries()], ([, candidate]) => candidate.cycleStartIndex !== undefined),
+        ([key]) => maintenanceLaneHomeFromDatabaseKey(key),
+      ),
     );
-    const inactiveHome = [...homeNextLaneIndexes.keys()].find(home => !activeHomes.has(home));
+    const inactiveHome = EffectOption.getOrUndefined(
+      EffectArray.findFirst([...homeNextLaneIndexes.keys()], home => !activeHomes.has(home)),
+    );
     if (inactiveHome === undefined) return [{state: 'capacity-full'}, current] as const;
     homeNextLaneIndexes.delete(inactiveHome);
   }
@@ -715,7 +725,17 @@ function maintenanceLaneDatabaseKey(input: CodeGraphRoutineMaintenanceTick): str
 }
 
 function maintenanceLaneHomeFromDatabaseKey(databaseKey: string): string {
-  return databaseKey.slice(0, databaseKey.indexOf('\u0000'));
+  return Effect2.pipe(
+    databaseKey,
+    EffectString.slice(
+      0,
+      Effect2.pipe(
+        databaseKey,
+        EffectString.indexOf('\u0000'),
+        Effect2.Option.getOrElse(() => -1),
+      ),
+    ),
+  );
 }
 
 function emptyMaintenanceResult(): CodeGraphRoutineMaintenanceResult {
@@ -856,7 +876,8 @@ export const makeCodeGraphMaintenanceCoordinator = Effect.fn('codeGraph.makeMain
                 home.active.input.allowIndexPreparation !== true &&
                 input.allowIndexPreparation === true;
               const needsTrailing = needsAuthoritativeTrailing || needsPreparationTrailing;
-              const ordinaryPendingCount = [...pending.keys()].filter(
+              const ordinaryPendingCount = EffectArray.filter(
+                [...pending.keys()],
                 databasePath => databasePath !== home.active.databasePath,
               ).length;
               let changed = false;
@@ -932,7 +953,8 @@ export const makeCodeGraphMaintenanceCoordinator = Effect.fn('codeGraph.makeMain
               pending.set(input.databasePath, {budget, input: mergeMaintenanceTick(existing.input, input)});
               changed = true;
             } else {
-              const ordinaryPendingCount = [...pending.keys()].filter(
+              const ordinaryPendingCount = EffectArray.filter(
+                [...pending.keys()],
                 databasePath => databasePath !== home.active.databasePath,
               ).length;
               if (ordinaryPendingCount < CODE_GRAPH_MAINTENANCE_PENDING_DATABASE_LIMIT - 1) {

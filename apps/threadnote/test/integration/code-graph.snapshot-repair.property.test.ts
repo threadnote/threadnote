@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
 import {execFileSync} from '@threadnote/testing/node-child-process';
@@ -93,7 +94,8 @@ class RepairCommand implements FC.AsyncCommand<SnapshotModel, SnapshotReal, fals
   async run(model: SnapshotModel, real: SnapshotReal): Promise<void> {
     const expectedRemovable =
       model.incomplete.size +
-      [...model.secondary.values()].filter(snapshot => snapshot.state === 'failed' && !snapshot.leased).length;
+      EffectArray.filter([...model.secondary.values()], snapshot => snapshot.state === 'failed' && !snapshot.leased)
+        .length;
     const summary = await runEffect(repairCodeGraphIndexes(real.home, this.dryRun));
     expect(summary).toMatchObject({
       databases: 1,
@@ -365,13 +367,13 @@ async function assertRealMatchesModel(model: Readonly<SnapshotModel>, real: Snap
   const secondary = [...model.secondary.values()];
   expect(health.diagnosed).toMatchObject({
     activeSnapshots: 1,
-    buildingSnapshots: expectedStates.filter(state => state === 'building').length,
+    buildingSnapshots: EffectArray.filter(expectedStates, state => state === 'building').length,
     failedSnapshots:
-      expectedStates.filter(state => state === 'failed').length +
-      secondary.filter(snapshot => snapshot.state === 'failed').length,
+      EffectArray.filter(expectedStates, state => state === 'failed').length +
+      EffectArray.filter(secondary, snapshot => snapshot.state === 'failed').length,
     foreignKeyViolations: 0,
     integrity: 'ok',
-    readySnapshots: 1 + secondary.filter(snapshot => snapshot.state === 'ready').length,
+    readySnapshots: 1 + EffectArray.filter(secondary, snapshot => snapshot.state === 'ready').length,
   });
   expect(health.ready?.id).toBe(real.baseline.id);
   expect(health.graph.snapshot.id).toBe(real.baseline.id);
@@ -382,8 +384,8 @@ async function assertRealMatchesModel(model: Readonly<SnapshotModel>, real: Snap
     expect(database.query('SELECT id, state FROM snapshots ORDER BY id').all()).toEqual(
       [
         {id: real.baseline.id, state: 'ready'},
-        ...[...model.incomplete].map(([slot, state]) => ({id: snapshotId(real, slot), state})),
-        ...[...model.secondary].map(([slot, snapshot]) => ({
+        ...EffectArray.map([...model.incomplete], ([slot, state]) => ({id: snapshotId(real, slot), state})),
+        ...EffectArray.map([...model.secondary], ([slot, snapshot]) => ({
           id: readySnapshotId(real, slot),
           state: snapshot.state,
         })),
@@ -391,13 +393,13 @@ async function assertRealMatchesModel(model: Readonly<SnapshotModel>, real: Snap
     );
     expect(database.query('SELECT snapshot_id FROM active_snapshots').all()).toEqual([{snapshot_id: real.baseline.id}]);
     expect(database.query('SELECT token, snapshot_id FROM snapshot_leases ORDER BY token').all()).toEqual(
-      [...model.secondary]
-        .filter(([, snapshot]) => snapshot.leased)
-        .map(([slot]) => ({
+      EffectArray.map(
+        EffectArray.filter([...model.secondary], ([, snapshot]) => snapshot.leased),
+        ([slot]) => ({
           snapshot_id: readySnapshotId(real, slot),
           token: real.leaseTokens.get(slot),
-        }))
-        .sort((left, right) => compareText(left.token ?? '', right.token ?? '')),
+        }),
+      ).sort((left, right) => compareText(left.token ?? '', right.token ?? '')),
     );
   } finally {
     database.close();

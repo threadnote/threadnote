@@ -2,7 +2,7 @@
 
 /* oxlint-disable effecttsgo/strict-effect-provide -- Evaluation entry point uses the pinned application inference layer. */
 
-import {Effect, Schema} from 'effect';
+import {Array as EffectArray, Effect, Schema} from 'effect';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
@@ -14,6 +14,8 @@ import {
   type TopicStudyVerifiedModel,
   type TopicStudyRuntimeFingerprint,
 } from './topic-maintenance-longitudinal-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface Request {
   readonly home: string;
@@ -22,11 +24,56 @@ interface Request {
   readonly verifiedModel: TopicStudyVerifiedModel;
   readonly runtime: TopicStudyRuntimeFingerprint;
 }
-const request = JSON.parse(await Bun.stdin.text()) as Request;
+const requestValue: unknown = JSON.parse(await Bun.stdin.text());
+if (!isRequest(requestValue)) throw new Error('Invalid local model request.');
+const request = requestValue;
 if (request.prompt.length > 24_000 || !request.modelId || !request.home || request.modelId !== request.verifiedModel.id)
   throw new Error('Invalid local model request.');
 await assertTopicStudyRuntime(request.runtime);
 await assertTopicStudyModel(request.verifiedModel);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function isRequest(value: unknown): value is Request {
+  return (
+    isRecord(value) &&
+    typeof value.home === 'string' &&
+    typeof value.modelId === 'string' &&
+    typeof value.prompt === 'string' &&
+    isVerifiedModel(value.verifiedModel) &&
+    isRuntimeFingerprint(value.runtime)
+  );
+}
+
+function isVerifiedModel(value: unknown): value is TopicStudyVerifiedModel {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.sha256 === 'string' &&
+    typeof value.size === 'number' &&
+    typeof value.path === 'string' &&
+    typeof value.stamp === 'string'
+  );
+}
+
+function isRuntimeFingerprint(value: unknown): value is TopicStudyRuntimeFingerprint {
+  return (
+    isRecord(value) &&
+    typeof value.sourceRoot === 'string' &&
+    typeof value.sourceHead === 'string' &&
+    typeof value.sourceTree === 'string' &&
+    typeof value.bunPath === 'string' &&
+    typeof value.bunVersion === 'string' &&
+    typeof value.bunHash === 'string' &&
+    typeof value.lockHash === 'string' &&
+    typeof value.dependencyHash === 'string' &&
+    typeof value.dependencyStampHash === 'string' &&
+    typeof value.bunStamp === 'string' &&
+    typeof value.lockStamp === 'string'
+  );
+}
+
 const system = 'Return only a JSON object with one string property named draft.';
 const generation = {
   prompt: request.prompt,
@@ -52,7 +99,7 @@ const result = await Effect.runPromise(
     const generated = yield* runtime.generate({...generation, manifest, modelPath: installed.path});
     const decoded = yield* Schema.decodeUnknownEffect(Schema.Struct({draft: Schema.String}))(generated);
     return {
-      draft: decoded.draft.trim(),
+      draft: Effect2.pipe(decoded.draft, EffectString.trim),
       model: {
         backend: 'local-ai',
         id: manifest.id,

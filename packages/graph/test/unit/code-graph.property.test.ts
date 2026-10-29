@@ -1,9 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {Effect} from 'effect';
 import {TestClock} from 'effect/testing';
-import type {CodeGraphEmbeddingIndexShape} from '@threadnote/graph/embedding';
 import {
   codeGraphInventoryExclusionReason,
   parseGitCatFileBatch,
@@ -17,24 +17,30 @@ import {
   CODE_GRAPH_HIGH_SIGNAL_JSON_HARD_CAP_BYTES,
 } from '@threadnote/graph/inventory/policy';
 import type {CodeGraphLayout} from '@threadnote/graph/layout';
-import {neighborQuery, traversalQuery} from '@threadnote/graph/query';
-import type {CodeGraphStoreShape} from '@threadnote/graph/store';
+import {
+  neighborQuery,
+  traversalQuery,
+  type CodeGraphTraversalQueryEmbedding,
+  type CodeGraphTraversalQueryStore,
+} from '@threadnote/graph/query';
 import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphQueryResult} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const pathSegmentArbitrary = FC.array(
   FC.constantFrom('a', 'Z', '0', ' ', '.', '-', '_', 'é', '漢', '🙂', '\\', '\t', '\n'),
   {maxLength: 14, minLength: 1},
-).map(characters => characters.join(''));
+).map(characters => EffectArray.join(characters, ''));
 
 const repositoryPathArbitrary = FC.record({
   leadingDot: FC.boolean(),
   segments: FC.array(pathSegmentArbitrary, {maxLength: 4, minLength: 1}),
-}).map(({leadingDot, segments}) => `${leadingDot ? './' : ''}${segments.join('/')}`);
+}).map(({leadingDot, segments}) => `${leadingDot ? './' : ''}${EffectArray.join(segments, '/')}`);
 
 const objectIdArbitrary = FC.array(FC.constantFrom(...'0123456789abcdef'), {
   maxLength: 40,
   minLength: 40,
-}).map(characters => characters.join(''));
+}).map(characters => EffectArray.join(characters, ''));
 
 const gitTreeEntryArbitrary = FC.record({
   blobId: objectIdArbitrary,
@@ -140,7 +146,7 @@ const layout: CodeGraphLayout = {
 
 const emptyEmbedding = {
   search: () => Effect.succeed(new Map<string, number>()),
-} as unknown as CodeGraphEmbeddingIndexShape;
+} satisfies CodeGraphTraversalQueryEmbedding;
 
 describe('native code graph parser properties', () => {
   fcProp(
@@ -188,10 +194,13 @@ describe('native code graph parser properties', () => {
       entries: FC.array(gitTreeEntryArbitrary, {maxLength: 24}),
     },
     ({entries}) => {
-      const output = entries.map(entry => `${entry.mode} blob ${entry.blobId} ${entry.size}\t${entry.path}\0`).join('');
+      const output = EffectArray.join(
+        EffectArray.map(entries, entry => `${entry.mode} blob ${entry.blobId} ${entry.size}\t${entry.path}\0`),
+        '',
+      );
 
       expect(parseGitTree(output)).toEqual(
-        entries.map(entry => ({
+        EffectArray.map(entries, entry => ({
           ...entry,
           path: normalizeRepositoryPath(entry.path),
         })),
@@ -207,11 +216,11 @@ describe('native code graph parser properties', () => {
       blobs: FC.array(FC.uint8Array({maxLength: 96}), {maxLength: 16}),
     },
     ({blobs}) => {
-      const entries = blobs.map((blob, index) => ({
-        blobId: `${'0'.repeat(39)}${index.toString(16)}`,
+      const entries = EffectArray.map(blobs, (blob, index) => ({
+        blobId: `${Effect2.pipe('0', EffectString.repeat(39))}${index.toString(16)}`,
         size: blob.byteLength,
       }));
-      const chunks = blobs.flatMap((blob, index) => [
+      const chunks = EffectArray.flatMap(blobs, (blob, index) => [
         new TextEncoder().encode(`${entries[index].blobId} blob ${blob.byteLength}\n`),
         blob,
         Uint8Array.of(10),
@@ -233,14 +242,14 @@ describe('native code graph parser properties', () => {
       const reverse = summarizeCodeGraphInventoryPreview([...entries].reverse(), {
         threadnoteIgnore: 'src/application.ts\n',
       });
-      const expectedBytes = entries.reduce((total, entry) => total + entry.size, 0);
+      const expectedBytes = EffectArray.reduce(entries, 0, (total, entry) => total + entry.size);
 
       expect(reverse).toEqual(forward);
       expect(forward.totals.repository).toEqual({bytes: expectedBytes, files: entries.length});
       expect(forward.totals.eligible.files + forward.totals.skipped.files).toBe(entries.length);
       expect(forward.totals.eligible.bytes + forward.totals.skipped.bytes).toBe(expectedBytes);
-      expect(forward.groups.reduce((total, group) => total + group.files, 0)).toBe(entries.length);
-      expect(forward.groups.reduce((total, group) => total + group.bytes, 0)).toBe(expectedBytes);
+      expect(EffectArray.reduce(forward.groups, 0, (total, group) => total + group.files)).toBe(entries.length);
+      expect(EffectArray.reduce(forward.groups, 0, (total, group) => total + group.bytes)).toBe(expectedBytes);
     },
     {fastCheck: {numRuns: 200}},
   );
@@ -309,7 +318,7 @@ function inventoryPolicyPath(
                 : kind === 'high-signal-json'
                   ? 'apps/mobile/project.json'
                   : 'src/application.ts';
-  return uppercase ? path.toUpperCase() : path;
+  return uppercase ? Effect2.pipe(path, EffectString.toUpperCase) : path;
 }
 
 describe('native code graph traversal properties', () => {
@@ -329,7 +338,7 @@ describe('native code graph traversal properties', () => {
         qualifiedName: 'TargetSelector',
         score: 0.01,
       };
-      const candidates = noiseScores.map((score, index) => ({
+      const candidates = EffectArray.map(noiseScores, (score, index) => ({
         ...graphNode(index + 1),
         id: `noise-${index}`,
         name: `TargetSelectorNoise${index}`,
@@ -344,16 +353,19 @@ describe('native code graph traversal properties', () => {
             inspectedSeeds.push([...ids]);
             return [];
           }),
+        findSymbolsByPathAndName: () => Effect.succeed([]),
+        searchSymbolsByPaths: () => Effect.succeed([]),
         searchSymbolsMany: () => Effect.succeed([candidates]),
         symbolsByIds: () => Effect.succeed([]),
-      } as unknown as CodeGraphStoreShape;
+        traversalEdgesForNodes: () => Effect.succeed([]),
+      } satisfies CodeGraphTraversalQueryStore;
 
       return Effect.gen(function* () {
         const result = yield* traversalQuery(
           store,
           layout.databasePath,
           'snapshot',
-          lowercaseQuery ? exact.name.toLocaleLowerCase('en-US') : exact.name,
+          lowercaseQuery ? Effect2.pipe(exact.name, EffectString.toLocaleLowerCase('en-US')) : exact.name,
           'incoming',
           20,
           40,
@@ -366,7 +378,7 @@ describe('native code graph traversal properties', () => {
         );
 
         expect(inspectedSeeds).toEqual([[exact.id]]);
-        expect(result.nodes.map(node => node.id)).toEqual([exact.id]);
+        expect(EffectArray.map(result.nodes, node => node.id)).toEqual([exact.id]);
       });
     },
     {fastCheck: {numRuns: 80}},
@@ -402,11 +414,11 @@ describe('native code graph traversal properties', () => {
           false,
         );
 
-        expect(new Set(result.nodes.map(node => node.id))).toEqual(expected.nodes);
-        expect(new Set(result.edges.map(edge => edge.id))).toEqual(expected.edges);
-        expect(new Set(result.nodes.map(node => node.id)).size).toBe(result.nodes.length);
-        expect(new Set(result.edges.map(edge => edge.id)).size).toBe(result.edges.length);
-        expect(result.nodes.every(node => Number.isFinite(node.score) && node.score > 0)).toBe(true);
+        expect(new Set(EffectArray.map(result.nodes, node => node.id))).toEqual(expected.nodes);
+        expect(new Set(EffectArray.map(result.edges, edge => edge.id))).toEqual(expected.edges);
+        expect(new Set(EffectArray.map(result.nodes, node => node.id)).size).toBe(result.nodes.length);
+        expect(new Set(EffectArray.map(result.edges, edge => edge.id)).size).toBe(result.edges.length);
+        expect(EffectArray.every(result.nodes, node => Number.isFinite(node.score) && node.score > 0)).toBe(true);
       });
     },
     {fastCheck: {numRuns: 80}},
@@ -433,7 +445,7 @@ describe('native code graph traversal properties', () => {
         visitedNodes: 2,
         inspectedEdges: 1,
       });
-      expect(result.nodes.map(node => node.id)).toEqual(nodes.map(node => node.id));
+      expect(EffectArray.map(result.nodes, node => node.id)).toEqual(EffectArray.map(nodes, node => node.id));
     }),
   );
 
@@ -494,7 +506,7 @@ describe('native code graph traversal properties', () => {
     Effect.gen(function* () {
       const seed = graphNode(0);
       const base = graphStore([seed], seed, []);
-      const store: CodeGraphStoreShape = {
+      const store: CodeGraphTraversalQueryStore = {
         ...base,
         edgesForNodes: (...args) => TestClock.adjust('2 seconds').pipe(Effect.andThen(base.edgesForNodes(...args))),
       };
@@ -534,7 +546,7 @@ describe('native code graph traversal properties', () => {
           ['resolved'],
         );
         expect(result.searchCoverage).toMatchObject({status: 'exhaustive', limitsReached: []});
-        expect(new Set(result.nodes.map(node => node.id))).toEqual(
+        expect(new Set(EffectArray.map(result.nodes, node => node.id))).toEqual(
           referenceNeighborReachability(seed.id, edges, graph.direction, 1),
         );
       }),
@@ -567,15 +579,16 @@ describe('native code graph traversal properties', () => {
           ['resolved'],
         );
 
-        const visibleIds = new Set(result.nodes.map(node => node.id));
+        const visibleIds = new Set(EffectArray.map(result.nodes, node => node.id));
         expect(result.nodes[0]?.id).toBe(seed.id);
         expect(result.nodes.length).toBeLessThanOrEqual(graph.nodeLimit);
         expect(result.edges.length).toBeLessThanOrEqual(graph.edgeLimit);
         expect(visibleIds.size).toBe(result.nodes.length);
-        expect(new Set(result.edges.map(edge => edge.id)).size).toBe(result.edges.length);
-        expect(result.nodes.every(node => reachable.has(node.id))).toBe(true);
+        expect(new Set(EffectArray.map(result.edges, edge => edge.id)).size).toBe(result.edges.length);
+        expect(EffectArray.every(result.nodes, node => reachable.has(node.id))).toBe(true);
         expect(
-          result.edges.every(
+          EffectArray.every(
+            result.edges,
             edge =>
               edge.sourceId !== undefined &&
               visibleIds.has(edge.sourceId) &&
@@ -592,11 +605,11 @@ describe('native code graph traversal properties', () => {
 type CodeGraphQuerySelection = Pick<CodeGraphQueryResult, 'nodes' | 'edges' | 'searchCoverage'>;
 
 function normalizeRepositoryPath(value: string): string {
-  return value.replace(/^\.\/+/, '');
+  return Effect2.pipe(value, EffectString.replace(/^\.\/+/, ''));
 }
 
 function concatenateBytes(chunks: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
+  const output = new Uint8Array(EffectArray.reduce(chunks, 0, (total, chunk) => total + chunk.byteLength));
   let offset = 0;
   for (const chunk of chunks) {
     output.set(chunk, offset);
@@ -614,7 +627,7 @@ function encodeNameStatus(changes: readonly NameStatusChange[]): string {
       fields.push(change.kind, change.path);
     }
   }
-  return `${fields.join('\0')}\0`;
+  return `${EffectArray.join(fields, '\0')}\0`;
 }
 
 function encodePorcelainStatus(changes: readonly PorcelainStatusChange[]): string {
@@ -631,7 +644,7 @@ function encodePorcelainStatus(changes: readonly PorcelainStatusChange[]): strin
       fields.push(`${status} ${change.path}`);
     }
   }
-  return `${fields.join('\0')}\0`;
+  return `${EffectArray.join(fields, '\0')}\0`;
 }
 
 function modelNameStatus(changes: readonly NameStatusChange[]): {
@@ -668,12 +681,16 @@ function modelPorcelainStatus(changes: readonly PorcelainStatusChange[]): {
   readonly untracked: Set<string>;
 } {
   const tracked = modelNameStatus(
-    changes.filter((change): change is NameStatusChange => change.kind !== '?' && change.kind !== 'U'),
+    EffectArray.filter(changes, (change): change is NameStatusChange => change.kind !== '?' && change.kind !== 'U'),
   );
   const untracked = new Set(
-    changes
-      .filter((change): change is Extract<PorcelainStatusChange, {readonly kind: '?'}> => change.kind === '?')
-      .map(change => normalizeRepositoryPath(change.path)),
+    EffectArray.map(
+      EffectArray.filter(
+        changes,
+        (change): change is Extract<PorcelainStatusChange, {readonly kind: '?'}> => change.kind === '?',
+      ),
+      change => normalizeRepositoryPath(change.path),
+    ),
   );
   for (const path of untracked) {
     tracked.added.add(path);
@@ -683,7 +700,7 @@ function modelPorcelainStatus(changes: readonly PorcelainStatusChange[]): {
     if (change.kind !== 'U') continue;
     const path = normalizeRepositoryPath(change.path);
     tracked.changed.add(path);
-    if (change.status.includes('A')) tracked.added.add(path);
+    if (Effect2.pipe(change.status, EffectString.includes('A'))) tracked.added.add(path);
   }
   return {...tracked, untracked};
 }
@@ -708,13 +725,25 @@ function graphEdges(nodeCount: number, rawEdges: readonly (readonly [number, num
   const pairs = new Map<string, readonly [number, number]>();
   for (let index = 0; index < nodeCount; index += 1) {
     const pair = [index, (index + 1) % nodeCount] as const;
-    pairs.set(pair.join(':'), pair);
+    pairs.set(
+      EffectArray.join(
+        EffectArray.map(pair, item => (item === null || item === undefined ? '' : String(item))),
+        ':',
+      ),
+      pair,
+    );
   }
   for (const [rawSource, rawTarget] of rawEdges) {
     const pair = [rawSource % nodeCount, rawTarget % nodeCount] as const;
-    pairs.set(pair.join(':'), pair);
+    pairs.set(
+      EffectArray.join(
+        EffectArray.map(pair, item => (item === null || item === undefined ? '' : String(item))),
+        ':',
+      ),
+      pair,
+    );
   }
-  return [...pairs.values()].map(([source, target]) => ({
+  return EffectArray.map([...pairs.values()], ([source, target]) => ({
     confidence: 1,
     evidencePath: `src/node-${source}.ts`,
     evidenceSpan: {column: 1, endColumn: 2, endLine: 1, line: 1},
@@ -732,8 +761,8 @@ function graphStore(
   nodes: readonly CodeGraphQueryNode[],
   seed: CodeGraphQueryNode,
   edges: readonly CodeGraphEdge[],
-): CodeGraphStoreShape {
-  const byId = new Map(nodes.map(node => [node.id, node]));
+): CodeGraphTraversalQueryStore {
+  const byId = new Map(EffectArray.map(nodes, node => [node.id, node]));
   const edgesForNodes = (
     _databasePath: string,
     _snapshotId: string,
@@ -742,26 +771,24 @@ function graphStore(
     limit: number,
   ) =>
     Effect.succeed(
-      edges
-        .filter(edge => {
-          if (direction === 'incoming') return edge.targetId !== undefined && ids.includes(edge.targetId);
-          if (direction === 'outgoing') return edge.sourceId !== undefined && ids.includes(edge.sourceId);
-          return (
-            (edge.sourceId !== undefined && ids.includes(edge.sourceId)) ||
-            (edge.targetId !== undefined && ids.includes(edge.targetId))
-          );
-        })
-        .slice(0, limit),
+      EffectArray.filter(edges, edge => {
+        if (direction === 'incoming') return edge.targetId !== undefined && ids.includes(edge.targetId);
+        if (direction === 'outgoing') return edge.sourceId !== undefined && ids.includes(edge.sourceId);
+        return (
+          (edge.sourceId !== undefined && ids.includes(edge.sourceId)) ||
+          (edge.targetId !== undefined && ids.includes(edge.targetId))
+        );
+      }).slice(0, limit),
     );
   return {
     edgesForNodes,
+    findSymbolsByPathAndName: () => Effect.succeed([]),
+    searchSymbolsByPaths: () => Effect.succeed([]),
     traversalEdgesForNodes: edgesForNodes,
-    edgesByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
-      Effect.succeed(ids.map(id => edges.find(edge => edge.id === id)!)),
     searchSymbolsMany: () => Effect.succeed([[seed]]),
     symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
-      Effect.succeed(ids.flatMap(id => (byId.has(id) ? [byId.get(id)!] : []))),
-  } as unknown as CodeGraphStoreShape;
+      Effect.succeed(EffectArray.flatMap(ids, id => (byId.has(id) ? [byId.get(id)!] : []))),
+  } satisfies CodeGraphTraversalQueryStore;
 }
 
 function referenceTraversal(

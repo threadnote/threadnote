@@ -8,14 +8,17 @@ import {
   topicStudyLedgerRowV1,
   topicStudyUnavailableObservationV1,
 } from '../../src/evaluation/topic-maintenance-longitudinal.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const summary = {
   version: 1,
-  receiptId: 'topic-generation-' + 'a'.repeat(32),
-  caseId: 'health-case-' + 'b'.repeat(40),
-  reviewId: 'review-' + 'c'.repeat(24),
-  targetHash: 'd'.repeat(64),
-  observationRevision: 'e'.repeat(64),
-  packetDigest: 'f'.repeat(64),
+  receiptId: 'topic-generation-' + Effect.pipe('a', EffectString.repeat(32)),
+  caseId: 'health-case-' + Effect.pipe('b', EffectString.repeat(40)),
+  reviewId: 'review-' + Effect.pipe('c', EffectString.repeat(24)),
+  targetHash: Effect.pipe('d', EffectString.repeat(64)),
+  observationRevision: Effect.pipe('e', EffectString.repeat(64)),
+  packetDigest: Effect.pipe('f', EffectString.repeat(64)),
   agent: 'local-ai',
   model: 'fixture',
   modelVersion: 'revision:digest',
@@ -27,7 +30,7 @@ const summary = {
   attempts: [
     {
       ordinal: 1,
-      promptHash: 'a'.repeat(64),
+      promptHash: Effect.pipe('a', EffectString.repeat(64)),
       promptBytes: 6,
       status: 'provider-failed',
       elapsedMilliseconds: 10,
@@ -35,7 +38,7 @@ const summary = {
       output: {status: 'unavailable', reason: 'not-returned'},
     },
   ],
-};
+} as const;
 const expected = {caseId: summary.caseId, agent: summary.agent, model: summary.model};
 describe('versioned generation study observations', () => {
   it('reads success and failure summaries while rejecting mismatches and private fields', () => {
@@ -68,7 +71,7 @@ describe('versioned generation study observations', () => {
     expect(assertTopicStudyLedgerV1(JSON.stringify(legacy), corpus)[0]).toEqual(legacy);
     const extended = topicStudyLedgerRowV1({
       ...base,
-      observation: {...observation, generationObservation: summary as never},
+      observation: {...observation, generationObservation: summary},
     });
     const parsed = assertTopicStudyLedgerV1(JSON.stringify(extended), corpus)[0];
     expect(parsed.observation.generationObservation).toEqual(summary);

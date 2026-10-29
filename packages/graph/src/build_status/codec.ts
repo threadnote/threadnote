@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option, Schema} from 'effect';
 import {isCodeGraphCapacityFailureOperation} from '../disk/capacity.js';
 import {CODE_GRAPH_BUILD_PHASES as VALID_PHASES, parseCodeGraphBuildScheduling} from './scheduling.js';
@@ -38,6 +39,9 @@ import type {
   CodeGraphBuildStatus,
   CodeGraphBuildTimings,
 } from '../build_status.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const BUILD_ID = CODE_GRAPH_BUILD_ID;
 const COMMIT_ID = CODE_GRAPH_BUILD_COMMIT_ID;
@@ -91,11 +95,13 @@ function codeGraphBuildCapacityFailure(
 function privacySafeBuildError(cause: unknown): string {
   const raw = cause instanceof Error ? cause.message : String(cause);
   const sanitized =
-    raw
-      .replaceAll(/(?:[A-Za-z]:[\\/]|\/)(?:[^\s'"`<>]|\\ )+/g, '<local-path>')
-      .replaceAll(/\s+/g, ' ')
-      .trim() || 'Code graph build failed.';
-  return sanitized.length <= 300 ? sanitized : `${sanitized.slice(0, 299)}…`;
+    Effect.pipe(
+      raw,
+      EffectString.replaceAll(/(?:[A-Za-z]:[\\/]|\/)(?:[^\s'"`<>]|\\ )+/g, '<local-path>'),
+      EffectString.replaceAll(/\s+/g, ' '),
+      EffectString.trim,
+    ) || 'Code graph build failed.';
+  return sanitized.length <= 300 ? sanitized : `${Effect.pipe(sanitized, EffectString.slice(0, 299))}…`;
 }
 
 export function parseCodeGraphBuildStatus(value: unknown): CodeGraphBuildStatus | undefined {
@@ -605,6 +611,9 @@ function parseMaterializationMetrics(value: unknown): CodeGraphMaterializationMe
   };
 }
 
+const isStringArray = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) && EffectArray.every(value, (item): item is string => typeof item === 'string');
+
 function parseOverlayFallbackAssessment(
   value: unknown,
 ): CodeGraphMaterializationMetrics['fallbackAssessment'] | undefined {
@@ -629,13 +638,14 @@ function parseOverlayFallbackAssessment(
   ) {
     return undefined;
   }
+  const unownedResolutionDomainsValue = value.unownedResolutionDomains;
   const unownedResolutionDomains =
-    value.unownedResolutionDomains === undefined
+    unownedResolutionDomainsValue === undefined
       ? undefined
-      : Array.isArray(value.unownedResolutionDomains) &&
-          value.unownedResolutionDomains.every(domain => typeof domain === 'string' && domain.length > 0) &&
-          new Set(value.unownedResolutionDomains).size === value.unownedResolutionDomains.length
-        ? [...value.unownedResolutionDomains].sort()
+      : isStringArray(unownedResolutionDomainsValue) &&
+          EffectArray.every(unownedResolutionDomainsValue, domain => domain.length > 0) &&
+          new Set(unownedResolutionDomainsValue).size === unownedResolutionDomainsValue.length
+        ? [...unownedResolutionDomainsValue].sort()
         : undefined;
   if (value.unownedResolutionDomains !== undefined && unownedResolutionDomains === undefined) return undefined;
   const unownedResolutionDomainFiles =
@@ -744,7 +754,10 @@ function parseMaterializationSubphaseMilliseconds(
     'shardPersistence',
     'shardSerialization',
   ] as const;
-  if (Object.keys(value).length !== keys.length || keys.some(key => !isNonNegativeFinite(value[key]))) {
+  if (
+    EffectRecord.keys(value).length !== keys.length ||
+    EffectArray.some(keys, key => !isNonNegativeFinite(value[key]))
+  ) {
     return undefined;
   }
   return {
@@ -778,7 +791,7 @@ function parseMaterializationStageMilliseconds(
   ] as const satisfies readonly CodeGraphMaterializationActivity['stage'][];
   const allowed = new Set<string>(stages);
   const parsed: Partial<Record<CodeGraphMaterializationActivity['stage'], number>> = {};
-  for (const [stage, milliseconds] of Object.entries(value)) {
+  for (const [stage, milliseconds] of EffectRecord.toEntries(value)) {
     if (!allowed.has(stage) || !isNonNegativeFinite(milliseconds)) return undefined;
     const parsedStage = oneOfValue(stage, stages);
     if (parsedStage === undefined) return undefined;
@@ -994,7 +1007,9 @@ function parseMaterializationRows(value: unknown): CodeGraphMaterializationRows 
   for (const key of keys) {
     if (value[key] !== undefined && !isNonNegativeSafeInteger(value[key])) return undefined;
   }
-  return Object.fromEntries(keys.flatMap(key => (value[key] === undefined ? [] : [[key, Number(value[key])]])));
+  return EffectRecord.fromEntries(
+    EffectArray.flatMap(keys, key => (value[key] === undefined ? [] : [[key, Number(value[key])]])),
+  );
 }
 
 function isBatchProgress(completed: unknown, total: unknown): boolean {
@@ -1055,13 +1070,13 @@ function parseExtraction(value: unknown): CodeGraphBuildExtraction | undefined {
     !isNonNegativeSafeInteger(value.completedFiles) ||
     !isNonNegativeSafeInteger(value.slowFiles) ||
     Number(value.slowFiles) > Number(value.completedFiles) ||
-    !Array.isArray(value.topSlowFiles) ||
+    !EffectArray.isArray(value.topSlowFiles) ||
     value.topSlowFiles.length > CODE_GRAPH_TOP_SLOW_FILE_LIMIT
   ) {
     return undefined;
   }
-  const topSlowFiles = value.topSlowFiles.map(parseSlowFileTelemetry);
-  if (topSlowFiles.some(sample => sample === undefined)) return undefined;
+  const topSlowFiles = EffectArray.map(value.topSlowFiles, parseSlowFileTelemetry);
+  if (EffectArray.some(topSlowFiles, sample => sample === undefined)) return undefined;
   const metrics = value.metrics === undefined ? undefined : parseScanningMetrics(value.metrics);
   if (value.metrics !== undefined && metrics === undefined) return undefined;
   const samples: CodeGraphSlowFileTelemetry[] = [];
@@ -1070,12 +1085,13 @@ function parseExtraction(value: unknown): CodeGraphBuildExtraction | undefined {
     samples.push(sample);
   }
   if (
-    samples.some(
+    EffectArray.some(
+      samples,
       (sample, index) =>
         index > 0 &&
         (sample.durationMilliseconds > samples[index - 1].durationMilliseconds ||
           (sample.durationMilliseconds === samples[index - 1].durationMilliseconds &&
-            sample.pathHash.localeCompare(samples[index - 1].pathHash) < 0)),
+            Effect.pipe(sample.pathHash, EffectString.localeCompare(samples[index - 1].pathHash)) < 0)),
     )
   ) {
     return undefined;
@@ -1176,7 +1192,7 @@ function oneOfValue<const Values extends readonly string[]>(
   value: unknown,
   options: Values,
 ): Values[number] | undefined {
-  return typeof value === 'string' && options.some(option => option === value) ? value : undefined;
+  return typeof value === 'string' && EffectArray.some(options, option => option === value) ? value : undefined;
 }
 
 function isOneOf<const Values extends readonly string[]>(value: unknown, options: Values): value is Values[number] {
@@ -1217,8 +1233,8 @@ function parseCounters(value: unknown): CodeGraphBuildCounters | undefined {
   }
   if (value.unit !== undefined && !['files', 'references', 'snapshots', 'symbols'].includes(String(value.unit)))
     return undefined;
-  return Object.fromEntries(
-    [...keys, 'unit' as const].flatMap(key => (value[key] === undefined ? [] : [[key, value[key]]])),
+  return EffectRecord.fromEntries(
+    EffectArray.flatMap([...keys, 'unit' as const], key => (value[key] === undefined ? [] : [[key, value[key]]])),
   );
 }
 
@@ -1290,7 +1306,7 @@ function parseCapacityRoles(
   value: unknown,
   bytesKey: 'bytes',
 ): CodeGraphBuildCapacityFailure['evidence']['activeReservations'] | undefined {
-  if (!Array.isArray(value) || value.length > 3) return undefined;
+  if (!EffectArray.isArray(value) || value.length > 3) return undefined;
   const roles = new Set<string>();
   const parsed: Array<{bytes: number; role: 'durable' | 'shared' | 'temporary'}> = [];
   for (const entry of value) {
@@ -1313,7 +1329,7 @@ function parseCapacityRoles(
 function parseCapacityFilesystems(
   value: unknown,
 ): CodeGraphBuildCapacityFailure['evidence']['filesystems'] | undefined {
-  if (!Array.isArray(value) || value.length > 3) return undefined;
+  if (!EffectArray.isArray(value) || value.length > 3) return undefined;
   const roles = new Set<string>();
   const parsed: Array<{
     availableBytes: number;

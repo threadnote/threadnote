@@ -1,4 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {Option, Tracer} from 'effect';
+import * as EffectRecord from 'effect/Record';
 
 // Test-only closed labels. Never copy attributes, arguments, names outside this set,
 // links, trace/span identifiers, results or error messages into diagnostic output.
@@ -161,11 +163,13 @@ export const closeoutSpanDiagnostics = (now = () => performance.now()) => {
       return {
         version: 1,
         timing: 'inclusive-span-ms' as const,
-        totals: Object.fromEntries(Object.entries(totals).map(([label, total]) => [label, {...total}])),
+        totals: EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.toEntries(totals), ([label, total]) => [label, {...total}]),
+        ),
         activeCount,
         unlistedActiveCount: activeCount - active.size,
-        active: [...active.values()].map(entry => ({...entry, elapsedMs: bounded(at - entry.startedMs)})),
-        recent: recent.map(entry => ({...entry})),
+        active: EffectArray.map([...active.values()], entry => ({...entry, elapsedMs: bounded(at - entry.startedMs)})),
+        recent: EffectArray.map(recent, entry => ({...entry})),
         recentDropped,
       };
     },

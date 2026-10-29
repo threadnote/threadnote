@@ -1,15 +1,17 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Option} from 'effect';
+import {Context, Effect, Layer, Option} from 'effect';
 import {describe, expect} from 'vitest';
 import {assessIncrementalOverlay} from '@threadnote/graph/indexer/incremental';
-import type {CodeGraphLanguagePackRegistryShape} from '@threadnote/graph/languages/registry';
+import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import type {CodeGraphLayout} from '@threadnote/graph/layout';
 import {
   CODE_GRAPH_REUSABLE_BASE_RECEIPT_VERSION,
+  CodeGraphStore,
   type CodeGraphReusableBaseReceipt,
-  type CodeGraphStoreShape,
 } from '@threadnote/graph/store';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSnapshot} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('incremental reusable-base receipt', () => {
   effectIt.effect('reuses the admitted immutable receipt and fails closed on a mismatched identity', () =>
@@ -19,13 +21,16 @@ describe('incremental reusable-base receipt', () => {
       const facts = [{diagnostics: [], edges: [], path: file.path, symbols: []}] satisfies CodeGraphFileFacts[];
       const receipt = reusableReceipt(snapshot.id);
       let receiptReads = 0;
-      const store = {
-        reusableBaseReceipt: () =>
-          Effect.sync(() => {
-            receiptReads += 1;
-            return receipt;
-          }),
-      } as unknown as CodeGraphStoreShape;
+      const storeContext = yield* Layer.build(
+        Layer.mock(CodeGraphStore, {
+          reusableBaseReceipt: () =>
+            Effect.sync(() => {
+              receiptReads += 1;
+              return receipt;
+            }),
+        }),
+      );
+      const store = Context.get(storeContext, CodeGraphStore);
       const common = {
         building: {...snapshot, id: 'overlay', state: 'building' as const},
         committedBase: {
@@ -45,8 +50,18 @@ describe('incremental reusable-base receipt', () => {
           parsedFiles: 1,
           skipped: 0,
         },
-        languagePacks: {} as CodeGraphLanguagePackRegistryShape,
-        layout: {databasePath: '/tmp/graph.sqlite'} as CodeGraphLayout,
+        languagePacks: BUILTIN_LANGUAGE_PACK_REGISTRY,
+        layout: {
+          checkoutId: 'checkout',
+          databasePath: '/tmp/graph.sqlite',
+          databaseWriteLockPath: '/tmp/graph.sqlite.lock',
+          lockPath: '/tmp/graph.lock',
+          repositoryRoot: '/tmp/repository',
+          staleMarkerPath: '/tmp/graph.stale',
+          vectorRoot: '/tmp/vectors',
+          worktreeId: 'worktree',
+          worktreeLockRoot: '/tmp/worktree-locks',
+        } satisfies CodeGraphLayout,
         store,
         totalFiles: 1,
       };
@@ -99,7 +114,7 @@ function reusableReceipt(snapshotId: string): CodeGraphReusableBaseReceipt {
 
 function readySnapshot(id: string): CodeGraphSnapshot {
   return {
-    commit: 'a'.repeat(40),
+    commit: Effect2.pipe('a', EffectString.repeat(40)),
     dirty: false,
     edgeCount: 0,
     extractorSet: 'extractors',
@@ -114,8 +129,8 @@ function readySnapshot(id: string): CodeGraphSnapshot {
 
 function inventoryFile(): CodeGraphInventoryFile {
   return {
-    blobId: 'b'.repeat(40),
-    contentHash: 'c'.repeat(64),
+    blobId: Effect2.pipe('b', EffectString.repeat(40)),
+    contentHash: Effect2.pipe('c', EffectString.repeat(64)),
     language: 'typescript',
     mode: '100644',
     path: 'src/value.ts',

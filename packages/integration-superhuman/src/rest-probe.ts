@@ -1,27 +1,37 @@
-import {Data, Redacted} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
+import {Redacted} from 'effect';
 import {createSuperhumanRestSession, SuperhumanClientError} from './client.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const SUPERHUMAN_REST_URL = 'https://docs.superhuman.com/apis/v1';
 
 const ORIGIN = 'https://docs.superhuman.com';
 const MAX_REQUESTS = 16;
 
-export type RestProbeErrorCode =
-  | 'missing-input'
-  | 'invalid-selected-url'
-  | 'authentication-rejected'
-  | 'access-rejected'
-  | 'not-found'
-  | 'quota-rejected'
-  | 'transport-rejected'
-  | 'response-too-large'
-  | 'contract-invalid'
-  | 'contract-incomplete'
-  | 'contract-unsupported'
-  | 'scope-mismatch'
-  | 'deadline-exceeded';
+export const RestProbeErrorCodeSchema = Schema.Literals([
+  'missing-input',
+  'invalid-selected-url',
+  'authentication-rejected',
+  'access-rejected',
+  'not-found',
+  'quota-rejected',
+  'transport-rejected',
+  'response-too-large',
+  'contract-invalid',
+  'contract-incomplete',
+  'contract-unsupported',
+  'scope-mismatch',
+  'deadline-exceeded',
+]);
+export type RestProbeErrorCode = typeof RestProbeErrorCodeSchema.Type;
 
-export class RestProbeError extends Data.TaggedError('RestProbeError')<{readonly code: RestProbeErrorCode}> {}
+export class RestProbeError extends Schema.TaggedError<RestProbeError, {readonly brand: unique symbol}>()(
+  'RestProbeError',
+  {code: RestProbeErrorCodeSchema},
+) {}
 
 export interface RestProbeOptions {
   readonly fetch?: (input: URL, init: RequestInit) => Promise<Response>;
@@ -78,11 +88,11 @@ interface ContentItem {
 }
 
 function fail(code: RestProbeErrorCode): never {
-  throw new RestProbeError({code});
+  throw RestProbeError.make({code});
 }
 
 function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 function opaqueId(value: unknown): value is string {
@@ -103,7 +113,7 @@ function selectedUrl(value: string): URL {
     url.port ||
     !/^\/d\/[^/]+\/[^/]+\/?$/.test(url.pathname) ||
     url.search ||
-    (url.hash !== '' && !url.hash.startsWith('#_'))
+    (url.hash !== '' && !Effect.pipe(url.hash, EffectString.startsWith('#_')))
   )
     return fail('invalid-selected-url');
   url.hash = '';
@@ -122,7 +132,7 @@ function responseUrl(path: string): URL {
     url.username ||
     url.password ||
     url.port ||
-    !url.pathname.startsWith('/apis/v1/') ||
+    !Effect.pipe(url.pathname, EffectString.startsWith('/apis/v1/')) ||
     url.hash
   )
     return fail('transport-rejected');
@@ -133,7 +143,8 @@ function pageFrom(value: unknown): Page {
   if (!record(value) || !opaqueId(value.id) || value.type !== 'page') return fail('contract-invalid');
   if (typeof value.isHidden !== 'boolean' || typeof value.isEffectivelyHidden !== 'boolean')
     return fail('contract-invalid');
-  if (!['canvas', 'embed', 'syncPage'].includes(String(value.contentType))) return fail('contract-invalid');
+  if (typeof value.contentType !== 'string' || !['canvas', 'embed', 'syncPage'].includes(value.contentType))
+    return fail('contract-invalid');
   if (value.updatedAt !== undefined && typeof value.updatedAt !== 'string') return fail('contract-invalid');
   if (value.parent !== undefined && (!record(value.parent) || !opaqueId(value.parent.id)))
     return fail('contract-invalid');
@@ -141,7 +152,7 @@ function pageFrom(value: unknown): Page {
     id: value.id,
     hidden: value.isHidden,
     effectivelyHidden: value.isEffectivelyHidden,
-    contentType: value.contentType as string,
+    contentType: value.contentType,
     hasUpdatedAt: value.updatedAt !== undefined,
     hasParent: value.parent !== undefined,
   };
@@ -158,13 +169,13 @@ function contentFrom(value: unknown): ContentItem {
     typeof detail.style !== 'string'
   )
     return fail('contract-invalid');
-  if (detail.lineLevel !== undefined && (!Number.isSafeInteger(detail.lineLevel) || (detail.lineLevel as number) < 0))
+  if (detail.lineLevel !== undefined && (!checkedIsSafeInteger(detail.lineLevel) || detail.lineLevel < 0))
     return fail('contract-invalid');
   return {
     id: value.id,
     style: detail.style,
     content: detail.content,
-    ...(detail.lineLevel === undefined ? {} : {level: detail.lineLevel as number}),
+    ...(detail.lineLevel === undefined ? {} : {level: detail.lineLevel}),
   };
 }
 
@@ -211,14 +222,16 @@ export async function probeSuperhumanRestPage(
     if (page.id !== pageId) return fail('contract-invalid');
     if (page.contentType !== 'canvas') return fail('contract-unsupported');
     const inventory = await list(`${prefix}?limit=2`, pageFrom);
-    const selectedInventory = inventory.items.find(item => item.id === pageId);
+    const selectedInventory = EffectOption.getOrUndefined(
+      EffectArray.findFirst(inventory.items, item => item.id === pageId),
+    );
     if (!selectedInventory) return fail('contract-incomplete');
     const contentPath = `${prefix}/${pageId}/content`;
     const full = await list(`${contentPath}?limit=500&contentFormat=plainText`, contentFrom);
     const small = await list(`${contentPath}?limit=1&contentFormat=plainText`, contentFrom);
     const orderedEqual =
       full.items.length === small.items.length &&
-      full.items.every((item, index) => {
+      EffectArray.every(full.items, (item, index) => {
         const other = small.items[index];
         return (
           other?.id === item.id &&
@@ -244,7 +257,12 @@ export async function probeSuperhumanRestPage(
         pages: inventory.items.length,
         batches: inventory.batches,
         selectedIncluded: true,
-        hiddenPages: inventory.items.filter(item => item.hidden).length,
+        hiddenPages: EffectArrayPipe(inventory.items, __effectArrayValues =>
+          EffectArray.filter(
+            __effectArrayValues,
+            (item, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && item.hidden,
+          ),
+        ).length,
         metadataMatches:
           selectedInventory.hidden === page.hidden && selectedInventory.effectivelyHidden === page.effectivelyHidden,
       },
@@ -254,12 +272,12 @@ export async function probeSuperhumanRestPage(
         fullBatches: full.batches,
         smallBatches: small.batches,
         orderedEqual,
-        itemsWithoutText: full.items.filter(item => item.content === undefined).length,
+        itemsWithoutText: EffectArray.filter(full.items, item => item.content === undefined).length,
       },
     };
   } catch (error) {
-    if (error instanceof SuperhumanClientError)
-      throw new RestProbeError({code: error.code === 'credential-reflected' ? 'contract-invalid' : error.code});
+    if (Schema.is(SuperhumanClientError)(error))
+      throw RestProbeError.make({code: error.code === 'credential-reflected' ? 'contract-invalid' : error.code});
     throw error;
   } finally {
     session.close();

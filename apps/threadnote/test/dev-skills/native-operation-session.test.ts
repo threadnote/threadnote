@@ -8,6 +8,9 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {withNativeWorkflowMemorySession, runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 type Call = (
   input: unknown,
@@ -177,7 +180,11 @@ describe('native child lower-memory sessions', () => {
       const writeChecked: typeof f.store.writeChecked = (location, uri, content, options, check) =>
         f.store.writeChecked(location, uri, content, options, check).pipe(
           Effect.tap(() => {
-            if (!drifted && uri !== f.artifact.uri && content.includes('Postwrite topology fixture')) {
+            if (
+              !drifted &&
+              uri !== f.artifact.uri &&
+              Effect2.pipe(content, EffectString.includes('Postwrite topology fixture'))
+            ) {
               drifted = true;
               return f.fs.rename(git, hidden).pipe(Effect.orDie);
             }
@@ -195,14 +202,32 @@ describe('native child lower-memory sessions', () => {
       expect(drifted).toBe(true);
       const pending = yield* readNativeWorkflowState(f.config, 'native-run');
       expect(
-        pending?.state.operations.find(operation => operation.intent.operationId === 'topology-write')?.status,
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(pending?.state.operations), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(
+                __effectArrayReceiver,
+                operation => operation.intent.operationId === 'topology-write',
+              ),
+            ),
+          ),
+        )?.status,
       ).toBe('prepared');
       expect(yield* f.fs.readFileString(f.statePath())).not.toBe(before);
       yield* f.fs.rename(hidden, git);
       expect(yield* f.call({...f.base('recover'), operationId: 'topology-write'})).toMatchObject({status: 'ok'});
       expect(
-        (yield* readNativeWorkflowState(f.config, 'native-run'))?.state.operations.find(
-          operation => operation.intent.operationId === 'topology-write',
+        EffectOption.getOrUndefined(
+          EffectOption.map(
+            EffectOption.fromNullishOr((yield* readNativeWorkflowState(f.config, 'native-run'))?.state.operations),
+            __effectArrayReceiver =>
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  __effectArrayReceiver,
+                  operation => operation.intent.operationId === 'topology-write',
+                ),
+              ),
+          ),
         )?.status,
       ).toBe('verified');
     }).pipe(run),

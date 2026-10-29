@@ -1,12 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {BUN_STANDALONE_TARGETS} from './release-targets.js';
-
-interface PackageManifest {
-  readonly version?: string;
-}
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const ROOT_URL = new URL('..', import.meta.url);
 
@@ -17,18 +16,29 @@ const compileTargets = Effect.gen(function* () {
   const manifest = yield* fs.readFileString(path.join(root, 'package.json')).pipe(
     Effect.flatMap(content =>
       Effect.try({
-        try: () => JSON.parse(content) as PackageManifest,
+        try: (): unknown => JSON.parse(content),
         catch: cause => ScriptError.make({message: 'Could not parse package.json.', cause}),
       }),
     ),
   );
-  if (!manifest.version) {
+  if (
+    typeof manifest !== 'object' ||
+    manifest === null ||
+    !('version' in manifest) ||
+    typeof manifest.version !== 'string' ||
+    manifest.version.length === 0
+  ) {
     return yield* ScriptError.make({message: 'package.json must declare a version.'});
   }
 
-  const configuredTarget = Bun.env.THREADNOTE_BUILD_TARGET?.trim();
+  const configuredTarget = Effect2.pipe(Bun.env.THREADNOTE_BUILD_TARGET, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   const targets = configuredTarget
-    ? BUN_STANDALONE_TARGETS.filter(target => target === configuredTarget)
+    ? EffectArray.filter(
+        BUN_STANDALONE_TARGETS,
+        (target, index) => index in BUN_STANDALONE_TARGETS && target === configuredTarget,
+      )
     : BUN_STANDALONE_TARGETS;
   if (targets.length === 0) {
     return yield* ScriptError.make({message: `${configuredTarget} is not a supported standalone target.`});
@@ -50,7 +60,10 @@ const compileTargets = Effect.gen(function* () {
             autoloadDotenv: false,
             autoloadPackageJson: false,
             autoloadTsconfig: false,
-            outfile: path.join(targetRoot, target.includes('windows') ? 'threadnote.exe' : 'threadnote'),
+            outfile: path.join(
+              targetRoot,
+              Effect2.pipe(target, EffectString.includes('windows')) ? 'threadnote.exe' : 'threadnote',
+            ),
             target,
           },
           define: {
@@ -68,10 +81,13 @@ const compileTargets = Effect.gen(function* () {
     });
     if (!result.success) {
       return yield* ScriptError.make({
-        message: `${target}: ${result.logs
-          .map(log => log.message)
-          .filter(Boolean)
-          .join('\n')}`,
+        message: `${target}: ${EffectArray.join(
+          EffectArray.filter(
+            EffectArray.map(result.logs, log => log.message),
+            Boolean,
+          ),
+          '\n',
+        )}`,
       });
     }
     yield* Console.log(`Compiled standalone Threadnote for ${target}`);

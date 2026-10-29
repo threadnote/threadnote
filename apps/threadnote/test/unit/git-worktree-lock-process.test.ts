@@ -4,6 +4,8 @@ import {join} from '@threadnote/testing/node-path';
 import {createGitShareWorktreeFixture, git} from '@threadnote/testing/git-share-worktree';
 import {testGitWorktreeLock} from '../helpers/git-worktree-lock.js';
 import {GitCanonicalMemoryStore} from '@threadnote/remote-memory/git/canonical_store';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const path = 'durable/projects/fixture/crash-recovery.md';
 
@@ -33,13 +35,13 @@ describe('Git worktree lock process boundary', () => {
     try {
       const first = await reader.read();
       expect(new TextDecoder().decode(first.value)).toBe('locked');
-      const owner = JSON.parse(await readFile(lockPath, 'utf8')) as {processId: number};
-      expect(owner.processId).toBe(child.pid);
+      const ownerProcessId = readLockOwnerProcessId(await readFile(lockPath, 'utf8'));
+      expect(ownerProcessId).toBe(child.pid);
       child.kill('SIGKILL');
       await child.exited;
       const store = new GitCanonicalMemoryStore({worktree: fixture.worktree, worktreeLock: testGitWorktreeLock});
       const receipt = await store.commit({path, content: 'Recovered after a killed owner.', message: 'crash recovery'});
-      expect((await git(['rev-parse', 'HEAD'], fixture.remote)).trim()).toBe(receipt.gitCommit);
+      expect(Effect.pipe(await git(['rev-parse', 'HEAD'], fixture.remote), EffectString.trim)).toBe(receipt.gitCommit);
       expect(await Bun.file(lockPath).exists()).toBe(false);
     } finally {
       if (child.exitCode === null) child.kill('SIGKILL');
@@ -84,7 +86,7 @@ describe('Git worktree lock process boundary', () => {
         () => store.refresh(),
         () => store.listCanonicalPaths(),
         () => store.commit({path, content: 'Missing lock must fail.', message: 'fixture'}),
-        () => store.read({path, commit: 'f'.repeat(40)}),
+        () => store.read({path, commit: Effect.pipe('f', EffectString.repeat(40))}),
       ])
         await expect(operation()).rejects.toMatchObject({code: 'service_unavailable'});
       expect(await git(['status', '--porcelain'], fixture.worktree)).toBe('');
@@ -93,3 +95,11 @@ describe('Git worktree lock process boundary', () => {
     }
   });
 });
+
+function readLockOwnerProcessId(text: string): number {
+  const value: unknown = JSON.parse(text);
+  if (typeof value !== 'object' || value === null || !('processId' in value) || typeof value.processId !== 'number') {
+    throw new Error('The Git worktree lock did not contain a numeric owner process ID.');
+  }
+  return value.processId;
+}

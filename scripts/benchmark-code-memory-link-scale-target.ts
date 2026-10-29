@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {DateTime, Effect} from 'effect';
@@ -18,6 +19,8 @@ import {runCodeMemoryLinkScaleWorkload} from '@threadnote/threadnote/evaluation/
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_BUDGET = 'apps/threadnote/test/evaluation/baselines/code-memory-link-scale-v1/budget.json';
 const CONFIG_NEUTRAL_GIT_STATUS_ARGUMENTS = [
@@ -100,7 +103,7 @@ const program = Effect.scoped(
     if (!options.developmentSmoke) {
       const provenanceFailures = codeMemoryLinkScaleReleaseClaimFailures(identity, candidateBinding);
       if (provenanceFailures.length > 0) {
-        return yield* ScriptError.make({message: provenanceFailures.join('\n')});
+        return yield* ScriptError.make({message: EffectArray.join(provenanceFailures, '\n')});
       }
     }
     const capture = yield* runCodeMemoryLinkScaleWorkload({
@@ -121,13 +124,14 @@ const program = Effect.scoped(
         yield* atomicWrite(`${options.outputPath}.subject.json`, codeMemoryLinkScaleAttestationSubjectV1(artifact));
     }
     yield* printJson(artifact);
-    const captureFailures = artifact.gate.failures.filter(
+    const captureFailures = EffectArray.filter(
+      artifact.gate.failures,
       failure =>
         failure !== 'artifact is a development smoke, not release-scale evidence' &&
         failure !== 'release-scale evidence requires an independently supplied runner binding',
     );
     if (!options.developmentSmoke && captureFailures.length > 0) {
-      return yield* ScriptError.make({message: captureFailures.join('\n')});
+      return yield* ScriptError.make({message: EffectArray.join(captureFailures, '\n')});
     }
   }),
 );
@@ -219,15 +223,33 @@ export function identityFromEnvironment(input: {
     gitStatusObserved: input.gitStatusObserved,
     github: {
       actions: environment.GITHUB_ACTIONS === 'true',
-      eventName: environment.GITHUB_EVENT_NAME?.trim() || 'local',
-      job: environment.GITHUB_JOB?.trim() || 'local',
-      ref: environment.GITHUB_REF?.trim() || 'local',
-      repository: environment.GITHUB_REPOSITORY?.trim() || 'local',
-      repositoryId: environment.GITHUB_REPOSITORY_ID?.trim() || 'local',
+      eventName:
+        Effect2.pipe(environment.GITHUB_EVENT_NAME, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) || 'local',
+      job:
+        Effect2.pipe(environment.GITHUB_JOB, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) || 'local',
+      ref:
+        Effect2.pipe(environment.GITHUB_REF, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) || 'local',
+      repository:
+        Effect2.pipe(environment.GITHUB_REPOSITORY, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) || 'local',
+      repositoryId:
+        Effect2.pipe(environment.GITHUB_REPOSITORY_ID, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) || 'local',
       runAttempt: environmentInteger(environment.GITHUB_RUN_ATTEMPT, 'GITHUB_RUN_ATTEMPT', smoke),
       runId: environmentInteger(environment.GITHUB_RUN_ID, 'GITHUB_RUN_ID', smoke),
       sha: environmentCommit(environment.GITHUB_SHA, 'GITHUB_SHA', smoke, fallbackCommit),
-      workflowRef: environment.GITHUB_WORKFLOW_REF?.trim() || 'local',
+      workflowRef:
+        Effect2.pipe(environment.GITHUB_WORKFLOW_REF, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) || 'local',
       workflowSha: environmentCommit(environment.GITHUB_WORKFLOW_SHA, 'GITHUB_WORKFLOW_SHA', smoke, fallbackCommit),
     },
     invocationMode: input.invocationMode,
@@ -235,10 +257,22 @@ export function identityFromEnvironment(input: {
     observedCommit: input.observedCommit,
     operatingSystem: input.hardware.operatingSystem,
     packageManager: input.candidateBinding?.packageManager ?? 'bun@local',
-    runnerArchitecture: environment.RUNNER_ARCH?.trim() || input.system.architecture,
-    runnerClass: environment.THREADNOTE_BENCHMARK_RUNNER_CLASS?.trim() || 'local-unpinned',
-    runnerEnvironment: environment.RUNNER_ENVIRONMENT?.trim() || 'local',
-    runnerOperatingSystem: environment.RUNNER_OS?.trim() || input.system.platform,
+    runnerArchitecture:
+      Effect2.pipe(environment.RUNNER_ARCH, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || input.system.architecture,
+    runnerClass:
+      Effect2.pipe(environment.THREADNOTE_BENCHMARK_RUNNER_CLASS, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || 'local-unpinned',
+    runnerEnvironment:
+      Effect2.pipe(environment.RUNNER_ENVIRONMENT, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || 'local',
+    runnerOperatingSystem:
+      Effect2.pipe(environment.RUNNER_OS, effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      ) || input.system.platform,
     runtime: `bun/${input.system.runtimeVersion}`,
     sourceVersion: `threadnote-${input.sourceVersion}`,
   };
@@ -261,7 +295,10 @@ function gitResult(args: readonly string[]): {readonly success: boolean; readonl
   const result = Bun.spawnSync({cmd: ['git', ...args], stderr: 'ignore', stdout: 'pipe'});
   return {
     success: result.exitCode === 0,
-    text: result.exitCode === 0 && result.stdout ? new TextDecoder().decode(result.stdout).trim() : '',
+    text:
+      result.exitCode === 0 && result.stdout
+        ? Effect2.pipe(new TextDecoder().decode(result.stdout), EffectString.trim)
+        : '',
   };
 }
 
@@ -287,6 +324,7 @@ function nonNegativeInteger(value: string | undefined, option: string): number {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   createRecallEvaluationFixtureV2,
@@ -103,10 +104,10 @@ const SCENARIOS: readonly SmokeScenario[] = [
 
 export function createRecallRerankerSmokeDatasetV1(): RecallRerankerDatasetV1 {
   const evaluationFixture = createRecallEvaluationFixtureV2();
-  const groups = SCENARIOS.flatMap(scenario => [answerableGroup(scenario), noAnswerGroup(scenario)]);
+  const groups = EffectArray.flatMap(SCENARIOS, scenario => [answerableGroup(scenario), noAnswerGroup(scenario)]);
   const forbiddenTexts = [
-    ...evaluationFixture.documents.map(document => document.text),
-    ...evaluationFixture.queries.map(query => query.query),
+    ...EffectArray.map(evaluationFixture.documents, document => document.text),
+    ...EffectArray.map(evaluationFixture.queries, query => query.query),
   ];
   return createRecallRerankerDatasetV1(
     {

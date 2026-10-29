@@ -1,4 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from './effect/errors.js';
+import {isJsonObject} from '@threadnote/platform/json';
 import {parseBenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import {RELEASE_EVIDENCE_HARNESS_DELTA_PATHS} from '@threadnote/evidence/external-evidence';
 import {
@@ -8,16 +10,19 @@ import {
   type PerformanceEvidence,
   type RetainedPerformancePayload,
 } from '@threadnote/evidence/performance';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const performanceArtifactRelativePath = 'apps/website/public/performance-evidence.json';
 export const performanceBindingRelativePath = 'apps/website/performance/evidence.binding.json';
 export function performanceArtifactPublicUrl(siteBase: string): string {
-  const segments = siteBase.split('/').filter(Boolean);
+  const segments = EffectArray.filter(Effect.pipe(siteBase, EffectString.split('/')), Boolean);
   if (
-    !siteBase.startsWith('/') ||
-    !siteBase.endsWith('/') ||
-    siteBase.includes('//') ||
-    segments.some(segment => segment === '.' || segment === '..' || !/^[A-Za-z0-9._~-]+$/.test(segment))
+    !Effect.pipe(siteBase, EffectString.startsWith('/')) ||
+    !Effect.pipe(siteBase, EffectString.endsWith('/')) ||
+    Effect.pipe(siteBase, EffectString.includes('//')) ||
+    EffectArray.some(segments, segment => segment === '.' || segment === '..' || !/^[A-Za-z0-9._~-]+$/.test(segment))
   ) {
     throw ScriptError.make({message: 'THREADNOTE_SITE_BASE must be a root-relative directory path ending in /.'});
   }
@@ -60,7 +65,7 @@ export const performanceSiteOnlyGeneratorPaths = [
 export const measuredPerformanceSourcePathspecs = [
   ...performanceSourcePathspecs,
   ':(exclude)package.json',
-  ...performanceSiteOnlyGeneratorPaths.map(path => `:(exclude)${path}`),
+  ...EffectArray.map(performanceSiteOnlyGeneratorPaths, path => `:(exclude)${path}`),
 ] as const;
 
 // `git ls-tree` does not support glob pathspec magic, so enumerate the package tree and
@@ -81,7 +86,7 @@ const runtimePackageSourcePath = /^packages\/[^/]+\/(?:package\.json$|(?:src|ass
 
 const cleanPerformanceSourcePathspecs = [
   ...performanceSourcePathspecs,
-  ...performanceSiteOnlyGeneratorPaths.map(path => `:(exclude)${path}`),
+  ...EffectArray.map(performanceSiteOnlyGeneratorPaths, path => `:(exclude)${path}`),
 ] as const;
 
 export type PerformanceArtifactBinding = Readonly<{
@@ -95,15 +100,17 @@ export type PerformanceArtifactBinding = Readonly<{
 const sha40Pattern = /^[a-f0-9]{40}$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const utcTimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+const allowedHarnessDeltaPaths = new Set<string>(RELEASE_EVIDENCE_HARNESS_DELTA_PATHS);
 
 function exactRecord(value: unknown, path: string, keys: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw ScriptError.make({message: `Performance binding ${path} must be an object.`});
-  }
-  const record = value as Record<string, unknown>;
-  const actualKeys = Object.keys(record).sort();
+  if (!isJsonObject(value)) throw ScriptError.make({message: `Performance binding ${path} must be an object.`});
+  const record = value;
+  const actualKeys = EffectRecord.keys(record).sort();
   const expectedKeys = [...keys].sort();
-  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) {
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    EffectArray.some(actualKeys, (key, index) => key !== expectedKeys[index])
+  ) {
     throw ScriptError.make({message: `Performance binding ${path} has unexpected or missing fields.`});
   }
   return record;
@@ -123,7 +130,7 @@ function matchingString(
   return value;
 }
 
-export function validatePerformanceArtifactBinding(input: unknown): PerformanceArtifactBinding {
+function assertPerformanceArtifactBinding(input: unknown): asserts input is PerformanceArtifactBinding {
   const binding = exactRecord(input, 'root', [
     'schemaVersion',
     'artifactSha256',
@@ -137,7 +144,11 @@ export function validatePerformanceArtifactBinding(input: unknown): PerformanceA
   matchingString(binding, 'generatedAt', 'root', utcTimestampPattern, 'an ISO-8601 UTC timestamp');
   matchingString(binding, 'sourceThreadnoteCommit', 'root', sha40Pattern, 'a lowercase 40-character Git commit');
   matchingString(binding, 'sourceTreeSha256', 'root', sha256Pattern, 'a lowercase SHA-256 digest');
-  return input as PerformanceArtifactBinding;
+}
+
+export function validatePerformanceArtifactBinding(input: unknown): PerformanceArtifactBinding {
+  assertPerformanceArtifactBinding(input);
+  return input;
 }
 
 export function sha256Hex(bytes: Uint8Array | string): string {
@@ -150,13 +161,15 @@ function canonicalJson(value: unknown): string {
   if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
     return JSON.stringify(value);
   }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (!value || typeof value !== 'object')
-    throw ScriptError.make({message: 'Package manifest contains a non-JSON value.'});
-  return `{${Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-    .join(',')}}`;
+  if (EffectArray.isArray(value)) return `[${EffectArray.join(EffectArray.map(value, canonicalJson), ',')}]`;
+  if (!isJsonObject(value)) throw ScriptError.make({message: 'Package manifest contains a non-JSON value.'});
+  return `{${EffectArray.join(
+    EffectArray.map(
+      EffectRecord.toEntries(value).sort(([left], [right]) => Effect.pipe(left, EffectString.localeCompare(right))),
+      ([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`,
+    ),
+    ',',
+  )}}`;
 }
 
 export function canonicalPerformanceRuntimePackageManifest(manifestBytes: Uint8Array | string): string {
@@ -166,14 +179,17 @@ export function canonicalPerformanceRuntimePackageManifest(manifestBytes: Uint8A
   } catch {
     throw ScriptError.make({message: 'Threadnote package manifest is not valid JSON.'});
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isJsonObject(parsed)) {
     throw ScriptError.make({message: 'Threadnote package manifest must be an object.'});
   }
-  const manifest = {...(parsed as Record<string, unknown>)};
+  const manifest = {...parsed};
   const scripts = manifest.scripts;
-  if (scripts && typeof scripts === 'object' && !Array.isArray(scripts)) {
-    manifest.scripts = Object.fromEntries(
-      Object.entries(scripts as Record<string, unknown>).filter(([name]) => !name.startsWith('site:')),
+  if (isJsonObject(scripts)) {
+    manifest.scripts = EffectRecord.fromEntries(
+      EffectArray.filter(
+        EffectRecord.toEntries(scripts),
+        ([name]) => !Effect.pipe(name, EffectString.startsWith('site:')),
+      ),
     );
   }
   return canonicalJson(manifest);
@@ -232,7 +248,7 @@ export function bindRetainedPerformanceArtifact(input: {
 }
 
 function decodeOutput(bytes: Uint8Array | undefined): string {
-  return bytes ? new TextDecoder().decode(bytes).trim() : '';
+  return bytes ? Effect.pipe(new TextDecoder().decode(bytes), EffectString.trim) : '';
 }
 
 function runGit(repositoryRoot: string, arguments_: readonly string[]): ReturnType<typeof Bun.spawnSync> {
@@ -363,12 +379,15 @@ function verifyReleaseEvidenceSource(repositoryRoot: string, payload: RetainedPe
     ...performanceSourcePathspecs,
   ]);
   requireSuccessfulGit(changed, 'inspect the retained performance harness delta');
-  const deltaPaths = decodeOutput(changed.stdout).split('\n').filter(Boolean).sort();
+  const deltaPaths = EffectArray.filter(
+    Effect.pipe(decodeOutput(changed.stdout), EffectString.split('\n')),
+    Boolean,
+  ).sort();
   const recordedDelta = String(payload.metadata.releaseEvidenceHarnessDeltaPaths);
   if (
     JSON.stringify(deltaPaths) !== recordedDelta ||
     deltaPaths.length === 0 ||
-    deltaPaths.some(path => !(RELEASE_EVIDENCE_HARNESS_DELTA_PATHS as readonly string[]).includes(path))
+    EffectArray.some(deltaPaths, path => !allowedHarnessDeltaPaths.has(path))
   ) {
     throw ScriptError.make({message: 'Retained performance harness delta contains unreviewed runtime-source changes.'});
   }
@@ -399,29 +418,31 @@ function performanceSourceTreeEntriesAtCommit(
       message: `Could not inventory measured performance sources: ${decodeOutput(listed.stderr)}.`,
     });
   }
-  const entries = new TextDecoder()
-    .decode(listed.stdout)
-    .split('\0')
-    .filter(Boolean)
-    .map(entry => {
-      const tabIndex = entry.indexOf('\t');
-      if (tabIndex === -1) throw ScriptError.make({message: 'Git returned an invalid performance source entry.'});
-      const metadata = entry.slice(0, tabIndex).split(' ');
-      const mode = metadata[0];
-      const type = metadata[1];
-      const objectId = metadata[2];
-      const path = entry.slice(tabIndex + 1);
-      if (!mode || type !== 'blob' || !objectId || !sha40Pattern.test(objectId) || !path) {
-        throw ScriptError.make({message: 'Git returned an incomplete performance source entry.'});
-      }
-      return {mode, objectId, path};
-    })
-    .filter(
-      entry =>
-        !measuredPerformanceSourceTreeExclusions.has(entry.path) &&
-        (!entry.path.startsWith('packages/') || runtimePackageSourcePath.test(entry.path)),
-    )
-    .sort((left, right) => left.path.localeCompare(right.path));
+  const entries = EffectArray.filter(
+    EffectArray.map(
+      EffectArray.filter(Effect.pipe(new TextDecoder().decode(listed.stdout), EffectString.split('\0')), Boolean),
+      entry => {
+        const tabIndex = Effect.pipe(
+          entry,
+          EffectString.indexOf('\t'),
+          Effect.Option.getOrElse(() => -1),
+        );
+        if (tabIndex === -1) throw ScriptError.make({message: 'Git returned an invalid performance source entry.'});
+        const metadata = Effect.pipe(entry, EffectString.slice(0, tabIndex), EffectString.split(' '));
+        const mode = metadata[0];
+        const type = metadata[1];
+        const objectId = metadata[2];
+        const path = Effect.pipe(entry, EffectString.slice(tabIndex + 1));
+        if (!mode || type !== 'blob' || !objectId || !sha40Pattern.test(objectId) || !path) {
+          throw ScriptError.make({message: 'Git returned an incomplete performance source entry.'});
+        }
+        return {mode, objectId, path};
+      },
+    ),
+    entry =>
+      !measuredPerformanceSourceTreeExclusions.has(entry.path) &&
+      (!Effect.pipe(entry.path, EffectString.startsWith('packages/')) || runtimePackageSourcePath.test(entry.path)),
+  ).sort((left, right) => Effect.pipe(left.path, EffectString.localeCompare(right.path)));
   if (entries.length === 0) throw ScriptError.make({message: 'Performance source inventory is empty.'});
   return entries;
 }
@@ -433,7 +454,12 @@ function hashPerformanceSourceTreeEntries(
   const batch = Bun.spawnSync({
     cmd: ['git', 'cat-file', '--batch'],
     cwd: repositoryRoot,
-    stdin: new TextEncoder().encode(`${entries.map(entry => entry.objectId).join('\n')}\n`),
+    stdin: new TextEncoder().encode(
+      `${EffectArray.join(
+        EffectArray.map(entries, entry => entry.objectId),
+        '\n',
+      )}\n`,
+    ),
     stderr: 'pipe',
     stdout: 'pipe',
   });
@@ -446,7 +472,10 @@ function hashPerformanceSourceTreeEntries(
     const headerEnd = output.indexOf(10, offset);
     if (headerEnd === -1)
       throw ScriptError.make({message: 'Git returned an incomplete performance source blob header.'});
-    const [objectId, type, sizeText] = new TextDecoder().decode(output.subarray(offset, headerEnd)).split(' ');
+    const [objectId, type, sizeText] = Effect.pipe(
+      new TextDecoder().decode(output.subarray(offset, headerEnd)),
+      EffectString.split(' '),
+    );
     const size = Number(sizeText);
     if (objectId !== entry.objectId || type !== 'blob' || !Number.isSafeInteger(size) || size < 0) {
       throw ScriptError.make({message: 'Git returned an invalid performance source blob header.'});

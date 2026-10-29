@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -5,13 +6,18 @@ import {previewCodeGraphInventory, type CodeGraphInventoryPreview} from '@thread
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runCodeGraphInventory = Effect.fn('codeGraph.command.inventory')(function* (
   config: RuntimeConfig,
   options: {readonly cwd?: string; readonly json?: boolean; readonly project?: string},
 ) {
   const system = yield* SystemInfo;
-  const cwd = options.cwd?.trim() || system.currentDirectory();
+  const cwd =
+    Effect2.pipe(options.cwd, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) || system.currentDirectory();
   const route = yield* resolveCodeGraphScopeRoute(config.manifestPath, cwd, options.project);
   const identity = yield* resolveRepositoryIdentity(cwd);
   const preview = yield* previewCodeGraphInventory(identity, {
@@ -21,7 +27,7 @@ export const runCodeGraphInventory = Effect.fn('codeGraph.command.inventory')(fu
 });
 
 function renderCodeGraphInventoryPreview(preview: CodeGraphInventoryPreview): string {
-  const source = `${preview.commit.slice(0, 12)}${preview.dirty ? ' + worktree changes' : ' (clean)'}`;
+  const source = `${Effect2.pipe(preview.commit, EffectString.slice(0, 12))}${preview.dirty ? ' + worktree changes' : ' (clean)'}`;
   const lines = [
     'Code graph inventory admission preview',
     `Source: ${source}`,
@@ -38,12 +44,16 @@ function renderCodeGraphInventoryPreview(preview: CodeGraphInventoryPreview): st
   lines.push('', 'DISPOSITION\tLANGUAGE\tROLE\tCLASSIFIER\tREASON\tFILES\tBYTES');
   for (const group of preview.groups) {
     lines.push(
-      [group.disposition, group.language, group.role, group.classifier, group.reason, group.files, group.bytes].join(
+      EffectArray.join(
+        EffectArray.map(
+          [group.disposition, group.language, group.role, group.classifier, group.reason, group.files, group.bytes],
+          item => (item === null || item === undefined ? '' : String(item)),
+        ),
         '\t',
       ),
     );
   }
-  return `${lines.join('\n')}\n`;
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 function formatCount(count: {readonly bytes: number; readonly files: number}): string {

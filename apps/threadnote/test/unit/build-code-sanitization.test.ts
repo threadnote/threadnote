@@ -13,12 +13,15 @@ describe('build-time JavaScript string serialization', () => {
   it('executes the optional native package fallback with a self-contained error', async () => {
     const source = optionalNativePackageFallbackModule();
     const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
-    const fallback = (await import(moduleUrl)) as {
-      readonly getBinsDir: () => never;
-    };
+    const fallback: unknown = await import(moduleUrl);
+    if (!isNativePackageFallback(fallback)) throw new Error('Optional native package fallback was invalid.');
 
     expect(() => fallback.getBinsDir()).toThrowError(
       new Error('Optional native package is not included in this Threadnote artifact.'),
     );
   });
 });
+
+function isNativePackageFallback(value: unknown): value is {readonly getBinsDir: () => unknown} {
+  return typeof value === 'object' && value !== null && 'getBinsDir' in value && typeof value.getBinsDir === 'function';
+}

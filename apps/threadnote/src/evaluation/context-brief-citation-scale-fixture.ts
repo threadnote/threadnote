@@ -1,4 +1,5 @@
-import {Clock, Data, Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
+import {Clock, Effect, FileSystem, Path} from 'effect';
 import {
   observeCodeGraphAdmissionEnvironment,
   recordCodeGraphSnapshotAdmission,
@@ -33,6 +34,8 @@ import {
   contextBriefCitationScaleFixtureCitationRepositoryOrdinal,
   contextBriefCitationScaleFixturePlan,
 } from './context-brief-citation-scale-contract.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PROJECT = CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.project;
 const EXTRACTOR_SET = extractorSetIdentityFromPackProvenance(
@@ -40,9 +43,10 @@ const EXTRACTOR_SET = extractorSetIdentityFromPackProvenance(
 );
 const FIXED_INSTANT = CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.fixedInstant;
 
-class ContextBriefCitationScaleFixtureError extends Data.TaggedError('ContextBriefCitationScaleFixtureError')<{
-  readonly message: string;
-}> {}
+class ContextBriefCitationScaleFixtureError extends Schema.TaggedError<
+  ContextBriefCitationScaleFixtureError,
+  {readonly brand: unique symbol}
+>()('ContextBriefCitationScaleFixtureError', {message: Schema.String}) {}
 
 export interface ContextBriefCitationScaleRepositoryFixture {
   readonly checkoutId: string;
@@ -101,7 +105,7 @@ export const prepareContextBriefCitationScaleFixture = Effect.fn('evaluation.pre
       options.warmups,
     );
     if (options.runCount !== plan.schedule.runCount) {
-      return yield* new ContextBriefCitationScaleFixtureError({
+      return yield* ContextBriefCitationScaleFixtureError.make({
         message: `Scale fixture run count ${options.runCount} disagrees with its ${plan.schedule.samples}/${plan.schedule.warmups} schedule.`,
       });
     }
@@ -120,22 +124,22 @@ export const prepareContextBriefCitationScaleFixture = Effect.fn('evaluation.pre
         profile,
         plan.schedule.runCount,
       );
-      projects.push(...repositories.map(repositoryProject));
+      projects.push(...EffectArray.map(repositories, repositoryProject));
       if (profile.id === 'local-100k') {
         preparedProfiles.set(profile.id, {profile, repositories});
         continue;
       }
       const workset: ResolvedWorkset = {
         name: profile.id,
-        projects: repositories.map(repositoryProject),
+        projects: EffectArray.map(repositories, repositoryProject),
         unresolvedProjects: [],
       };
-      worksets.push({name: workset.name, projects: workset.projects.map(project => project.name)});
+      worksets.push({name: workset.name, projects: EffectArray.map(workset.projects, project => project.name)});
       preparedProfiles.set(profile.id, {profile, repositories, workset});
     }
     const query = yield* CodeGraphQueryService;
     yield* Effect.forEach(
-      [...preparedProfiles.values()].flatMap(profile => profile.repositories),
+      EffectArray.flatMap([...preparedProfiles.values()], profile => profile.repositories),
       repository =>
         query
           .statusForPublishedIdentity(
@@ -153,13 +157,13 @@ export const prepareContextBriefCitationScaleFixture = Effect.fn('evaluation.pre
               !status.stale && status.freshness === 'current' && status.readySnapshot?.id === repository.snapshotId
                 ? Effect.void
                 : Effect.fail(
-                    new ContextBriefCitationScaleFixtureError({
+                    ContextBriefCitationScaleFixtureError.make({
                       message: `Prebuilt scale graph is not current: ${JSON.stringify({
                         actualSnapshot: status.readySnapshot?.id,
                         expectedSnapshot: repository.snapshotId,
                         extractorSet: status.readySnapshot?.extractorSet,
                         freshness: status.freshness,
-                        languagePacks: status.languagePacks.map(pack => pack.id),
+                        languagePacks: EffectArray.map(status.languagePacks, pack => pack.id),
                         repository: repository.name,
                         stale: status.stale,
                       })}`,
@@ -182,7 +186,7 @@ export const prepareContextBriefCitationScaleFixture = Effect.fn('evaluation.pre
       const prepared = preparedProfiles.get(profileId)!;
       const staged = yield* stageCodeGraphWorksetCatalogGeneration(home, {
         manifestDigest: codeGraphWorksetManifestDigest(prepared.workset!),
-        members: prepared.repositories.map((repository, ordinal) => ({
+        members: EffectArray.map(prepared.repositories, (repository, ordinal) => ({
           projection: createCodeGraphWorksetRoutingProjection({
             checkoutId: repository.checkoutId,
             commitId: repository.status.identity.headCommit,
@@ -205,19 +209,19 @@ export const prepareContextBriefCitationScaleFixture = Effect.fn('evaluation.pre
       });
       preparedProfiles.set(profileId, {...prepared, generation: {digest: staged.digest, id: staged.id}});
     }
-    const selectedRecords = plan.selectedProfiles.flatMap(profileId => {
+    const selectedRecords = EffectArray.flatMap(plan.selectedProfiles, profileId => {
       const prepared = preparedProfiles.get(profileId)!;
       return Array.from({length: plan.schedule.runCount}, (_, ordinal) =>
         selectedMemoryRecords(path, home, prepared, ordinal),
       ).flat();
     });
     if (selectedRecords.length !== plan.counts.selectedMemoryCandidates) {
-      return yield* new ContextBriefCitationScaleFixtureError({
+      return yield* ContextBriefCitationScaleFixtureError.make({
         message: `Scale selected-record count ${selectedRecords.length} disagrees with the normalized fixture plan.`,
       });
     }
     if (selectedRecords.length > plan.counts.requestedMemoryCandidates) {
-      return yield* new ContextBriefCitationScaleFixtureError({
+      return yield* ContextBriefCitationScaleFixtureError.make({
         message: `Scale corpus requires at least ${selectedRecords.length} documents for the selected profiles and samples.`,
       });
     }
@@ -229,7 +233,7 @@ export const prepareContextBriefCitationScaleFixture = Effect.fn('evaluation.pre
     const buildFinished = yield* Clock.currentTimeNanos;
     const status = yield* recallIndexStatus(config);
     if (!status.ready || status.documentCount !== plan.counts.indexedMemoryCandidates) {
-      return yield* new ContextBriefCitationScaleFixtureError({
+      return yield* ContextBriefCitationScaleFixtureError.make({
         message: `Scale recall index contains ${status.documentCount}/${plan.counts.indexedMemoryCandidates} memory candidates.`,
       });
     }
@@ -271,7 +275,7 @@ export function prepareContextBriefCitationScaleRepositories(
       Array.from({length: profile.worksetMembers}, (_, ordinal) => ordinal),
       ordinal =>
         Effect.gen(function* () {
-          const name = `${profile.id}-repo-${String(ordinal).padStart(3, '0')}`;
+          const name = `${profile.id}-repo-${Effect2.pipe(String(ordinal), EffectString.padStart(3, '0'))}`;
           const repositoryRoot = path.join(root, 'repositories', name);
           const sourcePaths = repositorySourcePaths(profile, ordinal, runCount);
           yield* fs.makeDirectory(repositoryRoot, {recursive: true});
@@ -311,10 +315,10 @@ export function prepareContextBriefCitationScaleRepositories(
             },
           );
           const identity = yield* resolveRepositoryIdentity(repositoryRoot);
-          const snapshotId = `cgsn_${sha256HexSync(`scale-snapshot\0${name}`).slice(0, 40)}`;
+          const snapshotId = `cgsn_${Effect2.pipe(sha256HexSync(`scale-snapshot\0${name}`), EffectString.slice(0, 40))}`;
           const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
           const databasePath = layout.databasePath;
-          const files = sourcePaths.map(codeGraphInventoryFile);
+          const files = EffectArray.map(sourcePaths, codeGraphInventoryFile);
           const snapshot = {
             commit: identity.headCommit,
             completedAt: FIXED_INSTANT,
@@ -322,7 +326,7 @@ export function prepareContextBriefCitationScaleRepositories(
             edgeCount: 0,
             extractorSet: EXTRACTOR_SET,
             fileCount: files.length,
-            graphContentId: `cgc_${sha256HexSync(`scale-graph-content\0${name}`).slice(0, 40)}`,
+            graphContentId: `cgc_${Effect2.pipe(sha256HexSync(`scale-graph-content\0${name}`), EffectString.slice(0, 40))}`,
             id: snapshotId,
             repositoryId: identity.repositoryId,
             state: 'ready',
@@ -333,7 +337,7 @@ export function prepareContextBriefCitationScaleRepositories(
           yield* store.activate(databasePath, identity, snapshot, files, [], [], []);
           yield* store.promote(databasePath, identity, snapshot.id);
           if ((yield* observeCodeGraphAdmissionEnvironment(identity)) !== admissionEnvironment) {
-            return yield* new ContextBriefCitationScaleFixtureError({
+            return yield* ContextBriefCitationScaleFixtureError.make({
               message: `Prebuilt scale graph admission policy changed during publication: ${name}.`,
             });
           }
@@ -366,7 +370,9 @@ function profileFromPlan(
   budget: ContextBriefCitationScaleBudgetV1,
   plan: ContextBriefCitationScaleFixturePlanProfileV2,
 ): ContextBriefCitationScaleProfileV1 {
-  const profile = budget.profiles.find(candidate => candidate.id === plan.id);
+  const profile = EffectOption.getOrUndefined(
+    EffectArray.findFirst(budget.profiles, candidate => candidate.id === plan.id),
+  );
   if (!profile) throw new Error(`Missing scale profile ${plan.id}.`);
   if (
     profile.citationCount !== plan.citationCount ||
@@ -386,15 +392,19 @@ function repositorySourcePaths(
 ): readonly string[] {
   if (repositoryOrdinal >= profile.citedRepositories) return [];
   return Array.from({length: runCount}, (_, runOrdinal) =>
-    Array.from({length: profile.citationCount}, (_, citationOrdinal) => citationOrdinal)
-      .filter(citationOrdinal => citationOrdinal % profile.citedRepositories === repositoryOrdinal)
-      .map(citationOrdinal => citationRepositoryPath(profile.id, runToken(profile.id, runOrdinal), citationOrdinal)),
+    EffectArray.map(
+      EffectArray.filter(
+        Array.from({length: profile.citationCount}, (_, citationOrdinal) => citationOrdinal),
+        citationOrdinal => citationOrdinal % profile.citedRepositories === repositoryOrdinal,
+      ),
+      citationOrdinal => citationRepositoryPath(profile.id, runToken(profile.id, runOrdinal), citationOrdinal),
+    ),
   ).flat();
 }
 
 function codeGraphInventoryFile(repositoryPath: string): CodeGraphInventoryFile {
   return {
-    blobId: sha256HexSync(`scale-blob\0${repositoryPath}`).slice(0, 40),
+    blobId: Effect2.pipe(sha256HexSync(`scale-blob\0${repositoryPath}`), EffectString.slice(0, 40)),
     contentHash: sha256HexSync(repositoryPath),
     language: 'typescript',
     mode: '100644',
@@ -445,27 +455,39 @@ function selectedMemoryRecords(
         version: 1,
       });
     });
-    const topic = [
-      prepared.profile.id,
-      token,
-      String(memoryOrdinal).padStart(
-        CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.selectedMemory.memoryOrdinalWidth,
-        '0',
-      ),
-    ].join(CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.selectedMemory.topicSeparator);
-    const content = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      `project: ${project}`,
-      `topic: ${topic}`,
-      'source_agent_client: benchmark',
-      `timestamp: ${FIXED_INSTANT}`,
-      `schema_version: ${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.selectedMemory.schemaVersion}`,
-      ...formatMemoryCodeCitationLines(citations),
-      '',
-      CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.selectedMemory.body.replace('<run-token>', token),
-    ].join('\n');
+    const topic = EffectArray.join(
+      [
+        prepared.profile.id,
+        token,
+        Effect2.pipe(
+          String(memoryOrdinal),
+          EffectString.padStart(
+            CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.selectedMemory.memoryOrdinalWidth,
+            '0',
+          ),
+        ),
+      ],
+      CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.selectedMemory.topicSeparator,
+    );
+    const content = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        `project: ${project}`,
+        `topic: ${topic}`,
+        'source_agent_client: benchmark',
+        `timestamp: ${FIXED_INSTANT}`,
+        `schema_version: ${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.selectedMemory.schemaVersion}`,
+        ...formatMemoryCodeCitationLines(citations),
+        '',
+        Effect2.pipe(
+          CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.selectedMemory.body,
+          EffectString.replace('<run-token>', token),
+        ),
+      ],
+      '\n',
+    );
     return {
       content,
       path: path.join(
@@ -486,7 +508,7 @@ function writeRecords(
     records,
     record =>
       fs
-        .makeDirectory(record.path.replace(/[\\/][^\\/]+$/u, ''), {recursive: true})
+        .makeDirectory(Effect2.pipe(record.path, EffectString.replace(/[\\/][^\\/]+$/u, '')), {recursive: true})
         .pipe(Effect.andThen(fs.writeFileString(record.path, record.content))),
     {concurrency: 32, discard: true},
   );
@@ -516,13 +538,14 @@ function writeLegacyNoise(fs: FileSystem.FileSystem, path: Path.Path, home: stri
       yield* Effect.forEach(
         Array.from({length: end - offset}, (_, index) => offset + index),
         index => {
-          const shard = String(
-            Math.floor(index / CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.shardSize),
-          ).padStart(CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.shardWidth, '0');
+          const shard = Effect2.pipe(
+            String(Math.floor(index / CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.shardSize)),
+            EffectString.padStart(CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.shardWidth, '0'),
+          );
           const file = path.join(
             root,
             shard,
-            `${String(index).padStart(CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.ordinalWidth, '0')}${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.extension}`,
+            `${Effect2.pipe(String(index), EffectString.padStart(CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.ordinalWidth, '0'))}${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.extension}`,
           );
           return fs
             .makeDirectory(path.dirname(file), {recursive: true})
@@ -535,18 +558,21 @@ function writeLegacyNoise(fs: FileSystem.FileSystem, path: Path.Path, home: stri
 }
 
 function legacyNoiseContent(): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    `project: ${PROJECT}`,
-    `topic: ${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.topic}`,
-    'source_agent_client: benchmark',
-    `timestamp: ${FIXED_INSTANT}`,
-    `schema_version: ${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.schemaVersion}`,
-    '',
-    CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.body,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      `project: ${PROJECT}`,
+      `topic: ${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.topic}`,
+      'source_agent_client: benchmark',
+      `timestamp: ${FIXED_INSTANT}`,
+      `schema_version: ${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.schemaVersion}`,
+      '',
+      CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.body,
+    ],
+    '\n',
+  );
 }
 
 function contextBriefCitationScaleFixtureHash(
@@ -570,26 +596,28 @@ function contextBriefCitationScaleFixtureHash(
         count: legacyV1MemoryCandidates,
         pathContract: CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.legacyNoise.pathContract,
       },
-      profiles: plan.profiles.map(profilePlan => {
+      profiles: EffectArray.map(plan.profiles, profilePlan => {
         const profile = profileFromPlan(options.budget, profilePlan);
         const prepared = preparedProfiles.get(profile.id)!;
         return {
           id: profile.id,
-          repositories: prepared.repositories.map((repository, ordinal) => ({
+          repositories: EffectArray.map(prepared.repositories, (repository, ordinal) => ({
             commit: repository.status.identity.headCommit,
             graphContentId: repository.status.readySnapshot!.graphContentId,
             name: repository.name,
             repositoryId: repository.repositoryId,
             snapshotId: repository.snapshotId,
-            sourcePathsHash: sha256HexSync(repositorySourcePaths(profile, ordinal, plan.schedule.runCount).join('\0')),
+            sourcePathsHash: sha256HexSync(
+              EffectArray.join(repositorySourcePaths(profile, ordinal, plan.schedule.runCount), '\0'),
+            ),
           })),
         };
       }),
       requestedMemoryCandidates: plan.counts.requestedMemoryCandidates,
       runCount: plan.schedule.runCount,
-      selectedRecords: selectedRecords.map(record => ({
+      selectedRecords: EffectArray.map(selectedRecords, record => ({
         contentHash: sha256HexSync(record.content),
-        path: path.relative(home, record.path).split(path.sep).join('/'),
+        path: EffectArray.join(Effect2.pipe(path.relative(home, record.path), EffectString.split(path.sep)), '/'),
       })),
       selectedProfiles: plan.selectedProfiles,
       version: 2,
@@ -598,11 +626,11 @@ function contextBriefCitationScaleFixtureHash(
 }
 
 function runToken(profile: ContextBriefCitationScaleProfileId, ordinal: number): string {
-  return `tnscale${profile.replaceAll('-', '')}run${String(ordinal).padStart(3, '0')}`;
+  return `tnscale${Effect2.pipe(profile, EffectString.replaceAll('-', ''))}run${Effect2.pipe(String(ordinal), EffectString.padStart(3, '0'))}`;
 }
 
 function citationRepositoryPath(profile: ContextBriefCitationScaleProfileId, token: string, index: number): string {
-  return `${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.repositorySource.directory}/${profile}/${token}/${String(index).padStart(3, '0')}${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.repositorySource.extension}`;
+  return `${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.repositorySource.directory}/${profile}/${token}/${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.repositorySource.extension}`;
 }
 
 export function contextBriefCitationScaleProject(prepared: ContextBriefCitationScalePreparedProfile): string {

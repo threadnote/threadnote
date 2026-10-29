@@ -11,17 +11,19 @@ import {
 } from '@threadnote/threadnote/mcp/server/code_graph/ready_read';
 import type {CodeGraphQueryScope} from '@threadnote/graph/query/scope';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const scope: ResolvedCodeGraphIndexScope = {
   admittedPrefixes: ['apps/a', 'shared/core'],
   controlPaths: ['package.json'],
-  closureDigest: 'a'.repeat(64),
-  definitionDigest: 'b'.repeat(64),
+  closureDigest: Effect.pipe('a', EffectString.repeat(64)),
+  definitionDigest: Effect.pipe('b', EffectString.repeat(64)),
   completeness: 'partial',
   diagnostics: [],
   includedProjectIds: ['a', 'core'],
   rootProjectIds: ['a'],
-  scopeKey: `code-graph-scope:${'c'.repeat(64)}`,
+  scopeKey: `code-graph-scope:${Effect.pipe('c', EffectString.repeat(64))}`,
 };
 const coverage: CodeGraphProjectCoverage = {
   project: 'app-a',
@@ -31,7 +33,7 @@ const coverage: CodeGraphProjectCoverage = {
   dependencyComponents: 1,
   completeness: 'partial',
   negativeProof: 'unavailable',
-  observedWorktreeCommit: 'd'.repeat(40),
+  observedWorktreeCommit: Effect.pipe('d', EffectString.repeat(40)),
   reusedEquivalentSnapshot: false,
 };
 const result: CodeGraphQueryResult = {
@@ -40,8 +42,13 @@ const result: CodeGraphQueryResult = {
   nodes: [],
   freshness: 'current',
   operation: 'path',
-  repository: {displayName: 'fixture', repositoryId: 'e'.repeat(64)},
-  snapshot: {commit: 'd'.repeat(40), dirty: false, id: 'snapshot', worktreeId: 'f'.repeat(64)},
+  repository: {displayName: 'fixture', repositoryId: Effect.pipe('e', EffectString.repeat(64))},
+  snapshot: {
+    commit: Effect.pipe('d', EffectString.repeat(40)),
+    dirty: false,
+    id: 'snapshot',
+    worktreeId: Effect.pipe('f', EffectString.repeat(64)),
+  },
   searchCoverage: {
     status: 'exhaustive',
     limitsReached: [],
@@ -57,7 +64,7 @@ const identity: RepositoryIdentity = {
   checkoutId: 'checkout',
   displayName: 'fixture',
   gitCommonDirectory: '/repo/.git',
-  headCommit: 'f'.repeat(40),
+  headCommit: Effect.pipe('f', EffectString.repeat(40)),
   objectFormat: 'sha1',
   repoRoot: '/repo',
   repositoryId: result.repository.repositoryId,
@@ -177,7 +184,7 @@ describe('project graph retrieval coverage', () => {
           span: {column: 1, endColumn: 2, endLine: 1, line: 1},
         },
       ],
-      snapshot: {...result.snapshot, commit: 'a'.repeat(40)},
+      snapshot: {...result.snapshot, commit: Effect.pipe('a', EffectString.repeat(40))},
       warnings: ['Selector did not resolve.'],
     };
     const presented = presentCodeGraphScopedReadyRead({

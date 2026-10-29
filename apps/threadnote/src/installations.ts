@@ -12,14 +12,17 @@ import {
   type StandaloneActiveRelease as ActiveRelease,
 } from './process/standalone_lease.js';
 import {compareVersions} from './release/version/compare.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
-class InstallationOperationError extends Schema.TaggedError<InstallationOperationError>()(
-  'InstallationOperationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class InstallationOperationError extends Schema.TaggedError<
+  InstallationOperationError,
+  {readonly brand: unique symbol}
+>()('InstallationOperationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const ACTIVE_RELEASE_FILE = 'active-release.json';
 /** Exact installed-pointer metadata input for Manager's local status observer. */
@@ -279,9 +282,12 @@ export const pruneStandaloneReleases = Effect.fn('installations.pruneReleases')(
   const active = currentActive ?? expectedActive;
   const versionsRoot = path.join(root, 'versions');
   if (!(yield* fs.exists(versionsRoot))) return {complete: false, failedRemovals: 0} as const;
-  const releases = (yield* Effect.forEach(yield* fs.readDirectory(versionsRoot), name =>
-    readValidatedRelease(fs, path, path.join(versionsRoot, name), root),
-  )).filter((release): release is ActiveRelease => release !== undefined);
+  const releases = EffectArray.filter(
+    yield* Effect.forEach(yield* fs.readDirectory(versionsRoot), name =>
+      readValidatedRelease(fs, path, path.join(versionsRoot, name), root),
+    ),
+    (release): release is ActiveRelease => release !== undefined,
+  );
   const keep = new Set<string>([active.version]);
   const running = yield* readValidatedRelease(fs, path, path.dirname(system.executablePath), root);
   if (running) keep.add(running.version);
@@ -520,7 +526,12 @@ function releasePromotionJournalPath(path: Path.Path, releaseRoot: string): stri
 
 function isContainedPath(path: Path.Path, root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)) &&
+    !path.isAbsolute(relative)
+  );
 }
 
 function isStandaloneStagingPath(
@@ -530,7 +541,7 @@ function isStandaloneStagingPath(
   candidate: string,
 ): boolean {
   if (!isContainedPath(path, versionsRoot, candidate)) return false;
-  const segments = path.relative(versionsRoot, candidate).split(path.sep);
+  const segments = Effect2.pipe(path.relative(versionsRoot, candidate), EffectString.split(path.sep));
   if (
     segments.length === 2 &&
     segments[1] === 'release' &&
@@ -545,12 +556,12 @@ function isStandaloneStagingPath(
 }
 
 function standaloneStagingCleanupRoot(path: Path.Path, versionsRoot: string, stagedRoot: string): string {
-  const segments = path.relative(versionsRoot, stagedRoot).split(path.sep);
+  const segments = Effect2.pipe(path.relative(versionsRoot, stagedRoot), EffectString.split(path.sep));
   return segments.length === 2 && segments[1] === 'release' ? path.dirname(stagedRoot) : stagedRoot;
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return Effect2.pipe(value, EffectString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 }
 
 const writePrivateJsonAtomically = Effect.fn('installations.writePrivateJsonAtomically')(function* (

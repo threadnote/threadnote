@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 /**
  * Parses Git's stable porcelain-v1 `-z` contract. Rename/copy records use the
  * documented destination-then-source order, while untracked rows remain
@@ -13,12 +15,12 @@ export function parsePorcelainV1Status(output: string): {
   const changed = new Set<string>();
   const deleted = new Set<string>();
   const untracked = new Set<string>();
-  const fields = output.split('\0');
+  const fields = Effect.pipe(output, EffectString.split('\0'));
   for (let index = 0; index < fields.length;) {
     const record = fields[index++];
     if (!record || record.length < 4 || record[2] !== ' ') continue;
-    const status = record.slice(0, 2);
-    const path = normalizeRepositoryPath(record.slice(3));
+    const status = Effect.pipe(record, EffectString.slice(0, 2));
+    const path = normalizeRepositoryPath(Effect.pipe(record, EffectString.slice(3)));
     if (!path) continue;
     if (status === '??') {
       added.add(path);
@@ -26,8 +28,8 @@ export function parsePorcelainV1Status(output: string): {
       untracked.add(path);
       continue;
     }
-    const rename = status.includes('R');
-    const copy = status.includes('C');
+    const rename = Effect.pipe(status, EffectString.includes('R'));
+    const copy = Effect.pipe(status, EffectString.includes('C'));
     if (rename || copy) {
       const source = normalizeRepositoryPath(fields[index++] ?? '');
       if (rename && source) deleted.add(source);
@@ -60,28 +62,28 @@ export function parseNameStatus(output: string): {
   const added = new Set<string>();
   const changed = new Set<string>();
   const deleted = new Set<string>();
-  const fields = output.split('\0');
+  const fields = Effect.pipe(output, EffectString.split('\0'));
   for (let index = 0; index < fields.length;) {
     const status = fields[index++];
     if (!status) continue;
     const first = normalizeRepositoryPath(fields[index++] ?? '');
-    if (status.startsWith('R') || status.startsWith('C')) {
+    if (Effect.pipe(status, EffectString.startsWith('R')) || Effect.pipe(status, EffectString.startsWith('C'))) {
       const second = normalizeRepositoryPath(fields[index++] ?? '');
-      if (status.startsWith('R') && first) deleted.add(first);
+      if (Effect.pipe(status, EffectString.startsWith('R')) && first) deleted.add(first);
       if (second) {
         added.add(second);
         changed.add(second);
       }
-    } else if (status.startsWith('D')) {
+    } else if (Effect.pipe(status, EffectString.startsWith('D'))) {
       if (first) deleted.add(first);
     } else if (first) {
       changed.add(first);
-      if (status.startsWith('A')) added.add(first);
+      if (Effect.pipe(status, EffectString.startsWith('A'))) added.add(first);
     }
   }
   return {added, changed, deleted};
 }
 
 function normalizeRepositoryPath(value: string): string {
-  return value.replace(/^\.\/+/, '');
+  return Effect.pipe(value, EffectString.replace(/^\.\/+/, ''));
 }

@@ -1,6 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {reviewedSupportSharingBlocker} from '../reviewed-support.js';
 import {MEMORY_CODE_CITATION_HEADER} from './citation.js';
 import {parseMemoryDocument, type MemoryMetadata} from '../document.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export type MemoryCodeCitationSharingBlocker =
   | 'dirty-source'
@@ -41,8 +45,24 @@ export function memoryCodeCitationSharingBlocker(
   )
     return 'private-obsidian-evidence';
   if ((metadata.citationErrors?.length ?? 0) > 0) return 'malformed-citation';
-  if (metadata.codeCitations?.some(citation => citation.sourceDirty)) return 'dirty-source';
-  if (metadata.codeCitations?.some(citation => citation.repositoryIdentityKind !== 'remote')) {
+  if (
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(metadata.codeCitations), __effectArrayReceiver =>
+        EffectArray.some(
+          __effectArrayReceiver,
+          __effectArrayValue => !!(citation => citation.sourceDirty)(__effectArrayValue),
+        ),
+      ),
+    )
+  )
+    return 'dirty-source';
+  if (
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(metadata.codeCitations), __effectArrayReceiver =>
+        EffectArray.some(__effectArrayReceiver, citation => citation.repositoryIdentityKind !== 'remote'),
+      ),
+    )
+  ) {
     return 'local-repository-identity';
   }
   return undefined;
@@ -142,13 +162,21 @@ function inspectEvidenceHeaderShape(
   readonly hasCitationShape: boolean;
   readonly hasNonCanonical: boolean;
 } {
-  const canonical = content.trim().replace(/\r\n?/gu, '\n');
-  const separatorIndex = canonical.indexOf('\n\n');
-  const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
-  const lines = header.split('\n').filter(line => new RegExp(`^\\s*${name}\\s*:`, 'iu').test(line));
+  const canonical = Effect.pipe(content, EffectString.trim, EffectString.replace(/\r\n?/gu, '\n'));
+  const separatorIndex = Effect.pipe(
+    canonical,
+    EffectString.indexOf('\n\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const header = separatorIndex === -1 ? canonical : Effect.pipe(canonical, EffectString.slice(0, separatorIndex));
+  const lines = EffectArray.filter(
+    Effect.pipe(header, EffectString.split('\n')),
+    __effectArrayValue2 => !!(line => new RegExp(`^\\s*${name}\\s*:`, 'iu').test(line))(__effectArrayValue2),
+  );
   return {
     hasCitationShape: lines.length > 0,
-    hasNonCanonical: lines.length > 1 || lines.some(line => !line.startsWith(`${name}: `)),
+    hasNonCanonical:
+      lines.length > 1 || EffectArray.some(lines, line => !Effect.pipe(line, EffectString.startsWith(`${name}: `))),
   };
 }
 
@@ -156,16 +184,20 @@ function inspectCodeCitationHeaderShape(content: string): {
   readonly hasCitationShape: boolean;
   readonly hasNonCanonical: boolean;
 } {
-  const canonical = content.trim().replace(/\r\n?/gu, '\n');
-  const separatorIndex = canonical.indexOf('\n\n');
-  const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
+  const canonical = Effect.pipe(content, EffectString.trim, EffectString.replace(/\r\n?/gu, '\n'));
+  const separatorIndex = Effect.pipe(
+    canonical,
+    EffectString.indexOf('\n\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const header = separatorIndex === -1 ? canonical : Effect.pipe(canonical, EffectString.slice(0, separatorIndex));
   const prefix = `${MEMORY_CODE_CITATION_HEADER}:`;
   let hasCitationShape = false;
   let hasNonCanonical = false;
-  for (const line of header.split('\n')) {
+  for (const line of Effect.pipe(header, EffectString.split('\n'))) {
     if (!/^\s*code_citation\s*:/u.test(line)) continue;
     hasCitationShape = true;
-    if (!line.startsWith(`${prefix} `)) hasNonCanonical = true;
+    if (!Effect.pipe(line, EffectString.startsWith(`${prefix} `))) hasNonCanonical = true;
   }
   return {hasCitationShape, hasNonCanonical};
 }

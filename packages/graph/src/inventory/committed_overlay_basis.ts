@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {CODE_GRAPH_INVENTORY_ADMISSION_POLICY_VERSION, codeGraphInventoryExclusionReason} from './policy.js';
 import type {RepositoryIdentity} from '../types.js';
 import type {GitTreeEntry, PolicyExclusionEntry} from '../inventory.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface CommittedOverlayBasis {
   readonly committedTreeEntries: ReadonlyMap<string, GitTreeEntry>;
@@ -39,9 +42,11 @@ export function committedOverlayBasis<E, R>(
           })).stdout,
         );
     const committedPolicyExclusions = policyExclusionsForEntries(allTreeEntries);
-    const roots = yield* discoverRoots(allTreeEntries.filter(entry => !committedPolicyExclusions.has(entry.path)));
+    const roots = yield* discoverRoots(
+      EffectArray.filter(allTreeEntries, entry => !committedPolicyExclusions.has(entry.path)),
+    );
     const basis = {
-      committedTreeEntries: new Map(allTreeEntries.map(entry => [entry.path, entry])),
+      committedTreeEntries: new Map(EffectArray.map(allTreeEntries, entry => [entry.path, entry])),
       committedPolicyExclusions,
       projectRoots: roots.projectRoots,
       sourceRoots: roots.sourceRoots,
@@ -72,13 +77,18 @@ function retainable(
 
 export function parseGitTree(output: string): readonly GitTreeEntry[] {
   const entries: GitTreeEntry[] = [];
-  for (const record of output.split('\0')) {
+  for (const record of Effect2.pipe(output, EffectString.split('\0'))) {
     if (!record) continue;
     const match = /^([0-7]{6}) (blob|commit) ([0-9a-f]+) +(-|\d+)\t([\s\S]+)$/.exec(record);
     if (!match || match[2] !== 'blob' || match[1] === '120000' || match[4] === '-') continue;
     const size = Number(match[4]);
     if (!Number.isSafeInteger(size) || size < 0) continue;
-    entries.push({blobId: match[3], mode: match[1], path: match[5].replace(/^\.\/+/, ''), size});
+    entries.push({
+      blobId: match[3],
+      mode: match[1],
+      path: Effect2.pipe(match[5], EffectString.replace(/^\.\/+/, '')),
+      size,
+    });
   }
   return entries;
 }

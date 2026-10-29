@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import {ByteSize, Effect, FileSystem, Path, Result} from 'effect';
@@ -21,6 +22,9 @@ import {
 } from '@threadnote/threadnote/memory/maintenance/records';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('context health aggregate runtime', () => {
   effectIt.effect('selects every configured team deterministically and excludes local shared copies', () =>
@@ -31,7 +35,7 @@ describe('context health aggregate runtime', () => {
         yield* writeLocalSharedCopy(fixture, 'platform', 'duplicate', 'Agents must retain deterministic evidence.');
         yield* writeTeamMemory(fixture, 'platform', 'platform', 'Platforms must retain deterministic evidence.');
         yield* writeTeamMemory(fixture, 'runtime', 'runtime', 'Runtimes must retain deterministic evidence.');
-        for (const worktree of Object.values(fixture.worktrees)) {
+        for (const worktree of EffectRecord.values(fixture.worktrees)) {
           const other = fixture.path.join(worktree, 'durable', 'projects', 'other-project');
           yield* fixture.fs.makeDirectory(other, {recursive: true});
           yield* fixture.fs.writeFileString(fixture.path.join(other, 'malformed.md'), 'not a memory');
@@ -62,7 +66,7 @@ describe('context health aggregate runtime', () => {
           status: 'clean',
           unknownSources: 0,
         });
-        expect(aggregate.sources.map(source => source.sourceKey)).toEqual([
+        expect(EffectArray.map(aggregate.sources, source => source.sourceKey)).toEqual([
           'personal',
           'team:platform',
           'team:runtime',
@@ -88,7 +92,10 @@ describe('context health aggregate runtime', () => {
         const legacyRecordBytes = 4_160_056;
         const ordinaryRecordBytes = Math.floor((totalBytes - legacyRecordBytes) / (fileCount - 1));
         const largerOrdinaryRecordCount = totalBytes - legacyRecordBytes - ordinaryRecordBytes * (fileCount - 1);
-        const topics = Array.from({length: fileCount - 1}, (_, index) => `scale-${String(index).padStart(4, '0')}`);
+        const topics = Array.from(
+          {length: fileCount - 1},
+          (_, index) => `scale-${Effect2.pipe(String(index), EffectString.padStart(4, '0'))}`,
+        );
         const handoffDirectory = personalProjectDirectory(fixture, 'handoff', 'threadnote');
         const archivedHandoffDirectory = personalProjectDirectory(fixture, 'handoff', 'threadnote', 'archived');
         yield* Effect.forEach(
@@ -112,7 +119,7 @@ describe('context health aggregate runtime', () => {
         );
         const snapshot = yield* readPersonalProjectMemoryRecords(fixture.config, 'threadnote');
         expect(snapshot).toHaveLength(fileCount);
-        expect(snapshot.some(record => record.metadata.topic === 'legacy-scale')).toBe(true);
+        expect(EffectArray.some(snapshot, record => record.metadata.topic === 'legacy-scale')).toBe(true);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -129,7 +136,8 @@ describe('context health aggregate runtime', () => {
         const recordingFileSystem = FileSystem.FileSystem.of({
           ...fixture.fs,
           open: (file, options) => {
-            if (hiddenNames.some(name => file.endsWith(`/${name}`))) hiddenFileOpens += 1;
+            if (EffectArray.some(hiddenNames, name => Effect2.pipe(file, EffectString.endsWith(`/${name}`))))
+              hiddenFileOpens += 1;
             return fixture.fs.open(file, options);
           },
           readDirectory: candidate =>
@@ -137,7 +145,8 @@ describe('context health aggregate runtime', () => {
               ? Effect.succeed([...hiddenNames, 'visible.md'])
               : fixture.fs.readDirectory(candidate),
           stat: file => {
-            if (hiddenNames.some(name => file.endsWith(`/${name}`))) hiddenFileStats += 1;
+            if (EffectArray.some(hiddenNames, name => Effect2.pipe(file, EffectString.endsWith(`/${name}`))))
+              hiddenFileStats += 1;
             return fixture.fs.stat(file);
           },
         });
@@ -146,7 +155,7 @@ describe('context health aggregate runtime', () => {
           Effect.provideService(FileSystem.FileSystem, recordingFileSystem),
         );
 
-        expect(records.map(record => record.metadata.topic)).toEqual(['visible']);
+        expect(EffectArray.map(records, record => record.metadata.topic)).toEqual(['visible']);
         expect(hiddenFileOpens).toBe(0);
         expect(hiddenFileStats).toBe(0);
       }),
@@ -165,12 +174,10 @@ describe('context health aggregate runtime', () => {
         Effect.gen(function* () {
           const fixture = yield* makeFixture([]);
           const directory = personalProjectDirectory(fixture, 'durable', 'threadnote');
-          const expected = ids
-            .map(id => ({
-              body: `Synthetic record ${id}.`,
-              topic: `interleaving-${id}`,
-            }))
-            .sort((left, right) => left.topic.localeCompare(right.topic));
+          const expected = EffectArray.map(ids, id => ({
+            body: `Synthetic record ${id}.`,
+            topic: `interleaving-${id}`,
+          })).sort((left, right) => Effect2.pipe(left.topic, EffectString.localeCompare(right.topic)));
           for (const record of expected) {
             yield* writePersonalMemory(fixture, record.topic, record.body);
           }
@@ -182,14 +189,16 @@ describe('context health aggregate runtime', () => {
                 .pipe(Effect.map(entries => (target === directory && reverse ? [...entries].reverse() : entries))),
             open: (file, options) =>
               Effect.gen(function* () {
-                if (file.endsWith(`${ids[0]}.md`)) yield* Effect.yieldNow;
+                if (Effect2.pipe(file, EffectString.endsWith(`${ids[0]}.md`))) yield* Effect.yieldNow;
                 return yield* fixture.fs.open(file, options);
               }),
           });
           const snapshot = yield* readPersonalProjectMemoryRecords(fixture.config, 'threadnote').pipe(
             Effect.provideService(FileSystem.FileSystem, reorderedFileSystem),
           );
-          expect(snapshot.map(record => ({body: record.body, topic: record.metadata.topic}))).toEqual(expected);
+          expect(EffectArray.map(snapshot, record => ({body: record.body, topic: record.metadata.topic}))).toEqual(
+            expected,
+          );
           for (const record of expected) {
             expect(yield* fixture.fs.readFileString(fixture.path.join(directory, `${record.topic}.md`))).toBe(
               personalMemory(record.topic, record.body),
@@ -214,14 +223,20 @@ describe('context health aggregate runtime', () => {
           fixture,
           'threadnote',
           'legacy-no-visibility.md',
-          personalMemory('legacy-no-visibility', 'Legacy personal evidence.').replace('visibility: personal\n', ''),
+          Effect2.pipe(
+            personalMemory('legacy-no-visibility', 'Legacy personal evidence.'),
+            EffectString.replace('visibility: personal\n', ''),
+          ),
         );
         const handoffDirectory = personalProjectDirectory(fixture, 'handoff', 'threadnote');
         yield* writePersonalRawAt(
           fixture,
           handoffDirectory,
           'current-handoff.md',
-          handoffMemory('current-handoff', 'Current handoff.', 'HANDOFF').replace('visibility: personal\n', ''),
+          Effect2.pipe(
+            handoffMemory('current-handoff', 'Current handoff.', 'HANDOFF'),
+            EffectString.replace('visibility: personal\n', ''),
+          ),
         );
         yield* writePersonalRawAt(
           fixture,
@@ -232,7 +247,7 @@ describe('context health aggregate runtime', () => {
 
         const records = yield* readPersonalProjectMemoryRecords(fixture.config, 'threadnote');
 
-        expect(records.map(record => record.metadata.topic)).toEqual([
+        expect(EffectArray.map(records, record => record.metadata.topic)).toEqual([
           'legacy-no-visibility',
           'subset-authoring/0324',
           'current-handoff',
@@ -255,7 +270,7 @@ describe('context health aggregate runtime', () => {
       Effect.scoped(
         Effect.gen(function* () {
           const fixture = yield* makeFixture([]);
-          const topic = segments.join('/');
+          const topic = EffectArray.join(segments, '/');
           yield* writePersonalRaw(
             fixture,
             'threadnote',
@@ -265,7 +280,7 @@ describe('context health aggregate runtime', () => {
 
           const records = yield* readPersonalProjectMemoryRecords(fixture.config, 'threadnote');
 
-          expect(records.map(record => record.metadata.topic)).toEqual([topic]);
+          expect(EffectArray.map(records, record => record.metadata.topic)).toEqual([topic]);
         }),
       ).pipe(provideTestLayer(ApplicationLayer)),
     {fastCheck: {numRuns: 24}},
@@ -280,10 +295,10 @@ describe('context health aggregate runtime', () => {
             filename: 'subset-authoring-0325.md',
             kind: 'durable' as const,
           },
-          ...(['shared', 'external', 'unknown'] as const).map(visibility => ({
-            content: personalMemory(`visibility-${visibility}`, 'Invalid visibility.').replace(
-              'visibility: personal',
-              `visibility: ${visibility}`,
+          ...EffectArray.map(['shared', 'external', 'unknown'] as const, visibility => ({
+            content: Effect2.pipe(
+              personalMemory(`visibility-${visibility}`, 'Invalid visibility.'),
+              EffectString.replace('visibility: personal', `visibility: ${visibility}`),
             ),
             filename: `visibility-${visibility}.md`,
             kind: 'durable' as const,
@@ -321,7 +336,7 @@ describe('context health aggregate runtime', () => {
         const oversizedFileSystem = FileSystem.FileSystem.of({
           ...fixture.fs,
           open: (file, options) => {
-            if (file.endsWith('.md')) selectedFileOpens += 1;
+            if (Effect2.pipe(file, EffectString.endsWith('.md'))) selectedFileOpens += 1;
             return fixture.fs.open(file, options);
           },
           readDirectory: directory =>
@@ -331,7 +346,7 @@ describe('context health aggregate runtime', () => {
                 ? Effect.succeed(Array.from({length: 4_001}, (_, index) => `handoff-overflow-${index}.md`))
                 : fixture.fs.readDirectory(directory),
           stat: file => {
-            if (file.endsWith('.md')) selectedFileStats += 1;
+            if (Effect2.pipe(file, EffectString.endsWith('.md'))) selectedFileStats += 1;
             return fixture.fs.stat(file);
           },
         });
@@ -368,7 +383,9 @@ describe('context health aggregate runtime', () => {
               .stat(file)
               .pipe(
                 Effect.map(info =>
-                  file.endsWith('/oversized.md') ? {...info, size: ByteSize.bytes(8 * 1_024 * 1_024 + 1)} : info,
+                  Effect2.pipe(file, EffectString.endsWith('/oversized.md'))
+                    ? {...info, size: ByteSize.bytes(8 * 1_024 * 1_024 + 1)}
+                    : info,
                 ),
               ),
         });
@@ -411,7 +428,13 @@ describe('context health aggregate runtime', () => {
           stat: file =>
             fixture.fs.stat(file).pipe(
               Effect.map(info => {
-                const index = Number(file.match(/total-(\d+)\.md$/u)?.[1]);
+                const index = Number(
+                  Effect2.pipe(
+                    file,
+                    EffectString.match(/total-(\d+)\.md$/u),
+                    Effect2.Option.getOrElse(() => null),
+                  )?.[1],
+                );
                 if (index >= 0)
                   return {
                     ...info,
@@ -466,7 +489,7 @@ describe('context health aggregate runtime', () => {
           const oversizedFileSystem = FileSystem.FileSystem.of({
             ...fixture.fs,
             open: (file, options) => {
-              if (file.endsWith('.md')) selectedFileOpens += 1;
+              if (Effect2.pipe(file, EffectString.endsWith('.md'))) selectedFileOpens += 1;
               return fixture.fs.open(file, options);
             },
             readDirectory: directory =>
@@ -480,7 +503,7 @@ describe('context health aggregate runtime', () => {
                     )
                   : fixture.fs.readDirectory(directory),
             stat: file => {
-              if (file.endsWith('.md')) selectedFileStats += 1;
+              if (Effect2.pipe(file, EffectString.endsWith('.md'))) selectedFileStats += 1;
               return fixture.fs.stat(file);
             },
           });
@@ -536,9 +559,9 @@ describe('context health aggregate runtime', () => {
         const citedPath = yield* teamMemoryPath(fixture, 'platform', 'cited');
         yield* fixture.fs.writeFileString(
           citedPath,
-          memory('cited', 'Cited records must retain repository proof.').replace(
-            '\n\n',
-            '\ncode_citation: {not-json}\n\n',
+          Effect2.pipe(
+            memory('cited', 'Cited records must retain repository proof.'),
+            EffectString.replace('\n\n', '\ncode_citation: {not-json}\n\n'),
           ),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
@@ -572,9 +595,9 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          memory('broken', 'Active paths must contain active records only.').replace(
-            'status: active',
-            'status: archived',
+          Effect2.pipe(
+            memory('broken', 'Active paths must contain active records only.'),
+            EffectString.replace('status: active', 'status: archived'),
           ),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
@@ -589,7 +612,10 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          memory('broken', 'Durable team records require the canonical MEMORY header.').replace(/^MEMORY/u, 'HANDOFF'),
+          Effect2.pipe(
+            memory('broken', 'Durable team records require the canonical MEMORY header.'),
+            EffectString.replace(/^MEMORY/u, 'HANDOFF'),
+          ),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
         yield* git(fixture.worktrees.platform, ['commit', '--quiet', '--message', 'mismatched header']);
@@ -617,9 +643,9 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          memory('broken', 'Team snapshots reject external visibility.').replace(
-            'visibility: shared',
-            'visibility: external',
+          Effect2.pipe(
+            memory('broken', 'Team snapshots reject external visibility.'),
+            EffectString.replace('visibility: shared', 'visibility: external'),
           ),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
@@ -634,9 +660,9 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          memory('broken', 'Team snapshots reject unknown visibility.').replace(
-            'visibility: shared',
-            'visibility: unknown',
+          Effect2.pipe(
+            memory('broken', 'Team snapshots reject unknown visibility.'),
+            EffectString.replace('visibility: shared', 'visibility: unknown'),
           ),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
@@ -651,9 +677,11 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          memory('broken', 'Team snapshots must retain evidence.\nvisibility: external')
-            .replace('\nvisibility: shared', '')
-            .replaceAll('\n', '\r\n'),
+          Effect2.pipe(
+            memory('broken', 'Team snapshots must retain evidence.\nvisibility: external'),
+            EffectString.replace('\nvisibility: shared', ''),
+            EffectString.replaceAll('\n', '\r\n'),
+          ),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
         yield* git(fixture.worktrees.platform, ['commit', '--quiet', '--message', 'body visibility']);
@@ -667,9 +695,11 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          memory('broken', 'Team snapshots reject CR-only external visibility.')
-            .replace('visibility: shared', 'visibility: external')
-            .replaceAll('\n', '\r'),
+          Effect2.pipe(
+            memory('broken', 'Team snapshots reject CR-only external visibility.'),
+            EffectString.replace('visibility: shared', 'visibility: external'),
+            EffectString.replaceAll('\n', '\r'),
+          ),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
         yield* git(fixture.worktrees.platform, ['commit', '--quiet', '--message', 'cr-only visibility']);
@@ -683,7 +713,7 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          memory('broken', `Evidence must remain bounded.\n${'x'.repeat(300_000)}`),
+          memory('broken', `Evidence must remain bounded.\n${Effect2.pipe('x', EffectString.repeat(300_000))}`),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
         yield* git(fixture.worktrees.platform, ['commit', '--quiet', '--message', 'oversized record']);
@@ -706,22 +736,25 @@ describe('context health aggregate runtime', () => {
         const archived = yield* teamMemoryPath(fixture, 'platform', 'archived');
         yield* fixture.fs.writeFileString(
           active,
-          memory('active', 'Active records must retain archived team knowledge.').replace(
-            'visibility: shared',
-            'relation: depends_on threadnote://memory/tn_archived\n',
+          Effect2.pipe(
+            memory('active', 'Active records must retain archived team knowledge.'),
+            EffectString.replace('visibility: shared', 'relation: depends_on threadnote://memory/tn_archived\n'),
           ),
         );
         yield* fixture.fs.writeFileString(
           archived,
-          memory('archived', 'Archived team knowledge remains relation evidence.').replace(
-            'status: active',
-            'status: archived',
+          Effect2.pipe(
+            memory('archived', 'Archived team knowledge remains relation evidence.'),
+            EffectString.replace('status: active', 'status: archived'),
           ),
         );
         const legacyVisibility = yield* teamMemoryPath(fixture, 'platform', 'legacy-visibility');
         yield* fixture.fs.writeFileString(
           legacyVisibility,
-          memory('legacy-visibility', 'Legacy team records must retain evidence.').replace('\nvisibility: shared', ''),
+          Effect2.pipe(
+            memory('legacy-visibility', 'Legacy team records must retain evidence.'),
+            EffectString.replace('\nvisibility: shared', ''),
+          ),
         );
         const updatedTopic = 'provider-neutral-credentials';
         const stableTopicPath = yield* teamMemoryPath(fixture, 'platform', 'legacy-credentials');
@@ -757,13 +790,13 @@ describe('context health aggregate runtime', () => {
       Effect.scoped(
         Effect.gen(function* () {
           const fixture = yield* makeFixture(['platform']);
-          const topic = segments.join('/');
+          const topic = EffectArray.join(segments, '/');
           const target = yield* teamMemoryPath(fixture, 'platform', 'stable-shared-location');
           yield* fixture.fs.writeFileString(
             target,
-            memory(topic, 'Replacements must retain their stable path.').replace(
-              /^memory_id: .*$/mu,
-              'memory_id: tn_stable_shared_location',
+            Effect2.pipe(
+              memory(topic, 'Replacements must retain their stable path.'),
+              EffectString.replace(/^memory_id: .*$/mu, 'memory_id: tn_stable_shared_location'),
             ),
           );
           yield* commitTeams(fixture);
@@ -806,7 +839,10 @@ describe('context health aggregate runtime', () => {
           fixture,
           'threadnote',
           'durable-header.md',
-          personalMemory('durable-header', 'Durable records require MEMORY headers.').replace(/^MEMORY/u, 'HANDOFF'),
+          Effect2.pipe(
+            personalMemory('durable-header', 'Durable records require MEMORY headers.'),
+            EffectString.replace(/^MEMORY/u, 'HANDOFF'),
+          ),
         );
         const durableHeaderMismatch = yield* collectContextHealthAggregate(fixture.config, {
           callerCwd: fixture.repository,
@@ -821,7 +857,10 @@ describe('context health aggregate runtime', () => {
           fixture,
           handoffDirectory,
           'handoff-header.md',
-          handoffMemory('handoff-header', 'Handoffs require a recognized header.').replace(/^HANDOFF/u, 'NOTE'),
+          Effect2.pipe(
+            handoffMemory('handoff-header', 'Handoffs require a recognized header.'),
+            EffectString.replace(/^HANDOFF/u, 'NOTE'),
+          ),
         );
         const handoffHeaderMismatch = yield* collectContextHealthAggregate(fixture.config, {
           callerCwd: fixture.repository,
@@ -878,11 +917,18 @@ describe('context health aggregate runtime', () => {
         expect(aggregate).toMatchObject({exitCode: 1, knownFindings: 2, status: 'findings'});
         expect(aggregate.sources[0]).toMatchObject({recordsScanned: 1, state: 'complete'});
         expect(
-          aggregate.findings.filter(finding => finding.findingId.startsWith('relation-target-inactive\0')),
+          EffectArray.filter(
+            aggregate.findings,
+            (finding, __effectArrayIndex) =>
+              __effectArrayIndex in aggregate.findings &&
+              Effect2.pipe(finding.findingId, EffectString.startsWith('relation-target-inactive\0')),
+          ),
         ).toHaveLength(2);
-        expect(aggregate.findings.some(finding => finding.findingId.startsWith('relation-target-missing\0'))).toBe(
-          false,
-        );
+        expect(
+          EffectArray.some(aggregate.findings, finding =>
+            Effect2.pipe(finding.findingId, EffectString.startsWith('relation-target-missing\0')),
+          ),
+        ).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -967,7 +1013,7 @@ describe('context health aggregate runtime', () => {
           ...fixture.fs,
           open: (file, options) =>
             Effect.gen(function* () {
-              if ((file === second || file.endsWith('/b.md')) && !replaced) {
+              if ((file === second || Effect2.pipe(file, EffectString.endsWith('/b.md'))) && !replaced) {
                 replaced = true;
                 yield* fixture.fs.writeFileString(first, personalMemory('a', 'Changed after its first read.'));
               }
@@ -990,8 +1036,8 @@ describe('context health aggregate runtime', () => {
     Effect.scoped(
       Effect.gen(function* () {
         const fixture = yield* makeFixture([]);
-        const teams = Object.fromEntries(
-          ['configured-teams', ...Array.from({length: 32}, (_, index) => `team-${index}`)].map(name => [
+        const teams = EffectRecord.fromEntries(
+          EffectArray.map(['configured-teams', ...Array.from({length: 32}, (_, index) => `team-${index}`)], name => [
             name,
             {
               addedAt: '2026-09-18T00:00:00.000Z',
@@ -1018,7 +1064,7 @@ describe('context health aggregate runtime', () => {
           sourceKey: 'team-selection',
           state: 'unknown',
         });
-        expect(aggregate.sources.some(source => source.sourceKey === 'team:configured-teams')).toBe(false);
+        expect(EffectArray.some(aggregate.sources, source => source.sourceKey === 'team:configured-teams')).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -1106,7 +1152,10 @@ describe('context health aggregate runtime', () => {
           fixture,
           'threadnote',
           'mismatch.md',
-          personalMemory('mismatch', `Personal evidence must remain bounded.\n${'x'.repeat(8 * 1_024 * 1_024)}`),
+          personalMemory(
+            'mismatch',
+            `Personal evidence must remain bounded.\n${Effect2.pipe('x', EffectString.repeat(8 * 1_024 * 1_024))}`,
+          ),
         );
         const oversized = yield* collectContextHealthAggregate(fixture.config, {
           callerCwd: fixture.repository,
@@ -1161,11 +1210,15 @@ describe('context health aggregate runtime', () => {
 
         expect(aggregate).toMatchObject({exitCode: 0, status: 'clean'});
         expect(aggregate.sources[1]).toMatchObject({recordsScanned: 1, state: 'complete'});
-        const snapshotReads = invocations.filter(invocation => invocation.args.includes('--literal-pathspecs'));
+        const snapshotReads = EffectArray.filter(invocations, invocation =>
+          invocation.args.includes('--literal-pathspecs'),
+        );
         expect(snapshotReads.length).toBeGreaterThan(0);
-        expect(snapshotReads.every(invocation => invocation.environment?.GIT_NO_LAZY_FETCH === '1')).toBe(true);
+        expect(EffectArray.every(snapshotReads, invocation => invocation.environment?.GIT_NO_LAZY_FETCH === '1')).toBe(
+          true,
+        );
         expect(
-          snapshotReads.every(invocation => {
+          EffectArray.every(snapshotReads, invocation => {
             const configIndex = invocation.args.indexOf('-c');
             return configIndex >= 0 && invocation.args[configIndex + 1] === 'core.fsmonitor=false';
           }),
@@ -1211,8 +1264,8 @@ function makeFixture(teams: readonly string[]) {
     yield* fs.writeFileString(
       path.join(home, 'share', 'teams.json'),
       `${JSON.stringify({
-        teams: Object.fromEntries(
-          teams.map(team => [
+        teams: EffectRecord.fromEntries(
+          EffectArray.map(teams, team => [
             team,
             {
               addedAt: '2026-09-18T00:00:00.000Z',
@@ -1341,7 +1394,7 @@ function writeTeamProjectMemory(fixture: Fixture, team: string, project: string,
 
 function commitTeams(fixture: Fixture) {
   return Effect.forEach(
-    Object.values(fixture.worktrees),
+    EffectRecord.values(fixture.worktrees),
     worktree =>
       Effect.gen(function* () {
         yield* git(worktree, ['add', '.']);
@@ -1354,7 +1407,7 @@ function commitTeams(fixture: Fixture) {
 function memory(topic: string, body: string, project = 'threadnote'): string {
   const metadata: MemoryMetadata = {
     kind: 'durable',
-    memoryId: `tn_${topic.replaceAll('-', '_')}`,
+    memoryId: `tn_${Effect2.pipe(topic, EffectString.replaceAll('-', '_'))}`,
     project,
     schemaVersion: 5,
     sourceAgentClient: 'test',
@@ -1374,7 +1427,7 @@ function personalMemory(
 ): string {
   const metadata: MemoryMetadata = {
     kind: 'durable',
-    memoryId: `tn_${topic.replaceAll('-', '_')}`,
+    memoryId: `tn_${Effect2.pipe(topic, EffectString.replaceAll('-', '_'))}`,
     project: 'threadnote',
     schemaVersion: 5,
     sourceAgentClient: 'test',
@@ -1390,7 +1443,7 @@ function personalMemory(
 function handoffMemory(topic: string, body: string, title: 'MEMORY' | 'HANDOFF' = 'HANDOFF'): string {
   const metadata: MemoryMetadata = {
     kind: 'handoff',
-    memoryId: `tn_${topic.replaceAll('-', '_')}`,
+    memoryId: `tn_${Effect2.pipe(topic, EffectString.replaceAll('-', '_'))}`,
     project: 'threadnote',
     schemaVersion: 5,
     sourceAgentClient: 'test',
@@ -1407,9 +1460,13 @@ function handoffMemoryOfByteLength(
   byteLength: number,
   status: MemoryMetadata['status'] = 'active',
 ): string {
-  const empty = handoffMemory(topic, '', 'HANDOFF').replace('status: active', `status: ${status}`);
-  return handoffMemory(topic, 'x'.repeat(byteLength - empty.length), 'HANDOFF').replace(
-    'status: active',
-    `status: ${status}`,
+  const empty = Effect2.pipe(
+    handoffMemory(topic, '', 'HANDOFF'),
+    EffectString.replace('status: active', `status: ${status}`),
+  );
+  return Effect2.pipe(
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
+    handoffMemory(topic, 'x'.repeat(byteLength - empty.length), 'HANDOFF'),
+    EffectString.replace('status: active', `status: ${status}`),
   );
 }

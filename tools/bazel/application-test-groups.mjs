@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- Target grouping runs before the declared Bazel graph exists. */
 import {posix} from 'node:path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const fnv1a = value => {
   let hash = 2166136261;
@@ -11,11 +14,10 @@ const fnv1a = value => {
 };
 
 const tokens = path =>
-  posix
-    .basename(path, '.test.ts')
-    .split(/[^a-zA-Z0-9]+/u)
-    .filter(Boolean)
-    .map(value => value.toLowerCase());
+  EffectArray.map(
+    EffectArray.filter(Effect.pipe(posix.basename(path, '.test.ts'), EffectString.split(/[^a-zA-Z0-9]+/u)), Boolean),
+    value => Effect.pipe(value, EffectString.toLowerCase),
+  );
 
 const nextPowerOfTwo = value => {
   let result = 1;
@@ -33,16 +35,16 @@ const emitBucketed = (result, key, entries, maxEntries, targetEntries, prefix) =
   do {
     buckets = Array.from({length: bucketCount}, () => []);
     for (const entry of entries) buckets[fnv1a(entry) % bucketCount].push(entry);
-    if (buckets.every(bucket => bucket.length <= maxEntries)) break;
+    if (EffectArray.every(buckets, bucket => bucket.length <= maxEntries)) break;
     bucketCount *= 2;
   } while (bucketCount <= 256);
-  if (buckets.some(bucket => bucket.length > maxEntries))
+  if (EffectArray.some(buckets, bucket => bucket.length > maxEntries))
     throw new Error(`Unable to bound generated application test group ${key}`);
   const width = String(bucketCount).length;
-  buckets.forEach((bucket, index) => {
+  EffectArray.forEach(buckets, (bucket, index) => {
     if (bucket.length === 0) return;
     result.push({
-      name: `test_standard_${prefix}${key}_${String(index + 1).padStart(width, '0')}_of_${bucketCount}`,
+      name: `test_standard_${prefix}${key}_${Effect.pipe(String(index + 1), EffectString.padStart(width, '0'))}_of_${bucketCount}`,
       entries: bucket,
     });
   });
@@ -60,16 +62,16 @@ const emitPooledFamilies = (result, families, maxEntries, targetEntries, prefix)
   do {
     buckets = Array.from({length: bucketCount}, () => []);
     for (const [family, familyEntries] of families) buckets[fnv1a(family) % bucketCount].push(...familyEntries);
-    if (buckets.every(bucket => bucket.length <= maxEntries)) break;
+    if (EffectArray.every(buckets, bucket => bucket.length <= maxEntries)) break;
     bucketCount *= 2;
   } while (bucketCount <= 256);
-  if (buckets.some(bucket => bucket.length > maxEntries))
+  if (EffectArray.some(buckets, bucket => bucket.length > maxEntries))
     throw new Error('Unable to bound generated pooled application test groups');
   const width = String(bucketCount).length;
-  buckets.forEach((bucket, index) => {
+  EffectArray.forEach(buckets, (bucket, index) => {
     if (bucket.length === 0) return;
     result.push({
-      name: `test_standard_${prefix}pooled_${String(index + 1).padStart(width, '0')}_of_${bucketCount}`,
+      name: `test_standard_${prefix}pooled_${Effect.pipe(String(index + 1), EffectString.padStart(width, '0'))}_of_${bucketCount}`,
       entries: bucket.sort(),
     });
   });

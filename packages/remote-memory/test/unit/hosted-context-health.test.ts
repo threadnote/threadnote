@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 
@@ -14,6 +15,9 @@ import {
   verifyHostedContextHealthEvaluationV1,
   type HostedContextHealthRunInputV1,
 } from '@threadnote/remote-memory/hosted/context_health';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const policy = buildHostedContextHealthPolicyV1({
   backlogAlertCount: 10,
@@ -78,16 +82,15 @@ describe('hosted organization context health', () => {
     });
 
     expect(receipt).toMatchObject({memoryMutation: 'none', outcome: 'unknown', reviewRequired: true});
-    expect(receipt.alerts.filter(alert => alert.state === 'firing').map(alert => alert.kind)).toEqual([
-      'backlog',
-      'failed-checks',
-      'persistent-stale-evidence',
-      'scheduler-lag',
-      'worker-heartbeat',
-    ]);
     expect(
-      receipt.alerts.every(
-        alert => alert.supportOwner === 'pilot-support-primary' && alert.safeFirstAction && alert.rollback,
+      EffectArray.map(
+        EffectArray.filter(receipt.alerts, alert => alert.state === 'firing'),
+        alert => alert.kind,
+      ),
+    ).toEqual(['backlog', 'failed-checks', 'persistent-stale-evidence', 'scheduler-lag', 'worker-heartbeat']);
+    expect(
+      EffectArray.every(receipt.alerts, alert =>
+        Boolean(alert.supportOwner === 'pilot-support-primary' && alert.safeFirstAction && alert.rollback),
       ),
     ).toBe(true);
   });
@@ -100,7 +103,7 @@ describe('hosted organization context health', () => {
       });
 
       expect(receipt).toMatchObject({outcome: 'findings', reviewRequired: true});
-      expect(receipt.alerts.every(alert => alert.state === 'clear')).toBe(true);
+      expect(EffectArray.every(receipt.alerts, alert => alert.state === 'clear')).toBe(true);
     }
     for (const signal of ['citationUnknown', 'failedChecks', 'unindexedScope'] as const) {
       const receipt = buildHostedContextHealthReceiptV1({
@@ -128,9 +131,9 @@ describe('hosted organization context health', () => {
     });
     const round = selectHostedContextHealthJobsV1(jobs, {concurrency: 3});
 
-    expect(first.jobs.map(value => value.tenantId)).toEqual(['alpha']);
-    expect(second.jobs.map(value => value.tenantId)).toEqual(['beta']);
-    expect(round.jobs.map(value => value.tenantId)).toEqual(['alpha', 'beta', 'gamma']);
+    expect(EffectArray.map(first.jobs, value => value.tenantId)).toEqual(['alpha']);
+    expect(EffectArray.map(second.jobs, value => value.tenantId)).toEqual(['beta']);
+    expect(EffectArray.map(round.jobs, value => value.tenantId)).toEqual(['alpha', 'beta', 'gamma']);
   });
 
   it('selects the same fair work regardless of candidate ordering', () => {
@@ -142,7 +145,7 @@ describe('hosted organization context health', () => {
         }),
         fc.integer({min: 1, max: 16}),
         (candidates, concurrency) => {
-          const jobs = candidates.map(([tenant, index]) => job(tenant, index, '2026-09-18T12:00:00.000Z'));
+          const jobs = EffectArray.map(candidates, ([tenant, index]) => job(tenant, index, '2026-09-18T12:00:00.000Z'));
           expect(selectHostedContextHealthJobsV1(jobs, {concurrency})).toEqual(
             selectHostedContextHealthJobsV1([...jobs].reverse(), {concurrency}),
           );
@@ -183,7 +186,7 @@ describe('hosted organization context health', () => {
     ).toThrow(/heartbeat cannot be later/i);
     const personalAggregate = aggregateContextHealthReportsV1({
       personal: {
-        evidenceRevision: '3'.repeat(64),
+        evidenceRevision: Effect.pipe('3', EffectString.repeat(64)),
         report: report(),
         scope: 'personal',
         state: 'complete',
@@ -214,7 +217,7 @@ describe('hosted organization context health', () => {
     ).not.toThrow();
     fc.assert(
       fc.property(
-        fc.constantFrom(...(Object.keys(input.signals) as (keyof typeof input.signals)[])).chain(signal =>
+        fc.constantFrom(...(EffectRecord.keys(input.signals) as (keyof typeof input.signals)[])).chain(signal =>
           fc
             .integer({min: 0, max: 10_000})
             .filter(count => count !== input.signals[signal])
@@ -273,10 +276,10 @@ function runInput(): HostedContextHealthRunInputV1 {
       aggregate: aggregate('clean'),
       backlogDepth: 0,
       dueAt: '2026-09-18T12:00:00.000Z',
-      memorySnapshotRevision: '2'.repeat(64),
+      memorySnapshotRevision: Effect.pipe('2', EffectString.repeat(64)),
       observedAt: '2026-09-18T12:00:00.000Z',
       priorConsecutiveStaleRuns: 0,
-      repositoryCommit: '1'.repeat(40),
+      repositoryCommit: Effect.pipe('1', EffectString.repeat(40)),
       schedule,
       signals: {
         citationChanged: 0,
@@ -291,7 +294,7 @@ function runInput(): HostedContextHealthRunInputV1 {
       version: 1,
       workerHeartbeatAt: '2026-09-18T12:00:00.000Z',
     },
-    {claimGeneration: 1, claimToken: 'a'.repeat(32)},
+    {claimGeneration: 1, claimToken: Effect.pipe('a', EffectString.repeat(32))},
     evaluationKey,
   );
 }
@@ -303,7 +306,7 @@ function aggregate(status: 'clean' | 'unknown') {
       status === 'unknown'
         ? {reason: 'evidence-incomplete', scope: 'team' as const, state: 'unknown' as const, team: 'canonical'}
         : {
-            evidenceRevision: '3'.repeat(64),
+            evidenceRevision: Effect.pipe('3', EffectString.repeat(64)),
             report: report(),
             scope: 'team' as const,
             state: 'complete' as const,
@@ -341,6 +344,13 @@ function report(): ContextHealthReportV1 {
 }
 
 function job(tenantId: string, ordinal: number, dueAt: string) {
-  const suffix = `${tenantId.charCodeAt(0).toString(16)}${ordinal.toString(16)}`.padStart(32, '0');
+  const suffix = Effect.pipe(
+    `${Effect.pipe(
+      tenantId,
+      EffectString.charCodeAt(0),
+      Effect.Option.getOrElse(() => NaN),
+    ).toString(16)}${ordinal.toString(16)}`,
+    EffectString.padStart(32, '0'),
+  );
   return {dueAt, scheduleId: `tnhs_${suffix}`, tenantId};
 }

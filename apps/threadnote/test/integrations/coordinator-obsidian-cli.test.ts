@@ -5,6 +5,8 @@ import {join} from '@threadnote/testing/node-path';
 import {Database} from 'bun:sqlite';
 import {describe, expect, it} from 'vitest';
 import {INTEGRATION_SYNC_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const entrypoint = 'apps/threadnote/src/standalone.ts';
 
@@ -37,7 +39,7 @@ describe('integration coordinator standalone Obsidian composition', () => {
           },
         );
         expect(result.code).toBe(1);
-        expect(result.stderr.trim()).toBe(
+        expect(Effect.pipe(result.stderr, EffectString.trim)).toBe(
           `Integration sync coordinator stopped during ${stage} initialization. Retry source sync to restart it.`,
         );
         expect(result.stderr).not.toContain('synthetic-private');
@@ -126,7 +128,10 @@ describe('integration coordinator standalone Obsidian composition', () => {
     } finally {
       for (const child of clients) child.kill('SIGKILL');
       const state = await readFile(endpoint, 'utf8')
-        .then(text => JSON.parse(text) as {pid: number})
+        .then(text => {
+          const value: unknown = JSON.parse(text);
+          return isProcessIdState(value) ? value : undefined;
+        })
         .catch(() => undefined);
       if (state) {
         try {
@@ -139,3 +144,14 @@ describe('integration coordinator standalone Obsidian composition', () => {
     }
   });
 });
+
+function isProcessIdState(value: unknown): value is {readonly pid: number} {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'pid' in value &&
+    typeof value.pid === 'number' &&
+    Number.isSafeInteger(value.pid) &&
+    value.pid > 0
+  );
+}

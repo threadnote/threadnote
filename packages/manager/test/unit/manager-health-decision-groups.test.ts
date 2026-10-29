@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
 import {healthDecisionGroups} from '../../src/attention/maintenance.js';
@@ -103,9 +104,9 @@ it('preserves every case for every subject and keeps grouping stable under page 
     fc.property(
       fc.array(fc.uniqueArray(fc.integer({min: 0, max: 8}), {minLength: 1, maxLength: 4}), {maxLength: 30}),
       memories => {
-        const cases = memories.map((subjects, index) => ({
+        const cases = EffectArray.map(memories, (subjects, index) => ({
           ...makeCase(subjects[0], index),
-          subjectContentHashes: subjects.map(memory => ({
+          subjectContentHashes: EffectArray.map(subjects, memory => ({
             uri: `threadnote://user/tester/memories/memory-${memory}.md`,
             hash: 'hash',
           })),
@@ -114,13 +115,23 @@ it('preserves every case for every subject and keeps grouping stable under page 
         const groups = healthDecisionGroups(report, cases);
         const reversed = healthDecisionGroups(
           report,
-          [...cases].reverse().flatMap(item => [item, item]),
+          EffectArray.flatMap([...cases].reverse(), item => [item, item]),
         );
-        expect(groups.map(group => group.uri)).toEqual(
-          [...new Set(memories.flat().map(memory => `threadnote://user/tester/memories/memory-${memory}.md`))].sort(),
+        expect(EffectArray.map(groups, group => group.uri)).toEqual(
+          [
+            ...new Set(
+              EffectArray.map(memories.flat(), memory => `threadnote://user/tester/memories/memory-${memory}.md`),
+            ),
+          ].sort(),
         );
-        expect(groups.flatMap(group => group.cases.map(item => `${item.caseId}:${group.uri}`)).sort()).toEqual(
-          cases.flatMap(item => item.subjectContentHashes.map(subject => `${item.caseId}:${subject.uri}`)).sort(),
+        expect(
+          EffectArray.flatMap(groups, group =>
+            EffectArray.map(group.cases, item => `${item.caseId}:${group.uri}`),
+          ).sort(),
+        ).toEqual(
+          EffectArray.flatMap(cases, item =>
+            EffectArray.map(item.subjectContentHashes, subject => `${item.caseId}:${subject.uri}`),
+          ).sort(),
         );
         expect(reversed).toEqual(groups);
         expect(JSON.stringify(cases)).toBe(before);

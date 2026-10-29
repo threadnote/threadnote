@@ -1,4 +1,6 @@
-import {Crypto, Data, DateTime, Effect, FileSystem, Option, Path} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
+import {Crypto, DateTime, Effect, FileSystem, Option, Path} from 'effect';
 import {makeCodeGraphCitationRepositoryRouteObservation} from '@threadnote/graph/citation/recovery';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -18,6 +20,9 @@ import {
   type ContextBriefMemoryCitationValidationV2,
 } from '@threadnote/context/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const POLICY = `health-receipts-v1:validator-${CONTEXT_BRIEF_CITATION_VALIDATOR_VERSION}`;
 const MAX_BYTES = 16 * 1024 * 1024;
@@ -28,11 +33,12 @@ const MAX_RECEIPTS = 20_000;
 const MAX_SOURCES = 32;
 const UNKNOWN_RETRY_MILLISECONDS = 60_000;
 const LOCK = {retryIntervalMilliseconds: 10, staleAfterMilliseconds: 60_000, waitTimeoutMilliseconds: 50};
-export class ContextMaintenanceEvidenceRequestError extends Data.TaggedError('ContextMaintenanceEvidenceRequestError')<{
-  readonly message: string;
-}> {}
+export class ContextMaintenanceEvidenceRequestError extends Schema.TaggedError<
+  ContextMaintenanceEvidenceRequestError,
+  {readonly brand: unique symbol}
+>()('ContextMaintenanceEvidenceRequestError', {message: Schema.String}) {}
 const requestPersistenceError = () =>
-  new ContextMaintenanceEvidenceRequestError({message: 'Unable to persist requested citation evidence work.'});
+  ContextMaintenanceEvidenceRequestError.make({message: 'Unable to persist requested citation evidence work.'});
 
 interface SourceObservation {
   readonly epoch: string;
@@ -88,8 +94,15 @@ export const readContextMaintenanceCitationAssociation = Effect.fn('contextMaint
   observe?: (root: string) => ReturnType<typeof observeSource>,
 ) {
   const selectors = [
-    ...new Map(citations.map(citation => [`${citation.repositoryId}:${citation.sourceCommit}`, citation])).values(),
-  ].sort((a, b) => `${a.repositoryId}:${a.sourceCommit}`.localeCompare(`${b.repositoryId}:${b.sourceCommit}`));
+    ...new Map(
+      EffectArray.map(citations, citation => [`${citation.repositoryId}:${citation.sourceCommit}`, citation]),
+    ).values(),
+  ].sort((a, b) =>
+    Effect2.pipe(
+      `${a.repositoryId}:${a.sourceCommit}`,
+      EffectString.localeCompare(`${b.repositoryId}:${b.sourceCommit}`),
+    ),
+  );
   const resolve = yield* makeCodeGraphCitationRepositoryRouteObservation({
     threadnoteHome: config.agentContextHome,
     callerCwd: cwd,
@@ -104,7 +117,11 @@ export const readContextMaintenanceCitationAssociation = Effect.fn('contextMaint
     {concurrency: 4},
   );
   const roots = [
-    ...new Set(observations.flatMap(observation => observation.routes.map(route => route.identity.repoRoot))),
+    ...new Set(
+      EffectArray.flatMap(observations, observation =>
+        EffectArray.map(observation.routes, route => route.identity.repoRoot),
+      ),
+    ),
   ]
     .sort()
     .slice(0, MAX_SOURCES);
@@ -114,14 +131,14 @@ export const readContextMaintenanceCitationAssociation = Effect.fn('contextMaint
     {concurrency: 4},
   );
   const sourceMap = new Map(sources);
-  const bySelector = Object.fromEntries(
-    observations.map((observation, index) => [
+  const bySelector = EffectRecord.fromEntries(
+    EffectArray.map(observations, (observation, index) => [
       `${selectors[index].repositoryId}:${selectors[index].sourceCommit}`,
       sha256HexSync(
         JSON.stringify([
           observation.generation,
           observation.complete,
-          observation.routes.map(route => [
+          EffectArray.map(observation.routes, route => [
             route.identity.repoRoot,
             sourceMap.get(route.identity.repoRoot) ?? 'unobserved',
           ]),
@@ -133,7 +150,7 @@ export const readContextMaintenanceCitationAssociation = Effect.fn('contextMaint
     epoch: sha256HexSync(JSON.stringify([selectors.length, bySelector])),
     roots,
     bySelector,
-    sourceEpochs: Object.fromEntries(sources),
+    sourceEpochs: EffectRecord.fromEntries(sources),
   };
 });
 
@@ -215,41 +232,48 @@ function projectCitationReceipts(
   input: Parameters<typeof projectMaintenanceCitationReceipts>[0],
   includeExpiredUnknown: boolean,
 ): readonly ContextBriefMemoryCitationValidationV2[] {
-  const entries = new Map(input.entries.map(entry => [entry.uri, entry]));
-  return input.records.flatMap(record => {
+  const entries = new Map(EffectArray.map(input.entries, entry => [entry.uri, entry]));
+  return EffectArray.flatMap(input.records, record => {
     const entry = entries.get(record.uri);
     if (
       entry === undefined ||
       entry.contentHash !== memoryHash(record) ||
-      !Object.entries(entry.sources).every(([cwd, epoch]) => input.sources.get(cwd)?.epoch === epoch)
+      !EffectArray.every(
+        EffectRecord.toEntries(entry.sources),
+        ([cwd, epoch]) => input.sources.get(cwd)?.epoch === epoch,
+      )
     )
       return [];
-    const ids = new Set((record.metadata.codeCitations ?? []).map(citation => citation.id));
-    const receipts = entry.receipts.filter(
-      receipt =>
-        (input.associations === undefined ||
-          (record.metadata.codeCitations ?? []).some(citation => {
-            const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
-            return (
-              citation.id === receipt.citationId &&
-              entry.associations?.[selector] !== undefined &&
-              entry.associations[selector] === input.associations?.[selector]
-            );
-          })) &&
-        ids.has(receipt.citationId) &&
-        (receipt.status === 'unknown' ||
-          receipt.provenance === 'historical-verified' ||
-          Object.keys(entry.sources).some(root => {
-            if (receipt.recovery !== undefined && root !== receipt.recovery.callerCwd) return false;
-            const source = input.sources.get(root);
-            return (
-              source?.current === true &&
-              receipt.repositoryId === source.repositoryId &&
-              receipt.snapshotId === source.snapshotId
-            );
-          })) &&
-        (receiptWithinRetryWindow(receipt, input.now) ||
-          (includeExpiredUnknown && expiredUnknownAttempt(receipt, input.now))),
+    const ids = new Set(EffectArray.map(record.metadata.codeCitations ?? [], citation => citation.id));
+    const receipts = EffectArrayPipe(entry.receipts, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (receipt, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues &&
+          (input.associations === undefined ||
+            EffectArray.some(record.metadata.codeCitations ?? [], citation => {
+              const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
+              return (
+                citation.id === receipt.citationId &&
+                entry.associations?.[selector] !== undefined &&
+                entry.associations[selector] === input.associations?.[selector]
+              );
+            })) &&
+          ids.has(receipt.citationId) &&
+          (receipt.status === 'unknown' ||
+            receipt.provenance === 'historical-verified' ||
+            EffectArray.some(EffectRecord.keys(entry.sources), root => {
+              if (receipt.recovery !== undefined && root !== receipt.recovery.callerCwd) return false;
+              const source = input.sources.get(root);
+              return (
+                source?.current === true &&
+                receipt.repositoryId === source.repositoryId &&
+                receipt.snapshotId === source.snapshotId
+              );
+            })) &&
+          (receiptWithinRetryWindow(receipt, input.now) ||
+            (includeExpiredUnknown && expiredUnknownAttempt(receipt, input.now))),
+      ),
     );
     return receipts.length === 0 ? [] : [{uri: record.uri, receipts, cacheHits: receipts.length}];
   });
@@ -282,19 +306,23 @@ export function foregroundReceiptCandidates(
   candidates: readonly ContextHealthCitationSubjectV1[],
   _now: number,
 ) {
-  const byEntry = new Map(entries.map(entry => [entry.uri, entry]));
-  const byRecord = new Map(records.map(record => [record.uri, record]));
+  const byEntry = new Map(EffectArray.map(entries, entry => [entry.uri, entry]));
+  const byRecord = new Map(EffectArray.map(records, record => [record.uri, record]));
   const selectedEntries: Entry[] = [];
   const selectedCandidates: ContextHealthCitationSubjectV1[] = [];
   for (const candidate of candidates) {
     const entry = byEntry.get(candidate.uri);
     const record = byRecord.get(candidate.uri);
     if (entry === undefined || record === undefined || entry.contentHash !== memoryHash(record)) continue;
-    const canonicalCitations = new Map((record.metadata.codeCitations ?? []).map(citation => [citation.id, citation]));
-    const eligibleIds = new Set(
-      entry.receipts.flatMap(receipt => (canonicalCitations.has(receipt.citationId) ? [receipt.citationId] : [])),
+    const canonicalCitations = new Map(
+      EffectArray.map(record.metadata.codeCitations ?? [], citation => [citation.id, citation]),
     );
-    const codeCitations = candidate.codeCitations.flatMap(citation => {
+    const eligibleIds = new Set(
+      EffectArray.flatMap(entry.receipts, receipt =>
+        canonicalCitations.has(receipt.citationId) ? [receipt.citationId] : [],
+      ),
+    );
+    const codeCitations = EffectArray.flatMap(candidate.codeCitations, citation => {
       const canonical = canonicalCitations.get(citation.id);
       if (canonical === undefined || !eligibleIds.has(citation.id)) return [];
       const selector = `${canonical.repositoryId}:${canonical.sourceCommit}`;
@@ -321,7 +349,7 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
     cwd: string,
     options: CitationEvidenceOptions<R>,
   ) {
-    if (!candidates.some(candidate => candidate.codeCitations.length > 0)) return [];
+    if (!EffectArray.some(candidates, candidate => candidate.codeCitations.length > 0)) return [];
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const file = path.join(
@@ -333,8 +361,12 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
     const beforeMemory = yield* mutationGeneration(config);
     const now = (yield* DateTime.nowAsDate).getTime();
     const stored = yield* readProjection(file);
-    const recordUris = new Set(records.map(record => record.uri));
-    const entries = stored?.entries.filter(entry => recordUris.has(entry.uri)) ?? [];
+    const recordUris = new Set(EffectArray.map(records, record => record.uri));
+    const storedEntries = stored?.entries ?? [];
+    const entries = EffectArray.filter(
+      storedEntries,
+      (entry, __effectArrayIndex) => __effectArrayIndex in storedEntries && recordUris.has(entry.uri),
+    );
     const foreground = options.mode === undefined || options.mode === 'foreground';
     const eligible = foreground ? foregroundReceiptCandidates(entries, records, candidates, now) : undefined;
     if (foreground && eligible?.candidates.length === 0) {
@@ -342,7 +374,10 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
         file,
         project,
         cwd,
-        candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri),
+        EffectArray.map(
+          EffectArray.filter(candidates, candidate => candidate.codeCitations.length > 0),
+          candidate => candidate.uri,
+        ),
       );
       return [];
     }
@@ -359,14 +394,14 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
     const association = yield* readContextMaintenanceCitationAssociation(
       config,
       cwd,
-      (eligible?.candidates ?? candidates).flatMap(candidate => candidate.codeCitations),
+      EffectArray.flatMap(eligible?.candidates ?? candidates, candidate => candidate.codeCitations),
       openingSource,
     );
     const roots = [
       ...new Set([
         cwd,
         ...association.roots,
-        ...(eligible?.entries ?? entries).flatMap(entry => Object.keys(entry.sources)),
+        ...EffectArray.flatMap(eligible?.entries ?? entries, entry => EffectRecord.keys(entry.sources)),
       ]),
     ].slice(0, MAX_SOURCES);
     for (const root of roots) sources.set(root, yield* openingSource(root));
@@ -387,30 +422,46 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
     const cached =
       candidateIds === undefined
         ? projected
-        : projected.flatMap(validation => {
-            const receipts = validation.receipts.filter(receipt =>
-              candidateIds.get(validation.uri)?.has(receipt.citationId),
+        : EffectArray.flatMap(projected, validation => {
+            const receipts = EffectArrayPipe(validation.receipts, __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (receipt, __effectArrayIndex2) =>
+                  __effectArrayIndex2 in __effectArrayValues &&
+                  Boolean(candidateIds.get(validation.uri)?.has(receipt.citationId)),
+              ),
             );
             return receipts.length === 0 ? [] : [{...validation, receipts, cacheHits: receipts.length}];
           });
     const lastAttempts = foreground
-      ? projectCitationReceipts(
-          {entries: eligible?.entries ?? entries, records, sources, now, associations: association.bySelector},
-          true,
-        ).flatMap(validation => {
-          const receipts = validation.receipts.filter(
-            receipt =>
-              expiredUnknownAttempt(receipt, now) && candidateIds?.get(validation.uri)?.has(receipt.citationId),
-          );
-          return receipts.length === 0 ? [] : [{...validation, receipts, cacheHits: 0}];
-        })
+      ? EffectArray.flatMap(
+          projectCitationReceipts(
+            {entries: eligible?.entries ?? entries, records, sources, now, associations: association.bySelector},
+            true,
+          ),
+          validation => {
+            const receipts = EffectArrayPipe(validation.receipts, __effectArrayValues =>
+              EffectArray.filter(
+                __effectArrayValues,
+                (receipt, __effectArrayIndex2) =>
+                  __effectArrayIndex2 in __effectArrayValues &&
+                  expiredUnknownAttempt(receipt, now) &&
+                  Boolean(candidateIds?.get(validation.uri)?.has(receipt.citationId)),
+              ),
+            );
+            return receipts.length === 0 ? [] : [{...validation, receipts, cacheHits: 0}];
+          },
+        )
       : [];
     const receiptIds = new Map(
-      cached.map(validation => [validation.uri, new Set(validation.receipts.map(receipt => receipt.citationId))]),
+      EffectArray.map(cached, validation => [
+        validation.uri,
+        new Set(EffectArray.map(validation.receipts, receipt => receipt.citationId)),
+      ]),
     );
     const pending = yield* Effect.forEach(candidates, candidate =>
       Effect.gen(function* () {
-        const record = records.find(record => record.uri === candidate.uri);
+        const record = Option.getOrUndefined(EffectArray.findFirst(records, record => record.uri === candidate.uri));
         const skip =
           options.mode === 'worker' && options.skipWorkerValidation !== undefined && record !== undefined
             ? yield* options.skipWorkerValidation(record, {
@@ -423,7 +474,7 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
           ...candidate,
           codeCitations: skip
             ? []
-            : candidate.codeCitations.filter(citation => !receiptIds.get(candidate.uri)?.has(citation.id)),
+            : EffectArray.filter(candidate.codeCitations, citation => !receiptIds.get(candidate.uri)?.has(citation.id)),
         };
       }),
     );
@@ -433,14 +484,16 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
         : options.mode === 'diagnostic'
           ? planContextHealthCitationBatch(pending).candidates
           : [];
-    const computed = selected.some(candidate => candidate.codeCitations.length > 0)
+    const computed = EffectArray.some(selected, candidate => candidate.codeCitations.length > 0)
       ? yield* options.validate(selected)
       : [];
     // Current recovery receipts can depend on an alternate checkout. Observe those
     // published identities too; overflow remains deferred, never cache-certified.
     for (const root of new Set(
-      computed.flatMap(validation =>
-        validation.receipts.flatMap(receipt => (receipt.recovery === undefined ? [] : [receipt.recovery.callerCwd])),
+      EffectArray.flatMap(computed, validation =>
+        EffectArray.flatMap(validation.receipts, receipt =>
+          receipt.recovery === undefined ? [] : [receipt.recovery.callerCwd],
+        ),
       ),
     )) {
       if (!sources.has(root) && sources.size < MAX_SOURCES) sources.set(root, yield* openingSource(root));
@@ -456,19 +509,25 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
         return source;
       });
     for (const [root] of sources) closing.set(root, yield* closingSource(root));
-    const canonicalByUri = new Map(records.map(record => [record.uri, record]));
+    const canonicalByUri = new Map(EffectArray.map(records, record => [record.uri, record]));
     const returnedCitations = foreground
-      ? [...cached, ...lastAttempts, ...computed].flatMap(validation =>
-          validation.receipts.map(receipt =>
-            canonicalByUri
-              .get(validation.uri)
-              ?.metadata.codeCitations?.find(citation => citation.id === receipt.citationId),
+      ? EffectArray.flatMap([...cached, ...lastAttempts, ...computed], validation =>
+          EffectArray.map(validation.receipts, receipt =>
+            Option.getOrUndefined(
+              Option.map(
+                Option.fromNullishOr(canonicalByUri.get(validation.uri)?.metadata.codeCitations),
+                __effectArrayReceiver =>
+                  Option.getOrUndefined(
+                    EffectArray.findFirst(__effectArrayReceiver, citation => citation.id === receipt.citationId),
+                  ),
+              ),
+            ),
           ),
         )
       : [];
     const closingCitations = foreground
-      ? returnedCitations.filter(citation => citation !== undefined)
-      : candidates.flatMap(candidate => candidate.codeCitations);
+      ? EffectArray.filter(returnedCitations, citation => citation !== undefined)
+      : EffectArray.flatMap(candidates, candidate => candidate.codeCitations);
     const closingAssociation = yield* readContextMaintenanceCitationAssociation(
       config,
       cwd,
@@ -484,21 +543,24 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
     const unchanged =
       (foreground
         ? returnedCitations.length === closingCitations.length &&
-          closingCitations.every(citation => {
+          EffectArray.every(closingCitations, citation => {
             const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
             const opening = association.bySelector[selector];
             return opening !== undefined && opening === closingAssociation.bySelector[selector];
           })
         : association.epoch === closingAssociation.epoch) &&
       proofGeneration !== undefined &&
-      [...sources].every(([root, observation]) => observation.epoch === closing.get(root)?.epoch);
+      EffectArray.every([...sources], ([root, observation]) => observation.epoch === closing.get(root)?.epoch);
     if (!unchanged) {
       if (foreground)
         yield* enqueueEvidenceRequest(
           file,
           project,
           cwd,
-          candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri),
+          EffectArray.map(
+            EffectArray.filter(candidates, candidate => candidate.codeCitations.length > 0),
+            candidate => candidate.uri,
+          ),
         );
       return [];
     }
@@ -508,7 +570,7 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
         association: closingAssociation,
         memoryGeneration: proofGeneration,
       });
-    const byUri = new Map(cached.map(validation => [validation.uri, validation]));
+    const byUri = new Map(EffectArray.map(cached, validation => [validation.uri, validation]));
     for (const validation of computed) {
       const previous = byUri.get(validation.uri);
       byUri.set(validation.uri, {...validation, receipts: [...(previous?.receipts ?? []), ...validation.receipts]});
@@ -523,11 +585,11 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
       );
     }
     const returnedValidations = [...returnedByUri.values()];
-    const recordsByUri = new Map(records.map(record => [record.uri, record]));
-    const additions: Entry[] = computed.flatMap(validation => {
+    const recordsByUri = new Map(EffectArray.map(records, record => [record.uri, record]));
+    const additions: Entry[] = EffectArray.flatMap(computed, validation => {
       const record = recordsByUri.get(validation.uri);
       if (record === undefined) return [];
-      const receipts = validation.receipts.filter(receipt => {
+      const receipts = EffectArray.filter(validation.receipts, receipt => {
         if (receipt.status === 'unknown') return true;
         if (receipt.provenance === 'historical-verified') return true;
         const source = closing.get(receipt.recovery?.callerCwd ?? cwd);
@@ -542,9 +604,9 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
         {
           uri: record.uri,
           contentHash: memoryHash(record),
-          sources: Object.fromEntries([...closing].map(([root, source]) => [root, source.epoch])),
-          associations: Object.fromEntries(
-            (record.metadata.codeCitations ?? []).flatMap(citation => {
+          sources: EffectRecord.fromEntries(EffectArray.map([...closing], ([root, source]) => [root, source.epoch])),
+          associations: EffectRecord.fromEntries(
+            EffectArray.flatMap(record.metadata.codeCitations ?? [], citation => {
               const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
               const epoch = closingAssociation.bySelector[selector];
               return epoch === undefined ? [] : [[selector, epoch]];
@@ -562,7 +624,7 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
         Effect.gen(function* () {
           if (proofGeneration !== (yield* mutationGeneration(config))) return;
           const latest = yield* readProjection(file);
-          const merged = new Map((latest?.entries ?? []).map(entry => [entry.uri, entry]));
+          const merged = new Map(EffectArray.map(latest?.entries ?? [], entry => [entry.uri, entry]));
           for (const entry of additions) {
             const previous = merged.get(entry.uri);
             const compatible =
@@ -570,7 +632,7 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
               JSON.stringify(previous.sources) === JSON.stringify(entry.sources) &&
               JSON.stringify(previous.associations) === JSON.stringify(entry.associations);
             const receipts = new Map(
-              [...(compatible ? previous.receipts : []), ...entry.receipts].map(receipt => [
+              EffectArray.map([...(compatible ? previous.receipts : []), ...entry.receipts], receipt => [
                 receipt.citationId,
                 receipt,
               ]),
@@ -593,25 +655,28 @@ const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMainten
         }),
       ).pipe(Effect.ignore);
     const checked = new Set(
-      validations.flatMap(validation => validation.receipts.map(receipt => `${validation.uri}\0${receipt.citationId}`)),
+      EffectArray.flatMap(validations, validation =>
+        EffectArray.map(validation.receipts, receipt => `${validation.uri}\0${receipt.citationId}`),
+      ),
     );
     if (options.mode === 'worker') return validations;
+    const candidateUris = EffectArray.map(candidates, candidate => candidate.uri);
     if (
-      candidates.some(candidate =>
-        candidate.codeCitations.some(citation => !checked.has(`${candidate.uri}\0${citation.id}`)),
+      EffectArray.some(candidates, candidate =>
+        EffectArray.some(candidate.codeCitations, citation => !checked.has(`${candidate.uri}\0${citation.id}`)),
       )
     ) {
-      const uris = candidates
-        .filter(candidate => candidate.codeCitations.some(citation => !checked.has(`${candidate.uri}\0${citation.id}`)))
-        .map(candidate => candidate.uri);
-      yield* enqueueEvidenceRequest(file, project, cwd, uris);
-    } else
-      yield* clearContextMaintenanceEvidenceRequest(
-        config,
-        project,
-        cwd,
-        candidates.map(candidate => candidate.uri),
+      const uris = EffectArray.map(
+        EffectArray.filter(
+          candidates,
+          (candidate, __effectArrayIndex) =>
+            __effectArrayIndex in candidates &&
+            EffectArray.some(candidate.codeCitations, citation => !checked.has(`${candidate.uri}\0${citation.id}`)),
+        ),
+        candidate => candidate.uri,
       );
+      yield* enqueueEvidenceRequest(file, project, cwd, uris);
+    } else yield* clearContextMaintenanceEvidenceRequest(config, project, cwd, candidateUris);
     return returnedValidations;
   },
 );
@@ -629,7 +694,10 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
     if (options.mode === 'worker' || options.mode === 'diagnostic') return yield* collect;
     const result = yield* collect.pipe(Effect.timeoutOption(3_000));
     if (Option.isSome(result)) return result.value;
-    const uris = candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri);
+    const uris = EffectArray.map(
+      EffectArray.filter(candidates, candidate => candidate.codeCitations.length > 0),
+      candidate => candidate.uri,
+    );
     if (uris.length > 0) {
       const path = yield* Path.Path;
       const file = path.join(
@@ -679,49 +747,66 @@ function memoryHash(record: MemoryRecord): string {
 }
 
 function decodeProjection(value: unknown): Projection | undefined {
-  if (value === null || typeof value !== 'object') return undefined;
-  const projection = value as Projection;
-  if (projection.version !== 1 || projection.policy !== POLICY || !Array.isArray(projection.entries)) return undefined;
+  if (!isProjection(value)) return undefined;
   let receipts = 0;
-  for (const entry of projection.entries) {
-    if (
-      entry === null ||
-      typeof entry !== 'object' ||
-      typeof entry.uri !== 'string' ||
-      typeof entry.contentHash !== 'string' ||
-      entry.sources === null ||
-      typeof entry.sources !== 'object' ||
-      Array.isArray(entry.sources) ||
-      Object.keys(entry.sources).length === 0 ||
-      Object.keys(entry.sources).length > MAX_SOURCES ||
-      !Object.values(entry.sources).every(epoch => typeof epoch === 'string') ||
-      (entry.associations !== undefined &&
-        (entry.associations === null ||
-          typeof entry.associations !== 'object' ||
-          Array.isArray(entry.associations) ||
-          Object.keys(entry.associations).length > MAX_SOURCES ||
-          !Object.values(entry.associations).every(epoch => typeof epoch === 'string'))) ||
-      !Array.isArray(entry.receipts)
-    )
-      return undefined;
+  for (const entry of value.entries) {
     receipts += entry.receipts.length;
     if (receipts > MAX_RECEIPTS) return undefined;
-    for (const receipt of entry.receipts) {
-      if (
-        receipt === null ||
-        typeof receipt !== 'object' ||
-        typeof receipt.citationId !== 'string' ||
-        typeof receipt.observedAt !== 'string' ||
-        receipt.validatorVersion !== CONTEXT_BRIEF_CITATION_VALIDATOR_VERSION ||
-        !['exact', 'relocated', 'changed', 'deleted', 'unknown'].includes(receipt.status) ||
-        !['current-complete', 'incomplete'].includes(receipt.coverage) ||
-        (receipt.provenance !== undefined &&
-          !['current-verified', 'historical-verified', 'unverified'].includes(receipt.provenance))
-      )
-        return undefined;
-    }
   }
-  return projection;
+  return value;
+}
+
+function isProjection(value: unknown): value is Projection {
+  return (
+    isRecord(value) &&
+    value.version === 1 &&
+    value.policy === POLICY &&
+    EffectArray.isArray(value.entries) &&
+    EffectArray.every(value.entries, isProjectionEntry)
+  );
+}
+
+function isProjectionEntry(value: unknown): value is Entry {
+  return (
+    isRecord(value) &&
+    typeof value.uri === 'string' &&
+    typeof value.contentHash === 'string' &&
+    isStringRecord(value.sources, 1, MAX_SOURCES) &&
+    (value.associations === undefined || isStringRecord(value.associations, 0, MAX_SOURCES)) &&
+    EffectArray.isArray(value.receipts) &&
+    EffectArray.every(value.receipts, isProjectionReceipt)
+  );
+}
+
+function isProjectionReceipt(value: unknown): value is ContextBriefMemoryCitationValidationV2['receipts'][number] {
+  return (
+    isRecord(value) &&
+    typeof value.citationId === 'string' &&
+    typeof value.observedAt === 'string' &&
+    value.validatorVersion === CONTEXT_BRIEF_CITATION_VALIDATOR_VERSION &&
+    oneOf(value.status, ['exact', 'relocated', 'changed', 'deleted', 'unknown']) &&
+    oneOf(value.coverage, ['current-complete', 'incomplete']) &&
+    (value.provenance === undefined ||
+      oneOf(value.provenance, ['current-verified', 'historical-verified', 'unverified']))
+  );
+}
+
+function oneOf(value: unknown, options: readonly string[]): value is string {
+  return typeof value === 'string' && options.includes(value);
+}
+
+function isStringRecord(value: unknown, min: number, max: number): value is Record<string, string> {
+  return (
+    isRecord(value) &&
+    !EffectArray.isArray(value) &&
+    EffectRecord.keys(value).length >= min &&
+    EffectRecord.keys(value).length <= max &&
+    EffectArray.every(EffectRecord.values(value), item => typeof item === 'string')
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 const pruneProjections = Effect.fn('contextMaintenance.pruneEvidenceProjections')(function* (retainedFile: string) {
@@ -729,7 +814,10 @@ const pruneProjections = Effect.fn('contextMaintenance.pruneEvidenceProjections'
   const path = yield* Path.Path;
   const directory = path.dirname(retainedFile);
   const files = yield* Effect.forEach(
-    (yield* fs.readDirectory(directory)).filter(name => /^[0-9a-f]{64}\.json$/u.test(name)),
+    EffectArray.filter(
+      yield* fs.readDirectory(directory),
+      __effectArrayValue => !!(name => /^[0-9a-f]{64}\.json$/u.test(name))(__effectArrayValue),
+    ),
     name =>
       fs.stat(path.join(directory, name)).pipe(
         Effect.map(info => ({
@@ -741,12 +829,10 @@ const pruneProjections = Effect.fn('contextMaintenance.pruneEvidenceProjections'
       ),
     {concurrency: 4},
   );
-  const ordered = files
-    .flatMap(value => (Option.isSome(value) ? [value.value] : []))
-    .sort(
-      (left, right) =>
-        Number(right.file === retainedFile) - Number(left.file === retainedFile) || right.modified - left.modified,
-    );
+  const ordered = EffectArray.flatMap(files, value => (Option.isSome(value) ? [value.value] : [])).sort(
+    (left, right) =>
+      Number(right.file === retainedFile) - Number(left.file === retainedFile) || right.modified - left.modified,
+  );
   let bytes = 0;
   for (const [index, item] of ordered.entries()) {
     bytes += item.bytes;
@@ -766,6 +852,23 @@ export interface ContextMaintenanceEvidenceRequest {
   readonly deferredUntil?: Readonly<Record<string, string>>;
   readonly revision?: string;
 }
+function isEvidenceRequest(value: unknown): value is ContextMaintenanceEvidenceRequest & {readonly policy: string} {
+  return (
+    isRecord(value) &&
+    value.policy === POLICY &&
+    typeof value.project === 'string' &&
+    typeof value.cwd === 'string' &&
+    (value.page === undefined ||
+      (typeof value.page === 'number' && Number.isSafeInteger(value.page) && value.page > 0)) &&
+    (value.cursor === undefined || typeof value.cursor === 'string') &&
+    (value.revision === undefined || typeof value.revision === 'string') &&
+    (value.deferredUntil === undefined || isStringRecord(value.deferredUntil, 0, Number.MAX_SAFE_INTEGER)) &&
+    EffectArray.isArray(value.uris) &&
+    value.uris.length <= 100 &&
+    EffectArray.every(value.uris, uri => typeof uri === 'string')
+  );
+}
+
 export interface ContextMaintenanceEvidenceRequestPage {
   readonly requests: readonly ContextMaintenanceEvidenceRequest[];
   readonly files: readonly string[];
@@ -788,14 +891,15 @@ export const pendingContextMaintenanceEvidenceRoots = Effect.fn('contextMaintena
   project?: string,
 ) {
   const path = yield* Path.Path;
-  return requests
-    .filter(request => project === undefined || request.project === project)
-    .filter(
+  return EffectArray.map(
+    EffectArray.filter(
+      EffectArray.filter(requests, request => project === undefined || request.project === project),
       request =>
         path.isAbsolute(request.cwd) &&
-        request.uris.some(uri => !(Date.parse(request.deferredUntil?.[uri] ?? '') > now)),
-    )
-    .map(contextMaintenanceEvidenceRequestKey);
+        EffectArray.some(request.uris, uri => !(Date.parse(request.deferredUntil?.[uri] ?? '') > now)),
+    ),
+    contextMaintenanceEvidenceRequestKey,
+  );
 });
 export function contextMaintenanceEvidenceRequestKey(request: ContextMaintenanceEvidenceRequest): string {
   return `${request.project}\0${request.cwd}\0${request.page ?? 0}`;
@@ -804,7 +908,7 @@ export function contextMaintenanceEvidenceRequestFileName(request: ContextMainte
   const root = sha256HexSync(`${request.project}\0${request.cwd}`);
   return request.page === undefined || request.page === 0
     ? `${root}.json.pending`
-    : `${root}.${String(request.page).padStart(6, '0')}.json.pending`;
+    : `${root}.${Effect2.pipe(String(request.page), EffectString.padStart(6, '0'))}.json.pending`;
 }
 export function advanceContextMaintenanceEvidenceRequestDiscovery(
   previous: ContextMaintenanceEvidenceRequestDiscovery | undefined,
@@ -817,7 +921,8 @@ export function advanceContextMaintenanceEvidenceRequestDiscovery(
       scope,
       scanned: previous === undefined || page.lastFile === undefined ? page.scanned : 0,
       lastFile: previous === undefined ? page.lastFile : undefined,
-      scopedPending: page.unreadable || page.requests.some(request => scope === undefined || request.project === scope),
+      scopedPending:
+        page.unreadable || EffectArray.some(page.requests, request => scope === undefined || request.project === scope),
     };
   return {
     namesHash: page.namesHash,
@@ -827,7 +932,7 @@ export function advanceContextMaintenanceEvidenceRequestDiscovery(
     scopedPending:
       previous.scopedPending ||
       page.unreadable ||
-      page.requests.some(request => scope === undefined || request.project === scope),
+      EffectArray.some(page.requests, request => scope === undefined || request.project === scope),
   };
 }
 export function advanceContextMaintenanceEvidenceRequestExecution(
@@ -847,7 +952,9 @@ export function advanceContextMaintenanceEvidenceRequestExecution(
   });
   // Keep eligible filenames in view across record and semantic phases; advance only past work actually attempted.
   if (hasEligible && executedRoot === undefined) return pinned();
-  const executed = page.requests.find(request => contextMaintenanceEvidenceRequestKey(request) === executedRoot);
+  const executed = Option.getOrUndefined(
+    EffectArray.findFirst(page.requests, request => contextMaintenanceEvidenceRequestKey(request) === executedRoot),
+  );
   const index =
     executedRoot === undefined
       ? page.files.length - 1
@@ -869,7 +976,13 @@ export const readContextMaintenanceEvidenceRequestPage = Effect.fn('contextMaint
     const names = yield* readEvidenceRequestFileNames(config);
     const requests: ContextMaintenanceEvidenceRequest[] = [];
     const ordered = names ?? [];
-    const next = afterFile === undefined ? 0 : ordered.findIndex(name => name > afterFile);
+    const next =
+      afterFile === undefined
+        ? 0
+        : Option.getOrElse(
+            EffectArray.findFirstIndex(ordered, name => name > afterFile),
+            () => -1,
+          );
     const rotated = next < 0 ? ordered : [...ordered.slice(next), ...ordered.slice(0, next)];
     const selected = rotated.slice(0, MAX_PROJECTIONS);
     let unreadable = names === undefined;
@@ -881,7 +994,7 @@ export const readContextMaintenanceEvidenceRequestPage = Effect.fn('contextMaint
     return {
       requests,
       files: selected,
-      namesHash: names === undefined ? 'unreadable' : sha256HexSync(ordered.join('\0')),
+      namesHash: names === undefined ? 'unreadable' : sha256HexSync(EffectArray.join(ordered, '\0')),
       total: ordered.length,
       scanned: selected.length,
       lastFile: selected.at(-1),
@@ -892,7 +1005,7 @@ export const readContextMaintenanceEvidenceRequestPage = Effect.fn('contextMaint
 export const readContextMaintenanceEvidenceRequestNamesHash = Effect.fn('contextMaintenance.requestNamesHash')(
   function* (config: RuntimeConfig) {
     const names = yield* readEvidenceRequestFileNames(config);
-    return names === undefined ? undefined : sha256HexSync(names.join('\0'));
+    return names === undefined ? undefined : sha256HexSync(EffectArray.join(names, '\0'));
   },
 );
 export const contextMaintenanceEvidenceDiscoveryPending = Effect.fn('contextMaintenance.requestDiscoveryPending')(
@@ -919,7 +1032,13 @@ const readEvidenceRequestFileNames = Effect.fn('contextMaintenance.requestFileNa
   const names = yield* fs
     .readDirectory(path.join(config.agentContextHome, 'context-maintenance', 'evidence'))
     .pipe(Effect.orElseSucceed(error => (error.reason._tag === 'NotFound' ? [] : undefined)));
-  return names?.filter(name => /^[0-9a-f]{64}(?:\.\d{6})?\.json\.pending$/u.test(name)).sort();
+  return names === undefined
+    ? undefined
+    : EffectArray.filter(
+        names,
+        (name, __effectArrayIndex) =>
+          __effectArrayIndex in names && /^[0-9a-f]{64}(?:\.\d{6})?\.json\.pending$/u.test(name),
+      ).sort();
 });
 export const readContextMaintenanceEvidenceRequests = Effect.fn('contextMaintenance.readEvidenceRequests')(function* (
   config: RuntimeConfig,
@@ -955,7 +1074,7 @@ export const clearContextMaintenanceEvidenceRequest = Effect.fn('contextMaintena
         if (request === undefined || (expectedRevision !== undefined && request.revision !== expectedRevision))
           continue;
         const acknowledged = new Set(acknowledgedUris);
-        const uris = request.uris.filter(uri => !acknowledged.has(uri));
+        const uris = EffectArray.filter(request.uris, uri => !acknowledged.has(uri));
         if (uris.length === request.uris.length) continue;
         if (uris.length === 0) yield* fs.remove(pageFile, {force: true});
         else
@@ -963,8 +1082,11 @@ export const clearContextMaintenanceEvidenceRequest = Effect.fn('contextMaintena
             ...request,
             policy: POLICY,
             uris,
-            deferredUntil: Object.fromEntries(
-              Object.entries(request.deferredUntil ?? {}).filter(([uri]) => !acknowledged.has(uri)),
+            deferredUntil: EffectRecord.fromEntries(
+              EffectArray.filter(
+                EffectRecord.toEntries(request.deferredUntil ?? {}),
+                ([uri]) => !acknowledged.has(uri),
+              ),
             ),
           });
       }
@@ -1046,12 +1168,15 @@ export const requestedRootProjectionComplete = Effect.fn('contextMaintenance.req
     `${sha256HexSync(`${project}\0${cwd}`)}.json`,
   );
   const projection = yield* readProjection(file);
-  const entry = projection?.entries.find(item => item.uri === record.uri);
+  const entry =
+    projection === undefined
+      ? undefined
+      : Option.getOrUndefined(EffectArray.findFirst(projection.entries, item => item.uri === record.uri));
   if (entry === undefined || entry.contentHash !== memoryHash(record)) return false;
   if (entry.sources[cwd] !== observation.sourceEpoch) return false;
   const now = (yield* DateTime.nowAsDate).getTime();
-  const receipts = new Map(entry.receipts.map(receipt => [receipt.citationId, receipt]));
-  return (record.metadata.codeCitations ?? []).every(citation => {
+  const receipts = new Map(EffectArray.map(entry.receipts, receipt => [receipt.citationId, receipt]));
+  return EffectArray.every(record.metadata.codeCitations ?? [], citation => {
     const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
     const receipt = receipts.get(citation.id);
     return (
@@ -1072,32 +1197,16 @@ const readEvidenceRequest = Effect.fn('contextMaintenance.readEvidenceRequest')(
     if (info.type !== 'File' || Number(info.size) > MAX_REQUEST_BYTES) return undefined;
     const text = yield* fs.readFileString(file);
     return yield* Effect.try(() => {
-      const value = JSON.parse(text) as ContextMaintenanceEvidenceRequest & {policy: string};
-      return value !== null &&
-        typeof value === 'object' &&
-        value.policy === POLICY &&
-        typeof value.project === 'string' &&
-        typeof value.cwd === 'string' &&
-        (value.page === undefined || (Number.isSafeInteger(value.page) && value.page > 0)) &&
-        (value.cursor === undefined || typeof value.cursor === 'string') &&
-        (value.revision === undefined || typeof value.revision === 'string') &&
-        (value.deferredUntil === undefined ||
-          (value.deferredUntil !== null &&
-            typeof value.deferredUntil === 'object' &&
-            Object.entries(value.deferredUntil).every(
-              ([uri, date]) => typeof uri === 'string' && typeof date === 'string',
-            ))) &&
-        Array.isArray(value.uris) &&
-        value.uris.length <= 100 &&
-        value.uris.every(uri => typeof uri === 'string')
-        ? value
-        : undefined;
+      const value: unknown = JSON.parse(text);
+      return isEvidenceRequest(value) ? value : undefined;
     });
   }).pipe(Effect.orElseSucceed(() => undefined));
 });
 
 function requestPageFile(file: string, page: number): string {
-  return page === 0 ? `${file}.pending` : `${file.slice(0, -5)}.${String(page).padStart(6, '0')}.json.pending`;
+  return page === 0
+    ? `${file}.pending`
+    : `${Effect2.pipe(file, EffectString.slice(0, -5))}.${Effect2.pipe(String(page), EffectString.padStart(6, '0'))}.json.pending`;
 }
 const readOwnerRequestPages = Effect.fn('contextMaintenance.ownerRequestPages')(function* (file: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -1107,13 +1216,11 @@ const readOwnerRequestPages = Effect.fn('contextMaintenance.ownerRequestPages')(
     .readDirectory(path.dirname(file))
     .pipe(Effect.orElseSucceed(error => (error.reason._tag === 'NotFound' ? [] : undefined)));
   if (names === undefined) return yield* requestPersistenceError();
-  return names
-    .flatMap(name => {
-      if (name === `${root}.json.pending`) return [0];
-      const match = new RegExp(`^${root}\\.(\\d{6})\\.json\\.pending$`, 'u').exec(name);
-      return match === null || Number(match[1]) === 0 ? [] : [Number(match[1])];
-    })
-    .sort((left, right) => left - right);
+  return EffectArray.flatMap(names, name => {
+    if (name === `${root}.json.pending`) return [0];
+    const match = new RegExp(`^${root}\\.(\\d{6})\\.json\\.pending$`, 'u').exec(name);
+    return match === null || Number(match[1]) === 0 ? [] : [Number(match[1])];
+  }).sort((left, right) => left - right);
 });
 function requestBytes(request: ContextMaintenanceEvidenceRequest & {readonly policy: string}): number {
   return new TextEncoder().encode(JSON.stringify(request)).byteLength;
@@ -1122,12 +1229,11 @@ function requestPageCanAdmit(request: ContextMaintenanceEvidenceRequest & {reado
   if (request.uris.length > 100) return false;
   const deferredUntil = {
     ...request.deferredUntil,
-    ...Object.fromEntries(request.uris.map(uri => [uri, '2099-12-31T23:59:59.999Z'])),
+    ...EffectRecord.fromEntries(EffectArray.map(request.uris, uri => [uri, '2099-12-31T23:59:59.999Z'])),
   };
   const encoder = new TextEncoder();
-  const largestCursor = request.uris.reduce(
-    (largest, uri) => (encoder.encode(uri).byteLength > encoder.encode(largest).byteLength ? uri : largest),
-    request.cursor ?? '',
+  const largestCursor = EffectArray.reduce(request.uris, request.cursor ?? '', (largest, uri) =>
+    encoder.encode(uri).byteLength > encoder.encode(largest).byteLength ? uri : largest,
   );
   return (
     requestBytes(request) <= MAX_REQUEST_BYTES &&

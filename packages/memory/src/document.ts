@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   MAX_REVIEWED_MEMORY_SUPPORT_BYTES,
   REVIEWED_MEMORY_SUPPORT_HEADER,
@@ -21,6 +22,7 @@ import {
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {
   serializeSourceEvidenceCitation,
+  validSourceEvidenceCitation,
   type SourceEvidenceCitationV1,
 } from '@threadnote/store/source-evidence-citation';
 import {
@@ -33,6 +35,9 @@ import {
   type MemoryCodeCitationError,
   type MemoryCodeCitationV1,
 } from './code/citation.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export type MemoryAuthority = 'agent_generated' | 'canonical_repo' | 'external' | 'reviewed_shared' | 'user_approved';
 
@@ -82,8 +87,11 @@ export function validMemoryObsidianEvidence(value: unknown): value is MemoryObsi
     typeof entry.relativePath === 'string' &&
     entry.relativePath.length > 0 &&
     entry.relativePath.length <= 4096 &&
-    !entry.relativePath.startsWith('/') &&
-    !entry.relativePath.split('/').some(segment => !segment || segment === '.' || segment === '..') &&
+    !Effect.pipe(entry.relativePath, EffectString.startsWith('/')) &&
+    !EffectArray.some(
+      Effect.pipe(entry.relativePath, EffectString.split('/')),
+      segment => !segment || segment === '.' || segment === '..',
+    ) &&
     typeof entry.revisionHash === 'string' &&
     HASH_PATTERN.test(entry.revisionHash) &&
     typeof entry.sanitizerVersion === 'string' &&
@@ -197,16 +205,28 @@ const TRUST_LEVEL: Readonly<Record<MemoryTrust, number>> = {
 };
 
 export function parseMemoryDocument(uri: string, content: string): MemoryRecord | undefined {
-  const trimmed = content.trim();
+  const trimmed = Effect.pipe(content, EffectString.trim);
   if (!trimmed) {
     return undefined;
   }
   const parseable = normalizeMemoryDocumentLineEndings(trimmed);
-  const separatorIndex = parseable.indexOf('\n\n');
-  const header = separatorIndex === -1 ? parseable : parseable.slice(0, separatorIndex);
-  const body = separatorIndex === -1 ? '' : stripLegacyMemoryFieldsTrailer(parseable.slice(separatorIndex + 2)).trim();
-  const lines = header.split('\n');
-  const firstLine = lines[0]?.trim();
+  const separatorIndex = Effect.pipe(
+    parseable,
+    EffectString.indexOf('\n\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const header = separatorIndex === -1 ? parseable : Effect.pipe(parseable, EffectString.slice(0, separatorIndex));
+  const body =
+    separatorIndex === -1
+      ? ''
+      : Effect.pipe(
+          stripLegacyMemoryFieldsTrailer(Effect.pipe(parseable, EffectString.slice(separatorIndex + 2))),
+          EffectString.trim,
+        );
+  const lines = Effect.pipe(header, EffectString.split('\n'));
+  const firstLine = Effect.pipe(lines[0], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   if (firstLine !== 'MEMORY' && firstLine !== 'HANDOFF') {
     return undefined;
   }
@@ -220,10 +240,18 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
     memoryCodeCitationHeaderValues(lines),
     canonicalCodeCitationSchemaVersion(lines, schemaVersion),
   );
-  const evidenceLines = lines.filter(line => /^\s*obsidian_evidence\s*:/u.test(line));
+  const evidenceLines = EffectArray.filter(
+    lines,
+    __effectArrayValue2 => !!(line => /^\s*obsidian_evidence\s*:/u.test(line))(__effectArrayValue2),
+  );
   const evidenceValue =
-    evidenceLines.length === 1 && evidenceLines[0]?.startsWith(`${EVIDENCE_HEADER}: `)
-      ? evidenceLines[0].slice(EVIDENCE_HEADER.length + 2)
+    evidenceLines.length === 1 &&
+    Effect.pipe(evidenceLines[0], effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(effectOptionalString, EffectString.startsWith(`${EVIDENCE_HEADER}: `)),
+    )
+      ? Effect.pipe(evidenceLines[0], EffectString.slice(EVIDENCE_HEADER.length + 2))
       : undefined;
   let obsidianEvidence: MemoryObsidianEvidenceV1 | undefined;
   if (
@@ -236,17 +264,25 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
   ) {
     try {
       const parsed: unknown = JSON.parse(evidenceValue);
-      if (serializeMemoryObsidianEvidence(parsed) === evidenceValue) {
-        obsidianEvidence = parsed as MemoryObsidianEvidenceV1;
+      if (validMemoryObsidianEvidence(parsed) && serializeMemoryObsidianEvidence(parsed) === evidenceValue) {
+        obsidianEvidence = parsed;
       }
     } catch {
       // Invalid citation metadata remains visible as an error and blocks rewrites/sharing.
     }
   }
-  const sourceEvidenceLines = lines.filter(line => /^\s*source_evidence\s*:/u.test(line));
+  const sourceEvidenceLines = EffectArray.filter(
+    lines,
+    __effectArrayValue2 => !!(line => /^\s*source_evidence\s*:/u.test(line))(__effectArrayValue2),
+  );
   const sourceEvidenceValue =
-    sourceEvidenceLines.length === 1 && sourceEvidenceLines[0]?.startsWith(`${SOURCE_EVIDENCE_HEADER}: `)
-      ? sourceEvidenceLines[0].slice(SOURCE_EVIDENCE_HEADER.length + 2)
+    sourceEvidenceLines.length === 1 &&
+    Effect.pipe(sourceEvidenceLines[0], effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(effectOptionalString, EffectString.startsWith(`${SOURCE_EVIDENCE_HEADER}: `)),
+    )
+      ? Effect.pipe(sourceEvidenceLines[0], EffectString.slice(SOURCE_EVIDENCE_HEADER.length + 2))
       : undefined;
   let sourceEvidence: SourceEvidenceCitationV1 | undefined;
   if (
@@ -258,14 +294,17 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
   ) {
     try {
       const parsed: unknown = JSON.parse(sourceEvidenceValue);
-      if (serializeSourceEvidenceCitation(parsed as SourceEvidenceCitationV1) === sourceEvidenceValue) {
-        sourceEvidence = parsed as SourceEvidenceCitationV1;
+      if (validSourceEvidenceCitation(parsed) && serializeSourceEvidenceCitation(parsed) === sourceEvidenceValue) {
+        sourceEvidence = parsed;
       }
     } catch {
       // Invalid evidence remains visible and blocks rewriting and sharing.
     }
   }
-  const consolidationLines = lines.filter(line => /^\s*consolidation\s*:/u.test(line));
+  const consolidationLines = EffectArray.filter(
+    lines,
+    __effectArrayValue2 => !!(line => /^\s*consolidation\s*:/u.test(line))(__effectArrayValue2),
+  );
   const consolidationValues = memoryHeaderValues(lines, 'consolidation') ?? [];
   let consolidation: ConsolidationReceipt | undefined;
   let consolidationError: string | undefined;
@@ -279,7 +318,7 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
           schemaVersion !== 10 &&
           schemaVersion !== MAX_SUPPORTED_MEMORY_SCHEMA_VERSION) ||
         consolidationLines.length !== 1 ||
-        !consolidationLines[0].startsWith('consolidation: ') ||
+        !Effect.pipe(consolidationLines[0], EffectString.startsWith('consolidation: ')) ||
         consolidationValues.length !== 1 ||
         new TextEncoder().encode(consolidationValues[0]).byteLength > MAX_CONSOLIDATION_V2_BYTES
       )
@@ -365,7 +404,10 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
     },
     uri: canonicalResourceInput(uri),
   };
-  const maintenanceLines = lines.filter(line => /^\s*topic_maintenance\s*:/u.test(line));
+  const maintenanceLines = EffectArray.filter(
+    lines,
+    __effectArrayValue2 => !!(line => /^\s*topic_maintenance\s*:/u.test(line))(__effectArrayValue2),
+  );
   if (!maintenanceLines.length) return validateParsedReviewedSupport(validateParsedConsolidationV2(record), lines);
   let topicMaintenance: TopicMaintenanceManifest | undefined;
   let topicMaintenanceError: string | undefined;
@@ -373,10 +415,10 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
     if (
       (schemaVersion !== 9 && schemaVersion !== 10 && schemaVersion !== MAX_SUPPORTED_MEMORY_SCHEMA_VERSION) ||
       maintenanceLines.length !== 1 ||
-      !maintenanceLines[0].startsWith(`${TOPIC_MAINTENANCE_HEADER}: `)
+      !Effect.pipe(maintenanceLines[0], EffectString.startsWith(`${TOPIC_MAINTENANCE_HEADER}: `))
     )
       throw new Error('Topic maintenance requires one canonical schema 9 or 10 header.');
-    const raw = maintenanceLines[0].slice(TOPIC_MAINTENANCE_HEADER.length + 2);
+    const raw = Effect.pipe(maintenanceLines[0], EffectString.slice(TOPIC_MAINTENANCE_HEADER.length + 2));
     if (new TextEncoder().encode(raw).byteLength > MAX_TOPIC_MAINTENANCE_BYTES)
       throw new Error('Topic maintenance manifest exceeds the 32 KiB limit.');
     const parsed: unknown = JSON.parse(raw);
@@ -410,16 +452,19 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
 }
 
 function validateParsedReviewedSupport(record: MemoryRecord, lines: readonly string[]): MemoryRecord {
-  const declarations = lines.filter(line => /^\s*reviewed_support\s*:/iu.test(line));
+  const declarations = EffectArray.filter(
+    lines,
+    __effectArrayValue2 => !!(line => /^\s*reviewed_support\s*:/iu.test(line))(__effectArrayValue2),
+  );
   if (!declarations.length) return record;
   try {
     if (
       record.metadata.schemaVersion !== 11 ||
       declarations.length !== 1 ||
-      !declarations[0].startsWith(`${REVIEWED_MEMORY_SUPPORT_HEADER}: `)
+      !Effect.pipe(declarations[0], EffectString.startsWith(`${REVIEWED_MEMORY_SUPPORT_HEADER}: `))
     )
       throw new Error('Reviewed support requires one canonical schema 11 header.');
-    const raw = declarations[0].slice(REVIEWED_MEMORY_SUPPORT_HEADER.length + 2);
+    const raw = Effect.pipe(declarations[0], EffectString.slice(REVIEWED_MEMORY_SUPPORT_HEADER.length + 2));
     if (new TextEncoder().encode(raw).byteLength > MAX_REVIEWED_MEMORY_SUPPORT_BYTES)
       throw new Error('Reviewed support exceeds its metadata bound.');
     const value: unknown = JSON.parse(raw);
@@ -480,7 +525,7 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
   if (metadata.reviewedSupport) {
     if (metadata.schemaVersion !== 11 || metadata.topicMaintenance || metadata.consolidation)
       throw new Error('Reviewed support requires schema 11 and typed legacy origin.');
-    validateReviewedMemorySupport(metadata.reviewedSupport, body.trim());
+    validateReviewedMemorySupport(metadata.reviewedSupport, Effect.pipe(body, EffectString.trim));
   }
   if (metadata.consolidationError) throw new Error(metadata.consolidationError);
   if (metadata.consolidation) {
@@ -501,7 +546,7 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
         (metadata.topicMaintenance.version === 3 && metadata.topicMaintenance.sourceKind !== 'code')
       )
         throw new Error('Consolidation V2 requires schema 10 and a topic maintenance V2 manifest.');
-      const receipt = validateConsolidationProvenanceV2(metadata.consolidation, body.trim());
+      const receipt = validateConsolidationProvenanceV2(metadata.consolidation, Effect.pipe(body, EffectString.trim));
       validateConsolidationV2ActiveEvidence(
         receipt,
         metadata.topicMaintenance,
@@ -511,7 +556,7 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     } else {
       const reviewed = validateConsolidationProvenance(
         metadata.consolidation,
-        body.trim(),
+        Effect.pipe(body, EffectString.trim),
         metadata.status === 'archived',
       );
       if (
@@ -568,7 +613,7 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     validateTopicMaintenanceManifest(metadata.topicMaintenance, {
       uri: 'threadnote://user/formatter/memories/durable/projects/topic/record.md',
       content: '',
-      body: body.trim(),
+      body: Effect.pipe(body, EffectString.trim),
       headerTitle: title,
       metadata,
     });
@@ -581,57 +626,64 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     throw new Error(`Memory code citations require memory schema version ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION}.`);
   }
   const codeCitationLines = formatMemoryCodeCitationLines(metadata.codeCitations ?? []);
-  const header = [
-    title,
-    `kind: ${metadata.kind}`,
-    `status: ${metadata.status}`,
-    memoryHeaderLine('project', metadata.project),
-    memoryHeaderLine('topic', metadata.topic),
-    memoryHeaderLine('source_agent_client', metadata.sourceAgentClient),
-    memoryHeaderLine('timestamp', metadata.timestamp),
-    metadata.schemaVersion !== undefined ? `schema_version: ${metadata.schemaVersion}` : undefined,
-    memoryHeaderLine('memory_id', metadata.memoryId),
-    memoryHeaderLine('owner', normalizeOptionalMetadata(metadata.owner)),
-    memoryHeaderLine('created_at', metadata.createdAt),
-    memoryHeaderLine('updated_at', metadata.updatedAt),
-    memoryHeaderLine('visibility', metadata.visibility),
-    memoryHeaderLine('workspace_scope', metadata.workspaceScope),
-    memoryHeaderLine('authority', metadata.authority),
-    memoryHeaderLine('trust', metadata.trust),
-    memoryHeaderLine('valid_from', metadata.validFrom),
-    memoryHeaderLine('valid_to', metadata.validTo),
-    memoryHeaderLine('last_reviewed', metadata.lastReviewed),
-    reviewAfterHeaderLine(metadata.reviewAfter),
-    memoryHeaderLine('source_observed_at', metadata.sourceObservedAt),
-    memoryHeaderLine('source_session_id', metadata.sourceSessionId),
-    memoryHeaderLine('source_commit', metadata.sourceCommit),
-    ...codeCitationLines,
-    metadata.obsidianEvidence
-      ? `${EVIDENCE_HEADER}: ${serializeMemoryObsidianEvidence(metadata.obsidianEvidence)}`
-      : undefined,
-    metadata.sourceEvidence
-      ? `${SOURCE_EVIDENCE_HEADER}: ${serializeSourceEvidenceCitation(metadata.sourceEvidence)}`
-      : undefined,
-    metadata.reviewedSupport
-      ? `${REVIEWED_MEMORY_SUPPORT_HEADER}: ${JSON.stringify(metadata.reviewedSupport)}`
-      : undefined,
-    metadata.topicMaintenance ? `${TOPIC_MAINTENANCE_HEADER}: ${JSON.stringify(metadata.topicMaintenance)}` : undefined,
-    metadata.consolidation ? memoryHeaderLine('consolidation', JSON.stringify(metadata.consolidation)) : undefined,
-    memoryHeaderLine('candidate_id', metadata.candidateId),
-    memoryHeaderLine('source_hash', metadata.sourceHash),
-    memoryHeaderLine('supersedes', metadata.supersedes),
-    memoryHeaderLine('archived_from', metadata.archivedFrom),
-    ...(metadata.references ?? []).map(reference => memoryHeaderLine('references', reference)),
-    ...(metadata.evidence ?? []).map(evidence => memoryHeaderLine('evidence', evidence)),
-    ...(metadata.relations ?? []).map(relation => memoryHeaderLine('relation', `${relation.type} ${relation.uri}`)),
-    ...(metadata.keywords ?? []).map(keyword => memoryHeaderLine('keywords', keyword)),
-  ].filter((line): line is string => line !== undefined);
-  return [...header, '', body.trim()].join('\n');
+  const header = EffectArray.filter(
+    [
+      title,
+      `kind: ${metadata.kind}`,
+      `status: ${metadata.status}`,
+      memoryHeaderLine('project', metadata.project),
+      memoryHeaderLine('topic', metadata.topic),
+      memoryHeaderLine('source_agent_client', metadata.sourceAgentClient),
+      memoryHeaderLine('timestamp', metadata.timestamp),
+      metadata.schemaVersion !== undefined ? `schema_version: ${metadata.schemaVersion}` : undefined,
+      memoryHeaderLine('memory_id', metadata.memoryId),
+      memoryHeaderLine('owner', normalizeOptionalMetadata(metadata.owner)),
+      memoryHeaderLine('created_at', metadata.createdAt),
+      memoryHeaderLine('updated_at', metadata.updatedAt),
+      memoryHeaderLine('visibility', metadata.visibility),
+      memoryHeaderLine('workspace_scope', metadata.workspaceScope),
+      memoryHeaderLine('authority', metadata.authority),
+      memoryHeaderLine('trust', metadata.trust),
+      memoryHeaderLine('valid_from', metadata.validFrom),
+      memoryHeaderLine('valid_to', metadata.validTo),
+      memoryHeaderLine('last_reviewed', metadata.lastReviewed),
+      reviewAfterHeaderLine(metadata.reviewAfter),
+      memoryHeaderLine('source_observed_at', metadata.sourceObservedAt),
+      memoryHeaderLine('source_session_id', metadata.sourceSessionId),
+      memoryHeaderLine('source_commit', metadata.sourceCommit),
+      ...codeCitationLines,
+      metadata.obsidianEvidence
+        ? `${EVIDENCE_HEADER}: ${serializeMemoryObsidianEvidence(metadata.obsidianEvidence)}`
+        : undefined,
+      metadata.sourceEvidence
+        ? `${SOURCE_EVIDENCE_HEADER}: ${serializeSourceEvidenceCitation(metadata.sourceEvidence)}`
+        : undefined,
+      metadata.reviewedSupport
+        ? `${REVIEWED_MEMORY_SUPPORT_HEADER}: ${JSON.stringify(metadata.reviewedSupport)}`
+        : undefined,
+      metadata.topicMaintenance
+        ? `${TOPIC_MAINTENANCE_HEADER}: ${JSON.stringify(metadata.topicMaintenance)}`
+        : undefined,
+      metadata.consolidation ? memoryHeaderLine('consolidation', JSON.stringify(metadata.consolidation)) : undefined,
+      memoryHeaderLine('candidate_id', metadata.candidateId),
+      memoryHeaderLine('source_hash', metadata.sourceHash),
+      memoryHeaderLine('supersedes', metadata.supersedes),
+      memoryHeaderLine('archived_from', metadata.archivedFrom),
+      ...EffectArray.map(metadata.references ?? [], reference => memoryHeaderLine('references', reference)),
+      ...EffectArray.map(metadata.evidence ?? [], evidence => memoryHeaderLine('evidence', evidence)),
+      ...EffectArray.map(metadata.relations ?? [], relation =>
+        memoryHeaderLine('relation', `${relation.type} ${relation.uri}`),
+      ),
+      ...EffectArray.map(metadata.keywords ?? [], keyword => memoryHeaderLine('keywords', keyword)),
+    ],
+    (line): line is string => line !== undefined,
+  );
+  return EffectArray.join([...header, '', Effect.pipe(body, EffectString.trim)], '\n');
 }
 
 /** Preserve source prose in an archive without duplicating machine-readable headers into recall text. */
 export function memoryArchiveBody(sourceBody: string): string {
-  return ['Archived original Threadnote memory.', '', sourceBody].join('\n');
+  return EffectArray.join(['Archived original Threadnote memory.', '', sourceBody], '\n');
 }
 
 /**
@@ -669,15 +721,22 @@ export function memoryArchiveMetadata(
 export function formatMemoryDocumentWithKeywords(content: string, keywords: readonly string[]): string {
   assertMemoryDocumentSchemaWritable(content);
   const canonical = normalizeMemoryDocumentLineEndings(canonicalMemoryDocumentContent(content));
-  const separatorIndex = canonical.indexOf('\n\n');
-  const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
-  const body = separatorIndex === -1 ? '' : canonical.slice(separatorIndex + 2);
-  const headerLines = header.split('\n').filter(line => !line.startsWith('keywords:'));
-  const keywordLines = keywords.flatMap(keyword => {
+  const separatorIndex = Effect.pipe(
+    canonical,
+    EffectString.indexOf('\n\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const header = separatorIndex === -1 ? canonical : Effect.pipe(canonical, EffectString.slice(0, separatorIndex));
+  const body = separatorIndex === -1 ? '' : Effect.pipe(canonical, EffectString.slice(separatorIndex + 2));
+  const headerLines = EffectArray.filter(
+    Effect.pipe(header, EffectString.split('\n')),
+    line => !Effect.pipe(line, EffectString.startsWith('keywords:')),
+  );
+  const keywordLines = EffectArray.flatMap(keywords, keyword => {
     const line = memoryHeaderLine('keywords', keyword);
     return line === undefined ? [] : [line];
   });
-  return [...headerLines, ...keywordLines, '', body].join('\n');
+  return EffectArray.join([...headerLines, ...keywordLines, '', body], '\n');
 }
 
 /**
@@ -685,25 +744,31 @@ export function formatMemoryDocumentWithKeywords(content: string, keywords: read
  * of the user-approved memory payload and must not affect content identity.
  */
 export function canonicalMemoryDocumentContent(content: string): string {
-  return stripLegacyMemoryFieldsTrailer(content.trim()).trim();
+  return Effect.pipe(stripLegacyMemoryFieldsTrailer(Effect.pipe(content, EffectString.trim)), EffectString.trim);
 }
 
 /** Malformed declarations still protect a topic; use the parser's exact header boundary. */
 export function declaresReviewedSupportHeader(content: string): boolean {
-  const header = normalizeMemoryDocumentLineEndings(content.trim()).split('\n\n', 1)[0] ?? '';
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  const header = normalizeMemoryDocumentLineEndings(Effect.pipe(content, EffectString.trim)).split('\n\n', 1)[0] ?? '';
   return /^\s*reviewed_support\s*:/imu.test(header);
 }
 
 export function declaresTopicMaintenanceHeader(content: string): boolean {
-  const header = normalizeMemoryDocumentLineEndings(content.trim()).split('\n\n', 1)[0] ?? '';
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+  const header = normalizeMemoryDocumentLineEndings(Effect.pipe(content, EffectString.trim)).split('\n\n', 1)[0] ?? '';
   return /^\s*topic_maintenance\s*:/imu.test(header);
 }
 
 function stripLegacyMemoryFieldsTrailer(content: string): string {
-  const trimmed = content.trimEnd();
-  if (!trimmed.endsWith('-->')) return content;
+  const trimmed = Effect.pipe(content, EffectString.trimEnd);
+  if (!Effect.pipe(trimmed, EffectString.endsWith('-->'))) return content;
   const marker = '<!-- MEMORY_FIELDS';
-  const markerStart = trimmed.lastIndexOf(marker);
+  const markerStart = Effect.pipe(
+    trimmed,
+    EffectString.lastIndexOf(marker),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (
     markerStart < 0 ||
     !lineBreakEndsAt(trimmed, markerStart) ||
@@ -714,7 +779,7 @@ function stripLegacyMemoryFieldsTrailer(content: string): string {
   const precedingBreak = previousLineBreakStart(trimmed, previousLineBreakStart(trimmed, markerStart));
   const closingStart = trimmed.length - '-->'.length;
   if (precedingBreak < 0 || !lineBreakEndsAt(trimmed, closingStart)) return content;
-  return trimmed.slice(0, precedingBreak);
+  return Effect.pipe(trimmed, EffectString.slice(0, precedingBreak));
 }
 
 function lineBreakStartsAt(value: string, index: number): boolean {
@@ -737,18 +802,33 @@ function previousLineBreakStart(value: string, index: number): number {
  */
 export function assertMemoryDocumentSchemaWritable(content: string): void {
   const canonical = normalizeMemoryDocumentLineEndings(canonicalMemoryDocumentContent(content));
-  const separatorIndex = canonical.indexOf('\n\n');
-  const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
-  if (header.split('\n').some(line => /^\s*consolidation\s*:/u.test(line))) {
+  const separatorIndex = Effect.pipe(
+    canonical,
+    EffectString.indexOf('\n\n'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const header = separatorIndex === -1 ? canonical : Effect.pipe(canonical, EffectString.slice(0, separatorIndex));
+  if (EffectArray.some(Effect.pipe(header, EffectString.split('\n')), line => /^\s*consolidation\s*:/u.test(line))) {
     const record = parseMemoryDocument('threadnote://memory/consolidation-check', content);
     if (!record?.metadata.consolidation || record.metadata.consolidationError)
       throw new Error(record?.metadata.consolidationError ?? 'Malformed consolidation provenance.');
   }
-  const hasObsidianEvidence = header.split('\n').some(line => /^\s*obsidian_evidence\s*:/u.test(line));
-  const hasSourceEvidence = header.split('\n').some(line => /^\s*source_evidence\s*:/u.test(line));
-  const hasTopicMaintenance = header.split('\n').some(line => /^\s*topic_maintenance\s*:/u.test(line));
-  const hasReviewedSupport = header.split('\n').some(line => /^\s*reviewed_support\s*:/iu.test(line));
-  const schemaLines = header.split('\n').filter(line => /^\s*schema_version\s*:/u.test(line));
+  const hasObsidianEvidence = EffectArray.some(Effect.pipe(header, EffectString.split('\n')), line =>
+    /^\s*obsidian_evidence\s*:/u.test(line),
+  );
+  const hasSourceEvidence = EffectArray.some(Effect.pipe(header, EffectString.split('\n')), line =>
+    /^\s*source_evidence\s*:/u.test(line),
+  );
+  const hasTopicMaintenance = EffectArray.some(Effect.pipe(header, EffectString.split('\n')), line =>
+    /^\s*topic_maintenance\s*:/u.test(line),
+  );
+  const hasReviewedSupport = EffectArray.some(Effect.pipe(header, EffectString.split('\n')), line =>
+    /^\s*reviewed_support\s*:/iu.test(line),
+  );
+  const schemaLines = EffectArray.filter(
+    Effect.pipe(header, EffectString.split('\n')),
+    __effectArrayValue2 => !!(line => /^\s*schema_version\s*:/u.test(line))(__effectArrayValue2),
+  );
   if (schemaLines.length === 0) {
     if (hasObsidianEvidence) throw new Error('Malformed Obsidian evidence citation metadata.');
     if (hasSourceEvidence) throw new Error('Malformed source evidence citation metadata.');
@@ -760,7 +840,20 @@ export function assertMemoryDocumentSchemaWritable(content: string): void {
     throw new Error('Memory schema_version header must appear exactly once before rewriting.');
   }
   const line = schemaLines[0];
-  const rawVersion = line.slice(line.indexOf(':') + 1).trim();
+  const rawVersion = Effect.pipe(line, __effectPipeInput => {
+    const __effectPipeStage0 = Effect.pipe(
+      __effectPipeInput,
+      EffectString.slice(
+        Effect.pipe(
+          line,
+          EffectString.indexOf(':'),
+          Effect.Option.getOrElse(() => -1),
+        ) + 1,
+      ),
+    );
+    const __effectPipeStage1 = Effect.pipe(__effectPipeStage0, EffectString.trim);
+    return __effectPipeStage1;
+  });
   const schemaVersion = parseSchemaVersion(rawVersion);
   if (schemaVersion === undefined) {
     throw new Error('Memory schema_version header must be a canonical positive safe integer before rewriting.');
@@ -804,7 +897,7 @@ export function assertMemoryRecordArchivable(record: Pick<MemoryRecord, 'content
   assertMemoryDocumentSchemaWritable(record.content);
   const citationErrors = record.metadata.citationErrors;
   if (citationErrors && citationErrors.length > 0) {
-    const reasons = [...new Set(citationErrors.map(error => error.reason))].sort().join(', ');
+    const reasons = EffectArray.join([...new Set(EffectArray.map(citationErrors, error => error.reason))].sort(), ', ');
     throw new Error(
       `Cannot archive ${record.uri}: malformed code citation metadata (${reasons}) must be repaired or recaptured first.`,
     );
@@ -826,7 +919,7 @@ export function boundedMemoryAuthority(
   const canonicalUri = canonicalResourceInput(uri);
   const fallback: MemoryAuthority = options.canonicalResource
     ? 'canonical_repo'
-    : canonicalUri.startsWith('threadnote://resources/')
+    : Effect.pipe(canonicalUri, EffectString.startsWith('threadnote://resources/'))
       ? 'external'
       : isSharedMemoryUri(canonicalUri)
         ? 'reviewed_shared'
@@ -847,7 +940,7 @@ export function boundedMemoryTrust(
   const fallback: MemoryTrust =
     options.canonicalResource || isSharedMemoryUri(canonicalUri) || reviewedCandidate
       ? 'approved'
-      : canonicalUri.startsWith('threadnote://resources/')
+      : Effect.pipe(canonicalUri, EffectString.startsWith('threadnote://resources/'))
         ? 'untrusted'
         : 'inferred';
   const asserted = metadata?.trust;
@@ -885,14 +978,29 @@ function canonicalResourceInput(uri: string): string {
 
 export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
   const parseable = normalizeMemoryDocumentLineEndings(memory);
-  const header = parseable.slice(0, Math.max(0, parseable.indexOf('\n\n')) || parseable.length);
-  const lines = header.split('\n');
-  const parsedRecord = lines.some(line =>
+  const header = Effect.pipe(
+    parseable,
+    EffectString.slice(
+      0,
+      Math.max(
+        0,
+        Effect.pipe(
+          parseable,
+          EffectString.indexOf('\n\n'),
+          Effect.Option.getOrElse(() => -1),
+        ),
+      ) || parseable.length,
+    ),
+  );
+  const lines = Effect.pipe(header, EffectString.split('\n'));
+  const parsedRecord = EffectArray.some(lines, line =>
     /^\s*(?:consolidation|obsidian_evidence|source_evidence|topic_maintenance)\s*:/u.test(line),
   )
     ? parseMemoryDocument('threadnote://memory/inferred', memory)
     : undefined;
-  const firstLine = lines[0]?.trim();
+  const firstLine = Effect.pipe(lines[0], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   const schemaVersion = parseSchemaVersion(memoryHeaderValueFromLines(lines, 'schema_version'));
   const codeCitationMetadata = parseMemoryCodeCitationHeaders(
     memoryCodeCitationHeaderValues(lines),
@@ -950,41 +1058,62 @@ export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
 }
 
 function normalizeMemoryDocumentLineEndings(content: string): string {
-  return content.replace(/\r\n?/gu, '\n');
+  return Effect.pipe(content, EffectString.replace(/\r\n?/gu, '\n'));
 }
 
 export function memoryHeaderValue(header: string, key: string): string | undefined {
-  return memoryHeaderValueFromLines(header.split('\n'), key);
+  return memoryHeaderValueFromLines(Effect.pipe(header, EffectString.split('\n')), key);
 }
 
 function memoryHeaderValueFromLines(lines: readonly string[], key: string): string | undefined {
   const prefix = `${key}:`;
-  return lines
-    .find(line => line.startsWith(prefix))
-    ?.slice(prefix.length)
-    .trim();
+  return Effect.pipe(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        lines,
+        __effectArrayValue => !!(line => Effect.pipe(line, EffectString.startsWith(prefix)))(__effectArrayValue),
+      ),
+    ),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.slice(prefix.length)),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
 }
 
 function memoryHeaderValues(lines: readonly string[], key: string): readonly string[] | undefined {
   const prefix = `${key}:`;
-  const values = lines
-    .filter(line => line.startsWith(prefix))
-    .map(line => line.slice(prefix.length).trim())
-    .filter(value => value.length > 0);
+  const values = EffectArray.filter(
+    EffectArray.map(
+      EffectArray.filter(
+        lines,
+        __effectArrayValue2 => !!(line => Effect.pipe(line, EffectString.startsWith(prefix)))(__effectArrayValue2),
+      ),
+      line => Effect.pipe(line, EffectString.slice(prefix.length), EffectString.trim),
+    ),
+    value => value.length > 0,
+  );
   return values.length > 0 ? values : undefined;
 }
 
 /** Preserve citation whitespace so a non-canonical header cannot become authoritative after trimming. */
 function memoryCodeCitationHeaderValues(lines: readonly string[]): readonly string[] | undefined {
   const prefix = `${MEMORY_CODE_CITATION_HEADER}:`;
-  const values = lines
-    .filter(line => line.trimStart().startsWith(prefix))
-    .map(line => {
-      const trimmedStart = line.trimStart();
-      const suffix = trimmedStart.slice(prefix.length);
-      const value = suffix.startsWith(' ') ? suffix.slice(1) : ` ${suffix}`;
+  const values = EffectArray.map(
+    EffectArray.filter(
+      lines,
+      __effectArrayValue2 =>
+        !!(line => Effect.pipe(line, EffectString.trimStart, EffectString.startsWith(prefix)))(__effectArrayValue2),
+    ),
+    line => {
+      const trimmedStart = Effect.pipe(line, EffectString.trimStart);
+      const suffix = Effect.pipe(trimmedStart, EffectString.slice(prefix.length));
+      const value = Effect.pipe(suffix, EffectString.startsWith(' '))
+        ? Effect.pipe(suffix, EffectString.slice(1))
+        : ` ${suffix}`;
       return line === trimmedStart ? value : ` ${value}`;
-    });
+    },
+  );
   return values.length > 0 ? values : undefined;
 }
 
@@ -993,7 +1122,11 @@ function canonicalCodeCitationSchemaVersion(
   schemaVersion: number | undefined,
 ): number | undefined {
   if (schemaVersion === undefined) return undefined;
-  const schemas = lines.filter(line => line.startsWith('schema_version:'));
+  const schemas = EffectArray.filter(
+    lines,
+    __effectArrayValue2 =>
+      !!(line => Effect.pipe(line, EffectString.startsWith('schema_version:')))(__effectArrayValue2),
+  );
   return schemas.length === 1 && schemas[0] === `schema_version: ${schemaVersion}` ? schemaVersion : undefined;
 }
 
@@ -1035,21 +1168,26 @@ function parseMemoryRelations(values: readonly string[] | undefined): readonly M
   if (!values) {
     return undefined;
   }
-  const relations = values
-    .map(parseMemoryRelationValue)
-    .filter((relation): relation is MemoryRelation => relation !== undefined);
+  const relations = EffectArray.filter(
+    EffectArray.map(values, parseMemoryRelationValue),
+    (relation): relation is MemoryRelation => relation !== undefined,
+  );
   return relations.length > 0 ? relations : undefined;
 }
 
 /** Tolerant legacy decoder; strict authoring validation lives in memory/relations.ts. */
 export function parseMemoryRelationValue(value: string): MemoryRelation | undefined {
-  const separator = value.indexOf(' ');
+  const separator = Effect.pipe(
+    value,
+    EffectString.indexOf(' '),
+    Effect.Option.getOrElse(() => -1),
+  );
   if (separator <= 0) {
     return undefined;
   }
-  const type = value.slice(0, separator);
-  const uri = canonicalOptionalResourceInput(value.slice(separator + 1).trim());
-  if (!uri || !uri.startsWith('threadnote://') || !isMemoryRelationType(type)) {
+  const type = Effect.pipe(value, EffectString.slice(0, separator));
+  const uri = canonicalOptionalResourceInput(Effect.pipe(value, EffectString.slice(separator + 1), EffectString.trim));
+  if (!uri || !Effect.pipe(uri, EffectString.startsWith('threadnote://')) || !isMemoryRelationType(type)) {
     return undefined;
   }
   return {type, uri};
@@ -1065,11 +1203,15 @@ function canonicalOptionalResourceInput(uri: string | undefined): string | undef
 }
 
 function canonicalResourceInputs(values: readonly string[] | undefined): readonly string[] | undefined {
-  return values?.map(value => canonicalOptionalResourceInput(value) ?? value);
+  return EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(values), __effectArrayReceiver =>
+      EffectArray.map(__effectArrayReceiver, value => canonicalOptionalResourceInput(value) ?? value),
+    ),
+  );
 }
 
 export function isMemoryRelationType(value: string): value is MemoryRelationType {
-  return MEMORY_RELATION_TYPES.some(type => type === value);
+  return EffectArray.some(MEMORY_RELATION_TYPES, type => type === value);
 }
 
 function parseSchemaVersion(value: string | undefined): number | undefined {
@@ -1081,13 +1223,15 @@ function parseSchemaVersion(value: string | undefined): number | undefined {
 }
 
 function normalizeOptionalMetadata(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
+  const trimmed = Effect.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+  );
   return trimmed ? trimmed : undefined;
 }
 
 export function isIsoDateOrCanonicalIsoInstant(value: string): boolean {
   if (/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
-    const [year, month, day] = value.split('-').map(Number);
+    const [year, month, day] = EffectArray.map(Effect.pipe(value, EffectString.split('-')), Number);
     const date = new Date(0);
     date.setUTCFullYear(year, month - 1, day);
     return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;

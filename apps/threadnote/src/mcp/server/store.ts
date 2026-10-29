@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {Console, DateTime, Effect, Schema} from 'effect';
 import {EffectMcpServerRegistry, EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
@@ -47,6 +48,9 @@ import {
 } from './common.js';
 import {readMemoryRecordsByUri, writeCursorCloudSharedMemory, writeDurableMemory} from './memory.js';
 import {resolveMemoryScope, type MemoryScopeSource} from './cursor_cloud_memory.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export function registerStoreTool(
   server: EffectMcpServerRegistry,
@@ -140,7 +144,11 @@ export function registerStoreTool(
       if (memoryScope) {
         const selection = yield* Effect.try({
           try: () => ({
-            teamShare: requestedTeam?.trim() ? cursorCloudShareForTeam(memoryScope, requestedTeam) : undefined,
+            teamShare: Effect2.pipe(requestedTeam, effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+            )
+              ? cursorCloudShareForTeam(memoryScope, requestedTeam)
+              : undefined,
             replaceShare: checkedReplaceUri.value
               ? cursorCloudShareForUri(memoryScope, checkedReplaceUri.value)
               : undefined,
@@ -149,8 +157,15 @@ export function registerStoreTool(
         }).pipe(Effect.result);
         if (selection._tag === 'Failure') return argumentError(selection.failure);
         const {teamShare, replaceShare} = selection.success;
-        if (requestedTeam?.trim() && !teamShare) {
-          return argumentError(`${name} team must be one of: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`);
+        if (
+          Effect2.pipe(requestedTeam, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          ) &&
+          !teamShare
+        ) {
+          return argumentError(
+            `${name} team must be one of: ${EffectArray.join(cursorCloudScopeTeams(memoryScope), ', ')}.`,
+          );
         }
         if (memoryKind === 'durable' && checkedReplaceUri.value && !replaceShare) {
           return argumentError(`${name} replaceUri must stay within a configured ${profileLabel} share.`);
@@ -161,7 +176,7 @@ export function registerStoreTool(
         selectedShare = teamShare ?? replaceShare ?? cursorCloudShareForTeam(memoryScope, undefined);
         if (memoryKind === 'durable' && !selectedShare) {
           return argumentError(
-            `${name} requires team when several ${profileLabel} shares are configured: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`,
+            `${name} requires team when several ${profileLabel} shares are configured: ${EffectArray.join(cursorCloudScopeTeams(memoryScope), ', ')}.`,
           );
         }
       }
@@ -171,10 +186,16 @@ export function registerStoreTool(
         );
       }
       if (memoryScope) {
-        const outsideReference = checkedReferences.value?.find(reference =>
-          memoryKind === 'durable'
-            ? !resourceIdIsWithin(reference, selectedShare!.root)
-            : !cursorCloudUriWithinScope(memoryScope, reference),
+        const outsideReference = EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(checkedReferences.value), __effectArrayReceiver =>
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(__effectArrayReceiver, reference =>
+                memoryKind === 'durable'
+                  ? !resourceIdIsWithin(reference, selectedShare!.root)
+                  : !cursorCloudUriWithinScope(memoryScope, reference),
+              ),
+            ),
+          ),
         );
         if (outsideReference) {
           return argumentError(
@@ -409,22 +430,26 @@ export function registerFinalizeCodeRefsTool(server: EffectMcpServerAdapter, con
             ...(checkedUri.value === undefined ? {} : {uris: [checkedUri.value]}),
           }),
         );
-        const summary = [
-          `Deferred code anchors: ${receipt.finalizedCount} finalized, ${receipt.pendingCount} pending, ${receipt.conflictCount} conflict, ${receipt.failedCount} failed.`,
-          ...(receipt.derivedIndexes
-            ? [
-                `Derived indexes: ${receipt.derivedIndexes.state}${receipt.derivedIndexes.state === 'deferred' ? ' · repair needed' : ''}.`,
-              ]
-            : []),
-          ...receipt.items.map(
-            item =>
-              `- ${item.memoryUri ?? 'invalid intent'}: ${item.state}` +
-              (item.code ? ` [${item.code}]` : '') +
-              (item.reason ? ` (${item.reason})` : '') +
-              (item.recoveryAction ? ` · next: ${item.recoveryAction}` : '') +
-              (item.citationCount === undefined ? '' : ` · ${item.citationCount} citation(s)`),
-          ),
-        ].join('\n');
+        const summary = EffectArray.join(
+          [
+            `Deferred code anchors: ${receipt.finalizedCount} finalized, ${receipt.pendingCount} pending, ${receipt.conflictCount} conflict, ${receipt.failedCount} failed.`,
+            ...(receipt.derivedIndexes
+              ? [
+                  `Derived indexes: ${receipt.derivedIndexes.state}${receipt.derivedIndexes.state === 'deferred' ? ' · repair needed' : ''}.`,
+                ]
+              : []),
+            ...EffectArray.map(
+              receipt.items,
+              item =>
+                `- ${item.memoryUri ?? 'invalid intent'}: ${item.state}` +
+                (item.code ? ` [${item.code}]` : '') +
+                (item.reason ? ` (${item.reason})` : '') +
+                (item.recoveryAction ? ` · next: ${item.recoveryAction}` : '') +
+                (item.citationCount === undefined ? '' : ` · ${item.citationCount} citation(s)`),
+            ),
+          ],
+          '\n',
+        );
         return {content: [{type: 'text' as const, text: summary}], structuredContent: receipt};
       }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),
   );
@@ -435,7 +460,7 @@ function stringList(value: string | readonly string[] | undefined): readonly str
 }
 
 function commonCitationSourceCommit(citations: readonly {readonly sourceCommit: string}[]): string | undefined {
-  const commits = new Set(citations.map(citation => citation.sourceCommit));
+  const commits = new Set(EffectArray.map(citations, citation => citation.sourceCommit));
   return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
 }
 
@@ -575,16 +600,19 @@ function withDeferredCodeAnchorWriteReceipt(
     runFrom: preparation.target === 'callerCwd' ? 'callerCwd' : 'any-directory',
     target: preparation.target,
   };
-  const note = [
-    'Memory stored now without finalized code citations.',
-    `${request.codeRefs.length} code reference(s) are pending in a private local outbox.`,
-    preparation.target === 'callerCwd'
-      ? 'After the graph is prepared, Threadnote retries automatically during graph indexing and the next code-linked Context Brief.'
-      : 'After the Workset is prepared, Threadnote retries automatically.',
-    typeof memoryUri === 'string'
-      ? `If it remains pending, call remember_context with the same content and replaceUri: "${memoryUri}", or run threadnote finalize-code-refs.`
-      : 'If it remains pending, replace the stored memory with the same content and codeRefs, or run threadnote finalize-code-refs.',
-  ].join(' ');
+  const note = EffectArray.join(
+    [
+      'Memory stored now without finalized code citations.',
+      `${request.codeRefs.length} code reference(s) are pending in a private local outbox.`,
+      preparation.target === 'callerCwd'
+        ? 'After the graph is prepared, Threadnote retries automatically during graph indexing and the next code-linked Context Brief.'
+        : 'After the Workset is prepared, Threadnote retries automatically.',
+      typeof memoryUri === 'string'
+        ? `If it remains pending, call remember_context with the same content and replaceUri: "${memoryUri}", or run threadnote finalize-code-refs.`
+        : 'If it remains pending, replace the stored memory with the same content and codeRefs, or run threadnote finalize-code-refs.',
+    ],
+    ' ',
+  );
   return {
     ...result,
     content: [...result.content, {type: 'text', text: note}],

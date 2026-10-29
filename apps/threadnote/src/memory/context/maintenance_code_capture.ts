@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
@@ -9,6 +10,7 @@ import {
   readContextHealthCitationEvidence,
   type ContextHealthCitationSourceExcerptV1,
 } from '@threadnote/context/citation_validation';
+import {Option as EffectOption} from 'effect';
 
 /** Select a new current observation, never validate or relocate the historical pin. */
 export function exactAutomaticCurrentSymbol(
@@ -19,7 +21,8 @@ export function exactAutomaticCurrentSymbol(
 ) {
   const target = citation.target;
   if (target.kind !== 'symbol' || citation.repositoryId !== repositoryId || truncated) return undefined;
-  const exact = symbols.filter(
+  const exact = EffectArray.filter(
+    symbols,
     symbol =>
       symbol.path === citation.path &&
       symbol.language === target.language &&
@@ -119,18 +122,19 @@ export function automaticInactiveCodeRootIds(
 ): readonly string[] {
   const selector = automaticSymbolSelectorKey(current);
   if (!selector) return [];
-  const approved = active.filter(citation => automaticSymbolSelectorKey(citation) === selector);
+  const approved = EffectArray.filter(active, citation => automaticSymbolSelectorKey(citation) === selector);
   if (approved.length !== 1 || !retainAutomaticApprovedSymbolExcerpt(approved[0], current, excerpt)) return [];
-  const activeIds = new Set(active.map(citation => citation.id));
-  return roots
-    .filter(
+  const activeIds = new Set(EffectArray.map(active, citation => citation.id));
+  return EffectArray.map(
+    EffectArray.filter(
+      roots,
       citation =>
         !activeIds.has(citation.id) &&
         citation.repositoryIdentityKind === current.repositoryIdentityKind &&
         automaticSymbolSelectorKey(citation) === selector,
-    )
-    .map(citation => citation.id)
-    .sort();
+    ),
+    citation => citation.id,
+  ).sort();
 }
 
 /** A changed extractor context requires an explicit independent current proof for the exact approved identity. */
@@ -242,6 +246,11 @@ export const captureAutomaticCurrentSymbol = Effect.fn('automaticPreparation.cap
     maximumLines: 24,
     symbolSpanOnly: true,
   });
-  const excerpt = read.excerpts.find(item => automaticCurrentSymbolMatchesExcerpt(current, item));
+  const excerpt = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      read.excerpts,
+      __effectArrayValue => !!(item => automaticCurrentSymbolMatchesExcerpt(current, item))(__effectArrayValue),
+    ),
+  );
   return excerpt ? {citation: current, excerpt, generation: read.generation} : undefined;
 });

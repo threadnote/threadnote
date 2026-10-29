@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {access, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -5,8 +6,32 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption, Schema} from 'effect';
 
 const execFilePromise = promisify(execFile);
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+function decodeJson<S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown): S['Type'] {
+  return Schema.decodeUnknownSync(schema)(value);
+}
+type CliFailure = NodeJS.ErrnoException & {stderr?: string; stdout?: string};
+function isCliFailure(value: unknown): value is CliFailure {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    value instanceof Error &&
+    'code' in value &&
+    (typeof value.code === 'number' || typeof value.code === 'string') &&
+    (!('stderr' in value) || typeof value.stderr === 'string') &&
+    (!('stdout' in value) || typeof value.stdout === 'string')
+  );
+}
+function processFailure(cause: unknown): CliFailure {
+  if (!isCliFailure(cause)) throw cause;
+  return cause;
+}
 
 describe('Effect CLI', () => {
   it('exposes a core repair mode that skips host integrations', async () => {
@@ -44,8 +69,8 @@ describe('Effect CLI', () => {
     const help = await runCli(['setup', 'gemini-cli', '--help']);
     expect(help.stdout).not.toContain('--task');
 
-    const error = await runCli(['setup', 'gemini-cli', '--task', 'custom verification']).catch(
-      cause => cause as NodeJS.ErrnoException & {stderr?: string},
+    const error = await runCli(['setup', 'gemini-cli', '--task', 'custom verification']).catch(cause =>
+      processFailure(cause),
     );
     expect(error).toMatchObject({code: 1});
     expect(String(error.stderr)).toContain('--task');
@@ -96,18 +121,21 @@ describe('Effect CLI', () => {
       await mkdir(memoryRoot, {recursive: true});
       await writeFile(
         join(memoryRoot, 'relation-target.md'),
-        [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          'project: threadnote',
-          'topic: relation-target',
-          'memory_id: tn_cli_relation_target',
-          'source_agent_client: test',
-          'timestamp: 2026-08-31T00:00:00.000Z',
-          '',
-          'CLI relation target.',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            'project: threadnote',
+            'topic: relation-target',
+            'memory_id: tn_cli_relation_target',
+            'source_agent_client: test',
+            'timestamp: 2026-08-31T00:00:00.000Z',
+            '',
+            'CLI relation target.',
+          ],
+          '\n',
+        ),
       );
 
       const stored = await runCli(
@@ -181,7 +209,7 @@ describe('Effect CLI', () => {
           ]).flat(),
         ],
         {THREADNOTE_HOME: root, THREADNOTE_USER: 'local'},
-      ).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+      ).catch(cause => processFailure(cause));
       expect(tooMany).toMatchObject({code: 1});
       expect(String(tooMany.stderr)).toContain('at most 16 relations');
     } finally {
@@ -195,7 +223,7 @@ describe('Effect CLI', () => {
       const failure = await runCli(
         ['remember', '--dry-run', '--defer-code-refs', '--text', 'No locator was supplied.'],
         {THREADNOTE_HOME: root},
-      ).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+      ).catch(cause => processFailure(cause));
       expect(failure).toMatchObject({code: 1});
       expect(String(failure.stderr)).toContain('--defer-code-refs requires at least one --code-ref');
     } finally {
@@ -295,7 +323,7 @@ describe('Effect CLI', () => {
           'Do not write without exact-current evidence.',
         ],
         {THREADNOTE_HOME: root},
-      ).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+      ).catch(cause => processFailure(cause));
 
       expect(failure).toMatchObject({code: 1});
       expect(String(failure.stderr)).toContain('already-published ready graph');
@@ -358,9 +386,7 @@ describe('Effect CLI', () => {
       await runCli(['graph', 'index', '--cwd', repository, '--no-vectors', '--json'], environment);
 
       expect((await runCli(['read', memoryUri!], environment)).stdout).toContain('code_citation:');
-      const diagnosis = await runCli(['doctor', '--dry-run'], environment).catch(
-        cause => cause as NodeJS.ErrnoException & {stdout?: string},
-      );
+      const diagnosis = await runCli(['doctor', '--dry-run'], environment).catch(cause => processFailure(cause));
       expect(String(diagnosis.stdout)).toContain('OK   lexical recall index:');
     } finally {
       await rm(root, {force: true, recursive: true});
@@ -381,7 +407,7 @@ describe('Effect CLI', () => {
           'Contradictory policy.',
         ],
         {THREADNOTE_HOME: root},
-      ).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+      ).catch(cause => processFailure(cause));
 
       expect(failure).toMatchObject({code: 1});
       expect(String(failure.stderr)).toContain('Choose only one of --defer-code-refs or --require-current-code-refs');
@@ -405,7 +431,7 @@ describe('Effect CLI', () => {
           'Inactive memories cannot own pending anchors.',
         ],
         {THREADNOTE_HOME: root},
-      ).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+      ).catch(cause => processFailure(cause));
 
       expect(failure).toMatchObject({code: 1});
       expect(String(failure.stderr)).toContain('--defer-code-refs can be used only when storing an active memory');
@@ -446,8 +472,8 @@ describe('Effect CLI', () => {
       expect(preview.stdout).toContain('Would enable automatic Threadnote updates.');
       await expect(access(join(root, 'install', 'auto-update.json'))).rejects.toMatchObject({code: 'ENOENT'});
 
-      const mixed = await runCli(['update', '--auto', 'off', '--json'], environment).catch(
-        cause => cause as NodeJS.ErrnoException & {stderr?: string},
+      const mixed = await runCli(['update', '--auto', 'off', '--json'], environment).catch(cause =>
+        processFailure(cause),
       );
       expect(mixed).toMatchObject({code: 1});
       expect(String(mixed.stderr)).toContain('Choose one update mode');
@@ -658,7 +684,7 @@ describe('Effect CLI', () => {
 
       await expect(
         runCli(['graph', 'index', '--home', home, '--cwd', repository, '--no-vectors'], {
-          THREADNOTE_CODE_GRAPH_REFRESH_DEMAND_TOKEN: `cgdq_${'a'.repeat(32)}`,
+          THREADNOTE_CODE_GRAPH_REFRESH_DEMAND_TOKEN: `cgdq_${Effect.pipe('a', EffectString.repeat(32))}`,
         }),
       ).rejects.toMatchObject({code: 75});
     } finally {
@@ -670,7 +696,7 @@ describe('Effect CLI', () => {
     const args = ['context', 'brief', '--task', 'Find memories linked to these files.'];
     for (let index = 0; index < 9; index += 1) args.push('--code-ref', `src/ref-${index}.ts`);
 
-    const error = await runCli(args).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+    const error = await runCli(args).catch(cause => processFailure(cause));
 
     expect(error).toMatchObject({code: 1});
     expect(String(error.stderr)).toContain('--code-ref');
@@ -682,19 +708,19 @@ describe('Effect CLI', () => {
       const budgetError = await runCli(
         ['context', 'brief', '--budget-tokens', '799', '--task', 'Find the current contract.'],
         {THREADNOTE_HOME: home},
-      ).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+      ).catch(cause => processFailure(cause));
       expect(budgetError).toMatchObject({code: 1});
       expect(String(budgetError.stderr)).toContain('800');
 
       for (const [codeRef, expectedMessage] of [
         ['./src/index.ts', 'canonical'],
-        [`cgs_${'a'.repeat(31)}`, 'cgs_<32 lowercase hex>'],
-        [`cgr_${'a'.repeat(40)}`, 'cgr_ handle, which Context Brief does not support'],
+        [`cgs_${Effect.pipe('a', EffectString.repeat(31))}`, 'cgs_<32 lowercase hex>'],
+        [`cgr_${Effect.pipe('a', EffectString.repeat(40))}`, 'cgr_ handle, which Context Brief does not support'],
       ] as const) {
         const refError = await runCli(
           ['context', 'brief', '--cwd', process.cwd(), '--code-ref', codeRef, '--task', 'Find the current contract.'],
           {THREADNOTE_HOME: home},
-        ).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+        ).catch(cause => processFailure(cause));
         expect(refError, codeRef).toMatchObject({code: 1});
         expect(String(refError.stderr), codeRef).toContain(expectedMessage);
       }
@@ -737,18 +763,35 @@ describe('Effect CLI', () => {
       ]);
 
       const output = await runCli(['graph', 'inventory', '--cwd', root, '--json']);
-      const preview = JSON.parse(output.stdout) as {
-        readonly groups: ReadonlyArray<{
-          readonly classifier: string;
-          readonly disposition: string;
-          readonly language: string;
-          readonly reason: string;
-          readonly role: string;
-        }>;
-        readonly totals: {readonly eligible: {readonly files: number}; readonly skipped: {readonly files: number}};
-        readonly type: string;
-        readonly version: number;
-      };
+      const preview = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            groups: Schema.Array(
+              Schema.StructWithRest(
+                Schema.Struct({
+                  classifier: Schema.String,
+                  disposition: Schema.String,
+                  language: Schema.String,
+                  reason: Schema.String,
+                  role: Schema.String,
+                }),
+                [JsonRecordSchema],
+              ),
+            ),
+            totals: Schema.StructWithRest(
+              Schema.Struct({
+                eligible: Schema.StructWithRest(Schema.Struct({files: Schema.Finite}), [JsonRecordSchema]),
+                skipped: Schema.StructWithRest(Schema.Struct({files: Schema.Finite}), [JsonRecordSchema]),
+              }),
+              [JsonRecordSchema],
+            ),
+            type: Schema.String,
+            version: Schema.Finite,
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse(output.stdout),
+      );
 
       expect(preview).toMatchObject({type: 'code-graph-inventory-preview', version: 1});
       expect(preview.totals.eligible.files).toBe(2);
@@ -797,12 +840,18 @@ describe('Effect CLI', () => {
         '-qm',
         'fixture',
       ]);
-      const indexed = JSON.parse(
-        (await runCli(['graph', 'index', '--home', home, '--cwd', root, '--no-vectors', '--json'])).stdout,
-      ) as {
-        readonly identity: {readonly checkoutId: string; readonly worktreeId: string};
-        readonly snapshot: {readonly id: string};
-      };
+      const indexed = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            identity: Schema.StructWithRest(Schema.Struct({checkoutId: Schema.String, worktreeId: Schema.String}), [
+              JsonRecordSchema,
+            ]),
+            snapshot: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema]),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse((await runCli(['graph', 'index', '--home', home, '--cwd', root, '--no-vectors', '--json'])).stdout),
+      );
       const target = [
         '--home',
         home,
@@ -825,9 +874,9 @@ describe('Effect CLI', () => {
         '--worktree-id',
         indexed.identity.worktreeId,
         '--snapshot-id',
-        `cgsn_${'e'.repeat(40)}-direct`,
+        `cgsn_${Effect.pipe('e', EffectString.repeat(40))}-direct`,
         '--json',
-      ]).catch(cause => cause as NodeJS.ErrnoException & {readonly stderr?: string; readonly stdout?: string});
+      ]).catch(cause => processFailure(cause));
       const notFoundFailure = await runCli([
         'graph',
         'remove-view',
@@ -836,18 +885,21 @@ describe('Effect CLI', () => {
         '--checkout-id',
         indexed.identity.checkoutId,
         '--worktree-id',
-        'f'.repeat(64),
+        Effect.pipe('f', EffectString.repeat(64)),
         '--snapshot-id',
         indexed.snapshot.id,
         '--json',
-      ]).catch(cause => cause as NodeJS.ErrnoException & {readonly stderr?: string; readonly stdout?: string});
+      ]).catch(cause => processFailure(cause));
       expect(staleFailure).toMatchObject({code: 1});
       expect(notFoundFailure).toMatchObject({code: 1});
-      const stale = JSON.parse(String(staleFailure.stdout)) as {readonly applied: boolean; readonly state: string};
-      const notFound = JSON.parse(String(notFoundFailure.stdout)) as {
-        readonly applied: boolean;
-        readonly state: string;
-      };
+      const stale = decodeJson(
+        Schema.StructWithRest(Schema.Struct({applied: Schema.Boolean, state: Schema.String}), [JsonRecordSchema]),
+        JSON.parse(String(staleFailure.stdout)),
+      );
+      const notFound = decodeJson(
+        Schema.StructWithRest(Schema.Struct({applied: Schema.Boolean, state: Schema.String}), [JsonRecordSchema]),
+        JSON.parse(String(notFoundFailure.stdout)),
+      );
       expect(stale).toMatchObject({applied: false, state: 'stale-target'});
       expect(notFound).toMatchObject({applied: false, state: 'not-found'});
       for (const failure of [staleFailure, notFoundFailure]) {
@@ -857,19 +909,21 @@ describe('Effect CLI', () => {
         expect(String(failure.stderr)).not.toContain(root);
       }
 
-      const preview = JSON.parse((await runCli(['graph', 'remove-view', ...target])).stdout) as {
-        readonly applied: boolean;
-        readonly state: string;
-      };
-      const applied = JSON.parse((await runCli(['graph', 'remove-view', ...target, '--apply'])).stdout) as {
-        readonly applied: boolean;
-        readonly state: string;
-        readonly type: string;
-        readonly version: number;
-      };
-      const retry = JSON.parse((await runCli(['graph', 'remove-view', ...target, '--apply'])).stdout) as {
-        readonly state: string;
-      };
+      const preview = decodeJson(
+        Schema.StructWithRest(Schema.Struct({applied: Schema.Boolean, state: Schema.String}), [JsonRecordSchema]),
+        JSON.parse((await runCli(['graph', 'remove-view', ...target])).stdout),
+      );
+      const applied = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({applied: Schema.Boolean, state: Schema.String, type: Schema.String, version: Schema.Finite}),
+          [JsonRecordSchema],
+        ),
+        JSON.parse((await runCli(['graph', 'remove-view', ...target, '--apply'])).stdout),
+      );
+      const retry = decodeJson(
+        Schema.StructWithRest(Schema.Struct({state: Schema.String}), [JsonRecordSchema]),
+        JSON.parse((await runCli(['graph', 'remove-view', ...target, '--apply'])).stdout),
+      );
 
       expect(preview).toMatchObject({applied: false, state: 'ready'});
       expect(applied).toMatchObject({
@@ -910,16 +964,33 @@ describe('Effect CLI', () => {
       ]);
 
       const result = await runCli(['graph', 'index', '--home', home, '--cwd', root, '--json']);
-      const summary = JSON.parse(result.stdout) as {readonly snapshot?: {readonly fileCount?: number}};
-      const progress = result.stderr
-        .split('\n')
-        .filter(Boolean)
-        .map(line => JSON.parse(line) as {readonly phase?: string; readonly type?: string});
+      const summary = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            snapshot: Schema.optionalKey(
+              Schema.StructWithRest(Schema.Struct({fileCount: Schema.optionalKey(Schema.Finite)}), [JsonRecordSchema]),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse(result.stdout),
+      );
+      const progress = EffectArray.map(
+        EffectArray.filter(Effect.pipe(result.stderr, EffectString.split('\n')), Boolean),
+        line =>
+          decodeJson(
+            Schema.StructWithRest(
+              Schema.Struct({phase: Schema.optionalKey(Schema.String), type: Schema.optionalKey(Schema.String)}),
+              [JsonRecordSchema],
+            ),
+            JSON.parse(line),
+          ),
+      );
 
       expect(summary.snapshot?.fileCount).toBe(2);
       expect(progress.length).toBeGreaterThan(0);
-      expect(progress.every(event => event.type === 'code-graph-progress')).toBe(true);
-      expect(progress.some(event => event.phase === 'scanning')).toBe(true);
+      expect(EffectArray.every(progress, event => event.type === 'code-graph-progress')).toBe(true);
+      expect(EffectArray.some(progress, event => event.phase === 'scanning')).toBe(true);
     } finally {
       await rm(root, {force: true, recursive: true});
     }
@@ -944,7 +1015,10 @@ describe('Effect CLI', () => {
         '-qm',
         'indexed commit',
       ]);
-      const indexedCommit = (await execFilePromise('git', ['-C', root, 'rev-parse', 'HEAD'])).stdout.trim();
+      const indexedCommit = Effect.pipe(
+        (await execFilePromise('git', ['-C', root, 'rev-parse', 'HEAD'])).stdout,
+        EffectString.trim,
+      );
       await runCli(['graph', 'index', '--home', home, '--cwd', root, '--json']);
 
       await writeFile(join(root, 'after-pull.ts'), 'export function addedAfterPull(): number { return 2; }\n');
@@ -978,15 +1052,33 @@ describe('Effect CLI', () => {
         '1',
         '--json',
       ]);
-      const graph = JSON.parse(result.stdout) as {
-        readonly freshness?: string;
-        readonly nodes?: readonly {readonly name?: string}[];
-        readonly snapshot?: {readonly commit?: string};
-      };
+      const graph = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            freshness: Schema.optionalKey(Schema.String),
+            nodes: Schema.optionalKey(
+              Schema.Array(
+                Schema.StructWithRest(Schema.Struct({name: Schema.optionalKey(Schema.String)}), [JsonRecordSchema]),
+              ),
+            ),
+            snapshot: Schema.optionalKey(
+              Schema.StructWithRest(Schema.Struct({commit: Schema.optionalKey(Schema.String)}), [JsonRecordSchema]),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse(result.stdout),
+      );
 
       expect(graph.freshness).toBe('stale');
       expect(graph.snapshot?.commit).toBe(indexedCommit);
-      expect(graph.nodes?.some(node => node.name === 'indexedBeforePull')).toBe(true);
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(graph.nodes), __effectArrayReceiver =>
+            EffectArray.some(__effectArrayReceiver, node => node.name === 'indexedBeforePull'),
+          ),
+        ),
+      ).toBe(true);
       expect(result.stderr).toBe('');
     } finally {
       await rm(root, {force: true, recursive: true});
@@ -1049,16 +1141,24 @@ describe('Effect CLI', () => {
         report,
         '--read-timeout-ms',
         '1',
-      ]).catch(cause => cause as NodeJS.ErrnoException & {stderr?: string});
+      ]).catch(cause => processFailure(cause));
       expect(reportFailure).toMatchObject({code: 1});
       expect(String(reportFailure.stderr)).toContain('No analysis result was returned');
       expect(String(reportFailure.stderr)).toContain('Run graph index explicitly');
       expect(String(reportFailure.stderr)).toContain('report output was not created');
       await expect(access(report)).rejects.toMatchObject({code: 'ENOENT'});
 
-      const recovered = JSON.parse(
-        (await runCli(['graph', 'index', '--home', home, '--cwd', root, '--json'])).stdout,
-      ) as {readonly snapshot?: {readonly fileCount?: number}};
+      const recovered = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            snapshot: Schema.optionalKey(
+              Schema.StructWithRest(Schema.Struct({fileCount: Schema.optionalKey(Schema.Finite)}), [JsonRecordSchema]),
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse((await runCli(['graph', 'index', '--home', home, '--cwd', root, '--json'])).stdout),
+      );
       expect(recovered.snapshot?.fileCount).toBe(2);
     } finally {
       await rm(root, {force: true, recursive: true});
@@ -1108,17 +1208,30 @@ describe('Effect CLI', () => {
       });
       expect(unavailable.stderr).toBe('');
 
-      const indexed = JSON.parse(
-        (await runCli(['graph', 'index', '--home', home, '--cwd', root, '--json'])).stdout,
-      ) as {readonly snapshot: {readonly id: string}};
+      const indexed = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({snapshot: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema])}),
+          [JsonRecordSchema],
+        ),
+        JSON.parse((await runCli(['graph', 'index', '--home', home, '--cwd', root, '--json'])).stdout),
+      );
       await writeFile(join(root, 'index.ts'), 'export function changedForAnalysis(): number { return 2; }\n');
 
       const ready = await runCli(['graph', 'analyze', '--home', home, '--cwd', root, '--view', 'stats', '--json']);
-      const readyAnalysis = JSON.parse(ready.stdout) as {
-        readonly freshness: string;
-        readonly freshnessPolicy: string;
-        readonly result: {readonly snapshot: {readonly id: string}};
-      };
+      const readyAnalysis = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            freshness: Schema.String,
+            freshnessPolicy: Schema.String,
+            result: Schema.StructWithRest(
+              Schema.Struct({snapshot: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema])}),
+              [JsonRecordSchema],
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse(ready.stdout),
+      );
       expect(readyAnalysis).toMatchObject({freshness: 'stale', freshnessPolicy: 'ready'});
       expect(readyAnalysis.result.snapshot.id).toBe(indexed.snapshot.id);
       expect(ready.stderr).toBe('');
@@ -1136,11 +1249,20 @@ describe('Effect CLI', () => {
         'current',
         '--json',
       ]);
-      const currentAnalysis = JSON.parse(current.stdout) as {
-        readonly freshness: string;
-        readonly freshnessPolicy: string;
-        readonly result: {readonly snapshot: {readonly id: string}};
-      };
+      const currentAnalysis = decodeJson(
+        Schema.StructWithRest(
+          Schema.Struct({
+            freshness: Schema.String,
+            freshnessPolicy: Schema.String,
+            result: Schema.StructWithRest(
+              Schema.Struct({snapshot: Schema.StructWithRest(Schema.Struct({id: Schema.String}), [JsonRecordSchema])}),
+              [JsonRecordSchema],
+            ),
+          }),
+          [JsonRecordSchema],
+        ),
+        JSON.parse(current.stdout),
+      );
       expect(currentAnalysis).toMatchObject({freshness: 'current', freshnessPolicy: 'current'});
       expect(currentAnalysis.result.snapshot.id).not.toBe(indexed.snapshot.id);
     } finally {
@@ -1152,10 +1274,13 @@ describe('Effect CLI', () => {
     const root = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-graph-large-output-'));
     const home = join(root, '.threadnote-test-home');
     try {
-      const declarations = Array.from({length: 80}, (_, index) => {
-        const name = `pipedOutputSymbol${'x'.repeat(2_500)}${index.toString().padStart(3, '0')}`;
-        return `export const ${name} = ${index};`;
-      }).join('\n');
+      const declarations = EffectArray.join(
+        Array.from({length: 80}, (_, index) => {
+          const name = `pipedOutputSymbol${Effect.pipe('x', EffectString.repeat(2_500))}${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}`;
+          return `export const ${name} = ${index};`;
+        }),
+        '\n',
+      );
       await writeFile(join(root, 'package.json'), '{"name":"large-piped-output"}\n');
       await writeFile(join(root, 'symbols.ts'), `${declarations}\n`);
       await execFilePromise('git', ['-C', root, 'init', '-q']);
@@ -1218,12 +1343,17 @@ describe('Effect CLI', () => {
     expect(exitCode, stderr).toBe(0);
     expect(performance.now() - startedAt).toBeGreaterThanOrEqual(450);
     expect(Buffer.byteLength(stdout)).toBeGreaterThan(65_536);
-    expect((JSON.parse(stdout) as {readonly value?: string}).value).toHaveLength(128 * 1024);
+    expect(
+      decodeJson(
+        Schema.StructWithRest(Schema.Struct({value: Schema.optionalKey(Schema.String)}), [JsonRecordSchema]),
+        JSON.parse(stdout),
+      ).value,
+    ).toHaveLength(128 * 1024);
   });
 
   it('drains large generic CLI output through the application-wide safety net', async () => {
     const home = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-large-generic-output-'));
-    const memoryText = `generic-output-start\n${'x'.repeat(128 * 1024)}\ngeneric-output-end`;
+    const memoryText = `generic-output-start\n${Effect.pipe('x', EffectString.repeat(128 * 1024))}\ngeneric-output-end`;
     try {
       const result = await runCliThroughTextPipe(
         [
@@ -1250,7 +1380,7 @@ describe('Effect CLI', () => {
 
   it('treats an early-closing stdout consumer as a normal CLI termination', async () => {
     const home = await mkdtemp(join(tmpdir(), 'threadnote-effect-cli-broken-pipe-'));
-    const input = `consumer-prefix\n${'synthetic-memory-line\n'.repeat(64 * 1024)}`;
+    const input = `consumer-prefix\n${Effect.pipe('synthetic-memory-line\n', EffectString.repeat(64 * 1024))}`;
     try {
       const child = Bun.spawn(
         [
@@ -1359,7 +1489,10 @@ describe('Effect CLI', () => {
         '-qm',
         'base',
       ]);
-      const base = (await execFilePromise('git', ['-C', root, 'rev-parse', 'HEAD'])).stdout.trim();
+      const base = Effect.pipe(
+        (await execFilePromise('git', ['-C', root, 'rev-parse', 'HEAD'])).stdout,
+        EffectString.trim,
+      );
       await rm(join(root, 'dependency.ts'));
       await execFilePromise('git', [
         '-C',
@@ -1552,7 +1685,7 @@ describe('Effect CLI', () => {
         '1',
         '--json',
       ]);
-      const finalLine = timedOut.stdout.trim().split('\n').at(-1);
+      const finalLine = Effect.pipe(timedOut.stdout, EffectString.trim, EffectString.split('\n')).at(-1);
       expect(finalLine).toBeDefined();
       expect(JSON.parse(finalLine!)).toMatchObject({
         budgetMilliseconds: 1,
@@ -1717,15 +1850,11 @@ describe('Effect CLI', () => {
   });
 
   it('renders expected Effect failures without a fiber dump', async () => {
-    const error = await runCli(['remember', '--dry-run', '--text', '   ']).catch(
-      cause => cause as NodeJS.ErrnoException,
-    );
+    const error = await runCli(['remember', '--dry-run', '--text', '   ']).catch(cause => processFailure(cause));
 
     expect(error).toMatchObject({code: 1});
-    expect(String((error as NodeJS.ErrnoException & {stderr?: string}).stderr)).toContain(
-      'Provide memory text with --text or --stdin.',
-    );
-    expect(String((error as NodeJS.ErrnoException & {stderr?: string}).stderr)).not.toContain('FiberFailure');
+    expect(String(error.stderr)).toContain('Provide memory text with --text or --stdin.');
+    expect(String(error.stderr)).not.toContain('FiberFailure');
   });
 
   it('returns a non-zero exit code for an unknown subcommand', async () => {
@@ -1841,19 +1970,22 @@ describe('Effect CLI', () => {
     try {
       await writeFile(
         manifestPath,
-        [
-          'version: 1',
-          'projects:',
-          '  - name: api',
-          '    path: /workspace/api',
-          '    uri: threadnote://resources/repos/api',
-          '    seed: []',
-          '  - name: worker',
-          '    path: /workspace/worker',
-          '    uri: threadnote://resources/repos/worker',
-          '    seed: []',
-          '',
-        ].join('\n'),
+        EffectArray.join(
+          [
+            'version: 1',
+            'projects:',
+            '  - name: api',
+            '    path: /workspace/api',
+            '    uri: threadnote://resources/repos/api',
+            '    seed: []',
+            '  - name: worker',
+            '    path: /workspace/worker',
+            '    uri: threadnote://resources/repos/worker',
+            '    seed: []',
+            '',
+          ],
+          '\n',
+        ),
       );
       const environment = {THREADNOTE_HOME: root, THREADNOTE_MANIFEST: manifestPath};
 
@@ -1908,7 +2040,7 @@ describe('Effect CLI', () => {
       await expect(runCli(['workset', 'update', c1Name, '--json'], environment)).resolves.toBeDefined();
       await expect(runCli(['workset', 'delete', c1Name, '--confirm', '--json'], environment)).resolves.toBeDefined();
 
-      for (const invalid of [' ', 'bad\u001fname', 'x'.repeat(257)]) {
+      for (const invalid of [' ', 'bad\u001fname', Effect.pipe('x', EffectString.repeat(257))]) {
         await expect(runCli(['workset', 'show', invalid], environment)).rejects.toMatchObject({
           code: 1,
           stderr: expect.stringContaining('workset must be bounded text without control characters.'),
@@ -1949,19 +2081,22 @@ function runCli(args: readonly string[], environment: NodeJS.ProcessEnv = {}, cw
 }
 
 async function runCliThroughJsonPipe(args: readonly string[]) {
-  return (await runCliThroughPlatformPipe(args, 'json')) as {
-    readonly allNamesMatched: boolean;
-    readonly bytes: number;
-    readonly nodeCount: number;
-  };
+  return decodeJson(
+    Schema.StructWithRest(
+      Schema.Struct({allNamesMatched: Schema.Boolean, bytes: Schema.Finite, nodeCount: Schema.Finite}),
+      [JsonRecordSchema],
+    ),
+    await runCliThroughPlatformPipe(args, 'json'),
+  );
 }
 
 async function runCliThroughTextPipe(args: readonly string[], input: string) {
-  return (await runCliThroughPlatformPipe(args, 'text', input)) as {
-    readonly bytes: number;
-    readonly hasEnd: boolean;
-    readonly hasStart: boolean;
-  };
+  return decodeJson(
+    Schema.StructWithRest(Schema.Struct({bytes: Schema.Finite, hasEnd: Schema.Boolean, hasStart: Schema.Boolean}), [
+      JsonRecordSchema,
+    ]),
+    await runCliThroughPlatformPipe(args, 'text', input),
+  );
 }
 
 async function runCliThroughPlatformPipe(
@@ -1976,11 +2111,17 @@ async function runCliThroughPlatformPipe(
     const inputPath = join(root, 'input.txt');
     if (input !== undefined) await writeFile(inputPath, input);
     const quote = (value: string): string =>
-      windows ? `"${value.replaceAll('%', '%%').replaceAll('"', '""')}"` : `'${value.replaceAll("'", `'\\''`)}'`;
-    const producer = [process.execPath, 'apps/threadnote/src/standalone.ts', ...args].map(quote).join(' ');
-    const consumer = [process.execPath, 'apps/threadnote/test/fixtures/cli-output-consumer.ts', mode]
-      .map(quote)
-      .join(' ');
+      windows
+        ? `"${Effect.pipe(value, EffectString.replaceAll('%', '%%'), EffectString.replaceAll('"', '""'))}"`
+        : `'${Effect.pipe(value, EffectString.replaceAll("'", `'\\''`))}'`;
+    const producer = EffectArray.join(
+      EffectArray.map([process.execPath, 'apps/threadnote/src/standalone.ts', ...args], quote),
+      ' ',
+    );
+    const consumer = EffectArray.join(
+      EffectArray.map([process.execPath, 'apps/threadnote/test/fixtures/cli-output-consumer.ts', mode], quote),
+      ' ',
+    );
     const pipeline = `${producer}${input === undefined ? '' : ` < ${quote(inputPath)}`} | ${consumer}`;
     await writeFile(scriptPath, windows ? `@echo off\r\n${pipeline}\r\n` : `set -eu\n${pipeline}\n`);
 

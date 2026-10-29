@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -14,7 +15,7 @@ import {finalizeDeferredCodeAnchors} from '../../src/memory/deferred/code_anchor
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {loadWorkflowJournal, workflowLocation} from '../../src/workflow_memory/journal.js';
 import {reconcileWorkflowCitationEnrichment} from '../../src/workflow_memory/citation_recovery.js';
-import type {WorkflowRequest, WorkflowReadResult} from '../../src/workflow_memory/protocol.js';
+import type {WorkflowRequest} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {
   executionDiagnosticPhase,
@@ -22,6 +23,10 @@ import {
   withWorkflowExecutionDiagnostics,
   type WorkflowExecutionDiagnostics,
 } from './workflow-execution-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (
   codeRefs = ['src/value.ts'],
@@ -57,7 +62,12 @@ const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (
     ...system,
     currentDirectory: () => repo,
     environment: () =>
-      Object.fromEntries(Object.entries(system.environment()).filter(([key]) => !key.startsWith('THREADNOTE_'))),
+      EffectRecord.fromEntries(
+        EffectArray.filter(
+          EffectRecord.toEntries(system.environment()),
+          ([key]) => !Effect2.pipe(key, EffectString.startsWith('THREADNOTE_')),
+        ),
+      ),
   };
   const call = (request: WorkflowRequest) =>
     runWorkflowMemory(config, request).pipe(Effect.provideService(SystemInfo, context));
@@ -88,7 +98,10 @@ const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (
     expectedRevision: null,
   };
   executionDiagnosticPhase(diagnostics, 'create');
-  const written = (yield* call(create)) as WorkflowReadResult;
+  const writtenResult = yield* call(create);
+  if (writtenResult.status !== 'ok' || !('codeCitations' in writtenResult))
+    return yield* Effect.die('Expected a successful workflow read result.');
+  const written = writtenResult;
   expect(written.codeCitations).toEqual([]);
   executionDiagnosticPhase(diagnostics, 'journal-before-index');
   const original = yield* loadWorkflowJournal(config, binding.bindingId).pipe(
@@ -113,13 +126,21 @@ describe('workflow deferred citation recovery', () => {
       const f = yield* fixture(codeRefs);
       const record = parseMemoryDocument(f.written.canonicalUri, f.content)!;
       expect(f.original.operations.create.request.codeRefs).toEqual(codeRefs);
-      expect(record.metadata.codeCitations?.map(citation => citation.path)).toEqual(['src/value.ts']);
-      const recovered = (yield* f.call({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(record.metadata.codeCitations), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, citation => citation.path),
+          ),
+        ),
+      ).toEqual(['src/value.ts']);
+      const recovered = yield* f.call({
         protocolVersion: 1,
         action: 'recover',
         bindingId: f.binding.bindingId,
         operationId: 'create',
-      })) as WorkflowReadResult;
+      });
+      if (recovered.status !== 'ok' || !('codeCitations' in recovered))
+        return yield* Effect.die('Expected a successful workflow read result.');
       expect(recovered).toMatchObject({
         canonicalUri: f.written.canonicalUri,
         memoryId: f.written.memoryId,
@@ -132,11 +153,11 @@ describe('workflow deferred citation recovery', () => {
         record.headerTitle,
         {
           ...record.metadata,
-          codeCitations: record.metadata.codeCitations!.map(citation => {
+          codeCitations: EffectArray.map(record.metadata.codeCitations!, citation => {
             const {id: _id, ...input} = citation;
             return createMemoryCodeCitation({
               ...input,
-              fileContentHash: {...input.fileContentHash, value: '0'.repeat(64)},
+              fileContentHash: {...input.fileContentHash, value: Effect2.pipe('0', EffectString.repeat(64))},
             });
           }),
         },
@@ -177,12 +198,14 @@ describe('workflow deferred citation recovery', () => {
           artifact: {memoryId: f.written.memoryId, revision: sha256HexSync(f.content)},
         });
         executionDiagnosticPhase(diagnostics, 'recover');
-        const recovered = (yield* f.call({
+        const recovered = yield* f.call({
           protocolVersion: 1,
           action: 'recover',
           bindingId: f.binding.bindingId,
           operationId: 'create',
-        })) as WorkflowReadResult;
+        });
+        if (recovered.status !== 'ok' || !('codeCitations' in recovered))
+          return yield* Effect.die('Expected a successful workflow read result.');
         expect(recovered).toMatchObject({
           canonicalUri: f.written.canonicalUri,
           memoryId: f.written.memoryId,
@@ -241,7 +264,7 @@ describe('workflow deferred citation recovery', () => {
             {...record.metadata, timestamp: '2020-01-01T00:00:00.000Z'},
             record.body,
           ),
-          f.content.replace('\n\n', '\nunknown_header: unexpected\n\n'),
+          Effect2.pipe(f.content, EffectString.replace('\n\n', '\nunknown_header: unexpected\n\n')),
         ])
           expect(
             yield* reconcileWorkflowCitationEnrichment(f.config, f.binding, f.original.operations.create, changed),

@@ -5,6 +5,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mocks = vi.hoisted(() => ({inspect: vi.fn(), preview: vi.fn(), apply: vi.fn()}));
 vi.mock('../../src/memory/maintenance/topic_enrollment.js', () => ({
@@ -12,7 +14,7 @@ vi.mock('../../src/memory/maintenance/topic_enrollment.js', () => ({
   previewTopicEnrollment: mocks.preview,
   applyTopicEnrollment: mocks.apply,
 }));
-const hash = 'a'.repeat(64);
+const hash = Effect2.pipe('a', EffectString.repeat(64));
 const uri = 'threadnote://user/tester/memories/durable/projects/notes/decision.md';
 const config = {
   agentContextHome: '/private',

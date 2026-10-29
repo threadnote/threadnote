@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -10,7 +11,7 @@ const execute = promisify(execFile);
 const standalone = join(process.cwd(), 'apps', 'threadnote', 'src', 'standalone.ts');
 const roots: string[] = [];
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(root => rm(root, {recursive: true, force: true})));
+  await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {recursive: true, force: true})));
 });
 
 describe('procedure CLI', () => {
@@ -175,6 +176,18 @@ async function runCli(args: readonly string[], root: string) {
     });
     return {...output, code: 0};
   } catch (error) {
-    return error as {code: number; stdout: string; stderr: string};
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      typeof error.code === 'number' &&
+      'stdout' in error &&
+      typeof error.stdout === 'string' &&
+      'stderr' in error &&
+      typeof error.stderr === 'string'
+    ) {
+      return {code: error.code, stdout: error.stdout, stderr: error.stderr};
+    }
+    throw error;
   }
 }

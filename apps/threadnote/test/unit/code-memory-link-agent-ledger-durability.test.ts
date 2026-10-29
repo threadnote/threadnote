@@ -1,5 +1,6 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Exit, FileSystem, Path} from 'effect';
+import {Effect, Exit, FileSystem, Path, PlatformError} from 'effect';
 import {describe, expect} from 'vitest';
 import type {CodeMemoryLinkAgentLedgerLayout} from '@threadnote/threadnote/evaluation/code-memory-link-agent-attempts';
 import {
@@ -13,30 +14,44 @@ import {
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Code Memory Link agent ledger durability', () => {
   effectIt.effect('syncs file data before rename and the parent after rename and unlink', () =>
     Effect.gen(function* () {
       const calls: string[] = [];
-      const fs = {
+      const fs = FileSystem.makeNoop({
         makeDirectory: (target: string) => Effect.sync(() => calls.push(`mkdir:${target}`)),
-        open: (target: string, options: {readonly flag: string}) =>
-          Effect.succeed({
-            sync: Effect.sync(() => calls.push(`sync:${options.flag}:${target}`)),
-          }),
+        open: (target, options) =>
+          Effect.succeed(
+            fileHandle(Effect.asVoid(Effect.sync(() => calls.push(`sync:${options?.flag ?? ''}:${target}`)))),
+          ),
         remove: (target: string) => Effect.sync(() => calls.push(`remove:${target}`)),
         rename: (from: string, to: string) => Effect.sync(() => calls.push(`rename:${from}:${to}`)),
         writeFileString: (target: string) => Effect.sync(() => calls.push(`write:${target}`)),
-      } as unknown as FileSystem.FileSystem;
+      });
       const target = '/reviewed/evidence/trials.jsonl';
 
       yield* durablyReplaceCodeMemoryLinkAgentLedger(target, 'trial\n').pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
       );
-      const writeIndex = calls.findIndex(call => call.startsWith('write:'));
-      const fileSyncIndex = calls.findIndex(call => call.startsWith('sync:r+:'));
-      const renameIndex = calls.findIndex(call => call.startsWith('rename:'));
-      const directorySyncIndex = calls.findIndex(call => call === 'sync:r:/reviewed/evidence');
+      const writeIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(calls, call => Effect2.pipe(call, EffectString.startsWith('write:'))),
+        () => -1,
+      );
+      const fileSyncIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(calls, call => Effect2.pipe(call, EffectString.startsWith('sync:r+:'))),
+        () => -1,
+      );
+      const renameIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(calls, call => Effect2.pipe(call, EffectString.startsWith('rename:'))),
+        () => -1,
+      );
+      const directorySyncIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(calls, call => call === 'sync:r:/reviewed/evidence'),
+        () => -1,
+      );
       expect(writeIndex).toBeGreaterThanOrEqual(0);
       expect(fileSyncIndex).toBeGreaterThan(writeIndex);
       expect(renameIndex).toBeGreaterThan(fileSyncIndex);
@@ -69,16 +84,24 @@ describe('Code Memory Link agent ledger durability', () => {
 
   effectIt.effect('fails closed when the host cannot sync the ledger directory', () =>
     Effect.gen(function* () {
-      const fs = {
+      const fs = FileSystem.makeNoop({
         makeDirectory: () => Effect.void,
-        open: (_target: string, options: {readonly flag: string}) =>
-          options.flag === 'r'
-            ? Effect.fail(TestError.make({message: 'directory sync unsupported'}))
-            : Effect.succeed({sync: Effect.void}),
+        open: (target, options) =>
+          options?.flag === 'r'
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: 'Unknown',
+                  module: 'FileSystem',
+                  method: 'open',
+                  description: 'directory sync unsupported',
+                  pathOrDescriptor: target,
+                }),
+              )
+            : Effect.succeed(fileHandle(Effect.void)),
         remove: () => Effect.void,
         rename: () => Effect.void,
         writeFileString: () => Effect.void,
-      } as unknown as FileSystem.FileSystem;
+      });
 
       const exit = yield* durablyReplaceCodeMemoryLinkAgentLedger('/reviewed/evidence/trials.jsonl', 'trial\n').pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
@@ -93,7 +116,8 @@ describe('Code Memory Link agent ledger durability', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        for (const step of CODE_MEMORY_LINK_AGENT_LEDGER_DURABILITY_STEPS.filter(
+        for (const step of EffectArray.filter(
+          CODE_MEMORY_LINK_AGENT_LEDGER_DURABILITY_STEPS,
           candidate => candidate !== 'attempt-start-durable',
         )) {
           const root = yield* fs.makeTempDirectoryScoped({prefix: `threadnote-agent-ledger-${step}-`});
@@ -145,5 +169,19 @@ function ledgerLayout(path: Path.Path, root: string): CodeMemoryLinkAgentLedgerL
     lockPath: `${trialsPath}.lock`,
     pendingPath: `${trialsPath}.pending.json`,
     trialsPath,
+  };
+}
+
+function fileHandle(sync: Effect.Effect<void, PlatformError.PlatformError>): FileSystem.File {
+  return {
+    [FileSystem.FileTypeId]: FileSystem.FileTypeId,
+    stat: Effect.die('file metadata is unused in this test'),
+    seek: () => Effect.die('file seeking is unused in this test'),
+    sync,
+    read: () => Effect.die('file reads are unused in this test'),
+    readAlloc: () => Effect.die('file reads are unused in this test'),
+    truncate: () => Effect.die('file truncation is unused in this test'),
+    write: () => Effect.die('file writes are unused in this test'),
+    writeAll: () => Effect.die('file writes are unused in this test'),
   };
 }

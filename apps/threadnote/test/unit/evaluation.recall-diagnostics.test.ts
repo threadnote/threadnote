@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Record} from 'effect';
@@ -12,6 +13,9 @@ import {
 } from '../../../../scripts/evaluate-recall-diagnostics.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const observation = (wallMilliseconds: number): RecallEvaluationSample => ({
   wallMilliseconds,
@@ -30,7 +34,7 @@ function diagnostics(durations: readonly number[], limit = 150): RecallEvaluatio
     incrementalUpdate: {durations: Array<number>(40).fill(600), limit: 2000},
     sourceValidation: {durations: [600, 700, 800], limit: 2000},
   };
-  const observations = Record.map(measurements, value => value.durations.map(observation));
+  const observations = Record.map(measurements, value => EffectArray.map(value.durations, observation));
   const scenarios = Record.map(measurements, (value, name) =>
     recallEvaluationScenario(observations[name], value.limit),
   );
@@ -38,7 +42,10 @@ function diagnostics(durations: readonly number[], limit = 150): RecallEvaluatio
     correctnessFailureCount: 0,
     productionBenchmark: {documents: 10000, scenarios, warmups: 5},
     observations,
-    source: {before: {commit: 'a'.repeat(40), dirty: false}, after: {commit: 'a'.repeat(40), dirty: false}},
+    source: {
+      before: {commit: Effect2.pipe('a', EffectString.repeat(40)), dirty: false},
+      after: {commit: Effect2.pipe('a', EffectString.repeat(40)), dirty: false},
+    },
   };
 }
 
@@ -94,6 +101,7 @@ effectIt.effect('observes one effect without changing its result or executing it
     const measured = yield* measureRecallEvaluationSample(() => Effect.sync(() => ++calls));
     expect(measured.result).toBe(1);
     expect(calls).toBe(1);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
     for (const value of Object.values(measured.observation)) {
       expect(Number.isFinite(value)).toBe(true);
       expect(value).toBeGreaterThanOrEqual(0);
@@ -107,7 +115,7 @@ it('preserves sample order/input bytes and the existing percentile definition ac
       fc.array(fc.integer({min: 0, max: 100000}), {minLength: 1, maxLength: 40}),
       fc.integer({min: 0, max: 2000}),
       (durations, limit) => {
-        const samples = durations.map(observation);
+        const samples = EffectArray.map(durations, observation);
         const before = JSON.stringify(samples);
         const sorted = [...durations].sort((left, right) => left - right);
         const summary = recallEvaluationScenario(samples, limit);

@@ -1,10 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Logger, Path} from 'effect';
+import {Effect, FileSystem, Layer, Logger, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {
@@ -19,8 +20,24 @@ import {
   retireCodeGraphVectorPointerWithCapacity,
   runCodeGraphOrdinaryVectorMaintenanceUnit,
 } from '@threadnote/graph/vector/maintenance';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
+const isRecordedOperation = Schema.is(Schema.Struct({operation: Schema.optionalKey(Schema.Unknown)}));
+
+function operationFromRecordedJson(content: string): string {
+  const parsed: unknown = JSON.parse(content);
+  if (parsed === null) throw new TypeError('Recorded vector operation must not be null.');
+  if (!isRecordedOperation(parsed)) return 'invalid';
+  return String(parsed.operation ?? 'invalid');
+}
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
+
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const VECTOR_DATABASE_NAME = 'vectors-v2.sqlite';
 const LOAD_ROWS = 73_001;
 const BYTE_PAGE_ROWS = 1_000;
@@ -232,7 +249,7 @@ function runVectorLoadCase(options: {
           expect(
             yield* retireCodeGraphVectorPointerWithCapacity(
               databasePath,
-              {expectedSnapshotId: 'snapshot-load', worktreeId: 'b'.repeat(64)},
+              {expectedSnapshotId: 'snapshot-load', worktreeId: Effect2.pipe('b', EffectString.repeat(64))},
               {capacityProtector: protector},
             ),
           ).toBe(1);
@@ -254,24 +271,29 @@ function runVectorLoadCase(options: {
         retirementReady: true,
         vectors: 0,
       });
-      const schemaMeasurements = measurements.filter(measurement => measurement.stage === 'schema');
-      const admissionMeasurements = measurements.filter(measurement => measurement.stage === 'admission');
-      const pageMeasurements = measurements.filter(measurement => measurement.stage === 'page');
+      const schemaMeasurements = EffectArray.filter(measurements, measurement => measurement.stage === 'schema');
+      const admissionMeasurements = EffectArray.filter(measurements, measurement => measurement.stage === 'admission');
+      const pageMeasurements = EffectArray.filter(measurements, measurement => measurement.stage === 'page');
       expect(schemaMeasurements.length).toBeGreaterThanOrEqual(1);
       expect(admissionMeasurements.length).toBeGreaterThanOrEqual(1);
       expect(pageMeasurements.length).toBeGreaterThanOrEqual(1);
-      expect(pageMeasurements.reduce((total, measurement) => total + measurement.vectorsDeleted, 0)).toBe(options.rows);
+      expect(EffectArray.reduce(pageMeasurements, 0, (total, measurement) => total + measurement.vectorsDeleted)).toBe(
+        options.rows,
+      );
       expect(
-        measurements.every(measurement => measurement.boundary.operation === 'maintain code graph vector retirement'),
+        EffectArray.every(
+          measurements,
+          measurement => measurement.boundary.operation === 'maintain code graph vector retirement',
+        ),
       ).toBe(true);
       if (options.expectedMinimumPageBoundaryRows !== undefined) {
-        expect(Math.max(...pageMeasurements.map(measurement => measurement.boundary.rowCount))).toBeGreaterThanOrEqual(
-          options.expectedMinimumPageBoundaryRows,
-        );
+        expect(
+          Math.max(...EffectArray.map(pageMeasurements, measurement => measurement.boundary.rowCount)),
+        ).toBeGreaterThanOrEqual(options.expectedMinimumPageBoundaryRows);
       }
       if (options.expectedMinimumPageBoundaryBytes !== undefined) {
         expect(
-          Math.max(...pageMeasurements.map(measurement => measurement.boundary.finalFactBytes)),
+          Math.max(...EffectArray.map(pageMeasurements, measurement => measurement.boundary.finalFactBytes)),
         ).toBeGreaterThanOrEqual(options.expectedMinimumPageBoundaryBytes);
       }
       if (options.verifyZeroBackfill) {
@@ -284,13 +306,21 @@ function runVectorLoadCase(options: {
           admissionTransactions: admissionMeasurements.length,
           deferredUnits,
           event: options.event,
-          maximumBoundaryBytes: Math.max(...measurements.map(measurement => measurement.boundary.finalFactBytes)),
-          maximumBoundaryRows: Math.max(...measurements.map(measurement => measurement.boundary.rowCount)),
-          maximumElapsedMilliseconds: Math.max(...measurements.map(measurement => measurement.elapsedMilliseconds)),
-          maximumMainGrowthBytes: Math.max(...measurements.map(measurement => measurement.mainGrowthBytes)),
-          maximumRssBytes: Math.max(...measurements.map(measurement => measurement.rssBytes)),
-          maximumSharedGrowthBytes: Math.max(...measurements.map(measurement => measurement.sharedGrowthBytes)),
-          maximumWalGrowthBytes: Math.max(...measurements.map(measurement => measurement.walGrowthBytes)),
+          maximumBoundaryBytes: Math.max(
+            ...EffectArray.map(measurements, measurement => measurement.boundary.finalFactBytes),
+          ),
+          maximumBoundaryRows: Math.max(...EffectArray.map(measurements, measurement => measurement.boundary.rowCount)),
+          maximumElapsedMilliseconds: Math.max(
+            ...EffectArray.map(measurements, measurement => measurement.elapsedMilliseconds),
+          ),
+          maximumMainGrowthBytes: Math.max(
+            ...EffectArray.map(measurements, measurement => measurement.mainGrowthBytes),
+          ),
+          maximumRssBytes: Math.max(...EffectArray.map(measurements, measurement => measurement.rssBytes)),
+          maximumSharedGrowthBytes: Math.max(
+            ...EffectArray.map(measurements, measurement => measurement.sharedGrowthBytes),
+          ),
+          maximumWalGrowthBytes: Math.max(...EffectArray.map(measurements, measurement => measurement.walGrowthBytes)),
           pageTransactions: pageMeasurements.length,
           pointerRetired,
           rows: options.rows,
@@ -342,11 +372,11 @@ function seedVectorDatabase(databasePath: string, rows: number, vectorBytes: num
            template_version, count, state, created_at
          ) VALUES ('generation-load', 'snapshot-load', 'model-load', ?, 384, 1, ?, 'ready', ?)`,
       )
-      .run('f'.repeat(64), rows, new Date(0).toISOString());
+      .run(Effect2.pipe('f', EffectString.repeat(64)), rows, new Date(0).toISOString());
     if (withPointer) {
       database
         .query("INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, 'generation-load')")
-        .run('b'.repeat(64));
+        .run(Effect2.pipe('b', EffectString.repeat(64)));
     }
     const vector = new Uint8Array(vectorBytes);
     const insert = database.prepare(
@@ -355,7 +385,11 @@ function seedVectorDatabase(databasePath: string, rows: number, vectorBytes: num
     );
     database.transaction(() => {
       for (let index = 0; index < rows; index += 1) {
-        insert.run(`symbol-${index.toString().padStart(6, '0')}`, 'e'.repeat(64), vector);
+        insert.run(
+          `symbol-${Effect2.pipe(index.toString(), EffectString.padStart(6, '0'))}`,
+          Effect2.pipe('e', EffectString.repeat(64)),
+          vector,
+        );
       }
     })();
     database.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 1000;');
@@ -380,9 +414,14 @@ function readStorageProfile(databasePath: string): {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return {
-      pageSize: Number((database.query('PRAGMA page_size').get() as {readonly page_size: number}).page_size),
+      pageSize: Number(
+        requiredRow(database.query<{readonly page_size: number}, SQLQueryBindings[]>('PRAGMA page_size').get())
+          .page_size,
+      ),
       walAutoCheckpointPages: Number(
-        (database.query('PRAGMA wal_autocheckpoint').get() as {readonly wal_autocheckpoint: number}).wal_autocheckpoint,
+        requiredRow(
+          database.query<{readonly wal_autocheckpoint: number}, SQLQueryBindings[]>('PRAGMA wal_autocheckpoint').get(),
+        ).wal_autocheckpoint,
       ),
     };
   } finally {
@@ -395,33 +434,48 @@ function readVectorCounts(databasePath: string): VectorCounts {
   try {
     const hasMarkers =
       Number(
-        (
+        requiredRow(
           database
-            .query(
+            .query<{readonly count: number}, SQLQueryBindings[]>(
               "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'vector_generation_retirements'",
             )
-            .get() as {readonly count: number}
+            .get(),
         ).count,
       ) === 1;
     return {
       generations: Number(
-        (database.query('SELECT COUNT(*) AS count FROM vector_generations').get() as {readonly count: number}).count,
+        requiredRow(
+          database
+            .query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM vector_generations')
+            .get(),
+        ).count,
       ),
       markers: hasMarkers
         ? Number(
-            (
-              database.query('SELECT COUNT(*) AS count FROM vector_generation_retirements').get() as {
-                readonly count: number;
-              }
+            requiredRow(
+              database
+                .query<
+                  {
+                    readonly count: number;
+                  },
+                  SQLQueryBindings[]
+                >('SELECT COUNT(*) AS count FROM vector_generation_retirements')
+                .get(),
             ).count,
           )
         : 0,
       pointers: Number(
-        (database.query('SELECT COUNT(*) AS count FROM vector_pointers').get() as {readonly count: number}).count,
+        requiredRow(
+          database
+            .query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM vector_pointers')
+            .get(),
+        ).count,
       ),
       retirementReady: hasMarkers,
       vectors: Number(
-        (database.query('SELECT COUNT(*) AS count FROM vectors').get() as {readonly count: number}).count,
+        requiredRow(
+          database.query<{readonly count: number}, SQLQueryBindings[]>('SELECT COUNT(*) AS count FROM vectors').get(),
+        ).count,
       ),
     };
   } finally {
@@ -433,13 +487,12 @@ function activeReceiptOperations(fs: FileSystem.FileSystem, path: Path.Path, thr
   return Effect.gen(function* () {
     const root = codeGraphDiskReservationRoot(path, threadnoteHome);
     if (!(yield* fs.exists(root))) return [] as string[];
-    const names = (yield* fs.readDirectory(root)).filter(name => /^v1-[0-9a-f]{64}\.json$/.test(name)).sort();
+    const names = EffectArray.filter(
+      yield* fs.readDirectory(root),
+      __effectArrayValue => !!(name => /^v1-[0-9a-f]{64}\.json$/.test(name))(__effectArrayValue),
+    ).sort();
     return yield* Effect.forEach(names, name =>
-      fs
-        .readFileString(path.join(root, name))
-        .pipe(
-          Effect.map(content => String((JSON.parse(content) as {readonly operation?: unknown}).operation ?? 'invalid')),
-        ),
+      fs.readFileString(path.join(root, name)).pipe(Effect.map(operationFromRecordedJson)),
     );
   });
 }

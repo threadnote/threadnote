@@ -15,14 +15,14 @@ const SHA256_HEX = /^[0-9a-f]{64}$/u;
 const MAXIMUM_PAGE_SIZE = 1_024;
 const MAXIMUM_SPAN_JSON_BYTES = 4 * 1_024;
 
-export class CodeGraphSnapshotMonikerError extends Schema.TaggedError<CodeGraphSnapshotMonikerError>()(
-  'CodeGraphSnapshotMonikerError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    code: Schema.Literals(['corrupt', 'invalid-input', 'limit-exceeded', 'snapshot-missing']),
-    message: Schema.String,
-  },
-) {
+export class CodeGraphSnapshotMonikerError extends Schema.TaggedError<
+  CodeGraphSnapshotMonikerError,
+  {readonly brand: unique symbol}
+>()('CodeGraphSnapshotMonikerError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  code: Schema.Literals(['corrupt', 'invalid-input', 'limit-exceeded', 'snapshot-missing']),
+  message: Schema.String,
+}) {
   static of(
     code: 'corrupt' | 'invalid-input' | 'limit-exceeded' | 'snapshot-missing',
     message: string,

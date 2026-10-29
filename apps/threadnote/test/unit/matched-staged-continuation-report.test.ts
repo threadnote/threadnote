@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -5,6 +6,8 @@ import {
   type MatchedStagedContinuationReportInputV1,
   type MatchedStagedContinuationRowV1,
 } from '@threadnote/threadnote/evaluation/matched-staged-continuation-report';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('matched staged continuation report', () => {
   it('charges a common Phase 1 failure symmetrically and keeps it in clustered inference', () => {
@@ -33,8 +36,12 @@ describe('matched staged continuation report', () => {
     );
 
     const skippedGraph = fixture();
-    const index = skippedGraph.rows.findIndex(
-      row => row.variant === 'threadnote-preloaded-resume' && row.phaseTwoAttempted,
+    const index = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        skippedGraph.rows,
+        row => row.variant === 'threadnote-preloaded-resume' && row.phaseTwoAttempted,
+      ),
+      () => -1,
     );
     skippedGraph.rows[index] = {...skippedGraph.rows[index], exactAuthoredGraphQueryFirst: false};
     expect(() => createMatchedStagedContinuationReportV1(skippedGraph)).toThrow('authored graph query first');
@@ -44,7 +51,7 @@ describe('matched staged continuation report', () => {
     fc.assert(
       fc.property(fc.shuffledSubarray([0, 1, 2, 3, 4], {minLength: 5, maxLength: 5}), order => {
         const input = fixture();
-        const reordered = order.flatMap(index => input.rows.slice(index * 2, index * 2 + 2));
+        const reordered = EffectArray.flatMap(order, index => input.rows.slice(index * 2, index * 2 + 2));
         const report = createMatchedStagedContinuationReportV1({...input, rows: reordered});
         expect(report.lifecycleTokenReductionPercent).toBeCloseTo(30.0953);
         expect(report.lifecycleTokenReductionPercent95).toEqual({
@@ -65,48 +72,51 @@ function fixture(): MatchedStagedContinuationReportInputV1 & {rows: MatchedStage
     ['885acb24064eb7b0cc272fb2', 303_530, 255_989, 119_130, 124_853, true],
     ['cc3f356a94428bd425c20a10', 619_439, 439_977, 219_437, 191_173, true],
   ] as const;
-  const rows = clusters.flatMap(([id, filesTokens, threadnoteTokens, filesMs, threadnoteMs, verified], index) => {
-    const commonFailure = index === 1;
-    const common = {
-      clusterId: `cluster_${id}`,
-      taskId: `tsk_${id}`,
-      failureStage: commonFailure ? ('common-phase-one' as const) : ('none' as const),
-      phaseTwoAttempted: !commonFailure,
-      deterministicVerified: verified,
-      hybridVerified: verified,
-      valid: true,
-      falseCurrentOutcomes: 0,
-      authorizationLeaks: 0,
-      harmfulActions: 0,
-      phaseOneTokens: commonFailure ? filesTokens : 100_000,
-      phaseOneMilliseconds: commonFailure ? filesMs : 50_000,
-      modelCalls: commonFailure ? 0 : 10,
-      toolTurns: commonFailure ? 0 : 8,
-      redundantFileReads: 0,
-    };
-    return [
-      {
-        ...common,
-        variant: 'files-bare' as const,
-        runNonce: `run_${String(index * 2).padStart(32, '0')}`,
-        phaseTwoTokens: filesTokens - common.phaseOneTokens,
-        phaseTwoMilliseconds: filesMs - common.phaseOneMilliseconds,
-        mcpToolCallBytes: 0,
-        initialContinuationEvidenceState: null,
-        exactAuthoredGraphQueryFirst: null,
-      },
-      {
-        ...common,
-        variant: 'threadnote-preloaded-resume' as const,
-        runNonce: `run_${String(index * 2 + 1).padStart(32, '0')}`,
-        phaseTwoTokens: threadnoteTokens - common.phaseOneTokens,
-        phaseTwoMilliseconds: threadnoteMs - common.phaseOneMilliseconds,
-        mcpToolCallBytes: commonFailure ? 0 : 2_500,
-        initialContinuationEvidenceState: commonFailure ? null : ('evidence-bearing' as const),
-        exactAuthoredGraphQueryFirst: commonFailure ? null : true,
-      },
-    ];
-  });
+  const rows = EffectArray.flatMap(
+    clusters,
+    ([id, filesTokens, threadnoteTokens, filesMs, threadnoteMs, verified], index) => {
+      const commonFailure = index === 1;
+      const common = {
+        clusterId: `cluster_${id}`,
+        taskId: `tsk_${id}`,
+        failureStage: commonFailure ? ('common-phase-one' as const) : ('none' as const),
+        phaseTwoAttempted: !commonFailure,
+        deterministicVerified: verified,
+        hybridVerified: verified,
+        valid: true,
+        falseCurrentOutcomes: 0,
+        authorizationLeaks: 0,
+        harmfulActions: 0,
+        phaseOneTokens: commonFailure ? filesTokens : 100_000,
+        phaseOneMilliseconds: commonFailure ? filesMs : 50_000,
+        modelCalls: commonFailure ? 0 : 10,
+        toolTurns: commonFailure ? 0 : 8,
+        redundantFileReads: 0,
+      };
+      return [
+        {
+          ...common,
+          variant: 'files-bare' as const,
+          runNonce: `run_${Effect.pipe(String(index * 2), EffectString.padStart(32, '0'))}`,
+          phaseTwoTokens: filesTokens - common.phaseOneTokens,
+          phaseTwoMilliseconds: filesMs - common.phaseOneMilliseconds,
+          mcpToolCallBytes: 0,
+          initialContinuationEvidenceState: null,
+          exactAuthoredGraphQueryFirst: null,
+        },
+        {
+          ...common,
+          variant: 'threadnote-preloaded-resume' as const,
+          runNonce: `run_${Effect.pipe(String(index * 2 + 1), EffectString.padStart(32, '0'))}`,
+          phaseTwoTokens: threadnoteTokens - common.phaseOneTokens,
+          phaseTwoMilliseconds: threadnoteMs - common.phaseOneMilliseconds,
+          mcpToolCallBytes: commonFailure ? 0 : 2_500,
+          initialContinuationEvidenceState: commonFailure ? null : ('evidence-bearing' as const),
+          exactAuthoredGraphQueryFirst: commonFailure ? null : true,
+        },
+      ];
+    },
+  );
   return {
     bootstrap: {
       confidenceLevelBasisPoints: 9_500,

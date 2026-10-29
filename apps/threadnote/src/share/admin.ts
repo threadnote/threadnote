@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, DateTime, Effect, FileSystem, Option, Path, Result} from 'effect';
 
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -76,13 +77,16 @@ import {
 } from './core.js';
 
 import {gitOutput, publishShareGitChange} from './git.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runShareInit = Effect.fn('share.runShareInit')(function* (
   config: ShareRuntime,
   remoteUrl: string,
   options: ShareInitOptions,
 ) {
-  if (!remoteUrl.trim()) {
+  if (!Effect2.pipe(remoteUrl, EffectString.trim)) {
     throw ShareOperationError.make({message: 'Provide a git remote URL for the shared memories repo.'});
   }
   const dryRun = options.dryRun === true;
@@ -182,16 +186,18 @@ export const recoverShareInit = Effect.fn('share.recoverShareInit')(function* (
   const path = yield* Path.Path;
   const [expectedGitdir, observedGitdir] = yield* Effect.all([
     fs.realPath(gitdir),
-    actualGitdir.exitCode === 0 ? fs.realPath(actualGitdir.stdout.trim()) : Effect.succeed(''),
+    actualGitdir.exitCode === 0
+      ? fs.realPath(Effect2.pipe(actualGitdir.stdout, EffectString.trim))
+      : Effect.succeed(''),
   ]);
-  const observedRemote = remote.stdout.trim();
-  const observedRemotePath = observedRemote.startsWith('file://')
+  const observedRemote = Effect2.pipe(remote.stdout, EffectString.trim);
+  const observedRemotePath = Effect2.pipe(observedRemote, EffectString.startsWith('file://'))
     ? yield* Effect.try({
         catch: () => '',
         try: () => decodeURIComponent(new URL(observedRemote).pathname),
       })
     : observedRemote;
-  const requestedRemotePath = remoteUrl.startsWith('file://')
+  const requestedRemotePath = Effect2.pipe(remoteUrl, EffectString.startsWith('file://'))
     ? yield* Effect.try({
         catch: () => '',
         try: () => decodeURIComponent(new URL(remoteUrl).pathname),
@@ -213,16 +219,16 @@ export const recoverShareInit = Effect.fn('share.recoverShareInit')(function* (
     status.exitCode !== 0 ||
     status.stdout.length > 0 ||
     divergence.exitCode !== 0 ||
-    divergence.stdout.trim() !== '0'
+    Effect2.pipe(divergence.stdout, EffectString.trim) !== '0'
   ) {
     const mismatches = [
       ...(actualGitdir.exitCode !== 0 || expectedGitdir !== observedGitdir ? ['gitdir'] : []),
       ...(remote.exitCode !== 0 || !remoteMatches ? ['remote'] : []),
       ...(status.exitCode !== 0 || status.stdout.length > 0 ? ['worktree'] : []),
-      ...(divergence.exitCode !== 0 || divergence.stdout.trim() !== '0' ? ['upstream'] : []),
+      ...(divergence.exitCode !== 0 || Effect2.pipe(divergence.stdout, EffectString.trim) !== '0' ? ['upstream'] : []),
     ];
     throw ShareOperationError.make({
-      message: `Existing shared checkout for team "${teamName}" does not exactly match the interrupted initialization (${mismatches.join(', ')}).`,
+      message: `Existing shared checkout for team "${teamName}" does not exactly match the interrupted initialization (${EffectArray.join(mismatches, ', ')}).`,
     });
   }
   const newConfig: ShareTeamConfig = {
@@ -392,10 +398,10 @@ const preflightSharedWorktreeRemoval = Effect.fn('share.preflightSharedWorktreeR
   });
   if (unmerged.exitCode !== 0) {
     return yield* ShareOperationError.make({
-      message: `Could not verify shared worktree state for ${safeRelativePath}: ${unmerged.stderr.trim() || unmerged.stdout.trim() || 'git ls-files failed'}.`,
+      message: `Could not verify shared worktree state for ${safeRelativePath}: ${Effect2.pipe(unmerged.stderr, EffectString.trim) || Effect2.pipe(unmerged.stdout, EffectString.trim) || 'git ls-files failed'}.`,
     });
   }
-  if (unmerged.stdout.trim().length > 0) {
+  if (Effect2.pipe(unmerged.stdout, EffectString.trim).length > 0) {
     return yield* ShareOperationError.make({
       message: `Refusing to unpublish unmerged shared worktree file: ${safeRelativePath}. Resolve the conflict first.`,
     });
@@ -406,15 +412,18 @@ const preflightSharedWorktreeRemoval = Effect.fn('share.preflightSharedWorktreeR
   });
   if (trackedResult.exitCode !== 0) {
     return yield* ShareOperationError.make({
-      message: `Could not inspect shared worktree tracking for ${safeRelativePath}: ${trackedResult.stderr.trim() || trackedResult.stdout.trim() || 'git ls-files failed'}.`,
+      message: `Could not inspect shared worktree tracking for ${safeRelativePath}: ${Effect2.pipe(trackedResult.stderr, EffectString.trim) || Effect2.pipe(trackedResult.stdout, EffectString.trim) || 'git ls-files failed'}.`,
     });
   }
-  const tracked = trackedResult.stdout.split(/\r?\n/).some(path => path === safeRelativePath);
+  const tracked = EffectArray.some(
+    Effect2.pipe(trackedResult.stdout, EffectString.split(/\r?\n/)),
+    path => path === safeRelativePath,
+  );
   if (tracked) {
     const indexed = yield* runCommand(git, ['-C', worktree, 'show', `:${safeRelativePath}`], {allowFailure: true});
     if (indexed.exitCode !== 0) {
       return yield* ShareOperationError.make({
-        message: `Could not verify shared worktree file ${safeRelativePath} against the Git index: ${indexed.stderr.trim() || indexed.stdout.trim() || 'git show failed'}.`,
+        message: `Could not verify shared worktree file ${safeRelativePath} against the Git index: ${Effect2.pipe(indexed.stderr, EffectString.trim) || Effect2.pipe(indexed.stdout, EffectString.trim) || 'git show failed'}.`,
       });
     }
     if (!sharedMemoryContentsEquivalent(indexed.stdout, canonicalContent)) {
@@ -424,7 +433,7 @@ const preflightSharedWorktreeRemoval = Effect.fn('share.preflightSharedWorktreeR
     }
   }
   const fs = yield* FileSystem.FileSystem;
-  const targetPath = yield* pathJoin(worktree, ...safeRelativePath.split('/'));
+  const targetPath = yield* pathJoin(worktree, ...Effect2.pipe(safeRelativePath, EffectString.split('/')));
   if (yield* fs.exists(targetPath)) {
     if (!tracked) {
       return yield* ShareOperationError.make({
@@ -462,7 +471,7 @@ export const runShareList = Effect.fn('share.runShareList')(function* (
   _options: ShareListOptions,
 ) {
   const teams = yield* readTeamsFile(config);
-  const entries = Object.values(teams.teams);
+  const entries = EffectRecord.values(teams.teams);
   if (entries.length === 0) {
     yield* Console.log('No shared teams configured. Run: threadnote share init <remote-url>');
     return;
@@ -504,7 +513,7 @@ export const runShareRename = Effect.fn('share.runShareRename')(function* (
     worktree: newWorktree,
   };
   const updatedTeams: Record<string, ShareTeamConfig> = {};
-  for (const [name, value] of Object.entries(teamsFile.teams)) {
+  for (const [name, value] of EffectRecord.toEntries(teamsFile.teams)) {
     if (name === oldTeam.name) {
       updatedTeams[newName] = updatedTeam;
     } else {
@@ -594,7 +603,7 @@ export const runShareSetUrl = Effect.fn('share.runShareSetUrl')(function* (
   remoteUrl: string,
   options: ShareSetUrlOptions,
 ) {
-  if (!remoteUrl.trim()) {
+  if (!Effect2.pipe(remoteUrl, EffectString.trim)) {
     throw ShareOperationError.make({message: 'Provide a git remote URL.'});
   }
   const team = yield* resolveTeam(config, options.team);
@@ -662,12 +671,12 @@ export const runShareRemove = Effect.fn('share.runShareRemove')(function* (
   }
   const teamsFile = yield* readTeamsFile(config);
   const remaining: Record<string, ShareTeamConfig> = {};
-  for (const [name, value] of Object.entries(teamsFile.teams)) {
+  for (const [name, value] of EffectRecord.toEntries(teamsFile.teams)) {
     if (name !== team.name) {
       remaining[name] = value;
     }
   }
-  const remainingNames = Object.keys(remaining);
+  const remainingNames = EffectRecord.keys(remaining);
   const nextDefault = teamsFile.defaultTeam === team.name ? remainingNames[0] : teamsFile.defaultTeam;
   const updated: ShareTeamsFile = {defaultTeam: nextDefault, teams: remaining, version: TEAMS_FILE_VERSION};
   if (dryRun) {
@@ -731,8 +740,9 @@ const preserveSharedMemoriesLocally = Effect.fn('share.preserveSharedMemoriesLoc
     readonly targetUri: string;
   }> = [];
   for (const file of files) {
-    const rel = (yield* pathRelative(team.worktree, file)).split(yield* pathSeparator).join('/');
-    if (!rel.startsWith('durable/')) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+    const rel = EffectArray.join((yield* pathRelative(team.worktree, file)).split(yield* pathSeparator), '/');
+    if (!Effect2.pipe(rel, EffectString.startsWith('durable/'))) {
       continue;
     }
     const targetUri = `threadnote://user/${uriSegment(config.user)}/memories/${rel}`;
@@ -773,10 +783,15 @@ const ensurePersonalDirectoryChain = Effect.fn('share.ensurePersonalDirectoryCha
 ) {
   const store = yield* ResourceStore;
   const prefix = 'threadnote://';
-  const parts = directoryUri.startsWith(prefix) ? directoryUri.slice(prefix.length).split('/').filter(Boolean) : [];
+  const parts = Effect2.pipe(directoryUri, EffectString.startsWith(prefix))
+    ? EffectArray.filter(
+        Effect2.pipe(directoryUri, EffectString.slice(prefix.length), EffectString.split('/')),
+        Boolean,
+      )
+    : [];
   const startIndex = parts[0] === 'user' && parts.length > 2 ? 3 : 1;
   for (let index = startIndex; index <= parts.length; index += 1) {
-    const uri = `${prefix}${parts.slice(0, index).join('/')}`;
+    const uri = `${prefix}${EffectArray.join(parts.slice(0, index), '/')}`;
     yield* store.makeDirectory(resourceStoreLocation(config), uri);
   }
 });

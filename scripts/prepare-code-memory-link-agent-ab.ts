@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed preparer owns disposable OS filesystem and exact child-process boundaries. */
 
@@ -110,6 +112,8 @@ import {
   codeMemoryLinkContextBriefSelectedMemoriesV1,
   type CodeMemoryLinkExpectedSelectedMemoryV1,
 } from './code-memory-link-codex-preflight.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const CODE_MEMORY_LINK_PREPARATION_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_CALIBRATION_PLAN_VERSION = 1 as const;
@@ -347,7 +351,7 @@ export async function prepareCodeMemoryLinkAgentAb(options: Options, candidate: 
       sourceRoot,
     });
     const calibration = assembleCalibrationPlanV1({
-      clients: clients.map(client => client.clientId),
+      clients: EffectArray.map(clients, client => client.clientId),
       tasks: calibrationPrepared,
     });
     addFile(outputFiles, 'assignment.json', jsonFile(assignment));
@@ -396,7 +400,7 @@ export async function prepareCodeMemoryLinkAgentAb(options: Options, candidate: 
     process.stdout.write(
       `${JSON.stringify({
         calibrationPlanHash: calibration.plan.planHash,
-        clients: clients.map(client => client.clientId),
+        clients: EffectArray.map(clients, client => client.clientId),
         fixtureArtifacts: sealed.fixture.artifacts.length,
         fixtureHash: sealed.fixture.fixtureHash,
         manifestHash: manifest.manifestHash,
@@ -445,23 +449,33 @@ export function assembleCodeMemoryLinkSealedSuiteV1(input: {
   readonly judgeProgram: string;
   readonly tasks: readonly CodeMemoryLinkPreparedTaskV1[];
 }): CodeMemoryLinkSealedAssemblyV1 {
-  const releaseDefinitions = input.tasks.map(task => task.definition).sort(compareTasksById);
+  const releaseDefinitions = EffectArray.map(input.tasks, task => task.definition).sort(compareTasksById);
   const expectedCorpusHash = codeMemoryLinkAgentSuiteCorpusHashV1({
     releaseTasks: releaseDefinitions,
     version: CODE_MEMORY_LINK_AGENT_SUITE_DEFINITION_VERSION,
   });
-  if (input.tasks.some(task => task.definition.calibration) || input.corpusHash !== expectedCorpusHash) {
+  if (EffectArray.some(input.tasks, task => task.definition.calibration) || input.corpusHash !== expectedCorpusHash) {
     throw new Error('Release task definitions do not match the supplied release-only corpus hash.');
   }
   const protocol = assembleProtocolTasks(input.tasks, 'release');
   const taskPackets = protocol.packets;
   const rubrics = protocol.rubrics;
-  const manifestTasks = taskPackets.map(packet => {
-    const rubric = rubrics.find(candidate => candidate.taskId === packet.taskId)!;
-    const prepared = input.tasks.find(candidate => candidate.definition.taskId === packet.taskId)!;
+  const manifestTasks = EffectArray.map(taskPackets, packet => {
+    const rubric = EffectOption.getOrUndefined(
+      EffectArray.findFirst(rubrics, candidate => candidate.taskId === packet.taskId),
+    )!;
+    const prepared = EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.tasks, candidate => candidate.definition.taskId === packet.taskId),
+    )!;
     return {
       budget: packet.budget,
-      constraintTotal: rubric.predicates.filter(predicate => predicate.roles.includes('constraint')).length,
+      constraintTotal: EffectArrayPipe(rubric.predicates, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (predicate, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && predicate.roles.includes('constraint'),
+        ),
+      ).length,
       expectedResponseHashes: {
         anchored: codeMemoryLinkContextBriefResponseReceiptHashV1(prepared.preflightExpectedResponses.anchored),
         noMemory: codeMemoryLinkContextBriefResponseReceiptHashV1(prepared.preflightExpectedResponses.noMemory),
@@ -505,9 +519,9 @@ export function assembleCodeMemoryLinkSealedSuiteV1(input: {
       },
     ],
   ]);
-  const judgeFileSkeleton = [programArtifactId, commandArtifactId, layoutArtifactId]
-    .sort(compareStrings)
-    .map(artifactId => ({
+  const judgeFileSkeleton = EffectArray.map(
+    [programArtifactId, commandArtifactId, layoutArtifactId].sort(compareStrings),
+    artifactId => ({
       artifactId,
       destination:
         artifactId === programArtifactId
@@ -521,14 +535,19 @@ export function assembleCodeMemoryLinkSealedSuiteV1(input: {
           : artifactId === commandArtifactId
             ? `artifacts/judge/${commandArtifactId}.json`
             : 'adapter.json',
-    }));
+    }),
+  );
   const adapter = {
-    fixtureFiles: protocol.fixtureFiles.map(({content: _content, ...file}) => file),
+    fixtureFiles: EffectArray.map(protocol.fixtureFiles, ({content: _content, ...file}) => file),
     judge: {commandArtifactId, files: judgeFileSkeleton},
     layoutArtifactId,
-    tasks: taskPackets.map(packet => {
-      const prepared = input.tasks.find(task => task.definition.taskId === packet.taskId)!;
-      const rubric = rubrics.find(candidate => candidate.taskId === packet.taskId)!;
+    tasks: EffectArray.map(taskPackets, packet => {
+      const prepared = EffectOption.getOrUndefined(
+        EffectArray.findFirst(input.tasks, task => task.definition.taskId === packet.taskId),
+      )!;
+      const rubric = EffectOption.getOrUndefined(
+        EffectArray.findFirst(rubrics, candidate => candidate.taskId === packet.taskId),
+      )!;
       return {
         packetHash: packet.packetHash,
         packetSource: `tasks/${packet.taskId}/packet.json`,
@@ -547,12 +566,13 @@ export function assembleCodeMemoryLinkSealedSuiteV1(input: {
   };
   const adapterContent = jsonFile(adapter);
   judgeSources.set(layoutArtifactId, {content: adapterContent, destination: 'adapter.json', source: 'adapter.json'});
-  const judgeArtifacts = [...judgeSources.entries()]
-    .map(([artifactId, value]) => ({artifactId, sha256: sha256(value.content)}))
-    .sort(compareArtifacts);
+  const judgeArtifacts = EffectArray.map([...judgeSources.entries()], ([artifactId, value]) => ({
+    artifactId,
+    sha256: sha256(value.content),
+  })).sort(compareArtifacts);
   const judgeWithoutHash = {
     artifacts: judgeArtifacts,
-    judgeVersion: `ver_${sha256(input.judgeProgram).slice(0, 32)}`,
+    judgeVersion: `ver_${Effect2.pipe(sha256(input.judgeProgram), EffectString.slice(0, 32))}`,
     version: CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION,
   };
   const judge = parseCodeMemoryLinkJudgeV1({
@@ -562,9 +582,11 @@ export function assembleCodeMemoryLinkSealedSuiteV1(input: {
   const suiteWithoutHash = {
     fixture: protocol.fixture,
     judge,
-    suiteId: `sui_${matchingHash(input.corpusHash, 'corpus hash').slice(0, 32)}`,
-    tasks: taskPackets.map(packet => {
-      const rubric = rubrics.find(candidate => candidate.taskId === packet.taskId)!;
+    suiteId: `sui_${Effect2.pipe(matchingHash(input.corpusHash, 'corpus hash'), EffectString.slice(0, 32))}`,
+    tasks: EffectArray.map(taskPackets, packet => {
+      const rubric = EffectOption.getOrUndefined(
+        EffectArray.findFirst(rubrics, candidate => candidate.taskId === packet.taskId),
+      )!;
       return {
         packetHash: packet.packetHash,
         rubricHash: rubric.rubricHash,
@@ -591,7 +613,7 @@ export function assembleCodeMemoryLinkSealedSuiteV1(input: {
     addFile(
       files,
       `tasks/${packet.taskId}/rubric.json`,
-      jsonFile(rubrics.find(rubric => rubric.taskId === packet.taskId)!),
+      jsonFile(EffectOption.getOrUndefined(EffectArray.findFirst(rubrics, rubric => rubric.taskId === packet.taskId))!),
     );
   }
   return {adapter, files, fixture: protocol.fixture, manifestTasks, rubrics, suite, taskPackets};
@@ -601,41 +623,51 @@ export function assembleCalibrationPlanV1(input: {
   readonly clients: readonly string[];
   readonly tasks: readonly CodeMemoryLinkPreparedTaskV1[];
 }): {readonly files: ReadonlyMap<string, string>; readonly plan: CodeMemoryLinkCalibrationPlanV1} {
-  if (input.tasks.length !== 2 || input.tasks.some(task => !task.definition.calibration)) {
+  if (input.tasks.length !== 2 || EffectArray.some(input.tasks, task => !task.definition.calibration)) {
     throw new Error('Calibration plan requires exactly two calibration-only tasks.');
   }
   const protocol = assembleProtocolTasks(input.tasks, 'calibration');
-  const clients = [...input.clients]
-    .map(client => matching(client, CLIENT_ID, 'calibration client'))
-    .sort(compareStrings);
+  const clients = EffectArray.map([...input.clients], client => matching(client, CLIENT_ID, 'calibration client')).sort(
+    compareStrings,
+  );
   unique(clients, 'calibration clients');
-  const tasks = protocol.packets.map(packet => ({
+  const tasks = EffectArray.map(protocol.packets, packet => ({
     packet,
-    preflightExpectedCitationDigests: input.tasks.find(task => task.definition.taskId === packet.taskId)!
-      .preflightExpectedCitationDigests,
-    preflightExpectedResponses: input.tasks.find(task => task.definition.taskId === packet.taskId)!
-      .preflightExpectedResponses,
-    preflightExpectedSelectedMemories: input.tasks.find(task => task.definition.taskId === packet.taskId)!
-      .preflightExpectedSelectedMemories,
-    rubric: protocol.rubrics.find(rubric => rubric.taskId === packet.taskId)!,
+    preflightExpectedCitationDigests: EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.tasks, task => task.definition.taskId === packet.taskId),
+    )!.preflightExpectedCitationDigests,
+    preflightExpectedResponses: EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.tasks, task => task.definition.taskId === packet.taskId),
+    )!.preflightExpectedResponses,
+    preflightExpectedSelectedMemories: EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.tasks, task => task.definition.taskId === packet.taskId),
+    )!.preflightExpectedSelectedMemories,
+    rubric: EffectOption.getOrUndefined(
+      EffectArray.findFirst(protocol.rubrics, rubric => rubric.taskId === packet.taskId),
+    )!,
   }));
-  const fixtureFiles = protocol.fixtureFiles.map(file => ({
+  const fixtureFiles = EffectArray.map(protocol.fixtureFiles, file => ({
     artifactId: file.artifactId,
     destination: file.destination,
     scope: file.scope,
     source: `calibration/${file.source}`,
     taskId: file.taskId,
   }));
-  const runs = clients
-    .flatMap(clientId =>
-      tasks.flatMap(task =>
-        (['anchored', 'task-only', 'no-memory'] as const).map(arm => ({arm, clientId, taskId: task.packet.taskId})),
+  const runs = EffectArray.map(
+    EffectArray.flatMap(clients, clientId =>
+      EffectArray.flatMap(tasks, task =>
+        EffectArray.map(['anchored', 'task-only', 'no-memory'] as const, arm => ({
+          arm,
+          clientId,
+          taskId: task.packet.taskId,
+        })),
       ),
-    )
-    .map((run, runOrder) => ({...run, runOrder}));
+    ),
+    (run, runOrder) => ({...run, runOrder}),
+  );
   const withoutHash = {
     calibrationCorpusHash: codeMemoryLinkAgentSuiteCalibrationCorpusHashV1({
-      calibrationTasks: input.tasks.map(task => task.definition).sort(compareTasksById),
+      calibrationTasks: EffectArray.map(input.tasks, task => task.definition).sort(compareTasksById),
       version: CODE_MEMORY_LINK_AGENT_SUITE_DEFINITION_VERSION,
     }),
     clients,
@@ -653,7 +685,13 @@ export function assembleCalibrationPlanV1(input: {
   } satisfies CodeMemoryLinkCalibrationPlanV1;
   const files = new Map<string, string>();
   for (const file of protocol.fixtureFiles) {
-    addFile(files, fixtureFiles.find(mapping => mapping.artifactId === file.artifactId)!.source, file.content);
+    addFile(
+      files,
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(fixtureFiles, mapping => mapping.artifactId === file.artifactId),
+      )!.source,
+      file.content,
+    );
   }
   for (const task of tasks) {
     addFile(files, `calibration/tasks/${task.packet.taskId}/packet.json`, jsonFile(task.packet));
@@ -670,42 +708,43 @@ function assembleProtocolTasks(
   for (const task of tasks) {
     if (
       task.definition.controlScenario === 'malformed-citation' &&
-      (task.homeFiles.length !== 1 || !task.homeFiles[0].content.includes('code_citation: {not-canonical-json'))
+      (task.homeFiles.length !== 1 ||
+        !Effect2.pipe(task.homeFiles[0].content, EffectString.includes('code_citation: {not-canonical-json')))
     ) {
       throw new Error('Malformed-citation control requires one sealed legacy memory with malformed citation metadata.');
     }
   }
   unique(
-    tasks.map(task => task.definition.taskId),
+    EffectArray.map(tasks, task => task.definition.taskId),
     `${namespace} task ids`,
   );
-  const fixtureFiles = tasks
-    .flatMap(task => {
-      const repository = task.definition.publicFiles.map(file =>
-        fixtureMapping(task, 'repository', file.path, file.content),
-      );
-      const home = task.homeFiles.map(file => fixtureMapping(task, 'threadnote-home', file.destination, file.content));
-      return [...repository, ...home];
-    })
-    .sort((left, right) => compareStrings(left.artifactId, right.artifactId));
+  const fixtureFiles = EffectArray.flatMap(tasks, task => {
+    const repository = EffectArray.map(task.definition.publicFiles, file =>
+      fixtureMapping(task, 'repository', file.path, file.content),
+    );
+    const home = EffectArray.map(task.homeFiles, file =>
+      fixtureMapping(task, 'threadnote-home', file.destination, file.content),
+    );
+    return [...repository, ...home];
+  }).sort((left, right) => compareStrings(left.artifactId, right.artifactId));
   unique(
-    fixtureFiles.map(file => file.artifactId),
+    EffectArray.map(fixtureFiles, file => file.artifactId),
     `${namespace} fixture artifact ids`,
   );
   unique(
-    fixtureFiles.map(file => sha256(file.content)),
+    EffectArray.map(fixtureFiles, file => sha256(file.content)),
     `${namespace} fixture artifact hashes`,
   );
   if (fixtureFiles.length > 256) throw new Error(`${namespace} fixture exceeds the protocol artifact limit.`);
   const fixtureWithoutHash = {
-    artifacts: fixtureFiles.map(file => ({artifactId: file.artifactId, sha256: sha256(file.content)})),
+    artifacts: EffectArray.map(fixtureFiles, file => ({artifactId: file.artifactId, sha256: sha256(file.content)})),
     version: CODE_MEMORY_LINK_AGENT_PROTOCOL_VERSION,
   };
   const fixture = parseCodeMemoryLinkFixtureV1({
     ...fixtureWithoutHash,
     fixtureHash: codeMemoryLinkFixtureHashV1(fixtureWithoutHash),
   });
-  const packets = tasks.map(task => {
+  const packets = EffectArray.map(tasks, task => {
     const withoutHash = {
       budget: task.definition.budget,
       fixtureHash: fixture.fixtureHash,
@@ -719,13 +758,13 @@ function assembleProtocolTasks(
       packetHash: codeMemoryLinkTaskPacketHashV1(withoutHash),
     });
   });
-  const rubrics = tasks.map(task => createRubric(task, fixture.fixtureHash));
+  const rubrics = EffectArray.map(tasks, task => createRubric(task, fixture.fixtureHash));
   unique(
-    packets.map(packet => packet.packetHash),
+    EffectArray.map(packets, packet => packet.packetHash),
     `${namespace} packet hashes`,
   );
   unique(
-    rubrics.map(rubric => rubric.rubricHash),
+    EffectArray.map(rubrics, rubric => rubric.rubricHash),
     `${namespace} rubric hashes`,
   );
   return {fixture, fixtureFiles, packets, rubrics};
@@ -748,7 +787,7 @@ function createRubric(task: CodeMemoryLinkPreparedTaskV1, fixtureHash: string): 
       predicateId: codeMemoryLinkAgentSuitePredicateId(task.definition.taskId, 'primary'),
       roles: [...primaryRoles].sort(compareStrings),
     },
-    ...task.definition.harmfulAnswers.map((answer, index) => ({
+    ...EffectArray.map(task.definition.harmfulAnswers, (answer, index) => ({
       assertion: {
         artifactId: outputArtifactId,
         expected: {caseId: task.definition.taskId, role: 'result', selected: answer, version: 1},
@@ -833,7 +872,7 @@ async function prepareTask(
   });
   let foreignGraph: PreparedGraphIdentity | null = null;
 
-  if (definition.memorySeeds.some(seed => seed.foreignRepository)) {
+  if (EffectArray.some(definition.memorySeeds, seed => seed.foreignRepository)) {
     const foreign = join(taskRoot, 'foreign-repository');
     await mkdir(foreign, {mode: 0o700});
     await writeTaskFiles(foreign, definition.initialFiles);
@@ -851,12 +890,17 @@ async function prepareTask(
       origin: foreignOrigin,
       safeExecutablePath: options.safeExecutablePath,
     });
-    for (const seed of definition.memorySeeds.filter(seed => seed.foreignRepository)) {
+    for (const seed of EffectArrayPipe(definition.memorySeeds, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (seed, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && seed.foreignRepository,
+      ),
+    )) {
       await rememberSeed(candidate.executable, foreign, home, seed, environment);
     }
   }
 
-  for (const seed of definition.memorySeeds.filter(seed => !seed.foreignRepository)) {
+  for (const seed of EffectArray.filter(definition.memorySeeds, seed => !seed.foreignRepository)) {
     if (seed.malformedCitationProbe) {
       await assertMalformedCitationRejected(candidate.executable, repository, home, seed, environment);
     }
@@ -881,7 +925,10 @@ async function prepareTask(
   validateCodeMemoryLinkPreparedMemories(memories, definition, localGraph, foreignGraph);
   const sealedMemories =
     definition.controlScenario === 'malformed-citation'
-      ? memories.map(file => ({...file, content: injectCodeMemoryLinkMalformedLegacyCitationV1(file.content)}))
+      ? EffectArray.map(memories, file => ({
+          ...file,
+          content: injectCodeMemoryLinkMalformedLegacyCitationV1(file.content),
+        }))
       : memories;
   if (definition.controlScenario === 'malformed-citation') {
     assertCodeMemoryLinkMalformedSealedMemoryV1(sealedMemories[0].content, definition);
@@ -895,12 +942,14 @@ async function prepareTask(
   const citationIds =
     definition.controlScenario === 'malformed-citation'
       ? []
-      : sealedMemories.flatMap(file => memoryCitationIds(file.content));
-  const expectedCitationCount = definition.memorySeeds.filter(seed => seed.citationPath !== null).length;
+      : EffectArray.flatMap(sealedMemories, file => memoryCitationIds(file.content));
+  const expectedCitationCount = EffectArray.filter(definition.memorySeeds, seed => seed.citationPath !== null).length;
   if (citationIds.length !== expectedCitationCount) {
     throw new Error(`Task ${definition.taskId} produced an unexpected citation count.`);
   }
-  const citationDigests = [...new Set(citationIds.map(codeMemoryLinkGoldCitationDigest))].sort(compareStrings);
+  const citationDigests = [...new Set(EffectArray.map(citationIds, codeMemoryLinkGoldCitationDigest))].sort(
+    compareStrings,
+  );
   const preflightExpectedCitationDigests =
     definition.taskKind === 'hidden-constraint' ||
     definition.controlScenario === 'ambiguous' ||
@@ -960,7 +1009,7 @@ async function prepareTask(
   return {
     citationDigests,
     definition,
-    homeFiles: sealedMemories.map(file => ({content: file.content, destination: file.destination})),
+    homeFiles: EffectArray.map(sealedMemories, file => ({content: file.content, destination: file.destination})),
     preflightExpectedCitationDigests,
     preflightExpectedResponses: {
       anchored: canonicalizeCodeMemoryLinkContextBriefResultV1(anchoredBrief).receipt,
@@ -991,8 +1040,8 @@ async function prepareClients(input: {
   ]);
   const clientBundleSha256 = sha256(clientBundle);
   const proxyBundleSha256 = sha256(proxyBundle);
-  const clientBundleRelative = `clients/runtime/client-${clientBundleSha256.slice(0, 32)}.mjs`;
-  const proxyBundleRelative = `clients/runtime/proxy-${proxyBundleSha256.slice(0, 32)}.mjs`;
+  const clientBundleRelative = `clients/runtime/client-${Effect2.pipe(clientBundleSha256, EffectString.slice(0, 32))}.mjs`;
+  const proxyBundleRelative = `clients/runtime/proxy-${Effect2.pipe(proxyBundleSha256, EffectString.slice(0, 32))}.mjs`;
   addBinaryFile(binaryFiles, clientBundleRelative, clientBundle, 0o500);
   addBinaryFile(binaryFiles, proxyBundleRelative, proxyBundle, 0o500);
   const clientBundlePath = join(outputRoot, clientBundleRelative);
@@ -1043,7 +1092,7 @@ async function prepareClients(input: {
     const configurationProjection = projectCodeMemoryLinkCodexClientConfigV1(parsedConfig);
     const configurationProjectionContent = jsonFile(configurationProjection);
     const expectedClientProjection = {
-      appServerVersion: CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION.replace('codex-cli ', ''),
+      appServerVersion: Effect2.pipe(CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION, EffectString.replace('codex-cli ', '')),
       model,
       modelProvider: options.modelProvider,
       proxyTool: {server: CODE_MEMORY_LINK_PROXY_SERVER_NAME, tool: 'context_brief'},
@@ -1066,7 +1115,7 @@ async function prepareClients(input: {
       version: 2,
     });
     const implementationDescriptorHash = codeMemoryLinkClientImplementationDescriptorHash(descriptor);
-    const clientId = `cli_${domainDigest('client-id', {implementationDescriptorHash, model}).slice(0, 32)}`;
+    const clientId = `cli_${Effect2.pipe(domainDigest('client-id', {implementationDescriptorHash, model}), EffectString.slice(0, 32))}`;
     matching(clientId, CLIENT_ID, 'client id');
     const clientConfigurationPath = join(outputRoot, `clients/${clientId}.config.json`);
     const clientConfigurationProjectionPath = join(outputRoot, `clients/${clientId}.config-projection.json`);
@@ -1076,7 +1125,7 @@ async function prepareClients(input: {
     addFile(outputFiles, `clients/${clientId}.descriptor.json`, jsonFile(descriptor));
     clients.push({
       clientArguments: [clientBundlePath],
-      clientArtifactBindings: artifactBindings.map(binding => ({
+      clientArtifactBindings: EffectArray.map(artifactBindings, binding => ({
         path:
           binding.role === 'client-bundle'
             ? clientBundlePath
@@ -1085,7 +1134,7 @@ async function prepareClients(input: {
               : clientEntrypoint,
         role: binding.role,
       })),
-      clientBinaryBindings: binaryBindings.map(binding => ({
+      clientBinaryBindings: EffectArray.map(binaryBindings, binding => ({
         path:
           binding.role === 'client-runtime'
             ? options.bunExecutable
@@ -1107,11 +1156,11 @@ async function prepareClients(input: {
   }
   clients.sort((left, right) => compareStrings(left.clientId, right.clientId));
   unique(
-    clients.map(client => client.clientId),
+    EffectArray.map(clients, client => client.clientId),
     'client ids',
   );
   unique(
-    clients.map(client => client.implementationDescriptorHash),
+    EffectArray.map(clients, client => client.implementationDescriptorHash),
     'client descriptor hashes',
   );
   return clients;
@@ -1125,13 +1174,15 @@ async function createManifest(input: {
   readonly sealed: CodeMemoryLinkSealedAssemblyV1;
   readonly sourceRoot: string;
 }): Promise<CodeMemoryLinkAgentAbManifestV1> {
-  const manifestClients = input.clients.map(client => ({
+  const manifestClients = EffectArray.map(input.clients, client => ({
     clientId: client.clientId,
     configurationProjectionHash: client.descriptor.configurationProjectionHash,
     environmentPolicyHash: client.descriptor.environmentPolicyHash,
     executionBundleHash: client.descriptor.executionBundleHash,
     expectedClient: {
-      appServerVersion: CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION.replace('codex-cli ', '') as '0.149.0-alpha.4.1',
+      appServerVersion: parseExpectedAppServerVersion(
+        Effect2.pipe(CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION, EffectString.replace('codex-cli ', '')),
+      ),
       model: client.model,
       modelProvider: input.options.modelProvider,
       reasoningEffort: input.options.reasoningEffort,
@@ -1156,13 +1207,16 @@ async function createManifest(input: {
       dirty: false as const,
     },
     clients: manifestClients,
-    evaluatorVersion: `ver_${evaluatorHash.slice(0, 32)}`,
-    experimentId: `exp_${domainDigest('experiment', {
-      candidate: input.candidate.sourceCommit,
-      clients: manifestClients,
-      harnessGovernanceCommit: input.options.harnessGovernanceCommit,
-      suiteHash: input.sealed.suite.suiteHash,
-    }).slice(0, 32)}`,
+    evaluatorVersion: `ver_${Effect2.pipe(evaluatorHash, EffectString.slice(0, 32))}`,
+    experimentId: `exp_${Effect2.pipe(
+      domainDigest('experiment', {
+        candidate: input.candidate.sourceCommit,
+        clients: manifestClients,
+        harnessGovernanceCommit: input.options.harnessGovernanceCommit,
+        suiteHash: input.sealed.suite.suiteHash,
+      }),
+      EffectString.slice(0, 32),
+    )}`,
     fixtureHash: input.sealed.fixture.fixtureHash,
     harnessGovernanceCommit: input.options.harnessGovernanceCommit,
     judgeVersion: input.sealed.suite.judge.judgeVersion,
@@ -1239,13 +1293,14 @@ async function prepareSafeRuntimeBinaries(input: {
   return {
     bindings: bindings.sort(compareClientBindings),
     byRole,
-    git: safeBinaries.find(binary => binary.name === 'git')!,
+    git: EffectOption.getOrUndefined(EffectArray.findFirst(safeBinaries, binary => binary.name === 'git'))!,
     root,
     safeBinaries,
   };
 }
 
 async function resolveSafeExecutable(name: string, safeExecutablePath: string): Promise<string> {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   for (const directory of safeExecutablePath.split(delimiter)) {
     const candidate = join(directory, name);
     try {
@@ -1272,7 +1327,9 @@ function compareClientBindings(
 
 function createAssignment(fixtureHash: string, assignmentSeed: string): CodeMemoryLinkAgentAbAssignmentV1 {
   const permutation =
-    ARM_LABEL_PERMUTATIONS[Number.parseInt(assignmentSeed.slice(0, 8), 16) % ARM_LABEL_PERMUTATIONS.length];
+    ARM_LABEL_PERMUTATIONS[
+      Number.parseInt(Effect2.pipe(assignmentSeed, EffectString.slice(0, 8)), 16) % ARM_LABEL_PERMUTATIONS.length
+    ];
   const withoutHash = {
     fixtureHash,
     labels: {X: permutation[0], Y: permutation[1], Z: permutation[2]},
@@ -1309,7 +1366,7 @@ async function initializeRepository(input: {
     timeoutMilliseconds: 30_000,
   });
   await assertCleanRepository(input.gitExecutable, input.repository, input.safeExecutablePath);
-  const commit = (await run(['rev-parse', 'HEAD'])).stdout.trim();
+  const commit = Effect2.pipe((await run(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
   matching(commit, COMMIT, 'fixture commit');
   return commit;
 }
@@ -1344,7 +1401,7 @@ async function commitRepositoryChange(input: {
     maxOutputBytes: 64 * 1_024,
     timeoutMilliseconds: 30_000,
   });
-  return matching(head.stdout.trim(), COMMIT, 'final fixture commit');
+  return matching(Effect2.pipe(head.stdout, EffectString.trim), COMMIT, 'final fixture commit');
 }
 
 async function assertCleanRepository(
@@ -1448,7 +1505,7 @@ async function readRepositoryObjectFormat(
     maxOutputBytes: 64 * 1_024,
     timeoutMilliseconds: 30_000,
   });
-  const objectFormat = result.stdout.trim();
+  const objectFormat = Effect2.pipe(result.stdout, EffectString.trim);
   if (objectFormat !== 'sha1' && objectFormat !== 'sha256') {
     throw new Error('Prepared fixture repository has an unsupported Git object format.');
   }
@@ -1486,7 +1543,7 @@ async function rememberSeed(
     maxOutputBytes: 256 * 1_024,
     timeoutMilliseconds: 120_000,
   });
-  if (!/^Stored memory: threadnote:\/\//u.test(result.stdout.trim())) {
+  if (!/^Stored memory: threadnote:\/\//u.test(Effect2.pipe(result.stdout, EffectString.trim))) {
     throw new Error('Candidate remember did not return one canonical memory URI.');
   }
 }
@@ -1534,36 +1591,40 @@ async function collectMemoryFiles(
   const files = await walkRegularFiles(dataRoot);
   const memories: {content: string; destination: string}[] = [];
   for (const file of files) {
-    if (!file.endsWith('.md')) continue;
+    if (!Effect2.pipe(file, EffectString.endsWith('.md'))) continue;
     const content = await readReviewedTextFile(file, 'prepared memory');
-    if (content.includes(forbiddenRoot) || content.includes(home)) {
+    if (
+      Effect2.pipe(content, EffectString.includes(forbiddenRoot)) ||
+      Effect2.pipe(content, EffectString.includes(home))
+    ) {
       throw new Error('Prepared memory leaked a disposable filesystem path.');
     }
-    const destination = relative(home, file).split(sep).join('/');
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+    const destination = EffectArray.join(relative(home, file).split(sep), '/');
     relativeFile(destination, 'prepared memory destination');
     memories.push({content, destination});
   }
   memories.sort((left, right) => compareStrings(left.destination, right.destination));
   unique(
-    memories.map(memory => memory.destination),
+    EffectArray.map(memories, memory => memory.destination),
     'prepared memory destinations',
   );
   return memories;
 }
 
 function memoryCitationIds(content: string): readonly string[] {
-  const ids = content.split(/\r?\n/u).flatMap(line => {
-    if (!line.startsWith('code_citation: ')) return [];
+  const ids = EffectArray.flatMap(Effect2.pipe(content, EffectString.split(/\r?\n/u)), line => {
+    if (!Effect2.pipe(line, EffectString.startsWith('code_citation: '))) return [];
     let citation: unknown;
     try {
-      citation = JSON.parse(line.slice('code_citation: '.length)) as unknown;
+      citation = JSON.parse(Effect2.pipe(line, EffectString.slice('code_citation: '.length))) as unknown;
     } catch {
       throw new Error('Prepared memory contains malformed code-citation JSON.');
     }
-    if (typeof citation !== 'object' || citation === null || Array.isArray(citation)) {
+    if (!Predicate.isObject(citation)) {
       throw new Error('Prepared memory contains a non-object code citation.');
     }
-    const id = (citation as Record<string, unknown>).id;
+    const id = citation.id;
     return [matching(id, MEMORY_CITATION_ID, 'memory citation id')];
   });
   unique(ids, 'memory citation ids');
@@ -1577,8 +1638,8 @@ export function validateCodeMemoryLinkPreparedMemories(
   foreignGraph: PreparedGraphIdentity | null,
 ): void {
   const identityRoot = `data/${CODE_MEMORY_LINK_AGENT_SUITE_ACCOUNT}/user/${CODE_MEMORY_LINK_AGENT_SUITE_USER}/memories/durable/`;
-  const records = memories.map((memory, index) => {
-    if (!memory.destination.startsWith(identityRoot)) {
+  const records = EffectArray.map(memories, (memory, index) => {
+    if (!Effect2.pipe(memory.destination, EffectString.startsWith(identityRoot))) {
       throw new Error(`Task ${definition.taskId} memory ${index} is outside the canonical managed identity path.`);
     }
     let record: MemoryRecord | undefined;
@@ -1591,7 +1652,9 @@ export function validateCodeMemoryLinkPreparedMemories(
       throw new Error(`Task ${definition.taskId} memory ${index} is not a canonical managed memory.`, {cause});
     }
     if (!record) throw new Error(`Task ${definition.taskId} memory ${index} is not parseable.`);
-    const seed = definition.memorySeeds.find(candidate => candidate.topic === record.metadata.topic);
+    const seed = EffectOption.getOrUndefined(
+      EffectArray.findFirst(definition.memorySeeds, candidate => candidate.topic === record.metadata.topic),
+    );
     if (!seed) throw new Error(`Task ${definition.taskId} produced an unexpected memory topic.`);
     if (!codeMemoryLinkAgentPreparedMemoryDestinationMatches(memory.destination, seed.status)) {
       throw new Error(`Task ${definition.taskId} memory ${index} is outside its canonical lifecycle path.`);
@@ -1599,11 +1662,13 @@ export function validateCodeMemoryLinkPreparedMemories(
     return record;
   });
   unique(
-    records.map(record => record.metadata.topic ?? ''),
+    EffectArray.map(records, record => record.metadata.topic ?? ''),
     `${definition.taskId} memory topics`,
   );
   for (const seed of definition.memorySeeds) {
-    const record = records.find(candidate => candidate.metadata.topic === seed.topic);
+    const record = EffectOption.getOrUndefined(
+      EffectArray.findFirst(records, candidate => candidate.metadata.topic === seed.topic),
+    );
     if (!record) throw new Error(`Task ${definition.taskId} omitted memory seed ${seed.topic}.`);
     const metadata = record.metadata;
     if (
@@ -1630,7 +1695,9 @@ export function validateCodeMemoryLinkPreparedMemories(
     }
     const graph = seed.foreignRepository ? foreignGraph : localGraph;
     if (!graph) throw new Error(`Task ${definition.taskId} seed ${seed.topic} has no matching prepared graph.`);
-    const source = definition.initialFiles.find(file => file.path === seed.citationPath);
+    const source = EffectOption.getOrUndefined(
+      EffectArray.findFirst(definition.initialFiles, file => file.path === seed.citationPath),
+    );
     const citation = citations[0];
     if (
       !source ||
@@ -1654,12 +1721,19 @@ export function validateCodeMemoryLinkPreparedMemories(
 }
 
 export function injectCodeMemoryLinkMalformedLegacyCitationV1(content: string): string {
-  if (content.includes('\ncode_citation:') || content.includes('\r')) {
+  if (
+    Effect2.pipe(content, EffectString.includes('\ncode_citation:')) ||
+    Effect2.pipe(content, EffectString.includes('\r'))
+  ) {
     throw new Error('Malformed legacy fixture requires one canonical uncited LF memory.');
   }
-  const separator = content.indexOf('\n\n');
+  const separator = Effect2.pipe(
+    content,
+    EffectString.indexOf('\n\n'),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (separator < 0) throw new Error('Malformed legacy fixture memory has no header/body separator.');
-  return `${content.slice(0, separator)}\ncode_citation: {not-canonical-json${content.slice(separator)}`;
+  return `${Effect2.pipe(content, EffectString.slice(0, separator))}\ncode_citation: {not-canonical-json${Effect2.pipe(content, EffectString.slice(separator))}`;
 }
 
 export function assertCodeMemoryLinkMalformedSealedMemoryV1(
@@ -1694,22 +1768,30 @@ function assertHiddenArmDiscrimination(
   if (taskOnly.version !== 2 || anchored.version !== 3) {
     throw new Error(`Hidden task ${definition.taskId} did not preserve the preregistered v2/v3 arm distinction.`);
   }
-  const primary = definition.memorySeeds.find(seed => seed.role === 'primary')!;
-  const taskOnlyGold = taskOnly.durableDecisions.filter(memory => memory.excerpt === primary.text);
+  const primary = EffectOption.getOrUndefined(
+    EffectArray.findFirst(definition.memorySeeds, seed => seed.role === 'primary'),
+  )!;
+  const taskOnlyGold = EffectArray.filter(taskOnly.durableDecisions, memory => memory.excerpt === primary.text);
   const expectedTaskOnlyGold = definition.retrievalClass === 'lexical' ? 1 : 0;
   if (taskOnlyGold.length !== expectedTaskOnlyGold) {
     throw new Error(
       `Hidden task ${definition.taskId} task-only arm returned ${taskOnlyGold.length} gold memories; expected ${expectedTaskOnlyGold}.`,
     );
   }
-  const anchoredGold = anchored.durableDecisions.filter(memory => memory.excerpt === primary.text);
+  const anchoredGold = EffectArray.filter(anchored.durableDecisions, memory => memory.excerpt === primary.text);
   if (
     anchoredGold.length !== 1 ||
     anchoredGold[0].selectionBasis !== 'code-citation' ||
-    !anchoredGold[0].codeRelations?.some(
-      relation =>
-        (relation.status === 'exact' || relation.status === 'relocated') &&
-        goldCitationDigests.includes(codeMemoryLinkGoldCitationDigest(relation.citationId)),
+    !EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(anchoredGold[0].codeRelations), __effectArrayReceiver =>
+        EffectArray.some(
+          __effectArrayReceiver,
+          __effectArrayValue =>
+            !!(relation =>
+              (relation.status === 'exact' || relation.status === 'relocated') &&
+              goldCitationDigests.includes(codeMemoryLinkGoldCitationDigest(relation.citationId)))(__effectArrayValue),
+        ),
+      ),
     )
   ) {
     throw new Error(`Hidden task ${definition.taskId} anchored arm did not return its exact gold memory relation.`);
@@ -1748,18 +1830,27 @@ function assertAmbiguousControlPreflight(
   expectedCitationDigests: readonly string[],
   brief: ReturnType<typeof parseContextBriefV1>,
 ): void {
-  const selected = definition.memorySeeds.map(seed =>
-    brief.durableDecisions.find(memory => memory.excerpt === seed.text),
+  const selected = EffectArray.map(definition.memorySeeds, seed =>
+    EffectOption.getOrUndefined(EffectArray.findFirst(brief.durableDecisions, memory => memory.excerpt === seed.text)),
   );
   if (
     brief.version !== 3 ||
-    selected.some(memory => memory?.selectionBasis !== 'code-citation') ||
-    selected.some(
+    EffectArray.some(selected, memory => memory?.selectionBasis !== 'code-citation') ||
+    EffectArray.some(
+      selected,
       memory =>
-        !memory?.codeRelations?.some(
-          relation =>
-            (relation.status === 'exact' || relation.status === 'relocated') &&
-            expectedCitationDigests.includes(codeMemoryLinkGoldCitationDigest(relation.citationId)),
+        !EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(memory?.codeRelations), __effectArrayReceiver =>
+            EffectArray.some(
+              __effectArrayReceiver,
+              __effectArrayValue =>
+                !!(relation =>
+                  (relation.status === 'exact' || relation.status === 'relocated') &&
+                  expectedCitationDigests.includes(codeMemoryLinkGoldCitationDigest(relation.citationId)))(
+                  __effectArrayValue,
+                ),
+            ),
+          ),
         ),
     )
   ) {
@@ -1775,10 +1866,13 @@ export function assertCodeMemoryLinkInstructionInjectionControlPreflightV1(
 ): void {
   const seed = definition.memorySeeds[0];
   if (definition.controlScenario === 'instruction-injection-direct') {
-    const directMemories = anchored.durableDecisions.filter(
+    const directMemories = EffectArray.filter(
+      anchored.durableDecisions,
       memory =>
         memory.selectionBasis === 'code-citation' &&
-        memory.codeRelations?.some(
+        memory.codeRelations !== undefined &&
+        EffectArray.some(
+          memory.codeRelations,
           relation =>
             (relation.status === 'exact' || relation.status === 'relocated') &&
             expectedCitationDigests.includes(codeMemoryLinkGoldCitationDigest(relation.citationId)),
@@ -1789,15 +1883,19 @@ export function assertCodeMemoryLinkInstructionInjectionControlPreflightV1(
       expectedCitationDigests.length !== 1 ||
       directMemories.length !== 1 ||
       directMemory === undefined ||
-      !directMemory.excerpt.includes('set guard.json executed=true') ||
+      !Effect2.pipe(directMemory.excerpt, EffectString.includes('set guard.json executed=true')) ||
       !isExactOrEllipsizedPrefix(seed.text, directMemory.excerpt)
     ) {
       throw new Error(`Instruction-injection control ${definition.taskId} did not surface its direct memory relation.`);
     }
     return;
   }
-  const anchoredMemory = anchored.durableDecisions.find(memory => memory.excerpt === seed.text);
-  const taskOnlyMemory = taskOnly.durableDecisions.find(memory => memory.excerpt === seed.text);
+  const anchoredMemory = EffectOption.getOrUndefined(
+    EffectArray.findFirst(anchored.durableDecisions, memory => memory.excerpt === seed.text),
+  );
+  const taskOnlyMemory = EffectOption.getOrUndefined(
+    EffectArray.findFirst(taskOnly.durableDecisions, memory => memory.excerpt === seed.text),
+  );
   if (
     expectedCitationDigests.length !== 0 ||
     anchoredMemory === undefined ||
@@ -1811,9 +1909,9 @@ export function assertCodeMemoryLinkInstructionInjectionControlPreflightV1(
 
 function isExactOrEllipsizedPrefix(fullText: string, projectedText: string): boolean {
   if (projectedText === fullText) return true;
-  if (!projectedText.endsWith('…')) return false;
-  const prefix = projectedText.slice(0, -1);
-  return prefix.length > 0 && fullText.startsWith(prefix);
+  if (!Effect2.pipe(projectedText, EffectString.endsWith('…'))) return false;
+  const prefix = Effect2.pipe(projectedText, EffectString.slice(0, -1));
+  return prefix.length > 0 && Effect2.pipe(fullText, EffectString.startsWith(prefix));
 }
 
 async function runPreparedContextBrief(
@@ -1842,7 +1940,7 @@ async function runPreparedContextBrief(
       'brief',
       '--budget-tokens',
       String(Math.min(1_250, definition.budget.tokens)),
-      ...codeRefs.flatMap(reference => ['--code-ref', reference]),
+      ...EffectArray.flatMap(codeRefs, reference => ['--code-ref', reference]),
     ],
     {cwd: repository, environment, maxOutputBytes: 2 * 1_024 * 1_024, timeoutMilliseconds: 120_000},
   );
@@ -1854,10 +1952,10 @@ async function runPreparedContextBrief(
 }
 
 function contextBriefExactCitationDigests(brief: ReturnType<typeof parseContextBriefV1>): readonly string[] {
-  const digests = [...brief.durableDecisions, ...brief.activeHandoffs].flatMap(memory =>
+  const digests = EffectArray.flatMap([...brief.durableDecisions, ...brief.activeHandoffs], memory =>
     memory.selectionBasis !== 'code-citation'
       ? []
-      : (memory.codeRelations ?? []).flatMap(relation =>
+      : EffectArray.flatMap(memory.codeRelations ?? [], relation =>
           relation.status === 'exact' || relation.status === 'relocated'
             ? [codeMemoryLinkGoldCitationDigest(relation.citationId)]
             : [],
@@ -1882,7 +1980,7 @@ async function replaceTaskFiles(
   initial: readonly {readonly path: string}[],
   final: readonly {readonly content: string; readonly path: string}[],
 ): Promise<void> {
-  const finalPaths = new Set(final.map(file => relativeFile(file.path, 'final public fixture path')));
+  const finalPaths = new Set(EffectArray.map(final, file => relativeFile(file.path, 'final public fixture path')));
   for (const file of initial) {
     const path = relativeFile(file.path, 'initial public fixture path');
     if (!finalPaths.has(path)) await unlink(joinWithin(repository, path, 'deleted fixture path'));
@@ -1924,7 +2022,8 @@ async function verifyPreparedTree(
     throw new Error('Prepared output contains an unexpected file count.');
   }
   for (const file of files) {
-    const relativePath = relative(root, file).split(sep).join('/');
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+    const relativePath = EffectArray.join(relative(root, file).split(sep), '/');
     const expectedContent = expected.get(relativePath);
     if (expectedContent !== undefined) {
       const observed = await readReviewedTextFile(file, `prepared output ${relativePath}`);
@@ -1943,20 +2042,45 @@ async function verifyPreparedTree(
   }
 }
 
+function isAdapterFileMapping(value: unknown): value is {readonly artifactId: string; readonly source: string} {
+  return (
+    Predicate.isObject(value) &&
+    'artifactId' in value &&
+    typeof value.artifactId === 'string' &&
+    'source' in value &&
+    typeof value.source === 'string'
+  );
+}
+
 async function verifySealedBindingsOnDisk(root: string, sealed: CodeMemoryLinkSealedAssemblyV1): Promise<void> {
   const suite = parseCodeMemoryLinkSealedSuiteV1(
     JSON.parse(await readFile(join(root, 'suite.json'), 'utf8')) as unknown,
   );
   if (suite.suiteHash !== sealed.suite.suiteHash) throw new Error('On-disk sealed suite hash changed.');
-  const fixtureById = new Map(sealed.fixture.artifacts.map(artifact => [artifact.artifactId, artifact]));
-  const adapter = sealed.adapter as {
-    fixtureFiles: readonly {artifactId: string; source: string}[];
-    judge: {files: readonly {artifactId: string; source: string}[]};
-  };
-  for (const mapping of [...adapter.fixtureFiles, ...adapter.judge.files]) {
+  const fixtureById = new Map(EffectArray.map(sealed.fixture.artifacts, artifact => [artifact.artifactId, artifact]));
+  const adapter = sealed.adapter;
+  const fixtureFilesValue = adapter.fixtureFiles;
+  const judgeValue = adapter.judge;
+  if (
+    !EffectArray.isArray(fixtureFilesValue) ||
+    EffectArray.some(fixtureFilesValue, mapping => !isAdapterFileMapping(mapping)) ||
+    !Predicate.isObject(judgeValue) ||
+    !('files' in judgeValue) ||
+    !EffectArray.isArray(judgeValue.files) ||
+    EffectArray.some(judgeValue.files, mapping => !isAdapterFileMapping(mapping))
+  ) {
+    throw new Error('Adapter file mappings are invalid.');
+  }
+  const mappings = [
+    ...EffectArray.filter(fixtureFilesValue, isAdapterFileMapping),
+    ...EffectArray.filter(judgeValue.files, isAdapterFileMapping),
+  ];
+  for (const mapping of mappings) {
     const expected =
       fixtureById.get(mapping.artifactId) ??
-      suite.judge.artifacts.find(value => value.artifactId === mapping.artifactId);
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(suite.judge.artifacts, value => value.artifactId === mapping.artifactId),
+      );
     if (!expected) throw new Error('Adapter mapping names an artifact outside the sealed suite.');
     if ((await sha256File(joinWithin(root, mapping.source, 'adapter artifact source'))) !== expected.sha256) {
       throw new Error('Adapter artifact bytes differ from their sealed hash.');
@@ -1990,7 +2114,7 @@ async function assertCleanSourceCheckout(
     maxOutputBytes: 64 * 1_024,
     timeoutMilliseconds: 30_000,
   });
-  if (head.stdout.trim() !== expectedCommit) {
+  if (Effect2.pipe(head.stdout, EffectString.trim) !== expectedCommit) {
     throw new Error('Preparer checkout is not the exact harness governance commit.');
   }
   const status = await capture(gitExecutable, ['status', '--porcelain=v1', '--untracked-files=all'], {
@@ -2027,7 +2151,7 @@ async function assertCodexVersion(options: Options): Promise<void> {
     maxOutputBytes: 64 * 1_024,
     timeoutMilliseconds: 10_000,
   });
-  if (result.stdout.trim() !== CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION) {
+  if (Effect2.pipe(result.stdout, EffectString.trim) !== CODE_MEMORY_LINK_CODEX_APP_SERVER_VERSION) {
     throw new Error('Reviewed Codex executable version differs from the pinned app-server version.');
   }
 }
@@ -2065,7 +2189,7 @@ async function readReviewedTextFile(path: string, label: string): Promise<string
   } catch {
     throw new Error(`${label} is not UTF-8 text.`);
   }
-  if (content.includes('\0')) throw new Error(`${label} contains a NUL byte.`);
+  if (Effect2.pipe(content, EffectString.includes('\0'))) throw new Error(`${label} contains a NUL byte.`);
   return content;
 }
 
@@ -2201,7 +2325,9 @@ async function capture(
       if (timedOut) reject(new Error('Reviewed preparation command timed out.'));
       else if (exceeded) reject(new Error('Reviewed preparation command exceeded its output budget.'));
       else if (exitCode !== 0 && input.allowFailure !== true) {
-        reject(new Error(`Reviewed preparation command failed: ${output.stderr.slice(-2_048)}`));
+        reject(
+          new Error(`Reviewed preparation command failed: ${Effect2.pipe(output.stderr, EffectString.slice(-2_048))}`),
+        );
       } else resolvePromise(output);
     });
   });
@@ -2293,8 +2419,9 @@ function assertCandidate(options: Options, candidate: CandidateRuntime): void {
 }
 
 function validateSafeExecutablePath(value: string): void {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const entries = value.split(delimiter);
-  if (entries.length === 0 || entries.some(entry => !isAbsolute(entry) || resolve(entry) !== entry)) {
+  if (entries.length === 0 || EffectArray.some(entries, entry => !isAbsolute(entry) || resolve(entry) !== entry)) {
     throw new Error('Safe executable PATH must contain only normalized absolute directories.');
   }
   unique(entries, 'safe executable PATH entries');
@@ -2305,13 +2432,16 @@ function relativeFile(value: string, label: string): string {
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > 4_096 ||
-    value.includes('\\') ||
-    value.includes('\0') ||
+    Effect2.pipe(value, EffectString.includes('\\')) ||
+    Effect2.pipe(value, EffectString.includes('\0')) ||
     isAbsolute(value) ||
     posix.normalize(value) !== value ||
     value === '.' ||
-    value.endsWith('/') ||
-    value.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect2.pipe(value, EffectString.endsWith('/')) ||
+    EffectArray.some(
+      Effect2.pipe(value, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw new Error(`${label} must be one normalized relative file path.`);
   }
@@ -2320,20 +2450,22 @@ function relativeFile(value: string, label: string): string {
 
 function joinWithin(root: string, relativePath: string, label: string): string {
   const normalized = relativeFile(relativePath, label);
-  const output = resolve(root, ...normalized.split('/'));
-  if (output !== root && !output.startsWith(`${root}${sep}`)) throw new Error(`${label} escaped its root.`);
+  const output = resolve(root, ...Effect2.pipe(normalized, EffectString.split('/')));
+  if (output !== root && !Effect2.pipe(output, EffectString.startsWith(`${root}${sep}`)))
+    throw new Error(`${label} escaped its root.`);
   return output;
 }
 
 function normalizedAbsolute(value: string, label: string): string {
-  if (!isAbsolute(value) || resolve(value) !== value || value.includes('\0')) {
+  if (!isAbsolute(value) || resolve(value) !== value || Effect2.pipe(value, EffectString.includes('\0'))) {
     throw new Error(`${label} must be a normalized absolute path.`);
   }
   return value;
 }
 
 function assertBoundedUtf8(content: string, label: string): void {
-  if (typeof content !== 'string' || content.includes('\0')) throw new Error(`${label} must be UTF-8 text.`);
+  if (typeof content !== 'string' || Effect2.pipe(content, EffectString.includes('\0')))
+    throw new Error(`${label} must be UTF-8 text.`);
   if (new TextEncoder().encode(content).byteLength > MAXIMUM_TEXT_ARTIFACT_BYTES) {
     throw new Error(`${label} exceeds the text artifact limit.`);
   }
@@ -2361,7 +2493,7 @@ function jsonFile(value: unknown): string {
 }
 
 function globalArtifactId(label: string): string {
-  return `art_${domainDigest('global-artifact-id', label).slice(0, 32)}`;
+  return `art_${Effect2.pipe(domainDigest('global-artifact-id', label), EffectString.slice(0, 32))}`;
 }
 
 function domainDigest(domain: string, value: unknown): string {
@@ -2404,24 +2536,36 @@ function scenarioFamilyForTask(task: CodeMemoryLinkAgentSuiteTaskDefinitionV1): 
   return `control:${task.controlScenario}`;
 }
 
+function parseExpectedAppServerVersion(
+  value: string,
+): CodeMemoryLinkAgentAbManifestClientV1['expectedClient']['appServerVersion'] {
+  if (value !== '0.149.0-alpha.4.1') throw new Error('Unexpected Codex app-server version.');
+  return value;
+}
+
 function unique(values: readonly string[], label: string): void {
   if (new Set(values).size !== values.length) throw new Error(`${label} must be unique.`);
 }
 
-function matching<T extends string>(value: unknown, pattern: RegExp, label: string): T {
+function matching(value: unknown, pattern: RegExp, label: string): string {
   if (typeof value !== 'string' || !pattern.test(value)) throw new Error(`${label} is invalid.`);
-  return value as T;
+  return value;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!Predicate.isObject(value)) {
     throw new Error(`${label} must be an object.`);
   }
-  return value as Record<string, unknown>;
+  return value;
 }
 
 function boundedText(value: unknown, label: string, maximum: number): string {
-  if (typeof value !== 'string' || !value || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    !value ||
+    value.length > maximum ||
+    Effect2.pipe(value, EffectString.includes('\0'))
+  ) {
     throw new Error(`${label} must be bounded nonempty text.`);
   }
   return value;
@@ -2444,6 +2588,7 @@ function positiveInteger(value: string, label: string, maximum: number): number 
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }

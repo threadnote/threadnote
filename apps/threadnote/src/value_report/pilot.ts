@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -15,6 +16,9 @@ import {
   type PilotMetricSummary,
   type PilotReport,
 } from './pilot/contract.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type Sample = {
   readonly actor: number;
@@ -24,20 +28,26 @@ type Sample = {
 
 export function buildPilotReport(raw: unknown): PilotReport {
   const input = parsePilotInput(raw);
-  const metrics = {} as Record<PilotMetric, PilotMetricSummary>;
+  const metricSummaries: Array<[PilotMetric, PilotMetricSummary]> = [];
   for (const metric of PILOT_MEASURES) {
-    const samples: Sample[] = input.observations.filter(observation => observation.metric === metric);
-    const seenActors = new Set(samples.map(sample => sample.actor));
+    const samples: Sample[] = EffectArray.filter(input.observations, observation => observation.metric === metric);
+    const seenActors = new Set(EffectArray.map(samples, sample => sample.actor));
     for (let actor = 0; actor < input.actors; actor += 1) {
       if (!seenActors.has(actor)) samples.push({actor, state: 'missing'});
     }
-    metrics[metric] = summarize(metric, samples);
+    metricSummaries.push([metric, summarize(metric, samples)]);
   }
   const derived = deriveEvidence(input);
-  for (const metric of PILOT_DERIVED) metrics[metric] = summarize(metric, derived[metric]);
+  for (const metric of PILOT_DERIVED) metricSummaries.push([metric, summarize(metric, derived[metric])]);
   const weeks = weeklyEvidence(input);
-  const retained = weeks.actorSets.reduce(
-    (previous, current) => new Set([...previous].filter(actor => current.has(actor))),
+  const retained = Effect.pipe(weeks.actorSets, __effectReduceValues =>
+    EffectArray.reduce(
+      EffectArray.drop(__effectReduceValues, 1),
+      Effect.Option.getOrElse(EffectArray.head(__effectReduceValues), () => {
+        throw new TypeError('Reduce of empty array with no initial value');
+      }),
+      (previous, current) => new Set(EffectArray.filter([...previous], actor => current.has(actor))),
+    ),
   );
   const report = {
     schema: 'threadnote.value-pilot-report.v1' as const,
@@ -47,15 +57,19 @@ export function buildPilotReport(raw: unknown): PilotReport {
     elapsedDays: input.elapsedDays,
     actors: countBucket(input.actors),
     evidenceCoverage: input.evidenceCoverage,
-    metrics,
+    metrics: EffectRecord.fromEntries(metricSummaries),
     supportingValue: {
       sources: countBucket(input.sources.length),
       missingSources: countBucket(input.actors - input.sources.length),
-      successfulBriefs: countBucket(sum(input.sources.map(source => source.value.report.contextBrief.successful))),
-      approvedDeltas: countBucket(sum(input.sources.map(source => source.value.report.knowledgeDelta.approved))),
-      setupCompleted: countBucket(sum(input.sources.map(source => source.value.report.setup.completed))),
-      healthOpened: countBucket(sum(input.sources.map(source => source.value.report.health.opened))),
-      healthResolved: countBucket(sum(input.sources.map(source => source.value.report.health.resolved))),
+      successfulBriefs: countBucket(
+        sum(EffectArray.map(input.sources, source => source.value.report.contextBrief.successful)),
+      ),
+      approvedDeltas: countBucket(
+        sum(EffectArray.map(input.sources, source => source.value.report.knowledgeDelta.approved)),
+      ),
+      setupCompleted: countBucket(sum(EffectArray.map(input.sources, source => source.value.report.setup.completed))),
+      healthOpened: countBucket(sum(EffectArray.map(input.sources, source => source.value.report.health.opened))),
+      healthResolved: countBucket(sum(EffectArray.map(input.sources, source => source.value.report.health.resolved))),
     },
     weeks: weeks.reports,
     fourWeekCrossActorRetention: {
@@ -84,15 +98,17 @@ export function parsePilotReport(raw: unknown): PilotReport {
   const {reportDigest, ...body} = report;
   if (reportDigest !== digestReport(body)) throw new Error('Invalid pilot report digest.');
   if (
-    PILOT_METRICS.some(metric => report.metrics[metric] === undefined) ||
+    EffectArray.some(PILOT_METRICS, metric => report.metrics[metric] === undefined) ||
     report.elapsedDays < 1 ||
     report.elapsedDays > 28
   ) {
     throw new Error('Invalid pilot report.');
   }
-  if (report.weeks.some((week, index) => week.week !== index + 1)) throw new Error('Invalid pilot report weeks.');
+  if (EffectArray.some(report.weeks, (week, index) => week.week !== index + 1))
+    throw new Error('Invalid pilot report weeks.');
   if (
-    report.weeks.some(
+    EffectArray.some(
+      report.weeks,
       week =>
         week.crossActorFullLoopActors === '0' &&
         (report.evidenceCoverage !== 'complete' || report.elapsedDays < week.week * 7),
@@ -119,16 +135,17 @@ export function countBucket(count: number): (typeof PILOT_COUNTS)[number] {
 }
 
 function summarize(metric: PilotMetric, samples: readonly Sample[]): PilotMetricSummary {
-  const observed = samples.filter(sample => sample.state === 'observed');
-  const positive = observed.filter(sample => sample.value! > 0).length;
+  const observed = EffectArray.filter(samples, sample => sample.state === 'observed');
+  const positive = EffectArray.filter(observed, sample => sample.value! > 0).length;
   const stateCounts = {observed: observed.length, missing: 0, pending: 0, failed: 0, inapplicable: 0};
   for (const sample of samples) if (sample.state !== 'observed') stateCounts[sample.state] += 1;
-  const states = Object.entries(stateCounts)
-    .filter(([, count]) => count > 0)
-    .map(([state]) => state);
-  const state = states.length === 0 ? 'missing' : states.length === 1 ? (states[0] as Sample['state']) : 'mixed';
-  const sufficient = new Set(observed.map(sample => sample.actor)).size >= 3;
-  const values = observed.map(sample => sample.value!).sort((a, b) => a - b);
+  const states = EffectArray.map(
+    EffectArray.filter(EffectRecord.toEntries(stateCounts), ([, count]) => count > 0),
+    ([state]) => state,
+  );
+  const state = states.length === 0 ? 'missing' : states.length === 1 ? states[0] : 'mixed';
+  const sufficient = new Set(EffectArray.map(observed, sample => sample.actor)).size >= 3;
+  const values = EffectArray.map(observed, sample => sample.value!).sort((a, b) => a - b);
   const middle = Math.floor(values.length / 2);
   const median = values.length % 2 === 0 ? (values[middle - 1] + values[middle]) / 2 : values[middle];
   return {
@@ -161,13 +178,14 @@ function deriveEvidence(input: PilotInput): Record<(typeof PILOT_DERIVED)[number
     items.set(event.item, list);
   }
   for (let actor = 0; actor < input.actors; actor += 1) {
-    const found = input.evidence.some(event => event.actor === actor && event.kind === 'verified-brief');
+    const found = EffectArray.some(input.evidence, event => event.actor === actor && event.kind === 'verified-brief');
     firstSourceVerifiedBrief.push(outcome(actor, found, input.evidenceCoverage === 'complete'));
   }
   for (const events of items.values()) {
-    const origins = events.filter(event => event.kind === 'verified-brief');
+    const origins = EffectArray.filter(events, event => event.kind === 'verified-brief');
     for (const origin of origins) {
-      const reuse = events.some(
+      const reuse = EffectArray.some(
+        events,
         event =>
           event.kind === 'verified-reuse' &&
           event.actor !== origin.actor &&
@@ -183,14 +201,16 @@ function deriveEvidence(input: PilotInput): Record<(typeof PILOT_DERIVED)[number
             : outcome(origin.actor, false, input.evidenceCoverage === 'complete'),
       );
     }
-    const deltas = events.filter(event => event.kind === 'approved-delta');
+    const deltas = EffectArray.filter(events, event => event.kind === 'approved-delta');
     for (const delta of deltas) {
-      const reuse = events.some(
+      const reuse = EffectArray.some(
+        events,
         event =>
           event.kind === 'verified-reuse' &&
           event.actor !== delta.actor &&
           event.minute > delta.minute &&
-          events.some(
+          EffectArray.some(
+            events,
             brief => brief.kind === 'verified-brief' && brief.actor === delta.actor && brief.minute <= delta.minute,
           ),
       );
@@ -214,24 +234,29 @@ function weeklyEvidence(input: PilotInput): {reports: PilotReport['weeks']; acto
     const crossActor = new Set<number>();
     for (const event of input.evidence) {
       if (event.kind !== 'full-loop' || Math.floor(event.minute / 10_080) !== week - 1) continue;
-      const preceding = items
-        .get(event.item)!
-        .filter(candidate => candidate.item === event.item && candidate.minute < event.minute);
-      const approved = preceding.some(
+      const preceding = EffectArray.filter(
+        items.get(event.item)!,
+        candidate => candidate.item === event.item && candidate.minute < event.minute,
+      );
+      const approved = EffectArray.some(
+        preceding,
         candidate => candidate.actor === event.actor && candidate.kind === 'approved-delta',
       );
-      const verified = preceding.some(
+      const verified = EffectArray.some(
+        preceding,
         candidate =>
           candidate.actor === event.actor &&
           (candidate.kind === 'verified-brief' || candidate.kind === 'verified-reuse'),
       );
       if (!approved || !verified) continue;
       fullLoop.add(event.actor);
-      const reused = preceding.some(
+      const reused = EffectArray.some(
+        preceding,
         candidate =>
           candidate.actor === event.actor &&
           candidate.kind === 'verified-reuse' &&
-          preceding.some(
+          EffectArray.some(
+            preceding,
             origin =>
               origin.kind === 'verified-brief' && origin.actor !== candidate.actor && origin.minute < candidate.minute,
           ),
@@ -255,7 +280,7 @@ function weeklyEvidence(input: PilotInput): {reports: PilotReport['weeks']; acto
       retainedFromPriorWeek:
         previous === undefined || input.elapsedDays < week * 7 || input.evidenceCoverage !== 'complete'
           ? null
-          : countBucket([...crossActor].filter(actor => previous.has(actor)).length),
+          : countBucket(EffectArray.filter([...crossActor], actor => previous.has(actor)).length),
     });
     actorSets.push(crossActor);
   }
@@ -273,26 +298,27 @@ function rateBucket(positive: number, total: number): NonNullable<PilotMetricSum
 }
 function valueBucket(metric: PilotMetric, value: number): NonNullable<PilotMetricSummary['median']> {
   if (value === 0) return 'zero';
-  const [low, medium] = metric.endsWith('Milliseconds')
+  const [low, medium] = Effect.pipe(metric, EffectString.endsWith('Milliseconds'))
     ? [60_000, 600_000]
-    : metric.endsWith('Tokens')
+    : Effect.pipe(metric, EffectString.endsWith('Tokens'))
       ? [1_000, 10_000]
       : [3, 10];
   return value <= low ? 'low' : value <= medium ? 'medium' : 'high';
 }
 function sum(values: readonly number[]): number {
-  return values.reduce((total, value) => total + value, 0);
+  return EffectArray.reduce(values, 0, (total, value) => total + value);
 }
 function digestReport(body: unknown): string {
   return sha256HexSync(JSON.stringify(canonical(body)));
 }
 function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
+  if (EffectArray.isArray(value)) return EffectArray.map(value, canonical);
   if (value !== null && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([key, item]) => [key, canonical(item)]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectRecord.toEntries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        ([key, item]) => [key, canonical(item)],
+      ),
     );
   return value;
 }

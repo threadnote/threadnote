@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {expect, it as effectIt} from '@effect/vitest';
@@ -11,10 +12,12 @@ import {promoteSnapshot} from '../../src/store/resolution.js';
 import {initializeSchema} from '../../src/store/schema/initialization.js';
 import {pruneRetiredSnapshotRowsPage} from '../../src/store/view_cleanup.js';
 import {CODE_GRAPH_EXTRACTOR_GENERATION, type RepositoryIdentity} from '../../src/types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const base = `cgsn_${'1'.repeat(40)}`;
-const selected = `cgsn_${'2'.repeat(40)}`;
-const replacement = `cgsn_${'3'.repeat(40)}`;
+const base = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
+const selected = `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`;
+const replacement = `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`;
 const span = {column: 1, endColumn: 2, endLine: 1, line: 1};
 
 effectIt.layer(BunServices.layer)(it => {
@@ -25,14 +28,14 @@ effectIt.layer(BunServices.layer)(it => {
       const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-traversal-lease-'});
       const identity: RepositoryIdentity = {
         caseMode: 'sensitive',
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
         displayName: 'traversal-lease-fixture',
         gitCommonDirectory: root,
-        headCommit: '1'.repeat(40),
+        headCommit: Effect2.pipe('1', EffectString.repeat(40)),
         objectFormat: 'sha1',
         repoRoot: root,
-        repositoryId: 'b'.repeat(64),
-        worktreeId: 'c'.repeat(64),
+        repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
       };
       const database = yield* Layer.build(SqliteClient.layer({filename: path.join(root, 'graph.sqlite')}));
       yield* Effect.gen(function* () {
@@ -79,9 +82,9 @@ effectIt.layer(BunServices.layer)(it => {
                     const recovery = yield* selectTraversalEdgesForNodes(base, ['deleted-symbol'], 'incoming', 10, [
                       'resolved',
                     ]);
-                    const pathIds = [...first, ...second].map(edge => edge.id);
+                    const pathIds = EffectArray.map([...first, ...second], edge => edge.id);
                     expect(pathIds).toEqual(['first', 'second']);
-                    expect(recovery.map(edge => edge.id)).toEqual(['removed']);
+                    expect(EffectArray.map(recovery, edge => edge.id)).toEqual(['removed']);
 
                     yield* promoteSnapshot(
                       identity,
@@ -96,7 +99,7 @@ effectIt.layer(BunServices.layer)(it => {
                       yield* sql`SELECT snapshot_id FROM active_snapshots WHERE worktree_id = ${identity.worktreeId}`,
                     ).toEqual([{snapshot_id: replacement}]);
                     expect(
-                      (yield* selectEdgesByIds(selected, pathIds)).map(edge => [
+                      EffectArray.map(yield* selectEdgesByIds(selected, pathIds), edge => [
                         edge.id,
                         edge.evidencePath,
                         edge.evidenceSpan,
@@ -106,18 +109,20 @@ effectIt.layer(BunServices.layer)(it => {
                       ['second', 'src/selected.ts', span],
                     ]);
                     expect(
-                      (yield* selectEdgesByIds(
-                        base,
-                        recovery.map(edge => edge.id),
-                      )).map(edge => edge.evidencePath),
+                      EffectArray.map(
+                        yield* selectEdgesByIds(
+                          base,
+                          EffectArray.map(recovery, edge => edge.id),
+                        ),
+                        edge => edge.evidencePath,
+                      ),
                     ).toEqual(['src/deleted.ts']);
                     expect(
                       yield* selectTraversalEdgesForNodes(selected, ['deleted-symbol'], 'incoming', 10, ['resolved']),
                     ).toEqual([]);
-                    expect((yield* selectEdgesByIds(replacement, pathIds)).map(edge => edge.evidencePath)).toEqual([
-                      'src/replacement-first.ts',
-                      'src/replacement-second.ts',
-                    ]);
+                    expect(
+                      EffectArray.map(yield* selectEdgesByIds(replacement, pathIds), edge => edge.evidencePath),
+                    ).toEqual(['src/replacement-first.ts', 'src/replacement-second.ts']);
                   }),
                 token => releaseSnapshotLease(token).pipe(Effect.orDie),
               );

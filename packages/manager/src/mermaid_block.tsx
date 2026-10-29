@@ -1,4 +1,6 @@
 import React, {useEffect, useId, useRef, useState} from 'react';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function resolvedTheme(): 'light' | 'dark' {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -21,7 +23,7 @@ function MermaidFrame({
   readonly source: string;
   readonly theme: 'light' | 'dark';
 }): React.ReactElement {
-  const id = 'mermaid-' + useId().replace(/[^a-zA-Z0-9-]/gu, '');
+  const id = 'mermaid-' + Effect.pipe(useId(), EffectString.replace(/[^a-zA-Z0-9-]/gu, ''));
   const frame = useRef<HTMLIFrameElement>(null);
   const sent = useRef(false);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -31,11 +33,23 @@ function MermaidFrame({
     const receive = (event: MessageEvent<unknown>) => {
       if (event.source !== frame.current?.contentWindow || typeof event.data !== 'object' || event.data === null)
         return;
-      const data = event.data as Record<string, unknown>;
-      if (data.type !== 'mermaid-result' || data.id !== id || typeof data.ok !== 'boolean') return;
-      if (data.ok && (typeof data.height !== 'number' || !Number.isFinite(data.height))) return;
+      const data = event.data;
+      if (
+        !('type' in data) ||
+        data.type !== 'mermaid-result' ||
+        !('id' in data) ||
+        data.id !== id ||
+        !('ok' in data) ||
+        typeof data.ok !== 'boolean'
+      )
+        return;
+      let receivedHeight: number | undefined;
+      if (data.ok) {
+        if (!('height' in data) || typeof data.height !== 'number' || !Number.isFinite(data.height)) return;
+        receivedHeight = data.height;
+      }
       window.clearTimeout(timer);
-      if (data.ok) setHeight(Math.max(80, Math.min(1200, Number(data.height) + 24)));
+      if (receivedHeight !== undefined) setHeight(Math.max(80, Math.min(1200, receivedHeight + 24)));
       setState(data.ok ? 'ready' : 'error');
     };
     window.addEventListener('message', receive);

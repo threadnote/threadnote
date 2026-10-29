@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -8,9 +9,12 @@ import {
   validateNativeAuthoring,
   type NativeAuthoringDocument,
 } from '../src/authoring.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const hash = 'a'.repeat(64);
-const source = {head: 'b'.repeat(40), files: [{path: 'src/cache.ts', sha256: hash}]};
+const hash = Effect.pipe('a', EffectString.repeat(64));
+const source = {head: Effect.pipe('b', EffectString.repeat(40)), files: [{path: 'src/cache.ts', sha256: hash}]};
 const context = {codeRefs: ['src/cache.ts'], evidenceRefs: [], note: 'Reviewed in the current source snapshot.'};
 const requirement = {id: 'req-cache', behavior: 'The cache keeps fresh entries available.'};
 const scenario = {
@@ -137,7 +141,7 @@ const caught = (run: () => unknown): unknown => {
   }
 };
 const issueCodes = (document: NativeAuthoringDocument) =>
-  validateNativeAuthoring(document).issues.map(issue => issue.code);
+  EffectArray.map(validateNativeAuthoring(document).issues, issue => issue.code);
 
 describe('native authoring documents', () => {
   it('strictly decodes versioned spec and plan shapes, safe source paths, and the canonical byte ceiling', () => {
@@ -152,8 +156,8 @@ describe('native authoring documents', () => {
       {...validSpec(), schemaVersion: 2},
       {...validSpec(), title: 'Two\nlines'},
       {...validSpec(), source: {...source, files: [{path: 'src/cache.ts', sha256: 'no-digest'}]}},
-      {...validSpec(), objective: '🧭'.repeat(110_000)},
-      {...validSpec(), observations: Array.from({length: 128}, () => 'x'.repeat(8192))},
+      {...validSpec(), objective: Effect.pipe('🧭', EffectString.repeat(110_000))},
+      {...validSpec(), observations: Array.from({length: 128}, () => Effect.pipe('x', EffectString.repeat(8192)))},
     ])
       expect(caught(() => decodeNativeAuthoringDocument(invalid))).toMatchObject({code: 'invalid-document'});
   });
@@ -161,12 +165,10 @@ describe('native authoring documents', () => {
   it('canonicalizes recursively, omits undefined object fields, and roundtrips bounded Unicode', () => {
     expect(canonicalAuthoringJson({z: {b: 2, a: 1}, a: undefined})).toBe('{"z":{"a":1,"b":2}}');
     const reverse = (value: unknown): unknown => {
-      if (Array.isArray(value)) return value.map(reverse);
+      if (EffectArray.isArray(value)) return EffectArray.map(value, reverse);
       if (value !== null && typeof value === 'object')
-        return Object.fromEntries(
-          Object.entries(value)
-            .reverse()
-            .map(([key, item]) => [key, reverse(item)]),
+        return EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.toEntries(value).reverse(), ([key, item]) => [key, reverse(item)]),
         );
       return value;
     };
@@ -174,7 +176,7 @@ describe('native authoring documents', () => {
       fc.property(
         fc
           .array(fc.constantFrom('a', 'é', '漢', '🧭', '🌊', ' e', 'x\n'), {maxLength: 120})
-          .map(parts => parts.join('')),
+          .map(parts => EffectArray.join(parts, '')),
         generated => {
           const original = validSpec({objective: `Keep this behavior — ${generated}`});
           const decodedAgain = decodeNativeAuthoringDocument(JSON.parse(canonicalAuthoringJson(original)));
@@ -190,7 +192,7 @@ describe('native authoring documents', () => {
   it('keeps spec approval intent stable across source-only changes but binds all behavioral content', () => {
     const original = validSpec();
     const sourceOnly = validSpec({
-      source: {...source, head: 'c'.repeat(40)},
+      source: {...source, head: Effect.pipe('c', EffectString.repeat(40))},
       context: {...context, note: 'Updated source context.'},
       observations: ['A newer observation.'],
       review: {required: true, reason: 'Updated classification reason.'},
@@ -237,11 +239,19 @@ describe('native authoring documents', () => {
     expect(accepted).toMatchObject({ready: true, documentHash, intentHash, issues: []});
     const stale = validateNativeAuthoring(spec, {
       ready: true,
-      confirmation: {decision: 'approved', intentHash: '0'.repeat(64), response: 'Approved.'},
-      review: {documentHash: '0'.repeat(64), outcome: 'changes-requested', blockingIssueCount: 1},
+      confirmation: {
+        decision: 'approved',
+        intentHash: Effect.pipe('0', EffectString.repeat(64)),
+        response: 'Approved.',
+      },
+      review: {
+        documentHash: Effect.pipe('0', EffectString.repeat(64)),
+        outcome: 'changes-requested',
+        blockingIssueCount: 1,
+      },
     });
     expect(stale.ready).toBe(false);
-    expect(stale.issues.map(issue => issue.code)).toEqual(
+    expect(EffectArray.map(stale.issues, issue => issue.code)).toEqual(
       expect.arrayContaining(['confirmation-required', 'review-required']),
     );
     const unresolved = validSpec({
@@ -250,10 +260,13 @@ describe('native authoring documents', () => {
     expect(validateNativeAuthoring(unresolved).issues).toEqual([]);
     expect(issueCodes(unresolved)).not.toContain('open-question');
     expect(
-      validateNativeAuthoring(unresolved, {
-        ready: true,
-        confirmation: {decision: 'approved', intentHash: nativeSpecIntentDigest(unresolved), response: 'Approved'},
-      }).issues.map(issue => issue.code),
+      EffectArray.map(
+        validateNativeAuthoring(unresolved, {
+          ready: true,
+          confirmation: {decision: 'approved', intentHash: nativeSpecIntentDigest(unresolved), response: 'Approved'},
+        }).issues,
+        issue => issue.code,
+      ),
     ).toContain('open-question');
   });
 
@@ -298,14 +311,17 @@ describe('native authoring documents', () => {
       ]),
     );
     const cycle = validPlan({
-      phases: [
-        ...asPlan(validPlan()).phases,
-        {
-          ...basePhase,
-          id: 'phase-cycle',
-          dependsOn: ['phase-cache-check'],
-        },
-      ].map(phase => (phase.id === 'phase-cache-check' ? {...phase, dependsOn: ['phase-cycle']} : phase)),
+      phases: EffectArray.map(
+        [
+          ...asPlan(validPlan()).phases,
+          {
+            ...basePhase,
+            id: 'phase-cycle',
+            dependsOn: ['phase-cache-check'],
+          },
+        ],
+        phase => (phase.id === 'phase-cache-check' ? {...phase, dependsOn: ['phase-cycle']} : phase),
+      ),
     });
     expect(issueCodes(cycle)).toContain('phase-dependency-cycle');
     const selfDependency = validPlan({
@@ -326,17 +342,24 @@ describe('native authoring documents', () => {
       },
     });
     expect(notReady.ready).toBe(false);
-    expect(notReady.issues.map(issue => issue.code)).toEqual(
+    expect(EffectArray.map(notReady.issues, issue => issue.code)).toEqual(
       expect.arrayContaining(['open-question', 'decision-required']),
     );
     const invalidDiagram = validPlan({
       current: {...asPlan(validPlan()).current, diagram: '```mermaid\nflowchart TD\n```'},
     });
     expect(
-      validateNativeAuthoring(invalidDiagram, {
-        ready: true,
-        confirmation: {decision: 'approved', intentHash: nativeAuthoringDigest(invalidDiagram), response: 'Approved.'},
-      }).issues.map(issue => issue.code),
+      EffectArray.map(
+        validateNativeAuthoring(invalidDiagram, {
+          ready: true,
+          confirmation: {
+            decision: 'approved',
+            intentHash: nativeAuthoringDigest(invalidDiagram),
+            response: 'Approved.',
+          },
+        }).issues,
+        issue => issue.code,
+      ),
     ).toContain('diagram-invalid');
   });
 });

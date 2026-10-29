@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Crypto, DateTime, Effect, FileSystem, Path, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import {
@@ -17,10 +18,16 @@ import type {MemoryKind} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {isJsonObject, toPosixPath} from '@threadnote/integration-core/utils';
 
-class ObsidianInboxError extends Schema.TaggedError<ObsidianInboxError>()('ObsidianInboxError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+class ObsidianInboxError extends Schema.TaggedError<ObsidianInboxError, {readonly brand: unique symbol}>()(
+  'ObsidianInboxError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export interface ObsidianInboxScanOptions {
   readonly apply?: boolean;
@@ -75,7 +82,7 @@ export const runObsidianInboxScan = Effect.fn('obsidian.inboxScan')(function* (
   }
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const inboxRoot = pathService.join(source.vault, ...source.inbox.split('/'));
+  const inboxRoot = pathService.join(source.vault, ...Effect2.pipe(source.inbox, EffectString.split('/')));
   if (!(yield* fs.exists(inboxRoot))) {
     return yield* ObsidianInboxError.make({message: `Configured Obsidian Inbox does not exist: ${source.inbox}`});
   }
@@ -87,7 +94,7 @@ export const runObsidianInboxScan = Effect.fn('obsidian.inboxScan')(function* (
     Effect.gen(function* () {
       const state = yield* readInboxState(statePath, source.id);
       const files = yield* scanFilesWithinBoundary(fs, inboxRoot, source.vault, {
-        includeFile: path => pathService.extname(path).toLowerCase() === '.md',
+        includeFile: path => Effect2.pipe(pathService.extname(path), EffectString.toLowerCase) === '.md',
         recursive: false,
       });
       if (files.length === 0) {
@@ -188,12 +195,19 @@ export function parseObsidianInboxNote(content: string, label = 'Inbox note'): P
   const evidence =
     loaded.evidence === undefined
       ? []
-      : Array.isArray(loaded.evidence) && loaded.evidence.every(value => typeof value === 'string')
-        ? loaded.evidence.map(value => value.trim()).filter(Boolean)
+      : EffectArray.isArray(loaded.evidence) && EffectArray.every(loaded.evidence, value => typeof value === 'string')
+        ? EffectArray.filter(
+            EffectArray.map(loaded.evidence, value => Effect2.pipe(value, EffectString.trim)),
+            Boolean,
+          )
         : (() => {
             throw ObsidianInboxError.make({message: 'evidence must be a string array'});
           })();
-  const body = content.slice(match[0].length).trim();
+  const body = Effect2.pipe(content, __effectPipeInput => {
+    const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(match[0].length));
+    const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.trim);
+    return __effectPipeStage1;
+  });
   if (!body) {
     throw ObsidianInboxError.make({message: `${label} has an empty body`});
   }
@@ -219,7 +233,7 @@ function closeoutForInbox(
     outcome: `Reviewed an explicit Obsidian Inbox candidate for ${note.project}/${note.topic}.`,
     project: note.project,
     sourceAgentClient: 'obsidian-inbox',
-    sourceSessionId: `obsidian:${sourceId}:${contentHash.slice(0, 20)}`,
+    sourceSessionId: `obsidian:${sourceId}:${Effect2.pipe(contentHash, EffectString.slice(0, 20))}`,
     task: `Import Obsidian Inbox note ${relativePath}`,
     topic: note.topic,
   };
@@ -289,6 +303,7 @@ function parseInboxState(value: unknown, sourceId: string): ObsidianInboxState {
     throw ObsidianInboxError.make({message: `Invalid Obsidian Inbox state for "${sourceId}".`});
   }
   const entries: Record<string, ObsidianInboxStateEntry> = {};
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- Persisted state was parsed from untrusted JSON and is heterogeneous.
   for (const [relativePath, entry] of Object.entries(value.entries)) {
     if (
       typeof entry !== 'object' ||
@@ -323,8 +338,8 @@ function inboxKind(value: unknown): ParsedInboxNote['kind'] {
 }
 
 function requiredMetadataString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
+  if (typeof value !== 'string' || Effect2.pipe(value, EffectString.trim).length === 0) {
     throw ObsidianInboxError.make({message: `${label} must be a non-empty string`});
   }
-  return value.trim();
+  return Effect2.pipe(value, EffectString.trim);
 }

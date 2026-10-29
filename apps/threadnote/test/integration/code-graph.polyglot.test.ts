@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
@@ -67,7 +68,7 @@ describe('polyglot code graph lifecycle', () => {
           ],
           {concurrency: 1},
         );
-        expect(graph.symbols.map(symbol => symbol.language)).toEqual(
+        expect(EffectArray.map(graph.symbols, symbol => symbol.language)).toEqual(
           expect.arrayContaining([
             'apex',
             'bash',
@@ -93,28 +94,37 @@ describe('polyglot code graph lifecycle', () => {
           ]),
         );
         expect(
-          graph.edges.find(
-            edge => edge.sourceName === 'start' && edge.relation === 'constructs' && edge.targetName === 'Greeter',
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              graph.edges,
+              edge => edge.sourceName === 'start' && edge.relation === 'constructs' && edge.targetName === 'Greeter',
+            ),
           ),
         ).toMatchObject({provenance: 'resolved', targetId: expect.stringMatching(/^cgs_/)});
         expect(
-          graph.edges.find(
-            edge => edge.sourceName === 'swiftBoot' && edge.relation === 'calls' && edge.targetName === 'makeService',
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              graph.edges,
+              edge => edge.sourceName === 'swiftBoot' && edge.relation === 'calls' && edge.targetName === 'makeService',
+            ),
           ),
         ).toMatchObject({provenance: 'resolved', targetId: expect.stringMatching(/^cgs_/)});
         expect(
-          graph.edges.find(
-            edge =>
-              edge.sourceName === 'typescriptBoot' &&
-              edge.relation === 'calls' &&
-              edge.targetName === 'typescriptHelper',
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              graph.edges,
+              edge =>
+                edge.sourceName === 'typescriptBoot' &&
+                edge.relation === 'calls' &&
+                edge.targetName === 'typescriptHelper',
+            ),
           ),
         ).toMatchObject({provenance: 'resolved', targetId: expect.stringMatching(/^cgs_/)});
-        expect(operations.every(operation => operation.snapshot.id === indexed.snapshot.id)).toBe(true);
-        expect(operations[0].nodes.some(node => node.language === 'java')).toBe(true);
-        expect(operations[1].nodes.some(node => node.name === 'KotlinApp')).toBe(true);
-        expect(operations[2].edges.some(edge => edge.targetName === 'typescriptHelper')).toBe(true);
-        expect(operations[3].nodes.some(node => node.name === 'swiftBoot')).toBe(true);
+        expect(EffectArray.every(operations, operation => operation.snapshot.id === indexed.snapshot.id)).toBe(true);
+        expect(EffectArray.some(operations[0].nodes, node => node.language === 'java')).toBe(true);
+        expect(EffectArray.some(operations[1].nodes, node => node.name === 'KotlinApp')).toBe(true);
+        expect(EffectArray.some(operations[2].edges, edge => edge.targetName === 'typescriptHelper')).toBe(true);
+        expect(EffectArray.some(operations[3].nodes, node => node.name === 'swiftBoot')).toBe(true);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     60_000,
   );
@@ -139,13 +149,16 @@ function createPolyglotRepository(): string {
   write(
     root,
     'Package.swift',
-    [
-      'import PackageDescription',
-      'let package = Package(name: "SwiftWorkspace", targets: [',
-      '  .target(name: "SwiftCore"),',
-      '  .target(name: "SwiftApp", dependencies: ["SwiftCore"])',
-      '])',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'import PackageDescription',
+        'let package = Package(name: "SwiftWorkspace", targets: [',
+        '  .target(name: "SwiftCore"),',
+        '  .target(name: "SwiftApp", dependencies: ["SwiftCore"])',
+        '])',
+      ],
+      '\n',
+    ),
   );
   write(root, 'Sources/SwiftCore/Service.swift', 'public func makeService() -> String { "ready" }\n');
   write(root, 'Sources/SwiftApp/Main.swift', 'import SwiftCore\npublic func swiftBoot() -> String { makeService() }\n');

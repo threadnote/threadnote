@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Exit} from 'effect';
 
 type Property = 'setup-opt-out' | 'workflow-retirement' | 'shared-context-namespace';
@@ -131,7 +132,7 @@ export const workflowDiagnostics = (property: Property, now = () => performance.
         loopIndex,
         phaseElapsedMs: at - phaseStart,
         activeEvaluation: active ? {...active, elapsedMs: at - active.startedMs} : null,
-        recent: recent.map(entry => ({...entry})),
+        recent: EffectArray.map(recent, entry => ({...entry})),
       };
     },
   };

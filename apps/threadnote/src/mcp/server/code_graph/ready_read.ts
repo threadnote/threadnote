@@ -1,4 +1,4 @@
-import {Effect} from 'effect';
+import {Array as EffectArray, Effect} from 'effect';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {codeGraphScopeAdmitsPath} from '@threadnote/graph/scope/applicability';
 import {
@@ -110,7 +110,7 @@ export const completeCodeGraphReadyReadRefresh = Effect.fn('codeGraph.completeRe
   readonly refresh?: CodeGraphRefreshContinuity;
   readonly refreshStatus?: CodeGraphRefreshStatus;
   readonly target: Omit<CodeGraphWatchOptions, 'key'>;
-  readonly watcher: CodeGraphWatcherShape;
+  readonly watcher: Pick<CodeGraphWatcherShape, 'scheduleEnsure' | 'scheduleRequest' | 'scheduleResume'>;
 }) {
   if (input.ensureWatcher && input.watcher.scheduleEnsure !== undefined) {
     yield* input.watcher.scheduleEnsure({...input.target, key: input.key});
@@ -143,7 +143,9 @@ export function selectCodeGraphReadyReadChangedPaths(
   projectScope: CodeGraphQueryScope | undefined,
   paths: readonly string[] | undefined,
 ): readonly string[] | undefined {
-  return paths?.filter(path => codeGraphScopeAdmitsPath(projectScope?.scope, path));
+  return paths === undefined
+    ? undefined
+    : EffectArray.filter(paths, path => codeGraphScopeAdmitsPath(projectScope?.scope, path));
 }
 
 export function presentCodeGraphScopedReadyRead(input: {

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   parseMatchedContinuationStudyV1,
@@ -6,6 +7,9 @@ import {
   type MatchedContinuationVariant,
 } from './matched-continuation-study.js';
 import type {MatchedEvaluationProviderTokensV1} from './matched-evaluation-runner.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MATCHED_CONTINUATION_OUTCOME_VERSION = 1 as const;
 export const MATCHED_CONTINUATION_REPORT_VERSION = 1 as const;
@@ -181,7 +185,7 @@ export function assertMatchedContinuationOutcomeLedgerV1(
   const study = parseMatchedContinuationStudyV1(studyInput);
   if (outcomesInput.length > study.schedule.length) invalid('outcome ledger is longer than the study schedule');
   let previous: string | null = null;
-  return outcomesInput.map((input, index) => {
+  return EffectArray.map(outcomesInput, (input, index) => {
     const outcome = parseMatchedContinuationOutcomeV1(input);
     const scheduled = study.schedule[index];
     if (
@@ -195,7 +199,9 @@ export function assertMatchedContinuationOutcomeLedgerV1(
     ) {
       invalid(`outcome ${index} does not match the sealed schedule and hash chain`);
     }
-    const task = required(study.tasks.find(candidate => candidate.taskId === outcome.taskId));
+    const task = required(
+      EffectOption.getOrUndefined(EffectArray.findFirst(study.tasks, candidate => candidate.taskId === outcome.taskId)),
+    );
     if (
       outcome.clusterId !== task.clusterId ||
       outcome.planSha256 !== task.planSha256 ||
@@ -216,23 +222,38 @@ export function evaluateMatchedContinuationStudyV1(input: {
   const outcomes = assertMatchedContinuationOutcomeLedgerV1(study, input.outcomes);
   if (outcomes.length !== study.schedule.length) invalid('a complete outcome ledger is required for a final report');
   assertSharedPhaseOneAccounting(outcomes);
-  const variants = study.variants.map(variant =>
+  const variants = EffectArray.map(study.variants, variant =>
     summarizeVariant(outcomes, variant, study.gates.minimumCorrectnessScoreMilli),
   );
-  const baseline = required(variants.find(result => result.variant === 'files-bare'));
-  const comparisons = study.variants
-    .filter((variant): variant is Exclude<MatchedContinuationVariant, 'files-bare'> => variant !== 'files-bare')
-    .map(target =>
+  const baseline = required(
+    EffectOption.getOrUndefined(EffectArray.findFirst(variants, result => result.variant === 'files-bare')),
+  );
+  const comparisons = EffectArray.map(
+    EffectArray.filter(
+      study.variants,
+      (variant): variant is Exclude<MatchedContinuationVariant, 'files-bare'> => variant !== 'files-bare',
+    ),
+    target =>
       compareVariants({
         baseline,
         outcomes,
         study,
-        target: required(variants.find(result => result.variant === target)),
+        target: required(
+          EffectOption.getOrUndefined(EffectArray.findFirst(variants, result => result.variant === target)),
+        ),
         targetVariant: target,
       }),
-    );
-  const primary = required(comparisons.find(comparison => comparison.target === 'threadnote-preloaded-resume'));
-  const primaryTarget = required(variants.find(result => result.variant === 'threadnote-preloaded-resume'));
+  );
+  const primary = required(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(comparisons, comparison => comparison.target === 'threadnote-preloaded-resume'),
+    ),
+  );
+  const primaryTarget = required(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(variants, result => result.variant === 'threadnote-preloaded-resume'),
+    ),
+  );
   const schedulePositionLimitation = continuationSchedulePositionLimitation(study);
   const supportedClaims: string[] = [];
   if (primary.status === 'passed' && primary.tokenReductionPercent !== null) {
@@ -287,21 +308,28 @@ export function evaluateMatchedContinuationStudyV1(input: {
 }
 
 function continuationSchedulePositionLimitation(study: MatchedContinuationStudyV1): string | null {
-  const positions = study.variants.map((_, index) => index + 1);
-  const summaries = study.variants.map(variant => ({
-    counts: positions.map(
+  const positions = EffectArray.map(study.variants, (_, index) => index + 1);
+  const summaries = EffectArray.map(study.variants, variant => ({
+    counts: EffectArray.map(
+      positions,
       position =>
-        study.schedule.filter(entry => entry.variant === variant && entry.withinTaskRunOrder === position).length,
+        EffectArray.filter(study.schedule, entry => entry.variant === variant && entry.withinTaskRunOrder === position)
+          .length,
     ),
     variant,
   }));
-  if (summaries.every(({counts}) => Math.max(...counts) - Math.min(...counts) <= 1)) return null;
-  const rendered = summaries
-    .map(
+  if (EffectArray.every(summaries, ({counts}) => Math.max(...counts) - Math.min(...counts) <= 1)) return null;
+  const rendered = EffectArray.join(
+    EffectArray.map(
+      summaries,
       ({counts, variant}) =>
-        `${variant}: ${counts.map((count, index) => `${count} at position ${index + 1}`).join(', ')}`,
-    )
-    .join('; ');
+        `${variant}: ${EffectArray.join(
+          EffectArray.map(counts, (count, index) => `${count} at position ${index + 1}`),
+          ', ',
+        )}`,
+    ),
+    '; ',
+  );
   return `Attempt order was not position-balanced (${rendered}); order effects may influence the paired estimates.`;
 }
 
@@ -318,7 +346,7 @@ export function renderMatchedContinuationArticleEvidenceV1(report: MatchedContin
     '',
     ...(report.supportedClaims.length === 0
       ? ['No comparative claim passed the preregistered gates.']
-      : report.supportedClaims.map(claim => `- ${claim}`)),
+      : EffectArray.map(report.supportedClaims, claim => `- ${claim}`)),
     '',
     '## Variant accounting',
     '',
@@ -358,14 +386,14 @@ export function renderMatchedContinuationArticleEvidenceV1(report: MatchedContin
       `- Full-lifecycle time reduction: ${formatNullablePercent(comparison.timeReductionPercent)}`,
       `- Time-reduction 95% interval: ${formatInterval(comparison.timeReductionPercent95)}`,
     );
-    if (comparison.failures.length > 0) lines.push(`- Failed gates: ${comparison.failures.join('; ')}`);
+    if (comparison.failures.length > 0) lines.push(`- Failed gates: ${EffectArray.join(comparison.failures, '; ')}`);
     if (comparison.insufficiencies.length > 0) {
-      lines.push(`- Evidence insufficiencies: ${comparison.insufficiencies.join('; ')}`);
+      lines.push(`- Evidence insufficiencies: ${EffectArray.join(comparison.insufficiencies, '; ')}`);
     }
     lines.push('');
   }
-  lines.push('## Limitations', '', ...report.limitations.map(limitation => `- ${limitation}`), '');
-  return `${lines.join('\n')}\n`;
+  lines.push('## Limitations', '', ...EffectArray.map(report.limitations, limitation => `- ${limitation}`), '');
+  return `${EffectArray.join(lines, '\n')}\n`;
 }
 
 function compareVariants(input: {
@@ -480,8 +508,8 @@ function bootstrapIntervals(
   readonly timeReduction: MatchedContinuationIntervalV1 | null;
   readonly tokenReduction: MatchedContinuationIntervalV1 | null;
 } {
-  const clusters = study.tasks.map(task => task.clusterId).sort();
-  const taskByCluster = new Map(study.tasks.map(task => [task.clusterId, task.taskId]));
+  const clusters = EffectArray.map(study.tasks, task => task.clusterId).sort();
+  const taskByCluster = new Map(EffectArray.map(study.tasks, task => [task.clusterId, task.taskId]));
   const completionDeltas: number[] = [];
   const hybridCompletionDeltas: number[] = [];
   const timeReductions: number[] = [];
@@ -513,7 +541,8 @@ function bootstrapIntervals(
   }
   const minimum = Math.ceil(study.bootstrap.iterations * 0.9);
   const tail = (1 - study.bootstrap.confidenceLevelBasisPoints / 10_000) / 2;
-  const completionMatrixAvailable = !outcomes.some(
+  const completionMatrixAvailable = !EffectArray.some(
+    outcomes,
     outcome => outcome.status === 'unavailable' && (outcome.variant === 'files-bare' || outcome.variant === target),
   );
   return {
@@ -549,7 +578,7 @@ function summarizeVariant(
   let phaseTwoTokens = ZERO_TOKENS;
   let phaseOneElapsedMilliseconds = 0;
   let phaseTwoElapsedMilliseconds = 0;
-  for (const outcome of outcomes.filter(candidate => candidate.variant === variant)) {
+  for (const outcome of EffectArray.filter(outcomes, candidate => candidate.variant === variant)) {
     const weight = weights === undefined ? 1 : (weights.get(outcome.taskId) ?? 0);
     if (weight === 0) continue;
     assigned += weight;
@@ -580,13 +609,13 @@ function summarizeVariant(
       }
     }
     const phaseTokens = [outcome.phaseOne.providerTokens, outcome.phaseTwo.providerTokens];
-    if (phaseTokens.some(value => value === null)) missingProviderUsage += weight;
+    if (EffectArray.some(phaseTokens, value => value === null)) missingProviderUsage += weight;
     else {
       phaseOneTokens = addTokens(phaseOneTokens, scaleTokens(outcome.phaseOne.providerTokens!, weight));
       phaseTwoTokens = addTokens(phaseTwoTokens, scaleTokens(outcome.phaseTwo.providerTokens!, weight));
     }
     const phaseElapsed = [outcome.phaseOne.elapsedMilliseconds, outcome.phaseTwo.elapsedMilliseconds];
-    if (phaseElapsed.some(value => value === null)) missingElapsedAccounting += weight;
+    if (EffectArray.some(phaseElapsed, value => value === null)) missingElapsedAccounting += weight;
     else {
       phaseOneElapsedMilliseconds += outcome.phaseOne.elapsedMilliseconds! * weight;
       phaseTwoElapsedMilliseconds += outcome.phaseTwo.elapsedMilliseconds! * weight;
@@ -684,7 +713,10 @@ function parseOutcomeWithoutHash(
   };
   if (
     status === 'completed' &&
-    Object.entries(parsedEvidence).some(([key, entry]) => key !== 'sourceReportSha256' && entry === null)
+    EffectArray.some(
+      EffectRecord.toEntries(parsedEvidence),
+      ([key, entry]) => key !== 'sourceReportSha256' && entry === null,
+    )
   ) {
     invalid('completed outcomes must retain all evidence hashes');
   }
@@ -781,14 +813,14 @@ function parseProviderTokens(value: unknown, label: string): MatchedEvaluationPr
 }
 
 function assertSharedPhaseOneAccounting(outcomes: readonly MatchedContinuationOutcomeV1[]): void {
-  const taskIds = [...new Set(outcomes.map(outcome => outcome.taskId))];
+  const taskIds = [...new Set(EffectArray.map(outcomes, outcome => outcome.taskId))];
   for (const taskId of taskIds) {
-    const attempts = outcomes.filter(outcome => outcome.taskId === taskId);
+    const attempts = EffectArray.filter(outcomes, outcome => outcome.taskId === taskId);
     const expected = JSON.stringify(attempts[0]?.phaseOne);
-    if (attempts.some(attempt => JSON.stringify(attempt.phaseOne) !== expected)) {
+    if (EffectArray.some(attempts, attempt => JSON.stringify(attempt.phaseOne) !== expected)) {
       invalid(`phase-one accounting differs across variants for task ${taskId}`);
     }
-    if (new Set(attempts.map(attempt => attempt.evidence.sourceReportSha256)).size !== 1) {
+    if (new Set(EffectArray.map(attempts, attempt => attempt.evidence.sourceReportSha256)).size !== 1) {
       invalid(`source report differs across variants for task ${taskId}`);
     }
   }
@@ -803,7 +835,9 @@ function summarizeSharedCheckpoints(
   let missingProviderUsage = false;
   let missingElapsed = false;
   for (const task of study.tasks) {
-    const accounting = required(outcomes.find(outcome => outcome.taskId === task.taskId)).phaseOne;
+    const accounting = required(
+      EffectOption.getOrUndefined(EffectArray.findFirst(outcomes, outcome => outcome.taskId === task.taskId)),
+    ).phaseOne;
     if (accounting.providerTokens === null) missingProviderUsage = true;
     else providerTokens = addTokens(providerTokens, accounting.providerTokens);
     if (accounting.elapsedMilliseconds === null) missingElapsed = true;
@@ -874,7 +908,7 @@ function quantile(sorted: readonly number[], probability: number): number {
 }
 
 function digestInteger(value: string): number {
-  return Number.parseInt(sha256HexSync(value).slice(0, 12), 16);
+  return Number.parseInt(Effect.pipe(sha256HexSync(value), EffectString.slice(0, 12)), 16);
 }
 
 function digest(domain: string, value: unknown): string {
@@ -898,14 +932,14 @@ function formatNumber(value: number | null): string {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }

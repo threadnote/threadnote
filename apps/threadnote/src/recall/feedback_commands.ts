@@ -4,6 +4,8 @@ import {MemoryOperationError, normalizeOptionalMetadata} from '../memory/migrati
 import {parseResourceId} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {recordRecallFeedback, type RecallFeedbackAction} from '@threadnote/recall/feedback';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface RunRecallFeedbackOptionsV1 {
   readonly action: RecallFeedbackAction;
@@ -16,7 +18,7 @@ export const runRecallFeedback = Effect.fn('runRecallFeedback')(function* (
   config: RuntimeConfig,
   options: RunRecallFeedbackOptionsV1,
 ) {
-  const query = options.query.trim();
+  const query = Effect2.pipe(options.query, EffectString.trim);
   if (!query) return yield* MemoryOperationError.make({message: 'Recall feedback requires the original query.'});
   const project = normalizeOptionalMetadata(options.project);
   if (options.action === 'pin' && project === undefined) {

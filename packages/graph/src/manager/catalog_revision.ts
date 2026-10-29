@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphDatabasePaths} from '../maintenance.js';
@@ -28,22 +29,18 @@ export interface ManagerGraphCatalogStatusObservation {
 
 /** Stable, path-free and order-independent revision for visible active pointers. */
 export function managerGraphCatalogRevision(databases: readonly ManagerGraphCatalogRevisionDatabase[]): string {
-  const canonical = databases
-    .map(database => ({
-      checkoutId: database.checkoutId,
-      state: database.state,
-      views: database.views
-        .map(view => ({
-          activatedAt: view.activatedAt ?? '',
-          repositoryId: view.repositoryId,
-          scopeId: view.scopeId ?? '',
-          snapshotId: view.snapshotId,
-          worktreeId: view.worktreeId,
-        }))
-        .sort(compareRevisionViews),
-      viewsTruncated: database.viewsTruncated,
-    }))
-    .sort((left, right) => compareCodeUnits(left.checkoutId, right.checkoutId));
+  const canonical = EffectArray.map(databases, database => ({
+    checkoutId: database.checkoutId,
+    state: database.state,
+    views: EffectArray.map(database.views, view => ({
+      activatedAt: view.activatedAt ?? '',
+      repositoryId: view.repositoryId,
+      scopeId: view.scopeId ?? '',
+      snapshotId: view.snapshotId,
+      worktreeId: view.worktreeId,
+    })).sort(compareRevisionViews),
+    viewsTruncated: database.viewsTruncated,
+  })).sort((left, right) => compareCodeUnits(left.checkoutId, right.checkoutId));
   return sha256HexSync(
     `threadnote-manager-graph-catalog-revision-v${CODE_GRAPH_MANAGER_CATALOG_REVISION_VERSION}\n${JSON.stringify(canonical)}`,
   );
@@ -85,9 +82,11 @@ export const observeManagerGraphCatalogStatus = Effect.fn('codeGraph.observeMana
             }),
           {concurrency: 2},
         );
-        const anchor = associations.find(association => association.state === 'verified' && 'path' in association);
+        const anchor = EffectOption.getOrUndefined(
+          EffectArray.findFirst(associations, association => association.state === 'verified' && 'path' in association),
+        );
         const anchorPath = anchor !== undefined && 'path' in anchor ? anchor.path : undefined;
-        const reconciliationPending = associations.some(association => association.state === 'missing');
+        const reconciliationPending = EffectArray.some(associations, association => association.state === 'missing');
         return {
           database: {
             checkoutId,
@@ -105,16 +104,19 @@ export const observeManagerGraphCatalogStatus = Effect.fn('codeGraph.observeMana
       }),
     {concurrency: 2},
   );
-  const lifecycleTargets = observations.flatMap(observation =>
+  const lifecycleTargets = EffectArray.flatMap(observations, observation =>
     observation.target === undefined ? [] : [observation.target],
   );
   return {
-    catalogRevision: managerGraphCatalogRevision(observations.map(observation => observation.database)),
-    lifecyclePending: lifecycleTargets.some(target => target.reconciliationPending === true),
+    catalogRevision: managerGraphCatalogRevision(EffectArray.map(observations, observation => observation.database)),
+    lifecyclePending: EffectArray.some(lifecycleTargets, target => target.reconciliationPending === true),
     lifecycleTargets,
     repositoryCount: databases.length,
-    unavailableRepositories: observations.filter(observation => observation.database.state === 'unavailable').length,
-    viewsTruncated: observations.some(observation => observation.database.viewsTruncated),
+    unavailableRepositories: EffectArray.filter(
+      observations,
+      observation => observation.database.state === 'unavailable',
+    ).length,
+    viewsTruncated: EffectArray.some(observations, observation => observation.database.viewsTruncated),
   } satisfies ManagerGraphCatalogStatusObservation;
 });
 

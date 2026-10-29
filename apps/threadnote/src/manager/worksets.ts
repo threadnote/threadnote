@@ -1,3 +1,12 @@
+import {
+  MANAGER_WORKSET_NAME_BYTES_MAXIMUM,
+  MANAGER_WORKSET_DESCRIPTION_BYTES_MAXIMUM,
+  MANAGER_WORKSET_SELECTOR_BYTES_MAXIMUM,
+  safeLabel,
+  safeDescription,
+  safeLocalPath,
+} from './workset_text.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Cause, Clock, Crypto, Effect, Fiber, FileSystem, Path, Predicate, Scope, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {isMap, isScalar, isSeq, parseDocument, type YAMLMap, type YAMLSeq} from 'yaml';
@@ -53,11 +62,8 @@ import type {ProjectManifest, RuntimeConfig, SeedManifest, WorksetManifest} from
 const UTF8 = new TextEncoder();
 const MANAGER_WORKSET_DEFINITION_MAXIMUM = 4_096;
 const MANAGER_WORKSET_MEMBER_MAXIMUM = 4_096;
-const MANAGER_WORKSET_NAME_BYTES_MAXIMUM = 256;
-const MANAGER_WORKSET_DESCRIPTION_BYTES_MAXIMUM = 4_096;
 const MANAGER_PROJECT_VALUE_BYTES_MAXIMUM = 4_096;
 const MANAGER_WORKSET_QUERY_BYTES_MAXIMUM = CODE_GRAPH_WORKSET_ROUTER_LIMITS.queryBytesMaximum;
-const MANAGER_WORKSET_SELECTOR_BYTES_MAXIMUM = 4_096;
 const MANAGER_WORKSET_JOB_MAXIMUM = 32;
 const MANAGER_WORKSET_BRANCH_OBSERVATION_MAXIMUM = 128;
 const MANAGER_WORKSET_PREPARE_CONCURRENCY_MAXIMUM = 8;
@@ -86,6 +92,9 @@ import type {
   ManagerWorksetPrepareJobSummary,
   ManagerWorksetApiResponse,
 } from '@threadnote/manager/workset/contracts';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 export type {
   ManagerWorksetDefinitionMember,
   ManagerWorksetProjectSummary,
@@ -103,8 +112,11 @@ export type {
   ManagerWorksetApiResponse,
 } from '@threadnote/manager/workset/contracts';
 
+const isJsonObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+
 export interface ManagerWorksetApiRequest {
-  readonly body: Effect.Effect<Record<string, unknown>, unknown>;
+  readonly body: Effect.Effect<unknown, unknown>;
   readonly config: RuntimeConfig;
   readonly contextKey: object;
   readonly jobScope: Scope.Scope;
@@ -130,12 +142,15 @@ interface ManagerWorksetJobRegistry {
   starting: boolean;
 }
 
-class ManagerWorksetApiError extends Schema.TaggedError<ManagerWorksetApiError>()('ManagerWorksetApiError', {
-  code: Schema.String,
-  message: Schema.String,
-  retryAfterMilliseconds: Schema.optionalKey(Schema.Finite),
-  status: Schema.Finite,
-}) {
+class ManagerWorksetApiError extends Schema.TaggedError<ManagerWorksetApiError, {readonly brand: unique symbol}>()(
+  'ManagerWorksetApiError',
+  {
+    code: Schema.String,
+    message: Schema.String,
+    retryAfterMilliseconds: Schema.optionalKey(Schema.Finite),
+    status: Schema.Finite,
+  },
+) {
   static of(code: string, message: string, status: number, retryAfterMilliseconds?: number): ManagerWorksetApiError {
     return ManagerWorksetApiError.make({
       code,
@@ -155,7 +170,8 @@ export function managerWorksetRequestAllowedDuringMaintenance(method: string, pa
       (pathname === '/api/worksets/definition' ||
         pathname === '/api/worksets/project' ||
         pathname === '/api/worksets/project-graph-preview')) ||
-    (method === 'GET' && (pathname === '/api/worksets/jobs' || pathname.startsWith('/api/worksets/jobs/'))) ||
+    (method === 'GET' &&
+      (pathname === '/api/worksets/jobs' || Effect2.pipe(pathname, EffectString.startsWith('/api/worksets/jobs/')))) ||
     pathname === '/api/worksets/definitions' ||
     pathname === '/api/worksets/projects' ||
     pathname === '/api/worksets/jobs/cancel'
@@ -163,17 +179,20 @@ export function managerWorksetRequestAllowedDuringMaintenance(method: string, pa
 }
 
 export function isManagerWorksetApiPath(pathname: string): boolean {
-  return pathname === '/api/worksets' || pathname.startsWith('/api/worksets/');
+  return pathname === '/api/worksets' || Effect2.pipe(pathname, EffectString.startsWith('/api/worksets/'));
 }
 
 export function managerWorksetCatalogFromManifest(
   manifest: SeedManifest,
   revision: string,
   editability: ManagerWorksetCatalog['editability'] = {state: 'editable'},
-  projects: readonly Omit<ManagerWorksetProjectSummary, 'worksetCount' | 'worksets'>[] = manifest.projects.map(
+  projects: readonly Omit<ManagerWorksetProjectSummary, 'worksetCount' | 'worksets'>[] = EffectArray.map(
+    manifest.projects,
     project => ({
       branchState: 'not-observed',
-      folder: trimTrailingCharacters(project.path, '/\\').split(/[\\/]/u).at(-1) || safeLabel(project.name),
+      folder:
+        Effect2.pipe(trimTrailingCharacters(project.path, '/\\'), EffectString.split(/[\\/]/u)).at(-1) ||
+        safeLabel(project.name),
       name: safeLabel(project.name),
       path: safeLocalPath(project.path),
     }),
@@ -190,13 +209,15 @@ export function managerWorksetCatalogFromManifest(
   }
   const projectWorksets = new Map<string, string[]>();
   for (const workset of manifest.worksets ?? []) {
-    for (const project of new Set(workset.projects.map(name => name.toLowerCase()))) {
+    for (const project of new Set(
+      EffectArray.map(workset.projects, name => Effect2.pipe(name, EffectString.toLowerCase)),
+    )) {
       const names = projectWorksets.get(project) ?? [];
       names.push(safeLabel(workset.name));
       projectWorksets.set(project, names);
     }
   }
-  const definitions = (manifest.worksets ?? []).map(workset => {
+  const definitions = EffectArray.map(manifest.worksets ?? [], workset => {
     if (workset.projects.length > MANAGER_WORKSET_MEMBER_MAXIMUM) {
       throw new Error(`Workset ${safeLabel(workset.name)} exceeds the member limit.`);
     }
@@ -211,8 +232,8 @@ export function managerWorksetCatalogFromManifest(
     definitionSource: 'seed-manifest',
     editability,
     projectEditability,
-    projects: projects.map(project => {
-      const worksets = projectWorksets.get(project.name.toLowerCase()) ?? [];
+    projects: EffectArray.map(projects, project => {
+      const worksets = projectWorksets.get(Effect2.pipe(project.name, EffectString.toLowerCase)) ?? [];
       return {...project, worksets, worksetCount: worksets.length};
     }),
     projectsReadOnly: projectEditability.state === 'read-only',
@@ -259,13 +280,23 @@ export const readManagerManifestProject = Effect.fn('managerWorksets.readProject
   const raw = yield* fs.readFileString(config.manifestPath);
   const manifest = yield* parseManifestForMutation(raw, config.manifestPath);
   yield* managerWorksetValidation(() => assertUniqueManagerManifestIdentity(manifest));
-  const project = manifest.projects.find(item => item.name.toLowerCase() === projectName.toLowerCase());
+  const project = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      manifest.projects,
+      item => Effect2.pipe(item.name, EffectString.toLowerCase) === Effect2.pipe(projectName, EffectString.toLowerCase),
+    ),
+  );
   if (!project) return yield* ManagerWorksetApiError.of('project-not-found', PROJECT_NOT_FOUND_MESSAGE, 404);
   const document = parseDocument(raw, {keepSourceTokens: true});
   const projects = document.get('projects', true);
   const rawUri = isSeq(projects)
-    ? projects.items.flatMap(item => {
-        if (!isMap(item) || String(item.get('name')).toLowerCase() !== project.name.toLowerCase()) return [];
+    ? EffectArray.flatMap(projects.items, item => {
+        if (
+          !isMap(item) ||
+          Effect2.pipe(String(item.get('name')), EffectString.toLowerCase) !==
+            Effect2.pipe(project.name, EffectString.toLowerCase)
+        )
+          return [];
         const value = item.get('uri');
         return typeof value === 'string' ? [value] : [];
       })[0]
@@ -295,20 +326,34 @@ export const readManagerWorksetDefinition = Effect.fn('managerWorksets.readDefin
 ) {
   const manifest = yield* readSeedManifest(config.manifestPath);
   yield* managerWorksetValidation(() => assertUniqueManagerManifestIdentity(manifest));
-  const workset = manifest.worksets?.find(item => item.name.toLowerCase() === worksetName.toLowerCase());
+  const workset = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(manifest.worksets), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          __effectArrayReceiver,
+          item =>
+            Effect2.pipe(item.name, EffectString.toLowerCase) === Effect2.pipe(worksetName, EffectString.toLowerCase),
+        ),
+      ),
+    ),
+  );
   if (!workset) return yield* ManagerWorksetApiError.of('workset-not-found', 'Workset definition not found.', 404);
-  const projects = new Map(manifest.projects.map(project => [project.name.toLowerCase(), project]));
+  const projects = new Map(
+    EffectArray.map(manifest.projects, project => [Effect2.pipe(project.name, EffectString.toLowerCase), project]),
+  );
   const observed = yield* observeManagerManifestProjects(
-    workset.projects.flatMap(project => {
-      const configured = projects.get(project.toLowerCase());
+    EffectArray.flatMap(workset.projects, project => {
+      const configured = projects.get(Effect2.pipe(project, EffectString.toLowerCase));
       return configured === undefined ? [] : [configured];
     }),
     MANAGER_WORKSET_BRANCH_OBSERVATION_MAXIMUM,
   );
-  const observedByName = new Map(observed.map(project => [project.name.toLowerCase(), project]));
-  const members = workset.projects.map(project => {
-    const configured = observedByName.get(project.toLowerCase());
-    const manifestProject = projects.get(project.toLowerCase());
+  const observedByName = new Map(
+    EffectArray.map(observed, project => [Effect2.pipe(project.name, EffectString.toLowerCase), project]),
+  );
+  const members = EffectArray.map(workset.projects, project => {
+    const configured = observedByName.get(Effect2.pipe(project, EffectString.toLowerCase));
+    const manifestProject = projects.get(Effect2.pipe(project, EffectString.toLowerCase));
     return {
       ...(configured !== undefined && 'branch' in configured && configured.branch !== undefined
         ? {branch: configured.branch}
@@ -326,11 +371,11 @@ export const readManagerWorksetDefinition = Effect.fn('managerWorksets.readDefin
     };
   });
   return {
-    configuredMembers: members.filter(member => member.configured).length,
+    configuredMembers: EffectArray.filter(members, member => member.configured).length,
     ...(workset.description === undefined ? {} : {description: safeDescription(workset.description)}),
     members,
     name: safeLabel(workset.name),
-    unresolvedMembers: members.filter(member => !member.configured).length,
+    unresolvedMembers: EffectArray.filter(members, member => !member.configured).length,
   } satisfies ManagerWorksetDefinition;
 });
 
@@ -482,8 +527,13 @@ function mutateManagerManifest<Operation extends string>(
             yield* fs.writeFileString(temporary, candidate, {flag: 'wx', mode: 0o600});
             yield* fs.chmod(temporary, 0o600);
             if (projectRootValidation !== undefined && change.projectCandidate !== undefined) {
-              const normalizedCandidate = parsedCandidate.projects.find(
-                project => project.name.toLowerCase() === change.projectCandidate!.name.toLowerCase(),
+              const normalizedCandidate = EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  parsedCandidate.projects,
+                  project =>
+                    Effect2.pipe(project.name, EffectString.toLowerCase) ===
+                    Effect2.pipe(change.projectCandidate!.name, EffectString.toLowerCase),
+                ),
               );
               if (normalizedCandidate === undefined) {
                 return yield* ManagerWorksetApiError.of(
@@ -493,10 +543,12 @@ function mutateManagerManifest<Operation extends string>(
                 );
               }
               const revalidated = yield* validateManagerProjectRoots(
-                manifest.projects.filter(
+                EffectArray.filter(
+                  manifest.projects,
                   project =>
                     change.projectCurrentName === undefined ||
-                    project.name.toLowerCase() !== change.projectCurrentName.toLowerCase(),
+                    Effect2.pipe(project.name, EffectString.toLowerCase) !==
+                      Effect2.pipe(change.projectCurrentName, EffectString.toLowerCase),
                 ),
                 normalizedCandidate,
               ).pipe(Effect.mapError(cause => ManagerWorksetApiError.of('revision-conflict', cause.message, 409)));
@@ -524,12 +576,14 @@ function mutateManagerManifest<Operation extends string>(
             changed: true,
             operation,
             scopeRetirementTargets,
-            retirementTargets: retirementCaptures.flatMap(capture =>
+            retirementTargets: EffectArray.flatMap(retirementCaptures, capture =>
               capture.target === undefined ? [] : [capture.target],
             ),
             warnings: [
               ...change.warnings,
-              ...retirementCaptures.flatMap(capture => (capture.warning === undefined ? [] : [capture.warning])),
+              ...EffectArray.flatMap(retirementCaptures, capture =>
+                capture.warning === undefined ? [] : [capture.warning],
+              ),
             ],
           };
         }),
@@ -572,7 +626,7 @@ function mutateManagerManifest<Operation extends string>(
       catalog,
       changed: promoted.changed,
       operation: promoted.operation,
-      warnings: [...promoted.warnings, ...retirementWarnings.filter(value => value !== undefined)],
+      warnings: [...promoted.warnings, ...EffectArray.filter(retirementWarnings, value => value !== undefined)],
     };
   });
 }
@@ -606,13 +660,13 @@ function routeManagerWorksetRequest(request: ManagerWorksetApiRequest) {
       return response(200, yield* previewManagerManifestProjectGraphScope(config, requiredQuery(url, 'project')));
     }
     if (method === 'GET' && url.pathname === '/api/worksets/jobs') {
-      const jobs = [...registryFor(request.contextKey).jobs.values()]
-        .map(entry => managerWorksetJobSummary(entry.job))
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const jobs = EffectArray.map([...registryFor(request.contextKey).jobs.values()], entry =>
+        managerWorksetJobSummary(entry.job),
+      ).sort((left, right) => Effect2.pipe(right.createdAt, EffectString.localeCompare(left.createdAt)));
       return response(200, {jobs});
     }
-    if (method === 'GET' && url.pathname.startsWith('/api/worksets/jobs/')) {
-      const id = url.pathname.slice('/api/worksets/jobs/'.length);
+    if (method === 'GET' && Effect2.pipe(url.pathname, EffectString.startsWith('/api/worksets/jobs/'))) {
+      const id = Effect2.pipe(url.pathname, EffectString.slice('/api/worksets/jobs/'.length));
       const job = registryFor(request.contextKey).jobs.get(id)?.job;
       if (!job) throw ManagerWorksetApiError.of('job-not-found', 'Workset preparation job not found.', 404);
       return response(200, {job});
@@ -621,7 +675,7 @@ function routeManagerWorksetRequest(request: ManagerWorksetApiRequest) {
     const body = yield* request.body.pipe(
       Effect.mapError(() => ManagerWorksetApiError.of('invalid-json', 'Provide a JSON object request body.', 400)),
     );
-    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    if (!isJsonObject(body)) {
       throw ManagerWorksetApiError.of('invalid-json', 'Provide a JSON object request body.', 400);
     }
     switch (url.pathname) {
@@ -754,7 +808,10 @@ function startManagerWorksetPrepare(request: ManagerWorksetApiRequest, body: Rec
     if (
       registry.mutating ||
       registry.starting ||
-      [...registry.jobs.values()].some(entry => entry.job.status === 'running' || entry.job.status === 'cancelling')
+      EffectArray.some(
+        [...registry.jobs.values()],
+        entry => entry.job.status === 'running' || entry.job.status === 'cancelling',
+      )
     ) {
       throw ManagerWorksetApiError.of('prepare-busy', 'A Manager workset preparation is already running.', 409);
     }
@@ -763,10 +820,13 @@ function startManagerWorksetPrepare(request: ManagerWorksetApiRequest, body: Rec
       yield* ensureManagerWorksetRegistryLifecycle(registry, request.jobScope);
       trimFinishedJobs(registry);
       const catalog = yield* readManagerWorksetCatalog(request.config);
-      const total = catalog.definitions.find(definition => definition.name === workset)?.memberCount ?? 0;
+      const total =
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(catalog.definitions, definition => definition.name === workset),
+        )?.memberCount ?? 0;
       const crypto = yield* Crypto.Crypto;
       const createdAt = isoTimestamp(yield* Clock.currentTimeMillis);
-      const id = `cgwj_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
+      const id = `cgwj_${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}`;
       const hints = yield* ManagerLiveConsumerChangeHints;
       const entry: InternalManagerWorksetPrepareJob = {
         onChange: hints.publish({topic: 'worksets', scope: 'account'}),
@@ -1068,22 +1128,28 @@ function assertProjectReferenceMutationSafe(
   previousName: string | undefined,
   nextName: string,
 ): void {
-  const nextKey = nextName.toLowerCase();
-  const previousKey = previousName?.toLowerCase();
-  const collision = (manifest.worksets ?? []).find(workset => {
-    const relevant =
-      previousKey === undefined
-        ? workset.projects.some(project => project.toLowerCase() === nextKey)
-        : workset.projects.some(project => {
-            const key = project.toLowerCase();
-            return key === previousKey || key === nextKey;
-          });
-    if (!relevant) return false;
-    const rewritten = workset.projects.map(project =>
-      previousKey !== undefined && project.toLowerCase() === previousKey ? nextKey : project.toLowerCase(),
-    );
-    return rewritten.filter(project => project === nextKey).length > 1;
-  });
+  const nextKey = Effect2.pipe(nextName, EffectString.toLowerCase);
+  const previousKey = Effect2.pipe(previousName, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+  );
+  const collision = EffectOption.getOrUndefined(
+    EffectArray.findFirst(manifest.worksets ?? [], workset => {
+      const relevant =
+        previousKey === undefined
+          ? EffectArray.some(workset.projects, project => Effect2.pipe(project, EffectString.toLowerCase) === nextKey)
+          : EffectArray.some(workset.projects, project => {
+              const key = Effect2.pipe(project, EffectString.toLowerCase);
+              return key === previousKey || key === nextKey;
+            });
+      if (!relevant) return false;
+      const rewritten = EffectArray.map(workset.projects, project =>
+        previousKey !== undefined && Effect2.pipe(project, EffectString.toLowerCase) === previousKey
+          ? nextKey
+          : Effect2.pipe(project, EffectString.toLowerCase),
+      );
+      return EffectArray.filter(rewritten, project => project === nextKey).length > 1;
+    }),
+  );
   if (collision) {
     throw ManagerWorksetApiError.of(
       'name-conflict',
@@ -1103,11 +1169,14 @@ function validatedProject(
     current !== undefined && input.path === current.path ? current.path : validateManagerProjectPath(input.path);
   const uri = validateManagerProjectUri(input.uri, current?.uri);
   const seed = projectSeedPatterns(input.seed);
-  const duplicateName = manifest.projects.some(
-    project => project !== current && project.name.toLowerCase() === name.toLowerCase(),
+  const duplicateName = EffectArray.some(
+    manifest.projects,
+    project =>
+      project !== current &&
+      Effect2.pipe(project.name, EffectString.toLowerCase) === Effect2.pipe(name, EffectString.toLowerCase),
   );
   if (duplicateName) throw ManagerWorksetApiError.of('name-conflict', 'A project with that name already exists.', 409);
-  const duplicateUri = manifest.projects.some(project => project !== current && project.uri === uri);
+  const duplicateUri = EffectArray.some(manifest.projects, project => project !== current && project.uri === uri);
   if (duplicateUri)
     throw ManagerWorksetApiError.of('uri-conflict', 'Another manifest project already owns that resource URI.', 409);
   const graph =
@@ -1150,15 +1219,17 @@ function validateManagerProjectRootMutation(
   return change.projectCandidate === undefined || change.normalizeProjectPath !== true
     ? succeedUndefined
     : validateManagerProjectRoots(
-        manifest.projects.filter(
+        EffectArray.filter(
+          manifest.projects,
           project =>
             change.projectCurrentName === undefined ||
-            project.name.toLowerCase() !== change.projectCurrentName.toLowerCase(),
+            Effect2.pipe(project.name, EffectString.toLowerCase) !==
+              Effect2.pipe(change.projectCurrentName, EffectString.toLowerCase),
         ),
         change.projectCandidate,
       ).pipe(
         Effect.mapError(cause => {
-          const invalidInput = cause.message.startsWith('Project path must identify');
+          const invalidInput = Effect2.pipe(cause.message, EffectString.startsWith('Project path must identify'));
           return ManagerWorksetApiError.of(
             invalidInput ? 'invalid-input' : 'project-path-unavailable',
             cause.message,
@@ -1181,10 +1252,13 @@ function validateManagerProjectUri(value: string, retainedCanonicalUri?: string)
 }
 
 function affectedWorksets(manifest: SeedManifest, projectName: string): readonly string[] {
-  const key = projectName.toLowerCase();
-  return (manifest.worksets ?? [])
-    .filter(workset => workset.projects.some(project => project.toLowerCase() === key))
-    .map(workset => workset.name);
+  const key = Effect2.pipe(projectName, EffectString.toLowerCase);
+  return EffectArray.map(
+    EffectArray.filter(manifest.worksets ?? [], workset =>
+      EffectArray.some(workset.projects, project => Effect2.pipe(project, EffectString.toLowerCase) === key),
+    ),
+    workset => workset.name,
+  );
 }
 
 function applyDefinitionMutation(
@@ -1270,12 +1344,16 @@ function validatedDefinition(
   if (projectValues.length === 0 || projectValues.length > MANAGER_WORKSET_MEMBER_MAXIMUM) {
     throw ManagerWorksetApiError.of('invalid-input', 'A workset must contain 1 to 4096 projects.', 400);
   }
-  const configured = new Map(manifest.projects.map(project => [project.name.toLowerCase(), project.name]));
-  const allowedUnknown = new Map(allowedUnknownProjects.map(project => [project.toLowerCase(), project]));
+  const configured = new Map(
+    EffectArray.map(manifest.projects, project => [Effect2.pipe(project.name, EffectString.toLowerCase), project.name]),
+  );
+  const allowedUnknown = new Map(
+    EffectArray.map(allowedUnknownProjects, project => [Effect2.pipe(project, EffectString.toLowerCase), project]),
+  );
   const seen = new Set<string>();
-  const projects = projectValues.map(value => {
+  const projects = EffectArray.map(projectValues, value => {
     const project = normalizedText(value, 'project', MANAGER_WORKSET_NAME_BYTES_MAXIMUM);
-    const key = project.toLowerCase();
+    const key = Effect2.pipe(project, EffectString.toLowerCase);
     if (seen.has(key)) throw ManagerWorksetApiError.of('invalid-input', 'Workset project members must be unique.', 400);
     seen.add(key);
     const canonical = configured.get(key) ?? allowedUnknown.get(key);
@@ -1289,7 +1367,7 @@ function validatedDefinition(
 function assertUniqueManifestNames(values: readonly string[], kind: 'project' | 'workset'): void {
   const seen = new Set<string>();
   for (const value of values) {
-    const key = value.toLowerCase();
+    const key = Effect2.pipe(value, EffectString.toLowerCase);
     if (seen.has(key)) {
       throw ManagerWorksetApiError.of(
         'manifest-invalid',
@@ -1303,8 +1381,8 @@ function assertUniqueManifestNames(values: readonly string[], kind: 'project' | 
 
 function assertUniqueManagerManifestIdentity(manifest: SeedManifest): void {
   for (const name of [
-    ...manifest.projects.map(project => project.name),
-    ...(manifest.worksets ?? []).flatMap(workset => [workset.name, ...workset.projects]),
+    ...EffectArray.map(manifest.projects, project => project.name),
+    ...EffectArray.flatMap(manifest.worksets ?? [], workset => [workset.name, ...workset.projects]),
   ]) {
     if (!managerManifestNameIsCanonical(name)) {
       throw ManagerWorksetApiError.of(
@@ -1327,15 +1405,21 @@ function assertUniqueManagerManifestIdentity(manifest: SeedManifest): void {
   if ((manifest.worksets?.length ?? 0) > MANAGER_WORKSET_DEFINITION_MAXIMUM) {
     throw ManagerWorksetApiError.of('manifest-invalid', 'The seed manifest has too many worksets for Manager.', 409);
   }
-  if (manifest.worksets?.some(workset => workset.projects.length > MANAGER_WORKSET_MEMBER_MAXIMUM)) {
+  if (
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(manifest.worksets), __effectArrayReceiver =>
+        EffectArray.some(__effectArrayReceiver, workset => workset.projects.length > MANAGER_WORKSET_MEMBER_MAXIMUM),
+      ),
+    )
+  ) {
     throw ManagerWorksetApiError.of('manifest-invalid', 'A workset has too many members for Manager.', 409);
   }
   assertUniqueManifestNames(
-    manifest.projects.map(project => project.name),
+    EffectArray.map(manifest.projects, project => project.name),
     'project',
   );
   assertUniqueManifestNames(
-    (manifest.worksets ?? []).map(workset => workset.name),
+    EffectArray.map(manifest.worksets ?? [], workset => workset.name),
     'workset',
   );
 }
@@ -1395,7 +1479,10 @@ function assertSupportedManagerWorksetYaml(document: ReturnType<typeof parseDocu
       throw unsupportedWorksetYaml();
     }
     if (
-      projects.items.some(project => !isScalar(project) || typeof project.value !== 'string' || hasYamlAnchor(project))
+      EffectArray.some(
+        projects.items,
+        project => !isScalar(project) || typeof project.value !== 'string' || hasYamlAnchor(project),
+      )
     ) {
       throw unsupportedWorksetYaml();
     }
@@ -1445,7 +1532,19 @@ function parseManifestForMutation(raw: string, path: string) {
 function requireKnownManagerWorkset(config: RuntimeConfig, requested: string) {
   return readSeedManifest(config.manifestPath).pipe(
     Effect.tap(manifest => managerWorksetValidation(() => assertUniqueManagerManifestIdentity(manifest))),
-    Effect.map(manifest => manifest.worksets?.find(item => item.name.toLowerCase() === requested.toLowerCase())),
+    Effect.map(manifest =>
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(manifest.worksets), __effectArrayReceiver =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(
+              __effectArrayReceiver,
+              item =>
+                Effect2.pipe(item.name, EffectString.toLowerCase) === Effect2.pipe(requested, EffectString.toLowerCase),
+            ),
+          ),
+        ),
+      ),
+    ),
     Effect.flatMap(workset =>
       workset
         ? Effect.succeed(workset.name)
@@ -1525,7 +1624,10 @@ function assertNoActiveManagerPrepare(registry: ManagerWorksetJobRegistry): void
   if (
     registry.mutating ||
     registry.starting ||
-    [...registry.jobs.values()].some(entry => entry.job.status === 'running' || entry.job.status === 'cancelling')
+    EffectArray.some(
+      [...registry.jobs.values()],
+      entry => entry.job.status === 'running' || entry.job.status === 'cancelling',
+    )
   ) {
     throw ManagerWorksetApiError.of(
       'prepare-busy',
@@ -1536,9 +1638,10 @@ function assertNoActiveManagerPrepare(registry: ManagerWorksetJobRegistry): void
 }
 
 function trimFinishedJobs(registry: ManagerWorksetJobRegistry): void {
-  const finished = [...registry.jobs.values()]
-    .filter(entry => entry.job.status !== 'running' && entry.job.status !== 'cancelling')
-    .sort((left, right) => left.job.createdAt.localeCompare(right.job.createdAt));
+  const finished = EffectArray.filter(
+    [...registry.jobs.values()],
+    entry => entry.job.status !== 'running' && entry.job.status !== 'cancelling',
+  ).sort((left, right) => Effect2.pipe(left.job.createdAt, EffectString.localeCompare(right.job.createdAt)));
   while (registry.jobs.size >= MANAGER_WORKSET_JOB_MAXIMUM && finished.length > 0) {
     registry.jobs.delete(finished.shift()!.job.id);
   }
@@ -1604,7 +1707,12 @@ function requiredManagerWorksetName(value: unknown, field = 'workset'): string {
 }
 
 function normalizedText(value: string, name: string, maximumBytes: number): string {
-  const text = value.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const text = Effect2.pipe(
+    value,
+    EffectString.normalize('NFKC'),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
   if (!text || UTF8.encode(text).byteLength > maximumBytes || hasControlCharacter(text)) {
     throw ManagerWorksetApiError.of('invalid-input', `${name} must be bounded text without control characters.`, 400);
   }
@@ -1612,10 +1720,10 @@ function normalizedText(value: string, name: string, maximumBytes: number): stri
 }
 
 function requiredTextArray(value: unknown, name: string, maximumItems: number): readonly string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > maximumItems) {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > maximumItems) {
     throw ManagerWorksetApiError.of('invalid-input', `Provide ${name} as a bounded non-empty string array.`, 400);
   }
-  return value.map(item => requiredText(item, name, MANAGER_WORKSET_NAME_BYTES_MAXIMUM));
+  return EffectArray.map(value, item => requiredText(item, name, MANAGER_WORKSET_NAME_BYTES_MAXIMUM));
 }
 
 function requiredLiteralText(value: unknown, name: string, maximumBytes: number): string {
@@ -1631,7 +1739,7 @@ function requiredLiteralText(value: unknown, name: string, maximumBytes: number)
 }
 
 function projectSeedPatterns(value: unknown): readonly string[] {
-  if (!Array.isArray(value) || !value.every(item => typeof item === 'string')) {
+  if (!EffectArray.isArray(value) || !EffectArray.every(value, item => typeof item === 'string')) {
     throw ManagerWorksetApiError.of('invalid-input', 'Provide seed as a bounded string array.', 400);
   }
   try {
@@ -1664,11 +1772,11 @@ function findWorksetNodeIndexes(sequence: YAMLSeq, name: string): readonly numbe
   return findNamedMapIndexes(sequence, name);
 }
 function findNamedMapIndexes(sequence: YAMLSeq, name: string): readonly number[] {
-  const target = name.toLowerCase();
-  return sequence.items.flatMap((item, index) => {
+  const target = Effect2.pipe(name, EffectString.toLowerCase);
+  return EffectArray.flatMap(sequence.items, (item, index) => {
     if (!isMap(item)) return [];
     const value = item.get('name');
-    return typeof value === 'string' && value.toLowerCase() === target ? [index] : [];
+    return typeof value === 'string' && Effect2.pipe(value, EffectString.toLowerCase) === target ? [index] : [];
   });
 }
 
@@ -1681,7 +1789,7 @@ function definitionsEqual(left: WorksetManifest, right: WorksetManifest): boolea
 function textSetsEqual(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
   const values = new Set(left);
-  return values.size === right.length && right.every(value => values.has(value));
+  return values.size === right.length && EffectArray.every(right, value => values.has(value));
 }
 
 function reconcileProjectSequence(map: YAMLMap, projects: readonly string[]): void {
@@ -1690,12 +1798,14 @@ function reconcileProjectSequence(map: YAMLMap, projects: readonly string[]): vo
     map.set('projects', [...projects]);
     return;
   }
-  const desired = new Map(projects.map(project => [project.toLowerCase(), project]));
+  const desired = new Map(
+    EffectArray.map(projects, project => [Effect2.pipe(project, EffectString.toLowerCase), project]),
+  );
   const retained = [] as typeof current.items;
   const retainedKeys = new Set<string>();
   for (const item of current.items) {
     if (!isScalar(item) || typeof item.value !== 'string') continue;
-    const key = item.value.toLowerCase();
+    const key = Effect2.pipe(item.value, EffectString.toLowerCase);
     if (!desired.has(key) || retainedKeys.has(key)) continue;
     item.value = desired.get(key)!;
     retained.push(item);
@@ -1703,7 +1813,7 @@ function reconcileProjectSequence(map: YAMLMap, projects: readonly string[]): vo
   }
   current.items = retained;
   for (const project of projects) {
-    if (retainedKeys.has(project.toLowerCase())) continue;
+    if (retainedKeys.has(Effect2.pipe(project, EffectString.toLowerCase))) continue;
     current.add(project);
   }
 }
@@ -1716,14 +1826,14 @@ function reconcileWorksetProjectReferences(
   const worksets = document.get('worksets', true);
   if (worksets === undefined) return;
   if (!isSeq(worksets)) throw unsupportedWorksetYaml();
-  const key = previousName.toLowerCase();
+  const key = Effect2.pipe(previousName, EffectString.toLowerCase);
   for (const item of worksets.items) {
     if (!isMap(item)) throw unsupportedWorksetYaml();
     const projects = item.get('projects', true);
     if (!isSeq(projects)) throw unsupportedWorksetYaml();
     for (const project of projects.items) {
       if (!isScalar(project) || typeof project.value !== 'string') throw unsupportedWorksetYaml();
-      if (project.value.toLowerCase() === key) project.value = nextName;
+      if (Effect2.pipe(project.value, EffectString.toLowerCase) === key) project.value = nextName;
     }
   }
 }
@@ -1788,7 +1898,7 @@ function managerWorksetErrorResponse(error: unknown): ManagerWorksetApiResponse 
 }
 
 function managerWorksetCauseError(cause: Cause.Cause<unknown>): {readonly code: string; readonly error: string} {
-  const failure = cause.reasons.find(Cause.isFailReason)?.error;
+  const failure = EffectOption.getOrUndefined(EffectArray.findFirst(cause.reasons, Cause.isFailReason))?.error;
   const result = managerWorksetErrorResponse(failure ?? cause);
   if (Predicate.isObject(result.body) && 'error' in result.body) {
     const body = result.body;
@@ -1812,7 +1922,7 @@ function publicWorksetError(error: unknown): string {
     'Workset component ',
     'A component selector ',
   ];
-  return allowed.some(prefix => message.startsWith(prefix))
+  return EffectArray.some(allowed, prefix => Effect2.pipe(message, EffectString.startsWith(prefix)))
     ? message
     : 'The workset operation failed without changing repository graphs.';
 }
@@ -1833,47 +1943,34 @@ function requiredManagerWorksetQuery(url: URL): string {
   return normalizeManagerWorksetName(value);
 }
 
-function safeLabel(value: string): string {
-  return (
-    value
-      .replace(/[\r\n\t\0]/gu, ' ')
-      .trim()
-      .slice(0, MANAGER_WORKSET_NAME_BYTES_MAXIMUM) || 'unknown'
-  );
-}
-
-function safeDescription(value: string): string {
-  return value
-    .replace(/[\r\n\t\0]/gu, ' ')
-    .trim()
-    .slice(0, MANAGER_WORKSET_DESCRIPTION_BYTES_MAXIMUM);
-}
-
-function safeLocalPath(value: string): string {
-  return value
-    .replace(/[\r\n\t\0]/gu, ' ')
-    .trim()
-    .slice(0, MANAGER_WORKSET_SELECTOR_BYTES_MAXIMUM);
-}
-
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31) || code === 127;
   });
 }
 
 function hasLiteralControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect2.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect2.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 31 || code === 127;
   });
 }
 
 function uniqueCaseInsensitive(values: readonly string[]): readonly string[] {
   const seen = new Set<string>();
-  return values.filter(value => {
-    const key = value.toLowerCase();
+  return EffectArray.filter(values, value => {
+    const key = Effect2.pipe(value, EffectString.toLowerCase);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

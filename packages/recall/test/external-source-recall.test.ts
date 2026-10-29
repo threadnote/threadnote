@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer} from 'effect';
@@ -17,6 +18,9 @@ import {
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {loadRecallExactMatches, loadRecallIndexData} from '@threadnote/recall/index';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const systemLayer = SystemInfo.layer.pipe(
   Layer.provide(
@@ -29,7 +33,7 @@ const systemLayer = SystemInfo.layer.pipe(
     ),
   ),
 );
-const fingerprint = 'a'.repeat(64);
+const fingerprint = Effect2.pipe('a', EffectString.repeat(64));
 const base = Layer.mergeAll(
   BunServices.layer,
   systemLayer,
@@ -61,7 +65,7 @@ describe('external source recall', () => {
         const store = yield* ResourceStore;
         const now = yield* Clock.currentTimeMillis;
         const uris: string[] = [];
-        for (const [sourceId, project] of Object.entries(projects)) {
+        for (const [sourceId, project] of EffectRecord.toEntries(projects)) {
           const metadata = {
             version: 1 as const,
             sourceId,
@@ -120,7 +124,10 @@ describe('external source recall', () => {
           query: 'needle',
           eligibility: deriveRecallEligibilityPolicy({originalQuery: 'needle', explicitProject: 'a'}),
         });
-        expect(scoped.candidates.map(candidate => candidate.fields?.project).sort()).toEqual(['a', undefined]);
+        expect(EffectArray.map(scoped.candidates, candidate => candidate.fields?.project).sort()).toEqual([
+          'a',
+          undefined,
+        ]);
         const approved = yield* loadRecallIndexData(config, {
           includeInactive: false,
           query: 'needle',

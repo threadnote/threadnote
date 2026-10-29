@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
@@ -9,8 +10,10 @@ import {
 import {decodeNativeCyclePlan, initializeNativeCycle, validateNativeCyclePhase} from '../src/cycle.js';
 import {decodeNativeCloseoutProposal, prepareNativeCloseout} from '../src/closeout.js';
 import {renderNativeDocument} from '../src/documents.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const digest = 'c'.repeat(64);
+const digest = Effect.pipe('c', EffectString.repeat(64));
 const common = {
   format: 'threadnote-native-authoring',
   schemaVersion: 1,
@@ -38,7 +41,7 @@ const spec = () =>
     outOfScope: [],
     constraints: [],
     observations: [],
-    scenarios: ['read', 'retry'].map(id => ({
+    scenarios: EffectArray.map(['read', 'retry'], id => ({
       id,
       requirementIds: ['req'],
       given: 'Saved input.',
@@ -59,7 +62,7 @@ function fixture(
     kind: 'plan',
     current: architecture,
     target: architecture,
-    phases: ['one', 'two'].map((id, index) => ({
+    phases: EffectArray.map(['one', 'two'], (id, index) => ({
       id,
       title: id,
       outcome: 'Working ' + id,
@@ -67,7 +70,7 @@ function fixture(
       affectedPaths: ['src/a.ts'],
       newPaths: [],
       contracts: ['No identity changes.'],
-      acceptance: ['first', 'second'].map((label, n) => ({
+      acceptance: EffectArray.map(['first', 'second'], (label, n) => ({
         id: id + '-' + n,
         criterion: id + ' ' + label,
         verification: 'Inspect output.',
@@ -75,13 +78,13 @@ function fixture(
       })),
       safeBoundary: 'Useful independent phase.',
     })),
-    decisions: ['first', 'second'].map(id => ({
+    decisions: EffectArray.map(['first', 'second'], id => ({
       id,
       question: 'How to implement ' + id + '?',
       selection: 'retain',
       selected: 'Retained design ' + id,
       alternatives: [{id: 'rejected', design: 'Rejected design ' + id, tradeoffs: 'Adds complexity.'}],
-      rationale: 'Original full rationale ' + id + ' ' + 'original rationale. '.repeat(80),
+      rationale: 'Original full rationale ' + id + ' ' + Effect.pipe('original rationale. ', EffectString.repeat(80)),
       affectedPhases: ['one'],
       authority: 'orchestrator',
     })),
@@ -118,18 +121,18 @@ function fixture(
       documentHash: nativeAuthoringDigest(plan),
     },
     completion: {},
-    phases: plan.phases.map((phase, index) => ({
+    phases: EffectArray.map(plan.phases, (phase, index) => ({
       id: phase.id,
-      definitionHash: String(index + 1).repeat(64),
+      definitionHash: Effect.pipe(String(index + 1), EffectString.repeat(64)),
       title: phase.title,
       dependsOn: phase.dependsOn,
       allowedPaths: ['src/'],
-      acceptanceCriteria: phase.acceptance.map(item => item.criterion),
+      acceptanceCriteria: EffectArray.map(phase.acceptance, item => item.criterion),
       safeToMergeReason: phase.safeBoundary,
       branch: 'feature/' + phase.id,
       baseBranch: 'main',
       status: 'pending',
-      acceptanceRefs: phase.acceptance.map(item => ({
+      acceptanceRefs: EffectArray.map(phase.acceptance, item => ({
         id: item.id,
         criterion: item.criterion,
         requirements: item.requirementIds,
@@ -143,13 +146,17 @@ function fixture(
     state = validateNativeCyclePhase(
       state,
       phase.id,
-      {head: 'a'.repeat(40), tree: 'b'.repeat(40), files: ['src/a.ts']},
       {
-        snapshotTree: 'b'.repeat(40),
+        head: Effect.pipe('a', EffectString.repeat(40)),
+        tree: Effect.pipe('b', EffectString.repeat(40)),
+        files: ['src/a.ts'],
+      },
+      {
+        snapshotTree: Effect.pipe('b', EffectString.repeat(40)),
         status: 'passed',
         productState: 'working',
         checks: [{command: 'check', result: 'passed', evidence: 'Passed fixture.'}],
-        acceptance: phase.acceptanceCriteria.map(criterion => ({
+        acceptance: EffectArray.map(phase.acceptanceCriteria, criterion => ({
           criterion,
           result: 'passed',
           evidence: 'Verified fixture.',
@@ -167,16 +174,19 @@ function fixture(
     },
     architectureVerification: 'Inspected actual code and tests.',
     combinedChecks: [{command: 'check combined', result: 'passed', evidence: 'Passed all phases together.'}],
-    phaseEvidence: cyclePlan.phases.map(phase => ({
+    phaseEvidence: EffectArray.map(cyclePlan.phases, phase => ({
       id: phase.id,
-      acceptance: phase.acceptanceCriteria.map(criterion => ({criterion, evidence: 'Observed ' + criterion})),
+      acceptance: EffectArray.map(phase.acceptanceCriteria, criterion => ({
+        criterion,
+        evidence: 'Observed ' + criterion,
+      })),
     })),
     scenarios:
       behavior?.kind === 'spec'
-        ? behavior.scenarios.map(scenario => ({id: scenario.id, evidence: 'Observed ' + scenario.id}))
+        ? EffectArray.map(behavior.scenarios, scenario => ({id: scenario.id, evidence: 'Observed ' + scenario.id}))
         : [],
     ...(behavior ? {behaviorVerification: 'Verified approved behavior.'} : {}),
-    decisions: plan.decisions.map(item => ({
+    decisions: EffectArray.map(plan.decisions, item => ({
       id: item.id,
       implemented: item.id === 'second' ? 'Adapted actual design' : item.selected,
       rationale: 'Actual implementation explanation ' + item.id,
@@ -187,7 +197,10 @@ function fixture(
 
 describe('pure native closeout admission', () => {
   it('bounds composed display titles and retains complete maximum-length feature titles and rationale', () => {
-    for (const title of ['x'.repeat(256), 'x'.repeat(234) + '🧭'.repeat(5)]) {
+    for (const title of [
+      Effect.pipe('x', EffectString.repeat(256)),
+      Effect.pipe('x', EffectString.repeat(234)) + Effect.pipe('🧭', EffectString.repeat(5)),
+    ]) {
       const f = fixture(true, plan => ({...plan, title}));
       const result = prepareNativeCloseout(f.state, f.plan, f.proposal, f.spec);
       for (const document of [
@@ -241,10 +254,13 @@ describe('pure native closeout admission', () => {
       {...f.proposal, combinedChecks: []},
       {...f.proposal, phaseEvidence: f.proposal.phaseEvidence.slice(1)},
       {...f.proposal, decisions: []},
-      {...f.proposal, decisions: f.proposal.decisions.map(item => ({...item, rationale: ''}))},
+      {...f.proposal, decisions: EffectArray.map(f.proposal.decisions, item => ({...item, rationale: ''}))},
       {
         ...f.proposal,
-        phaseEvidence: f.proposal.phaseEvidence.map(item => ({...item, acceptance: item.acceptance.slice(1)})),
+        phaseEvidence: EffectArray.map(f.proposal.phaseEvidence, item => ({
+          ...item,
+          acceptance: item.acceptance.slice(1),
+        })),
       },
       {...f.proposal, phaseEvidence: [...f.proposal.phaseEvidence, {...f.proposal.phaseEvidence[0], id: 'extra'}]},
     ])
@@ -254,7 +270,7 @@ describe('pure native closeout admission', () => {
     const f = fixture(true);
     const result = prepareNativeCloseout(f.state, f.plan, f.proposal, f.spec);
     expect(result.documents.behavior?.kind).toBe('spec');
-    expect(result.scenarios.map(item => item.scenario.id)).toEqual(['read', 'retry']);
+    expect(EffectArray.map(result.scenarios, item => item.scenario.id)).toEqual(['read', 'retry']);
     const content = renderNativeDocument(result.documents.behavior!);
     expect(content).toContain('Retain complete results.');
     expect(content).toContain('Observed retry');
@@ -277,7 +293,7 @@ describe('pure native closeout admission', () => {
     for (const proposal of [
       {...f.proposal, extra: true},
       {...f.proposal, architecture: {...f.proposal.architecture, diagram: '```mermaid\nflowchart TD\n```'}},
-      ...['../secret', '/absolute', 'C:\\secret', 'src//a.ts', 'src/a.ts:2'].map(path => ({
+      ...EffectArray.map(['../secret', '/absolute', 'C:\\secret', 'src//a.ts', 'src/a.ts:2'], path => ({
         ...f.proposal,
         architecture: {...f.proposal.architecture, codeRefs: [path]},
       })),
@@ -290,11 +306,19 @@ describe('pure native closeout admission', () => {
       decisions: [
         {
           ...plan.decisions[0],
-          selected: 's'.repeat(8192),
-          rationale: 'r'.repeat(8192),
+          selected: Effect.pipe('s', EffectString.repeat(8192)),
+          rationale: Effect.pipe('r', EffectString.repeat(8192)),
           alternatives: [
-            {id: 'a', design: 'd'.repeat(8192), tradeoffs: 't'.repeat(8192)},
-            {id: 'b', design: 'd'.repeat(8192), tradeoffs: 't'.repeat(8192)},
+            {
+              id: 'a',
+              design: Effect.pipe('d', EffectString.repeat(8192)),
+              tradeoffs: Effect.pipe('t', EffectString.repeat(8192)),
+            },
+            {
+              id: 'b',
+              design: Effect.pipe('d', EffectString.repeat(8192)),
+              tradeoffs: Effect.pipe('t', EffectString.repeat(8192)),
+            },
           ],
         },
         ...plan.decisions.slice(1),
@@ -302,8 +326,14 @@ describe('pure native closeout admission', () => {
     }));
     const proposal = {
       ...f.proposal,
-      decisions: f.proposal.decisions.map(item =>
-        item.id === 'first' ? {...item, implemented: 'i'.repeat(8192), rationale: 'e'.repeat(8192)} : item,
+      decisions: EffectArray.map(f.proposal.decisions, item =>
+        item.id === 'first'
+          ? {
+              ...item,
+              implemented: Effect.pipe('i', EffectString.repeat(8192)),
+              rationale: Effect.pipe('e', EffectString.repeat(8192)),
+            }
+          : item,
       ),
     };
     expect(() => prepareNativeCloseout(f.state, f.plan, proposal)).toThrow();
@@ -318,12 +348,12 @@ describe('pure native closeout admission', () => {
           const [phases, criteria, decisions, scenarios] = orders;
           const proposal = {
             ...f.proposal,
-            phaseEvidence: phases.map(i => ({
+            phaseEvidence: EffectArray.map(phases, i => ({
               ...f.proposal.phaseEvidence[i],
-              acceptance: criteria.map(j => f.proposal.phaseEvidence[i].acceptance[j]),
+              acceptance: EffectArray.map(criteria, j => f.proposal.phaseEvidence[i].acceptance[j]),
             })),
-            decisions: decisions.map(i => f.proposal.decisions[i]),
-            scenarios: scenarios.map(i => f.proposal.scenarios[i]),
+            decisions: EffectArray.map(decisions, i => f.proposal.decisions[i]),
+            scenarios: EffectArray.map(scenarios, i => f.proposal.scenarios[i]),
           };
           expect(prepareNativeCloseout(f.state, f.plan, proposal, f.spec)).toEqual(expected);
           expect(() =>

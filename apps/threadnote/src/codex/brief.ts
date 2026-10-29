@@ -6,6 +6,8 @@ import {writeFinalCliOutput} from '../effect/cli/output.js';
 import {cursorCloudScopeRoots} from '../cursor/cloud.js';
 import {codexCloudMemoryScope} from './cloud.js';
 import {CodexCloudError} from './profile.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const runCodexCloudBrief = Effect.fn('codexCloud.brief')(function* (
   config: RuntimeConfig,
@@ -28,5 +30,7 @@ export const runCodexCloudBrief = Effect.fn('codexCloud.brief')(function* (
     },
     cursorCloudScopeRoots(scope),
   );
-  yield* writeFinalCliOutput(options.json ? JSON.stringify(projected.structuredContent) : projected.text.trimEnd());
+  yield* writeFinalCliOutput(
+    options.json ? JSON.stringify(projected.structuredContent) : Effect2.pipe(projected.text, EffectString.trimEnd),
+  );
 });

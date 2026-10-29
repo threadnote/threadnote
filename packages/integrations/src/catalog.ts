@@ -1,5 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import catalog from './catalog.json' with {type: 'json'};
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const capability = Schema.Struct({
   status: Schema.Literals(['managed', 'partial', 'unsupported']),
@@ -75,13 +80,18 @@ export function validateAgentCatalog(value: unknown): readonly AgentCatalogEntry
     for (const url of entry.officialDocs) {
       if (new URL(url).protocol !== 'https:') throw new Error(`Agent documentation must use HTTPS: ${entry.id}`);
     }
-    for (const value of Object.values(entry.capabilities)) {
-      if (value.status !== 'managed' && !value.reason?.trim())
+    for (const value of EffectRecord.values(entry.capabilities)) {
+      if (
+        value.status !== 'managed' &&
+        !Effect.pipe(value.reason, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        )
+      )
         throw new Error(`Missing capability reason: ${entry.id}`);
     }
     const skills = entry.devSkills;
     if (skills.status === 'unsupported') {
-      if (!skills.reason.trim() || entry.capabilities.skills.status === 'managed')
+      if (!Effect.pipe(skills.reason, EffectString.trim) || entry.capabilities.skills.status === 'managed')
         throw new Error(`Missing declared development skill target: ${entry.id}`);
     } else {
       if (
@@ -90,25 +100,29 @@ export function validateAgentCatalog(value: unknown): readonly AgentCatalogEntry
         !skills.scopes.includes(skills.defaultScope) ||
         skills.platforms.length === 0 ||
         new Set(skills.platforms).size !== skills.platforms.length ||
-        skills.platforms.some(platform => !entry.platforms.includes(platform)) ||
-        (skills.root.kind !== 'json-strategy' && skills.scopes.some(scope => scope !== 'user'))
+        EffectArray.some(skills.platforms, platform => !entry.platforms.includes(platform)) ||
+        (skills.root.kind !== 'json-strategy' && EffectArray.some(skills.scopes, scope => scope !== 'user'))
       )
         throw new Error(`Invalid development skill scopes/platforms: ${entry.id}`);
       if (skills.root.kind === 'home-relative') {
         const portable = (value: string) =>
-          /^[A-Za-z0-9_./-]+$/u.test(value) && value.split('/').every(part => part && part !== '.' && part !== '..');
+          /^[A-Za-z0-9_./-]+$/u.test(value) &&
+          EffectArray.every(Effect.pipe(value, EffectString.split('/')), part =>
+            Boolean(part && part !== '.' && part !== '..'),
+          );
         if (
           !portable(skills.root.path) ||
           !skills.root.discoveryPaths.includes(skills.root.path) ||
           new Set(skills.root.discoveryPaths).size !== skills.root.discoveryPaths.length ||
-          !skills.root.discoveryPaths.every(portable)
+          !EffectArray.every(skills.root.discoveryPaths, portable)
         )
           throw new Error(`Invalid development skill discovery roots: ${entry.id}`);
       }
     }
     if (
-      (entry.projectGuidance.status === 'managed' && !entry.projectGuidance.targetPath.trim()) ||
-      (entry.projectGuidance.status === 'unsupported' && !entry.projectGuidance.reason.trim())
+      (entry.projectGuidance.status === 'managed' &&
+        !Effect.pipe(entry.projectGuidance.targetPath, EffectString.trim)) ||
+      (entry.projectGuidance.status === 'unsupported' && !Effect.pipe(entry.projectGuidance.reason, EffectString.trim))
     )
       throw new Error(`Missing project-guidance capability detail: ${entry.id}`);
   }
@@ -118,5 +132,10 @@ export function validateAgentCatalog(value: unknown): readonly AgentCatalogEntry
 export const AGENT_CATALOG = validateAgentCatalog(catalog);
 
 export function findAgentSurface(selector: string): AgentCatalogEntry | undefined {
-  return AGENT_CATALOG.find(entry => entry.id === selector || entry.aliases.includes(selector));
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      AGENT_CATALOG,
+      __effectArrayValue => !!(entry => entry.id === selector || entry.aliases.includes(selector))(__effectArrayValue),
+    ),
+  );
 }

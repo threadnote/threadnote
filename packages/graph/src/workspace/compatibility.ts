@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Option} from 'effect';
 import {discoverPackages} from '../extractor.js';
 import {isRepositoryFactAttributionContextPath} from '../extractor_context.js';
@@ -11,6 +12,9 @@ import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '../types.js';
 import type {WorkspaceTransitionFile} from './transition.js';
 import type {CodeGraphWorkspace, CodeGraphWorkspaceProject} from '../languages/types.js';
 import {compareCodeUnits} from '../ordering.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type CodeGraphWorkspaceCompatibility =
   | {readonly mode: 'unchanged'}
@@ -33,16 +37,17 @@ export function assessCodeGraphWorkspaceCompatibility(
     baseProjects === undefined ||
     currentProjects === undefined ||
     baseProjects.size !== currentProjects.size ||
-    [...baseProjects.keys()].some(id => !currentProjects.has(id))
+    EffectArray.some([...baseProjects.keys()], id => !currentProjects.has(id))
   ) {
     return {mode: 'fallback', reason: 'workspace-changed'};
   }
-  const seedProjectIds = [...currentProjects]
-    .filter(
+  const seedProjectIds = EffectArray.map(
+    EffectArray.filter(
+      [...currentProjects],
       ([id, project]) => projectCompatibilitySurface(baseProjects.get(id)!) !== projectCompatibilitySurface(project),
-    )
-    .map(([id]) => id)
-    .sort(compareCodeUnits);
+    ),
+    ([id]) => id,
+  ).sort(compareCodeUnits);
   if (seedProjectIds.length > 0) return {mode: 'project-closure', seedProjectIds};
   return JSON.stringify(base.workspaces) === JSON.stringify(current.workspaces) &&
     JSON.stringify(base.diagnostics) === JSON.stringify(current.diagnostics)
@@ -74,7 +79,7 @@ function projectCompatibilitySurface(project: CodeGraphWorkspaceProject): string
     project.dependencies,
     project.externalDependencies ?? [],
     project.monikers ?? [],
-    project.dependencyDetails.map(dependency => [
+    EffectArray.map(project.dependencyDetails, dependency => [
       dependency.targetId,
       dependency.provenance,
       dependency.evidence ?? '',
@@ -102,20 +107,21 @@ export function workspaceMembershipEvidence(input: {
 }): WorkspaceMembershipEvidence | undefined {
   const projects = [...input.baseWorkspace.projects, ...input.currentWorkspace.projects];
   if (
-    projects.some(
+    EffectArray.some(
+      projects,
       project => !['node', 'pnpm'].includes(project.buildSystem) || project.resolutionDomain !== 'typescript',
     )
   )
     return undefined;
-  const baseByPath = new Map(input.baseFiles.map(file => [file.path, file]));
-  const currentByPath = new Map(input.currentFiles.map(file => [file.path, file]));
+  const baseByPath = new Map(EffectArray.map(input.baseFiles, file => [file.path, file]));
+  const currentByPath = new Map(EffectArray.map(input.currentFiles, file => [file.path, file]));
   if (baseByPath.size !== input.baseFiles.length || currentByPath.size !== input.currentFiles.length) return undefined;
-  const oldIds = new Set(input.baseWorkspace.projects.map(project => project.id));
-  const newIds = new Set(input.currentWorkspace.projects.map(project => project.id));
-  const added = input.currentWorkspace.projects.filter(project => !oldIds.has(project.id));
-  const removed = input.baseWorkspace.projects.filter(project => !newIds.has(project.id));
+  const oldIds = new Set(EffectArray.map(input.baseWorkspace.projects, project => project.id));
+  const newIds = new Set(EffectArray.map(input.currentWorkspace.projects, project => project.id));
+  const added = EffectArray.filter(input.currentWorkspace.projects, project => !oldIds.has(project.id));
+  const removed = EffectArray.filter(input.baseWorkspace.projects, project => !newIds.has(project.id));
   if (!added.length && !removed.length) return undefined;
-  const deltaNames = new Set([...added, ...removed].map(project => project.name));
+  const deltaNames = new Set(EffectArray.map([...added, ...removed], project => project.name));
   for (const [workspace, files] of [
     [input.baseWorkspace, baseByPath],
     [input.currentWorkspace, currentByPath],
@@ -166,9 +172,9 @@ export function workspaceMembershipEvidence(input: {
       continue;
     }
     if (file.language !== 'npm-manifest' || !/(?:^|\/)package\.json$/.test(path)) return undefined;
-    const root = path.replace(/(?:^|\/)package\.json$/, '');
-    if (!before && !added.some(project => project.root === root)) return undefined;
-    if (!after && !removed.some(project => project.root === root)) return undefined;
+    const root = Effect.pipe(path, EffectString.replace(/(?:^|\/)package\.json$/, ''));
+    if (!before && !EffectArray.some(added, project => project.root === root)) return undefined;
+    if (!after && !EffectArray.some(removed, project => project.root === root)) return undefined;
     if (before && after) {
       const oldManifest = parsedManifest(before);
       const newManifest = parsedManifest(after);
@@ -180,7 +186,7 @@ export function workspaceMembershipEvidence(input: {
         if (newDependencies !== undefined && !record(newDependencies)) return undefined;
         const oldValues = record(oldDependencies) ? oldDependencies : {};
         const newValues = record(newDependencies) ? newDependencies : {};
-        for (const name of new Set([...Object.keys(oldValues), ...Object.keys(newValues)])) {
+        for (const name of new Set([...EffectRecord.keys(oldValues), ...EffectRecord.keys(newValues)])) {
           if (oldValues[name] !== newValues[name] && !deltaNames.has(name)) return undefined;
         }
         delete oldManifest[section];
@@ -192,13 +198,37 @@ export function workspaceMembershipEvidence(input: {
   const namesFor = (files: readonly CodeGraphInventoryFile[]) => {
     const packages = discoverPackages(files);
     return new Map(
-      files.map(file => {
-        let directory = file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : '';
+      EffectArray.map(files, file => {
+        let directory = Effect.pipe(file.path, EffectString.includes('/'))
+          ? Effect.pipe(
+              file.path,
+              EffectString.slice(
+                0,
+                Effect.pipe(
+                  file.path,
+                  EffectString.lastIndexOf('/'),
+                  Effect.Option.getOrElse(() => -1),
+                ),
+              ),
+            )
+          : '';
         for (;;) {
           const name = packages.nameByRoot.get(directory);
           if (name !== undefined) return [file.path, name] as const;
           if (!directory) return [file.path, null] as const;
-          directory = directory.includes('/') ? directory.slice(0, directory.lastIndexOf('/')) : '';
+          directory = Effect.pipe(directory, EffectString.includes('/'))
+            ? Effect.pipe(
+                directory,
+                EffectString.slice(
+                  0,
+                  Effect.pipe(
+                    directory,
+                    EffectString.lastIndexOf('/'),
+                    Effect.Option.getOrElse(() => -1),
+                  ),
+                ),
+              )
+            : '';
         }
       }),
     );
@@ -257,20 +287,22 @@ export function workspaceTransitionFileEvidence(
       if (reference.resolutionDomain !== 'workspace') domains.add(reference.resolutionDomain);
     }
   }
-  if ([...domains].some(domain => !['typescript', 'generic', 'documentation', 'global'].includes(domain)))
+  if (EffectArray.some([...domains], domain => !['typescript', 'generic', 'documentation', 'global'].includes(domain)))
     return undefined;
   return {
     path: file.path,
     size: file.size,
     resolutionDomains: [...domains].sort(compareCodeUnits),
-    provenUnownedResolutionDomains: [...domains].filter(domain => domain !== 'typescript').sort(compareCodeUnits),
+    provenUnownedResolutionDomains: EffectArray.filter([...domains], domain => domain !== 'typescript').sort(
+      compareCodeUnits,
+    ),
     hasWorkspacePackageSymbol,
     repositoryPackageName: packageName,
   };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 function parsedManifest(file: CodeGraphInventoryFile): Record<string, unknown> | undefined {
   try {
@@ -282,13 +314,14 @@ function parsedManifest(file: CodeGraphInventoryFile): Record<string, unknown> |
 }
 function canonicalManifest(value: unknown): string {
   const canonical = (item: unknown): unknown =>
-    Array.isArray(item)
-      ? item.map(canonical)
+    EffectArray.isArray(item)
+      ? EffectArray.map(item, canonical)
       : record(item)
-        ? Object.fromEntries(
-            Object.entries(item)
-              .sort(([a], [b]) => compareCodeUnits(a, b))
-              .map(([key, entry]) => [key, canonical(entry)]),
+        ? EffectRecord.fromEntries(
+            EffectArray.map(
+              EffectRecord.toEntries(item).sort(([a], [b]) => compareCodeUnits(a, b)),
+              ([key, entry]) => [key, canonical(entry)],
+            ),
           )
         : item;
   return JSON.stringify(canonical(value));

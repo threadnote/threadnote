@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -11,9 +12,12 @@ import {
 
 const MAX_ACTIVATION_STATE_BYTES = 64 * 1024;
 
-export class ActivationStoreError extends Schema.TaggedError<ActivationStoreError>()('ActivationStoreError', {
-  message: Schema.String,
-}) {}
+export class ActivationStoreError extends Schema.TaggedError<ActivationStoreError, {readonly brand: unique symbol}>()(
+  'ActivationStoreError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export interface ActivationStateV1 {
   readonly plan: ActivationPlanV1;
@@ -185,7 +189,7 @@ function isInitialReceipt(receipt: ActivationReceiptV1): boolean {
   return (
     receipt.generation === 0 &&
     receipt.status === 'pending' &&
-    receipt.operations.every(operation => operation.status === 'pending')
+    EffectArray.every(receipt.operations, operation => operation.status === 'pending')
   );
 }
 

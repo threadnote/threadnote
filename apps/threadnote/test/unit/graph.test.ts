@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {buildGraphDocument, extractDependencyFacts, resolveGraphEdges} from '@threadnote/threadnote/graph';
 import {runEffect as run} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('extractDependencyFacts', () => {
   let dir: string;
@@ -36,17 +39,20 @@ describe('extractDependencyFacts', () => {
   it('parses go.mod module and require block', async () => {
     await writeFile(
       join(dir, 'go.mod'),
-      [
-        'module github.com/acme/service',
-        '',
-        'go 1.22',
-        '',
-        'require (',
-        '\tgithub.com/acme/lib v1.2.3',
-        '\tgithub.com/pkg/errors v0.9.1 // indirect',
-        ')',
-        '',
-      ].join('\n'),
+      EffectArray.join(
+        [
+          'module github.com/acme/service',
+          '',
+          'go 1.22',
+          '',
+          'require (',
+          '\tgithub.com/acme/lib v1.2.3',
+          '\tgithub.com/pkg/errors v0.9.1 // indirect',
+          ')',
+          '',
+        ],
+        '\n',
+      ),
       'utf8',
     );
     const facts = await run(extractDependencyFacts(dir));
@@ -87,7 +93,7 @@ describe('buildGraphDocument', () => {
       internalEdges: [{dependency: '@acme/design-system', project: 'design-system'}],
       projectName: 'web-app',
     });
-    expect(doc.startsWith('# web-app — dependency facts')).toBe(true);
+    expect(Effect.pipe(doc, EffectString.startsWith('# web-app — dependency facts'))).toBe(true);
     expect(doc).not.toContain('MEMORY');
     expect(doc).not.toContain('kind:');
     expect(doc).toContain('provides: @acme/web-app');

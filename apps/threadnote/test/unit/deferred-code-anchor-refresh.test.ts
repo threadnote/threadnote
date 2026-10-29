@@ -1,9 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphWatcher} from '@threadnote/graph/watcher';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
+import type {CodeGraphStatus, RepositoryIdentity} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -24,6 +26,8 @@ import {
 import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PRESENT_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/present.md';
 const MISSING_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/missing.md';
@@ -56,7 +60,7 @@ describe('deferred code-anchor workspace refresh', () => {
             cwd: fixture.present,
           }),
         ]);
-        expect(targets.some(target => target.cwd === fixture.missing)).toBe(false);
+        expect(EffectArray.some(targets, target => target.cwd === fixture.missing)).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
@@ -167,10 +171,10 @@ describe('deferred code-anchor workspace refresh', () => {
       const scheduled: Array<{readonly admissionClass?: string; readonly cwd: string; readonly project?: string}> = [];
       yield* scheduleDeferredCodeAnchorWorkspaceRefresh(fixture.config, {
         cwd: fixture.present,
-        worktreeId: 'a'.repeat(64),
+        worktreeId: Effect2.pipe('a', EffectString.repeat(64)),
         project: 'selected',
       }).pipe(
-        Effect.provideService(CodeGraphQueryService, {status: () => Effect.succeed({} as never)} as never),
+        Effect.provideService(CodeGraphQueryService, queryServiceWithStatus(statusForFixture(fixture.present))),
         provideTestLayer(
           deferredCodeAnchorRefreshSchedulerLayer.pipe(
             Layer.provide(
@@ -217,7 +221,7 @@ describe('deferred code-anchor workspace refresh', () => {
       const scheduled: string[] = [];
       yield* scheduleDeferredCodeAnchorWorkspaceRefresh(
         {agentContextHome: '/threadnote-home', manifestPath: '/missing-manifest.yaml'},
-        {cwd: '/repo', worktreeId: 'a'.repeat(64)},
+        {cwd: '/repo', worktreeId: Effect2.pipe('a', EffectString.repeat(64))},
       );
       expect(scheduled).toEqual([]);
     }).pipe(provideTestLayer(ApplicationLayer)),
@@ -300,4 +304,36 @@ function deferredRequest(callerCwd: string): DeferredCodeAnchorWriteRequest {
 
 function memoryContent(metadata: MemoryMetadata, body: string): string {
   return formatMemoryDocument('MEMORY', metadata, body);
+}
+
+function statusForFixture(repoRoot: string): CodeGraphStatus {
+  const identity: RepositoryIdentity = {
+    caseMode: 'sensitive',
+    checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+    displayName: 'selected',
+    gitCommonDirectory: `${repoRoot}/.git`,
+    headCommit: Effect2.pipe('b', EffectString.repeat(40)),
+    objectFormat: 'sha1',
+    repoRoot,
+    repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
+  };
+  return {
+    databasePath: `${repoRoot}/.threadnote/code-graph.sqlite`,
+    freshness: 'current',
+    identity,
+    languagePacks: [],
+    stale: false,
+  };
+}
+
+function queryServiceWithStatus(status: CodeGraphStatus) {
+  return CodeGraphQueryService.of({
+    attachSharedReadySnapshot: () => Effect.die('unused query operation'),
+    inspect: () => Effect.die('unused query operation'),
+    purge: () => Effect.die('unused query operation'),
+    status: () => Effect.succeed(status),
+    statusForIdentity: () => Effect.die('unused query operation'),
+    statusForPublishedIdentity: () => Effect.die('unused query operation'),
+  });
 }

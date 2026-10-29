@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {lazy, Suspense} from 'react';
 import articles from 'virtual:threadnote-articles';
 import latestRelease from 'virtual:threadnote-latest-release';
@@ -14,6 +15,8 @@ import {
   whatsNewArticleHref,
   whatsNewReleaseHref,
 } from '../lib/site';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const ThreadScene = lazy(() => import('../visuals/ThreadScene'));
 const continuationStudySlug = 'graphmem-agent-continuation-study';
@@ -257,7 +260,7 @@ export default function LandingPage() {
           >
             <span className="home-update-banner__label">Latest release</span>
             <div>
-              <strong>Threadnote {latestRelease.version.replace(/^v/, '')}</strong>
+              <strong>Threadnote {Effect.pipe(latestRelease.version, EffectString.replace(/^v/, ''))}</strong>
               <p>{latestRelease.headline}</p>
             </div>
             <span className="home-update-banner__action">
@@ -311,7 +314,7 @@ export default function LandingPage() {
           </p>
         </header>
         <div className="feature-grid">
-          {features.map((feature, index) => (
+          {EffectArray.map(features, (feature, index) => (
             <article className={`feature-card feature-card--${feature.accent}`} key={feature.label}>
               <div className="feature-card__top">
                 <span className="feature-card__index">0{index + 1}</span>
@@ -381,7 +384,7 @@ export default function LandingPage() {
           </p>
         </header>
         <ol className="workflow-list">
-          {workflow.map(item => (
+          {EffectArray.map(workflow, item => (
             <li key={item.number}>
               <span>{item.number}</span>
               <div>

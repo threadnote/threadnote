@@ -7,6 +7,8 @@ import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-inva
 import {SystemInfo} from '@threadnote/platform/system';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {inspectWorkflowJournal} from '../../src/workflow_memory/journal.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const Initialized = Schema.Struct({
   bindingId: Schema.String,
@@ -29,7 +31,9 @@ effectIt.effect('allocates distinct native families while another initializer at
     const fs = {
       ...f.fs,
       link: (source: string, target: string) =>
-        source.endsWith('.tmp') && f.path.dirname(source) === inventoryDirectory && !synchronized
+        Effect2.pipe(source, EffectString.endsWith('.tmp')) &&
+        f.path.dirname(source) === inventoryDirectory &&
+        !synchronized
           ? Effect.gen(function* () {
               synchronized = true;
               temporary = source;

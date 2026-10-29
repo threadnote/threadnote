@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Crypto, Effect, FileSystem, Path, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -37,10 +38,10 @@ import {
 export const CODE_GRAPH_ORPHAN_PROVENANCE_CANDIDATE_LIMIT = 32;
 export const CODE_GRAPH_ORPHAN_PROVENANCE_CURSOR_RECOVERY_DIAGNOSTIC = 'orphan-provenance-cursor-recovered' as const;
 
-class CodeGraphOrphanProvenanceAuthorityChanged extends Schema.TaggedError<CodeGraphOrphanProvenanceAuthorityChanged>()(
-  'CodeGraphOrphanProvenanceAuthorityChanged',
-  {message: Schema.String},
-) {}
+class CodeGraphOrphanProvenanceAuthorityChanged extends Schema.TaggedError<
+  CodeGraphOrphanProvenanceAuthorityChanged,
+  {readonly brand: unique symbol}
+>()('CodeGraphOrphanProvenanceAuthorityChanged', {message: Schema.String}) {}
 
 export type CodeGraphOrphanProvenanceCleanupResult =
   | {
@@ -179,7 +180,8 @@ export const makeCodeGraphOrphanProvenanceCleaner = Effect.fn('codeGraph.makeOrp
             }
             expectedAnchor = resolved.value;
           }
-          const repositoryCandidates = evidenceCandidates.filter(
+          const repositoryCandidates = EffectArray.filter(
+            evidenceCandidates,
             candidate =>
               candidate.repositoryId === expectedAnchor.repositoryId &&
               candidate.worktreeId !== expectedAnchor.worktreeId,
@@ -192,7 +194,7 @@ export const makeCodeGraphOrphanProvenanceCleaner = Effect.fn('codeGraph.makeOrp
             return withCursorRecovery({reason: 'anchor-unavailable', state: 'preserved'} as const);
           }
           const initialAuthority = yield* dependencies
-            .observeAuthority(initialAnchor.value, repositoryCandidates.map(authorityTarget))
+            .observeAuthority(initialAnchor.value, EffectArray.map(repositoryCandidates, authorityTarget))
             .pipe(Effect.option);
           if (initialAuthority._tag === 'None' || initialAuthority.value.state === 'unknown') {
             return withCursorRecovery({reason: 'registry-unavailable', state: 'deferred'} as const);
@@ -204,10 +206,14 @@ export const makeCodeGraphOrphanProvenanceCleaner = Effect.fn('codeGraph.makeOrp
           ) {
             return withCursorRecovery({reason: 'registry-unavailable', state: 'deferred'} as const);
           }
-          const targetIndex = repositoryCandidates.findIndex(
-            (_candidate, index) =>
-              completeInitialAuthority.pathStates[index] === 'missing' &&
-              completeInitialAuthority.registryStates[index] === 'absent',
+          const targetIndex = EffectOption.getOrElse(
+            EffectArray.findFirstIndex(
+              repositoryCandidates,
+              (_candidate, index) =>
+                completeInitialAuthority.pathStates[index] === 'missing' &&
+                completeInitialAuthority.registryStates[index] === 'absent',
+            ),
+            () => -1,
           );
           if (targetIndex < 0) {
             return withCursorRecovery({
@@ -457,7 +463,7 @@ function readEvidenceCandidates(
     {concurrency: 1},
   ).pipe(
     Effect.map(evidence =>
-      evidence.filter((candidate): candidate is ProvenanceCandidate => candidate.state === 'candidate'),
+      EffectArray.filter(evidence, (candidate): candidate is ProvenanceCandidate => candidate.state === 'candidate'),
     ),
   );
 }

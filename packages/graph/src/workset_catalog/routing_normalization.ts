@@ -1,6 +1,8 @@
 import type {CodeGraphWorksetRoutingSymbolV1} from './types.js';
 import {normalizedTerms} from '../store/utilities.js';
 import {compareCodeUnits} from '../ordering.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_WORKSET_ROUTING_EXACT_KEY_KINDS = [
   'lookup-key',
@@ -25,7 +27,13 @@ export interface CodeGraphWorksetRoutingTermsV1 {
 
 /** Keep this normalization identical to the router's exact-match comparison. */
 export function normalizeCodeGraphWorksetRoutingExactKey(value: string): string {
-  return value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
+  return Effect.pipe(
+    value,
+    EffectString.normalize('NFKC'),
+    EffectString.trim,
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.toLowerCase,
+  );
 }
 
 /**
@@ -39,7 +47,16 @@ export function normalizeCodeGraphWorksetRoutingTerms(
 ): CodeGraphWorksetRoutingTermsV1 {
   const accepted = new Set<string>();
   let truncated = false;
-  const lexicalChunks = value.normalize('NFKC').match(/[\p{L}\p{N}_$.-]+/gu) ?? [];
+  const lexicalChunks =
+    Effect.pipe(value, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.normalize('NFKC'));
+      const __effectPipeStage1 = Effect.pipe(
+        __effectPipeStage0,
+        EffectString.match(/[\p{L}\p{N}_$.-]+/gu),
+        Effect.Option.getOrElse(() => null),
+      );
+      return __effectPipeStage1;
+    }) ?? [];
   for (const chunk of lexicalChunks) {
     const terms = normalizedTerms(chunk);
     // normalizedTerms itself has the catalog's 32-term per-value storage cap.
@@ -81,8 +98,17 @@ export function codeGraphWorksetRoutingExactKeys(
   add('package', symbol.packageName);
   const path = normalizeCodeGraphWorksetRoutingExactKey(symbol.path);
   add('path', path);
-  for (let offset = path.indexOf('/'); offset >= 0; offset = path.indexOf('/', offset + 1)) {
-    add('path-suffix', path.slice(offset + 1));
+  for (
+    let offset = Effect.pipe(
+      path,
+      EffectString.indexOf('/'),
+      Effect.Option.getOrElse(() => -1),
+    );
+    offset >= 0;
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native search position argument changes the search origin; Effect String has no position parameter.
+    offset = path.indexOf('/', offset + 1)
+  ) {
+    add('path-suffix', Effect.pipe(path, EffectString.slice(offset + 1)));
   }
 
   return [...keys.values()].sort(

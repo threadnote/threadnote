@@ -1,10 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {inferProjectFromManifest, parseSeedManifest, requireManifestWorkset} from '@threadnote/workspace/manifest';
 
 const manifest = parseSeedManifest(
   JSON.stringify({
     version: 1,
-    projects: ['product', 'product-mobile'].map(name => ({
+    projects: EffectArray.map(['product', 'product-mobile'], name => ({
       name,
       path: '/fixture',
       seed: [],
@@ -27,7 +28,7 @@ describe('recall manifest metadata', () => {
   });
 
   it('preserves empty worksets and rejects unknown names or members explicitly', () => {
-    expect(requireManifestWorkset(manifest, 'MOBILE').projects.map(project => project.name)).toEqual([
+    expect(EffectArray.map(requireManifestWorkset(manifest, 'MOBILE').projects, project => project.name)).toEqual([
       'product-mobile',
     ]);
     expect(requireManifestWorkset(manifest, 'empty').projects).toEqual([]);

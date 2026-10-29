@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -6,7 +7,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {TestClock} from 'effect/testing';
-import {Deferred, Effect, FileSystem, Fiber, Layer} from 'effect';
+import {Deferred, Effect, FileSystem, Fiber, Layer, Schema} from 'effect';
 import {cachedCodeGraphFactBytes, CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '@threadnote/graph/fact/budget';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
@@ -32,6 +33,8 @@ import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const encoder = new TextEncoder();
 
@@ -129,7 +132,7 @@ describe('code graph parser worker pool', () => {
       diagnostics: [],
       edges: [],
       path: file.path,
-      symbols: [{...root, documentation: 'x'.repeat(maximumFactBytes * 2)}],
+      symbols: [{...root, documentation: Effect2.pipe('x', EffectString.repeat(maximumFactBytes * 2))}],
     };
     const observedBytes = cachedCodeGraphFactBytes(byteHeavyFacts);
     const byteHeavy = budgetParserWorkerFacts(file, byteHeavyFacts, {maximumFactBytes});
@@ -236,7 +239,7 @@ describe('code graph parser worker pool', () => {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-source-budget-'});
       const pool = yield* CodeGraphParserPool;
-      const file = {...inventoryFile('src/oversized.ts', 'é'.repeat(9)), size: 1};
+      const file = {...inventoryFile('src/oversized.ts', Effect2.pipe('é', EffectString.repeat(9))), size: 1};
       const result = yield* pool.extract(file, home);
 
       expect(result.degraded).toBe(true);
@@ -264,7 +267,10 @@ describe('code graph parser worker pool', () => {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-source-boundary-'});
       const pool = yield* CodeGraphParserPool;
-      const admitted = yield* pool.extract(inventoryFile('src/boundary.ts', 'é'.repeat(8)), home);
+      const admitted = yield* pool.extract(
+        inventoryFile('src/boundary.ts', Effect2.pipe('é', EffectString.repeat(8))),
+        home,
+      );
 
       expect(admitted.degraded).toBe(false);
       expect(processes).toHaveLength(1);
@@ -315,7 +321,7 @@ describe('code graph parser worker pool', () => {
       expect(result.degraded).toBe(false);
       expect(result.parseMilliseconds).toBeGreaterThanOrEqual(0);
       expect(result.facts.path).toBe('src/real-worker.ts');
-      expect(result.facts.symbols.some(symbol => symbol.name === 'realWorker')).toBe(true);
+      expect(EffectArray.some(result.facts.symbols, symbol => symbol.name === 'realWorker')).toBe(true);
 
       yield* pool.trimIdle;
       const restarted = yield* pool.extract(
@@ -323,7 +329,7 @@ describe('code graph parser worker pool', () => {
         home,
       );
       expect(restarted.degraded).toBe(false);
-      expect(restarted.facts.symbols.some(symbol => symbol.name === 'restartedWorker')).toBe(true);
+      expect(EffectArray.some(restarted.facts.symbols, symbol => symbol.name === 'restartedWorker')).toBe(true);
     }).pipe(provideTestLayer(parserLayer({capacity: 1})), Effect.scoped),
   );
 
@@ -386,7 +392,7 @@ describe('code graph parser worker pool', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-budget-'});
-      const content = `Pathological corpus\n===================\n\nprivate-corpus-sentinel ${'漢'.repeat(2_850_000)}`;
+      const content = `Pathological corpus\n===================\n\nprivate-corpus-sentinel ${Effect2.pipe('漢', EffectString.repeat(2_850_000))}`;
       const file = inventoryFile('docs/pathological.rst', content, 'document');
       const raw = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.extractRawFile(file).pipe(
         provideTestLayer(TreeSitterRuntime.layer),
@@ -400,9 +406,9 @@ describe('code graph parser worker pool', () => {
       expect(result.facts.edges).toEqual([]);
       expect(result.facts.diagnostics[0]).toContain('code-graph-budget code=fact-bytes status=exhausted');
       expect(cachedCodeGraphFactBytes(result.facts)).toBeLessThanOrEqual(CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM);
-      expect(parserWorkerSuccessResponseBytes(result.facts, 'x'.repeat(100))).toBeLessThanOrEqual(
-        CODE_GRAPH_PARSER_WORKER_RESPONSE_BYTES_MAXIMUM,
-      );
+      expect(
+        parserWorkerSuccessResponseBytes(result.facts, Effect2.pipe('x', EffectString.repeat(100))),
+      ).toBeLessThanOrEqual(CODE_GRAPH_PARSER_WORKER_RESPONSE_BYTES_MAXIMUM);
       expect(JSON.stringify(result.facts)).not.toContain('private-corpus-sentinel');
     }).pipe(provideTestLayer(parserLayer({capacity: 1})), Effect.scoped),
   );
@@ -417,7 +423,7 @@ describe('code graph parser worker pool', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-determinism-'});
-        const files = names.map((name, index) =>
+        const files = EffectArray.map(names, (name, index) =>
           inventoryFile(`src/${index}-${name}.ts`, `export const ${name || 'value'}${index} = ${index};`),
         );
         const serial = yield* runPool(files, home, 1, echoSpawner({delayFor: file => file.path.length % 3}));
@@ -428,9 +434,11 @@ describe('code graph parser worker pool', () => {
           echoSpawner({delayFor: file => Math.abs(17 - file.path.length) % 3}),
         );
 
-        expect(serial.map(result => result.facts)).toEqual(parallel.map(result => result.facts));
-        expect(serial.every(result => !result.degraded)).toBe(true);
-        expect(parallel.every(result => !result.degraded)).toBe(true);
+        expect(EffectArray.map(serial, result => result.facts)).toEqual(
+          EffectArray.map(parallel, result => result.facts),
+        );
+        expect(EffectArray.every(serial, result => !result.degraded)).toBe(true);
+        expect(EffectArray.every(parallel, result => !result.degraded)).toBe(true);
       }).pipe(provideTestLayer(baseLayer), Effect.scoped),
     {fastCheck: {numRuns: 30}},
   );
@@ -464,7 +472,7 @@ describe('code graph parser worker pool', () => {
             {concurrency: 'unbounded'},
           ),
         );
-        yield* waitUntil(() => processes.filter(worker => worker.writes.length === 1).length === capacity);
+        yield* waitUntil(() => EffectArray.filter(processes, worker => worker.writes.length === 1).length === capacity);
 
         expect(attempts).toHaveLength(capacity);
         expect(new Set(attempts).size).toBe(capacity);
@@ -472,7 +480,7 @@ describe('code graph parser worker pool', () => {
           const request = worker.writes[0];
           worker.respond(request, factsFor(request.file));
         }
-        expect((yield* Fiber.join(requests)).every(result => !result.degraded)).toBe(true);
+        expect(EffectArray.every(yield* Fiber.join(requests), result => !result.degraded)).toBe(true);
       }).pipe(
         provideTestLayer(parserLayer({capacity, spawnWorker: spawn}, TestSystemInfoLayer, trackedFs)),
         Effect.scoped,
@@ -520,7 +528,7 @@ describe('code graph parser worker pool', () => {
       );
 
       expect(result.degraded).toBe(false);
-      expect(attempts.map(path => path.split('/').at(-1))).toEqual([
+      expect(EffectArray.map(attempts, path => Effect2.pipe(path, EffectString.split('/')).at(-1))).toEqual([
         `${preferredSlot}.lock`,
         `${1 - preferredSlot}.lock`,
       ]);
@@ -612,9 +620,9 @@ describe('code graph parser worker pool', () => {
 
       expect(result.degraded).toBe(true);
       expect(processes).toHaveLength(2);
-      expect(processes.every(process => process.killed)).toBe(true);
-      expect(result.facts.diagnostics.join('\n')).toContain('time budget');
-      expect(result.facts.diagnostics.join('\n')).toContain(
+      expect(EffectArray.every(processes, process => process.killed)).toBe(true);
+      expect(EffectArray.join(result.facts.diagnostics, '\n')).toContain('time budget');
+      expect(EffectArray.join(result.facts.diagnostics, '\n')).toContain(
         '[code-graph-budget code=elapsed status=exhausted observed-milliseconds=20 maximum-milliseconds=20]',
       );
     }).pipe(
@@ -673,7 +681,7 @@ describe('code graph parser worker pool', () => {
       expect(result.degraded).toBe(true);
       expect(processes).toHaveLength(1);
       expect(JSON.stringify(result.facts)).not.toContain('SUPER_SECRET_SOURCE_TEXT');
-      expect(result.facts.diagnostics.join('\n')).toContain('language extraction failed');
+      expect(EffectArray.join(result.facts.diagnostics, '\n')).toContain('language extraction failed');
     }).pipe(provideTestLayer(parserLayer({capacity: 1, spawnWorker: spawn})), Effect.scoped);
   });
 
@@ -694,9 +702,13 @@ describe('code graph parser worker pool', () => {
       yield* pool.extract(inventoryFile('src/second.ts', 'export const second = true;'), secondHome);
 
       expect(launches).toHaveLength(2);
-      expect(launches.map(launch => launch.environment.THREADNOTE_HOME)).toEqual([firstHome, secondHome]);
-      expect(launches.every(launch => launch.arguments.at(-1) === CODE_GRAPH_PARSER_WORKER_ARGUMENT)).toBe(true);
-      expect(launches.every(launch => launch.environment.THREADNOTE_CODE_GRAPH_PARSER_WORKER === '1')).toBe(true);
+      expect(EffectArray.map(launches, launch => launch.environment.THREADNOTE_HOME)).toEqual([firstHome, secondHome]);
+      expect(EffectArray.every(launches, launch => launch.arguments.at(-1) === CODE_GRAPH_PARSER_WORKER_ARGUMENT)).toBe(
+        true,
+      );
+      expect(
+        EffectArray.every(launches, launch => launch.environment.THREADNOTE_CODE_GRAPH_PARSER_WORKER === '1'),
+      ).toBe(true);
     }).pipe(provideTestLayer(parserLayer({capacity: 1, spawnWorker: spawn})), Effect.scoped);
   });
 
@@ -763,7 +775,7 @@ describe('code graph parser worker pool', () => {
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-parser-worker-session-budget-'});
       const pool = yield* CodeGraphParserPool;
       const active = inventoryFile('src/active.ts', 'export const active = true;');
-      const oversized = inventoryFile('src/oversized.ts', 'x'.repeat(65));
+      const oversized = inventoryFile('src/oversized.ts', Effect2.pipe('x', EffectString.repeat(65)));
 
       const occupied = yield* Effect.forkScoped(pool.withParserSlot(home, [active], extract => extract(active)));
       yield* waitUntil(() => processes[0]?.writes.length === 1);
@@ -792,7 +804,9 @@ describe('code graph parser worker pool', () => {
 
       yield* pool.warm(home);
       expect(processes).toHaveLength(2);
-      expect(processes.every(process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts')).toBe(true);
+      expect(
+        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts'),
+      ).toBe(true);
 
       const files = [
         inventoryFile('src/warm-a.ts', 'export const warmA = true;'),
@@ -804,9 +818,9 @@ describe('code graph parser worker pool', () => {
         {concurrency: 'unbounded'},
       );
 
-      expect(results.every(result => !result.degraded)).toBe(true);
+      expect(EffectArray.every(results, result => !result.degraded)).toBe(true);
       expect(processes).toHaveLength(2);
-      expect(processes.reduce((total, process) => total + process.writes.length, 0)).toBe(4);
+      expect(EffectArray.reduce(processes, 0, (total, process) => total + process.writes.length)).toBe(4);
     }).pipe(provideTestLayer(parserLayer({capacity: 2, spawnWorker: spawn})), Effect.scoped);
   });
 
@@ -827,7 +841,9 @@ describe('code graph parser worker pool', () => {
       expect(processes).toHaveLength(2);
       yield* pool.warm(home, 4);
       expect(processes).toHaveLength(4);
-      expect(processes.every(process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts')).toBe(true);
+      expect(
+        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts'),
+      ).toBe(true);
 
       for (const requestedSlots of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
         expect(yield* Effect.flip(pool.warm(home, requestedSlots))).toEqual(
@@ -894,12 +910,14 @@ describe('code graph parser worker pool', () => {
 
       yield* pool.warm(home);
       expect(processes).toHaveLength(1);
-      expect(processes[0].writes.map(request => request.file.path)).toEqual(['.threadnote/parser-warmup.ts']);
+      expect(EffectArray.map(processes[0].writes, request => request.file.path)).toEqual([
+        '.threadnote/parser-warmup.ts',
+      ]);
 
       const result = yield* pool.extract(inventoryFile('src/lazy.ts', 'export const lazy = true;'), home);
       expect(result.degraded).toBe(false);
       expect(processes).toHaveLength(1);
-      expect(processes[0].writes.map(request => request.file.path)).toEqual([
+      expect(EffectArray.map(processes[0].writes, request => request.file.path)).toEqual([
         '.threadnote/parser-warmup.ts',
         'src/lazy.ts',
       ]);
@@ -930,10 +948,10 @@ describe('code graph parser worker pool', () => {
       });
 
       expect(processes).toHaveLength(4);
-      expect(results.every(result => !result.degraded)).toBe(true);
-      expect(processes.flatMap(process => process.writes.map(request => request.file.path)).sort()).toEqual(
-        files.map(file => file.path).sort(),
-      );
+      expect(EffectArray.every(results, result => !result.degraded)).toBe(true);
+      expect(
+        EffectArray.flatMap(processes, process => EffectArray.map(process.writes, request => request.file.path)).sort(),
+      ).toEqual(EffectArray.map(files, file => file.path).sort());
     }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
   });
 
@@ -963,14 +981,11 @@ describe('code graph parser worker pool', () => {
         {concurrency: 'unbounded'},
       );
 
-      expect(results.every(result => !result.degraded)).toBe(true);
+      expect(EffectArray.every(results, result => !result.degraded)).toBe(true);
       expect(processes).toHaveLength(4);
-      expect(processes.flatMap(process => process.writes.map(request => request.file.path))).toEqual([
-        'src/planned.ts',
-        'src/planned.ts',
-        'src/planned.ts',
-        'src/planned.ts',
-      ]);
+      expect(
+        EffectArray.flatMap(processes, process => EffectArray.map(process.writes, request => request.file.path)),
+      ).toEqual(['src/planned.ts', 'src/planned.ts', 'src/planned.ts', 'src/planned.ts']);
     }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
   });
 
@@ -989,7 +1004,9 @@ describe('code graph parser worker pool', () => {
 
       yield* warmPlannedParserCapacity(pool, home, 5);
       expect(processes).toHaveLength(4);
-      expect(processes.every(process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts')).toBe(true);
+      expect(
+        EffectArray.every(processes, process => process.writes[0]?.file.path === '.threadnote/parser-warmup.ts'),
+      ).toBe(true);
     }).pipe(provideTestLayer(parserLayer({capacity: 4, spawnWorker: spawn})), Effect.scoped);
   });
 
@@ -1022,7 +1039,7 @@ describe('code graph parser worker pool', () => {
       );
       expect(result.degraded).toBe(false);
       expect(processes).toHaveLength(1);
-      expect(prepared.writes.map(request => request.file.path)).toEqual([
+      expect(EffectArray.map(prepared.writes, request => request.file.path)).toEqual([
         '.threadnote/parser-warmup.ts',
         'src/reused-after-interrupt.ts',
       ]);
@@ -1053,11 +1070,11 @@ describe('code graph parser worker pool', () => {
         home,
       );
 
-      expect(results.map(result => result.facts.path)).toEqual(files.map(file => file.path));
+      expect(EffectArray.map(results, result => result.facts.path)).toEqual(EffectArray.map(files, file => file.path));
       expect(afterSession.degraded).toBe(false);
       expect(processes).toHaveLength(1);
-      expect(processes[0].writes.map(request => request.file.path)).toEqual([
-        ...files.map(file => file.path),
+      expect(EffectArray.map(processes[0].writes, request => request.file.path)).toEqual([
+        ...EffectArray.map(files, file => file.path),
         'src/session-after.ts',
       ]);
     }).pipe(provideTestLayer(parserLayer({capacity: 1, spawnWorker: spawn})), Effect.scoped);
@@ -1101,7 +1118,7 @@ describe('code graph parser worker pool', () => {
       expect(result.degraded).toBe(false);
       expect(processes).toHaveLength(2);
       expect(interruptedWorker.writes).toEqual([]);
-      expect(processes[1].writes.map(request => request.file.path)).toEqual([secondFile.path]);
+      expect(EffectArray.map(processes[1].writes, request => request.file.path)).toEqual([secondFile.path]);
       expect(interruptedWorker.inputClosed).toBe(true);
       expect(processes[1].inputClosed).toBe(true);
     }).pipe(provideTestLayer(parserLayer({capacity: 1, spawnWorker: spawn})), Effect.scoped);
@@ -1123,9 +1140,9 @@ describe('code graph parser worker pool', () => {
 
       const results = yield* pool.withParserSlot(home, files, extract => Effect.forEach(files, extract));
 
-      expect(results.map(result => result.facts.path)).toEqual(files.map(file => file.path));
+      expect(EffectArray.map(results, result => result.facts.path)).toEqual(EffectArray.map(files, file => file.path));
       expect(processes).toHaveLength(1);
-      expect(processes[0].writes.map(request => request.file.path)).toEqual([files[0].path]);
+      expect(EffectArray.map(processes[0].writes, request => request.file.path)).toEqual([files[0].path]);
     }).pipe(provideTestLayer(parserLayer({capacity: 2, spawnWorker: spawn})), Effect.scoped);
   });
 
@@ -1184,10 +1201,10 @@ describe('code graph parser worker pool', () => {
       const recovered = yield* Fiber.join(second);
       yield* pool.trimIdle;
 
-      expect(recovered.every(result => !result.degraded)).toBe(true);
+      expect(EffectArray.every(recovered, result => !result.degraded)).toBe(true);
       expect(spawnCount).toBe(3);
       expect(delayedWorker.writes).toEqual([]);
-      expect(processes.every(process => process.inputClosed || process.killed)).toBe(true);
+      expect(EffectArray.every(processes, process => process.inputClosed || process.killed)).toBe(true);
     }).pipe(
       Effect.ensuring(Effect.sync(() => resolveSpawn?.(delayedWorker))),
       provideTestLayer(parserLayer({capacity: 1, spawnWorker: spawn})),
@@ -1300,8 +1317,8 @@ function inventoryFile(path: string, content: string, language = 'typescript'): 
   };
 }
 
-function factsFor(file: CodeGraphInventoryFile): CodeGraphFileFacts {
-  const name = file.path.split('/').at(-1) ?? file.path;
+function factsFor(file: Pick<CodeGraphInventoryFile, 'contentHash' | 'language' | 'path'>): CodeGraphFileFacts {
+  const name = Effect2.pipe(file.path, EffectString.split('/')).at(-1) ?? file.path;
   return {
     diagnostics: [],
     edges: [],
@@ -1323,10 +1340,17 @@ function factsFor(file: CodeGraphInventoryFile): CodeGraphFileFacts {
 }
 
 interface WireRequest {
-  readonly file: CodeGraphInventoryFile;
+  readonly file: Pick<CodeGraphInventoryFile, 'contentHash' | 'language' | 'path'>;
   readonly id: string;
   readonly protocol: number;
 }
+
+const wireRequestSchema = Schema.Struct({
+  file: Schema.Struct({contentHash: Schema.String, language: Schema.String, path: Schema.String}),
+  id: Schema.String,
+  protocol: Schema.Finite,
+});
+const isWireRequest = Schema.is(wireRequestSchema);
 
 class ScriptedParserWorkerProcess implements ParserWorkerProcess {
   readonly stderrFeed = new AsyncFeed<string | Uint8Array>();
@@ -1387,7 +1411,9 @@ class ScriptedParserWorkerProcess implements ParserWorkerProcess {
   }
 
   write(line: string): Promise<void> | void {
-    const request = JSON.parse(line) as WireRequest;
+    const parsed: unknown = JSON.parse(line);
+    if (!isWireRequest(parsed)) throw new Error('Malformed parser worker request.');
+    const request = parsed;
     this.writes.push(request);
     const written = this.writeImplementation?.(line);
     if (written instanceof Promise) return written;
@@ -1442,7 +1468,7 @@ interface ConcurrencyTracker {
 }
 
 function echoSpawner(options: {
-  readonly delayFor: (file: CodeGraphInventoryFile) => number;
+  readonly delayFor: (file: Pick<CodeGraphInventoryFile, 'path'>) => number;
   readonly tracker?: ConcurrencyTracker;
 }): ParserWorkerSpawner {
   return () => {

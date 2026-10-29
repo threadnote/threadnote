@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {DateTime, Effect, FileSystem, Schema} from 'effect';
 import {findContextHealthSemanticContradiction} from '@threadnote/context/health_semantic';
 import {buildContextHealthReport} from '@threadnote/context/health';
@@ -35,6 +36,8 @@ import {
   type SemanticReviewEntry,
   SemanticReviewError,
 } from './semantic_review_state.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 function validateComparison(input: ManagerSemanticRefreshInputV1) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(input.project) || !/^[a-f0-9]{64}$/u.test(input.contradictionId))
@@ -43,7 +46,7 @@ function validateComparison(input: ManagerSemanticRefreshInputV1) {
     if (
       !source ||
       !/^[a-f0-9]{64}$/u.test(source.recordContentFingerprint) ||
-      !source.recordUri.startsWith('threadnote://')
+      !Effect2.pipe(source.recordUri, EffectString.startsWith('threadnote://'))
     )
       throw new Error('Select both exact source revisions.');
   }
@@ -83,26 +86,31 @@ export const refreshSemanticComparison = Effect.fn('semanticReview.refresh')(fun
   const uris = [input.left.recordUri, input.right.recordUri];
   const read = Effect.forEach(uris, uri => store.readBounded(resourceStoreLocation(config), uri, 1_048_576));
   const before = yield* read;
-  const contents = before.flatMap(source => (source.truncated ? [] : [source.content]));
+  const contents = EffectArray.flatMap(before, source => (source.truncated ? [] : [source.content]));
   if (contents.length !== 2)
     return {
       outcome: 'unavailable',
       reason: 'A source memory is too large for this comparison. Review it in Library.',
     } satisfies ManagerSemanticRefreshResultV1;
-  const records = contents.map((content, index) => parseMemoryDocument(uris[index], content));
+  const records = EffectArray.map(contents, (content, index) => parseMemoryDocument(uris[index], content));
   if (
-    records.some(record => !record || record.metadata.status !== 'active' || record.metadata.project !== input.project)
+    EffectArray.some(
+      records,
+      record => !record || record.metadata.status !== 'active' || record.metadata.project !== input.project,
+    )
   )
     return {
       outcome: 'unavailable',
       reason: 'A selected memory is no longer active in this project.',
     } satisfies ManagerSemanticRefreshResultV1;
-  const current = records.filter((record): record is MemoryRecord => record !== undefined);
+  const current = EffectArray.filter(records, (record): record is MemoryRecord => record !== undefined);
   const exact = findContextHealthSemanticContradiction(current, input.contradictionId, fingerprints);
   if (
     exact &&
-    [input.left, input.right].some(source => {
-      const claim = [exact.left, exact.right].find(claim => claim.recordUri === source.recordUri);
+    EffectArray.some([input.left, input.right], source => {
+      const claim = EffectOption.getOrUndefined(
+        EffectArray.findFirst([exact.left, exact.right], claim => claim.recordUri === source.recordUri),
+      );
       return (
         claim?.recordContentFingerprint !== source.recordContentFingerprint ||
         claim.claimFingerprint !== source.claimFingerprint
@@ -112,7 +120,8 @@ export const refreshSemanticComparison = Effect.fn('semanticReview.refresh')(fun
     return yield* semanticReviewError('The selected revisions do not match their source claims.');
   if (
     !exact &&
-    current.every(
+    EffectArray.every(
+      current,
       (record, index) =>
         sha256HexSync(record.content) === input[index === 0 ? 'left' : 'right'].recordContentFingerprint,
     )
@@ -129,9 +138,9 @@ export const refreshSemanticComparison = Effect.fn('semanticReview.refresh')(fun
       });
   const comparisons = exact
     ? [exact]
-    : report!.findings.flatMap(finding => (finding.semanticEvidence ? [finding.semanticEvidence] : []));
+    : EffectArray.flatMap(report!.findings, finding => (finding.semanticEvidence ? [finding.semanticEvidence] : []));
   const after = yield* read;
-  if (after.some((source, index) => source.truncated || source.content !== contents[index]))
+  if (EffectArray.some(after, (source, index) => source.truncated || source.content !== contents[index]))
     return {
       outcome: 'changing',
       reason: 'The selected memories changed during the check. Checking again shortly.',
@@ -158,8 +167,10 @@ export function buildSemanticReviewPreview(
   user: string,
 ): ManagerSemanticReviewPreviewV1 {
   validateInput(input);
-  const pair = [input.left, input.right].map(source => {
-    const record = records.find(record => record.uri === source.recordUri);
+  const pair = EffectArray.map([input.left, input.right], source => {
+    const record = EffectOption.getOrUndefined(
+      EffectArray.findFirst(records, record => record.uri === source.recordUri),
+    );
     if (
       !record ||
       record.metadata.status !== 'active' ||
@@ -182,12 +193,13 @@ export function buildSemanticReviewPreview(
       ? []
       : [
           ...new Set(
-            pair.flatMap(record => {
+            EffectArray.flatMap(pair, (record, __effectFlatMapIndex) => {
+              if (!(__effectFlatMapIndex in pair)) return [];
               const reasons: string[] = [];
               if (
-                !record.uri.startsWith(personal) ||
-                record.uri.slice(personal.length).includes('/') ||
-                !/^[A-Za-z0-9._-]+\.md$/u.test(record.uri.slice(personal.length)) ||
+                !Effect2.pipe(record.uri, EffectString.startsWith(personal)) ||
+                Effect2.pipe(record.uri, EffectString.slice(personal.length), EffectString.includes('/')) ||
+                !/^[A-Za-z0-9._-]+\.md$/u.test(Effect2.pipe(record.uri, EffectString.slice(personal.length))) ||
                 record.metadata.kind !== 'durable' ||
                 record.metadata.visibility === 'shared'
               )
@@ -238,7 +250,7 @@ export function buildSemanticReviewPreview(
   };
   const revision = sha256HexSync(JSON.stringify({version: 1, input: canonicalInput, evidence, blockers}));
   return {
-    previewId: `semantic-review-${revision.slice(0, 40)}`,
+    previewId: `semantic-review-${Effect2.pipe(revision, EffectString.slice(0, 40))}`,
     revision,
     choice: input.choice,
     mode: blockers.length ? 'review-only' : input.choice === 'both' ? 'keep-both' : 'archive-other',
@@ -246,7 +258,7 @@ export function buildSemanticReviewPreview(
       input.choice === 'both'
         ? 'Record that you reviewed both memories and want to keep both.'
         : 'Keep the chosen memory and move the entire other memory to history.',
-    ...(blockers.length ? {reason: blockers.join(' ')} : {}),
+    ...(blockers.length ? {reason: EffectArray.join(blockers, ' ')} : {}),
     keptUri: kept.uri,
     archivedUri: other.uri,
     keptContent: kept.body,
@@ -285,12 +297,12 @@ function bindRawPreview(
   const revision = sha256HexSync(
     JSON.stringify([
       preview.revision,
-      sources
-        .map(source => [source.recordUri, source.fingerprint])
-        .sort((left, right) => left[0].localeCompare(right[0])),
+      EffectArray.map(sources, source => [source.recordUri, source.fingerprint]).sort((left, right) =>
+        Effect2.pipe(left[0], EffectString.localeCompare(right[0])),
+      ),
     ]),
   );
-  return {...preview, previewId: `semantic-review-${revision.slice(0, 40)}`, revision};
+  return {...preview, previewId: `semantic-review-${Effect2.pipe(revision, EffectString.slice(0, 40))}`, revision};
 }
 const assertRawSources = Effect.fn('semanticReview.assertRawSources')(function* (
   config: RuntimeConfig,
@@ -298,9 +310,9 @@ const assertRawSources = Effect.fn('semanticReview.assertRawSources')(function* 
 ) {
   const current = yield* rawSourceFingerprints(
     config,
-    expected.map(source => source.recordUri),
+    EffectArray.map(expected, source => source.recordUri),
   );
-  if (current.some((source, index) => source.fingerprint !== expected[index].fingerprint))
+  if (EffectArray.some(current, (source, index) => source.fingerprint !== expected[index].fingerprint))
     return yield* semanticReviewError('A source memory changed. Reopen the comparison before deciding.', 'stale');
 });
 
@@ -324,10 +336,14 @@ export const previewSemanticReview = Effect.fn('semanticReview.preview')(functio
         const rawSources = yield* rawSourceFingerprints(config, [input.left.recordUri, input.right.recordUri]);
         const preview = bindRawPreview(yield* checkedPreview(input, records, config.user), rawSources);
         const state = yield* readSemanticReviewState(config);
-        const existing = state.entries.find(entry => entry.preview.previewId === preview.previewId);
+        const existing = EffectOption.getOrUndefined(
+          EffectArray.findFirst(state.entries, entry => entry.preview.previewId === preview.previewId),
+        );
         if (existing) return existing.preview;
         const timestamp = DateTime.formatIso(yield* DateTime.now);
-        const source = records.find(record => record.uri === preview.archivedUri)!;
+        const source = EffectOption.getOrUndefined(
+          EffectArray.findFirst(records, record => record.uri === preview.archivedUri),
+        )!;
         const archiveUri = `threadnote://user/${uriSegment(config.user)}/memories/durable/archived/${uriSegment(input.project)}/${preview.previewId}.md`;
         const archiveContent =
           preview.mode === 'archive-other'
@@ -349,7 +365,7 @@ export const previewSemanticReview = Effect.fn('semanticReview.preview')(functio
         const entry: SemanticReviewEntry = {
           input,
           preview,
-          slot: [comparison.left.claimFingerprint, comparison.right.claimFingerprint].sort().join(':'),
+          slot: EffectArray.join([comparison.left.claimFingerprint, comparison.right.claimFingerprint].sort(), ':'),
           timestamp,
           applied: false,
           rawSources,
@@ -357,7 +373,10 @@ export const previewSemanticReview = Effect.fn('semanticReview.preview')(functio
         };
         const entries = [...state.entries, entry];
         while (entries.length > MAX_SEMANTIC_REVIEWS) {
-          const unused = entries.findIndex(item => !item.applied && item.preview.previewId !== preview.previewId);
+          const unused = EffectOption.getOrElse(
+            EffectArray.findFirstIndex(entries, item => !item.applied && item.preview.previewId !== preview.previewId),
+            () => -1,
+          );
           if (unused < 0)
             return yield* semanticReviewError(
               'Review receipt storage is full. Preserve existing decisions before continuing.',
@@ -383,11 +402,14 @@ export const applySemanticReview = Effect.fn('semanticReview.apply')(function* (
     config,
     Effect.gen(function* () {
       const state = yield* readSemanticReviewState(config);
-      const entry = state.entries.find(
-        entry =>
-          entry.preview.previewId === input.previewId &&
-          entry.preview.revision === input.revision &&
-          entry.input.project === input.project,
+      const entry = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          state.entries,
+          entry =>
+            entry.preview.previewId === input.previewId &&
+            entry.preview.revision === input.revision &&
+            entry.input.project === input.project,
+        ),
       );
       if (!entry)
         return yield* semanticReviewError(
@@ -412,14 +434,20 @@ export const applySemanticReview = Effect.fn('semanticReview.apply')(function* (
           const location = resourceStoreLocation(config);
           const current = yield* readMemoryRecordsByUri(
             config,
-            uris.filter((uri): uri is string => uri !== undefined),
+            EffectArray.filter(uris, (uri): uri is string => uri !== undefined),
           );
-          const kept = current.find(record => record.uri === entry.preview.keptUri);
+          const kept = EffectOption.getOrUndefined(
+            EffectArray.findFirst(current, record => record.uri === entry.preview.keptUri),
+          );
           const keptSource = entry.input.left.recordUri === kept?.uri ? entry.input.left : entry.input.right;
           if (!kept || sha256HexSync(kept.content) !== keptSource.recordContentFingerprint)
             return yield* semanticReviewError('The kept source changed. Refresh the comparison.', 'stale');
-          const archive = current.find(record => record.uri === entry.archiveUri);
-          const source = current.find(record => record.uri === entry.preview.archivedUri);
+          const archive = EffectOption.getOrUndefined(
+            EffectArray.findFirst(current, record => record.uri === entry.archiveUri),
+          );
+          const source = EffectOption.getOrUndefined(
+            EffectArray.findFirst(current, record => record.uri === entry.preview.archivedUri),
+          );
           const recovered =
             entry.preview.mode === 'archive-other' &&
             !source &&
@@ -428,7 +456,7 @@ export const applySemanticReview = Effect.fn('semanticReview.apply')(function* (
             (yield* store.read(location, archive.uri)) === entry.archiveContent;
           yield* assertRawSources(
             config,
-            recovered ? rawSources.filter(source => source.recordUri === kept.uri) : rawSources,
+            recovered ? EffectArray.filter(rawSources, source => source.recordUri === kept.uri) : rawSources,
           );
           if (entry.applied && entry.preview.mode === 'archive-other' && !recovered)
             return yield* semanticReviewError(
@@ -461,7 +489,11 @@ export const applySemanticReview = Effect.fn('semanticReview.apply')(function* (
                 {
                   type: 'remove',
                   uri: source.uri,
-                  options: {expectedFingerprint: rawSources.find(raw => raw.recordUri === source.uri)!.fingerprint},
+                  options: {
+                    expectedFingerprint: EffectOption.getOrUndefined(
+                      EffectArray.findFirst(rawSources, raw => raw.recordUri === source.uri),
+                    )!.fingerprint,
+                  },
                 },
               ],
               Effect.gen(function* () {
@@ -480,7 +512,7 @@ export const applySemanticReview = Effect.fn('semanticReview.apply')(function* (
           if (!entry.applied)
             yield* writeSemanticReviewState(config, {
               version: 1,
-              entries: state.entries.map(item => (item === entry ? {...entry, applied: true} : item)),
+              entries: EffectArray.map(state.entries, item => (item === entry ? {...entry, applied: true} : item)),
             });
           const result: ManagerSemanticReviewApplyResultV1 = {
             status: entry.applied || recovered ? 'already-applied' : 'applied',

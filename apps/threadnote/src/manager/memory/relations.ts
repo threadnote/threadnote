@@ -1,4 +1,5 @@
-import {Data, Effect, Predicate, Schema} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Effect, Predicate, Schema} from 'effect';
 import {assertMemoryDocumentSchemaWritable, type MemoryRelation} from '@threadnote/memory/document';
 import {isMemoryId} from '@threadnote/memory/identity-alias';
 import {
@@ -16,19 +17,28 @@ import {uriSegment} from '@threadnote/workspace/manifest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {MemoryPointerNotFound} from '@threadnote/memory/relocation';
 import type {ManagerMemoryRelationsResponse} from '@threadnote/manager/memory/contracts';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
+
 export type {ManagerMemoryRelationsResponse} from '@threadnote/manager/memory/contracts';
 
-export class ManagerMemoryRelationsError extends Data.TaggedError('ManagerMemoryRelationsError')<{
-  readonly code:
-    | 'memory-relations-conflict'
-    | 'memory-relations-forbidden'
-    | 'memory-relations-invalid'
-    | 'memory-relations-not-found'
-    | 'memory-relations-operation-failed'
-    | 'memory-relations-verification-failed';
-  readonly message: string;
-  readonly status: 400 | 403 | 404 | 409 | 500;
-}> {}
+export class ManagerMemoryRelationsError extends Schema.TaggedError<
+  ManagerMemoryRelationsError,
+  {readonly brand: unique symbol}
+>()('ManagerMemoryRelationsError', {
+  code: Schema.Literals([
+    'memory-relations-conflict',
+    'memory-relations-forbidden',
+    'memory-relations-invalid',
+    'memory-relations-not-found',
+    'memory-relations-operation-failed',
+    'memory-relations-verification-failed',
+  ]),
+  message: Schema.String,
+  status: Schema.Literals([400, 403, 404, 409, 500]),
+}) {}
 
 interface ManagerMemoryRelationsInput {
   readonly expectedContent: string;
@@ -43,7 +53,7 @@ export const updateManagerMemoryRelations = Effect.fn('manager.updateMemoryRelat
 ) {
   const input = yield* Effect.try({
     catch: cause =>
-      cause instanceof ManagerMemoryRelationsError
+      Schema.is(ManagerMemoryRelationsError)(cause)
         ? cause
         : relationError(cause instanceof Error ? cause.message : 'Invalid relation editor input.'),
     try: () => parseManagerMemoryRelationsInput(body),
@@ -130,20 +140,24 @@ export const updateManagerMemoryRelations = Effect.fn('manager.updateMemoryRelat
 });
 
 export function parseManagerMemoryRelationsInput(body: Record<string, unknown>): ManagerMemoryRelationsInput {
-  const unsupported = Object.keys(body).filter(key => !new Set(['expectedContent', 'relations', 'uri']).has(key));
+  const unsupported = EffectArray.filter(
+    EffectRecord.keys(body),
+    key => !new Set(['expectedContent', 'relations', 'uri']).has(key),
+  );
   if (unsupported.length > 0) throw relationError(`Unsupported relation editor field: ${unsupported.sort()[0]}.`);
-  if (typeof body.uri !== 'string' || !body.uri.trim()) throw relationError('uri is required.');
+  if (typeof body.uri !== 'string' || !Effect2.pipe(body.uri, EffectString.trim))
+    throw relationError('uri is required.');
   if (typeof body.expectedContent !== 'string' || !body.expectedContent) {
     throw relationError('expectedContent is required for relation updates.');
   }
-  if (!Array.isArray(body.relations)) throw relationError('relations must be an array.');
-  const relations = body.relations.map((value, index) => {
+  if (!EffectArray.isArray(body.relations)) throw relationError('relations must be an array.');
+  const relations = EffectArray.map(body.relations, (value, index) => {
     if (!Predicate.isObject(value)) {
       throw relationError(`relations[${index}] must contain type and uri.`);
     }
     const relation = value;
     if (
-      Object.keys(relation).some(key => key !== 'type' && key !== 'uri') ||
+      EffectArray.some(EffectRecord.keys(relation), key => key !== 'type' && key !== 'uri') ||
       typeof relation.type !== 'string' ||
       typeof relation.uri !== 'string'
     ) {
@@ -165,7 +179,7 @@ function relationError(
   status: ManagerMemoryRelationsError['status'] = 400,
   code: ManagerMemoryRelationsError['code'] = 'memory-relations-invalid',
 ): ManagerMemoryRelationsError {
-  return new ManagerMemoryRelationsError({code, message, status});
+  return ManagerMemoryRelationsError.make({code, message, status});
 }
 
 function relationOperationError(): ManagerMemoryRelationsError {
@@ -177,7 +191,7 @@ function relationOperationError(): ManagerMemoryRelationsError {
 }
 
 function relationResolutionError(cause: unknown): ManagerMemoryRelationsError {
-  if (cause instanceof MemoryRelationWriteError || cause instanceof MemoryPointerNotFound) {
+  if (Schema.is(MemoryRelationWriteError)(cause) || Schema.is(MemoryPointerNotFound)(cause)) {
     return relationError(cause.message);
   }
   if (Schema.is(MemoryIdentityResolutionError)(cause)) {
@@ -189,7 +203,12 @@ function relationResolutionError(cause: unknown): ManagerMemoryRelationsError {
 }
 
 function toolErrorMessage(content: readonly unknown[]): string {
-  const text = content.find(item => Predicate.isObject(item) && typeof item.text === 'string');
+  const text = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      content,
+      __effectArrayValue => !!(item => Predicate.isObject(item) && typeof item.text === 'string')(__effectArrayValue),
+    ),
+  );
   return Predicate.isObject(text) && typeof text.text === 'string'
     ? text.text
     : 'Threadnote could not update the memory relations.';

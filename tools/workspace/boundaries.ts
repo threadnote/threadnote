@@ -1,4 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import ts from 'typescript-compiler';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export interface WorkspacePackage {
   readonly name: string;
@@ -21,7 +26,7 @@ export function validateRelocatedTestPaths(
   const errors: string[] = [];
   for (const file of files) {
     if (!/^(?:apps|packages)\/[^/]+\/test\//.test(file.path)) continue;
-    if (file.content.includes('../../../test')) {
+    if (Effect.pipe(file.content, EffectString.includes('../../../test'))) {
       errors.push(`${file.path}: contains a corrupted parent segment from the test-root migration`);
     }
     if (/join\((?:process\.cwd\(\)|repoRoot),\s*['"]src['"],\s*['"]standalone\.ts['"]\)/u.test(file.content)) {
@@ -35,10 +40,10 @@ export function validateSourceVisibility(
   sources: readonly SourceModule[],
   gitVisiblePaths: ReadonlySet<string>,
 ): readonly string[] {
-  return sources
-    .filter(source => !gitVisiblePaths.has(source.path))
-    .map(source => `${source.path}: source file is hidden by Git ignore rules`)
-    .sort();
+  return EffectArray.map(
+    EffectArray.filter(sources, source => !gitVisiblePaths.has(source.path)),
+    source => `${source.path}: source file is hidden by Git ignore rules`,
+  ).sort();
 }
 
 const allowedDependencies: Readonly<Record<string, readonly string[]>> = {
@@ -130,7 +135,7 @@ export function declaredVirtualModules(path: string, content: string): readonly 
     if (
       ts.isModuleDeclaration(statement) &&
       ts.isStringLiteral(statement.name) &&
-      statement.name.text.startsWith('virtual:')
+      Effect.pipe(statement.name.text, EffectString.startsWith('virtual:'))
     )
       modules.push(statement.name.text);
   }
@@ -138,18 +143,18 @@ export function declaredVirtualModules(path: string, content: string): readonly 
 }
 
 function relativeTarget(source: string, specifier: string): string {
-  const segments = source.split('/').slice(0, -1);
-  for (const segment of specifier.split('/')) {
+  const segments = Effect.pipe(source, EffectString.split('/')).slice(0, -1);
+  for (const segment of Effect.pipe(specifier, EffectString.split('/'))) {
     if (segment === '.') continue;
     if (segment === '..') segments.pop();
     else segments.push(segment);
   }
-  return segments.join('/');
+  return EffectArray.join(segments, '/');
 }
 
 function barePackage(specifier: string): string {
-  const segments = specifier.split('/');
-  return segments.slice(0, specifier.startsWith('@') ? 2 : 1).join('/');
+  const segments = Effect.pipe(specifier, EffectString.split('/'));
+  return EffectArray.join(segments.slice(0, Effect.pipe(specifier, EffectString.startsWith('@')) ? 2 : 1), '/');
 }
 
 export function validateWorkspaceBoundaries(
@@ -157,30 +162,44 @@ export function validateWorkspaceBoundaries(
   sources: readonly SourceModule[],
 ): readonly string[] {
   const errors = new Set<string>();
-  const byName = new Map(packages.map(pkg => [pkg.name, pkg]));
-  const ownerOf = (path: string) => packages.find(pkg => path.startsWith(`${pkg.directory}/`));
+  const byName = new Map(EffectArray.map(packages, pkg => [pkg.name, pkg]));
+  const ownerOf = (path: string) =>
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        packages,
+        __effectArrayValue =>
+          !!(pkg => Effect.pipe(path, EffectString.startsWith(`${pkg.directory}/`)))(__effectArrayValue),
+      ),
+    );
   const edges = new Map<string, Set<string>>();
   for (const pkg of packages) {
     if (!pkg.private) errors.add(`${pkg.name}: workspace packages must be private`);
-    if (!pkg.name.startsWith('@threadnote/')) errors.add(`${pkg.directory}: expected an @threadnote package name`);
-    if (packages.filter(other => other.name === pkg.name).length !== 1) errors.add(`${pkg.name}: duplicate name`);
-    for (const [key, value] of Object.entries(pkg.exports)) {
-      if (key.includes('*') || value.includes('*')) errors.add(`${pkg.name}: exports must name explicit entrypoints`);
-      if (!value.startsWith('./') || value.split('/').includes('..')) errors.add(`${pkg.name}: export escapes package`);
+    if (!Effect.pipe(pkg.name, EffectString.startsWith('@threadnote/')))
+      errors.add(`${pkg.directory}: expected an @threadnote package name`);
+    if (EffectArray.filter(packages, other => other.name === pkg.name).length !== 1)
+      errors.add(`${pkg.name}: duplicate name`);
+    for (const [key, value] of EffectRecord.toEntries(pkg.exports)) {
+      if (Effect.pipe(key, EffectString.includes('*')) || Effect.pipe(value, EffectString.includes('*')))
+        errors.add(`${pkg.name}: exports must name explicit entrypoints`);
+      if (
+        !Effect.pipe(value, EffectString.startsWith('./')) ||
+        Effect.pipe(value, EffectString.split('/')).includes('..')
+      )
+        errors.add(`${pkg.name}: export escapes package`);
     }
     const dependencies = {...pkg.dependencies, ...pkg.devDependencies};
     const adjacent = new Set<string>();
     edges.set(pkg.name, adjacent);
-    for (const [name, version] of Object.entries(dependencies)) {
-      if (!name.startsWith('@threadnote/')) continue;
+    for (const [name, version] of EffectRecord.toEntries(dependencies)) {
+      if (!Effect.pipe(name, EffectString.startsWith('@threadnote/'))) continue;
       adjacent.add(name);
       if (!byName.has(name)) errors.add(`${pkg.name}: unknown workspace dependency ${name}`);
       if (version !== 'workspace:*') errors.add(`${pkg.name}: ${name} must use workspace:*`);
-      if (pkg.directory.startsWith('packages/') && pkg.name !== '@threadnote/testing') {
-        const allowed = allowedDependencies[pkg.name.slice('@threadnote/'.length)];
+      if (Effect.pipe(pkg.directory, EffectString.startsWith('packages/')) && pkg.name !== '@threadnote/testing') {
+        const allowed = allowedDependencies[Effect.pipe(pkg.name, EffectString.slice('@threadnote/'.length))];
         if (
           !(name === '@threadnote/testing' && !pkg.dependencies[name]) &&
-          !allowed?.includes(name.slice('@threadnote/'.length))
+          !allowed?.includes(Effect.pipe(name, EffectString.slice('@threadnote/'.length)))
         ) {
           errors.add(`${pkg.name}: forbidden dependency on ${name}`);
         }
@@ -191,36 +210,47 @@ export function validateWorkspaceBoundaries(
     const owner = ownerOf(source.path);
     const declared = owner
       ? {
-          ...(source.path.includes('/src/') && !source.path.includes('/test/') ? {} : owner.devDependencies),
+          ...(Effect.pipe(source.path, EffectString.includes('/src/')) &&
+          !Effect.pipe(source.path, EffectString.includes('/test/'))
+            ? {}
+            : owner.devDependencies),
           ...owner.dependencies,
         }
       : {};
     for (const specifier of source.imports) {
-      if (specifier.startsWith('.')) {
+      if (Effect.pipe(specifier, EffectString.startsWith('.'))) {
         const target = relativeTarget(source.path, specifier);
         const targetOwner = ownerOf(target);
-        const testMayReadRepositorySupport = source.path.includes('/test/') && owner && !targetOwner;
+        const testMayReadRepositorySupport =
+          Effect.pipe(source.path, EffectString.includes('/test/')) && owner && !targetOwner;
         if ((owner || targetOwner) && owner !== targetOwner && !testMayReadRepositorySupport) {
           errors.add(`${source.path}: relative import crosses workspace boundary: ${specifier}`);
         }
         continue;
       }
-      if (specifier.startsWith('@threadnote/')) {
+      if (Effect.pipe(specifier, EffectString.startsWith('@threadnote/'))) {
         const name = barePackage(specifier);
         const dependency = byName.get(name);
         if (!dependency) {
           errors.add(`${source.path}: unknown workspace import ${specifier}`);
           continue;
         }
-        const subpath = specifier === name ? '.' : `.${specifier.slice(name.length)}`;
+        const subpath = specifier === name ? '.' : `.${Effect.pipe(specifier, EffectString.slice(name.length))}`;
         if (!(subpath in dependency.exports)) errors.add(`${source.path}: unexported entrypoint ${specifier}`);
         if (owner && owner !== dependency && !declared[name]) {
           errors.add(`${source.path}: undeclared dependency ${name}`);
         }
-      } else if (owner && !specifier.startsWith('node:') && !specifier.startsWith('bun:')) {
+      } else if (
+        owner &&
+        !Effect.pipe(specifier, EffectString.startsWith('node:')) &&
+        !Effect.pipe(specifier, EffectString.startsWith('bun:'))
+      ) {
         if (
-          specifier.startsWith('virtual:') &&
-          sources.some(candidate => ownerOf(candidate.path) === owner && candidate.virtualModules?.includes(specifier))
+          Effect.pipe(specifier, EffectString.startsWith('virtual:')) &&
+          EffectArray.some(
+            sources,
+            candidate => ownerOf(candidate.path) === owner && Boolean(candidate.virtualModules?.includes(specifier)),
+          )
         )
           continue;
         const name = barePackage(specifier);
@@ -234,7 +264,7 @@ export function validateWorkspaceBoundaries(
   const visited = new Set<string>();
   function visit(name: string, path: readonly string[]): void {
     if (visiting.has(name)) {
-      errors.add(`Workspace cycle: ${[...path, name].join(' -> ')}`);
+      errors.add(`Workspace cycle: ${EffectArray.join([...path, name], ' -> ')}`);
       return;
     }
     if (visited.has(name)) return;

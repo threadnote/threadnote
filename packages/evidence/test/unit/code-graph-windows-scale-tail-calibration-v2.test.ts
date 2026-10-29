@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -194,30 +196,34 @@ describe('hosted Windows 10k scheduler-tail calibration v2', () => {
 
     expect(calibration.observations).toHaveLength(calibration.derivation.observationCount);
     expect(prior).toHaveLength(calibration.derivation.priorObservationCount);
-    expect(new Set(calibration.observations.map(observation => observation.artifactId)).size).toBe(27);
-    expect(new Set(calibration.observations.map(observation => observation.archiveDigest)).size).toBe(27);
-    expect(new Set(calibration.observations.map(observation => observation.runId)).size).toBe(26);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.artifactId)).size).toBe(27);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.archiveDigest)).size).toBe(27);
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.runId)).size).toBe(26);
     expect(
-      calibration.observations.every(
-        (observation, index, observations) =>
-          index === 0 || Date.parse(required(observations[index - 1]).createdAt) >= Date.parse(observation.createdAt),
+      EffectArrayPipe(calibration.observations, __effectNativeArray =>
+        EffectArray.every(
+          __effectNativeArray,
+          (observation, index) =>
+            index === 0 ||
+            Date.parse(required(__effectNativeArray[index - 1]).createdAt) >= Date.parse(observation.createdAt),
+        ),
       ),
     ).toBe(true);
     expect(
       summary(
-        prior.map(observation => observation.measurements.hotQueryP50Milliseconds),
+        EffectArray.map(prior, observation => observation.measurements.hotQueryP50Milliseconds),
         governed.companionHotQueryP50MillisecondsMaximum,
       ),
     ).toEqual(calibration.derivation.priorHotQueryP50);
     expect(
       summary(
-        prior.map(observation => observation.measurements.hotQueryP95Milliseconds),
+        EffectArray.map(prior, observation => observation.measurements.hotQueryP95Milliseconds),
         governed.previousHotQueryP95MillisecondsMaximum,
       ),
     ).toEqual(calibration.derivation.priorHotQueryP95);
     expect(
       summary(
-        prior.map(observation => observation.measurements.hotQueryProcessCpuP95Milliseconds),
+        EffectArray.map(prior, observation => observation.measurements.hotQueryProcessCpuP95Milliseconds),
         governed.companionHotQueryProcessCpuP95MillisecondsMaximum,
       ),
     ).toEqual(calibration.derivation.priorHotQueryProcessCpuP95);
@@ -376,7 +382,7 @@ function summary(values: readonly number[], maximum: number) {
   const sorted = [...values].sort((left, right) => left - right);
   const percentile = (ratio: number) => required(sorted[Math.max(0, Math.ceil(ratio * sorted.length) - 1)]);
   return {
-    breaches: sorted.filter(value => value > maximum).length,
+    breaches: EffectArray.filter(sorted, value => value > maximum).length,
     maximum: required(sorted.at(-1)),
     minimum: required(sorted[0]),
     p50: percentile(0.5),
@@ -402,7 +408,7 @@ function replaceStatistics(
 ): BenchmarkArtifactV1 {
   return parseBenchmarkArtifactV1({
     ...artifact,
-    measurements: artifact.measurements.map(measurement => {
+    measurements: EffectArray.map(artifact.measurements, measurement => {
       if (measurement.name === 'hot-exact-lexical-query') {
         const maximum = Math.max(values.p50, values.p95);
         return {...measurement, maximum, p50: values.p50, p95: values.p95, p99: maximum};

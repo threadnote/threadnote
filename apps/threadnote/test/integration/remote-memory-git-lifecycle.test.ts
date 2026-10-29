@@ -24,6 +24,8 @@ import {PostgresRemoteControlPlane} from '@threadnote/remote-memory/postgres/con
 import {PostgresRemoteMemoryRepository} from '@threadnote/remote-memory/postgres/repository';
 import {RemoteMemoryIndexer} from '@threadnote/remote-memory/indexer';
 import type {AuthorizedRemotePrincipal} from '@threadnote/remote-memory/authorization';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const databaseUrl = process.env.THREADNOTE_TEST_POSTGRES_URL;
 const postgresDescribe = databaseUrl ? describe : describe.skip;
@@ -87,7 +89,7 @@ postgresDescribe('external Git lifecycle convergence', () => {
     await git(['add', '--', relativePath], laptop);
     await git(['commit', '-m', 'lifecycle fixture publication'], laptop);
     await git(['push', 'origin', 'main'], laptop);
-    return (await git(['rev-parse', 'HEAD'], laptop)).trim();
+    return Effect.pipe(await git(['rev-parse', 'HEAD'], laptop), EffectString.trim);
   }
 
   const ingest = () => repository.ingestGitShare(principal, 'lifecycle-ingest');
@@ -96,7 +98,7 @@ postgresDescribe('external Git lifecycle convergence', () => {
   it('cannot erase a rejection committed by another scan of the same snapshot', async () => {
     await publish(document('active'));
     await ingest();
-    await publish(document('active').replace('status: active', 'status: invalid'));
+    await publish(Effect.pipe(document('active'), EffectString.replace('status: active', 'status: invalid')));
     const beforeHeads = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
     let transactions = 0;
@@ -164,8 +166,8 @@ postgresDescribe('external Git lifecycle convergence', () => {
   it("cannot replace another concurrent scan's rejected path or partially archive its own candidate", async () => {
     const alphaPath = gitCanonicalSharePath('durable', 'alpha', topic);
     const betaPath = gitCanonicalSharePath('durable', 'beta', topic);
-    const alpha = document('active').replace('project: threadnote', 'project: alpha');
-    const beta = document('active').replace('project: threadnote', 'project: beta');
+    const alpha = Effect.pipe(document('active'), EffectString.replace('project: threadnote', 'project: alpha'));
+    const beta = Effect.pipe(document('active'), EffectString.replace('project: threadnote', 'project: beta'));
     await publish(alpha, alphaPath);
     await publish(beta, betaPath);
     await ingest();
@@ -198,8 +200,8 @@ postgresDescribe('external Git lifecycle convergence', () => {
       if (!authorized) throw new Error('Scoped fixture authorization failed.');
       limited.push(authorized);
     }
-    await publish(alpha.replace('status: active', 'status: invalid'), alphaPath);
-    await publish(beta.replace('status: active', 'status: invalid'), betaPath);
+    await publish(Effect.pipe(alpha, EffectString.replace('status: active', 'status: invalid')), alphaPath);
+    await publish(Effect.pipe(beta, EffectString.replace('status: active', 'status: invalid')), betaPath);
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const readBlob = store.read.bind(store);
@@ -237,7 +239,7 @@ postgresDescribe('external Git lifecycle convergence', () => {
   it('does not manufacture a rejection revision for an unrelated descendant commit', async () => {
     await publish(document('active'));
     await ingest();
-    await publish(document('active').replace('status: active', 'status: invalid'));
+    await publish(Effect.pipe(document('active'), EffectString.replace('status: active', 'status: invalid')));
     await expect(ingest()).rejects.toMatchObject({code: 'service_unavailable'});
     const rejected = await read();
     await publish('Unrelated documentation.', 'README.md');
@@ -249,7 +251,7 @@ postgresDescribe('external Git lifecycle convergence', () => {
     const safe = document('active');
     await publish(safe);
     await ingest();
-    const blob = (await git(['rev-parse', `HEAD:${path}`], laptop)).trim();
+    const blob = Effect.pipe(await git(['rev-parse', `HEAD:${path}`], laptop), EffectString.trim);
     await git(['update-index', '--cacheinfo', '120000', blob, path], laptop);
     await git(['commit', '-m', 'replace file with unsupported mode'], laptop);
     await git(['push', 'origin', 'main'], laptop);
@@ -258,7 +260,7 @@ postgresDescribe('external Git lifecycle convergence', () => {
   });
 
   it('does not activate a newly rejected path and clears its failure after removal', async () => {
-    await publish(document('active').replace('status: active', 'status: invalid'));
+    await publish(Effect.pipe(document('active'), EffectString.replace('status: active', 'status: invalid')));
     await expect(ingest()).rejects.toMatchObject({code: 'service_unavailable'});
     expect((await repository.list(principal, {limit: 10}, 'rejected-new-list')).entries).toHaveLength(0);
     await publish(null);
@@ -316,7 +318,7 @@ postgresDescribe('external Git lifecycle convergence', () => {
   });
 
   it('checks the expected head revision when HTTP commits after ingestion planning', async () => {
-    await publish(document('active').replace('keywords: lifecycleproof\n', ''));
+    await publish(Effect.pipe(document('active'), EffectString.replace('keywords: lifecycleproof\n', '')));
     await ingest();
     const original = await read();
     const gitWritten = Promise.withResolvers<void>();
@@ -377,9 +379,12 @@ postgresDescribe('external Git lifecycle convergence', () => {
   it('validates legacy same-commit heads past the hydration bound without manufacturing no-op revisions', async () => {
     const records: {name: string; gitPath: string; content: string; index: number}[] = [];
     for (let index = 0; index < 257; index += 1) {
-      const name = `legacy-${String(index).padStart(3, '0')}`;
+      const name = `legacy-${Effect.pipe(String(index), EffectString.padStart(3, '0'))}`;
       const gitPath = gitCanonicalSharePath('durable', project, name);
-      const content = document(index === 256 ? 'archived' : 'active').replace('topic: lifecycle', `topic: ${name}`);
+      const content = Effect.pipe(
+        document(index === 256 ? 'archived' : 'active'),
+        EffectString.replace('topic: lifecycle', `topic: ${name}`),
+      );
       const target = join(laptop, gitPath);
       await mkdir(dirname(target), {recursive: true});
       await writeFile(target, content, 'utf8');
@@ -388,7 +393,7 @@ postgresDescribe('external Git lifecycle convergence', () => {
     await git(['add', 'durable'], laptop);
     await git(['commit', '-m', 'legacy snapshot'], laptop);
     await git(['push', 'origin', 'main'], laptop);
-    const commit = (await git(['rev-parse', 'HEAD'], laptop)).trim();
+    const commit = Effect.pipe(await git(['rev-parse', 'HEAD'], laptop), EffectString.trim);
     await fixture.migratorSql.begin(async transaction => {
       await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
       await transaction`INSERT INTO remote_memory.projects(tenant_id, share_id, name, status) VALUES (${tenantId}, ${shareId}, ${project}, 'active')`;
@@ -422,10 +427,10 @@ postgresDescribe('external Git lifecycle convergence', () => {
   it('keeps a known rejection unhealthy even when a newer snapshot inserts more than one batch before it', async () => {
     await publish(document('active'));
     await ingest();
-    await publish(document('active').replace('status: active', 'status: invalid'));
+    await publish(Effect.pipe(document('active'), EffectString.replace('status: active', 'status: invalid')));
     await expect(ingest()).rejects.toMatchObject({code: 'service_unavailable'});
     for (let index = 0; index < 257; index += 1) {
-      const name = `ahead-${String(index).padStart(3, '0')}`;
+      const name = `ahead-${Effect.pipe(String(index), EffectString.padStart(3, '0'))}`;
       await writeFile(
         join(laptop, gitCanonicalSharePath('durable', project, name)),
         `Safe earlier file ${index}.`,
@@ -608,7 +613,7 @@ postgresDescribe('external Git lifecycle convergence', () => {
     const safe = document('active');
     await publish(safe);
     await ingest();
-    await publish(safe.replace('status: active', header));
+    await publish(Effect.pipe(safe, EffectString.replace('status: active', header)));
     await expect(ingest()).rejects.toMatchObject({code: 'service_unavailable'});
     expect(await read()).toMatchObject({status: 'archived', content: safe});
     await expect(ingest()).rejects.toMatchObject({code: 'service_unavailable'});

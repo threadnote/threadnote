@@ -1,3 +1,5 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+
 /**
  * Named code-graph storage and protocol revisions.
  *
@@ -231,14 +233,17 @@ export const CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS = [
 
 type CatalogProfile = (typeof CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS)[number];
 const profilesByValue: ReadonlyMap<number, CatalogProfile> = new Map(
-  CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS.map(value => [value.value, value]),
+  EffectArray.map(CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS, value => [value.value, value]),
 );
 
 function requiredProfile<const Key extends CodeGraphPersistentSchemaRevisionKey>(
   key: Key,
 ): Extract<CatalogProfile, {readonly key: Key}> {
-  const value = CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS.find(
-    (profile): profile is Extract<CatalogProfile, {readonly key: Key}> => profile.key === key,
+  const value = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS,
+      (profile): profile is Extract<CatalogProfile, {readonly key: Key}> => profile.key === key,
+    ),
   );
   if (value === undefined) throw new Error(`Missing code graph persistent schema profile ${key}.`);
   return value;

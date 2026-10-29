@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {fcProp} from '@threadnote/testing/fast-check-property';
@@ -17,12 +18,15 @@ import {
   createCodeGraphWorkspaceDiagnosticIndex,
   resolveCodeGraphWorkspaceDiagnostics,
 } from '@threadnote/graph/workspace/diagnostics';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const project = (id: string, root: string, dependencies: readonly string[] = []) =>
   ({
     buildSystem: 'typescript',
     dependencies,
-    dependencyDetails: dependencies.map(targetId => ({
+    dependencyDetails: EffectArray.map(dependencies, targetId => ({
       evidence: `${root}/tsconfig.json`,
       provenance: 'declared' as const,
       targetId,
@@ -42,7 +46,7 @@ const project = (id: string, root: string, dependencies: readonly string[] = [])
 
 const catalog = (projects: readonly CodeGraphWorkspaceProject[]): CodeGraphWorkspaceCatalog => ({
   fingerprint: 'catalog',
-  resolutionContextPaths: ['tsconfig.json', ...projects.map(value => `${value.root}/tsconfig.json`)],
+  resolutionContextPaths: ['tsconfig.json', ...EffectArray.map(projects, value => `${value.root}/tsconfig.json`)],
   workspace: {diagnostics: [], fingerprint: 'workspace', projects, workspaces: []},
 });
 
@@ -61,21 +65,38 @@ function naiveDiagnosticProjects(
   projects: readonly CodeGraphWorkspaceProject[],
   diagnostic: string,
 ): readonly CodeGraphWorkspaceProject[] {
-  const evidencePath = diagnostic.slice(0, diagnostic.indexOf(':'));
+  const evidencePath = Effect.pipe(
+    diagnostic,
+    EffectString.slice(
+      0,
+      Effect.pipe(
+        diagnostic,
+        EffectString.indexOf(':'),
+        Effect.Option.getOrElse(() => -1),
+      ),
+    ),
+  );
   const specificityById = new Map(
-    projects.map(project => {
+    EffectArray.map(projects, project => {
       const specificity = Math.max(
         -1,
-        ...[project.root, ...project.sourceRoots]
-          .filter(prefix => prefix === '' || evidencePath === prefix || evidencePath.startsWith(`${prefix}/`))
-          .map(prefix => (prefix === '' ? 0 : prefix.split('/').length)),
+        ...EffectArray.map(
+          EffectArray.filter(
+            [project.root, ...project.sourceRoots],
+            prefix =>
+              prefix === '' ||
+              evidencePath === prefix ||
+              Effect.pipe(evidencePath, EffectString.startsWith(`${prefix}/`)),
+          ),
+          prefix => (prefix === '' ? 0 : Effect.pipe(prefix, EffectString.split('/')).length),
+        ),
       );
       return [project.id, specificity] as const;
     }),
   );
   const maximum = Math.max(-1, ...specificityById.values());
   if (maximum < 0) return [];
-  return projects.filter(project => specificityById.get(project.id) === maximum);
+  return EffectArray.filter(projects, project => specificityById.get(project.id) === maximum);
 }
 
 describe('code graph index scope', () => {
@@ -134,10 +155,11 @@ describe('code graph index scope', () => {
   });
 
   it('rejects unpersistable project membership before a graph build can start', () => {
-    const oversizedId = (index: number) => `${index.toString().padStart(6, '0')}${'x'.repeat(4_090)}`;
+    const oversizedId = (index: number) =>
+      `${Effect.pipe(index.toString(), EffectString.padStart(6, '0'))}${Effect.pipe('x', EffectString.repeat(4_090))}`;
     const dependencyIds = Array.from({length: 1_024}, (_, index) => oversizedId(index + 1));
     const root = project(oversizedId(0), 'apps/app', dependencyIds);
-    const dependencies = dependencyIds.map((id, index) => project(id, `packages/dependency-${index}`));
+    const dependencies = EffectArray.map(dependencyIds, (id, index) => project(id, `packages/dependency-${index}`));
 
     expect(() =>
       resolveCodeGraphIndexScope(
@@ -241,8 +263,15 @@ describe('code graph index scope', () => {
 
     expect(resolution.diagnostics).toEqual([diagnostic, 'pathless diagnostic']);
     expect([...resolution.projectsByDiagnostic.keys()]).toEqual([diagnostic, 'pathless diagnostic']);
-    expect(resolution.projectsByDiagnostic.get(diagnostic)?.map(candidate => candidate.id)).toEqual(['left', 'right']);
-    expect(resolution.projects.map(candidate => [candidate.id, candidate.diagnostics])).toEqual([
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(
+          EffectOption.fromNullishOr(resolution.projectsByDiagnostic.get(diagnostic)),
+          __effectArrayReceiver => EffectArray.map(__effectArrayReceiver, candidate => candidate.id),
+        ),
+      ),
+    ).toEqual(['left', 'right']);
+    expect(EffectArray.map(resolution.projects, candidate => [candidate.id, candidate.diagnostics])).toEqual([
       ['parent', []],
       ['left', [diagnostic]],
       ['right', [diagnostic]],
@@ -252,7 +281,7 @@ describe('code graph index scope', () => {
   it('preserves a selected diagnostic beyond the global workspace diagnostic bound', () => {
     const files: CodeGraphInventoryFile[] = [];
     for (let index = 0; index < 105; index += 1) {
-      const root = `apps/a-${String(index).padStart(3, '0')}`;
+      const root = `apps/a-${Effect.pipe(String(index), EffectString.padStart(3, '0'))}`;
       files.push(
         workspaceFile(`${root}/package.json`, JSON.stringify({name: `@fixture/a-${index}`}), 'npm-manifest'),
         workspaceFile(`${root}/tsconfig.json`, '{invalid', 'typescript-config'),
@@ -267,7 +296,7 @@ describe('code graph index scope', () => {
       {graph: {closure: 'dependencies', roots: ['apps/z-selected']}, uri: 'threadnote://resources/repos/selected'},
       {
         fingerprint: workspace.fingerprint,
-        resolutionContextPaths: files.map(file => file.path),
+        resolutionContextPaths: EffectArray.map(files, file => file.path),
         workspace,
       },
     );
@@ -275,7 +304,11 @@ describe('code graph index scope', () => {
     expect(workspace.diagnostics).toEqual([
       expect.stringMatching(/^apps\/a-000\/tsconfig\.json: invalid TypeScript config.*\(106 occurrences\)$/u),
     ]);
-    expect(workspace.diagnostics.some(diagnostic => diagnostic.startsWith('apps/z-selected/'))).toBe(false);
+    expect(
+      EffectArray.some(workspace.diagnostics, diagnostic =>
+        Effect.pipe(diagnostic, EffectString.startsWith('apps/z-selected/')),
+      ),
+    ).toBe(false);
     expect(selected.completeness).toBe('partial');
     expect(selected.diagnostics).toEqual([
       expect.stringMatching(/^apps\/z-selected\/tsconfig\.json: invalid TypeScript config/u),
@@ -285,7 +318,7 @@ describe('code graph index scope', () => {
   it('preserves a selected Bazel diagnostic beyond the global workspace diagnostic bound', () => {
     const files: CodeGraphInventoryFile[] = [];
     for (let index = 0; index < 101; index += 1) {
-      const root = `apps/a-${String(index).padStart(3, '0')}`;
+      const root = `apps/a-${Effect.pipe(String(index), EffectString.padStart(3, '0'))}`;
       files.push(
         workspaceFile(
           `${root}/BUILD`,
@@ -306,13 +339,17 @@ describe('code graph index scope', () => {
       {graph: {closure: 'dependencies', roots: ['apps/z-selected']}, uri: 'threadnote://resources/repos/selected'},
       {
         fingerprint: workspace.fingerprint,
-        resolutionContextPaths: files.map(file => file.path),
+        resolutionContextPaths: EffectArray.map(files, file => file.path),
         workspace,
       },
     );
 
     expect(workspace.diagnostics).toHaveLength(100);
-    expect(workspace.diagnostics.some(diagnostic => diagnostic.startsWith('apps/z-selected/'))).toBe(false);
+    expect(
+      EffectArray.some(workspace.diagnostics, diagnostic =>
+        Effect.pipe(diagnostic, EffectString.startsWith('apps/z-selected/')),
+      ),
+    ).toBe(false);
     expect(selected.completeness).toBe('partial');
     expect(selected.diagnostics).toEqual([
       'apps/z-selected/BUILD: local Bazel package //missing-selected was not indexed',
@@ -359,47 +396,53 @@ describe('code graph index scope', () => {
       segments: FC.uniqueArray(FC.stringMatching(/^[a-z]{1,6}$/), {minLength: 2, maxLength: 4}),
     },
     ({evidenceSelections, projectRootSelections, segments, sourceRootSelections}) => {
-      const paths = segments.map((_segment, index) => segments.slice(0, index + 1).join('/'));
-      const projects = projectRootSelections.map(
+      const paths = EffectArray.map(segments, (_segment, index) => EffectArray.join(segments.slice(0, index + 1), '/'));
+      const projects = EffectArray.map(
+        projectRootSelections,
         (selection, index) =>
           ({
             ...project(`project-${index}`, paths[selection % paths.length]),
-            sourceRoots: sourceRootSelections[index % sourceRootSelections.length].map(
+            sourceRoots: EffectArray.map(
+              sourceRootSelections[index % sourceRootSelections.length],
               sourceSelection => paths[sourceSelection % paths.length],
             ),
           }) satisfies CodeGraphWorkspaceProject,
       );
-      const diagnostics = evidenceSelections.map(
+      const diagnostics = EffectArray.map(
+        evidenceSelections,
         (selection, index) => `${paths[selection % paths.length]}/evidence-${index}: diagnostic`,
       );
       const orderedDiagnostics = [...diagnostics].sort();
       const index = createCodeGraphWorkspaceDiagnosticIndex(projects);
       const resolution = resolveCodeGraphWorkspaceDiagnostics(projects, diagnostics);
-      const expectedMatches = diagnostics.map(diagnostic =>
-        naiveDiagnosticProjects(projects, diagnostic).map(project => project.id),
+      const expectedMatches = EffectArray.map(diagnostics, diagnostic =>
+        EffectArray.map(naiveDiagnosticProjects(projects, diagnostic), project => project.id),
       );
 
       expect(
-        diagnostics.map(diagnostic =>
-          codeGraphWorkspaceProjectsForDiagnostic(index, diagnostic).map(project => project.id),
+        EffectArray.map(diagnostics, diagnostic =>
+          EffectArray.map(codeGraphWorkspaceProjectsForDiagnostic(index, diagnostic), project => project.id),
         ),
       ).toEqual(expectedMatches);
       expect(
-        [...resolution.projectsByDiagnostic.entries()].map(([diagnostic, matches]) => [
+        EffectArray.map([...resolution.projectsByDiagnostic.entries()], ([diagnostic, matches]) => [
           diagnostic,
-          matches.map(project => project.id),
+          EffectArray.map(matches, project => project.id),
         ]),
       ).toEqual(
-        orderedDiagnostics.map(diagnostic => [
+        EffectArray.map(orderedDiagnostics, diagnostic => [
           diagnostic,
-          naiveDiagnosticProjects(projects, diagnostic).map(project => project.id),
+          EffectArray.map(naiveDiagnosticProjects(projects, diagnostic), project => project.id),
         ]),
       );
-      expect(resolution.projects.map(project => [project.id, project.diagnostics])).toEqual(
-        projects.map(project => [
+      expect(EffectArray.map(resolution.projects, project => [project.id, project.diagnostics])).toEqual(
+        EffectArray.map(projects, project => [
           project.id,
-          orderedDiagnostics.filter(diagnostic =>
-            naiveDiagnosticProjects(projects, diagnostic).some(match => match.id === project.id),
+          EffectArray.filter(
+            orderedDiagnostics,
+            (diagnostic, __effectArrayIndex) =>
+              __effectArrayIndex in orderedDiagnostics &&
+              EffectArray.some(naiveDiagnosticProjects(projects, diagnostic), match => match.id === project.id),
           ),
         ]),
       );
@@ -423,10 +466,9 @@ describe('code graph index scope', () => {
         catalog([selected, dependency, unreachable]),
       );
       expect(scope.includedProjectIds).toEqual(['selected', 'dependency']);
-      expect(forwardDependencyClosure([selected], [unreachable, dependency, selected]).map(value => value.id)).toEqual([
-        'selected',
-        'dependency',
-      ]);
+      expect(
+        EffectArray.map(forwardDependencyClosure([selected], [unreachable, dependency, selected]), value => value.id),
+      ).toEqual(['selected', 'dependency']);
     },
     {fastCheck: {numRuns: 100}},
   );
@@ -476,7 +518,7 @@ describe('code graph index scope', () => {
         catalog([app, expandedCore, utility, reverse]),
       );
 
-      expect(before.includedProjectIds.every(id => after.includedProjectIds.includes(id))).toBe(true);
+      expect(EffectArray.every(before.includedProjectIds, id => after.includedProjectIds.includes(id))).toBe(true);
       expect(after.includedProjectIds).toEqual(['app', 'core', 'utility']);
       expect(after.includedProjectIds).not.toContain('reverse');
     },

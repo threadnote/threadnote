@@ -16,13 +16,16 @@ import {
   type CodeGraphRemovedViewCleanupPhase,
   type CodeGraphRemovedViewCleanupUpdate,
 } from '@threadnote/graph/store';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const INPUT = {
-  checkoutId: 'a'.repeat(64),
+  checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
   databasePath: '/private/graph-v3.sqlite',
   threadnoteHome: '/private/threadnote',
 };
-const SNAPSHOT_ID = `cgsn_${'1'.repeat(40)}`;
+const SNAPSHOT_ID = `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`;
 
 const phaseArbitrary = fc.constantFrom<Exclude<CodeGraphRemovedViewCleanupPhase, 'complete'>>(
   'vector-pointers',
@@ -128,13 +131,13 @@ function cleanupEntry(overrides: Partial<CodeGraphRemovedViewCleanupEntry>): Cod
     expectedSnapshotId: SNAPSHOT_ID,
     nextAttemptAt: 30_000,
     phase: 'vector-pointers',
-    provenanceRecordDigest: 'b'.repeat(64),
-    provenanceRecordIdentity: 'c'.repeat(64),
+    provenanceRecordDigest: Effect2.pipe('b', EffectString.repeat(64)),
+    provenanceRecordIdentity: Effect2.pipe('c', EffectString.repeat(64)),
     removedAt: new Date(0).toISOString(),
-    repositoryId: 'd'.repeat(64),
+    repositoryId: Effect2.pipe('d', EffectString.repeat(64)),
     revision: 1,
     updatedAt: new Date(0).toISOString(),
-    worktreeId: 'e'.repeat(64),
+    worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
     ...overrides,
   };
 }
@@ -150,15 +153,22 @@ function pageResult(
   if (action === 'deferred') return {blockedCode, retryAfterMilliseconds: delay, state: 'deferred'};
   return {
     cursorToken:
-      phase === 'vector-pointers' ? `vp1:a:${'f'.repeat(64)}:model-000:${revision}` : buildProgressCursor(revision),
+      phase === 'vector-pointers'
+        ? `vp1:a:${Effect2.pipe('f', EffectString.repeat(64))}:model-000:${revision}`
+        : buildProgressCursor(revision),
     state: 'progress',
   };
 }
 
 function buildProgressCursor(revision: number): string {
-  const fields = ['bs1', 's', revision.toString(16).padStart(16, '0'), 'a'.repeat(64)] as const;
-  const seal = sha256HexSync(['threadnote-code-graph-build-cleanup-cursor-v1', ...fields].join('\0'));
-  return [...fields, seal].join(':');
+  const fields = [
+    'bs1',
+    's',
+    Effect2.pipe(revision.toString(16), EffectString.padStart(16, '0')),
+    Effect2.pipe('a', EffectString.repeat(64)),
+  ] as const;
+  const seal = sha256HexSync(EffectArray.join(['threadnote-code-graph-build-cleanup-cursor-v1', ...fields], '\0'));
+  return EffectArray.join([...fields, seal], ':');
 }
 
 function modeledUpdate(

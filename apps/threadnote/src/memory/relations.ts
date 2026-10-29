@@ -1,4 +1,5 @@
-import {Data, Effect} from 'effect';
+import {Array as EffectArray, Schema} from 'effect';
+import {Effect} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {makeResourceIdScopeChecker, parseResourceId} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -16,10 +17,13 @@ import {
 } from '@threadnote/memory/identity-alias';
 import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class MemoryRelationWriteError extends Data.TaggedError('MemoryRelationWriteError')<{
-  readonly message: string;
-}> {}
+export class MemoryRelationWriteError extends Schema.TaggedError<
+  MemoryRelationWriteError,
+  {readonly brand: unique symbol}
+>()('MemoryRelationWriteError', {message: Schema.String}) {}
 
 export interface AuthoredMemoryRelationTarget {
   readonly allowedUriScopes: readonly string[];
@@ -38,22 +42,32 @@ export function memoryIdentityWriteLockKeys(
   sourceMemoryId: string | undefined,
   targets: readonly {readonly memoryId?: string}[],
 ): readonly string[] {
-  return [
-    memoryIdentityLockKey(sourceMemoryId),
-    ...targets.map(target => memoryIdentityLockKey(target.memoryId)),
-  ].filter((key): key is string => key !== undefined);
+  return EffectArray.filter(
+    [
+      memoryIdentityLockKey(sourceMemoryId),
+      ...EffectArray.map(targets, target => memoryIdentityLockKey(target.memoryId)),
+    ],
+    (key): key is string => key !== undefined,
+  );
 }
 
 type RelationInput = Readonly<{readonly type: string; readonly uri: string}>;
 
 /** Parse the repeatable CLI `--relation <type>=<threadnote://uri>` form. */
 export function parseMemoryRelationOption(value: string): MemoryRelation {
-  const separator = value.indexOf('=');
+  const separator = Effect2.pipe(
+    value,
+    EffectString.indexOf('='),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (separator <= 0) {
     throw relationError('Relation must use <type>=<threadnote://uri>.');
   }
   return normalizeMemoryRelationInputs([
-    {type: value.slice(0, separator).trim(), uri: value.slice(separator + 1).trim()},
+    {
+      type: Effect2.pipe(value, EffectString.slice(0, separator), EffectString.trim),
+      uri: Effect2.pipe(value, EffectString.slice(separator + 1), EffectString.trim),
+    },
   ])[0];
 }
 
@@ -78,7 +92,7 @@ export function normalizeMemoryRelationInputs(inputs: readonly RelationInput[]):
     let uri: string;
     let resource: ReturnType<typeof parseResourceId>;
     try {
-      resource = parseResourceId(input.uri.trim());
+      resource = parseResourceId(Effect2.pipe(input.uri, EffectString.trim));
       uri = resource.canonicalUri;
     } catch {
       throw relationError('Relation targets must be canonical threadnote:// memory URIs or stable memory aliases.');
@@ -120,27 +134,27 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
   const resourceIds = makeResourceIdScopeChecker();
   const relations = yield* Effect.try({
     catch: cause =>
-      cause instanceof MemoryRelationWriteError
+      Schema.is(MemoryRelationWriteError)(cause)
         ? cause
         : relationError(cause instanceof Error ? cause.message : 'Memory relation input is invalid.'),
     try: () => normalizeMemoryRelationInputs(inputs),
   });
   const sourceUri = yield* Effect.try({
     catch: cause =>
-      cause instanceof MemoryRelationWriteError
+      Schema.is(MemoryRelationWriteError)(cause)
         ? cause
         : relationError(cause instanceof Error ? cause.message : 'Relation source URI is invalid.'),
     try: () => (options.sourceUri === undefined ? undefined : resourceIds.parse(options.sourceUri).canonicalUri),
   });
   if (relations.length === 0) return {relations: undefined, targets: []} satisfies ResolvedAuthoredMemoryRelations;
-  const allowedUriScopes = options.allowedUriScopes.map(scope => resourceIds.parse(scope).canonicalUri);
+  const allowedUriScopes = EffectArray.map(options.allowedUriScopes, scope => resourceIds.parse(scope).canonicalUri);
   if (allowedUriScopes.length === 0) {
     return yield* relationError('Relation resolution requires an explicit authorized memory scope.');
   }
   for (const relation of relations) {
     if (
       memoryIdFromIdentityAlias(relation.uri) === undefined &&
-      !allowedUriScopes.some(scope => resourceIds.isWithin(relation.uri, scope))
+      !EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(relation.uri, scope))
     ) {
       return yield* relationError('Relation targets must stay inside the authorized memory scope.');
     }
@@ -148,13 +162,13 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
 
   const initiallyResolved = yield* resolveMemoryIdentityAliases(
     config,
-    relations.map(relation => relation.uri),
+    EffectArray.map(relations, relation => relation.uri),
     allowedUriScopes,
   );
   const liveTargets = yield* Effect.forEach(initiallyResolved, (resolved, index) =>
     Effect.gen(function* () {
       const live = yield* readMemoryWithRelocations(config, resolved.canonicalUri, {allowedUriScopes});
-      if (!allowedUriScopes.some(scope => resourceIds.isWithin(live.canonicalUri, scope))) {
+      if (!EffectArray.some(allowedUriScopes, scope => resourceIds.isWithin(live.canonicalUri, scope))) {
         return yield* relationError('Relation target does not resolve inside the authorized active memory scope.');
       }
       yield* verifyResolvedMemoryIdentity(resolved, live.canonicalUri, live.content);
@@ -175,7 +189,8 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     }),
   );
 
-  const identityBearing = liveTargets.filter(
+  const identityBearing = EffectArray.filter(
+    liveTargets,
     (target): target is (typeof liveTargets)[number] & {readonly memoryId: string} => target.memoryId !== undefined,
   );
   const identityChecks =
@@ -183,11 +198,11 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
       ? []
       : yield* resolveMemoryIdentityAliases(
           config,
-          identityBearing.map(target => memoryIdentityAlias(target.memoryId)),
+          EffectArray.map(identityBearing, target => memoryIdentityAlias(target.memoryId)),
           allowedUriScopes,
         );
   const identityByMemoryId = new Map(
-    identityBearing.map((target, index) => [target.memoryId, identityChecks[index]] as const),
+    EffectArray.map(identityBearing, (target, index) => [target.memoryId, identityChecks[index]] as const),
   );
   const output: MemoryRelation[] = [];
   const targets = new Map<string, AuthoredMemoryRelationTarget>();
@@ -257,7 +272,7 @@ export const verifyAuthoredMemoryRelationTargetIdentities = Effect.fn('memory.ve
       const allowedUriScopes = targetsInScope[0].allowedUriScopes!;
       const resolved = yield* resolveMemoryIdentityAliases(
         config,
-        targetsInScope.map(target => memoryIdentityAlias(target.memoryId!)),
+        EffectArray.map(targetsInScope, target => memoryIdentityAlias(target.memoryId!)),
         allowedUriScopes,
         {validateNow: true},
       ).pipe(
@@ -283,7 +298,7 @@ export const verifyAuthoredMemoryRelationTargetIdentities = Effect.fn('memory.ve
 );
 
 function relationError(message: string): MemoryRelationWriteError {
-  return new MemoryRelationWriteError({message});
+  return MemoryRelationWriteError.make({message});
 }
 
 function compareText(left: string, right: string): number {

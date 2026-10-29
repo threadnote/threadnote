@@ -1,4 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import type {GitHubConversation} from '../src/client.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export const timestamp = '2026-10-08T00:00:00Z';
 export const conversation: GitHubConversation = {
   id: '11',
@@ -35,10 +39,11 @@ export const fixtureFetch =
   (items: readonly number[] = [1, 2]) =>
   async (url: URL) => {
     url = new URL(url);
-    url.pathname = url.pathname.replace(/^\/repositories\/7(?=\/|$)/, '/repos/owner/repo');
+    url.pathname = Effect.pipe(url.pathname, EffectString.replace(/^\/repositories\/7(?=\/|$)/, '/repos/owner/repo'));
     if (url.pathname === '/repos/owner/repo') return json({id: 7, full_name: 'owner/repo', private: false});
-    if (url.pathname === '/repos/owner/repo/issues') return json(items.map(n => restItem(n)));
-    if (/\/issues\/\d+$/.test(url.pathname)) return json(restItem(Number(url.pathname.split('/').at(-1))));
-    if (url.pathname.endsWith('/comments')) return json([]);
+    if (url.pathname === '/repos/owner/repo/issues') return json(EffectArray.map(items, n => restItem(n)));
+    if (/\/issues\/\d+$/.test(url.pathname))
+      return json(restItem(Number(Effect.pipe(url.pathname, EffectString.split('/')).at(-1))));
+    if (Effect.pipe(url.pathname, EffectString.endsWith('/comments'))) return json([]);
     return json({}, 404);
   };

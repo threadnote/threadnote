@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {extractFileFacts} from '@threadnote/graph/extractor';
@@ -5,6 +6,8 @@ import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {mkdtempSync, rmSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 it('loads the TypeScript compiler only for TypeScript extraction, preserving its identity and repeated facts', () => {
   // This contract is process-global module loading, so an isolated CLI boundary is intentional.
@@ -67,9 +70,9 @@ it('preserves facts and caller inputs across repeated cached-compiler extraction
     FC.property(FC.integer({min: 0, max: 1_000}), FC.integer({min: -100, max: 100}), (suffix, increment) => {
       const content = `export function example${suffix}(value: number) { return value + ${increment}; }`;
       const file: CodeGraphInventoryFile = {
-        blobId: 'b'.repeat(40),
+        blobId: Effect.pipe('b', EffectString.repeat(40)),
         content,
-        contentHash: 'a'.repeat(64),
+        contentHash: Effect.pipe('a', EffectString.repeat(64)),
         language: 'typescript',
         mode: '100644',
         path: `src/example-${suffix}.ts`,
@@ -102,7 +105,13 @@ it.each([false, true])('bundles the lazy compiler outside the dependency checkou
       minify: true,
       target: 'bun',
     });
-    expect(result.success, result.logs.map(log => log.message).join('\n')).toBe(true);
+    expect(
+      result.success,
+      EffectArray.join(
+        EffectArray.map(result.logs, log => log.message),
+        '\n',
+      ),
+    ).toBe(true);
     const child = Bun.spawnSync(
       compiled ? [executable] : [process.execPath, join(directory, 'code-graph-lazy-extractor.js')],
       {cwd: directory, stderr: 'pipe', stdout: 'pipe'},

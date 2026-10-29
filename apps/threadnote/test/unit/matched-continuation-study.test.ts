@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
 import {mkdtemp, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -21,12 +22,14 @@ import {
   parseMatchedContinuationPreparationPlanV1,
 } from '../../../../scripts/prepare-matched-continuation-study.js';
 import {assertMatchedContinuationRuntimeFilesV1} from '../../../../scripts/matched-continuation-runtime-integrity.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('matched continuation claim-study sealing', () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(roots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('seals a position-balanced multi-repository continuation schedule', () => {
@@ -39,10 +42,10 @@ describe('matched continuation claim-study sealing', () => {
     expect(parseMatchedContinuationStudyV1(JSON.parse(JSON.stringify(study)))).toEqual(study);
     for (const variant of MATCHED_CONTINUATION_VARIANTS) {
       expect(
-        study.schedule
-          .filter(entry => entry.variant === variant)
-          .map(entry => entry.withinTaskRunOrder)
-          .sort(),
+        EffectArray.map(
+          EffectArray.filter(study.schedule, entry => entry.variant === variant),
+          entry => entry.withinTaskRunOrder,
+        ).sort(),
       ).toEqual([1, 2, 3, 4, 5]);
     }
   });
@@ -52,7 +55,7 @@ describe('matched continuation claim-study sealing', () => {
     expect(() => parseMatchedContinuationStudyV1({...study, schedule: study.schedule.slice(1)})).toThrow(
       'one attempt per task and variant',
     );
-    const imbalanced = study.schedule.map(entry =>
+    const imbalanced = EffectArray.map(study.schedule, entry =>
       entry.variant === 'files-bare' ? {...entry, withinTaskRunOrder: 1} : entry,
     );
     expect(() => parseMatchedContinuationStudyV1({...study, schedule: imbalanced})).toThrow(
@@ -61,7 +64,7 @@ describe('matched continuation claim-study sealing', () => {
     expect(() =>
       parseMatchedContinuationStudyV1({
         ...study,
-        tasks: study.tasks.map((task, index) =>
+        tasks: EffectArray.map(study.tasks, (task, index) =>
           index === 0 ? {...task, checkpointRevision: task.sourceRevision} : task,
         ),
       }),
@@ -69,7 +72,7 @@ describe('matched continuation claim-study sealing', () => {
     expect(() =>
       parseMatchedContinuationStudyV1({
         ...study,
-        tasks: study.tasks.map((task, index) =>
+        tasks: EffectArray.map(study.tasks, (task, index) =>
           index === 0 ? {...task, repositoryUrl: `${task.repositoryUrl}?token=secret`} : task,
         ),
       }),
@@ -87,7 +90,7 @@ describe('matched continuation claim-study sealing', () => {
       matchedRuntimePath: '/tmp/continuation/runtime.json',
       matchedStudyPath: '/tmp/continuation/study.json',
       studyHash: study.studyHash,
-      tasks: study.tasks.map(task => ({
+      tasks: EffectArray.map(study.tasks, task => ({
         pilotDirectory: `/tmp/continuation/pilots/${task.taskId}`,
         planPath: `/tmp/continuation/plans/${task.taskId}.json`,
         planSha256: task.planSha256,
@@ -101,22 +104,28 @@ describe('matched continuation claim-study sealing', () => {
       assertMatchedContinuationRuntimeMatchesStudyV1(study, {...runtime, tasks: runtime.tasks.slice(1)}),
     ).toThrow('do not exactly cover');
     expect(() =>
-      assertMatchedContinuationRuntimeMatchesStudyV1(study, {...runtime, studyHash: 'f'.repeat(64)}),
+      assertMatchedContinuationRuntimeMatchesStudyV1(study, {
+        ...runtime,
+        studyHash: Effect.pipe('f', EffectString.repeat(64)),
+      }),
     ).toThrow('different study');
     expect(() =>
-      assertMatchedContinuationRuntimeMatchesStudyV1(study, {...runtime, exposureAuditSha256: 'f'.repeat(64)}),
+      assertMatchedContinuationRuntimeMatchesStudyV1(study, {
+        ...runtime,
+        exposureAuditSha256: Effect.pipe('f', EffectString.repeat(64)),
+      }),
     ).toThrow('exposure audit hash differs');
     expect(() =>
       assertMatchedContinuationRuntimeMatchesStudyV1(study, {
         ...runtime,
-        tasks: runtime.tasks.map((task, index) => (index === 0 ? {...task, planSha256: hex(63)} : task)),
+        tasks: EffectArray.map(runtime.tasks, (task, index) => (index === 0 ? {...task, planSha256: hex(63)} : task)),
       }),
     ).toThrow('runtime plan hash differs');
   });
 
   it('binds each preparation task to a distinct checkpoint runtime', () => {
     const tasks = Array.from({length: 5}, (_, index) => ({
-      clusterId: `cluster_${(index + 1).toString(16).padStart(16, '0')}`,
+      clusterId: `cluster_${Effect.pipe((index + 1).toString(16), EffectString.padStart(16, '0'))}`,
       pilotDirectory: `/tmp/continuation/pilot-${index}`,
       planPath: `/tmp/continuation/plan-${index}.json`,
       runtimePath: `/tmp/continuation/runtime-${index}.json`,
@@ -139,13 +148,15 @@ describe('matched continuation claim-study sealing', () => {
       version: 1,
     };
 
-    expect(parseMatchedContinuationPreparationPlanV1(plan).tasks.map(task => task.runtimePath)).toEqual(
-      tasks.map(task => task.runtimePath),
+    expect(EffectArray.map(parseMatchedContinuationPreparationPlanV1(plan).tasks, task => task.runtimePath)).toEqual(
+      EffectArray.map(tasks, task => task.runtimePath),
     );
     expect(() =>
       parseMatchedContinuationPreparationPlanV1({
         ...plan,
-        tasks: tasks.map((task, index) => (index === 1 ? {...task, runtimePath: tasks[0].runtimePath} : task)),
+        tasks: EffectArray.map(tasks, (task, index) =>
+          index === 1 ? {...task, runtimePath: tasks[0].runtimePath} : task,
+        ),
       }),
     ).toThrow('continuation preparation runtime paths must be unique');
   });
@@ -163,7 +174,7 @@ describe('matched continuation claim-study sealing', () => {
     ]);
     const input = studyInput();
     const plans = await Promise.all(
-      input.tasks.map(async task => {
+      EffectArray.map(input.tasks, async task => {
         const planPath = join(root, `${task.taskId}.json`);
         const bytes = Buffer.from(`${JSON.stringify({taskId: task.taskId})}\n`);
         await writeFile(planPath, bytes);
@@ -177,9 +188,11 @@ describe('matched continuation claim-study sealing', () => {
         exposureAuditSha256: sha256HexSync(exposureAuditBytes),
         matchedPreparationReceiptSha256: sha256HexSync(receiptBytes),
       },
-      tasks: input.tasks.map(task => ({
+      tasks: EffectArray.map(input.tasks, task => ({
         ...task,
-        planSha256: sha256HexSync(plans.find(plan => plan.taskId === task.taskId)!.bytes),
+        planSha256: sha256HexSync(
+          EffectOption.getOrUndefined(EffectArray.findFirst(plans, plan => plan.taskId === task.taskId))!.bytes,
+        ),
       })),
     });
     const runtime = {
@@ -191,9 +204,10 @@ describe('matched continuation claim-study sealing', () => {
       matchedRuntimePath: join(root, 'matched-runtime.json'),
       matchedStudyPath: join(root, 'matched-study.json'),
       studyHash: study.studyHash,
-      tasks: study.tasks.map(task => ({
+      tasks: EffectArray.map(study.tasks, task => ({
         pilotDirectory: join(root, 'pilots', task.taskId),
-        planPath: plans.find(plan => plan.taskId === task.taskId)!.planPath,
+        planPath: EffectOption.getOrUndefined(EffectArray.findFirst(plans, plan => plan.taskId === task.taskId))!
+          .planPath,
         planSha256: task.planSha256,
         taskId: task.taskId,
       })),
@@ -218,7 +232,7 @@ describe('matched continuation claim-study sealing', () => {
           fixRevision: commit(23),
           fixFixtureHash: hex(23),
           protectedPaths: ['tests/expected.txt'],
-          taskId: `tsk_${hex(24).slice(-16)}`,
+          taskId: `tsk_${Effect.pipe(hex(24), EffectString.slice(-16))}`,
         },
       ],
       version: 1 as const,
@@ -266,7 +280,7 @@ describe('matched continuation claim-study sealing', () => {
     fc.assert(
       fc.property(fc.shuffledSubarray([0, 1, 2, 3, 4], {minLength: 5, maxLength: 5}), order => {
         const input = studyInput();
-        const shuffled = {...input, tasks: order.map(index => input.tasks[index])};
+        const shuffled = {...input, tasks: EffectArray.map(order, index => input.tasks[index])};
         const study = createMatchedContinuationStudyV1(shuffled);
         const {studyHash: _studyHash, version: _version, ...withoutHash} = study;
         expect(study.studyHash).toBe(createStudy().studyHash);
@@ -319,7 +333,10 @@ describe('matched continuation claim-study sealing', () => {
 
 describe('matched continuation exposure audit', () => {
   const sourceCommit = commit(70);
-  const taskIds = [`tsk_${hex(71).slice(-16)}`, `tsk_${hex(72).slice(-16)}`];
+  const taskIds = [
+    `tsk_${Effect.pipe(hex(71), EffectString.slice(-16))}`,
+    `tsk_${Effect.pipe(hex(72), EffectString.slice(-16))}`,
+  ];
 
   it('retains the strict held-out v1 contract', () => {
     expect(() =>
@@ -327,7 +344,7 @@ describe('matched continuation exposure audit', () => {
         {
           productFreezeCommit: sourceCommit,
           reviewedBeforeProviderOutcomes: true,
-          tasks: taskIds.map(taskId => ({
+          tasks: EffectArray.map(taskIds, taskId => ({
             priorProductImplementationExposure: false,
             priorProviderOutcomeExposure: false,
             taskId,
@@ -394,7 +411,7 @@ describe('matched continuation exposure audit', () => {
       },
       productFreezeCommit: sourceCommit,
       reviewedBeforeCurrentProviderOutcomes: true,
-      tasks: taskIds.map(taskId => ({priorProviderOutcomeExposure: true, taskId})),
+      tasks: EffectArray.map(taskIds, taskId => ({priorProviderOutcomeExposure: true, taskId})),
       version: 2,
     };
   }
@@ -438,12 +455,12 @@ function studyInput(
   const tasks = Array.from({length: options.taskCount ?? 5}, (_, index): MatchedContinuationStudyTaskV1 => ({
     checkpointRepositoryFixtureHash: hex(index + 40),
     checkpointRevision: commit(index + 40),
-    clusterId: `cluster_${hex(index + 10).slice(-16)}`,
+    clusterId: `cluster_${Effect.pipe(hex(index + 10), EffectString.slice(-16))}`,
     planSha256: hex(index + 50),
     repositoryUrl: `https://example.com/org/repository-${index}.git`,
     sourceRepositoryFixtureHash: hex(index + 20),
     sourceRevision: commit(index + 20),
-    taskId: `tsk_${hex(index + 30).slice(-16)}`,
+    taskId: `tsk_${Effect.pipe(hex(index + 30), EffectString.slice(-16))}`,
   }));
   let globalRunOrder = 0;
   return {
@@ -463,13 +480,13 @@ function studyInput(
       minimumCorrectnessScoreMilli: 1_000,
       minimumTokenReductionBasisPoints: 500,
     },
-    schedule: tasks.flatMap((task, taskIndex) =>
+    schedule: EffectArray.flatMap(tasks, (task, taskIndex) =>
       Array.from({length: variants.length}, (_, position) => {
         const variant = variants[(position + taskIndex) % variants.length];
         globalRunOrder += 1;
         return {
           globalRunOrder,
-          runNonce: `run_${globalRunOrder.toString(16).padStart(32, '0')}`,
+          runNonce: `run_${Effect.pipe(globalRunOrder.toString(16), EffectString.padStart(32, '0'))}`,
           taskId: task.taskId,
           variant,
           withinTaskRunOrder: position + 1,
@@ -492,9 +509,9 @@ function studyInput(
 }
 
 function hex(seed: number): string {
-  return seed.toString(16).padStart(64, '0');
+  return Effect.pipe(seed.toString(16), EffectString.padStart(64, '0'));
 }
 
 function commit(seed: number): string {
-  return seed.toString(16).padStart(40, '0');
+  return Effect.pipe(seed.toString(16), EffectString.padStart(40, '0'));
 }

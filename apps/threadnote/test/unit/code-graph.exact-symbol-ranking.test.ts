@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {Database} from 'bun:sqlite';
 import {expect, it as effectIt} from '@effect/vitest';
@@ -20,7 +21,9 @@ effectIt.effect('keeps an exact variable match in a full page of boosted mutatio
       Effect.tap(results =>
         Effect.sync(() => {
           expect(results).toHaveLength(10);
-          expect(results.find(result => result.name === exactSymbol)).toMatchObject({score: 1});
+          expect(
+            EffectOption.getOrUndefined(EffectArray.findFirst(results, result => result.name === exactSymbol)),
+          ).toMatchObject({score: 1});
         }),
       ),
     ),
@@ -39,7 +42,7 @@ fcEffectProp(
       queryExactSymbolRanking(distractorCount, limit).pipe(
         Effect.tap(results =>
           Effect.sync(() => {
-            expect(results.some(result => result.name === exactSymbol)).toBe(true);
+            expect(EffectArray.some(results, result => result.name === exactSymbol)).toBe(true);
           }),
         ),
         Effect.asVoid,

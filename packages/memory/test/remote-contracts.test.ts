@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -18,6 +19,7 @@ import {
   type RemoteMemoryReceiptV1,
 } from '@threadnote/memory/remote/receipts';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
+import {Option as EffectOption} from 'effect';
 
 const portableSegment = FC.stringMatching(/^[a-z][a-z0-9]{0,8}$/u).filter(value => {
   try {
@@ -175,7 +177,7 @@ describe('remote memory versioned schemas', () => {
       ),
     },
     ({relations}) => {
-      const authored = relations.map(relation => ({
+      const authored = EffectArray.map(relations, relation => ({
         type: relation.type,
         uri: formatRemoteMemoryUri({
           kind: 'durable',
@@ -196,9 +198,15 @@ describe('remote memory versioned schemas', () => {
         }).relations;
 
       expect(parse(authored)).toEqual(parse([...authored].reverse()));
-      expect(new Set(parse(authored)?.map(relation => `${relation.type}\n${relation.uri}`))).toEqual(
-        new Set(authored.map(relation => `${relation.type}\n${relation.uri}`)),
-      );
+      expect(
+        new Set(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(parse(authored)), __effectArrayReceiver =>
+              EffectArray.map(__effectArrayReceiver, relation => `${relation.type}\n${relation.uri}`),
+            ),
+          ),
+        ),
+      ).toEqual(new Set(EffectArray.map(authored, relation => `${relation.type}\n${relation.uri}`)));
     },
     {fastCheck: {numRuns: 100}},
   );
@@ -261,17 +269,20 @@ describe('remote memory versioned schemas', () => {
 
   it('validates canonical Markdown identity without returning blocked content in the decision', () => {
     const uri = 'threadnote://share/share-1/memories/durable/threadnote/decision.md';
-    const content = [
-      'MEMORY',
-      'kind: durable',
-      'status: active',
-      'project: threadnote',
-      'topic: decision',
-      'source_agent_client: cursor',
-      'timestamp: 2026-08-13T08:00:00.000Z',
-      '',
-      'Use immutable revisions.',
-    ].join('\n');
+    const content = EffectArray.join(
+      [
+        'MEMORY',
+        'kind: durable',
+        'status: active',
+        'project: threadnote',
+        'topic: decision',
+        'source_agent_client: cursor',
+        'timestamp: 2026-08-13T08:00:00.000Z',
+        '',
+        'Use immutable revisions.',
+      ],
+      '\n',
+    );
 
     expect(
       parseRemoteCanonicalMemoryDocument({content, kind: 'durable', project: 'threadnote', topic: 'decision', uri}),

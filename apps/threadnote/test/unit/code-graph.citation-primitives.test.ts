@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import * as FC from 'fast-check';
@@ -31,15 +32,17 @@ import {mergeCodeGraphWorkspaces} from '@threadnote/graph/workspace';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {validateContextBriefFileCitation} from '@threadnote/context/citation_validation';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const baseSnapshotId = 'citation-base';
 const currentSnapshotId = 'citation-current';
-const oldHash = '1'.repeat(64);
-const newHash = '2'.repeat(64);
-const keepHash = '3'.repeat(64);
-const deletedHash = '4'.repeat(64);
-const duplicateHash = '5'.repeat(64);
-const legacyRawHash = '8'.repeat(64);
+const oldHash = Effect2.pipe('1', EffectString.repeat(64));
+const newHash = Effect2.pipe('2', EffectString.repeat(64));
+const keepHash = Effect2.pipe('3', EffectString.repeat(64));
+const deletedHash = Effect2.pipe('4', EffectString.repeat(64));
+const duplicateHash = Effect2.pipe('5', EffectString.repeat(64));
+const legacyRawHash = Effect2.pipe('8', EffectString.repeat(64));
 
 const targetLocator = {
   kind: 'function',
@@ -63,14 +66,14 @@ describe('code graph citation query primitives', () => {
     'queries eager hashes and only missing-path relocation fallbacks in first-seen order',
     {
       eagerContentHashes: FC.array(
-        FC.integer({max: 5, min: 0}).map(value => String(value).repeat(64)),
+        FC.integer({max: 5, min: 0}).map(value => Effect2.pipe(String(value), EffectString.repeat(64))),
         {
           maxLength: 8,
         },
       ),
       fallbacks: FC.array(
         FC.record({
-          contentHash: FC.integer({max: 5, min: 0}).map(value => String(value).repeat(64)),
+          contentHash: FC.integer({max: 5, min: 0}).map(value => Effect2.pipe(String(value), EffectString.repeat(64))),
           path: FC.integer({max: 5, min: 0}).map(value => `src/${value}.ts`),
         }),
         {maxLength: 12},
@@ -83,17 +86,22 @@ describe('code graph citation query primitives', () => {
       ),
     },
     ({eagerContentHashes, fallbacks, presentPaths}) => {
-      const potential = [...new Set([...eagerContentHashes, ...fallbacks.map(fallback => fallback.contentHash)])];
+      const potential = [
+        ...new Set([...eagerContentHashes, ...EffectArray.map(fallbacks, fallback => fallback.contentHash)]),
+      ];
       const present = new Set(presentPaths);
       const selected = selectCodeGraphCitationContentHashTargets([...new Set(eagerContentHashes)], fallbacks, present);
       const expected = [
         ...new Set([
           ...eagerContentHashes,
-          ...fallbacks.filter(fallback => !present.has(fallback.path)).map(fallback => fallback.contentHash),
+          ...EffectArray.map(
+            EffectArray.filter(fallbacks, fallback => !present.has(fallback.path)),
+            fallback => fallback.contentHash,
+          ),
         ]),
       ];
       expect(selected).toEqual(expected);
-      expect(selected.every(contentHash => potential.includes(contentHash))).toBe(true);
+      expect(EffectArray.every(selected, contentHash => potential.includes(contentHash))).toBe(true);
     },
     {fastCheck: {numRuns: 100}},
   );
@@ -180,7 +188,13 @@ describe('code graph citation query primitives', () => {
           [duplicateHash],
           8,
         );
-        expect(ambiguousFiles[0]?.files.map(file => file.path)).toEqual(['src/base-copy.ts', 'src/current-copy.ts']);
+        expect(
+          Effect2.Option.getOrUndefined(
+            Effect2.Option.map(Effect2.Option.fromNullishOr(ambiguousFiles[0]?.files), __effectOptionalArrayReceiver =>
+              EffectArray.map(__effectOptionalArrayReceiver, file => file.path),
+            ),
+          ),
+        ).toEqual(['src/base-copy.ts', 'src/current-copy.ts']);
         expect(ambiguousFiles[0]?.truncated).toBe(false);
         const boundedFiles = yield* store.effectiveSnapshotFilesByContentHashes(
           databasePath,
@@ -198,7 +212,7 @@ describe('code graph citation query primitives', () => {
         expect(legacyEvidence.filesByContentHashes[0]).toMatchObject({
           files: [
             {
-              contentHash: '7'.repeat(64),
+              contentHash: Effect2.pipe('7', EffectString.repeat(64)),
               path: 'src/extra.ts',
               rawContentHash: legacyRawHash,
             },
@@ -210,11 +224,11 @@ describe('code graph citation query primitives', () => {
             extractorSet: 'native-code-graph-13',
             fileContentHash: {algorithm: 'sha256', value: contentHash},
             path: citationPath,
-            repositoryId: '9'.repeat(64),
+            repositoryId: Effect2.pipe('9', EffectString.repeat(64)),
             repositoryIdentityKind: 'local',
-            sourceCommit: 'a'.repeat(40),
+            sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
             sourceDirty: true,
-            sourceSnapshotId: `cgsn_${'a'.repeat(40)}`,
+            sourceSnapshotId: `cgsn_${Effect2.pipe('a', EffectString.repeat(40))}`,
             target: {kind: 'file'},
             version: 1,
           });
@@ -238,7 +252,7 @@ describe('code graph citation query primitives', () => {
         ).toMatchObject({observedPath: 'src/extra.ts', reason: 'relocated', status: 'relocated'});
         expect(
           validateContextBriefFileCitation(
-            legacyCitation('src/extra.ts', 'f'.repeat(64)),
+            legacyCitation('src/extra.ts', Effect2.pipe('f', EffectString.repeat(64))),
             legacyEvidence.filesByPaths[0],
             undefined,
             currentSnapshot(),
@@ -251,7 +265,7 @@ describe('code graph citation query primitives', () => {
           'symbol-overridden',
           'symbol-deleted',
         ]);
-        expect(byIds.map(symbol => [symbol.id, symbol.path, symbol.signature])).toEqual([
+        expect(EffectArray.map(byIds, symbol => [symbol.id, symbol.path, symbol.signature])).toEqual([
           ['symbol-inherited', 'src/keep.ts', 'function inherited(): void'],
           ['symbol-overridden', 'src/override.ts', 'function overridden(value: string): void'],
         ]);
@@ -262,12 +276,23 @@ describe('code graph citation query primitives', () => {
           [targetLocator, inheritedLocator],
           8,
         );
-        expect(semanticMatches[0]?.symbols.map(symbol => symbol.path)).toEqual([
-          'src/current-copy-2.ts',
-          'src/current-copy.ts',
-        ]);
+        expect(
+          Effect2.Option.getOrUndefined(
+            Effect2.Option.map(
+              Effect2.Option.fromNullishOr(semanticMatches[0]?.symbols),
+              __effectOptionalArrayReceiver => EffectArray.map(__effectOptionalArrayReceiver, symbol => symbol.path),
+            ),
+          ),
+        ).toEqual(['src/current-copy-2.ts', 'src/current-copy.ts']);
         expect(semanticMatches[0]?.truncated).toBe(false);
-        expect(semanticMatches[1]?.symbols.map(symbol => symbol.id)).toEqual(['symbol-inherited']);
+        expect(
+          Effect2.Option.getOrUndefined(
+            Effect2.Option.map(
+              Effect2.Option.fromNullishOr(semanticMatches[1]?.symbols),
+              __effectOptionalArrayReceiver => EffectArray.map(__effectOptionalArrayReceiver, symbol => symbol.id),
+            ),
+          ),
+        ).toEqual(['symbol-inherited']);
         const boundedSymbols = yield* store.effectiveSnapshotSymbolsBySemanticLocators(
           databasePath,
           currentSnapshotId,
@@ -288,14 +313,16 @@ describe('code graph citation query primitives', () => {
         expect(combined.fileInventoryCoverage).toBe('incomplete');
         const cleanCombined = yield* store.effectiveSnapshotCitationEvidence(databasePath, baseSnapshotId, {});
         expect(cleanCombined.fileInventoryCoverage).toBe('complete');
-        expect(combined.filesByPaths.map(observation => [observation.path, observation.file?.contentHash])).toEqual([
+        expect(
+          EffectArray.map(combined.filesByPaths, observation => [observation.path, observation.file?.contentHash]),
+        ).toEqual([
           ['src/keep.ts', keepHash],
           ['src/deleted.ts', undefined],
         ]);
         expect(combined.filesByContentHashes[0]).toEqual(
           expect.objectContaining({contentHash: duplicateHash, truncated: true}),
         );
-        expect(combined.symbolsByIds.map(symbol => symbol.id)).toEqual(['symbol-inherited']);
+        expect(EffectArray.map(combined.symbolsByIds, symbol => symbol.id)).toEqual(['symbol-inherited']);
         expect(combined.symbolsBySemanticLocators[0]).toEqual(
           expect.objectContaining({truncated: true, symbols: [expect.objectContaining({id: 'symbol-new-target-b'})]}),
         );
@@ -326,10 +353,14 @@ describe('code graph citation query primitives', () => {
           fileRelocationFallbacks: [{contentHash: duplicateHash, path: 'src/missing.ts'}],
         });
         expect(missingPathFallback.filesByPaths).toEqual([{path: 'src/missing.ts'}]);
-        expect(missingPathFallback.filesByContentHashes[0]?.files.map(file => file.path)).toEqual([
-          'src/base-copy.ts',
-          'src/current-copy.ts',
-        ]);
+        expect(
+          Effect2.Option.getOrUndefined(
+            Effect2.Option.map(
+              Effect2.Option.fromNullishOr(missingPathFallback.filesByContentHashes[0]?.files),
+              __effectOptionalArrayReceiver => EffectArray.map(__effectOptionalArrayReceiver, file => file.path),
+            ),
+          ),
+        ).toEqual(['src/base-copy.ts', 'src/current-copy.ts']);
 
         yield* withCitationDatabase(databasePath, database => {
           const pathPlan = queryPlan(
@@ -377,18 +408,18 @@ describe('code graph citation query primitives', () => {
         const databasePath = path.join(root, 'graph.sqlite');
         const identity: RepositoryIdentity = {
           caseMode: 'sensitive',
-          checkoutId: 'a'.repeat(64),
+          checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
           displayName: 'citation-inventory-coverage',
           gitCommonDirectory: path.join(root, '.git'),
-          headCommit: '1'.repeat(40),
+          headCommit: Effect2.pipe('1', EffectString.repeat(40)),
           objectFormat: 'sha1',
           repoRoot: root,
-          repositoryId: 'b'.repeat(64),
-          worktreeId: 'c'.repeat(64),
+          repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
+          worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
         };
         const keep: CodeGraphInventoryFile = {
-          blobId: '2'.repeat(40),
-          contentHash: 'd'.repeat(64),
+          blobId: Effect2.pipe('2', EffectString.repeat(40)),
+          contentHash: Effect2.pipe('d', EffectString.repeat(64)),
           language: 'typescript',
           mode: '100644',
           path: 'src/keep.ts',
@@ -397,35 +428,35 @@ describe('code graph citation query primitives', () => {
         };
         const removed: CodeGraphInventoryFile = {
           ...keep,
-          blobId: '3'.repeat(40),
-          contentHash: 'e'.repeat(64),
+          blobId: Effect2.pipe('3', EffectString.repeat(40)),
+          contentHash: Effect2.pipe('e', EffectString.repeat(64)),
           path: 'src/removed.ts',
         };
         const base = citationSnapshot(identity, {
-          commit: '1'.repeat(40),
+          commit: Effect2.pipe('1', EffectString.repeat(40)),
           fileCount: 2,
-          id: `cgsn_${'4'.repeat(40)}`,
+          id: `cgsn_${Effect2.pipe('4', EffectString.repeat(40))}`,
         });
         const alias = citationSnapshot(identity, {
           baseSnapshotId: base.id,
-          commit: '2'.repeat(40),
+          commit: Effect2.pipe('2', EffectString.repeat(40)),
           fileCount: 2,
-          id: `cgsn_${'5'.repeat(40)}`,
+          id: `cgsn_${Effect2.pipe('5', EffectString.repeat(40))}`,
         });
         const incremental = citationSnapshot(identity, {
           baseSnapshotId: base.id,
-          commit: '3'.repeat(40),
+          commit: Effect2.pipe('3', EffectString.repeat(40)),
           fileCount: 1,
-          id: `cgsn_${'6'.repeat(40)}`,
+          id: `cgsn_${Effect2.pipe('6', EffectString.repeat(40))}`,
         });
         const independent = citationSnapshot(identity, {
           commit: incremental.commit,
           fileCount: 1,
-          id: `cgsn_${'7'.repeat(40)}`,
+          id: `cgsn_${Effect2.pipe('7', EffectString.repeat(40))}`,
         });
         const inventory = completeInventoryReuseReceipt();
         const reusableReceipt = {
-          fileSetFingerprint: 'f'.repeat(64),
+          fileSetFingerprint: Effect2.pipe('f', EffectString.repeat(64)),
           inventory,
           packProvenance: [],
           workspaceFingerprint: inventory.workspace.fingerprint,
@@ -560,7 +591,7 @@ describe('versioned code graph source-span hashing', () => {
     {
       lines: FC.array(
         FC.array(FC.constantFrom('a', 'Z', '0', ' ', '\t', 'é', '中', '😀'), {maxLength: 30}).map(value =>
-          value.join(''),
+          EffectArray.join(value, ''),
         ),
         {maxLength: 12, minLength: 1},
       ),
@@ -568,8 +599,8 @@ describe('versioned code graph source-span hashing', () => {
     ({lines}) => {
       const endColumn = (lines.at(-1)?.length ?? 0) + 1;
       const span = {column: 1, endColumn, endLine: lines.length, line: 1};
-      const lf = codeGraphSourceSpanFragment(lines.join('\n'), span);
-      const crlf = codeGraphSourceSpanFragment(lines.join('\r\n'), span);
+      const lf = codeGraphSourceSpanFragment(EffectArray.join(lines, '\n'), span);
+      const crlf = codeGraphSourceSpanFragment(EffectArray.join(lines, '\r\n'), span);
       expect(lf.ok).toBe(true);
       expect(crlf.ok).toBe(true);
       if (!lf.ok || !crlf.ok) return;
@@ -593,13 +624,20 @@ function queryPlan(
   database: Database,
   statement: {readonly parameters: readonly (number | string)[]; readonly text: string},
 ): string {
-  return (
-    database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-      readonly detail: string;
-    }[]
-  )
-    .map(row => row.detail)
-    .join('\n');
+  return EffectArray.join(
+    EffectArray.map(
+      database
+        .query<
+          {
+            readonly detail: string;
+          },
+          SQLQueryBindings[]
+        >(`EXPLAIN QUERY PLAN ${statement.text}`)
+        .all(...statement.parameters),
+      row => row.detail,
+    ),
+    '\n',
+  );
 }
 
 function seedCitationDatabase(database: Database): void {
@@ -618,10 +656,10 @@ function seedCitationDatabase(database: Database): void {
     ) VALUES (?, 'citation-repository', 'citation-worktree', ?, ?, ?, 'native-code-graph-13',
       ?, ?, 'ready', ?, ?, 0, '2026-08-26T00:00:00.000Z', '2026-08-26T00:00:01.000Z')`,
   );
-  insertSnapshot.run(baseSnapshotId, 'a'.repeat(40), 'base-content', null, 0, null, 5, 5);
+  insertSnapshot.run(baseSnapshotId, Effect2.pipe('a', EffectString.repeat(40)), 'base-content', null, 0, null, 5, 5);
   insertSnapshot.run(
     currentSnapshotId,
-    'b'.repeat(40),
+    Effect2.pipe('b', EffectString.repeat(40)),
     'current-content',
     baseSnapshotId,
     1,
@@ -642,7 +680,7 @@ function seedCitationDatabase(database: Database): void {
       baseSnapshotId,
       CODE_GRAPH_REUSABLE_BASE_RECEIPT_VERSION,
       workspace.fingerprint,
-      'a'.repeat(64),
+      Effect2.pipe('a', EffectString.repeat(64)),
       inventoryReceipt,
     );
 
@@ -657,8 +695,8 @@ function seedCitationDatabase(database: Database): void {
   insertFile.run(baseSnapshotId, 'src/old-target.ts', duplicateHash, 'commit');
   insertFile.run(currentSnapshotId, 'src/override.ts', newHash, 'worktree');
   insertFile.run(currentSnapshotId, 'src/current-copy.ts', duplicateHash, 'worktree');
-  insertFile.run(currentSnapshotId, 'src/current-copy-2.ts', '6'.repeat(64), 'worktree');
-  insertFile.run(currentSnapshotId, 'src/extra.ts', '7'.repeat(64), 'worktree');
+  insertFile.run(currentSnapshotId, 'src/current-copy-2.ts', Effect2.pipe('6', EffectString.repeat(64)), 'worktree');
+  insertFile.run(currentSnapshotId, 'src/extra.ts', Effect2.pipe('7', EffectString.repeat(64)), 'worktree');
   database
     .query('UPDATE snapshot_files SET raw_content_hash = ? WHERE snapshot_id = ? AND path = ?')
     .run(legacyRawHash, currentSnapshotId, 'src/extra.ts');
@@ -749,15 +787,15 @@ function seedCitationDatabase(database: Database): void {
 function completeInventoryReuseReceipt(workspace = mergeCodeGraphWorkspaces([])) {
   return {
     attributionFiles: [],
-    contract: '8'.repeat(64),
+    contract: Effect2.pipe('8', EffectString.repeat(64)),
     diagnostics: [],
-    environmentFingerprint: '9'.repeat(64),
+    environmentFingerprint: Effect2.pipe('9', EffectString.repeat(64)),
     includeOpaqueCorpusAssets: true,
     policyExclusions: {
       bytes: 0,
       files: 0,
       policyVersion: 2 as const,
-      reasons: CODE_GRAPH_INVENTORY_EXCLUSION_REASONS.map(reason => ({bytes: 0, files: 0, reason})),
+      reasons: EffectArray.map(CODE_GRAPH_INVENTORY_EXCLUSION_REASONS, reason => ({bytes: 0, files: 0, reason})),
     },
     skipped: 0,
     version: CODE_GRAPH_INVENTORY_REUSE_RECEIPT_VERSION,
@@ -768,7 +806,7 @@ function completeInventoryReuseReceipt(workspace = mergeCodeGraphWorkspaces([]))
 function currentSnapshot(): CodeGraphSnapshot {
   return {
     baseSnapshotId,
-    commit: 'b'.repeat(40),
+    commit: Effect2.pipe('b', EffectString.repeat(40)),
     dirty: true,
     edgeCount: 0,
     extractorSet: 'native-code-graph-13',

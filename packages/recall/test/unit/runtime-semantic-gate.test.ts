@@ -1,6 +1,6 @@
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Fiber} from 'effect';
+import {Array as EffectArray, Cause, Effect, Exit, Fiber} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as FC from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -11,6 +11,22 @@ import {
 } from '../../src/runtime.js';
 
 describe('MCP semantic retrieval cooldown', () => {
+  effectIt.effect('preserves typed failures when a cause also carries an interruption', () =>
+    Effect.gen(function* () {
+      const failure = 'retrieval failed';
+      const original = Cause.fromReasons([Cause.makeFailReason(failure), Cause.makeInterruptReason(123)]);
+      const exit = yield* Effect.exit(createMcpRecallSemanticRetrievalGate()({}, Effect.failCause(original)));
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(
+          EffectArray.map(EffectArray.filter(exit.cause.reasons, Cause.isFailReason), reason => reason.error),
+        ).toEqual([failure]);
+        expect(Cause.hasInterrupts(exit.cause)).toBe(true);
+        expect(EffectArray.map(exit.cause.reasons, reason => reason._tag)).toEqual(['Fail', 'Interrupt']);
+      }
+    }),
+  );
+
   effectIt.effect('allows semantic evidence to complete within a thirty-second default budget', () =>
     Effect.gen(function* () {
       const gate = createMcpRecallSemanticRetrievalGate();

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -17,6 +18,8 @@ import {
   parseMatchedEvaluationVerificationPlanV1,
   parseMatchedEvaluationVerificationReceiptV1,
 } from '@threadnote/threadnote/evaluation/matched-verification';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('matched evaluation deterministic verification', () => {
   it('canonicalizes task order and rejects a tampered plan', () => {
@@ -24,21 +27,25 @@ describe('matched evaluation deterministic verification', () => {
     const second = task('tsk_2222222222222222', 'beta');
     const plan = createMatchedEvaluationVerificationPlanV1({
       environmentDirectory: '/tmp/verifier-environment',
-      environmentHash: '1'.repeat(64),
+      environmentHash: Effect.pipe('1', EffectString.repeat(64)),
       interpreter: '/tmp/verifier-environment/bin/python',
-      interpreterHash: '2'.repeat(64),
+      interpreterHash: Effect.pipe('2', EffectString.repeat(64)),
       runner: '/tmp/verifier.py',
-      runnerHash: '3'.repeat(64),
-      sandbox: {executable: '/usr/bin/sandbox-exec', executableHash: '4'.repeat(64), policy: 'darwin-seatbelt-v1'},
+      runnerHash: Effect.pipe('3', EffectString.repeat(64)),
+      sandbox: {
+        executable: '/usr/bin/sandbox-exec',
+        executableHash: Effect.pipe('4', EffectString.repeat(64)),
+        policy: 'darwin-seatbelt-v1',
+      },
       tasks: [second, first],
       timeoutMilliseconds: 120_000,
     });
 
-    expect(plan.tasks.map(candidate => candidate.taskId)).toEqual([first.taskId, second.taskId]);
+    expect(EffectArray.map(plan.tasks, candidate => candidate.taskId)).toEqual([first.taskId, second.taskId]);
     expect(parseMatchedEvaluationVerificationPlanV1(plan)).toEqual(plan);
-    expect(() => parseMatchedEvaluationVerificationPlanV1({...plan, runnerHash: '5'.repeat(64)})).toThrow(
-      'plan hash does not match',
-    );
+    expect(() =>
+      parseMatchedEvaluationVerificationPlanV1({...plan, runnerHash: Effect.pipe('5', EffectString.repeat(64))}),
+    ).toThrow('plan hash does not match');
   });
 
   it('binds every artifact hash into a parse-verified receipt', () => {
@@ -47,21 +54,21 @@ describe('matched evaluation deterministic verification', () => {
         const artifactHash = Buffer.from(bytes).toString('hex');
         const receipt = createMatchedEvaluationVerificationReceiptV1({
           artifactHash,
-          diagnosticHash: '1'.repeat(64),
+          diagnosticHash: Effect.pipe('1', EffectString.repeat(64)),
           durationMilliseconds: 12,
-          environmentHash: '2'.repeat(64),
+          environmentHash: Effect.pipe('2', EffectString.repeat(64)),
           exitCode: 0,
-          interpreterHash: '3'.repeat(64),
-          planHash: '4'.repeat(64),
-          runnerHash: '5'.repeat(64),
-          sandboxExecutableHash: '6'.repeat(64),
+          interpreterHash: Effect.pipe('3', EffectString.repeat(64)),
+          planHash: Effect.pipe('4', EffectString.repeat(64)),
+          runnerHash: Effect.pipe('5', EffectString.repeat(64)),
+          sandboxExecutableHash: Effect.pipe('6', EffectString.repeat(64)),
           status: 'passed',
           taskId: 'tsk_1111111111111111',
-          verificationId: '7'.repeat(64),
+          verificationId: Effect.pipe('7', EffectString.repeat(64)),
         });
 
         expect(parseMatchedEvaluationVerificationReceiptV1(receipt)).toEqual(receipt);
-        const changedArtifactHash = `${artifactHash[0] === '0' ? '1' : '0'}${artifactHash.slice(1)}`;
+        const changedArtifactHash = `${artifactHash[0] === '0' ? '1' : '0'}${Effect.pipe(artifactHash, EffectString.slice(1))}`;
         expect(
           createMatchedEvaluationVerificationReceiptV1({...receipt, artifactHash: changedArtifactHash}).receiptHash,
         ).not.toBe(receipt.receiptHash);
@@ -73,27 +80,31 @@ describe('matched evaluation deterministic verification', () => {
   it('rejects status and exit-code disagreement', () => {
     expect(() =>
       createMatchedEvaluationVerificationReceiptV1({
-        artifactHash: '0'.repeat(64),
-        diagnosticHash: '1'.repeat(64),
+        artifactHash: Effect.pipe('0', EffectString.repeat(64)),
+        diagnosticHash: Effect.pipe('1', EffectString.repeat(64)),
         durationMilliseconds: 0,
-        environmentHash: '2'.repeat(64),
+        environmentHash: Effect.pipe('2', EffectString.repeat(64)),
         exitCode: 1,
-        interpreterHash: '3'.repeat(64),
-        planHash: '4'.repeat(64),
-        runnerHash: '5'.repeat(64),
-        sandboxExecutableHash: '6'.repeat(64),
+        interpreterHash: Effect.pipe('3', EffectString.repeat(64)),
+        planHash: Effect.pipe('4', EffectString.repeat(64)),
+        runnerHash: Effect.pipe('5', EffectString.repeat(64)),
+        sandboxExecutableHash: Effect.pipe('6', EffectString.repeat(64)),
         status: 'passed',
         taskId: 'tsk_1111111111111111',
-        verificationId: '7'.repeat(64),
+        verificationId: Effect.pipe('7', EffectString.repeat(64)),
       }),
     ).toThrow('status and exit code disagree');
   });
 
   it('requires the target to pass and rejects compatibility failures not present at baseline', () => {
     const plan = continuationPlan();
-    const suite = plan.checks.find(check => check.policy === 'no-new-failures')!;
-    const target = plan.checks.find(check => check.policy === 'must-pass')!;
-    const artifactHash = '8'.repeat(64);
+    const suite = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.checks, check => check.policy === 'no-new-failures'),
+    )!;
+    const target = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.checks, check => check.policy === 'must-pass'),
+    )!;
+    const artifactHash = Effect.pipe('8', EffectString.repeat(64));
     const resume = createMatchedContinuationPhaseTwoVerificationReceiptV1({
       artifactHash,
       checks: [
@@ -151,9 +162,13 @@ describe('matched evaluation deterministic verification', () => {
 
   it('rejects missing, extra, and duplicate checks instead of accepting focused-only evidence', () => {
     const plan = continuationPlan();
-    const suite = plan.checks.find(check => check.policy === 'no-new-failures')!;
-    const target = plan.checks.find(check => check.policy === 'must-pass')!;
-    const artifactHash = '8'.repeat(64);
+    const suite = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.checks, check => check.policy === 'no-new-failures'),
+    )!;
+    const target = EffectOption.getOrUndefined(
+      EffectArray.findFirst(plan.checks, check => check.policy === 'must-pass'),
+    )!;
+    const artifactHash = Effect.pipe('8', EffectString.repeat(64));
     const focused = checkReceipt(plan.planHash, artifactHash, target, 0, []);
     expect(() =>
       createMatchedContinuationPhaseTwoVerificationReceiptV1({
@@ -196,8 +211,8 @@ describe('matched evaluation deterministic verification', () => {
 
   it('canonicalizes check receipts independently of execution order', () => {
     const plan = continuationPlan();
-    const artifactHash = '8'.repeat(64);
-    const receipts = plan.checks.map(check =>
+    const artifactHash = Effect.pipe('8', EffectString.repeat(64));
+    const receipts = EffectArray.map(plan.checks, check =>
       checkReceipt(
         plan.planHash,
         artifactHash,
@@ -238,7 +253,7 @@ describe('matched evaluation deterministic verification', () => {
   });
 
   it('extracts failure ids in linear time from diagnostics with long whitespace runs', () => {
-    const whitespace = '\t'.repeat(10_000);
+    const whitespace = Effect.pipe('\t', EffectString.repeat(10_000));
     expect(
       parseMatchedContinuationPytestFailureIdsV1(
         `FAILED${whitespace}tests/test_text.py::test_a${whitespace}-${whitespace}AssertionError`,
@@ -255,11 +270,14 @@ describe('matched evaluation deterministic verification', () => {
 
   it('extracts and dispatches canonical Vitest failure ids', () => {
     const escape = String.fromCodePoint(27);
-    const stdout = [
-      `${escape}[41m${escape}[1m FAIL ${escape}[22m${escape}[49m packages/zod/src/example.test.ts${escape}[2m > ${escape}[22mschema > handles beta`,
-      ' FAIL  packages/zod/src/example.test.ts > schema > handles alpha',
-      ' FAIL  packages/zod/src/example.test.ts > schema > handles beta',
-    ].join('\n');
+    const stdout = EffectArray.join(
+      [
+        `${escape}[41m${escape}[1m FAIL ${escape}[22m${escape}[49m packages/zod/src/example.test.ts${escape}[2m > ${escape}[22mschema > handles beta`,
+        ' FAIL  packages/zod/src/example.test.ts > schema > handles alpha',
+        ' FAIL  packages/zod/src/example.test.ts > schema > handles beta',
+      ],
+      '\n',
+    );
     const expected = [
       'packages/zod/src/example.test.ts > schema > handles alpha',
       'packages/zod/src/example.test.ts > schema > handles beta',
@@ -304,11 +322,11 @@ describe('matched evaluation deterministic verification', () => {
   it('canonicalizes Vitest failure ids independently of diagnostic order and duplicates', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 10_000}), {minLength: 1, maxLength: 24}), values => {
-        const ids = values.map(value => `packages/example-${value}.test.ts > handles ${value}`);
-        const diagnostics = [...ids, ...ids]
-          .reverse()
-          .map(id => ` FAIL  ${id}`)
-          .join('\n');
+        const ids = EffectArray.map(values, value => `packages/example-${value}.test.ts > handles ${value}`);
+        const diagnostics = EffectArray.join(
+          EffectArray.map([...ids, ...ids].reverse(), id => ` FAIL  ${id}`),
+          '\n',
+        );
         expect(parseMatchedContinuationVitestFailureIdsV1(diagnostics, '')).toEqual([...ids].sort());
       }),
       {numRuns: 50},
@@ -331,7 +349,7 @@ describe('matched evaluation deterministic verification', () => {
     });
     expect(parseMatchedContinuationPhaseTwoVerificationPlanV1(plan)).toEqual(plan);
 
-    const artifactHash = '8'.repeat(64);
+    const artifactHash = Effect.pipe('8', EffectString.repeat(64));
     const receipt = createMatchedContinuationPhaseTwoVerificationReceiptV1({
       artifactHash,
       checks: [checkReceipt(plan.planHash, artifactHash, plan.checks[0], 1, [failureId])],
@@ -386,7 +404,7 @@ function checkReceipt(
   return createMatchedContinuationPhaseTwoVerificationCheckReceiptV1({
     artifactHash,
     check,
-    diagnosticHash: '9'.repeat(64),
+    diagnosticHash: Effect.pipe('9', EffectString.repeat(64)),
     durationMilliseconds: 10,
     exitCode,
     failureIds,
@@ -397,14 +415,14 @@ function checkReceipt(
 function task(taskId: string, selector: string) {
   return {
     calibration: createMatchedEvaluationVerificationCalibrationV1({
-      baseDiagnosticHash: 'a'.repeat(64),
+      baseDiagnosticHash: Effect.pipe('a', EffectString.repeat(64)),
       baseExitCode: 1,
-      baseRepositoryFixtureHash: 'b'.repeat(64),
-      baseRevision: 'c'.repeat(40),
-      fixDiagnosticHash: 'd'.repeat(64),
+      baseRepositoryFixtureHash: Effect.pipe('b', EffectString.repeat(64)),
+      baseRevision: Effect.pipe('c', EffectString.repeat(40)),
+      fixDiagnosticHash: Effect.pipe('d', EffectString.repeat(64)),
       fixExitCode: 0,
-      fixRepositoryFixtureHash: 'e'.repeat(64),
-      fixRevision: 'f'.repeat(40),
+      fixRepositoryFixtureHash: Effect.pipe('e', EffectString.repeat(64)),
+      fixRevision: Effect.pipe('f', EffectString.repeat(40)),
     }),
     selector,
     taskId,

@@ -1,10 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {dependencyClosure} from '../dependency-closure.mjs';
 
 it('includes cycles and shared dependencies exactly once', () => {
-  const graph = {a: ['b', 'c'], b: ['a', 'c'], c: []};
-  expect(dependencyClosure('a', key => graph[key as keyof typeof graph])).toEqual(['a', 'b', 'c']);
+  const graph: Record<string, string[]> = {a: ['b', 'c'], b: ['a', 'c'], c: []};
+  expect(dependencyClosure('a', (key: string) => graph[key])).toEqual(['a', 'b', 'c']);
 });
 
 it('matches reachability and is deterministic for bounded dependency graphs', () => {
@@ -20,10 +21,13 @@ it('matches reachability and is deterministic for bounded dependency graphs', ()
           }
         }
         const dependencies = (key: string) =>
-          edges.filter(([from]) => String(from) === key).map(([, to]) => String(to));
-        const expected = reach[0].flatMap((reachable, to) => (reachable ? [String(to)] : []));
+          EffectArray.map(
+            EffectArray.filter(edges, ([from]) => String(from) === key),
+            ([, to]) => String(to),
+          );
+        const expected = EffectArray.flatMap(reach[0], (reachable, to) => (reachable ? [String(to)] : []));
         expect(dependencyClosure('0', dependencies)).toEqual(expected);
-        expect(dependencyClosure('0', key => dependencies(key).reverse())).toEqual(expected);
+        expect(dependencyClosure('0', (key: string) => dependencies(key).reverse())).toEqual(expected);
       },
     ),
     {numRuns: 50},

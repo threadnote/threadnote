@@ -1,4 +1,6 @@
 import {isLowSignalStructuredPath, isRecognizedStructuredPath} from '../languages/schemas/policy.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 /**
  * Bump this whenever repository admission changes. The extractor generation is
@@ -33,10 +35,14 @@ export function codeGraphInventoryExclusionReason(
   size: number,
 ): CodeGraphInventoryExclusionReason | undefined {
   if (!Number.isSafeInteger(size) || size < 0) return undefined;
-  const normalizedPath = repositoryPath.replace(/^\.\/+/, '');
-  const lowerPath = normalizedPath.toLowerCase();
-  if (lowerPath.endsWith('.svg')) return 'svg';
-  if (!lowerPath.endsWith('.json') && !lowerPath.endsWith('.jsonc')) return undefined;
+  const normalizedPath = Effect.pipe(repositoryPath, EffectString.replace(/^\.\/+/, ''));
+  const lowerPath = Effect.pipe(normalizedPath, EffectString.toLowerCase);
+  if (Effect.pipe(lowerPath, EffectString.endsWith('.svg'))) return 'svg';
+  if (
+    !Effect.pipe(lowerPath, EffectString.endsWith('.json')) &&
+    !Effect.pipe(lowerPath, EffectString.endsWith('.jsonc'))
+  )
+    return undefined;
 
   if (isLowSignalStructuredPath(lowerPath) || isGeneratedOrMinifiedJsonPath(lowerPath)) {
     return 'low-signal-json';
@@ -52,7 +58,7 @@ function isGeneratedOrMinifiedJsonPath(path: string): boolean {
 }
 
 function isHighSignalJsonPath(path: string): boolean {
-  const name = path.split('/').at(-1) ?? '';
+  const name = Effect.pipe(path, EffectString.split('/')).at(-1) ?? '';
   return (
     name === 'package.json' ||
     name === 'project.json' ||

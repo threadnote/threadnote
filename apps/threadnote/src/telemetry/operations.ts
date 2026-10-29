@@ -1,3 +1,6 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import * as EffectRecord from 'effect/Record';
+
 const CLI_SUBCOMMANDS = {
   cloud: ['cursor'],
   context: ['brief'],
@@ -164,8 +167,8 @@ const FIXED_RUNTIME_OPERATIONS = [
   'threadnote_guide',
 ] as const;
 
-const NESTED_CLI_OPERATIONS = Object.entries(CLI_SUBCOMMANDS).flatMap(([topLevel, subcommands]) =>
-  subcommands.map(subcommand => `${topLevel}.${subcommand}`),
+const NESTED_CLI_OPERATIONS = EffectArray.flatMap(EffectRecord.toEntries(CLI_SUBCOMMANDS), ([topLevel, subcommands]) =>
+  EffectArray.map(subcommands, subcommand => `${topLevel}.${subcommand}`),
 );
 
 const ANONYMOUS_TELEMETRY_OPERATIONS = new Set<string>([
@@ -194,11 +197,13 @@ export function cliAnonymousTelemetryOperation(
   subcommand: string | undefined,
   nestedSubcommand: string | undefined,
 ): string {
-  const knownSubcommands = Object.entries(CLI_SUBCOMMANDS).find(([name]) => name === topLevel)?.[1];
+  const knownSubcommands = EffectOption.getOrUndefined(
+    EffectArray.findFirst(EffectRecord.toEntries(CLI_SUBCOMMANDS), ([name]) => name === topLevel),
+  )?.[1];
   if (
     knownSubcommands === undefined ||
     subcommand === undefined ||
-    !knownSubcommands.some(value => value === subcommand)
+    !EffectArray.some(knownSubcommands, value => value === subcommand)
   ) {
     return safeAnonymousTelemetryOperation(topLevel);
   }

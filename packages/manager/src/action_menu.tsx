@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Ellipsis} from 'lucide-react';
 import React, {useEffect, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
@@ -26,8 +27,9 @@ export function ActionMenu({
     if (!position) return;
     menu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
     const close = (event: PointerEvent) => {
-      if (!menu.current?.contains(event.target as Node) && !trigger.current?.contains(event.target as Node))
-        setPosition(undefined);
+      const target = event.target;
+      if (target !== null && !(target instanceof Node)) return;
+      if (!menu.current?.contains(target) && !trigger.current?.contains(target)) setPosition(undefined);
     };
     const scroll = () => setPosition(undefined);
     document.addEventListener('pointerdown', close);
@@ -79,12 +81,13 @@ export function ActionMenu({
                 if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
                   event.preventDefault();
                   const items = [...(menu.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
-                  const index = items.indexOf(document.activeElement as HTMLButtonElement);
+                  const index =
+                    document.activeElement instanceof HTMLButtonElement ? items.indexOf(document.activeElement) : -1;
                   items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus();
                 }
               }}
             >
-              {actions.map(action => (
+              {EffectArray.map(actions, action => (
                 <button
                   className={action.danger ? 'danger-text' : undefined}
                   disabled={action.disabled}

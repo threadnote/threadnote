@@ -1,23 +1,38 @@
-import {Clock, Crypto, Effect, Equal, FileSystem, Option, Path} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Clock, Crypto, Effect, Equal, FileSystem, Option, Path, Schema} from 'effect';
 import {
   canonicalMemoryDocumentContent,
   isAgentArtifactUri,
   isAgentArtifactPath,
   isSharedMemoryUri,
   parseMemoryDocument,
+  validMemoryObsidianEvidence,
   type MemoryMetadata,
   type MemoryRecord,
 } from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
+import {isConsolidationReceiptShape, type ConsolidationReceipt} from '@threadnote/memory/consolidation';
+import {
+  validateReviewedSupportLegacyOrigin,
+  validateReviewedSupportSnapshot,
+  type ReviewedMemorySupportV1,
+} from '@threadnote/memory/reviewed-support';
+import type {TopicMaintenanceManifest} from '@threadnote/memory/topic-maintenance';
+import {validSourceEvidenceCitation} from '@threadnote/store/source-evidence-citation';
+import {isOneOf} from '@threadnote/platform/validation';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {canonicalResourceUri, parseResourceId} from '@threadnote/store/resource-id';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
-import type {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
+import {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
 import {localUserMemoriesRoot} from '../migrations.js';
 import {maintenanceSnapshotFailure, withMaintenanceSnapshotDiagnostic} from './maintenance_snapshot.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface InventoryEntry {
   readonly uri: string;
@@ -95,12 +110,248 @@ function inventoryMemoryUri(path: Path.Path, root: string, user: string, candida
   return canonicalResourceUri('user', [
     uriSegment(user),
     'memories',
-    ...path.relative(root, candidate).split(path.sep),
+    ...Effect2.pipe(path.relative(root, candidate), EffectString.split(path.sep)),
   ]);
 }
 
+function inventoryRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function isMemoryCitation(value: unknown): value is MemoryCodeCitationV1 {
+  try {
+    assertMemoryCodeCitation(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isTopicMaintenanceManifest(value: unknown): value is TopicMaintenanceManifest {
+  if (!inventoryRecord(value) || !EffectArray.isArray(value.paragraphs)) return false;
+  const paragraphsValid = EffectArray.every(value.paragraphs, (paragraph: unknown) => {
+    if (
+      !inventoryRecord(paragraph) ||
+      !isOneOf(['descriptive', 'normative', 'historical'], paragraph.role) ||
+      !isOneOf(['direct', 'contextual', 'unresolved'], paragraph.support) ||
+      !EffectArray.isArray(paragraph.citationIds) ||
+      !EffectArray.every(paragraph.citationIds, (id: unknown) => typeof id === 'string') ||
+      typeof paragraph.ordinal !== 'number' ||
+      !Number.isFinite(paragraph.ordinal) ||
+      typeof paragraph.hash !== 'string'
+    )
+      return false;
+    return (
+      (!('scope' in paragraph) || paragraph.scope === undefined || typeof paragraph.scope === 'string') &&
+      (!('validity' in paragraph) || paragraph.validity === undefined || typeof paragraph.validity === 'string')
+    );
+  });
+  if (!paragraphsValid || !EffectArray.isArray(value.additionalDependencies)) return false;
+  const dependenciesValid = EffectArray.every(
+    value.additionalDependencies,
+    (dependency: unknown) =>
+      inventoryRecord(dependency) &&
+      isOneOf(['configuration', 'dependency'], dependency.kind) &&
+      typeof dependency.citationId === 'string',
+  );
+  if (!dependenciesValid) return false;
+  const common =
+    typeof value.memoryId === 'string' && typeof value.bodyHash === 'string' && value.coverage === 'declared-only';
+  if (!common) return false;
+  if (value.version === 1) return typeof value.repositoryId === 'string';
+  if (value.version === 2)
+    return (
+      typeof value.repositoryId === 'string' &&
+      EffectArray.isArray(value.originCitationIds) &&
+      EffectArray.every(value.originCitationIds, (id: unknown) => typeof id === 'string') &&
+      EffectArray.isArray(value.acceptedSources) &&
+      EffectArray.every(
+        value.acceptedSources,
+        (source: unknown) =>
+          inventoryRecord(source) &&
+          typeof source.citationId === 'string' &&
+          typeof source.acceptedCitationId === 'string',
+      )
+    );
+  if (value.version !== 3) return false;
+  if (value.sourceKind === 'obsidian')
+    return (
+      value.additionalDependencies.length === 0 &&
+      typeof value.originCitationId === 'string' &&
+      validMemoryObsidianEvidence(value.activeEvidence)
+    );
+  return (
+    value.sourceKind === 'code' &&
+    typeof value.repositoryId === 'string' &&
+    EffectArray.isArray(value.originCitationIds) &&
+    EffectArray.every(value.originCitationIds, (id: unknown) => typeof id === 'string') &&
+    EffectArray.isArray(value.acceptedSources) &&
+    EffectArray.every(
+      value.acceptedSources,
+      (source: unknown) =>
+        inventoryRecord(source) &&
+        typeof source.citationId === 'string' &&
+        typeof source.acceptedCitationId === 'string',
+    ) &&
+    (!('dependencyExpansions' in value) ||
+      value.dependencyExpansions === undefined ||
+      (EffectArray.isArray(value.dependencyExpansions) &&
+        EffectArray.every(
+          value.dependencyExpansions,
+          (expansion: unknown) =>
+            inventoryRecord(expansion) &&
+            expansion.version === 1 &&
+            typeof expansion.revision === 'string' &&
+            typeof expansion.proofDigest === 'string' &&
+            typeof expansion.requestDigest === 'string' &&
+            typeof expansion.previousManifestHash === 'string' &&
+            typeof expansion.sourceCommit === 'string' &&
+            EffectArray.isArray(expansion.citationIds) &&
+            EffectArray.every(expansion.citationIds, (id: unknown) => typeof id === 'string'),
+        )))
+  );
+}
+
+function isReviewedMemorySupport(value: unknown): value is ReviewedMemorySupportV1 {
+  if (
+    !inventoryRecord(value) ||
+    value.type !== 'reviewed-memory-support' ||
+    value.version !== 1 ||
+    !('active' in value)
+  )
+    return false;
+  try {
+    validateReviewedSupportSnapshot(value.active);
+    if ('initialApproval' in value && value.initialApproval !== undefined)
+      validateReviewedSupportSnapshot(value.initialApproval);
+    if ('legacyOrigin' in value && value.legacyOrigin !== undefined)
+      validateReviewedSupportLegacyOrigin(value.legacyOrigin);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const MemoryCitationSchema = Schema.declare<MemoryCodeCitationV1>(isMemoryCitation);
+const TopicMaintenanceManifestSchema = Schema.declare<TopicMaintenanceManifest>(isTopicMaintenanceManifest);
+const ReviewedMemorySupportSchema = Schema.declare<ReviewedMemorySupportV1>(isReviewedMemorySupport);
+const MemoryMetadataSchema = Schema.Struct({
+  archivedFrom: Schema.optionalKey(Schema.String),
+  authority: Schema.optionalKey(
+    Schema.Literals(['agent_generated', 'canonical_repo', 'external', 'reviewed_shared', 'user_approved']),
+  ),
+  candidateId: Schema.optionalKey(Schema.String),
+  codeCitations: Schema.optionalKey(Schema.Array(MemoryCitationSchema)),
+  citationErrors: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        index: Schema.optionalKey(Schema.Int),
+        reason: Schema.Literals([
+          'aggregate-too-large',
+          'duplicate-id',
+          'entry-too-large',
+          'id-mismatch',
+          'invalid-json',
+          'invalid-shape',
+          'non-canonical',
+          'schema-version-mismatch',
+          'too-many-citations',
+          'unsupported-version',
+        ]),
+      }),
+    ),
+  ),
+  consolidation: Schema.optionalKey(Schema.declare<ConsolidationReceipt>(isConsolidationReceiptShape)),
+  consolidationError: Schema.optionalKey(Schema.String),
+  createdAt: Schema.optionalKey(Schema.String),
+  evidence: Schema.optionalKey(Schema.Array(Schema.String)),
+  obsidianEvidence: Schema.optionalKey(
+    Schema.declare<MemoryMetadata['obsidianEvidence'] & {}>(validMemoryObsidianEvidence),
+  ),
+  obsidianEvidenceError: Schema.optionalKey(Schema.Boolean),
+  sourceEvidence: Schema.optionalKey(
+    Schema.declare<NonNullable<MemoryMetadata['sourceEvidence']>>(validSourceEvidenceCitation),
+  ),
+  sourceEvidenceError: Schema.optionalKey(Schema.Boolean),
+  reviewedSupport: Schema.optionalKey(ReviewedMemorySupportSchema),
+  reviewedSupportError: Schema.optionalKey(Schema.String),
+  topicMaintenance: Schema.optionalKey(TopicMaintenanceManifestSchema),
+  topicMaintenanceError: Schema.optionalKey(Schema.String),
+  kind: Schema.Literals(['durable', 'handoff', 'incident', 'preference', 'smoke']),
+  keywords: Schema.optionalKey(Schema.Array(Schema.String)),
+  lastReviewed: Schema.optionalKey(Schema.String),
+  memoryId: Schema.optionalKey(Schema.String),
+  owner: Schema.optionalKey(Schema.String),
+  project: Schema.optionalKey(Schema.String),
+  reviewAfter: Schema.optionalKey(Schema.String),
+  references: Schema.optionalKey(Schema.Array(Schema.String)),
+  relations: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        type: Schema.Literals(['depends_on', 'evidence_for', 'references', 'related_to', 'supersedes']),
+        uri: Schema.String,
+      }),
+    ),
+  ),
+  schemaVersion: Schema.optionalKey(Schema.Finite),
+  sourceHash: Schema.optionalKey(Schema.String),
+  sourceAgentClient: Schema.String,
+  sourceCommit: Schema.optionalKey(Schema.String),
+  sourceObservedAt: Schema.optionalKey(Schema.String),
+  sourceSessionId: Schema.optionalKey(Schema.String),
+  status: Schema.Literals(['active', 'archived', 'expired', 'superseded']),
+  supersedes: Schema.optionalKey(Schema.String),
+  timestamp: Schema.String,
+  topic: Schema.optionalKey(Schema.String),
+  trust: Schema.optionalKey(Schema.Literals(['approved', 'inferred', 'untrusted'])),
+  updatedAt: Schema.optionalKey(Schema.String),
+  validFrom: Schema.optionalKey(Schema.String),
+  validTo: Schema.optionalKey(Schema.String),
+  visibility: Schema.optionalKey(Schema.Literals(['external', 'personal', 'shared'])),
+  workspaceScope: Schema.optionalKey(Schema.String),
+});
+const InventoryEntrySchema = Schema.Struct({
+  uri: Schema.String,
+  path: Schema.String,
+  signature: Schema.String,
+  hash: Schema.String,
+  canonicalContentHash: Schema.optionalKey(Schema.String),
+  bodyHash: Schema.String,
+  headerTitle: Schema.Literals(['MEMORY', 'HANDOFF']),
+  metadata: MemoryMetadataSchema,
+});
+const DirectoryPageSchema = Schema.Struct({
+  directory: Schema.String,
+  names: Schema.optionalKey(Schema.Array(Schema.String)),
+  offset: Schema.Int,
+});
+const InventorySchema = Schema.Struct({
+  version: Schema.Literals([1, 2]),
+  mutationGeneration: Schema.String,
+  entries: Schema.Record(Schema.String, InventoryEntrySchema),
+  queue: Schema.Array(DirectoryPageSchema),
+  complete: Schema.Boolean,
+  root: Schema.String,
+  incompleteReason: Schema.optionalKey(
+    Schema.Literals([
+      'inventory-records-omitted',
+      'inventory-discovery-incomplete',
+      'inventory-terminal-catalog-boundary',
+      'inventory-terminal-byte-boundary',
+      'inventory-terminal-time-boundary',
+      'inventory-terminal-lock-contended',
+      'inventory-terminal-generation-race',
+      'inventory-terminal-membership-race',
+    ]),
+  ),
+  diagnostics: Schema.optionalKey(Schema.Record(Schema.String, ContextMaintenanceSnapshotDiagnosticV1)),
+  refreshCursor: Schema.optionalKey(Schema.Int),
+});
+
 function decodeInventory(raw: string, root: string, user: string, path: Path.Path): Inventory | undefined {
-  const value = JSON.parse(raw) as Partial<Omit<Inventory, 'version'>> & {version?: number; refreshCursor?: number};
+  const decoded: unknown = JSON.parse(raw);
+  if (!Schema.is(InventorySchema)(decoded)) return undefined;
+  const value = decoded;
   if (
     ![1, 2].includes(value.version ?? 0) ||
     value.root !== root ||
@@ -109,35 +360,41 @@ function decodeInventory(raw: string, root: string, user: string, path: Path.Pat
     (value.version === 1 && (!Number.isSafeInteger(value.refreshCursor) || value.refreshCursor! < 0)) ||
     value.entries === null ||
     typeof value.entries !== 'object' ||
-    !Array.isArray(value.queue) ||
+    !EffectArray.isArray(value.queue) ||
     (value.version === 1 && !value.complete && value.queue.length === 0)
   )
     return undefined;
   const contained = (candidate: unknown): candidate is string =>
     typeof candidate === 'string' &&
-    (candidate === root || candidate.startsWith(`${root}/`) || candidate.startsWith(`${root}\\`));
+    (candidate === root ||
+      Effect2.pipe(candidate, EffectString.startsWith(`${root}/`)) ||
+      Effect2.pipe(candidate, EffectString.startsWith(`${root}\\`)));
+  const isDirectoryPage = (page: unknown): page is DirectoryPage => {
+    if (page === null || typeof page !== 'object' || !('directory' in page) || !('offset' in page)) return false;
+    const offset = page.offset;
+    const names = 'names' in page ? page.names : undefined;
+    return (
+      contained(page.directory) &&
+      typeof offset === 'number' &&
+      Number.isSafeInteger(offset) &&
+      offset >= 0 &&
+      (names === undefined ||
+        (EffectArray.isArray(names) &&
+          names.length <= 10_000 &&
+          offset <= names.length &&
+          EffectArray.every(names, (name: unknown) => typeof name === 'string' && !/[/\0]/u.test(name))))
+    );
+  };
+  const queue = EffectArray.filter(value.queue, isDirectoryPage);
+  if (queue.length !== value.queue.length) return undefined;
   if (
-    !value.queue.every(
-      page =>
-        page !== null &&
-        contained(page.directory) &&
-        Number.isSafeInteger(page.offset) &&
-        page.offset >= 0 &&
-        (page.names === undefined ||
-          (Array.isArray(page.names) &&
-            page.names.length <= 10_000 &&
-            page.offset <= page.names.length &&
-            page.names.every((name: unknown) => typeof name === 'string' && !/[\\/\0]/u.test(name)))),
-    )
-  )
-    return undefined;
-  if (
-    !Object.entries(value.entries).every(
+    !EffectArray.every(
+      EffectRecord.toEntries(value.entries),
       ([uri, entry]) =>
         entry !== null &&
         typeof entry === 'object' &&
         entry.uri === uri &&
-        uri.startsWith(`threadnote://user/${uriSegment(user)}/memories/`) &&
+        Effect2.pipe(uri, EffectString.startsWith(`threadnote://user/${uriSegment(user)}/memories/`)) &&
         contained(entry.path) &&
         uri === inventoryMemoryUri(path, root, user, entry.path) &&
         typeof entry.signature === 'string' &&
@@ -158,10 +415,11 @@ function decodeInventory(raw: string, root: string, user: string, path: Path.Pat
     value.diagnostics !== undefined &&
     (value.diagnostics === null ||
       typeof value.diagnostics !== 'object' ||
-      Array.isArray(value.diagnostics) ||
-      Object.entries(value.diagnostics).some(
+      EffectArray.isArray(value.diagnostics) ||
+      EffectArray.some(
+        EffectRecord.toEntries(value.diagnostics),
         ([uri, diagnostic]) =>
-          !uri.startsWith(`threadnote://user/${uriSegment(user)}/memories/`) ||
+          !Effect2.pipe(uri, EffectString.startsWith(`threadnote://user/${uriSegment(user)}/memories/`)) ||
           parseResourceId(uri).canonicalUri !== uri ||
           diagnostic?.memoryUri !== uri ||
           ![
@@ -175,14 +433,14 @@ function decodeInventory(raw: string, root: string, user: string, path: Path.Pat
       ))
   )
     return undefined;
-  const diagnostics = Object.fromEntries(
-    Object.entries(value.diagnostics ?? {}).map(([uri, diagnostic]) => [
+  const diagnostics = EffectRecord.fromEntries(
+    EffectArray.map(EffectRecord.toEntries(value.diagnostics ?? {}), ([uri, diagnostic]) => [
       uri,
       maintenanceSnapshotFailure(diagnostic.category, 'record-read', uri).diagnostic,
     ]),
   );
   // V1 completeness is only a discovery hint; every completed view receives a fresh terminal proof below.
-  return {...value, version: 2, diagnostics} as Inventory;
+  return {...value, version: 2, queue, diagnostics};
 }
 
 const signature = (info: FileSystem.File.Info) => `${Number(info.size)}:${JSON.stringify(info.mtime)}`;
@@ -195,7 +453,7 @@ const statIfPresent = (fs: FileSystem.FileSystem, candidate: string) =>
     ),
   );
 function inProject(path: Path.Path, root: string, candidate: string, project: string | undefined) {
-  const segments = path.relative(root, candidate).split(path.sep);
+  const segments = Effect2.pipe(path.relative(root, candidate), EffectString.split(path.sep));
   const projectAt = segments.indexOf('projects');
   return (
     project === undefined ||
@@ -213,7 +471,7 @@ const checkAuthority = (
 ) =>
   Effect.gen(function* () {
     const canonical = yield* fs.realPath(candidate);
-    if (canonical !== canonicalRoot && !canonical.startsWith(`${canonicalRoot}${path.sep}`))
+    if (canonical !== canonicalRoot && !Effect2.pipe(canonical, EffectString.startsWith(`${canonicalRoot}${path.sep}`)))
       return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check', memoryUri);
   }).pipe(withMaintenanceSnapshotDiagnostic('authority-check', memoryUri));
 
@@ -312,10 +570,13 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
       });
       const record = parseMemoryDocument(uri, content);
       if (record === undefined) {
-        const firstLine = content
-          .trim()
-          .split(/\r\n?|\n/u, 1)[0]
-          ?.trim();
+        const firstLine = Effect2.pipe(
+          Effect2.pipe(content, EffectString.trim)
+            // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+            .split(/\r\n?|\n/u, 1)[0],
+          effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        );
         if (!isSharedMemoryUri(uri) || firstLine === 'MEMORY' || firstLine === 'HANDOFF')
           return yield* maintenanceSnapshotFailure('invalid-header', 'record-read', uri);
       }
@@ -345,7 +606,7 @@ export const readContextMaintenanceCanonicalRecord = Effect.fn('contextMaintenan
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/`;
-  if (!uri.startsWith(prefix) || isAgentArtifactUri(uri))
+  if (!Effect2.pipe(uri, EffectString.startsWith(prefix)) || isAgentArtifactUri(uri))
     return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check', uri);
   const resource = yield* Effect.try({
     try: () => parseResourceId(uri),
@@ -356,7 +617,7 @@ export const readContextMaintenanceCanonicalRecord = Effect.fn('contextMaintenan
   const root = yield* localUserMemoriesRoot(config);
   const canonicalRoot = yield* fs.realPath(root);
   const canonicalHome = yield* fs.realPath(config.agentContextHome);
-  if (!canonicalRoot.startsWith(`${canonicalHome}${path.sep}`))
+  if (!Effect2.pipe(canonicalRoot, EffectString.startsWith(`${canonicalHome}${path.sep}`)))
     return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check', uri);
   const maxBytes = options.maxBytes ?? contextMaintenanceInventoryAuthorityLimits.recordBytes;
   if (
@@ -393,7 +654,8 @@ export const readContextMaintenanceInventoryPage = Effect.fn('contextMaintenance
   let bounded = false;
   const inventories: Inventory[] = [];
   for (const scope of [project, undefined]) {
-    if (inventories.some(inventory => inventory.complete && inventory.mutationGeneration === generation)) break;
+    if (EffectArray.some(inventories, inventory => inventory.complete && inventory.mutationGeneration === generation))
+      break;
     const file = path.join(
       config.agentContextHome,
       'context-maintenance',
@@ -438,30 +700,32 @@ export const readContextMaintenanceInventoryPage = Effect.fn('contextMaintenance
   }
   const entries = new Map<string, InventoryEntry>();
   for (const inventory of inventories)
-    for (const entry of Object.values(inventory.entries)) {
+    for (const entry of EffectRecord.values(inventory.entries)) {
       if (inventory.mutationGeneration === generation || !entries.has(entry.uri)) entries.set(entry.uri, entry);
     }
-  const eligible = [...entries.values()]
-    .filter(
-      entry =>
-        (entry.metadata.project ?? 'unscoped') === project &&
-        entry.metadata.status === 'active' &&
-        !isAgentArtifactUri(entry.uri) &&
-        (!entry.metadata.topicMaintenance || entry.metadata.reviewedSupport),
-    )
-    .sort((left, right) => left.uri.localeCompare(right.uri));
+  const eligible = EffectArray.filter([...entries.values()], entry =>
+    Boolean(
+      (entry.metadata.project ?? 'unscoped') === project &&
+      entry.metadata.status === 'active' &&
+      !isAgentArtifactUri(entry.uri) &&
+      (!entry.metadata.topicMaintenance || entry.metadata.reviewedSupport),
+    ),
+  ).sort((left, right) => Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)));
   const limit = Math.max(1, Math.min(128, Number.isSafeInteger(options.limit) ? options.limit! : 32));
-  const remaining = eligible.filter(
-    entry => options.afterUri === undefined || entry.uri.localeCompare(options.afterUri) > 0,
+  const remaining = EffectArray.filter(
+    eligible,
+    entry =>
+      options.afterUri === undefined || Effect2.pipe(entry.uri, EffectString.localeCompare(options.afterUri)) > 0,
   );
   const page = remaining.slice(0, limit);
   return {
-    uris: page.map(entry => entry.uri),
+    uris: EffectArray.map(page, entry => entry.uri),
     total: eligible.length,
     omitted: Math.max(0, eligible.length - page.length),
     ...(remaining.length > page.length ? {nextCursor: page.at(-1)!.uri} : {}),
     incomplete:
-      bounded || !inventories.some(inventory => inventory.complete && inventory.mutationGeneration === generation),
+      bounded ||
+      !EffectArray.some(inventories, inventory => inventory.complete && inventory.mutationGeneration === generation),
   };
 });
 
@@ -513,13 +777,16 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
       if (Option.isSome(rootInfo)) {
         const canonicalRoot = yield* fs.realPath(root);
         const canonicalHome = yield* fs.realPath(config.agentContextHome);
-        if (!canonicalRoot.startsWith(`${canonicalHome}${path.sep}`))
+        if (!Effect2.pipe(canonicalRoot, EffectString.startsWith(`${canonicalHome}${path.sep}`)))
           return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check');
         const directories = [root];
         while (directories.length > 0) {
           const directory = directories.shift()!;
           yield* checkAuthority(fs, path, canonicalRoot, directory);
-          const names = (yield* fs.readDirectory(directory)).sort().filter(name => !name.startsWith('.'));
+          const names = EffectArray.filter(
+            (yield* fs.readDirectory(directory)).sort(),
+            name => !Effect2.pipe(name, EffectString.startsWith('.')),
+          );
           if (names.length > contextMaintenanceInventoryAuthorityLimits.catalogNames)
             return incomplete('inventory-terminal-catalog-boundary');
           catalogNames += names.length;
@@ -553,7 +820,7 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
                 yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
                 if (isAgentArtifactUri(uri)) return item();
                 if (info.value.type === 'Directory') return item(candidate);
-                if (name.endsWith('.md')) {
+                if (Effect2.pipe(name, EffectString.endsWith('.md'))) {
                   if (info.value.type !== 'File')
                     return yield* maintenanceSnapshotFailure('record-not-regular', 'record-read', uri);
                   if (Number(info.value.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes)
@@ -640,8 +907,8 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
   );
   // Account writes invalidate authority, never the fair discovery cursor. The terminal
   // snapshot reconciles every selected byte and deletion under the native mutation lock.
-  let entries: Record<string, InventoryEntry> = Object.fromEntries(
-    Object.entries(prior?.entries ?? {}).filter(([uri]) => !isAgentArtifactUri(uri)),
+  let entries: Record<string, InventoryEntry> = EffectRecord.fromEntries(
+    EffectArray.filter(EffectRecord.toEntries(prior?.entries ?? {}), ([uri]) => !isAgentArtifactUri(uri)),
   );
   const diagnostics: Record<string, ContextMaintenanceSnapshotDiagnosticV1> = {...prior?.diagnostics};
   const queue: DirectoryPage[] =
@@ -649,7 +916,11 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
       ? [{directory: root, offset: 0}]
       : prior.complete
         ? []
-        : prior.queue.filter(page => !isAgentArtifactPath(path.relative(root, page.directory).split(path.sep)));
+        : EffectArray.filter(
+            prior.queue,
+            page =>
+              !isAgentArtifactPath(Effect2.pipe(path.relative(root, page.directory), EffectString.split(path.sep))),
+          );
   let incompleteReason: InventoryIncompleteReason | undefined = 'inventory-discovery-incomplete';
   let admitted = 0;
   while (queue.length > 0 && admitted < budget) {
@@ -660,7 +931,7 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
       return yield* maintenanceSnapshotFailure('record-changed', 'discovery');
     const canonicalRoot = yield* fs.realPath(root);
     const canonicalHome = yield* fs.realPath(config.agentContextHome);
-    if (!canonicalRoot.startsWith(`${canonicalHome}${path.sep}`))
+    if (!Effect2.pipe(canonicalRoot, EffectString.startsWith(`${canonicalHome}${path.sep}`)))
       return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check');
     yield* checkAuthority(fs, path, canonicalRoot, page.directory);
     const names =
@@ -674,7 +945,7 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     let offset = page.offset;
     while (offset < names.length && admitted < budget) {
       const name = names[offset++];
-      if (name.startsWith('.')) continue;
+      if (Effect2.pipe(name, EffectString.startsWith('.'))) continue;
       admitted++;
       const candidate = path.join(page.directory, name);
       const uri = yield* Effect.try({
@@ -691,7 +962,7 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
       if (info.value.type === 'Directory') {
         yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
         queue.push({directory: candidate, offset: 0});
-      } else if (info.value.type === 'File' && name.endsWith('.md')) {
+      } else if (info.value.type === 'File' && Effect2.pipe(name, EffectString.endsWith('.md'))) {
         yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
         if (entries[uri]?.signature === signature(info.value) && entries[uri]?.canonicalContentHash !== undefined)
           continue;
@@ -722,9 +993,9 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     if (authority.complete) {
       entries = authority.entries;
       authorityGeneration = authority.mutationGeneration;
-      for (const key of Object.keys(diagnostics)) delete diagnostics[key];
+      for (const key of EffectRecord.keys(diagnostics)) delete diagnostics[key];
       Object.assign(diagnostics, authority.diagnostics);
-      complete = Object.keys(diagnostics).length === 0;
+      complete = EffectRecord.keys(diagnostics).length === 0;
       incompleteReason = complete ? undefined : 'inventory-records-omitted';
     } else {
       incompleteReason = authority.incompleteReason;
@@ -757,21 +1028,29 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     inventory = {...inventory, complete: false, incompleteReason};
     yield* persistInventory(fs, path, file, inventory);
   }
-  const ordered = Object.values(entries).sort((left, right) => left.uri.localeCompare(right.uri));
+  const ordered = EffectRecord.values(entries).sort((left, right) =>
+    Effect2.pipe(left.uri, EffectString.localeCompare(right.uri)),
+  );
   return {
     complete: inventory.complete,
     incompleteReason,
     reconciliation,
-    diagnostics: Object.values(diagnostics),
-    generation: sha256HexSync(ordered.map(entry => `${entry.uri}:${entry.hash}`).join('|')),
-    hashes: new Map(ordered.map(entry => [entry.uri, entry.hash])),
+    diagnostics: EffectRecord.values(diagnostics),
+    generation: sha256HexSync(
+      EffectArray.join(
+        EffectArray.map(ordered, entry => `${entry.uri}:${entry.hash}`),
+        '|',
+      ),
+    ),
+    hashes: new Map(EffectArray.map(ordered, entry => [entry.uri, entry.hash])),
     canonicalContentHashes: new Map(
-      ordered.flatMap(entry =>
+      EffectArray.flatMap(ordered, entry =>
         entry.canonicalContentHash === undefined ? [] : [[entry.uri, entry.canonicalContentHash] as const],
       ),
     ),
-    bodyHashes: new Map(ordered.map(entry => [entry.uri, entry.bodyHash])),
-    records: ordered.map(
+    bodyHashes: new Map(EffectArray.map(ordered, entry => [entry.uri, entry.bodyHash])),
+    records: EffectArray.map(
+      ordered,
       entry =>
         ({
           uri: entry.uri,
@@ -789,5 +1068,5 @@ export function pruneAbsentMaintenanceCheckpoints<T>(
   scope: {readonly project?: string; readonly complete: boolean},
 ): void {
   if (scope.project !== undefined || !scope.complete) return;
-  for (const key of Object.keys(checkpoints)) if (!activeKeys.has(key)) delete checkpoints[key];
+  for (const key of EffectRecord.keys(checkpoints)) if (!activeKeys.has(key)) delete checkpoints[key];
 }

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This evaluation runner owns pinned local executable, artifact, and process-group boundaries. */
 
@@ -74,6 +75,10 @@ import {
   stageMatchedEvaluationPinnedFileV1,
   withMatchedEvaluationArtifactLockV1,
 } from './matched-evaluation-runtime-integrity.js';
+import * as EffectRecord from 'effect/Record';
+import {isJsonObject} from '@threadnote/platform/json';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MATCHED_EVALUATION_RUNTIME_VERSION = 4 as const;
 
@@ -106,7 +111,14 @@ export function projectMatchedEvaluationAdapterTaskV1(
   request: Pick<MatchedEvaluationRunRequestV1, 'arm' | 'task'>,
   study: MatchedTokenEfficiencyStudyV1 | null,
 ) {
-  const taskContext = study?.taskContexts.find(context => context.taskId === request.task.taskId) ?? null;
+  const taskContext =
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(study?.taskContexts), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, context => context.taskId === request.task.taskId),
+        ),
+      ),
+    ) ?? null;
   if (study !== null && taskContext === null) {
     throw new Error(`Token-efficiency study has no prepared context for ${request.task.taskId}.`);
   }
@@ -144,10 +156,24 @@ export function projectMatchedEvaluationAdapterTaskV1(
 
 export function projectMatchedEvaluationContinuationAdapterTaskV2(
   request: Pick<MatchedEvaluationRunRequestV1, 'arm' | 'task'>,
-  study: MatchedTokenEfficiencyStudyV1,
-  plan: MatchedEvaluationContinuationPilotPlanCurrent,
+  study: {
+    readonly studyHash: string;
+    readonly taskContexts: MatchedTokenEfficiencyStudyV1['taskContexts'];
+  },
+  plan: {
+    readonly phaseTwoPrompt: string;
+    readonly checkpoint: {
+      readonly repositoryFixtureHash: string;
+      readonly preparedContext: Pick<
+        MatchedEvaluationContinuationPilotPlanCurrent['checkpoint']['preparedContext'],
+        'graphContentHash' | 'graphSnapshotHash' | 'linkReceiptsHash' | 'taskContextHash'
+      >;
+    };
+  },
 ) {
-  const sourceContext = study.taskContexts.find(context => context.taskId === request.task.taskId);
+  const sourceContext = EffectOption.getOrUndefined(
+    EffectArray.findFirst(study.taskContexts, context => context.taskId === request.task.taskId),
+  );
   if (sourceContext === undefined) {
     throw new Error(`Token-efficiency study has no prepared context for ${request.task.taskId}.`);
   }
@@ -293,11 +319,35 @@ export function matchedEvaluationContinuationAdapterConfigurationPathsV2(planPat
 }
 
 export async function assertMatchedEvaluationContinuationAdapterConfigurationsV2(input: {
-  readonly manifest: MatchedEvaluationManifestV1;
-  readonly plan: MatchedEvaluationContinuationPilotPlanCurrent;
+  readonly manifest: {
+    readonly arms: readonly Pick<MatchedEvaluationManifestV1['arms'][number], 'arm' | 'adapterConfigurationHash'>[];
+  };
+  readonly plan: {
+    readonly taskId: string;
+    readonly checkpoint: {
+      readonly preparedContext: Pick<
+        MatchedEvaluationContinuationPilotPlanCurrent['checkpoint']['preparedContext'],
+        'graphContentHash' | 'graphSnapshotHash' | 'linkReceiptsHash' | 'taskContextHash'
+      >;
+      readonly adapterConfigurations: Pick<
+        MatchedEvaluationContinuationPilotPlanCurrent['checkpoint']['adapterConfigurations'],
+        'threadnoteCompactSha256' | 'threadnoteGraphSha256'
+      >;
+      readonly preparedGraphHome: Pick<
+        MatchedEvaluationContinuationPilotPlanCurrent['checkpoint']['preparedGraphHome'],
+        'fixtureHash' | 'identitySha256'
+      >;
+      readonly preparedHome: Pick<
+        MatchedEvaluationContinuationPilotPlanCurrent['checkpoint']['preparedHome'],
+        'fixtureHash' | 'identitySha256'
+      >;
+    };
+  };
   readonly planPath: string;
   readonly requiredArms: ReadonlySet<'threadnote-compact' | 'threadnote-graph'>;
-  readonly runtime: MatchedEvaluationRuntimeV1;
+  readonly runtime: {
+    readonly arms: readonly {readonly arm: MatchedEvaluationArm; readonly adapterConfigFile: string}[];
+  };
 }): Promise<
   ReadonlyMap<'threadnote-compact' | 'threadnote-graph', MatchedEvaluationContinuationAdapterConfigOverrideV2>
 > {
@@ -329,12 +379,16 @@ export async function assertMatchedEvaluationContinuationAdapterConfigurationsV2
     },
   ];
   const overrides = await Promise.all(
-    specifications
-      .filter(specification => input.requiredArms.has(specification.arm))
-      .map(async specification => {
-        const definition = input.manifest.arms.find(candidate => candidate.arm === specification.arm);
+    EffectArray.map(
+      EffectArray.filter(specifications, specification => input.requiredArms.has(specification.arm)),
+      async specification => {
+        const definition = EffectOption.getOrUndefined(
+          EffectArray.findFirst(input.manifest.arms, candidate => candidate.arm === specification.arm),
+        );
         if (definition === undefined) throw new Error(`Continuation manifest lacks ${specification.arm}.`);
-        const runtimeArm = input.runtime.arms.find(candidate => candidate.arm === specification.arm);
+        const runtimeArm = EffectOption.getOrUndefined(
+          EffectArray.findFirst(input.runtime.arms, candidate => candidate.arm === specification.arm),
+        );
         if (runtimeArm === undefined) throw new Error(`Continuation runtime lacks ${specification.arm}.`);
         const [sourceConfigFile, checkpointConfigFile] = await Promise.all([
           canonicalRegularFile(runtimeArm.adapterConfigFile, `${specification.arm} source adapter configuration`),
@@ -378,7 +432,8 @@ export async function assertMatchedEvaluationContinuationAdapterConfigurationsV2
           specification.arm,
           {adapterConfigFile: checkpointConfigFile, adapterConfigurationHash: checkpointHash},
         ] as const;
-      }),
+      },
+    ),
   );
   return new Map(overrides);
 }
@@ -390,10 +445,20 @@ export async function prepareMatchedEvaluationContinuationAdapterRuntimeOverride
     MatchedEvaluationContinuationAdapterConfigOverrideV2
   >;
   readonly checkpointRepository: string;
-  readonly manifest: MatchedEvaluationManifestV1;
+  readonly manifest: {
+    readonly arms: readonly Pick<MatchedEvaluationManifestV1['arms'][number], 'arm' | 'adapterConfigurationHash'>[];
+  };
   readonly outputDirectory: string;
-  readonly plan: MatchedEvaluationContinuationPilotPlanCurrent;
-  readonly runtime: MatchedEvaluationRuntimeV1;
+  readonly plan: {
+    readonly checkpoint: Pick<
+      MatchedEvaluationContinuationPilotPlanCurrent['checkpoint'],
+      'repositoryFixtureHash' | 'repositoryRevision'
+    >;
+    readonly taskId: string;
+  };
+  readonly runtime: {
+    readonly arms: readonly Pick<MatchedEvaluationRuntimeV1['arms'][number], 'arm' | 'adapterConfigFile'>[];
+  };
 }): Promise<ReadonlyMap<MatchedEvaluationArm, MatchedEvaluationContinuationAdapterConfigOverrideV2>> {
   const checkpointRepository = await realpath(input.checkpointRepository);
   const observedCheckpoint = await observeMatchedEvaluationRepositoryV1(checkpointRepository);
@@ -407,9 +472,13 @@ export async function prepareMatchedEvaluationContinuationAdapterRuntimeOverride
   const outputDirectory = resolve(input.outputDirectory, 'continuation-runtime-config');
   await mkdir(outputDirectory, {recursive: true, mode: 0o700});
   const overrides = await Promise.all(
-    input.arms.map(async arm => {
-      const definition = input.manifest.arms.find(candidate => candidate.arm === arm);
-      const runtimeArm = input.runtime.arms.find(candidate => candidate.arm === arm);
+    EffectArray.map(input.arms, async arm => {
+      const definition = EffectOption.getOrUndefined(
+        EffectArray.findFirst(input.manifest.arms, candidate => candidate.arm === arm),
+      );
+      const runtimeArm = EffectOption.getOrUndefined(
+        EffectArray.findFirst(input.runtime.arms, candidate => candidate.arm === arm),
+      );
       if (definition === undefined || runtimeArm === undefined) {
         throw new Error(`Continuation runtime lacks ${arm}.`);
       }
@@ -421,8 +490,9 @@ export async function prepareMatchedEvaluationContinuationAdapterRuntimeOverride
         throw new Error(`${arm} source adapter configuration differs from its manifest identity.`);
       }
       const baseConfigFile =
-        input.checkpointOverrides.get(arm as 'threadnote-compact' | 'threadnote-graph')?.adapterConfigFile ??
-        sourceConfigFile;
+        arm === 'files'
+          ? sourceConfigFile
+          : (input.checkpointOverrides.get(arm)?.adapterConfigFile ?? sourceConfigFile);
       const baseConfig = parseMatchedEvaluationCodexAdapterConfigV1(await readJson(baseConfigFile));
       const dependencyProjection = dependencyProjectionForTaskV1(baseConfig, input.plan.taskId);
       let runtimeConfig = baseConfig;
@@ -444,7 +514,7 @@ export async function prepareMatchedEvaluationContinuationAdapterRuntimeOverride
         }
         runtimeConfig = {
           ...baseConfig,
-          dependencyProjections: baseConfig.dependencyProjections.map(projection =>
+          dependencyProjections: EffectArray.map(baseConfig.dependencyProjections, projection =>
             projection.taskId === input.plan.taskId
               ? {
                   ...projection,
@@ -490,15 +560,16 @@ export function selectMatchedEvaluationPilotRowsV1(
   if (manifest.activeArms === undefined || JSON.stringify([...manifest.activeArms]) !== JSON.stringify(expectedArms)) {
     throw new Error('Pilot requires manifest.activeArms to be exactly files, threadnote-graph, threadnote-compact.');
   }
-  const rows = manifest.schedule.filter(row => row.taskId === taskId);
+  const rows = EffectArray.filter(manifest.schedule, row => row.taskId === taskId);
   if (rows.length === 0) throw new Error(`Pilot task ${taskId} is not in the manifest schedule.`);
-  const firstRepetition = Math.min(...rows.map(row => row.repetition));
-  const selected = rows.filter(row => row.repetition === firstRepetition);
+  const firstRepetition = Math.min(...EffectArray.map(rows, row => row.repetition));
+  const selected = EffectArray.filter(rows, row => row.repetition === firstRepetition);
   if (
     selected.length !== 3 ||
-    new Set(selected.map(row => manifest.blindAssignment[row.blindLabel])).size !== 3 ||
-    selected.some(
-      row => !expectedArms.includes(manifest.blindAssignment[row.blindLabel] as (typeof expectedArms)[number]),
+    new Set(EffectArray.map(selected, row => manifest.blindAssignment[row.blindLabel])).size !== 3 ||
+    EffectArray.some(
+      selected,
+      row => !EffectArray.some(expectedArms, expectedArm => manifest.blindAssignment[row.blindLabel] === expectedArm),
     )
   ) {
     throw new Error('Pilot could not select exactly one first-repetition row per active arm.');
@@ -690,7 +761,10 @@ export function parseMatchedEvaluationContinuationPhaseOneTaskPacketV1(
     invalid('continuation phase-one task packet version or status is invalid');
   }
   const paths = stringArray(packet.phaseOneAllowedPaths, 1, 16, 4_096, 'phase-one allowed paths');
-  if (new Set(paths).size !== paths.length || paths.some(path => !isSafeContinuationRepositoryPath(path))) {
+  if (
+    new Set(paths).size !== paths.length ||
+    EffectArray.some(paths, path => !isSafeContinuationRepositoryPath(path))
+  ) {
     invalid('continuation phase-one allowed paths are invalid');
   }
   const phaseTwoProtectedPaths =
@@ -700,7 +774,7 @@ export function parseMatchedEvaluationContinuationPhaseOneTaskPacketV1(
   if (
     phaseTwoProtectedPaths &&
     (new Set(phaseTwoProtectedPaths).size !== phaseTwoProtectedPaths.length ||
-      phaseTwoProtectedPaths.some(path => !isSafeContinuationRepositoryPath(path)))
+      EffectArray.some(phaseTwoProtectedPaths, path => !isSafeContinuationRepositoryPath(path)))
   ) {
     invalid('continuation phase-two protected paths are invalid');
   }
@@ -744,9 +818,12 @@ export function parseMatchedEvaluationContinuationPhaseOneTaskPacketV1(
 function isSafeContinuationRepositoryPath(path: string): boolean {
   return (
     !isAbsolute(path) &&
-    !path.startsWith('.') &&
-    !path.includes('\\') &&
-    path.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..')
+    !Effect2.pipe(path, EffectString.startsWith('.')) &&
+    !Effect2.pipe(path, EffectString.includes('\\')) &&
+    EffectArray.every(
+      Effect2.pipe(path, EffectString.split('/')),
+      segment => segment.length > 0 && segment !== '.' && segment !== '..',
+    )
   );
 }
 
@@ -775,9 +852,9 @@ const CONTINUATION_PRODUCTION_SOURCE_EXTENSIONS = new Set([
 ]);
 
 function isContinuationProductionSourcePath(path: string): boolean {
-  const segments = path.toLowerCase().split('/');
+  const segments: readonly string[] = Effect2.pipe(path, EffectString.toLowerCase, EffectString.split('/'));
   if (
-    segments.some(segment =>
+    EffectArray.some(segments, segment =>
       /^(?:test|tests|__tests__|testdata|docs?|examples?|samples?|fixture|fixtures|__fixtures__|mock|mocks|__mocks__|generated|__generated__|dist|build|coverage)$/u.test(
         segment,
       ),
@@ -785,13 +862,13 @@ function isContinuationProductionSourcePath(path: string): boolean {
   ) {
     return false;
   }
-  const filename = segments.at(-1) ?? '';
+  const filename = EffectOption.getOrElse(EffectArray.last(segments), () => '');
   if (
     /(?:^|[._-])(?:test|spec|fixture|fixtures|mock|mocks|generated)(?:[._-]|$)/u.test(filename) ||
     /__generated__/u.test(filename)
   )
     return false;
-  return CONTINUATION_PRODUCTION_SOURCE_EXTENSIONS.has(extname(path).toLowerCase());
+  return CONTINUATION_PRODUCTION_SOURCE_EXTENSIONS.has(Effect2.pipe(extname(path), EffectString.toLowerCase));
 }
 
 /** Validate v4 anchors against a bounded view of regular tracked checkpoint files. */
@@ -841,7 +918,7 @@ export function selectMatchedEvaluationContinuationInBoundsSourceCitationsV1(inp
   readonly sourceCitations: MatchedEvaluationContinuationDiagnosticEvidenceV1['sourceCitations'];
   readonly trackedRegularFiles: ReadonlyMap<string, string>;
 }): MatchedEvaluationContinuationDiagnosticEvidenceV1['sourceCitations'] {
-  return input.sourceCitations.filter(citation => {
+  return EffectArray.filter(input.sourceCitations, citation => {
     const content = input.trackedRegularFiles.get(citation.path);
     if (content === undefined) return true;
     const lineCount = matchedEvaluationContinuationLineCountV1(content);
@@ -850,7 +927,9 @@ export function selectMatchedEvaluationContinuationInBoundsSourceCitationsV1(inp
 }
 
 function matchedEvaluationContinuationLineCountV1(content: string): number {
-  return content.length === 0 ? 0 : content.split(/\r\n|\n|\r/u).length - (/(?:\r\n|\n|\r)$/u.test(content) ? 1 : 0);
+  return content.length === 0
+    ? 0
+    : Effect2.pipe(content, EffectString.split(/\r\n|\n|\r/u)).length - (/(?:\r\n|\n|\r)$/u.test(content) ? 1 : 0);
 }
 
 /** Pure checkpoint/handoff projection shared by the v3 and diagnostic v4 finalizer paths. */
@@ -873,49 +952,63 @@ export function buildMatchedEvaluationContinuationDiagnosticHandoffV1(input: {
   const sourceAnchors =
     diagnostic === null
       ? null
-      : diagnostic.sourceCitations
-          .map(citation => `${citation.path}:${citation.startLine}-${citation.endLine}`)
-          .join(', ');
-  const handoff = [
-    diagnostic === null ? `Task: ${input.phaseTwoPrompt}` : `Task: ${input.resumeEvidenceMarker}. ${graphQuery!}`,
-    `Decisions: Phase 1 added only the committed regression in ${input.changedPaths.join(', ')}; production code is unchanged.${diagnostic === null ? ` ${input.resumeEvidenceMarker}` : ''}`,
-    ...(diagnostic === null
-      ? [
-          `Observed: ${input.legacyEvidence!.observations}`,
-          `Anchors: ${input.legacyEvidence!.anchors}`,
-          'Attempted: Phase 1 changed only the cited regression and ran the required focused check.',
-        ]
-      : [
-          `Observed: ${diagnostic.diagnosticConclusion}`,
-          `Rejected hypothesis: ${diagnostic.rejectedHypothesis}`,
-          `Verified invariant: ${diagnostic.verifiedInvariant}`,
-          `Untested invariant: ${diagnostic.untestedInvariant}`,
-          `Unresolved: ${diagnostic.unresolvedGap}`,
-          `Graph question: ${diagnostic.graphQuestion}`,
-          `Graph query: ${graphQuery!}`,
-          `Anchors: regression ${input.legacyEvidence!.anchors}; source ${sourceAnchors}`,
-          'Attempted: Phase 1 added the regression, inspected the cited production path, narrowed the diagnosis, and stopped before the production fix.',
-        ]),
-    'Constraints: Keep the committed regression unchanged, preserve public behavior, use no network access, and implement the smallest general production correction.',
-    'Rationale: The direct-child checkpoint isolates cross-session continuation from initial test discovery and makes every treatment start from the same failing regression.',
-    `Verification: ${input.verification}`,
-    'Blockers: none.',
-    ...(diagnostic === null
-      ? [
-          'Unresolved: Root cause and broader production invariants were not established in Phase 1.',
-          'Avoid repeat: Do not reread the cited regression unless current source differs; trace the production path behind the observed failure.',
-        ]
-      : [
-          'Avoid repeat: The sealed baseline failure is already established; do not rerun it before changing production code. Do not reread unchanged cited anchors. First run exactly one inspect_code_graph query using the Graph query above, then inspect only the source needed to resolve the named gap.',
-        ]),
-    'Risks: Adjacent compatibility behavior may encode the old implementation and must remain covered by the sealed Phase 2 checks.',
-    diagnostic === null
-      ? `Next step: ${input.phaseTwoPrompt}`
-      : `Next step: First inspect_code_graph query: ${graphQuery!}. Then resolve the named gap, implement the smallest general correction, and run the sealed check.`,
-  ].join('\n');
+      : EffectArray.join(
+          EffectArray.map(
+            diagnostic.sourceCitations,
+            citation => `${citation.path}:${citation.startLine}-${citation.endLine}`,
+          ),
+          ', ',
+        );
+  const handoff = EffectArray.join(
+    [
+      diagnostic === null ? `Task: ${input.phaseTwoPrompt}` : `Task: ${input.resumeEvidenceMarker}. ${graphQuery!}`,
+      `Decisions: Phase 1 added only the committed regression in ${EffectArray.join(input.changedPaths, ', ')}; production code is unchanged.${diagnostic === null ? ` ${input.resumeEvidenceMarker}` : ''}`,
+      ...(diagnostic === null
+        ? [
+            `Observed: ${input.legacyEvidence!.observations}`,
+            `Anchors: ${input.legacyEvidence!.anchors}`,
+            'Attempted: Phase 1 changed only the cited regression and ran the required focused check.',
+          ]
+        : [
+            `Observed: ${diagnostic.diagnosticConclusion}`,
+            `Rejected hypothesis: ${diagnostic.rejectedHypothesis}`,
+            `Verified invariant: ${diagnostic.verifiedInvariant}`,
+            `Untested invariant: ${diagnostic.untestedInvariant}`,
+            `Unresolved: ${diagnostic.unresolvedGap}`,
+            `Graph question: ${diagnostic.graphQuestion}`,
+            `Graph query: ${graphQuery!}`,
+            `Anchors: regression ${input.legacyEvidence!.anchors}; source ${sourceAnchors}`,
+            'Attempted: Phase 1 added the regression, inspected the cited production path, narrowed the diagnosis, and stopped before the production fix.',
+          ]),
+      'Constraints: Keep the committed regression unchanged, preserve public behavior, use no network access, and implement the smallest general production correction.',
+      'Rationale: The direct-child checkpoint isolates cross-session continuation from initial test discovery and makes every treatment start from the same failing regression.',
+      `Verification: ${input.verification}`,
+      'Blockers: none.',
+      ...(diagnostic === null
+        ? [
+            'Unresolved: Root cause and broader production invariants were not established in Phase 1.',
+            'Avoid repeat: Do not reread the cited regression unless current source differs; trace the production path behind the observed failure.',
+          ]
+        : [
+            'Avoid repeat: The sealed baseline failure is already established; do not rerun it before changing production code. Do not reread unchanged cited anchors. First run exactly one inspect_code_graph query using the Graph query above, then inspect only the source needed to resolve the named gap.',
+          ]),
+      'Risks: Adjacent compatibility behavior may encode the old implementation and must remain covered by the sealed Phase 2 checks.',
+      diagnostic === null
+        ? `Next step: ${input.phaseTwoPrompt}`
+        : `Next step: First inspect_code_graph query: ${graphQuery!}. Then resolve the named gap, implement the smallest general correction, and run the sealed check.`,
+    ],
+    '\n',
+  );
   return {
     codeRefs: [
-      ...new Set([...input.changedPaths, ...(diagnostic?.sourceCitations.map(citation => citation.path) ?? [])]),
+      ...new Set([
+        ...input.changedPaths,
+        ...(EffectOption.getOrUndefined(
+          EffectOption.map(EffectOption.fromNullishOr(diagnostic?.sourceCitations), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, citation => citation.path),
+          ),
+        ) ?? []),
+      ]),
     ],
     handoff,
     planVersion: diagnostic === null ? 3 : 4,
@@ -925,12 +1018,14 @@ export function buildMatchedEvaluationContinuationDiagnosticHandoffV1(input: {
 
 /** Accept a model's invocation-like spelling while sealing only the semantic graph query argument. */
 export function normalizeMatchedEvaluationContinuationGraphQueryV1(value: string): string {
-  const trimmed = value.trim();
+  const trimmed = Effect2.pipe(value, EffectString.trim);
   const invocation = /^inspect_code_graph\s*\(\s*("(?:[^"\\]|\\.)*")\s*\)$/u.exec(trimmed);
   if (invocation === null) return trimmed;
   try {
     const parsed = JSON.parse(invocation[1]) as unknown;
-    return typeof parsed === 'string' && parsed.trim() !== '' ? parsed.trim() : trimmed;
+    return typeof parsed === 'string' && Effect2.pipe(parsed, EffectString.trim) !== ''
+      ? Effect2.pipe(parsed, EffectString.trim)
+      : trimmed;
   } catch {
     return trimmed;
   }
@@ -942,12 +1037,21 @@ export function buildMatchedEvaluationContinuationAnchoredGraphQueryV1(input: {
   readonly graphQuestion: string;
   readonly sourceCitations: readonly {readonly path: string}[];
 }): string {
-  const normalized = normalizeMatchedEvaluationContinuationGraphQueryV1(input.fallbackQuery)
-    .replace(/\s+/gu, ' ')
-    .trim();
-  const semanticQuery = normalized.replace(/^inspect_code_graph(?:\s+query)?(?:\s+for|\s*:)?\s*/iu, '').trim();
-  const fallback = semanticQuery || normalized || input.graphQuestion.replace(/\s+/gu, ' ').trim();
-  return matchedEvaluationUtf8Prefix(fallback, 256).trim();
+  const normalized = Effect2.pipe(
+    normalizeMatchedEvaluationContinuationGraphQueryV1(input.fallbackQuery),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
+  const semanticQuery = Effect2.pipe(
+    normalized,
+    EffectString.replace(/^inspect_code_graph(?:\s+query)?(?:\s+for|\s*:)?\s*/iu, ''),
+    EffectString.trim,
+  );
+  const fallback =
+    semanticQuery ||
+    normalized ||
+    Effect2.pipe(input.graphQuestion, EffectString.replace(/\s+/gu, ' '), EffectString.trim);
+  return Effect2.pipe(matchedEvaluationUtf8Prefix(fallback, 256), EffectString.trim);
 }
 
 function matchedEvaluationUtf8Prefix(value: string, maximumBytes: number): string {
@@ -976,8 +1080,11 @@ export function parseMatchedEvaluationContinuationAutomaticHandoffReadV1(input: 
     /^tn_[A-Za-z0-9_-]{1,128}$/u,
     'continuation automatic handoff memory id',
   );
-  const expectedPaths = [...new Set(input.expectedCodeRefs)].sort((left, right) => left.localeCompare(right));
-  const citations = prefixedLines(input.stdout, 'code_citation: ', 'continuation automatic handoff citations').map(
+  const expectedPaths = [...new Set(input.expectedCodeRefs)].sort((left, right) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
+  );
+  const citations = EffectArray.map(
+    prefixedLines(input.stdout, 'code_citation: ', 'continuation automatic handoff citations'),
     (line, index) => {
       let parsed: unknown;
       try {
@@ -1005,11 +1112,13 @@ export function parseMatchedEvaluationContinuationAutomaticHandoffReadV1(input: 
       return {citationId, path};
     },
   );
-  const actualPaths = citations.map(citation => citation.path).sort((left, right) => left.localeCompare(right));
+  const actualPaths = EffectArray.map(citations, citation => citation.path).sort((left, right) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
+  );
   if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) {
     throw new Error('Continuation automatic handoff citations differ from the requested code references.');
   }
-  const regression = citations.filter(citation => citation.path === input.regressionPath);
+  const regression = EffectArray.filter(citations, citation => citation.path === input.regressionPath);
   if (regression.length !== 1) {
     throw new Error('Continuation automatic handoff citation is missing or ambiguous for the regression.');
   }
@@ -1019,23 +1128,26 @@ export function parseMatchedEvaluationContinuationAutomaticHandoffReadV1(input: 
 function renderMatchedEvaluationContinuationPhaseOnePromptV1(
   packet: MatchedEvaluationContinuationPhaseOneTaskPacket,
 ): string {
-  const focusedCheck = packet.phaseOneFocusedChecks[0].replaceAll('{python}', 'python');
+  const focusedCheck = Effect2.pipe(packet.phaseOneFocusedChecks[0], EffectString.replaceAll('{python}', 'python'));
   const diagnosticContract =
     packet.version === 4
-      ? [
-          '',
-          'CONTINUATION DIAGNOSIS/1',
-          'Add the failing regression and inspect the production source deeply enough to leave a decision-grade diagnosis, but do not edit production code or implement the fix.',
-          'Your citations must include both the changed regression and at least one unchanged production-source anchor.',
-          'Write the summary as exactly these seven nonempty lines:',
-          'Diagnosis: <source-grounded conclusion>',
-          'Rejected hypothesis: <attempted explanation that evidence ruled out or narrowed>',
-          'Verified invariant: <behavior established by source or the focused check>',
-          'Untested invariant: <important behavior still requiring verification>',
-          'Unresolved gap: <one exact decision still blocking the production fix>',
-          'Graph question: <one bounded source-relationship question whose answer advances that decision>',
-          'Graph query: <one concise inspect_code_graph query for that question>',
-        ].join('\n')
+      ? EffectArray.join(
+          [
+            '',
+            'CONTINUATION DIAGNOSIS/1',
+            'Add the failing regression and inspect the production source deeply enough to leave a decision-grade diagnosis, but do not edit production code or implement the fix.',
+            'Your citations must include both the changed regression and at least one unchanged production-source anchor.',
+            'Write the summary as exactly these seven nonempty lines:',
+            'Diagnosis: <source-grounded conclusion>',
+            'Rejected hypothesis: <attempted explanation that evidence ruled out or narrowed>',
+            'Verified invariant: <behavior established by source or the focused check>',
+            'Untested invariant: <important behavior still requiring verification>',
+            'Unresolved gap: <one exact decision still blocking the production fix>',
+            'Graph question: <one bounded source-relationship question whose answer advances that decision>',
+            'Graph query: <one concise inspect_code_graph query for that question>',
+          ],
+          '\n',
+        )
       : '';
   return `${packet.sourceTaskPrompt}\n\n${packet.phaseOneDirective}${diagnosticContract}\n\nRequired focused check (run exactly as written; do not change its flags or selector):\n${focusedCheck}`;
 }
@@ -1043,7 +1155,7 @@ function renderMatchedEvaluationContinuationPhaseOnePromptV1(
 export function createMatchedEvaluationContinuationPhaseOneSelectionV1(input: {
   readonly packet: MatchedEvaluationContinuationPhaseOneTaskPacket;
   readonly taskPacketSha256: string;
-  readonly task: MatchedEvaluationManifestV1['tasks'][number];
+  readonly task: Pick<MatchedEvaluationManifestV1['tasks'][number], 'promptHash' | 'repositoryFixtureHash' | 'taskId'>;
   readonly taskPrompt: string;
   readonly repositoryRevision: string;
 }): MatchedEvaluationContinuationPhaseOneSelectionV1 {
@@ -1061,29 +1173,31 @@ export function createMatchedEvaluationContinuationPhaseOneSelectionV1(input: {
       : input.packet.version === 2
         ? MATCHED_CONTEXT_CONTINUATION_VARIANTS
         : CONTINUATION_VARIANTS;
-  const variants = treatmentVariants
-    .map(variant => ({
-      score: sha256Bytes(
-        Buffer.from(`matched-continuation-treatment-order-v1\0${packetHash}\0${input.task.taskId}\0${variant}`),
-      ),
-      variant,
-    }))
-    .sort((left, right) => left.score.localeCompare(right.score));
+  const variants = EffectArray.map(treatmentVariants, variant => ({
+    score: sha256Bytes(
+      Buffer.from(`matched-continuation-treatment-order-v1\0${packetHash}\0${input.task.taskId}\0${variant}`),
+    ),
+    variant,
+  })).sort((left, right) => Effect2.pipe(left.score, EffectString.localeCompare(right.score)));
   const labels = ['A', 'B', 'C', 'D', 'E'] as const;
   return {
-    continuationAttempts: variants.map(({variant}, index) => ({
+    continuationAttempts: EffectArray.map(variants, ({variant}, index) => ({
       blindLabel: labels[index],
-      runNonce: `run_${sha256Bytes(
-        Buffer.from(`matched-continuation-phase-two-run-v1\0${packetHash}\0${input.task.taskId}\0${variant}`),
-      ).slice(0, 32)}`,
+      runNonce: `run_${Effect2.pipe(
+        sha256Bytes(
+          Buffer.from(`matched-continuation-phase-two-run-v1\0${packetHash}\0${input.task.taskId}\0${variant}`),
+        ),
+        EffectString.slice(0, 32),
+      )}`,
       runOrder: index + 1,
       variant,
     })),
     phaseOnePrompt,
     phaseOnePromptSha256: sha256Bytes(Buffer.from(phaseOnePrompt)),
-    phaseOneRunNonce: `run_${sha256Bytes(
-      Buffer.from(`matched-continuation-phase-one-run-v1\0${packetHash}\0${input.task.taskId}`),
-    ).slice(0, 32)}`,
+    phaseOneRunNonce: `run_${Effect2.pipe(
+      sha256Bytes(Buffer.from(`matched-continuation-phase-one-run-v1\0${packetHash}\0${input.task.taskId}`)),
+      EffectString.slice(0, 32),
+    )}`,
     sourceTask: {
       prompt: input.taskPrompt,
       promptSha256: input.task.promptHash,
@@ -1302,7 +1416,7 @@ function parseContinuationPhaseOneAttemptsV1(
   value: unknown,
   label: string,
 ): MatchedEvaluationContinuationPhaseOneSelectionV1['continuationAttempts'] {
-  const attempts = array(value, label).map((entry, index) => {
+  const attempts = EffectArray.map(array(value, label), (entry, index) => {
     const attempt = object(entry, `${label} entry ${index}`);
     exactKeys(attempt, ['blindLabel', 'runNonce', 'runOrder', 'variant'], `${label} entry ${index}`);
     return {
@@ -1324,11 +1438,11 @@ function parseContinuationPhaseOneAttemptsV1(
             : null;
   if (
     expectedVariants === null ||
-    new Set(attempts.map(attempt => attempt.blindLabel)).size !== expectedVariants.length ||
-    new Set(attempts.map(attempt => attempt.runNonce)).size !== expectedVariants.length ||
-    new Set(attempts.map(attempt => attempt.runOrder)).size !== expectedVariants.length ||
-    new Set(attempts.map(attempt => attempt.variant)).size !== expectedVariants.length ||
-    expectedVariants.some(variant => !attempts.some(attempt => attempt.variant === variant))
+    new Set(EffectArray.map(attempts, attempt => attempt.blindLabel)).size !== expectedVariants.length ||
+    new Set(EffectArray.map(attempts, attempt => attempt.runNonce)).size !== expectedVariants.length ||
+    new Set(EffectArray.map(attempts, attempt => attempt.runOrder)).size !== expectedVariants.length ||
+    new Set(EffectArray.map(attempts, attempt => attempt.variant)).size !== expectedVariants.length ||
+    EffectArray.some(expectedVariants, variant => !EffectArray.some(attempts, attempt => attempt.variant === variant))
   ) {
     invalid(`${label} must contain a complete supported two-, three-, four-, or five-treatment set`);
   }
@@ -1403,7 +1517,7 @@ export function parseMatchedEvaluationContinuationPilotPlanV1(value: unknown): M
   const handoffSha256 = matchingString(checkpoint.handoffSha256, HASH, 'continuation pilot handoff hash');
   if (sha256Bytes(Buffer.from(handoff)) !== handoffSha256) invalid('continuation pilot handoff hash differs');
   for (const heading of ['Task:', 'Decisions:', 'Constraints:', 'Rationale:', 'Verification:', 'Next step:']) {
-    if (!handoff.includes(heading)) invalid(`continuation pilot handoff lacks ${heading}`);
+    if (!Effect2.pipe(handoff, EffectString.includes(heading))) invalid(`continuation pilot handoff lacks ${heading}`);
   }
   const resumeEvidenceMarker = boundedString(
     checkpoint.resumeEvidenceMarker,
@@ -1411,7 +1525,8 @@ export function parseMatchedEvaluationContinuationPilotPlanV1(value: unknown): M
     256,
     'continuation pilot resume evidence marker',
   );
-  if (!handoff.includes(resumeEvidenceMarker)) invalid('continuation pilot handoff lacks its resume evidence marker');
+  if (!Effect2.pipe(handoff, EffectString.includes(resumeEvidenceMarker)))
+    invalid('continuation pilot handoff lacks its resume evidence marker');
   const phaseOneAccounting = object(checkpoint.phaseOneAccounting, 'continuation pilot phase-one accounting');
   exactKeys(
     phaseOneAccounting,
@@ -1461,7 +1576,7 @@ export function parseMatchedEvaluationContinuationPilotPlanV1(value: unknown): M
     }
     return parsed;
   })();
-  const attempts = array(plan.attempts, 'continuation pilot attempts').map((entry, index) => {
+  const attempts = EffectArray.map(array(plan.attempts, 'continuation pilot attempts'), (entry, index) => {
     const attempt = object(entry, `continuation pilot attempt ${index}`);
     exactKeys(attempt, ['blindLabel', 'runNonce', 'runOrder', 'variant'], `continuation pilot attempt ${index}`);
     return {
@@ -1489,11 +1604,14 @@ export function parseMatchedEvaluationContinuationPilotPlanV1(value: unknown): M
   if (
     versionedExpectedVariants === null ||
     attempts.length !== versionedExpectedVariants.length ||
-    new Set(attempts.map(attempt => attempt.variant)).size !== versionedExpectedVariants.length ||
-    versionedExpectedVariants.some(variant => !attempts.some(attempt => attempt.variant === variant)) ||
-    new Set(attempts.map(attempt => attempt.runNonce)).size !== attempts.length ||
-    new Set(attempts.map(attempt => attempt.blindLabel)).size !== attempts.length ||
-    new Set(attempts.map(attempt => attempt.runOrder)).size !== attempts.length
+    new Set(EffectArray.map(attempts, attempt => attempt.variant)).size !== versionedExpectedVariants.length ||
+    EffectArray.some(
+      versionedExpectedVariants,
+      variant => !EffectArray.some(attempts, attempt => attempt.variant === variant),
+    ) ||
+    new Set(EffectArray.map(attempts, attempt => attempt.runNonce)).size !== attempts.length ||
+    new Set(EffectArray.map(attempts, attempt => attempt.blindLabel)).size !== attempts.length ||
+    new Set(EffectArray.map(attempts, attempt => attempt.runOrder)).size !== attempts.length
   ) {
     invalid('continuation pilot must contain one unique attempt per variant');
   }
@@ -1609,7 +1727,7 @@ export function parseMatchedEvaluationContinuationPilotPlanV1(value: unknown): M
   if (phaseOnePrompt === phaseTwoPrompt || parsedSourceTask.prompt === phaseTwoPrompt) {
     invalid('continuation pilot phase prompts must be distinct');
   }
-  if (!phaseOnePrompt.includes(parsedSourceTask.prompt)) {
+  if (!Effect2.pipe(phaseOnePrompt, EffectString.includes(parsedSourceTask.prompt))) {
     invalid('continuation pilot phase-one prompt must include the exact source task prompt');
   }
   const diagnosticEvidence =
@@ -1679,7 +1797,8 @@ function parseMatchedEvaluationContinuationDiagnosticEvidenceV1(
     ],
     'continuation diagnostic evidence',
   );
-  const sourceCitations = array(evidence.sourceCitations, 'continuation diagnostic source citations').map(
+  const sourceCitations = EffectArray.map(
+    array(evidence.sourceCitations, 'continuation diagnostic source citations'),
     (entry, index) => {
       const citation = object(entry, `continuation diagnostic source citation ${index}`);
       exactKeys(citation, ['endLine', 'path', 'startLine'], `continuation diagnostic source citation ${index}`);
@@ -1739,7 +1858,9 @@ export function assertMatchedEvaluationContinuationSupplementV1(input: {
   if (input.plan.attempts.length !== CONTINUATION_VARIANTS.length) {
     throw new Error('Continuation supplement requires a five-treatment sealed plan.');
   }
-  const supplement = input.plan.attempts.find(attempt => attempt.variant === 'threadnote-preloaded-resume');
+  const supplement = EffectOption.getOrUndefined(
+    EffectArray.findFirst(input.plan.attempts, attempt => attempt.variant === 'threadnote-preloaded-resume'),
+  );
   if (supplement === undefined || supplement.blindLabel !== 'E' || supplement.runOrder !== 5) {
     throw new Error('Continuation supplement must reserve label E and order 5 for preloaded resume.');
   }
@@ -1776,7 +1897,7 @@ export function assertMatchedEvaluationContinuationSupplementV1(input: {
   ) {
     throw new Error('Continuation supplement parent selection and report differ.');
   }
-  const parentVariants = selectionRows.map((entry, index) => {
+  const parentVariants = EffectArray.map(selectionRows, (entry, index) => {
     const row = object(entry, `continuation supplement parent row ${index}`);
     const attempt = object(reportAttempts[index], `continuation supplement parent attempt ${index}`);
     const variant = literal(
@@ -1784,7 +1905,9 @@ export function assertMatchedEvaluationContinuationSupplementV1(input: {
       BASE_CONTINUATION_VARIANTS,
       `continuation supplement parent row ${index} variant`,
     );
-    const planned = input.plan.attempts.find(candidate => candidate.variant === variant);
+    const planned = EffectOption.getOrUndefined(
+      EffectArray.findFirst(input.plan.attempts, candidate => candidate.variant === variant),
+    );
     if (
       planned === undefined ||
       row.taskId !== input.plan.taskId ||
@@ -1803,7 +1926,7 @@ export function assertMatchedEvaluationContinuationSupplementV1(input: {
   });
   if (
     new Set(parentVariants).size !== BASE_CONTINUATION_VARIANTS.length ||
-    BASE_CONTINUATION_VARIANTS.some(variant => !parentVariants.includes(variant))
+    EffectArray.some(BASE_CONTINUATION_VARIANTS, variant => !parentVariants.includes(variant))
   ) {
     throw new Error('Continuation supplement parent does not contain the four baseline variants.');
   }
@@ -2010,8 +2133,8 @@ export async function assertMatchedEvaluationContinuationPhaseOneEvidenceV2(inpu
     responseSha256,
     transcriptSha256,
   };
-  for (const [field, value] of Object.entries(observedHashes)) {
-    if (execution[field as keyof typeof observedHashes] !== value) {
+  for (const [field, value] of EffectRecord.toEntries(observedHashes)) {
+    if (execution[field] !== value) {
       throw new Error(`Continuation phase-one evidence differs: ${field}.`);
     }
   }
@@ -2351,7 +2474,10 @@ export async function runMatchedEvaluationFromFilesV1(options: {
         if (ledgerOutcomes.length !== outcome.runOrder) {
           throw new Error('Outcome ledger prefix differs from the in-memory run prefix.');
         }
-        const replacement = `${[...ledgerOutcomes, outcome].map(value => JSON.stringify(value)).join('\n')}\n`;
+        const replacement = `${EffectArray.join(
+          EffectArray.map([...ledgerOutcomes, outcome], value => JSON.stringify(value)),
+          '\n',
+        )}\n`;
         await compareAndSwapMatchedEvaluationLedgerV1(outcomesPath, expectedLedgerText, replacement);
         expectedLedgerText = replacement;
         ledgerOutcomes.push(outcome);
@@ -2378,11 +2504,11 @@ export async function runMatchedEvaluationFromFilesV1(options: {
     process.stdout.write(
       `${JSON.stringify({
         artifactDirectory: runtime.artifactDirectory,
-        completed: outcomes.filter(outcome => outcome.status === 'completed').length,
+        completed: EffectArray.filter(outcomes, outcome => outcome.status === 'completed').length,
         comparativeClaimsEligible: summary.comparativeClaimsEligible,
         manifestHash: manifest.manifestHash,
         tokenEfficiencyReportHash: tokenEfficiencyReport?.reportHash ?? null,
-        unavailable: Object.fromEntries(unavailable),
+        unavailable: EffectRecord.fromEntries(unavailable),
         version: MATCHED_EVALUATION_RUNTIME_VERSION,
       })}\n`,
     );
@@ -2408,7 +2534,7 @@ export async function runMatchedEvaluationPilotFromFilesV1(options: {
   if (runtime.verificationPlanHash !== study.verificationPlanHash) {
     throw new Error('Runtime and study disagree on the sealed verification plan.');
   }
-  if (!manifest.tasks.some(task => task.taskId === options.taskId))
+  if (!EffectArray.some(manifest.tasks, task => task.taskId === options.taskId))
     throw new Error(`Pilot task ${options.taskId} is not in the manifest.`);
   const pilotDirectory = absolutePath(options.pilotDirectory, 'pilot directory');
   if (pilotDirectory === runtime.artifactDirectory)
@@ -2432,7 +2558,7 @@ export async function runMatchedEvaluationPilotFromFilesV1(options: {
       'One task, one repetition, no CI, non-generalizable exploratory pilot.',
       'No full-study ledger or report is produced.',
     ],
-    rows: selected.map(row => ({...row, arm: manifest.blindAssignment[row.blindLabel]})),
+    rows: EffectArray.map(selected, row => ({...row, arm: manifest.blindAssignment[row.blindLabel]})),
     taskId: options.taskId,
     version: 1,
   };
@@ -2443,7 +2569,7 @@ export async function runMatchedEvaluationPilotFromFilesV1(options: {
       mode: 0o600,
     });
   } catch (cause) {
-    if ((cause as {code?: string}).code === 'EEXIST')
+    if (hasErrorCode(cause, 'EEXIST'))
       throw new Error('Pilot selection already exists; resume/retry is not supported.', {cause});
     throw cause;
   }
@@ -2451,9 +2577,11 @@ export async function runMatchedEvaluationPilotFromFilesV1(options: {
   const repositories = await resolveMatchedEvaluationRuntimeRepositoriesV1(pilotRuntime, study, manifest.repository);
   await assertResolvedRuntimeRepositories(repositories);
   const preflight = await Promise.all(
-    selected.map(async row => {
+    EffectArray.map(selected, async row => {
       const arm = manifest.blindAssignment[row.blindLabel];
-      const definition = manifest.arms.find(candidate => candidate.arm === arm);
+      const definition = EffectOption.getOrUndefined(
+        EffectArray.findFirst(manifest.arms, candidate => candidate.arm === arm),
+      );
       if (definition === undefined) throw new Error(`Pilot schedule arm ${arm} is not defined.`);
       const resolution = await resolveRuntimeArm(pilotRuntime, arm, definition);
       if ('reason' in resolution) throw new Error(`Pilot runtime unavailable for ${arm}: ${resolution.detail}`);
@@ -2468,7 +2596,9 @@ export async function runMatchedEvaluationPilotFromFilesV1(options: {
   await writeReport(false);
   for (const row of selected) {
     const arm = manifest.blindAssignment[row.blindLabel];
-    const definition = manifest.arms.find(candidate => candidate.arm === arm);
+    const definition = EffectOption.getOrUndefined(
+      EffectArray.findFirst(manifest.arms, candidate => candidate.arm === arm),
+    );
     if (definition === undefined) throw new Error(`Pilot schedule arm ${arm} is not defined.`);
     const rawArtifactPath = resolve(pilotDirectory, 'runs', row.runNonce, 'artifact.json');
     const requestPath = resolve(pilotDirectory, 'runs', row.runNonce, 'request.json');
@@ -2480,13 +2610,19 @@ export async function runMatchedEvaluationPilotFromFilesV1(options: {
       armDefinition: definition,
       manifest,
       schedule: row,
-      task: corpus.tasks.find(task => task.taskId === options.taskId)!,
+      task: EffectOption.getOrUndefined(EffectArray.findFirst(corpus.tasks, task => task.taskId === options.taskId))!,
     };
     await assertMatchedEvaluationRepositoryV1(
-      repositories.get(study.taskContexts.find(context => context.taskId === options.taskId)?.clusterId ?? null)!
-        .repositoryDirectory,
-      repositories.get(study.taskContexts.find(context => context.taskId === options.taskId)?.clusterId ?? null)!
-        .expected,
+      repositories.get(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(study.taskContexts, context => context.taskId === options.taskId),
+        )?.clusterId ?? null,
+      )!.repositoryDirectory,
+      repositories.get(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(study.taskContexts, context => context.taskId === options.taskId),
+        )?.clusterId ?? null,
+      )!.expected,
     );
     try {
       const observation = await executeArm(
@@ -2511,10 +2647,14 @@ export async function runMatchedEvaluationPilotFromFilesV1(options: {
         transcriptPath,
       });
     } catch (cause) {
-      if (!(cause instanceof Error) || !cause.message.includes('adapter failed with exit code')) throw cause;
+      if (
+        !(cause instanceof Error) ||
+        !Effect2.pipe(cause.message, EffectString.includes('adapter failed with exit code'))
+      )
+        throw cause;
       attempts.push({
         arm,
-        diagnostics: cause.message.slice(-2_048),
+        diagnostics: Effect2.pipe(cause.message, EffectString.slice(-2_048)),
         metrics: null,
         providerUsage: null,
         rawArtifactPath,
@@ -2536,7 +2676,7 @@ export async function runMatchedEvaluationPilotFromFilesV1(options: {
     await writeReport(false);
   }
   await assertResolvedRuntimeRepositories(repositories);
-  const allCompleted = attempts.every(attempt => attempt.status === 'completed');
+  const allCompleted = EffectArray.every(attempts, attempt => attempt.status === 'completed');
   await writeReport(allCompleted);
   process.stdout.write(
     `${JSON.stringify({artifactDirectory: pilotDirectory, attemptCount: attempts.length, comparativeClaimsEligible: false, completed: allCompleted, finished: true, version: 1})}\n`,
@@ -2568,16 +2708,22 @@ export async function runMatchedEvaluationContinuationPhaseOneFromFilesV1(option
   const packet = parseMatchedEvaluationContinuationPhaseOneTaskPacketV1(
     JSON.parse(taskPacketBytes.toString('utf8')) as unknown,
   );
-  const matchingTasks = corpus.tasks.filter(task => task.prompt === packet.sourceTaskPrompt);
+  const matchingTasks = EffectArray.filter(corpus.tasks, task => task.prompt === packet.sourceTaskPrompt);
   if (matchingTasks.length !== 1) {
     throw new Error('Continuation phase-one packet must match exactly one frozen corpus task.');
   }
   const corpusTask = matchingTasks[0];
-  const manifestTask = manifest.tasks.find(task => task.taskId === corpusTask.taskId);
+  const manifestTask = EffectOption.getOrUndefined(
+    EffectArray.findFirst(manifest.tasks, task => task.taskId === corpusTask.taskId),
+  );
   if (manifestTask === undefined) throw new Error(`Manifest lacks task ${corpusTask.taskId}.`);
-  const taskContext = study.taskContexts.find(context => context.taskId === corpusTask.taskId);
+  const taskContext = EffectOption.getOrUndefined(
+    EffectArray.findFirst(study.taskContexts, context => context.taskId === corpusTask.taskId),
+  );
   if (taskContext === undefined) throw new Error(`Study lacks task context ${corpusTask.taskId}.`);
-  const cluster = study.clusters.find(candidate => candidate.clusterId === taskContext.clusterId);
+  const cluster = EffectOption.getOrUndefined(
+    EffectArray.findFirst(study.clusters, candidate => candidate.clusterId === taskContext.clusterId),
+  );
   if (cluster === undefined) throw new Error(`Study lacks cluster ${taskContext.clusterId}.`);
   if (
     cluster.revision !== packet.sourceRevision ||
@@ -2611,12 +2757,14 @@ export async function runMatchedEvaluationContinuationPhaseOneFromFilesV1(option
       mode: 0o600,
     });
   } catch (cause) {
-    if ((cause as {code?: string}).code === 'EEXIST') {
+    if (hasErrorCode(cause, 'EEXIST')) {
       throw new Error('Continuation phase-one selection already exists; retry is not supported.', {cause});
     }
     throw cause;
   }
-  const filesDefinition = manifest.arms.find(definition => definition.arm === 'files');
+  const filesDefinition = EffectOption.getOrUndefined(
+    EffectArray.findFirst(manifest.arms, definition => definition.arm === 'files'),
+  );
   if (filesDefinition === undefined) throw new Error('Manifest lacks the files arm definition.');
   const executionDirectory = resolve(outputDirectory, 'phase-one-execution');
   const phaseOneRuntime = {...runtime, artifactDirectory: executionDirectory};
@@ -2626,8 +2774,9 @@ export async function runMatchedEvaluationContinuationPhaseOneFromFilesV1(option
   if ('reason' in resolution) {
     throw new Error(`Continuation phase-one files runtime unavailable: ${resolution.detail}`);
   }
-  const blindLabel = Object.entries(manifest.blindAssignment).find(([, arm]) => arm === 'files')?.[0] as
-    MatchedEvaluationRunRequestV1['schedule']['blindLabel'] | undefined;
+  const blindLabel = EffectOption.getOrUndefined(
+    EffectArray.findFirst(EffectRecord.toEntries(manifest.blindAssignment), ([, arm]) => arm === 'files'),
+  )?.[0];
   if (blindLabel === undefined) throw new Error('Manifest blind assignment lacks the files arm.');
   const request: MatchedEvaluationRunRequestV1 = {
     arm: 'files',
@@ -2659,10 +2808,10 @@ export async function runMatchedEvaluationContinuationPhaseOneFromFilesV1(option
     [transcriptPath, resolve(evidenceDirectory, 'transcript.jsonl')],
   ] as const;
   await Promise.all(
-    evidence.map(async ([source, destination]) =>
+    EffectArray.map(evidence, async ([source, destination]) =>
       writeFile(destination, await readFile(source), {
         flag: 'wx',
-        mode: destination.endsWith('/adapter') ? 0o700 : 0o600,
+        mode: Effect2.pipe(destination, EffectString.endsWith('/adapter')) ? 0o700 : 0o600,
       }),
     ),
   );
@@ -2777,36 +2926,45 @@ export function extractMatchedEvaluationContinuationPhaseOneEvidenceV1(
   if (finalAnswer.completed !== true) {
     throw new Error('Continuation phase-one structured final answer is not completed.');
   }
-  const observations = boundedString(finalAnswer.summary, 1, 2_048, 'continuation phase-one observed summary')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  const observations = Effect2.pipe(
+    boundedString(finalAnswer.summary, 1, 2_048, 'continuation phase-one observed summary'),
+    EffectString.replace(/\s+/gu, ' '),
+    EffectString.trim,
+  );
   if (observations.length === 0) {
     throw new Error('Continuation phase-one observed summary must contain non-whitespace evidence.');
   }
   const allowedPaths = new Set(changedPaths);
-  const anchors = array(finalAnswer.citations, 'continuation phase-one final citations').map((citation, index) => {
-    const value = object(citation, `continuation phase-one final citation ${index}`);
-    exactKeys(value, ['endLine', 'path', 'startLine'], `continuation phase-one final citation ${index}`);
-    const path = boundedString(value.path, 1, 1_024, `continuation phase-one final citation ${index} path`);
-    if (isAbsolute(path) || path.split('/').some(segment => segment === '..') || !allowedPaths.has(path)) {
-      throw new Error('Continuation phase-one final citation must name a changed regression path.');
-    }
-    const startLine = boundedPositiveInteger(
-      value.startLine,
-      1,
-      10_000_000,
-      `continuation phase-one final citation ${index} start line`,
-    );
-    const endLine = boundedPositiveInteger(
-      value.endLine,
-      startLine,
-      10_000_000,
-      `continuation phase-one final citation ${index} end line`,
-    );
-    return `${path}:${startLine}-${endLine}`;
-  });
+  const anchors = EffectArray.map(
+    array(finalAnswer.citations, 'continuation phase-one final citations'),
+    (citation, index) => {
+      const value = object(citation, `continuation phase-one final citation ${index}`);
+      exactKeys(value, ['endLine', 'path', 'startLine'], `continuation phase-one final citation ${index}`);
+      const path = boundedString(value.path, 1, 1_024, `continuation phase-one final citation ${index} path`);
+      if (
+        isAbsolute(path) ||
+        EffectArray.some(Effect2.pipe(path, EffectString.split('/')), segment => segment === '..') ||
+        !allowedPaths.has(path)
+      ) {
+        throw new Error('Continuation phase-one final citation must name a changed regression path.');
+      }
+      const startLine = boundedPositiveInteger(
+        value.startLine,
+        1,
+        10_000_000,
+        `continuation phase-one final citation ${index} start line`,
+      );
+      const endLine = boundedPositiveInteger(
+        value.endLine,
+        startLine,
+        10_000_000,
+        `continuation phase-one final citation ${index} end line`,
+      );
+      return `${path}:${startLine}-${endLine}`;
+    },
+  );
   if (anchors.length === 0) throw new Error('Continuation phase-one final answer lacks a changed regression citation.');
-  return {anchors: [...new Set(anchors)].join(', '), observations};
+  return {anchors: EffectArray.join([...new Set(anchors)], ', '), observations};
 }
 
 export function extractMatchedEvaluationContinuationPhaseOneEvidenceV2(
@@ -2822,7 +2980,9 @@ export function extractMatchedEvaluationContinuationPhaseOneEvidenceV2(
     throw new Error('Continuation phase-one structured final answer is not completed.');
   }
   const summary = boundedString(finalAnswer.summary, 1, 8_192, 'continuation phase-one diagnostic summary');
-  const summaryLines = summary.split(/\r?\n/u).map(line => line.trim());
+  const summaryLines = EffectArray.map(Effect2.pipe(summary, EffectString.split(/\r?\n/u)), line =>
+    Effect2.pipe(line, EffectString.trim),
+  );
   const expectedPrefixes = [
     'Diagnosis: ',
     'Rejected hypothesis: ',
@@ -2834,7 +2994,11 @@ export function extractMatchedEvaluationContinuationPhaseOneEvidenceV2(
   ] as const;
   if (
     summaryLines.length !== expectedPrefixes.length ||
-    summaryLines.some((line, index) => !line.startsWith(expectedPrefixes[index]) || line === expectedPrefixes[index])
+    EffectArray.some(
+      summaryLines,
+      (line, index) =>
+        !Effect2.pipe(line, EffectString.startsWith(expectedPrefixes[index])) || line === expectedPrefixes[index],
+    )
   ) {
     throw new Error('Continuation diagnostic summary must contain exactly the seven ordered contract lines.');
   }
@@ -2897,21 +3061,25 @@ export function extractMatchedEvaluationContinuationPhaseOneEvidenceV2(
     graphQuery,
     sourceCitations,
   });
-  return {diagnosticEvidence, regressionAnchors: [...new Set(regressionAnchors)].join(', ')};
+  return {diagnosticEvidence, regressionAnchors: EffectArray.join([...new Set(regressionAnchors)], ', ')};
 }
 
 function matchedEvaluationContinuationPhaseOneFinalAnswer(transcript: string): Record<string, unknown> {
-  const envelopes = transcript
-    .split(/\r?\n/gu)
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map((line, index) => object(JSON.parse(line) as unknown, `continuation phase-one transcript line ${index + 1}`));
-  const agentEnvelopes = envelopes.filter(envelope => envelope.kind === 'agent');
+  const envelopes = EffectArray.map(
+    EffectArray.filter(
+      EffectArray.map(Effect2.pipe(transcript, EffectString.split(/\r?\n/gu)), line =>
+        Effect2.pipe(line, EffectString.trim),
+      ),
+      Boolean,
+    ),
+    (line, index) => object(JSON.parse(line) as unknown, `continuation phase-one transcript line ${index + 1}`),
+  );
+  const agentEnvelopes = EffectArray.filter(envelopes, envelope => envelope.kind === 'agent');
   if (agentEnvelopes.length !== 1) {
     throw new Error('Continuation phase-one transcript must contain exactly one agent envelope.');
   }
   const events = array(agentEnvelopes[0].events, 'continuation phase-one agent events');
-  const finalMessages = events.flatMap((event, index) => {
+  const finalMessages = EffectArray.flatMap(events, (event, index) => {
     const envelope = object(event, `continuation phase-one agent event ${index}`);
     if (envelope.method !== 'item/completed') return [];
     const params = object(envelope.params, `continuation phase-one agent event ${index} params`);
@@ -2964,15 +3132,23 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
   if (sha256Bytes(taskPacketBytes) !== selection.taskPacketSha256) {
     throw new Error('Continuation phase-one task packet bytes differ from the sealed selection.');
   }
-  const corpusTask = corpus.tasks.find(task => task.taskId === selection.sourceTask.taskId);
+  const corpusTask = EffectOption.getOrUndefined(
+    EffectArray.findFirst(corpus.tasks, task => task.taskId === selection.sourceTask.taskId),
+  );
   if (corpusTask === undefined || corpusTask.prompt !== selection.sourceTask.prompt) {
     throw new Error('Continuation checkpoint selection differs from the frozen corpus task.');
   }
-  const taskContext = study.taskContexts.find(context => context.taskId === corpusTask.taskId);
+  const taskContext = EffectOption.getOrUndefined(
+    EffectArray.findFirst(study.taskContexts, context => context.taskId === corpusTask.taskId),
+  );
   if (taskContext === undefined) throw new Error(`Study lacks task context ${corpusTask.taskId}.`);
-  const cluster = study.clusters.find(candidate => candidate.clusterId === taskContext.clusterId);
+  const cluster = EffectOption.getOrUndefined(
+    EffectArray.findFirst(study.clusters, candidate => candidate.clusterId === taskContext.clusterId),
+  );
   if (cluster === undefined) throw new Error(`Study lacks cluster ${taskContext.clusterId}.`);
-  const runtimeRepository = runtime.repositories.find(repository => repository.clusterId === cluster.clusterId);
+  const runtimeRepository = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.repositories, repository => repository.clusterId === cluster.clusterId),
+  );
   if (runtimeRepository === undefined) throw new Error(`Runtime lacks cluster ${cluster.clusterId}.`);
   await assertMatchedEvaluationRepositoryV1(runtimeRepository.repositoryDirectory, {
     dirty: false,
@@ -3088,7 +3264,13 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
   });
   const dependencyProjection = dependencyProjectionForTaskV1(filesConfig, corpusTask.taskId);
   const focusedCommand = phaseTwoCommands[0];
-  const verificationTask = filesConfig.verificationPlan?.tasks.find(task => task.taskId === corpusTask.taskId);
+  const verificationTask = EffectOption.getOrUndefined(
+    EffectOption.map(EffectOption.fromNullishOr(filesConfig.verificationPlan?.tasks), __effectArrayReceiver =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(__effectArrayReceiver, task => task.taskId === corpusTask.taskId),
+      ),
+    ),
+  );
   if (verificationTask === undefined) {
     throw new Error('Continuation phase-one checkpoint lacks a calibrated accepted correction.');
   }
@@ -3157,10 +3339,18 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
     temporaryRoot: resolve(outputDirectory, 'phase-two-verification-baseline-tmp'),
   });
 
-  const graphArm = runtime.arms.find(arm => arm.arm === 'threadnote-graph');
-  const compactArm = runtime.arms.find(arm => arm.arm === 'threadnote-compact');
-  const graphDefinition = manifest.arms.find(arm => arm.arm === 'threadnote-graph');
-  const compactDefinition = manifest.arms.find(arm => arm.arm === 'threadnote-compact');
+  const graphArm = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.arms, arm => arm.arm === 'threadnote-graph'),
+  );
+  const compactArm = EffectOption.getOrUndefined(
+    EffectArray.findFirst(runtime.arms, arm => arm.arm === 'threadnote-compact'),
+  );
+  const graphDefinition = EffectOption.getOrUndefined(
+    EffectArray.findFirst(manifest.arms, arm => arm.arm === 'threadnote-graph'),
+  );
+  const compactDefinition = EffectOption.getOrUndefined(
+    EffectArray.findFirst(manifest.arms, arm => arm.arm === 'threadnote-compact'),
+  );
   if (
     graphArm?.toolExecutable === null ||
     graphArm?.toolExecutable === undefined ||
@@ -3173,8 +3363,12 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
   }
   const sourceGraphConfig = parseMatchedEvaluationCodexAdapterConfigV1(await readJson(graphArm.adapterConfigFile));
   const sourceCompactConfig = parseMatchedEvaluationCodexAdapterConfigV1(await readJson(compactArm.adapterConfigFile));
-  const sourceGraphHome = sourceGraphConfig.contextHomes.find(home => home.taskId === corpusTask.taskId);
-  const sourceCompactHome = sourceCompactConfig.contextHomes.find(home => home.taskId === corpusTask.taskId);
+  const sourceGraphHome = EffectOption.getOrUndefined(
+    EffectArray.findFirst(sourceGraphConfig.contextHomes, home => home.taskId === corpusTask.taskId),
+  );
+  const sourceCompactHome = EffectOption.getOrUndefined(
+    EffectArray.findFirst(sourceCompactConfig.contextHomes, home => home.taskId === corpusTask.taskId),
+  );
   if (
     sourceGraphHome === undefined ||
     sourceCompactHome === undefined ||
@@ -3273,7 +3467,7 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
     throw new Error('Continuation checkpoint graph snapshot unexpectedly equals the source snapshot.');
   }
   await cp(graphHome, compactHome, {errorOnExist: true, force: false, recursive: true});
-  const resumeEvidenceMarker = `threadnote-resume-${phaseOnePatchSha256.slice(0, 20)}`;
+  const resumeEvidenceMarker = `threadnote-resume-${Effect2.pipe(phaseOnePatchSha256, EffectString.slice(0, 20))}`;
   const phaseOneTranscript = await readFile(resolve(outputDirectory, 'phase-one', 'transcript.jsonl'), 'utf8');
   const diagnosticPhaseOneEvidence =
     selection.taskPacket.version === 4
@@ -3286,9 +3480,13 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
   let diagnostic = diagnosticPhaseOneEvidence?.diagnosticEvidence ?? null;
   if (diagnostic !== null) {
     const trackedPaths = new Set(
-      (await captureContinuationGit(checkpointRepository, ['ls-files', '-z'], 8 * 1_024 * 1_024))
-        .split('\0')
-        .filter(Boolean),
+      EffectArray.filter(
+        Effect2.pipe(
+          await captureContinuationGit(checkpointRepository, ['ls-files', '-z'], 8 * 1_024 * 1_024),
+          EffectString.split('\0'),
+        ),
+        Boolean,
+      ),
     );
     const trackedRegularFiles = new Map<string, string>();
     const canonicalCheckpointRepository = await realpath(checkpointRepository);
@@ -3302,7 +3500,7 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
           throw cause;
         }),
       );
-      if (pathFromRepository.startsWith('..') || isAbsolute(pathFromRepository)) continue;
+      if (Effect2.pipe(pathFromRepository, EffectString.startsWith('..')) || isAbsolute(pathFromRepository)) continue;
       const metadata = await lstat(citationPath).catch(cause => (isMissing(cause) ? null : Promise.reject(cause)));
       if (
         metadata?.isFile() &&
@@ -3354,7 +3552,7 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
         : {anchors: diagnosticPhaseOneEvidence!.regressionAnchors, observations: ''},
     phaseTwoPrompt: selection.taskPacket.phaseTwoPrompt,
     resumeEvidenceMarker,
-    verification: `${focusedCommand.tokens.join(' ')} fails with exit code 1 at this checkpoint, as required before the production fix.`,
+    verification: `${EffectArray.join(focusedCommand.tokens, ' ')} fails with exit code 1 at this checkpoint, as required before the production fix.`,
   });
   const {handoff} = finalizedHandoff;
   const memory = await captureCodeMemoryLinkProcessGroup({
@@ -3370,7 +3568,7 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
       sourceCompactHome.project,
       '--topic',
       `continuation-${corpusTask.taskId}`,
-      ...finalizedHandoff.codeRefs.flatMap(path => ['--code-ref', path]),
+      ...EffectArray.flatMap(finalizedHandoff.codeRefs, path => ['--code-ref', path]),
       '--require-current-code-refs',
       '--text',
       handoff,
@@ -3383,7 +3581,7 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
     timeoutMilliseconds: 120_000,
   });
   const automaticHandoffUri = matchingString(
-    memory.stdout.trim().replace(/^Stored memory:\s*/u, ''),
+    Effect2.pipe(memory.stdout, EffectString.trim, EffectString.replace(/^Stored memory:\s*/u, '')),
     /^threadnote:\/\/[^\s]+$/u,
     'continuation automatic handoff URI',
   );
@@ -3396,7 +3594,10 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
     maxOutputBytes: 1 * 1_024 * 1_024,
     timeoutMilliseconds: 120_000,
   });
-  if (!automaticHandoffRead.stdout.includes(handoff) || !automaticHandoffRead.stdout.includes(resumeEvidenceMarker)) {
+  if (
+    !Effect2.pipe(automaticHandoffRead.stdout, EffectString.includes(handoff)) ||
+    !Effect2.pipe(automaticHandoffRead.stdout, EffectString.includes(resumeEvidenceMarker))
+  ) {
     throw new Error('Continuation checkpoint automatic handoff cannot be read back exactly.');
   }
   const {citationId, managedMemoryId} = parseMatchedEvaluationContinuationAutomaticHandoffReadV1({
@@ -3407,9 +3608,10 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
     snapshotId: boundedString(statusSnapshot.id, 1, 256, 'checkpoint graph snapshot id'),
     stdout: automaticHandoffRead.stdout,
   });
-  const fixtureMemoryId = `mem_${sha256Bytes(
-    Buffer.from(`matched-continuation-automatic-handoff-v1\0${corpusTask.taskId}`),
-  ).slice(0, 32)}`;
+  const fixtureMemoryId = `mem_${Effect2.pipe(
+    sha256Bytes(Buffer.from(`matched-continuation-automatic-handoff-v1\0${corpusTask.taskId}`)),
+    EffectString.slice(0, 32),
+  )}`;
   const linkReceipts = [
     {
       citationHash: matchedTokenEfficiencyCitationHashV1({citationId, fixtureMemoryId, managedMemoryId}),
@@ -3606,7 +3808,7 @@ export async function finalizeMatchedEvaluationContinuationCheckpointFromFilesV1
   const continuationRuntime = {
     ...runtime,
     artifactDirectory: resolve(outputDirectory, 'pilot'),
-    repositories: runtime.repositories.map(repository =>
+    repositories: EffectArray.map(runtime.repositories, repository =>
       repository.clusterId === cluster.clusterId
         ? {...repository, repositoryDirectory: checkpointRepository}
         : repository,
@@ -3702,16 +3904,17 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
     plan,
     planPath: options.planPath,
     requiredArms: new Set(
-      plan.attempts
-        .map(attempt => continuationTreatment(attempt.variant, plan.checkpoint).arm)
-        .filter(
-          (arm): arm is 'threadnote-compact' | 'threadnote-graph' =>
-            arm === 'threadnote-compact' || arm === 'threadnote-graph',
-        ),
+      EffectArray.filter(
+        EffectArray.map(plan.attempts, attempt => continuationTreatment(attempt.variant, plan.checkpoint).arm),
+        (arm): arm is 'threadnote-compact' | 'threadnote-graph' =>
+          arm === 'threadnote-compact' || arm === 'threadnote-graph',
+      ),
     ),
     runtime,
   });
-  const task = corpus.tasks.find(candidate => candidate.taskId === plan.taskId);
+  const task = EffectOption.getOrUndefined(
+    EffectArray.findFirst(corpus.tasks, candidate => candidate.taskId === plan.taskId),
+  );
   if (task === undefined) throw new Error(`Continuation pilot task ${plan.taskId} is not in the corpus.`);
   if (
     task.prompt !== plan.sourceTask.prompt ||
@@ -3722,7 +3925,9 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
   }
   const repositoryStudy = continuationCheckpointStudyV2(study, plan.sourceTask, plan.checkpoint);
   for (const arm of ['threadnote-graph', 'threadnote-compact'] as const) {
-    const definition = manifest.arms.find(candidate => candidate.arm === arm);
+    const definition = EffectOption.getOrUndefined(
+      EffectArray.findFirst(manifest.arms, candidate => candidate.arm === arm),
+    );
     if (
       definition === undefined ||
       definition.tool.artifactHash !== plan.candidate.toolArtifactHash ||
@@ -3742,8 +3947,8 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
   const plannedAttempts =
     supplement === null
       ? plan.attempts
-      : plan.attempts.filter(attempt => attempt.variant === 'threadnote-preloaded-resume');
-  const selected = plannedAttempts.map(attempt => {
+      : EffectArray.filter(plan.attempts, attempt => attempt.variant === 'threadnote-preloaded-resume');
+  const selected = EffectArray.map(plannedAttempts, attempt => {
     const {arm, treatment} = continuationTreatment(attempt.variant, plan.checkpoint);
     return {
       arm,
@@ -3793,7 +3998,7 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
       repositoryRevision: plan.sourceTask.repositoryRevision,
       taskId: plan.sourceTask.taskId,
     },
-    rows: selected.map(({arm, row, variant}) => ({...row, arm, variant})),
+    rows: EffectArray.map(selected, ({arm, row, variant}) => ({...row, arm, variant})),
     ...(supplement === null ? {} : {supplementaryTo: supplement}),
     taskId: plan.taskId,
     version: 2,
@@ -3812,7 +4017,7 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
         mode: 0o600,
       });
     } catch (cause) {
-      if ((cause as {code?: string}).code === 'EEXIST') {
+      if (hasErrorCode(cause, 'EEXIST')) {
         throw new Error('Continuation pilot selection already exists; use explicit resume recovery.', {cause});
       }
       throw cause;
@@ -3845,9 +4050,10 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
     patchSha256: plan.checkpoint.phaseOnePatchSha256,
     repositoryDirectory: checkpointRepository.repositoryDirectory,
   });
-  const requiredArms = [...new Set([...selected.map(attempt => attempt.arm), 'files' as const])];
+  const requiredArms = [...new Set([...EffectArray.map(selected, attempt => attempt.arm), 'files' as const])];
   const adapterConfigOverrides = await prepareMatchedEvaluationContinuationAdapterRuntimeOverridesV1({
-    arms: requiredArms.filter(
+    arms: EffectArray.filter(
+      requiredArms,
       (arm): arm is 'files' | 'threadnote-compact' | 'threadnote-graph' =>
         arm === 'files' || arm === 'threadnote-compact' || arm === 'threadnote-graph',
     ),
@@ -3859,8 +4065,10 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
     runtime,
   });
   const preflight = await Promise.all(
-    requiredArms.map(async arm => {
-      const definition = manifest.arms.find(candidate => candidate.arm === arm);
+    EffectArray.map(requiredArms, async arm => {
+      const definition = EffectOption.getOrUndefined(
+        EffectArray.findFirst(manifest.arms, candidate => candidate.arm === arm),
+      );
       if (definition === undefined) throw new Error(`Continuation pilot arm ${arm} is not defined.`);
       const resolution = await resolveRuntimeArm(
         pilotRuntime,
@@ -3880,7 +4088,8 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
   );
   for (const check of plan.phaseTwoVerification.checks) {
     if (
-      !verificationAdapterConfig.approvedCommands.some(
+      !EffectArray.some(
+        verificationAdapterConfig.approvedCommands,
         command => command.taskId === plan.taskId && sameJson(command.tokens, check.commandTokens),
       )
     ) {
@@ -3918,8 +4127,10 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
   await writeReport(false);
   for (const selectedAttempt of selected) {
     const {arm, row, treatment, variant} = selectedAttempt;
-    if (attempts.some(attempt => attempt.runNonce === row.runNonce)) continue;
-    const definition = manifest.arms.find(candidate => candidate.arm === arm);
+    if (EffectArray.some(attempts, attempt => attempt.runNonce === row.runNonce)) continue;
+    const definition = EffectOption.getOrUndefined(
+      EffectArray.findFirst(manifest.arms, candidate => candidate.arm === arm),
+    );
     if (definition === undefined) throw new Error(`Continuation pilot arm ${arm} is not defined.`);
     const rawArtifactPath = resolve(pilotDirectory, 'runs', row.runNonce, 'artifact.json');
     const requestPath = resolve(pilotDirectory, 'runs', row.runNonce, 'request.json');
@@ -4010,7 +4221,11 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
         variant,
       });
     } catch (cause) {
-      if (!(cause instanceof Error) || !cause.message.includes('adapter failed with exit code')) throw cause;
+      if (
+        !(cause instanceof Error) ||
+        !Effect2.pipe(cause.message, EffectString.includes('adapter failed with exit code'))
+      )
+        throw cause;
       const [failureAccounting, requestSha256, responseSha256, artifactSha256] = await Promise.all([
         readContinuationFailureAccounting(checkpointPath),
         optionalBoundedRegularFileHash(requestPath, MAXIMUM_JSON_BYTES, 'continuation pilot failed request'),
@@ -4022,7 +4237,7 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
         arm,
         artifactSha256,
         checkpointPath,
-        diagnostics: cause.message.slice(-2_048),
+        diagnostics: Effect2.pipe(cause.message, EffectString.slice(-2_048)),
         metrics: null,
         providerUsage: failureAccounting?.providerUsage ?? null,
         rawArtifactPath,
@@ -4043,7 +4258,7 @@ export async function runMatchedEvaluationContinuationPilotFromFilesV1(options: 
     }
   }
   await assertResolvedRuntimeRepositories(repositories);
-  const allCompleted = attempts.every(attempt => attempt.status === 'completed');
+  const allCompleted = EffectArray.every(attempts, attempt => attempt.status === 'completed');
   await writeReport(allCompleted);
   process.stdout.write(
     `${JSON.stringify({artifactDirectory: pilotDirectory, attemptCount: attempts.length, comparativeClaimsEligible: false, completed: allCompleted, finished: true, version: 2})}\n`,
@@ -4058,7 +4273,7 @@ export async function initializeMatchedEvaluationContinuationNonceStatesV1(input
   const directory = resolve(input.pilotDirectory, 'nonce-state');
   await mkdir(directory, {mode: 0o700});
   await Promise.all(
-    input.selected.map(({row}) =>
+    EffectArray.map(input.selected, ({row}) =>
       writeFile(
         continuationNonceStatePath(input.pilotDirectory, row.runNonce, 'unstarted'),
         continuationNonceStateContent(input.plan, row),
@@ -4150,7 +4365,7 @@ export async function recoverMatchedEvaluationContinuationAttemptsV1(input: {
       });
       const transcriptPath = resolve(input.pilotDirectory, 'transcripts', `${selected.row.runNonce}.jsonl`);
       const transcriptEvidence = await Promise.all(
-        [transcriptPath, `${transcriptPath}.agent.jsonl`, `${transcriptPath}.preflight.json`].map(path =>
+        EffectArray.map([transcriptPath, `${transcriptPath}.agent.jsonl`, `${transcriptPath}.preflight.json`], path =>
           lstat(path).then(
             () => true,
             cause => {
@@ -4160,7 +4375,7 @@ export async function recoverMatchedEvaluationContinuationAttemptsV1(input: {
           ),
         ),
       );
-      if (runEntries.length > 0 || transcriptEvidence.some(Boolean)) {
+      if (runEntries.length > 0 || EffectArray.some(transcriptEvidence, Boolean)) {
         throw new Error(
           `Continuation pilot nonce ${selected.row.runNonce} has provider-ambiguous evidence without a terminal journal.`,
         );
@@ -4198,7 +4413,8 @@ export async function recoverMatchedEvaluationContinuationAttemptsV1(input: {
       reportAttempts.length > attempts.length ||
       !sameJson(reportAttempts, attempts.slice(0, reportAttempts.length)) ||
       reportCompleted !==
-        (attempts.length === input.selected.length && attempts.every(attempt => attempt.status === 'completed'))
+        (attempts.length === input.selected.length &&
+          EffectArray.every(attempts, attempt => attempt.status === 'completed'))
     ) {
       throw new Error('Continuation pilot resume report differs from its terminal journals.');
     }
@@ -4300,7 +4516,7 @@ async function validateRecoveredContinuationAttemptV1(input: {
     attempt.runOrder !== input.row.runOrder ||
     attempt.taskId !== input.plan.taskId ||
     attempt.variant !== input.variant ||
-    Object.entries(expectedPaths).some(([key, path]) => attempt[key] !== path)
+    EffectArray.some(EffectRecord.toEntries(expectedPaths), ([key, path]) => attempt[key] !== path)
   ) {
     throw new Error(`Continuation terminal attempt ${input.row.runNonce} differs from its sealed row.`);
   }
@@ -4454,21 +4670,21 @@ export function parseMatchedEvaluationRuntimeV1(value: unknown): MatchedEvaluati
     'runtime',
   );
   if (runtime.version !== MATCHED_EVALUATION_RUNTIME_VERSION) invalid('runtime version must be 4');
-  const arms = array(runtime.arms, 'runtime arms').map((entry, index) => parseRuntimeArm(entry, index));
-  const repositories = array(runtime.repositories, 'runtime repositories').map((entry, index) =>
+  const arms = EffectArray.map(array(runtime.arms, 'runtime arms'), (entry, index) => parseRuntimeArm(entry, index));
+  const repositories = EffectArray.map(array(runtime.repositories, 'runtime repositories'), (entry, index) =>
     parseRuntimeRepository(entry, index),
   );
   if (repositories.length === 0 || repositories.length > 64) invalid('runtime repositories must contain 1-64 entries');
   unique(
-    arms.map(arm => arm.arm),
+    EffectArray.map(arms, arm => arm.arm),
     'runtime arm ids',
   );
   unique(
-    repositories.map(repository => repository.clusterId ?? 'single-repository'),
+    EffectArray.map(repositories, repository => repository.clusterId ?? 'single-repository'),
     'runtime repository cluster ids',
   );
   unique(
-    repositories.map(repository => repository.repositoryDirectory),
+    EffectArray.map(repositories, repository => repository.repositoryDirectory),
     'runtime repository directories',
   );
   return {
@@ -4486,7 +4702,12 @@ export function parseMatchedEvaluationRuntimeV1(value: unknown): MatchedEvaluati
 
 export async function resolveMatchedEvaluationRuntimeRepositoriesV1(
   runtime: MatchedEvaluationRuntimeV1,
-  study: MatchedTokenEfficiencyStudyV1 | null,
+  study: {
+    readonly clusters: readonly Pick<
+      MatchedTokenEfficiencyStudyV1['clusters'][number],
+      'clusterId' | 'repositoryFixtureHash' | 'repositoryIdentityHash' | 'revision'
+    >[];
+  } | null,
   manifestRepository: MatchedEvaluationRepositoryObservationV1,
 ): Promise<ReadonlyMap<string | null, ResolvedRuntimeRepository>> {
   const resolved = new Map<string | null, ResolvedRuntimeRepository>();
@@ -4509,13 +4730,15 @@ export async function resolveMatchedEvaluationRuntimeRepositoriesV1(
   }
   if (
     runtime.repositories.length !== study.clusters.length ||
-    runtime.repositories.some(entry => entry.clusterId === null)
+    EffectArray.some(runtime.repositories, entry => entry.clusterId === null)
   ) {
     throw new Error('Token-efficiency runtime repositories do not exactly cover the held-out clusters.');
   }
   await Promise.all(
-    study.clusters.map(async cluster => {
-      const repository = runtime.repositories.find(candidate => candidate.clusterId === cluster.clusterId);
+    EffectArray.map(study.clusters, async cluster => {
+      const repository = EffectOption.getOrUndefined(
+        EffectArray.findFirst(runtime.repositories, candidate => candidate.clusterId === cluster.clusterId),
+      );
       if (repository === undefined) throw new Error(`Runtime repository is missing cluster ${cluster.clusterId}.`);
       if (repository.repositoryIdentityHash !== cluster.repositoryIdentityHash) {
         throw new Error(`Runtime repository identity differs for cluster ${cluster.clusterId}.`);
@@ -4538,14 +4761,36 @@ export async function resolveMatchedEvaluationRuntimeRepositoriesV1(
   return resolved;
 }
 
-export function continuationCheckpointStudyV2(
-  study: MatchedTokenEfficiencyStudyV1,
-  sourceTask: MatchedEvaluationContinuationPilotPlanCurrent['sourceTask'],
-  checkpoint: MatchedEvaluationContinuationPilotPlanCurrent['checkpoint'],
-): MatchedTokenEfficiencyStudyV1 {
-  const taskContext = study.taskContexts.find(candidate => candidate.taskId === sourceTask.taskId);
+export function continuationCheckpointStudyV2<
+  Study extends {
+    readonly clusters: readonly Pick<
+      MatchedTokenEfficiencyStudyV1['clusters'][number],
+      'clusterId' | 'repositoryFixtureHash' | 'revision'
+    >[];
+    readonly taskContexts: readonly Pick<
+      MatchedTokenEfficiencyStudyV1['taskContexts'][number],
+      'clusterId' | 'graphSnapshotHash' | 'taskId'
+    >[];
+  },
+>(
+  study: Study,
+  sourceTask: Pick<
+    MatchedEvaluationContinuationPilotPlanCurrent['sourceTask'],
+    'repositoryFixtureHash' | 'repositoryRevision' | 'taskId'
+  >,
+  checkpoint: {
+    readonly repositoryFixtureHash: string;
+    readonly repositoryRevision: string;
+    readonly preparedContext: {readonly graphSnapshotHash: string};
+  },
+): Study {
+  const taskContext = EffectOption.getOrUndefined(
+    EffectArray.findFirst(study.taskContexts, candidate => candidate.taskId === sourceTask.taskId),
+  );
   if (taskContext === undefined) throw new Error('Continuation source task lacks a study context.');
-  const cluster = study.clusters.find(candidate => candidate.clusterId === taskContext.clusterId);
+  const cluster = EffectOption.getOrUndefined(
+    EffectArray.findFirst(study.clusters, candidate => candidate.clusterId === taskContext.clusterId),
+  );
   if (
     cluster === undefined ||
     cluster.repositoryFixtureHash !== sourceTask.repositoryFixtureHash ||
@@ -4558,7 +4803,7 @@ export function continuationCheckpointStudyV2(
   }
   return {
     ...study,
-    clusters: study.clusters.map(candidate =>
+    clusters: EffectArray.map(study.clusters, candidate =>
       candidate.clusterId === cluster.clusterId
         ? {
             ...candidate,
@@ -4574,7 +4819,7 @@ async function assertResolvedRuntimeRepositories(
   repositories: ReadonlyMap<string | null, ResolvedRuntimeRepository>,
 ): Promise<void> {
   await Promise.all(
-    [...repositories.values()].map(repository =>
+    EffectArray.map([...repositories.values()], repository =>
       assertMatchedEvaluationRepositoryV1(repository.repositoryDirectory, repository.expected),
     ),
   );
@@ -4622,7 +4867,7 @@ export async function assertMatchedEvaluationContinuationCheckpointV2(input: {
         captureContinuationGit(baseDirectory, ['write-tree']),
         captureContinuationGit(input.repositoryDirectory, ['rev-parse', `${input.checkpoint.revision}^{tree}`]),
       ]);
-      if (agentTree.trim() !== checkpointTree.trim()) {
+      if (Effect2.pipe(agentTree, EffectString.trim) !== Effect2.pipe(checkpointTree, EffectString.trim)) {
         throw new Error('Continuation checkpoint differs from the preserved phase-one agent patch.');
       }
     }
@@ -4639,7 +4884,7 @@ export async function assertMatchedEvaluationContinuationCheckpointV2(input: {
     '--max-count=1',
     input.checkpoint.revision,
   ]);
-  const lineage = parent.trim().split(/\s+/u);
+  const lineage = Effect2.pipe(parent, EffectString.trim, EffectString.split(/\s+/u));
   if (lineage.length !== 2 || lineage[0] !== input.checkpoint.revision || lineage[1] !== input.baseRevision) {
     throw new Error('Continuation checkpoint must be one direct non-merge commit after the frozen source revision.');
   }
@@ -4705,7 +4950,7 @@ export async function applyMatchedEvaluationContinuationPhaseOnePatchV1(input: {
     'apply',
     '--index',
     '--whitespace=nowarn',
-    ...input.allowedPaths.map(path => `--include=${path}`),
+    ...EffectArray.map(input.allowedPaths, path => `--include=${path}`),
     input.agentPatchPath,
   ]);
 }
@@ -4739,7 +4984,7 @@ export async function prepareMatchedEvaluationContinuationPhaseOnePatchV1(input:
         'apply',
         '--cached',
         '--whitespace=nowarn',
-        ...input.allowedPaths.map(path => `--include=${path}`),
+        ...EffectArray.map(input.allowedPaths, path => `--include=${path}`),
         input.agentPatchPath,
       ],
       64 * 1_024,
@@ -4765,12 +5010,15 @@ export async function prepareMatchedEvaluationContinuationPhaseOnePatchV1(input:
   const allowedPaths = [...input.allowedPaths].sort();
   if (
     expectedChangedPaths.length !== allowedPaths.length ||
-    expectedChangedPaths.some((path, index) => path !== allowedPaths[index])
+    EffectArray.some(expectedChangedPaths, (path, index) => path !== allowedPaths[index])
   ) {
     throw new Error('Continuation phase-one patch changes a path outside the sealed test-only boundary.');
   }
 
-  const headRevision = (await captureContinuationGit(input.repositoryDirectory, ['rev-parse', 'HEAD'])).trim();
+  const headRevision = Effect2.pipe(
+    await captureContinuationGit(input.repositoryDirectory, ['rev-parse', 'HEAD']),
+    EffectString.trim,
+  );
   const needsCommit = headRevision === input.baseRevision;
   if (needsCommit) {
     const unstagedPaths = continuationGitPaths(
@@ -4829,7 +5077,7 @@ function continuationCheckpointPatchDiffArguments(baseRevision: string, cached: 
 }
 
 function continuationGitPaths(output: string): readonly string[] {
-  return output.split('\0').filter(Boolean).sort();
+  return EffectArray.filter(Effect2.pipe(output, EffectString.split('\0')), Boolean).sort();
 }
 
 async function runMatchedEvaluationContinuationFocusedCheckV1(input: {
@@ -4845,8 +5093,15 @@ async function runMatchedEvaluationContinuationFocusedCheckV1(input: {
     /^[A-Z][A-Z0-9_]*=/u.test(input.commandTokens[executableIndex])
   ) {
     const token = input.commandTokens[executableIndex];
-    const separator = token.indexOf('=');
-    environmentAssignments[token.slice(0, separator)] = token.slice(separator + 1);
+    const separator = Effect2.pipe(
+      token,
+      EffectString.indexOf('='),
+      Effect2.Option.getOrElse(() => -1),
+    );
+    environmentAssignments[Effect2.pipe(token, EffectString.slice(0, separator))] = Effect2.pipe(
+      token,
+      EffectString.slice(separator + 1),
+    );
     executableIndex += 1;
   }
   const command = input.commandTokens[executableIndex];
@@ -4981,7 +5236,7 @@ async function ensureMatchedEvaluationDependencyProjectionV1(input: {
   const lockFromRepository = relative(input.repositoryDirectory, lockFile);
   if (
     lockFromRepository === '..' ||
-    lockFromRepository.startsWith(`..${sep}`) ||
+    Effect2.pipe(lockFromRepository, EffectString.startsWith(`..${sep}`)) ||
     isAbsolute(lockFromRepository) ||
     sha256Bytes(await readFile(lockFile)) !== input.projection.lockFileSha256
   ) {
@@ -4993,7 +5248,11 @@ function dependencyProjectionForTaskV1(
   config: ReturnType<typeof parseMatchedEvaluationCodexAdapterConfigV1>,
   taskId: string,
 ): MatchedEvaluationDependencyProjectionV1 | null {
-  return config.dependencyProjections.find(projection => projection.taskId === taskId) ?? null;
+  return (
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(config.dependencyProjections, projection => projection.taskId === taskId),
+    ) ?? null
+  );
 }
 
 export function matchContinuationPhaseTwoCommandsV1(input: {
@@ -5004,20 +5263,26 @@ export function matchContinuationPhaseTwoCommandsV1(input: {
   if (input.commandTexts.length === 0 || input.commandTexts.length > 8) {
     throw new Error('Continuation phase-two verification must contain 1-8 commands.');
   }
-  const matched = input.commandTexts.map((commandText, index) => {
-    const canonicalTokens = tokenizeCodeMemoryLinkCommandV1(commandText.replaceAll('{python}', 'python').trim());
-    const candidates = input.approvedCommands.filter(
-      command =>
-        command.taskId === input.taskId &&
-        command.tokens.length === canonicalTokens.length &&
-        command.tokens.every((token, tokenIndex) => token === canonicalTokens[tokenIndex]),
+  const matched = EffectArray.map(input.commandTexts, (commandText, index) => {
+    const canonicalTokens = tokenizeCodeMemoryLinkCommandV1(
+      Effect2.pipe(commandText, EffectString.replaceAll('{python}', 'python'), EffectString.trim),
+    );
+    const candidates = Effect2.pipe(input.approvedCommands, values =>
+      EffectArray.filter<(typeof input.approvedCommands)[number]>(
+        values,
+        (command, commandIndex) =>
+          commandIndex in values &&
+          command.taskId === input.taskId &&
+          command.tokens.length === canonicalTokens.length &&
+          EffectArray.every(command.tokens, (token, tokenIndex) => token === canonicalTokens[tokenIndex]),
+      ),
     );
     if (candidates.length !== 1) {
       throw new Error(`Continuation phase-two command ${index} is not one unique sealed approved command.`);
     }
     return candidates[0];
   });
-  if (new Set(matched.map(command => JSON.stringify(command.tokens))).size !== matched.length) {
+  if (new Set(EffectArray.map(matched, command => JSON.stringify(command.tokens))).size !== matched.length) {
     throw new Error('Continuation phase-two verification commands must be unique.');
   }
   return matched;
@@ -5124,6 +5389,7 @@ export function matchedContinuationDiagnosticParserForCommandV1(
   commandTokens: readonly string[],
   diagnosticOutput?: {readonly stderr: string; readonly stdout: string},
 ): MatchedContinuationPhaseTwoDiagnosticParser {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional indexing for an empty command token list.
   const executableName = commandTokens[0]?.split('/').at(-1) ?? '';
   if (executableName === 'v19-verifier.py') return 'threadnote-verifier-v1';
   const usesPytest = commandTokens.includes('pytest') || /^pytest(?:$|-)/u.test(executableName);
@@ -5132,7 +5398,8 @@ export function matchedContinuationDiagnosticParserForCommandV1(
     return usesPytest ? 'pytest-summary-v1' : 'vitest-summary-v1';
   }
   if (!usesPytest && diagnosticOutput !== undefined) {
-    const inferred = (['pytest-summary-v1', 'threadnote-verifier-v1', 'vitest-summary-v1'] as const).filter(
+    const inferred = EffectArray.filter(
+      ['pytest-summary-v1', 'threadnote-verifier-v1', 'vitest-summary-v1'] as const,
       parser =>
         parseMatchedContinuationFailureIdsV1(parser, diagnosticOutput.stdout, diagnosticOutput.stderr).length > 0,
     );
@@ -5174,13 +5441,18 @@ export async function verifyMatchedEvaluationContinuationArtifactV1(input: {
     });
     await writeFile(patchPath, patch, {encoding: 'utf8', flag: 'wx', mode: 0o600});
     await captureContinuationGit(repositoryDirectory, ['apply', '--index', '--whitespace=nowarn', patchPath]);
-    const changedPaths = (
-      await captureContinuationGit(repositoryDirectory, ['diff', '--cached', '--name-only', '-z', '--'])
-    )
-      .split('\0')
-      .filter(Boolean);
-    protectedPathViolations = changedPaths.filter(path =>
-      input.plan.protectedPaths.some(protectedPath => path === protectedPath || path.startsWith(`${protectedPath}/`)),
+    const changedPaths = EffectArray.filter(
+      Effect2.pipe(
+        await captureContinuationGit(repositoryDirectory, ['diff', '--cached', '--name-only', '-z', '--']),
+        EffectString.split('\0'),
+      ),
+      Boolean,
+    );
+    protectedPathViolations = EffectArray.filter(changedPaths, path =>
+      EffectArray.some(
+        input.plan.protectedPaths,
+        protectedPath => path === protectedPath || Effect2.pipe(path, EffectString.startsWith(`${protectedPath}/`)),
+      ),
     );
     for (const [index, check] of input.plan.checks.entries()) {
       const startedAt = Date.now();
@@ -5290,7 +5562,8 @@ export function parseMatchedEvaluationContinuationAgentBriefResultV1(value: unkn
   if (result.structuredContent !== undefined) {
     throw new Error('Continuation checkpoint agent Context Brief must not include dual structured content.');
   }
-  const texts = array(result.content, 'continuation checkpoint agent Context Brief content').flatMap(
+  const texts = EffectArray.flatMap(
+    array(result.content, 'continuation checkpoint agent Context Brief content'),
     (candidate, index) => {
       const content = object(candidate, `continuation checkpoint agent Context Brief content ${index}`);
       return content.type === 'text' && typeof content.text === 'string' ? [content.text] : [];
@@ -5308,12 +5581,17 @@ export function assertMatchedEvaluationContinuationAgentBriefV1(input: {
   readonly resumeEvidenceMarker: string;
   readonly text: string;
 }): void {
-  const memoriesIndex = input.automaticHandoffUri.indexOf('/memories/');
-  const compactHandoffUri = memoriesIndex === -1 ? null : input.automaticHandoffUri.slice(memoriesIndex + 1);
+  const memoriesIndex = Effect2.pipe(
+    input.automaticHandoffUri,
+    EffectString.indexOf('/memories/'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  const compactHandoffUri =
+    memoriesIndex === -1 ? null : Effect2.pipe(input.automaticHandoffUri, EffectString.slice(memoriesIndex + 1));
   const referencesHandoff =
-    input.text.includes(input.automaticHandoffUri) ||
-    (compactHandoffUri !== null && input.text.includes(compactHandoffUri));
-  const trimmed = input.text.trimStart();
+    Effect2.pipe(input.text, EffectString.includes(input.automaticHandoffUri)) ||
+    (compactHandoffUri !== null && Effect2.pipe(input.text, EffectString.includes(compactHandoffUri)));
+  const trimmed = Effect2.pipe(input.text, EffectString.trimStart);
   let evidenceState: 'partial' | 'sufficient' | null = /^State: sufficient(?:\s|\|)/mu.test(input.text)
     ? 'sufficient'
     : /^State: partial(?:\s|\|)/mu.test(input.text)
@@ -5321,7 +5599,7 @@ export function assertMatchedEvaluationContinuationAgentBriefV1(input: {
       : null;
   let jsonReferencesHandoff = false;
   let jsonHandoffEvidence: string | null = null;
-  if (trimmed.startsWith('{')) {
+  if (Effect2.pipe(trimmed, EffectString.startsWith('{'))) {
     let parsed: Record<string, unknown>;
     try {
       parsed = object(JSON.parse(input.text) as unknown, 'continuation checkpoint agent brief');
@@ -5330,7 +5608,8 @@ export function assertMatchedEvaluationContinuationAgentBriefV1(input: {
     }
     evidenceState =
       parsed.evidenceState === 'sufficient' || parsed.evidenceState === 'partial' ? parsed.evidenceState : null;
-    const matchingHandoffs = array(parsed.activeHandoffs, 'continuation checkpoint active handoffs').flatMap(
+    const matchingHandoffs = EffectArray.flatMap(
+      array(parsed.activeHandoffs, 'continuation checkpoint active handoffs'),
       candidate => {
         const handoffEvidence = object(candidate, 'continuation checkpoint active handoff');
         return handoffEvidence.uri === input.automaticHandoffUri || handoffEvidence.uri === compactHandoffUri
@@ -5345,11 +5624,12 @@ export function assertMatchedEvaluationContinuationAgentBriefV1(input: {
         : null;
   }
   const evidenceText = jsonHandoffEvidence ?? input.text;
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const markerCount = evidenceText.split(input.resumeEvidenceMarker).length - 1;
   const referencesRequiredGraphQuery =
     input.requiredGraphQuery === undefined ||
     input.requiredGraphQuery === null ||
-    evidenceText.includes(`Graph query: ${input.requiredGraphQuery}`);
+    Effect2.pipe(evidenceText, EffectString.includes(`Graph query: ${input.requiredGraphQuery}`));
   if (
     evidenceState !== 'sufficient' ||
     (!referencesHandoff && !jsonReferencesHandoff) ||
@@ -5369,24 +5649,28 @@ function uniquePrefixedLine(value: string, prefix: string, label: string): strin
 }
 
 function prefixedLines(value: string, prefix: string, label: string): readonly string[] {
-  const matches = value
-    .split(/\r?\n/u)
-    .filter(line => line.startsWith(prefix))
-    .map(line => line.slice(prefix.length));
-  if (matches.length === 0 || matches.some(match => match.length === 0)) {
+  const matches = EffectArray.map(
+    EffectArray.filter(
+      Effect2.pipe(value, EffectString.split(/\r?\n/u)),
+      __effectArrayValue => !!(line => Effect2.pipe(line, EffectString.startsWith(prefix)))(__effectArrayValue),
+    ),
+    line => Effect2.pipe(line, EffectString.slice(prefix.length)),
+  );
+  if (matches.length === 0 || EffectArray.some(matches, match => match.length === 0)) {
     throw new Error(`${label} is missing or ambiguous.`);
   }
   return matches;
 }
 
 function parseLastJsonLine(value: string, label: string): Record<string, unknown> {
-  const lines = value
-    .split(/\r?\n/u)
-    .map(line => line.trim())
-    .filter(Boolean);
-  if (lines.length === 0) throw new Error(`${label} returned no JSON output.`);
+  const lines = EffectArray.filter(
+    EffectArray.map(Effect2.pipe(value, EffectString.split(/\r?\n/u)), line => Effect2.pipe(line, EffectString.trim)),
+    Boolean,
+  );
+  const lastLine = lines.at(-1);
+  if (lastLine === undefined) throw new Error(`${label} returned no JSON output.`);
   try {
-    return object(JSON.parse(lines.at(-1)!) as unknown, label);
+    return object(JSON.parse(lastLine) as unknown, label);
   } catch (cause) {
     throw new Error(`${label} returned invalid terminal JSON.`, {cause});
   }
@@ -5436,29 +5720,30 @@ export function assertMatchedEvaluationContinuationGraphEvidenceResultV1(
   sourceCitations: readonly {readonly path: string}[],
 ): void {
   const response = object(value, 'continuation checkpoint graph query');
-  const nodes = array(response.nodes, 'continuation checkpoint graph query nodes').map((value, index) =>
+  const nodes = EffectArray.map(array(response.nodes, 'continuation checkpoint graph query nodes'), (value, index) =>
     object(value, `continuation checkpoint graph query node ${index}`),
   );
-  const edges = array(response.edges, 'continuation checkpoint graph query edges').map((value, index) =>
+  const edges = EffectArray.map(array(response.edges, 'continuation checkpoint graph query edges'), (value, index) =>
     object(value, `continuation checkpoint graph query edge ${index}`),
   );
-  const sourcePaths = new Set(sourceCitations.map(citation => citation.path));
-  const evidenceNodeIds = new Set(
-    nodes
-      .filter(
-        node =>
-          typeof node.path === 'string' &&
-          sourcePaths.has(node.path) &&
-          typeof node.resolutionDomain === 'string' &&
-          node.resolutionDomain !== 'degraded' &&
-          typeof node.id === 'string',
-      )
-      .map(node => node.id as string),
+  const sourcePaths = new Set(EffectArray.map(sourceCitations, citation => citation.path));
+  const evidenceNodes = EffectArray.filter(
+    nodes,
+    (node): node is Record<string, unknown> & {id: string; path: string; resolutionDomain: string} =>
+      typeof node.path === 'string' &&
+      sourcePaths.has(node.path) &&
+      typeof node.resolutionDomain === 'string' &&
+      node.resolutionDomain !== 'degraded' &&
+      typeof node.id === 'string',
   );
+  const evidenceNodeIds = new Set(EffectArray.map(evidenceNodes, node => node.id));
   if (
     response.operation !== 'query' ||
     evidenceNodeIds.size === 0 ||
-    !edges.some(edge => evidenceNodeIds.has(String(edge.sourceId)) || evidenceNodeIds.has(String(edge.targetId)))
+    !EffectArray.some(
+      edges,
+      edge => evidenceNodeIds.has(String(edge.sourceId)) || evidenceNodeIds.has(String(edge.targetId)),
+    )
   ) {
     throw new Error(
       'Continuation checkpoint required graph query did not return relationship evidence on a cited source path.',
@@ -5471,7 +5756,12 @@ function requiredRuntimeRepository(
   taskId: string,
   study: MatchedTokenEfficiencyStudyV1 | null,
 ): ResolvedRuntimeRepository {
-  const clusterId = study?.taskContexts.find(context => context.taskId === taskId)?.clusterId ?? null;
+  const clusterId =
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(study?.taskContexts), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(EffectArray.findFirst(__effectArrayReceiver, context => context.taskId === taskId)),
+      ),
+    )?.clusterId ?? null;
   const repository = repositories.get(clusterId);
   if (repository === undefined) throw new Error(`No runtime repository is bound to task ${taskId}.`);
   return repository;
@@ -5485,7 +5775,9 @@ async function assertContinuationAutomaticHandoffV1(input: {
     throw new Error('Continuation pilot compact arm lacks Threadnote.');
   }
   const config = parseMatchedEvaluationCodexAdapterConfigV1(await readJson(input.resolvedCompactArm.adapterConfigFile));
-  const prepared = config.contextHomes.find(home => home.taskId === input.plan.taskId);
+  const prepared = EffectOption.getOrUndefined(
+    EffectArray.findFirst(config.contextHomes, home => home.taskId === input.plan.taskId),
+  );
   if (prepared === undefined) throw new Error('Continuation pilot compact arm lacks the task prepared home.');
   if (
     input.plan.version !== 1 &&
@@ -5516,8 +5808,8 @@ async function assertContinuationAutomaticHandoffV1(input: {
   });
   if (
     sha256Bytes(Buffer.from(read.stdout)) !== input.plan.checkpoint.automaticHandoffReadSha256 ||
-    !read.stdout.includes(input.plan.checkpoint.resumeEvidenceMarker) ||
-    !read.stdout.includes(input.plan.checkpoint.handoff)
+    !Effect2.pipe(read.stdout, EffectString.includes(input.plan.checkpoint.resumeEvidenceMarker)) ||
+    !Effect2.pipe(read.stdout, EffectString.includes(input.plan.checkpoint.handoff))
   ) {
     throw new Error('Continuation pilot automatic handoff differs from the sealed checkpoint.');
   }
@@ -5548,7 +5840,7 @@ export async function resolveRuntimeArm(
   adapterArtifactHashOverride: string | null = null,
   adapterConfigOverride: MatchedEvaluationContinuationAdapterConfigOverrideV2 | null = null,
 ): Promise<ResolvedRuntimeArm | {readonly detail: string; readonly reason: MatchedEvaluationUnavailableReason}> {
-  const config = runtime.arms.find(candidate => candidate.arm === arm);
+  const config = EffectOption.getOrUndefined(EffectArray.findFirst(runtime.arms, candidate => candidate.arm === arm));
   if (config === undefined) return {detail: `${arm} has no local runtime mapping`, reason: 'runtime-not-configured'};
   const [adapter, adapterConfigFile] = await Promise.all([
     optionalCanonicalRegularFile(config.adapterExecutable, true),
@@ -5748,7 +6040,7 @@ function assertProjectedObservationContext(
     studyHash: expected.studyHash,
     taskContextHash: memoryAccess === 'disabled' ? null : expectedEvidence.taskContextHash,
   } as const;
-  for (const [key, value] of Object.entries(wanted)) {
+  for (const [key, value] of EffectRecord.toEntries(wanted)) {
     if (actual[key] !== value) throw new Error(`Continuation observation context mismatch: ${key}.`);
   }
 }
@@ -5877,11 +6169,17 @@ export async function stageMatchedEvaluationProductionPayloadV1(input: {
     maxOutputBytes: 4 * 1_024 * 1_024,
     timeoutMilliseconds: 30_000,
   });
-  for (const name of listing.stdout
-    .split(/\r?\n/u)
-    .map(line => line.trim())
-    .filter(Boolean)) {
-    if (name.startsWith('/') || name.split('/').includes('..') || name.includes('\\0')) {
+  for (const name of EffectArray.filter(
+    EffectArray.map(Effect2.pipe(listing.stdout, EffectString.split(/\r?\n/u)), line =>
+      Effect2.pipe(line, EffectString.trim),
+    ),
+    Boolean,
+  )) {
+    if (
+      Effect2.pipe(name, EffectString.startsWith('/')) ||
+      Effect2.pipe(name, EffectString.split('/')).includes('..') ||
+      Effect2.pipe(name, EffectString.includes('\\0'))
+    ) {
       throw new Error('Production release archive contains an unsafe path.');
     }
   }
@@ -5931,7 +6229,7 @@ export async function hashMatchedEvaluationPayloadV1(root: string): Promise<stri
     }
   };
   await visit(root, '');
-  files.sort((left, right) => left.relative.localeCompare(right.relative));
+  files.sort((left, right) => Effect2.pipe(left.relative, EffectString.localeCompare(right.relative)));
   const hash = createHash('sha256');
   for (const file of files)
     hash.update(`${file.relative}\0${file.mode.toString(8)}\0${sha256Bytes(await readFile(file.path))}\n`);
@@ -6022,7 +6320,7 @@ function parseRuntimeArm(value: unknown, index: number): MatchedEvaluationRuntim
   );
   const environmentKeys = stringArray(arm.environmentKeys, 0, 32, 64, `runtime arm ${index} environment keys`);
   unique(environmentKeys, `runtime arm ${index} environment keys`);
-  if (environmentKeys.some(key => !ENVIRONMENT_KEY.test(key) || BLOCKED_ENVIRONMENT_KEYS.has(key))) {
+  if (EffectArray.some(environmentKeys, key => !ENVIRONMENT_KEY.test(key) || BLOCKED_ENVIRONMENT_KEYS.has(key))) {
     invalid(`runtime arm ${index} contains a reserved or invalid environment key`);
   }
   return {
@@ -6109,12 +6407,15 @@ function parseArguments(args: readonly string[]): {
   const continuationPilotResume = continuationPilotResumeValue === 'true';
   const continuationParentPilotDirectory = values.get('--continuation-parent-pilot-directory') ?? null;
   if (
-    [
-      pilotTaskId !== null,
-      continuationPilotPlan !== null,
-      continuationPhaseOneTaskPacket !== null,
-      continuationFinalizeDirectory !== null,
-    ].filter(Boolean).length > 1
+    EffectArray.filter(
+      [
+        pilotTaskId !== null,
+        continuationPilotPlan !== null,
+        continuationPhaseOneTaskPacket !== null,
+        continuationFinalizeDirectory !== null,
+      ],
+      Boolean,
+    ).length > 1
   ) {
     throw ScriptError.make({message: 'Matched evaluation pilot selectors are mutually exclusive'});
   }
@@ -6184,6 +6485,7 @@ function parseArguments(args: readonly string[]): {
 }
 
 async function assertLocalArtifactDirectory(path: string): Promise<void> {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   if (!path.split(sep).includes('.context')) {
     throw new Error('Runtime artifact directory must be inside a local .context directory.');
   }
@@ -6281,7 +6583,7 @@ async function runtimeAdapterArtifactHashV1(
   runtime: MatchedEvaluationRuntimeV1,
   arm: MatchedEvaluationArm,
 ): Promise<string> {
-  const config = runtime.arms.find(candidate => candidate.arm === arm);
+  const config = EffectOption.getOrUndefined(EffectArray.findFirst(runtime.arms, candidate => candidate.arm === arm));
   if (config === undefined) throw new Error(`Continuation supplement has no runtime mapping for ${arm}.`);
   const adapter = await optionalCanonicalRegularFile(config.adapterExecutable, true);
   if (adapter === null) throw new Error(`Continuation supplement ${arm} adapter executable is missing.`);
@@ -6293,12 +6595,13 @@ function sameJson(left: unknown, right: unknown): boolean {
 }
 
 function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJson);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([key, entry]) => [key, sortJson(entry)]),
+  if (EffectArray.isArray(value)) return EffectArray.map(value, sortJson);
+  if (isJsonObject(value)) {
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectRecord.toEntries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+        ([key, entry]) => [key, sortJson(entry)],
+      ),
     );
   }
   return value;
@@ -6318,7 +6621,7 @@ async function readContinuationFailureAccounting(path: string): Promise<{
   if (text === null) return null;
   let input: unknown;
   try {
-    input = JSON.parse(text.trim()) as unknown;
+    input = JSON.parse(Effect2.pipe(text, EffectString.trim)) as unknown;
   } catch (cause) {
     throw new Error('Continuation pilot agent checkpoint is not valid JSON.', {cause});
   }
@@ -6416,15 +6719,21 @@ function sha256Bytes(bytes: Uint8Array): string {
 }
 
 function boundedDiagnostic(result: {readonly stderr: string; readonly stdout: string}): string {
-  const diagnostic = [result.stderr && `stderr: ${result.stderr}`, result.stdout && `stdout: ${result.stdout}`]
-    .filter(Boolean)
-    .join('\n');
-  return diagnostic.slice(-2_048) || '(no output)';
+  const diagnostic = EffectArray.join(
+    EffectArray.filter(
+      [result.stderr && `stderr: ${result.stderr}`, result.stdout && `stdout: ${result.stdout}`],
+      Boolean,
+    ),
+    '\n',
+  );
+  return Effect2.pipe(diagnostic, EffectString.slice(-2_048)) || '(no output)';
 }
 
 function boundedFailureDiagnostic(cause: unknown): string {
   const diagnostic = cause instanceof Error ? cause.message : 'Unknown continuation verification failure.';
-  return diagnostic.slice(-2_048) || 'Continuation verification failed without a diagnostic.';
+  return (
+    Effect2.pipe(diagnostic, EffectString.slice(-2_048)) || 'Continuation verification failed without a diagnostic.'
+  );
 }
 
 function requiredResolvedArm(
@@ -6437,7 +6746,12 @@ function requiredResolvedArm(
 }
 
 function absolutePath(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    !isAbsolute(value) ||
+    resolve(value) !== value ||
+    Effect2.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} must be a normalized absolute path`);
   }
   return value;
@@ -6458,7 +6772,12 @@ function boundedNonnegativeInteger(value: unknown, maximum: number, label: strin
 }
 
 function boundedString(value: unknown, minimum: number, maximum: number, label: string): string {
-  if (typeof value !== 'string' || value.length < minimum || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Effect2.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} is invalid`);
   }
   return value;
@@ -6473,8 +6792,13 @@ function stringArray(
 ): readonly string[] {
   const values = array(value, label);
   if (values.length < minimum || values.length > maximum) invalid(`${label} has invalid bounds`);
-  return values.map((entry, index) => {
-    if (typeof entry !== 'string' || entry.length === 0 || entry.length > maximumLength || entry.includes('\0')) {
+  return EffectArray.map(values, (entry, index) => {
+    if (
+      typeof entry !== 'string' ||
+      entry.length === 0 ||
+      entry.length > maximumLength ||
+      Effect2.pipe(entry, EffectString.includes('\0'))
+    ) {
       invalid(`${label} ${index} is invalid`);
     }
     return entry;
@@ -6482,19 +6806,19 @@ function stringArray(
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -6518,8 +6842,13 @@ function unique(values: readonly string[], label: string): void {
 }
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
   return value;
+}
+
+function hasErrorCode(cause: unknown, code: string): boolean {
+  return typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === code;
 }
 
 function isMissing(cause: unknown): boolean {

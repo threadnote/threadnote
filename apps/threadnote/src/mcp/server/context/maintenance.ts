@@ -1,5 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Path, Result, Schema} from 'effect';
-import {EffectMcpServerAdapter, McpInput} from '../../../effect/ai/mcp.js';
+import {EffectMcpServerRegistry, McpInput} from '../../../effect/ai/mcp.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -37,17 +38,21 @@ import {managerTopicReviewCaseIdentity, projectManagerTopicReview} from '../../.
 import {loadCandidateReview} from '@threadnote/memory/candidate';
 import {registerTopicDependencyExpansionTools} from './topic_expansion.js';
 
-class InvalidTopicEnrollmentJson extends Schema.TaggedError<InvalidTopicEnrollmentJson>()(
-  'InvalidTopicEnrollmentJson',
-  {},
-) {}
+class InvalidTopicEnrollmentJson extends Schema.TaggedError<
+  InvalidTopicEnrollmentJson,
+  {readonly brand: unique symbol}
+>()('InvalidTopicEnrollmentJson', {}) {}
 import {
   applyTopicMaintenanceReview,
   decideTopicMaintenanceReview,
   prepareTopicMaintenanceReview,
 } from '../../../memory/context/maintenance_review.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
+export type ContextMaintenanceToolRegistrar = Pick<EffectMcpServerRegistry, 'registerTool'>;
+
+export function registerContextMaintenanceTools(server: ContextMaintenanceToolRegistrar, config: RuntimeConfig): void {
   registerTopicDependencyExpansionTools(server, config);
   server.registerTool(
     'context_topic_enrollment',
@@ -83,7 +88,7 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
           return argumentError('Topic enrollment callerCwd must be absolute.');
         if (
           input.project !== undefined &&
-          (!input.project.trim() || new TextEncoder().encode(input.project).byteLength > 256)
+          (!Effect2.pipe(input.project, EffectString.trim) || new TextEncoder().encode(input.project).byteLength > 256)
         )
           return argumentError('Select a graph project name or root within 256 bytes.');
         if (
@@ -174,7 +179,7 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
           if (
             (input.backend !== 'local-ai' && input.backend !== 'effect-ai') ||
             typeof input.modelId !== 'string' ||
-            !input.modelId.trim() ||
+            !Effect2.pipe(input.modelId, EffectString.trim) ||
             typeof input.expectedContentHash !== 'string' ||
             !/^[a-f0-9]{64}$/u.test(input.expectedContentHash)
           )
@@ -194,9 +199,22 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
           !/^health-case-[a-f0-9]{40}$/u.test(input.caseId) ||
           (input.backend !== 'local-ai' && input.backend !== 'effect-ai') ||
           typeof input.modelId !== 'string' ||
-          !input.modelId.trim() ||
+          !Effect2.pipe(input.modelId, EffectString.trim) ||
           new TextEncoder().encode(input.modelId).byteLength > 256 ||
-          [...input.modelId].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+          EffectArray.some(
+            [...input.modelId],
+            character =>
+              Effect2.pipe(
+                character,
+                EffectString.charCodeAt(0),
+                Effect2.Option.getOrElse(() => NaN),
+              ) < 32 ||
+              Effect2.pipe(
+                character,
+                EffectString.charCodeAt(0),
+                Effect2.Option.getOrElse(() => NaN),
+              ) === 127,
+          )
         )
           return argumentError('Select an exact ready topic case, backend, and model.');
         const review = yield* requestTopicMaintenanceDraft(config, {
@@ -240,7 +258,7 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
         if (input.action === 'automatic-preview' || input.action === 'manual-preview') {
           if (
             typeof input.uri !== 'string' ||
-            !input.uri.startsWith('threadnote://') ||
+            !Effect2.pipe(input.uri, EffectString.startsWith('threadnote://')) ||
             typeof input.expectedContentHash !== 'string' ||
             !/^[a-f0-9]{64}$/u.test(input.expectedContentHash) ||
             (input.action === 'manual-preview' && typeof input.desiredBody !== 'string')
@@ -418,7 +436,7 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
     },
     input =>
       Effect.gen(function* () {
-        if (typeof input.action === 'string' && input.action.startsWith('background-')) {
+        if (typeof input.action === 'string' && Effect2.pipe(input.action, EffectString.startsWith('background-'))) {
           const status = yield* setAutomaticDraftBackgroundPolicy(config, {
             action: input.action,
             backend: input.backend,

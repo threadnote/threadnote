@@ -5,8 +5,9 @@ import {
   inspectCodeGraphCheckpointCompatibilityV1,
 } from '@threadnote/graph/checkpoint/compatibility';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY, codeGraphLanguagePackProvenance} from '@threadnote/graph/languages/registry';
+import {Array as EffectArray} from 'effect';
 
-const provenance = BUILTIN_LANGUAGE_PACK_REGISTRY.packs.map(codeGraphLanguagePackProvenance);
+const provenance = EffectArray.map(BUILTIN_LANGUAGE_PACK_REGISTRY.packs, codeGraphLanguagePackProvenance);
 
 describe('code graph checkpoint compatibility', () => {
   it('checks only the language packs active in the checkpoint', () => {

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, Effect, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -11,7 +12,6 @@ import {
   acknowledgeNativeWatch,
   updateNativeWatchWork,
   recordNativeWatchLifecycle,
-  type NativeWatchDisposition,
   type NativeWatchState,
 } from '@threadnote/workflow-automations/watch';
 import {collectNativeWatchGitHub} from './watch_provider.js';
@@ -84,7 +84,7 @@ const health = Effect.fn('workflowWatch.health')(function* (
   const alive = yield* nativeWatchCollectorAlive(envelope.collector);
   const consumer = envelope.state.consumer;
   const consumerLive = consumer !== null && consumer.leaseUntil > now;
-  const sourceErrors = envelope.state.sources.flatMap(source =>
+  const sourceErrors = EffectArray.flatMap(envelope.state.sources, source =>
     source.error ? [{source: source.source, ...source.error}] : [],
   );
   return {
@@ -115,11 +115,12 @@ const health = Effect.fn('workflowWatch.health')(function* (
     pending: envelope.state.events.length,
     deliveryId: envelope.state.delivery?.id ?? null,
     work: {
-      open: envelope.state.work.filter(item => item.status === 'open').length,
-      blocked: envelope.state.work.filter(item => item.status === 'blocked').length,
-      terminal: envelope.state.work.filter(item => item.status === 'resolved' || item.status === 'ignored').length,
+      open: EffectArray.filter(envelope.state.work, item => item.status === 'open').length,
+      blocked: EffectArray.filter(envelope.state.work, item => item.status === 'blocked').length,
+      terminal: EffectArray.filter(envelope.state.work, item => item.status === 'resolved' || item.status === 'ignored')
+        .length,
     },
-    sources: envelope.state.sources.map(source => ({
+    sources: EffectArray.map(envelope.state.sources, source => ({
       source: source.source,
       lastCompleteAt: source.lastCompleteAt ?? null,
       items: source.items.length,
@@ -290,7 +291,7 @@ export const runNativeWatchCollector = Effect.fn('workflowWatch.collector')(func
               const result = collected.success;
               const state = yield* from(() => reconcileNativeWatch(current.envelope.state, result.sweep));
               const count = result.blockers.length ? collector.consecutiveErrors + 1 : 0;
-              const terminate = result.blockers.some(item => !item.retryable) || count >= 3;
+              const terminate = EffectArray.some(result.blockers, item => !item.retryable) || count >= 3;
               const terminal = state.prState !== 'open';
               const {reason: _reason, ...currentCollector} = collector;
               yield* writeNativeWatch(
@@ -460,7 +461,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
                   envelope.state,
                   consumerId,
                   required(request.deliveryId, 'deliveryId'),
-                  required(request.dispositions, 'dispositions') as NativeWatchDisposition[],
+                  required(request.dispositions, 'dispositions'),
                   at,
                 ),
               ),
@@ -469,12 +470,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
             envelope = {
               ...envelope,
               state: yield* from(() =>
-                updateNativeWatchWork(
-                  envelope.state,
-                  consumerId,
-                  required(request.dispositions, 'dispositions') as NativeWatchDisposition[],
-                  at,
-                ),
+                updateNativeWatchWork(envelope.state, consumerId, required(request.dispositions, 'dispositions'), at),
               ),
             };
           else if (request.command === 'ack')

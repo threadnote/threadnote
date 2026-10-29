@@ -1,5 +1,6 @@
+import {Array as EffectArray} from 'effect';
 import {controlHostedContextCi} from '../hosted/context_ci_control.js';
-import type {Sql, TransactionSql} from 'postgres';
+import type {Sql, ISql} from 'postgres';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {randomUuidV4} from '@threadnote/platform/uuid';
@@ -38,6 +39,8 @@ import {
   type GitBetaImportApplyOutcomeV1,
   type RemoteMemoryPortableRecordV1,
 } from '../portability.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface PortableRecordRow {
   readonly aliases: string[] | null;
@@ -185,7 +188,7 @@ export class PostgresRemoteMemoryOperatorAdapter implements RemoteMemoryOperator
           tenant_id, share_id, plan_id, plan_digest, alias_compatibility_ends_at, outcome
         ) VALUES (
           ${tenantId}, ${input.shareId}, ${input.planId}, ${input.planDigest},
-          ${input.aliasCompatibilityEndsAt}, ${transaction.json(outcomes.map(outcome => ({...outcome})))}
+          ${input.aliasCompatibilityEndsAt}, ${transaction.json(EffectArray.map(outcomes, outcome => ({...outcome})))}
         )
       `;
       return outcomes;
@@ -194,7 +197,7 @@ export class PostgresRemoteMemoryOperatorAdapter implements RemoteMemoryOperator
 
   readonly inspectRecords = async (shareId: string): Promise<readonly RemoteMemoryExistingRecordV1[]> => {
     const rows = await this.portableRows(shareId);
-    return rows.map(row => ({
+    return EffectArray.map(rows, row => ({
       aliases: sortedAliases(row.aliases),
       contentHash: row.content_hash,
       uri: row.canonical_uri,
@@ -204,7 +207,7 @@ export class PostgresRemoteMemoryOperatorAdapter implements RemoteMemoryOperator
 
   readonly exportRecords = async (shareId: string): Promise<readonly RemoteMemoryPortableRecordV1[]> => {
     const rows = await this.portableRows(shareId);
-    return rows.map(row => portableRecordFromRow(row, shareId));
+    return EffectArray.map(rows, row => portableRecordFromRow(row, shareId));
   };
 
   async close(): Promise<void> {
@@ -233,7 +236,7 @@ export class PostgresRemoteMemoryOperatorAdapter implements RemoteMemoryOperator
     });
   }
 
-  private async withTenant<A>(tenantId: string, use: (transaction: TransactionSql) => Promise<A>): Promise<A> {
+  private async withTenant<A>(tenantId: string, use: (transaction: ISql) => Promise<A>): Promise<A> {
     return await this.sql.begin<Promise<A>>(async transaction => {
       await setTenant(transaction, tenantId);
       return use(transaction);
@@ -242,7 +245,7 @@ export class PostgresRemoteMemoryOperatorAdapter implements RemoteMemoryOperator
 }
 
 async function importRecord(
-  transaction: TransactionSql,
+  transaction: ISql,
   tenantId: string,
   shareId: string,
   plan: {readonly aliasCompatibilityEndsAt: string; readonly planId: string},
@@ -352,7 +355,7 @@ async function importRecord(
 }
 
 async function upsertAliases(
-  transaction: TransactionSql,
+  transaction: ISql,
   tenantId: string,
   shareId: string,
   record: RemoteMemoryPortableRecordV1,
@@ -388,7 +391,7 @@ function validateApplyInput(input: {
   ) {
     throw new Error('Git beta import alias compatibility end is invalid.');
   }
-  if (!Array.isArray(input.records)) throw new Error('Git beta import records must be an array.');
+  if (!EffectArray.isArray(input.records)) throw new Error('Git beta import records must be an array.');
   if (input.records.length > MAX_GIT_BETA_IMPORT_RECORDS) {
     throw new Error('Git beta import exceeds the record limit.');
   }
@@ -404,7 +407,7 @@ function validateApplyInput(input: {
       typeof record !== 'object' ||
       typeof record.uri !== 'string' ||
       typeof record.canonicalContent !== 'string' ||
-      !Array.isArray(recordAliases)
+      !EffectArray.isArray(recordAliases)
     ) {
       throw new Error('Git beta import contains an invalid record shape.');
     }
@@ -517,7 +520,9 @@ function validateGitBetaAlias(alias: string): void {
     kind !== 'durable' ||
     scope !== 'projects' ||
     !project ||
-    !file?.endsWith('.md') ||
+    !Effect.pipe(file, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    ) ||
     resource.segments.length !== 8
   ) {
     throw new Error('Git beta import alias is not canonical or has an unsupported layout.');
@@ -539,7 +544,7 @@ function sortedAliases(values: readonly string[] | null): readonly string[] {
   return [...new Set(values ?? [])].sort(compareCodeUnits);
 }
 
-async function setTenant(transaction: TransactionSql, tenantId: string): Promise<void> {
+async function setTenant(transaction: ISql, tenantId: string): Promise<void> {
   await transaction`SELECT set_config('threadnote.tenant_id', ${tenantId}, true)`;
   await transaction`SELECT set_config('statement_timeout', '120000', true)`;
   await transaction`SELECT set_config('lock_timeout', '5000', true)`;

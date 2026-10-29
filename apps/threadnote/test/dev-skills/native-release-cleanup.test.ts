@@ -11,6 +11,8 @@ import {
   type StageArguments,
   type StageDependencies,
 } from './release-artifact.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const permission = (path: string) => Object.assign(new Error(`read-only Windows fixture: ${path}`), {code: 'EACCES'});
 const withFixture = async (program: (base: string) => Promise<void> | void) => {
@@ -166,7 +168,12 @@ function archiveFixture(path: string, payload: Buffer) {
   const header = Buffer.alloc(512);
   header.write('payload', 0);
   const octal = (offset: number, length: number, value: number) =>
-    header.write(value.toString(8).padStart(length - 1, '0') + '\0', offset, length, 'ascii');
+    header.write(
+      Effect.pipe(value.toString(8), EffectString.padStart(length - 1, '0')) + '\0',
+      offset,
+      length,
+      'ascii',
+    );
   octal(100, 8, 0o644);
   octal(108, 8, 0);
   octal(116, 8, 0);
@@ -177,10 +184,7 @@ function archiveFixture(path: string, payload: Buffer) {
   header.write('ustar\0', 257);
   header.write('00', 263);
   header.write(
-    header
-      .reduce((sum, byte) => sum + byte, 0)
-      .toString(8)
-      .padStart(6, '0') + '\0 ',
+    Effect.pipe(header.reduce((sum, byte) => sum + byte, 0).toString(8), EffectString.padStart(6, '0')) + '\0 ',
     148,
     8,
     'ascii',

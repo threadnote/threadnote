@@ -1,6 +1,7 @@
+import {Array as EffectArray, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {applyScrubber, credentialScrubberBlocker} from '@threadnote/platform/scrubber';
-import {Data} from 'effect';
+
 import type {SuperhumanDocumentSnapshot, SuperhumanLine, SuperhumanPage} from './client.js';
 
 export const SUPERHUMAN_RENDERER_VERSION = 'canvas-page-text-v2';
@@ -16,48 +17,63 @@ export interface SuperhumanChunk {
   readonly contentHash: string;
 }
 
-export class SuperhumanSecretBlocked extends Data.TaggedError('SuperhumanSecretBlocked')<{
-  readonly message: string;
-}> {}
+export class SuperhumanSecretBlocked extends Schema.TaggedError<
+  SuperhumanSecretBlocked,
+  {readonly brand: unique symbol}
+>()('SuperhumanSecretBlocked', {message: Schema.String}) {}
 
-export class SuperhumanPageTooLarge extends Data.TaggedError('SuperhumanPageTooLarge')<{
-  readonly message: string;
-}> {}
+export class SuperhumanPageTooLarge extends Schema.TaggedError<
+  SuperhumanPageTooLarge,
+  {readonly brand: unique symbol}
+>()('SuperhumanPageTooLarge', {message: Schema.String}) {}
 
 export function normalizeSuperhumanDisplayText(value: string): string {
-  return [...value.replace(/\r\n?/g, '\n')]
-    .filter(character => {
-      const code = character.charCodeAt(0);
+  return EffectArray.join(
+    EffectArray.filter([...Effect.pipe(value, EffectString.replace(/\r\n?/g, '\n'))], character => {
+      const code = Effect.pipe(
+        character,
+        EffectString.charCodeAt(0),
+        Effect.Option.getOrElse(() => NaN),
+      );
       return (code >= 32 || code === 10 || code === 9) && (code < 127 || code > 159);
-    })
-    .join('');
+    }),
+    '',
+  );
 }
 
 export function normalizeSuperhumanTitle(value: string): string {
-  return [...normalizeSuperhumanDisplayText(value)]
-    .map(character => (character === '\n' || character === '\t' ? ' ' : character))
-    .join('');
+  return EffectArray.join(
+    EffectArray.map([...normalizeSuperhumanDisplayText(value)], character =>
+      character === '\n' || character === '\t' ? ' ' : character,
+    ),
+    '',
+  );
 }
 
 export function renderSuperhumanDocument(snapshot: SuperhumanDocumentSnapshot): readonly SuperhumanChunk[] {
-  const selectedText = snapshot.pages.flatMap(({lines}) => lines.map(line => line.content ?? '')).join('');
+  const selectedText = EffectArray.join(
+    EffectArray.flatMap(snapshot.pages, ({lines}) => EffectArray.map(lines, line => line.content ?? '')),
+    '',
+  );
   if (
-    snapshot.pages.some(
+    EffectArray.some(
+      snapshot.pages,
       ({page, lines}) =>
-        credentialScrubberBlocker(page.name) || lines.some(line => credentialScrubberBlocker(line.style ?? '')),
+        Boolean(credentialScrubberBlocker(page.name)) ||
+        EffectArray.some(lines, line => Boolean(credentialScrubberBlocker(line.style ?? ''))),
     ) ||
     credentialScrubberBlocker(selectedText) ||
     credentialScrubberBlocker(normalizeSuperhumanDisplayText(selectedText))
   )
-    throw new SuperhumanSecretBlocked({message: 'Selected Superhuman document contains credential-like content.'});
-  return snapshot.pages.map(({page, lines}) => {
+    throw SuperhumanSecretBlocked.make({message: 'Selected Superhuman document contains credential-like content.'});
+  return EffectArray.map(snapshot.pages, ({page, lines}) => {
     const title = splitUtf8(normalizeSuperhumanTitle(scrub(page.name)), 512)[0] ?? '';
-    const paragraphs = lines.flatMap(line =>
+    const paragraphs = EffectArray.flatMap(lines, line =>
       line.content === undefined || line.content === '' ? [] : [formatLine(line, scrub(line.content))],
     );
-    const body = [`# ${title}`, ...paragraphs].join('\n\n');
+    const body = EffectArray.join([`# ${title}`, ...paragraphs], '\n\n');
     if (Buffer.byteLength(body) > SUPERHUMAN_PAGE_LIMIT_BYTES)
-      throw new SuperhumanPageTooLarge({message: 'Selected Superhuman page exceeds the resource size limit.'});
+      throw SuperhumanPageTooLarge.make({message: 'Selected Superhuman page exceeds the resource size limit.'});
     return {
       pageId: page.id,
       chunkId: 'page',
@@ -72,13 +88,14 @@ export function renderSuperhumanDocument(snapshot: SuperhumanDocumentSnapshot): 
 function scrub(value: string): string {
   const result = applyScrubber(value, {redact: true});
   if (result.blocker)
-    throw new SuperhumanSecretBlocked({message: 'Selected Superhuman document contains credential-like content.'});
+    throw SuperhumanSecretBlocked.make({message: 'Selected Superhuman document contains credential-like content.'});
   return normalizeSuperhumanDisplayText(result.cleaned);
 }
 
 function formatLine(line: SuperhumanLine, content: string): string {
-  const style = scrub(line.style ?? 'plain').toLowerCase();
+  const style = Effect.pipe(scrub(line.style ?? 'plain'), EffectString.toLowerCase);
   const heading = /^h([1-6])$/.exec(style);
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   if (heading) return `${'#'.repeat(Number(heading[1]))} ${content}`;
   return content;
 }
@@ -89,3 +106,5 @@ export function superhumanPageFingerprint(page: SuperhumanPage): string {
 
 export {splitUtf8} from '@threadnote/integration-core/render';
 import {splitUtf8} from '@threadnote/integration-core/render';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';

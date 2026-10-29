@@ -1,7 +1,10 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {trimTrailingCharacters} from '@threadnote/platform/string-boundaries';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NOTIFICATION_TIMEOUT_MILLISECONDS = 5_000;
 const NOTIFICATION_OUTPUT_LIMIT_BYTES = 4 * 1_024;
@@ -87,16 +90,24 @@ export const sendSystemNotification = Effect.fn('systemNotification.send')(funct
 });
 
 function boundedNotificationText(value: string, maximumLength: number): string {
-  return value.replaceAll('\0', '').trim().slice(0, maximumLength);
+  return Effect2.pipe(
+    value,
+    EffectString.replaceAll('\0', ''),
+    EffectString.trim,
+    EffectString.slice(0, maximumLength),
+  );
 }
 
-const windowsToastScript = [
-  '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
-  '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null',
-  '$title=[Security.SecurityElement]::Escape($env:THREADNOTE_NOTIFICATION_TITLE)',
-  '$body=[Security.SecurityElement]::Escape($env:THREADNOTE_NOTIFICATION_BODY)',
-  '$xml=New-Object Windows.Data.Xml.Dom.XmlDocument',
-  '$xml.LoadXml("<toast><visual><binding template=`"ToastGeneric`"><text>$title</text><text>$body</text></binding></visual></toast>")',
-  '$toast=New-Object Windows.UI.Notifications.ToastNotification $xml',
-  '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Threadnote").Show($toast)',
-].join('; ');
+const windowsToastScript = EffectArray.join(
+  [
+    '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
+    '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null',
+    '$title=[Security.SecurityElement]::Escape($env:THREADNOTE_NOTIFICATION_TITLE)',
+    '$body=[Security.SecurityElement]::Escape($env:THREADNOTE_NOTIFICATION_BODY)',
+    '$xml=New-Object Windows.Data.Xml.Dom.XmlDocument',
+    '$xml.LoadXml("<toast><visual><binding template=`"ToastGeneric`"><text>$title</text><text>$body</text></binding></visual></toast>")',
+    '$toast=New-Object Windows.UI.Notifications.ToastNotification $xml',
+    '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Threadnote").Show($toast)',
+  ],
+  '; ',
+);

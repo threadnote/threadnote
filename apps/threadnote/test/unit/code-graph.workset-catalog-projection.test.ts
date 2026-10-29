@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import fc from 'fast-check';
@@ -31,6 +32,8 @@ import {CI_STANDARD_TEST_TIMEOUT_MILLISECONDS} from '../../../../tools/ci/vitest
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 // This suite is serialized in CI but deliberately keeps the ordinary regression ceiling.
 // prettier-ignore
@@ -38,7 +41,7 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
   const homes: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   it('projects compact lexical and lookup surfaces without selecting source bodies', async () => {
@@ -47,11 +50,11 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
     const snapshotId = snapshotIdentity('compact');
     const symbols = [
       symbol('gamma', {
-        aliases: Array.from({length: 70}, (_, index) => `alias.gamma.${index.toString().padStart(2, '0')}`),
-        documentation: `SOURCE_BODY_MUST_NOT_ESCAPE_${'private '.repeat(4_000)}`,
+        aliases: Array.from({length: 70}, (_, index) => `alias.gamma.${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`),
+        documentation: `SOURCE_BODY_MUST_NOT_ESCAPE_${Effect2.pipe('private ', EffectString.repeat(4_000))}`,
         lookupKeys: ['gamma', 'service.gamma'],
         terms: Array.from({length: 70}, (_, index) => ({
-          term: `term-${index.toString().padStart(2, '0')}`,
+          term: `term-${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`,
           weight: index < 4 ? 5 : 1,
         })),
       }),
@@ -90,14 +93,14 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
       snapshotId,
       worktreeId: identity.worktreeId,
     });
-    expect(result.projection.symbols.map(entry => entry.name).sort(compareText)).toEqual(['alpha', 'beta', 'gamma']);
-    const gamma = result.projection.symbols.find(entry => entry.name === 'gamma');
+    expect(EffectArray.map(result.projection.symbols, entry => entry.name).sort(compareText)).toEqual(['alpha', 'beta', 'gamma']);
+    const gamma = EffectOption.getOrUndefined(EffectArray.findFirst(result.projection.symbols, entry => entry.name === 'gamma'));
     expect(gamma?.lookupKeys).toHaveLength(64);
     expect(gamma?.lookupKeys).toContain('gamma');
     expect(gamma?.lookupKeys).toContain('service.gamma');
     expect(gamma?.terms).toHaveLength(64);
     expect(gamma?.terms).toEqual(expect.arrayContaining([{term: 'term-00', weight: 5}]));
-    expect(gamma?.terms.some(term => term.term === 'ignored-legacy')).toBe(false);
+    expect( EffectOption.getOrUndefined(EffectOption.map(EffectOption.fromNullishOr(gamma?.terms), __effectArrayReceiver => EffectArray.some(__effectArrayReceiver, term => term.term === 'ignored-legacy'))) ).toBe(false);
     expect(result.stats).toMatchObject({
       componentCount: 2,
       dependencyCount: 1,
@@ -195,12 +198,12 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
     );
 
     expect(incremental.projection.symbols).toEqual(clean.projection.symbols);
-    expect(incremental.projection.symbols.map(entry => entry.name).sort(compareText)).toEqual([
+    expect(EffectArray.map(incremental.projection.symbols, entry => entry.name).sort(compareText)).toEqual([
       'betaUpdated',
       'delta',
       'gamma',
     ]);
-    const beta = incremental.projection.symbols.find(entry => entry.name === 'betaUpdated');
+    const beta = EffectOption.getOrUndefined(EffectArray.findFirst(incremental.projection.symbols, entry => entry.name === 'betaUpdated'));
     expect(beta?.lookupKeys).toContain('new.beta');
     expect(beta?.lookupKeys).not.toContain('old.beta');
     expect(beta?.terms).toEqual([{term: 'beta-updated', weight: 5}]);
@@ -282,7 +285,7 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
     const identity = repositoryIdentity('page-property');
     const snapshotId = snapshotIdentity('page-property');
     const symbols = Array.from({length: 19}, (_, index) =>
-      symbol(`node${index.toString().padStart(2, '0')}`, {
+      symbol(`node${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`, {
         aliases: [`alias.${index}`],
         terms: [
           {term: `node-${index}`, weight: 5},
@@ -340,11 +343,11 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
   it('splits a source page when its derived routing storage charge exceeds the catalog page bound', () => {
     const symbols = Array.from({length: 40}, (_, symbolIndex) =>
       routingSymbol(
-        `wide${symbolIndex.toString().padStart(2, '0')}`,
+        `wide${Effect2.pipe(symbolIndex.toString(), EffectString.padStart(2, '0'))}`,
         Array.from(
           {length: 64},
           (_, lookupIndex) =>
-            `wide.${symbolIndex.toString().padStart(2, '0')}.${lookupIndex.toString().padStart(2, '0')}.${'x'.repeat(1_800)}`,
+            `wide.${Effect2.pipe(symbolIndex.toString(), EffectString.padStart(2, '0'))}.${Effect2.pipe(lookupIndex.toString(), EffectString.padStart(2, '0'))}.${Effect2.pipe('x', EffectString.repeat(1_800))}`,
         ),
       ),
     );
@@ -377,17 +380,17 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
         fc.integer({min: 0, max: 16_384}),
         fc.integer({min: 1, max: 16}),
         (entries, extraPageBytes, pageSymbolsMaximum) => {
-          const symbols = entries.map((entry, symbolIndex) =>
+          const symbols = EffectArray.map(entries, (entry, symbolIndex) =>
             routingSymbol(
-              `property${symbolIndex.toString().padStart(2, '0')}`,
+              `property${Effect2.pipe(symbolIndex.toString(), EffectString.padStart(2, '0'))}`,
               Array.from(
                 {length: entry.lookupKeyCount},
+                // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
                 (_, lookupIndex) => `property.${symbolIndex}.${lookupIndex}.${'x'.repeat(entry.lookupKeyPayloadBytes)}`,
               ),
-            ),
-          );
+            ));
           const largestSymbolBytes = Math.max(
-            ...symbols.map(symbol => codeGraphWorksetRoutingProjectionLogicalBytes([symbol])),
+            ...EffectArray.map(symbols, symbol => codeGraphWorksetRoutingProjectionLogicalBytes([symbol])),
           );
           const pageBytesMaximum = Math.min(
             CODE_GRAPH_WORKSET_CATALOG_LIMITS.projectionPageBytesMaximum,
@@ -426,7 +429,7 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
         const identity = repositoryIdentity('reverse-terms');
         const snapshotId = snapshotIdentity('reverse-terms');
         const symbols = Array.from({length: 257}, (_, index) =>
-          symbol(`reverse${index.toString().padStart(3, '0')}`, {
+          symbol(`reverse${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`, {
             terms: [
               {term: `shared-${index % 11}`, weight: 2},
               {term: `unique-${index}`, weight: 5},
@@ -595,7 +598,7 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
 
         expect(plans.lookup.length).toBeGreaterThan(0);
         expect(plans.terms.length).toBeGreaterThan(0);
-        expect(details.some(detail => detail.toUpperCase().includes('USE TEMP B-TREE'))).toBe(false);
+        expect(EffectArray.some(details, detail => Effect2.pipe(detail, EffectString.toUpperCase, EffectString.includes('USE TEMP B-TREE')))).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
@@ -610,9 +613,9 @@ describe('code graph ready-snapshot workset routing projections', {timeout: CI_S
         const snapshotId = snapshotIdentity('temp-full');
         const graphPath = databasePath(home, identity.checkoutId);
         const symbols = Array.from({length: 32}, (_, index) =>
-          symbol(`full${index.toString().padStart(2, '0')}`, {
-            aliases: [`full.alias.${index}.${'x'.repeat(256)}`],
-            terms: [{term: `full-term-${index}-${'y'.repeat(128)}`, weight: 5}],
+          symbol(`full${Effect2.pipe(index.toString(), EffectString.padStart(2, '0'))}`, {
+            aliases: [`full.alias.${index}.${Effect2.pipe('x', EffectString.repeat(256))}`],
+            terms: [{term: `full-term-${index}-${Effect2.pipe('y', EffectString.repeat(128))}`, weight: 5}],
           }),
         );
         yield* store.initialize(graphPath);
@@ -747,7 +750,7 @@ function seedSnapshot(database: Database, repositoryId: string, snapshot: Fixtur
       repositoryId,
       snapshot.worktreeId,
       commitIdentity(snapshot.id),
-      `cgc_${hash(`content:${snapshot.id}`).slice(0, 40)}`,
+      `cgc_${Effect2.pipe(hash(`content:${snapshot.id}`), EffectString.slice(0, 40))}`,
       snapshot.baseSnapshotId ?? null,
       'native-code-graph-12',
       snapshot.dirty === true ? 1 : 0,
@@ -833,9 +836,9 @@ function seedCompactTerms(database: Database, snapshot: FixtureSnapshot): void {
   const selectTerm = database.query<{readonly term_key: number}, [number, string]>(
     'SELECT term_key FROM lexical_compact_terms WHERE snapshot_key = ? AND term = ?',
   );
-  for (const term of [...new Set(snapshot.symbols.flatMap(entry => entry.terms.map(value => value.term)))].sort(
-    compareText,
-  )) {
+  for (const term of [
+    ...new Set(EffectArray.flatMap(snapshot.symbols, entry => EffectArray.map(entry.terms, value => value.term))),
+  ].sort(compareText)) {
     insertTerm.run(snapshotKey, term);
     termKeys.set(term, selectTerm.get(snapshotKey, term)!.term_key);
   }
@@ -932,7 +935,7 @@ function symbol(
     packageName: '@fixture/api',
     path: options.path ?? `src/${key}.ts`,
     qualifiedName: `fixture.${name}`,
-    terms: options.terms ?? [{term: name.toLowerCase(), weight: 5}],
+    terms: options.terms ?? [{term: Effect2.pipe(name, EffectString.toLowerCase), weight: 5}],
   };
 }
 
@@ -948,7 +951,7 @@ function routingSymbol(key: string, lookupKeys: readonly string[]): CodeGraphWor
     path: `src/${key}.ts`,
     qualifiedName: `fixture.${key}`,
     span: {column: 1, endColumn: 2, endLine: 1, line: 1},
-    terms: [{term: key.toLowerCase(), weight: 5}],
+    terms: [{term: Effect2.pipe(key, EffectString.toLowerCase), weight: 5}],
   };
 }
 
@@ -1004,15 +1007,15 @@ function replaceCompactTermWeight(home: string, checkoutId: string, snapshotId: 
 }
 
 function snapshotIdentity(value: string): string {
-  return `cgsn_${hash(`snapshot:${value}`).slice(0, 40)}`;
+  return `cgsn_${Effect2.pipe(hash(`snapshot:${value}`), EffectString.slice(0, 40))}`;
 }
 
 function nodeIdentity(value: string): string {
-  return `cgs_${hash(`node:${value}`).slice(0, 32)}`;
+  return `cgs_${Effect2.pipe(hash(`node:${value}`), EffectString.slice(0, 32))}`;
 }
 
 function commitIdentity(value: string): string {
-  return hash(`commit:${value}`).slice(0, 40);
+  return Effect2.pipe(hash(`commit:${value}`), EffectString.slice(0, 40));
 }
 
 function hash(value: string): string {

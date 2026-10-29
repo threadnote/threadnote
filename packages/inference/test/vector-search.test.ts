@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {normalizeVector, searchExactVectors} from '@threadnote/inference/vector-search';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('exact vector search', () => {
   it('normalizes query vectors and applies deterministic score/id ordering', () => {
@@ -44,12 +47,11 @@ describe('exact vector search', () => {
 
   it('keeps deterministic top-K results while validating every record at limit zero', () => {
     const records = Array.from({length: 2_000}, (_, index) => ({
-      id: `record-${String(index).padStart(4, '0')}`,
+      id: `record-${Effect.pipe(String(index), EffectString.padStart(4, '0'))}`,
       vector: normalizeVector([index + 1, 2_000 - index]),
     }));
-    const expected = records
-      .map(record => ({id: record.id, score: record.vector[0]}))
-      .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
+    const expected = EffectArray.map(records, record => ({id: record.id, score: record.vector[0]}))
+      .sort((left, right) => right.score - left.score || Effect.pipe(left.id, EffectString.localeCompare(right.id)))
       .slice(0, 7);
 
     expect(searchExactVectors([1, 0], records, {dimensions: 2, limit: 7})).toEqual(expected);

@@ -1,6 +1,7 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Crypto, Deferred, Effect, Fiber, FileSystem, Logger, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -20,8 +21,16 @@ import {
 } from '@threadnote/graph/store';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {CodeGraphStoreError, isCodeGraphStoreError} from '@threadnote/graph/types';
+import {parseCodeGraphFileFacts} from '@threadnote/graph/fact/validation';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const LOAD_ROWS = 73_000;
 const FILE_FACT_OPERATION = 'cache code graph file facts' as const;
@@ -62,8 +71,8 @@ describe('code graph cache capacity load calibration', () => {
             const ledgerRoot = path.join(root, 'reservations');
             const ledgerLockPath = path.join(root, 'reservation.lock');
             const files = Array.from({length: LOAD_ROWS}, (_, index) => loadFile(index));
-            const facts = files.map(file => emptyFacts(file.path));
-            facts[0] = {...facts[0], diagnostics: ['界'.repeat(2_500_000)]};
+            const facts = EffectArray.map(files, file => emptyFacts(file.path));
+            facts[0] = {...facts[0], diagnostics: [Effect2.pipe('界', EffectString.repeat(2_500_000))]};
             const store = yield* CodeGraphStore;
             yield* store.initialize(databasePath);
             const sqliteProfile = yield* Effect.sync(() => readSqliteProfile(databasePath));
@@ -73,12 +82,12 @@ describe('code graph cache capacity load calibration', () => {
               walAutoCheckpointPages: 1_000,
             });
 
-            const evidence = new Map([
+            const evidence = new Map<CodeGraphDirectPersistentCapacityBoundary['operation'], LoadEvidence>([
               [FILE_FACT_OPERATION, emptyLoadEvidence()],
               [SHARD_OPERATION, emptyLoadEvidence()],
             ]);
             const protector: CodeGraphDirectPersistentCapacityProtector = (boundary, transaction) => {
-              const operationEvidence = evidence.get(boundary.operation as typeof FILE_FACT_OPERATION);
+              const operationEvidence = evidence.get(boundary.operation);
               if (!operationEvidence) return Effect.die(TestError.make({message: 'Unexpected cache load operation.'}));
               const demand = codeGraphPersistentCapacityDemand({
                 boundary,
@@ -95,16 +104,20 @@ describe('code graph cache capacity load calibration', () => {
                   observe: Effect.succeed({
                     demand,
                     durableAvailableBytes: Number.MAX_SAFE_INTEGER,
-                    durableFilesystemKey: 'a'.repeat(64),
+                    durableFilesystemKey: Effect2.pipe('a', EffectString.repeat(64)),
                     freelistBytes: 0,
                     temporaryAvailableBytes: Number.MAX_SAFE_INTEGER,
-                    temporaryFilesystemKey: 'a'.repeat(64),
+                    temporaryFilesystemKey: Effect2.pipe('a', EffectString.repeat(64)),
                   }),
                 },
                 Effect.gen(function* () {
                   const beforeMainBytes = yield* observedFileSize(fs, databasePath);
                   const beforeWalBytes = yield* observedFileSize(fs, `${databasePath}-wal`);
-                  const activeReceipts = (yield* fs.readDirectory(ledgerRoot)).filter(name => name.endsWith('.json'));
+                  const activeReceipts = EffectArray.filter(
+                    yield* fs.readDirectory(ledgerRoot),
+                    __effectArrayValue =>
+                      !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue),
+                  );
                   expect(activeReceipts).toHaveLength(1);
                   operationEvidence.receipts += activeReceipts.length;
                   const result = yield* transaction;
@@ -166,7 +179,11 @@ describe('code graph cache capacity load calibration', () => {
                     .readDirectory(ledgerRoot)
                     .pipe(
                       Effect.tap(entries =>
-                        Effect.sync(() => expect(entries.filter(name => name.endsWith('.json'))).toEqual([])),
+                        Effect.sync(() =>
+                          expect(
+                            EffectArray.filter(entries, name => Effect2.pipe(name, EffectString.endsWith('.json'))),
+                          ).toEqual([]),
+                        ),
                       ),
                     ),
                 ),
@@ -196,9 +213,13 @@ describe('code graph cache capacity load calibration', () => {
               const measured = evidence.get(operation)!;
               expect(measured.transactions).toBe(143);
               expect(measured.receipts).toBe(143);
-              expect(measured.boundaries.slice(0, -1).every(boundary => boundary.rowCount === 512)).toBe(true);
+              expect(EffectArray.every(measured.boundaries.slice(0, -1), boundary => boundary.rowCount === 512)).toBe(
+                true,
+              );
               expect(measured.boundaries.at(-1)?.rowCount).toBe(296);
-              const maximumBoundaryBytes = Math.max(...measured.boundaries.map(boundary => boundary.finalFactBytes));
+              const maximumBoundaryBytes = Math.max(
+                ...EffectArray.map(measured.boundaries, boundary => boundary.finalFactBytes),
+              );
               // The fixture contains a raw multi-megabyte fact. Compact fact
               // envelopes must make the persisted transaction materially
               // smaller while the physical main/WAL assertions below remain
@@ -206,7 +227,8 @@ describe('code graph cache capacity load calibration', () => {
               expect(maximumBoundaryBytes).toBeGreaterThan(64 * 1_024);
               expect(maximumBoundaryBytes).toBeLessThan(1 * 1_048_576);
               expect(
-                measured.boundaries.every(
+                EffectArray.every(
+                  measured.boundaries,
                   boundary =>
                     boundary.operation === operation &&
                     boundary.rowCount <= 512 &&
@@ -227,14 +249,15 @@ describe('code graph cache capacity load calibration', () => {
                 incrementalMainHighWaterBytes: measured.incrementalMainHighWaterBytes,
                 incrementalSharedHighWaterBytes: measured.incrementalSharedHighWaterBytes,
                 incrementalWalHighWaterBytes: measured.incrementalWalHighWaterBytes,
-                maximumBoundaryBytes: Math.max(...measured.boundaries.map(boundary => boundary.finalFactBytes)),
+                maximumBoundaryBytes: Math.max(
+                  ...EffectArray.map(measured.boundaries, boundary => boundary.finalFactBytes),
+                ),
                 operation,
                 receipts: measured.receipts,
                 rows: LOAD_ROWS,
                 rssHighWaterBytes: measured.rssHighWaterBytes,
-                summedBoundaryBytes: measured.boundaries.reduce(
-                  (total, boundary) => saturatingCapacityAdd(total, boundary.finalFactBytes),
-                  0,
+                summedBoundaryBytes: EffectArray.reduce(measured.boundaries, 0, (total, boundary) =>
+                  saturatingCapacityAdd(total, boundary.finalFactBytes),
                 ),
                 transactions: measured.transactions,
               });
@@ -276,7 +299,7 @@ describe('code graph cache capacity load calibration', () => {
           const system = yield* SystemInfo;
           const store = yield* CodeGraphStore;
           const files = Array.from({length: 513}, (_, index) => loadFile(index));
-          const facts = files.map(file => emptyFacts(file.path));
+          const facts = EffectArray.map(files, file => emptyFacts(file.path));
 
           for (const mode of ['facts', 'shards'] as const) {
             for (const pressureAt of [1, 2] as const) {
@@ -309,10 +332,10 @@ describe('code graph cache capacity load calibration', () => {
                           walAutoCheckpointPages: profile.walAutoCheckpointPages,
                         }),
                         durableAvailableBytes: availableBytes,
-                        durableFilesystemKey: 'b'.repeat(64),
+                        durableFilesystemKey: Effect2.pipe('b', EffectString.repeat(64)),
                         freelistBytes: 0,
                         temporaryAvailableBytes: availableBytes,
-                        temporaryFilesystemKey: 'b'.repeat(64),
+                        temporaryFilesystemKey: Effect2.pipe('b', EffectString.repeat(64)),
                       }),
                     },
                     transaction,
@@ -391,7 +414,9 @@ describe('code graph cache capacity load calibration', () => {
                     ledgerLockPath,
                     ledgerRoot,
                     maintenance: Effect.void,
-                    observe: Effect.succeed(healthyReservationObservation(boundary, profile, 'c'.repeat(64))),
+                    observe: Effect.succeed(
+                      healthyReservationObservation(boundary, profile, Effect2.pipe('c', EffectString.repeat(64))),
+                    ),
                   },
                   transaction,
                 ).pipe(
@@ -443,7 +468,9 @@ describe('code graph cache capacity load calibration', () => {
                     ledgerLockPath,
                     ledgerRoot,
                     maintenance: Effect.void,
-                    observe: Effect.succeed(healthyReservationObservation(boundary, profile, 'd'.repeat(64))),
+                    observe: Effect.succeed(
+                      healthyReservationObservation(boundary, profile, Effect2.pipe('d', EffectString.repeat(64))),
+                    ),
                   },
                   transaction,
                 ).pipe(
@@ -515,10 +542,10 @@ describe('code graph cache capacity load calibration', () => {
 });
 
 function loadFile(index: number): CodeGraphInventoryFile {
-  const suffix = index.toString().padStart(6, '0');
+  const suffix = Effect2.pipe(index.toString(), EffectString.padStart(6, '0'));
   return {
-    blobId: index.toString(16).padStart(40, '0'),
-    contentHash: index.toString(16).padStart(64, '0'),
+    blobId: Effect2.pipe(index.toString(16), EffectString.padStart(40, '0')),
+    contentHash: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
     language: 'typescript',
     mode: '100644',
     path: `src/load/file-${suffix}.ts`,
@@ -572,10 +599,15 @@ function readCacheMutationCount(databasePath: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return Number(
-      (
-        database.query('SELECT mutation_count FROM cache_capacity_mutation_count WHERE id = 1').get() as {
-          readonly mutation_count: number;
-        }
+      requiredRow(
+        database
+          .query<
+            {
+              readonly mutation_count: number;
+            },
+            SQLQueryBindings[]
+          >('SELECT mutation_count FROM cache_capacity_mutation_count WHERE id = 1')
+          .get(),
       ).mutation_count,
     );
   } finally {
@@ -587,7 +619,11 @@ function readCacheRowCount(databasePath: string, mode: CacheMode): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   const table = mode === 'facts' ? 'file_blobs' : 'materialized_file_shards';
   try {
-    return Number((database.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as {readonly count: number}).count);
+    return Number(
+      requiredRow(
+        database.query<{readonly count: number}, SQLQueryBindings[]>(`SELECT COUNT(*) AS count FROM ${table}`).get(),
+      ).count,
+    );
   } finally {
     database.close(false);
   }
@@ -601,16 +637,21 @@ function expectCacheMapping(
   const database = new Database(databasePath, {readonly: true, strict: true});
   const table = mode === 'facts' ? 'file_blobs' : 'materialized_file_shards';
   try {
-    const rows = database.query(`SELECT path_hint, facts_json FROM ${table} ORDER BY path_hint`).all() as readonly {
-      readonly facts_json: string;
-      readonly path_hint: string;
-    }[];
+    const rows = database
+      .query<
+        {
+          readonly facts_json: string;
+          readonly path_hint: string;
+        },
+        SQLQueryBindings[]
+      >(`SELECT path_hint, facts_json FROM ${table} ORDER BY path_hint`)
+      .all();
     expect(
-      rows.map(row => ({
-        factsPath: (JSON.parse(row.facts_json) as CodeGraphFileFacts).path,
+      EffectArray.map(rows, row => ({
+        factsPath: parseCodeGraphFileFacts(JSON.parse(row.facts_json)).path,
         pathHint: row.path_hint,
       })),
-    ).toEqual(expectedFiles.map(file => ({factsPath: file.path, pathHint: file.path})));
+    ).toEqual(EffectArray.map(expectedFiles, file => ({factsPath: file.path, pathHint: file.path})));
   } finally {
     database.close(false);
   }
@@ -638,7 +679,9 @@ function healthyReservationObservation(
 
 function activeReceiptCount(fs: FileSystem.FileSystem, ledgerRoot: string) {
   return fs.readDirectory(ledgerRoot).pipe(
-    Effect.map(entries => entries.filter(name => name.endsWith('.json')).length),
+    Effect.map(
+      entries => EffectArray.filter(entries, name => Effect2.pipe(name, EffectString.endsWith('.json'))).length,
+    ),
     Effect.orElseSucceed(() => 0),
   );
 }
@@ -664,11 +707,17 @@ function emptyLoadEvidence(): LoadEvidence {
 function readSqliteProfile(databasePath: string) {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const page = database.query('PRAGMA page_size').get() as {readonly page_size: number};
-    const journal = database.query('PRAGMA journal_mode').get() as {readonly journal_mode: string};
-    const checkpoint = database.query('PRAGMA wal_autocheckpoint').get() as {readonly wal_autocheckpoint: number};
+    const page = requiredRow(
+      database.query<{readonly page_size: number}, SQLQueryBindings[]>('PRAGMA page_size').get(),
+    );
+    const journal = requiredRow(
+      database.query<{readonly journal_mode: string}, SQLQueryBindings[]>('PRAGMA journal_mode').get(),
+    );
+    const checkpoint = requiredRow(
+      database.query<{readonly wal_autocheckpoint: number}, SQLQueryBindings[]>('PRAGMA wal_autocheckpoint').get(),
+    );
     return {
-      journalMode: journal.journal_mode.toLowerCase(),
+      journalMode: Effect2.pipe(journal.journal_mode, EffectString.toLowerCase),
       pageSize: Number(page.page_size),
       walAutoCheckpointPages: Number(checkpoint.wal_autocheckpoint),
     };

@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Result, Schema} from 'effect';
+import {Array as EffectArray, Effect, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -158,8 +158,8 @@ describe('native closeout receipt store', () => {
           ).pipe(Effect.result),
         {concurrency: 'unbounded'},
       );
-      expect(outcomes.filter(Result.isSuccess)).toHaveLength(1);
-      expect(outcomes.filter(Result.isFailure)).toHaveLength(1);
+      expect(EffectArray.filter(outcomes, Result.isSuccess)).toHaveLength(1);
+      expect(EffectArray.filter(outcomes, Result.isFailure)).toHaveLength(1);
     }).pipe(provideNative, TestClock.withLive),
   );
 });

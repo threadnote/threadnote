@@ -1,6 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {benchmarkMeasurement, type BenchmarkMeasurementV1} from '@threadnote/evidence/benchmark';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_BRIEF_CITATION_EVALUATION_VERSION = 1 as const;
 export const CONTEXT_BRIEF_CITATION_EVALUATION_MAXIMUM_SCENARIOS = 128 as const;
@@ -285,7 +289,7 @@ export function parseContextBriefCitationEvaluationFixtureV1(value: unknown): Co
     throw new Error(`Citation evaluation requires 1-${CONTEXT_BRIEF_CITATION_EVALUATION_MAXIMUM_SCENARIOS} scenarios.`);
   }
   assertUnique(
-    fixture.scenarios.map(scenario => scenario.id),
+    EffectArray.map(fixture.scenarios, scenario => scenario.id),
     'citation evaluation scenario IDs',
   );
 
@@ -300,7 +304,7 @@ export function parseContextBriefCitationEvaluationFixtureV1(value: unknown): Co
       );
     }
     assertUnique(
-      scenario.citations.map(citation => citation.citationId),
+      EffectArray.map(scenario.citations, citation => citation.citationId),
       `citation IDs for ${scenario.id}`,
     );
     if (scenario.legacy !== (scenario.citations.length === 0)) {
@@ -310,13 +314,17 @@ export function parseContextBriefCitationEvaluationFixtureV1(value: unknown): Co
       throw new Error(`Citation evaluation scenario ${scenario.id} cannot capture an ineligible citation.`);
     }
     if (!scenario.legacy) {
-      const expectedFreshness = aggregateCitationFreshness(scenario.citations.map(citation => citation.expectedStatus));
+      const expectedFreshness = aggregateCitationFreshness(
+        EffectArray.map(scenario.citations, citation => citation.expectedStatus),
+      );
       if (scenario.expectedFreshness !== expectedFreshness) {
         throw new Error(
           `Citation evaluation scenario ${scenario.id} expected freshness must aggregate to ${expectedFreshness}.`,
         );
       }
-      const expectedWarning = aggregateCitationWarning(scenario.citations.map(citation => citation.expectedStatus));
+      const expectedWarning = aggregateCitationWarning(
+        EffectArray.map(scenario.citations, citation => citation.expectedStatus),
+      );
       if (scenario.expectedWarning !== expectedWarning) {
         throw new Error(
           `Citation evaluation scenario ${scenario.id} expected warning must aggregate to ${expectedWarning}.`,
@@ -351,8 +359,8 @@ export function parseContextBriefCitationEvaluationFixtureV1(value: unknown): Co
   for (const [key, scenarios] of equivalenceGroups) {
     if (
       scenarios.length !== 2 ||
-      !scenarios.some(scenario => scenario.execution === 'clean') ||
-      !scenarios.some(scenario => scenario.execution === 'incremental')
+      !EffectArray.some(scenarios, scenario => scenario.execution === 'clean') ||
+      !EffectArray.some(scenarios, scenario => scenario.execution === 'incremental')
     ) {
       throw new Error(`Citation evaluation equivalence group ${key} requires one clean and one incremental scenario.`);
     }
@@ -365,11 +373,13 @@ export function parseContextBriefCitationEvaluationFixtureV1(value: unknown): Co
     throw new Error('Citation evaluation fixture must contain every governed performance profile exactly once.');
   }
   assertUnique(
-    fixture.performanceProfiles.map(profile => profile.id),
+    EffectArray.map(fixture.performanceProfiles, profile => profile.id),
     'citation performance profile IDs',
   );
   for (const profileId of CONTEXT_BRIEF_CITATION_PERFORMANCE_PROFILE_IDS) {
-    const profile = fixture.performanceProfiles.find(candidate => candidate.id === profileId);
+    const profile = EffectOption.getOrUndefined(
+      EffectArray.findFirst(fixture.performanceProfiles, candidate => candidate.id === profileId),
+    );
     if (!profile) throw new Error(`Citation evaluation fixture is missing performance profile ${profileId}.`);
     const contract = CONTEXT_BRIEF_CITATION_PERFORMANCE_CONTRACTS[profileId];
     if (!samePerformanceShape(profile.shape, contract.shape)) {
@@ -384,7 +394,7 @@ export function parseContextBriefCitationEvaluationFixtureV1(value: unknown): Co
       );
     }
     assertUnique(
-      profile.samples.map(sample => sample.sampleId),
+      EffectArray.map(profile.samples, sample => sample.sampleId),
       `performance sample IDs for ${profileId}`,
     );
     for (const sample of profile.samples) {
@@ -411,7 +421,7 @@ export function parseContextBriefCitationEvaluationFixtureV1(value: unknown): Co
 export function aggregateCitationFreshness(
   statuses: readonly ContextBriefCitationEvaluationStatus[],
 ): ContextBriefCitationEvaluationFreshness {
-  if (statuses.some(status => status === 'changed' || status === 'deleted')) return 'stale';
+  if (EffectArray.some(statuses, status => status === 'changed' || status === 'deleted')) return 'stale';
   if (statuses.length === 0 || statuses.includes('unknown')) return 'unknown';
   return 'fresh';
 }
@@ -420,7 +430,7 @@ export function aggregateCitationFreshness(
 export function aggregateCitationWarning(
   statuses: readonly ContextBriefCitationEvaluationStatus[],
 ): Exclude<ContextBriefCitationEvaluationWarning, 'legacy-stale'> {
-  if (statuses.some(status => status === 'changed' || status === 'deleted')) return 'stale-evidence';
+  if (EffectArray.some(statuses, status => status === 'changed' || status === 'deleted')) return 'stale-evidence';
   if (statuses.length === 0 || statuses.includes('unknown')) return 'unknown-evidence';
   if (statuses.includes('relocated')) return 'stale-link';
   return 'none';
@@ -437,32 +447,26 @@ export function serializeContextBriefCitationEvaluationFixtureIdentity(
   const fixture = parseContextBriefCitationEvaluationFixtureV1(input);
   const canonical = {
     id: fixture.id,
-    performanceProfiles: fixture.performanceProfiles
-      .map(profile => ({
-        id: profile.id,
-        sampleIds: profile.samples.map(sample => sample.sampleId).sort(),
-        shape: profile.shape,
-      }))
-      .sort((left, right) => left.id.localeCompare(right.id)),
-    scenarios: fixture.scenarios
-      .map(scenario => ({
-        captureEligible: scenario.capture.eligible,
-        citations: scenario.citations
-          .map(citation => ({
-            citationId: citation.citationId,
-            expectedStatus: citation.expectedStatus,
-            support: citation.support,
-          }))
-          .sort((left, right) => left.citationId.localeCompare(right.citationId)),
-        ...(scenario.equivalenceKey === undefined ? {} : {equivalenceKey: scenario.equivalenceKey}),
-        execution: scenario.execution,
-        expectedFreshness: scenario.expectedFreshness,
-        expectedWarning: scenario.expectedWarning,
-        id: scenario.id,
-        legacy: scenario.legacy,
-        snapshotState: scenario.snapshotState,
-      }))
-      .sort((left, right) => left.id.localeCompare(right.id)),
+    performanceProfiles: EffectArray.map(fixture.performanceProfiles, profile => ({
+      id: profile.id,
+      sampleIds: EffectArray.map(profile.samples, sample => sample.sampleId).sort(),
+      shape: profile.shape,
+    })).sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id))),
+    scenarios: EffectArray.map(fixture.scenarios, scenario => ({
+      captureEligible: scenario.capture.eligible,
+      citations: EffectArray.map(scenario.citations, citation => ({
+        citationId: citation.citationId,
+        expectedStatus: citation.expectedStatus,
+        support: citation.support,
+      })).sort((left, right) => Effect.pipe(left.citationId, EffectString.localeCompare(right.citationId))),
+      ...(scenario.equivalenceKey === undefined ? {} : {equivalenceKey: scenario.equivalenceKey}),
+      execution: scenario.execution,
+      expectedFreshness: scenario.expectedFreshness,
+      expectedWarning: scenario.expectedWarning,
+      id: scenario.id,
+      legacy: scenario.legacy,
+      snapshotState: scenario.snapshotState,
+    })).sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id))),
     version: fixture.version,
   };
   return `${JSON.stringify(canonical, undefined, 2)}\n`;
@@ -477,19 +481,25 @@ export function evaluateContextBriefCitationFixture(
   input: ContextBriefCitationEvaluationFixtureV1,
 ): ContextBriefCitationEvaluationResultV1 {
   const fixture = parseContextBriefCitationEvaluationFixtureV1(input);
-  const scenarios = [...fixture.scenarios].sort((left, right) => left.id.localeCompare(right.id));
-  const citations = scenarios.flatMap(scenario => scenario.citations.map(citation => ({citation, scenario})));
-  const confusionMatrix = CONTEXT_BRIEF_CITATION_STATUSES.map(expectedStatus => {
-    const matching = citations.filter(item => item.citation.expectedStatus === expectedStatus);
+  const scenarios = [...fixture.scenarios].sort((left, right) =>
+    Effect.pipe(left.id, EffectString.localeCompare(right.id)),
+  );
+  const citations = EffectArray.flatMap(scenarios, scenario =>
+    EffectArray.map(scenario.citations, citation => ({citation, scenario})),
+  );
+  const confusionMatrix = EffectArray.map(CONTEXT_BRIEF_CITATION_STATUSES, expectedStatus => {
+    const matching = EffectArray.filter(citations, item => item.citation.expectedStatus === expectedStatus);
     return {
       expectedStatus,
       observed: contextBriefCitationStatusCounts(matching),
     };
   });
-  const statusMetrics = CONTEXT_BRIEF_CITATION_STATUSES.map(status => {
-    const row = confusionMatrix.find(candidate => candidate.expectedStatus === status)!;
-    const expected = Object.values(row.observed).reduce((total, count) => total + count, 0);
-    const observed = confusionMatrix.reduce((total, candidate) => total + candidate.observed[status], 0);
+  const statusMetrics = EffectArray.map(CONTEXT_BRIEF_CITATION_STATUSES, status => {
+    const row = EffectOption.getOrUndefined(
+      EffectArray.findFirst(confusionMatrix, candidate => candidate.expectedStatus === status),
+    )!;
+    const expected = EffectArray.reduce(EffectRecord.values(row.observed), 0, (total, count) => total + count);
+    const observed = EffectArray.reduce(confusionMatrix, 0, (total, candidate) => total + candidate.observed[status]);
     const correct = row.observed[status];
     const precision = score(correct, observed);
     const recall = score(correct, expected);
@@ -503,20 +513,28 @@ export function evaluateContextBriefCitationFixture(
     } satisfies ContextBriefCitationStatusMetricV1;
   });
   const statusMetric = (status: ContextBriefCitationEvaluationStatus) =>
-    statusMetrics.find(metric => metric.status === status)!;
-  const supported = citations.filter(item => item.citation.support === 'supported');
-  const unsupported = citations.filter(item => item.citation.support === 'unsupported');
-  const legacy = scenarios.filter(scenario => scenario.legacy);
-  const warningCases = scenarios.filter(scenario => scenario.expectedWarning !== 'none');
-  const captureEligible = scenarios.filter(scenario => scenario.capture.eligible);
-  const falseFreshCitationCount = citations.filter(
+    EffectOption.getOrUndefined(EffectArray.findFirst(statusMetrics, metric => metric.status === status))!;
+  const supported = EffectArray.filter(citations, item => item.citation.support === 'supported');
+  const unsupported = EffectArray.filter(citations, item => item.citation.support === 'unsupported');
+  const legacy = EffectArray.filter(
+    scenarios,
+    (scenario, __effectArrayIndex) => __effectArrayIndex in scenarios && scenario.legacy,
+  );
+  const warningCases = EffectArray.filter(scenarios, scenario => scenario.expectedWarning !== 'none');
+  const captureEligible = EffectArray.filter(
+    scenarios,
+    (scenario, __effectArrayIndex) => __effectArrayIndex in scenarios && scenario.capture.eligible,
+  );
+  const falseFreshCitationCount = EffectArray.filter(
+    citations,
     ({citation}) =>
       (citation.expectedStatus === 'changed' ||
         citation.expectedStatus === 'deleted' ||
         citation.expectedStatus === 'unknown') &&
       (citation.observedStatus === 'exact' || citation.observedStatus === 'relocated'),
   ).length;
-  const falseFreshMemoryCount = scenarios.filter(
+  const falseFreshMemoryCount = EffectArray.filter(
+    scenarios,
     scenario => scenario.expectedFreshness !== 'fresh' && scenario.observedFreshness === 'fresh',
   ).length;
   const equivalenceGroups = new Map<string, ContextBriefCitationEvaluationScenarioV1[]>();
@@ -527,25 +545,33 @@ export function evaluateContextBriefCitationFixture(
       scenario,
     ]);
   }
-  const incrementalCleanMismatchCount = [...equivalenceGroups.values()].filter(group => {
-    const clean = group.find(scenario => scenario.execution === 'clean')!;
-    const incremental = group.find(scenario => scenario.execution === 'incremental')!;
+  const incrementalCleanMismatchCount = EffectArray.filter([...equivalenceGroups.values()], group => {
+    const clean = EffectOption.getOrUndefined(
+      EffectArray.findFirst(group, scenario => scenario.execution === 'clean'),
+    )!;
+    const incremental = EffectOption.getOrUndefined(
+      EffectArray.findFirst(group, scenario => scenario.execution === 'incremental'),
+    )!;
     return observedOutcomeIdentity(clean) !== observedOutcomeIdentity(incremental);
   }).length;
   const quality: ContextBriefCitationEvaluationMetricsV1 = {
     aggregateFreshnessAccuracy: score(
-      scenarios.filter(scenario => scenario.expectedFreshness === scenario.observedFreshness).length,
+      EffectArray.filter(scenarios, scenario => scenario.expectedFreshness === scenario.observedFreshness).length,
       scenarios.length,
     ),
     captureCoverage: score(
-      captureEligible.filter(scenario => scenario.capture.succeeded).length,
+      EffectArray.filter(captureEligible, scenario => scenario.capture.succeeded).length,
       captureEligible.length,
     ),
     changedDeletedRecall: Math.min(statusMetric('changed').recall, statusMetric('deleted').recall),
     citationCount: citations.length,
     confusionMatrix,
-    crossRepositoryLeakageCount: scenarios.filter(scenario => scenario.crossRepositoryLeakage).length,
-    falseDeletedFromIncompleteCoverageCount: citations.filter(
+    crossRepositoryLeakageCount: EffectArray.filter(
+      scenarios,
+      (scenario, __effectArrayIndex) => __effectArrayIndex in scenarios && scenario.crossRepositoryLeakage,
+    ).length,
+    falseDeletedFromIncompleteCoverageCount: EffectArray.filter(
+      citations,
       ({citation, scenario}) =>
         (scenario.snapshotState === 'current-incomplete' || scenario.snapshotState === 'unsupported') &&
         citation.observedStatus === 'deleted',
@@ -553,16 +579,18 @@ export function evaluateContextBriefCitationFixture(
     falseFreshCitationCount,
     falseFreshMemoryCount,
     falseFreshRiskCount: falseFreshCitationCount + falseFreshMemoryCount,
-    falseStaleMemoryCount: scenarios.filter(
+    falseStaleMemoryCount: EffectArray.filter(
+      scenarios,
       scenario => scenario.expectedFreshness === 'fresh' && scenario.observedFreshness === 'stale',
     ).length,
     incrementalCleanMismatchCount,
     legacyParity: score(
-      legacy.filter(scenario => scenario.expectedFreshness === scenario.observedFreshness).length,
+      EffectArray.filter(legacy, scenario => scenario.expectedFreshness === scenario.observedFreshness).length,
       legacy.length,
     ),
-    macroF1: statusMetrics.reduce((total, metric) => total + metric.f1, 0) / statusMetrics.length,
-    nonCurrentAuthoritativeStatusCount: citations.filter(
+    macroF1: EffectArray.reduce(statusMetrics, 0, (total, metric) => total + metric.f1) / statusMetrics.length,
+    nonCurrentAuthoritativeStatusCount: EffectArray.filter(
+      citations,
       ({citation, scenario}) => scenario.snapshotState !== 'current-complete' && citation.observedStatus !== 'unknown',
     ).length,
     relocationPrecision: statusMetric('relocated').precision,
@@ -570,33 +598,34 @@ export function evaluateContextBriefCitationFixture(
     scenarioCount: scenarios.length,
     statusMetrics,
     supportedUnknownRate: rate(
-      supported.filter(item => item.citation.observedStatus === 'unknown').length,
+      EffectArray.filter(supported, item => item.citation.observedStatus === 'unknown').length,
       supported.length,
     ),
     unsupportedUnknownRate: rate(
-      unsupported.filter(item => item.citation.observedStatus === 'unknown').length,
+      EffectArray.filter(unsupported, item => item.citation.observedStatus === 'unknown').length,
       unsupported.length,
     ),
     warningAccuracy: score(
-      scenarios.filter(scenario => scenario.expectedWarning === scenario.observedWarning).length,
+      EffectArray.filter(scenarios, scenario => scenario.expectedWarning === scenario.observedWarning).length,
       scenarios.length,
     ),
     warningCoverage: score(
-      warningCases.filter(scenario => scenario.observedWarning !== 'none').length,
+      EffectArray.filter(warningCases, scenario => scenario.observedWarning !== 'none').length,
       warningCases.length,
     ),
   };
 
-  const performance = [...fixture.performanceProfiles]
-    .sort((left, right) => left.id.localeCompare(right.id))
-    .map(evaluatePerformanceProfile);
+  const performance = EffectArray.map(
+    [...fixture.performanceProfiles].sort((left, right) => Effect.pipe(left.id, EffectString.localeCompare(right.id))),
+    evaluatePerformanceProfile,
+  );
   const failures = evaluateReleaseGate(quality, performance);
   return {
     fixture: {
       citationCount: citations.length,
       hash: contextBriefCitationEvaluationFixtureHash(fixture),
       id: fixture.id,
-      performanceSampleCount: performance.reduce((total, profile) => total + profile.sampleCount, 0),
+      performanceSampleCount: EffectArray.reduce(performance, 0, (total, profile) => total + profile.sampleCount),
       scenarioCount: scenarios.length,
     },
     gate: {failures, passed: failures.length === 0, version: CONTEXT_BRIEF_CITATION_EVALUATION_VERSION},
@@ -610,7 +639,7 @@ function contextBriefCitationStatusCounts(
   citations: readonly {readonly citation: ContextBriefCitationEvaluationScenarioV1['citations'][number]}[],
 ): Readonly<Record<ContextBriefCitationEvaluationStatus, number>> {
   const count = (status: ContextBriefCitationEvaluationStatus) =>
-    citations.filter(item => item.citation.observedStatus === status).length;
+    EffectArray.filter(citations, item => item.citation.observedStatus === status).length;
   return {
     changed: count('changed'),
     deleted: count('deleted'),
@@ -623,38 +652,40 @@ function contextBriefCitationStatusCounts(
 function evaluatePerformanceProfile(
   profile: ContextBriefCitationPerformanceProfileV1,
 ): ContextBriefCitationPerformanceMetricsV1 {
-  const samples = [...profile.samples].sort((left, right) => left.sampleId.localeCompare(right.sampleId));
-  const totalValidated = samples.reduce((total, sample) => total + sample.citationsValidated, 0);
+  const samples = [...profile.samples].sort((left, right) =>
+    Effect.pipe(left.sampleId, EffectString.localeCompare(right.sampleId)),
+  );
+  const totalValidated = EffectArray.reduce(samples, 0, (total, sample) => total + sample.citationsValidated);
   return {
-    addedPeakRssBytesMaximum: Math.max(...samples.map(sample => sample.addedPeakRssBytes)),
+    addedPeakRssBytesMaximum: Math.max(...EffectArray.map(samples, sample => sample.addedPeakRssBytes)),
     cacheHitRate: rate(
-      samples.reduce((total, sample) => total + sample.cacheHits, 0),
+      EffectArray.reduce(samples, 0, (total, sample) => total + sample.cacheHits),
       totalValidated,
     ),
     captureMilliseconds: benchmarkMeasurement(
       'citation-capture',
       'milliseconds',
-      samples.map(sample => sample.captureMilliseconds),
+      EffectArray.map(samples, sample => sample.captureMilliseconds),
     ),
     citationValidationMilliseconds: benchmarkMeasurement(
       'citation-validation',
       'milliseconds',
-      samples.map(sample => sample.citationValidationMilliseconds),
+      EffectArray.map(samples, sample => sample.citationValidationMilliseconds),
     ),
-    coldBuilds: samples.reduce((total, sample) => total + sample.coldBuilds, 0),
+    coldBuilds: EffectArray.reduce(samples, 0, (total, sample) => total + sample.coldBuilds),
     contextBriefMilliseconds: benchmarkMeasurement(
       'context-brief',
       'milliseconds',
-      samples.map(sample => sample.contextBriefMilliseconds),
+      EffectArray.map(samples, sample => sample.contextBriefMilliseconds),
     ),
-    databaseStatements: samples.reduce((total, sample) => total + sample.databaseStatements, 0),
-    estimatedTokensMaximum: Math.max(...samples.map(sample => sample.estimatedTokens)),
+    databaseStatements: EffectArray.reduce(samples, 0, (total, sample) => total + sample.databaseStatements),
+    estimatedTokensMaximum: Math.max(...EffectArray.map(samples, sample => sample.estimatedTokens)),
     id: profile.id,
-    maintenanceOperations: samples.reduce((total, sample) => total + sample.maintenanceOperations, 0),
+    maintenanceOperations: EffectArray.reduce(samples, 0, (total, sample) => total + sample.maintenanceOperations),
     maximumDatabaseOpenOverage: Math.max(
-      ...samples.map(sample => sample.repositoryDatabasesOpened - sample.repositoriesValidated),
+      ...EffectArray.map(samples, sample => sample.repositoryDatabasesOpened - sample.repositoriesValidated),
     ),
-    responseBytesMaximum: Math.max(...samples.map(sample => sample.responseBytes)),
+    responseBytesMaximum: Math.max(...EffectArray.map(samples, sample => sample.responseBytes)),
     sampleCount: samples.length,
   };
 }
@@ -735,9 +766,10 @@ function evaluateReleaseGate(
 
 function observedOutcomeIdentity(scenario: ContextBriefCitationEvaluationScenarioV1): string {
   return JSON.stringify({
-    citations: scenario.citations
-      .map(citation => ({citationId: citation.citationId, status: citation.observedStatus}))
-      .sort((left, right) => left.citationId.localeCompare(right.citationId)),
+    citations: EffectArray.map(scenario.citations, citation => ({
+      citationId: citation.citationId,
+      status: citation.observedStatus,
+    })).sort((left, right) => Effect.pipe(left.citationId, EffectString.localeCompare(right.citationId))),
     freshness: scenario.observedFreshness,
     warning: scenario.observedWarning,
   });
@@ -745,9 +777,11 @@ function observedOutcomeIdentity(scenario: ContextBriefCitationEvaluationScenari
 
 function expectedOutcomeIdentity(scenario: ContextBriefCitationEvaluationScenarioV1): string {
   return JSON.stringify({
-    citations: scenario.citations
-      .map(citation => ({citationId: citation.citationId, status: citation.expectedStatus, support: citation.support}))
-      .sort((left, right) => left.citationId.localeCompare(right.citationId)),
+    citations: EffectArray.map(scenario.citations, citation => ({
+      citationId: citation.citationId,
+      status: citation.expectedStatus,
+      support: citation.support,
+    })).sort((left, right) => Effect.pipe(left.citationId, EffectString.localeCompare(right.citationId))),
     freshness: scenario.expectedFreshness,
     snapshotState: scenario.snapshotState,
     warning: scenario.expectedWarning,

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This local evidence preparer owns reviewed filesystem and child-process boundaries. */
 
@@ -8,7 +9,7 @@ import {chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, s
 import {basename, dirname, isAbsolute, join, relative, resolve, sep} from 'node:path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {Effect} from 'effect';
+import {Effect, Schema} from 'effect';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {
@@ -64,6 +65,9 @@ import {
   type MatchedEvaluationRuntimeArmV1,
   type MatchedEvaluationRuntimeV1,
 } from './run-matched-evaluation.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const MATCHED_TOKEN_EFFICIENCY_PREPARATION_VERSION = 4 as const;
 export const MATCHED_TOKEN_EFFICIENCY_REQUIRED_PRODUCT_VERSION = '5.0.6' as const;
@@ -291,6 +295,7 @@ export async function prepareMatchedTokenEfficiencyStudyV1(
   ]);
   const activeArms = plan.activeArms;
   const outputRoot = absolutePath(options.outputRoot, 'output root');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   if (!outputRoot.split(sep).includes('.context'))
     throw new Error('Output root must be inside a local .context directory.');
   const outputParent = await canonicalDirectory(dirname(outputRoot), 'output parent');
@@ -306,9 +311,12 @@ export async function prepareMatchedTokenEfficiencyStudyV1(
   ]);
   const runtimeFileHashes = new Map<string, string>();
   await Promise.all(
-    [plan.adapter.appServer.executable, plan.adapter.gitExecutable, ...plan.adapter.safeBinaries].map(async path => {
-      runtimeFileHashes.set(path, await hashCanonicalFile(path, true, `runtime executable ${path}`));
-    }),
+    EffectArray.map(
+      [plan.adapter.appServer.executable, plan.adapter.gitExecutable, ...plan.adapter.safeBinaries],
+      async path => {
+        runtimeFileHashes.set(path, await hashCanonicalFile(path, true, `runtime executable ${path}`));
+      },
+    ),
   );
   await assertPrivateAuthFile(plan.adapter.authSourcePath);
   await mkdir(plan.adapter.temporaryRoot, {mode: 0o700, recursive: true});
@@ -345,10 +353,15 @@ export async function prepareMatchedTokenEfficiencyStudyV1(
     runtimeFileHashes,
     verificationPlan,
   });
-  const configBytes = new Map(configs.map(([arm, config]) => [arm, jsonBytes(config)]));
-  const configHashes = Object.fromEntries(
-    MATCHED_EVALUATION_ARMS.map(arm => [arm, sha256(required(configBytes.get(arm), `adapter config ${arm}`))]),
-  ) as Readonly<Record<MatchedEvaluationArm, string>>;
+  const configBytes = new Map(EffectArray.map(configs, ([arm, config]) => [arm, jsonBytes(config)]));
+  const configHashes = Schema.decodeUnknownSync(Schema.Record(Schema.Literals(MATCHED_EVALUATION_ARMS), Schema.String))(
+    EffectRecord.fromEntries(
+      EffectArray.map(MATCHED_EVALUATION_ARMS, arm => [
+        arm,
+        sha256(required(configBytes.get(arm), `adapter config ${arm}`)),
+      ]),
+    ),
+  );
   const unavailableReference = Buffer.from(
     `${JSON.stringify({reason: 'reference-scope runtime is not configured by the production Codex preparer', version: 1})}\n`,
   );
@@ -372,7 +385,7 @@ export async function prepareMatchedTokenEfficiencyStudyV1(
   });
   const study = createMatchedTokenEfficiencyStudyV1({
     bootstrap: plan.bootstrap,
-    clusters: plan.clusters.map(cluster => {
+    clusters: EffectArray.map(plan.clusters, cluster => {
       const observation = required(clusterObservations.get(cluster.clusterId), `cluster ${cluster.clusterId}`);
       return {
         clusterId: cluster.clusterId,
@@ -381,9 +394,10 @@ export async function prepareMatchedTokenEfficiencyStudyV1(
         repositoryIdentityHash: observation.identityHash,
         repositoryUrl: cluster.repositoryUrl,
         revision: observation.revision,
-        taskIds: tasks
-          .filter(task => task.taskContext.clusterId === cluster.clusterId)
-          .map(task => task.taskContext.taskId),
+        taskIds: EffectArray.map(
+          EffectArray.filter(tasks, task => task.taskContext.clusterId === cluster.clusterId),
+          task => task.taskContext.taskId,
+        ),
       };
     }),
     gates: plan.gates,
@@ -391,10 +405,13 @@ export async function prepareMatchedTokenEfficiencyStudyV1(
     manifestHash: manifest.manifestHash,
     promptPolicy: 'identical-as-issued',
     studyId: plan.studyId,
-    targetArms: (plan.targetArms ?? ['threadnote-compact', 'threadnote-source']).filter(arm =>
-      activeArms.includes(arm),
+    targetArms: EffectArray.filter(
+      EffectArray.map(plan.targetArms ?? ['threadnote-compact', 'threadnote-source'], (arm, index) =>
+        literal(arm, ['threadnote-compact', 'threadnote-source'] as const, `target arm ${index}`),
+      ),
+      arm => activeArms.includes(arm),
     ),
-    taskContexts: tasks.map(task => task.taskContext),
+    taskContexts: EffectArray.map(tasks, task => task.taskContext),
     verificationPlanHash: verificationPlan.planHash,
   });
   const runtime = createRuntime({
@@ -414,7 +431,7 @@ export async function prepareMatchedTokenEfficiencyStudyV1(
     ['reference-scope-unavailable.json', unavailableReference],
   ]);
   for (const [arm, bytes] of configBytes) files.set(`adapter-config/${arm}.json`, bytes);
-  const outputHashes = Object.fromEntries([...files].map(([path, bytes]) => [path, sha256(bytes)]));
+  const outputHashes = EffectRecord.fromEntries(EffectArray.map([...files], ([path, bytes]) => [path, sha256(bytes)]));
   const receiptWithoutHash = {
     adapterArtifactHash,
     adapterConfigurationHashes: configHashes,
@@ -499,7 +516,7 @@ async function assertPreparationInputsUnchanged(input: {
     throw new Error('A pinned evaluation executable or lock changed during preparation.');
   }
   await Promise.all(
-    [...input.runtimeFileHashes].map(async ([path, expected]) => {
+    EffectArray.map([...input.runtimeFileHashes], async ([path, expected]) => {
       if ((await hashCanonicalFile(path, true, `runtime executable ${path}`)) !== expected) {
         throw new Error(`Runtime executable changed during preparation: ${path}`);
       }
@@ -509,7 +526,9 @@ async function assertPreparationInputsUnchanged(input: {
   await assertVerificationPlanUnchanged(input.verificationPlan);
   for (const qualification of input.qualificationReceipt.tasks) {
     const task = required(
-      input.plan.verification.tasks.find(candidate => candidate.taskId === qualification.taskId),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(input.plan.verification.tasks, candidate => candidate.taskId === qualification.taskId),
+      ),
       `qualification task ${qualification.taskId}`,
     );
     const observed = await observeMatchedEvaluationRepositoryV1(task.fixRepositoryDirectory);
@@ -555,7 +574,9 @@ async function prepareClusters(
   }
   for (const task of corpus.tasks) {
     const context = required(
-      plan.taskContexts.find(candidate => candidate.taskId === task.taskId),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(plan.taskContexts, candidate => candidate.taskId === task.taskId),
+      ),
       `task ${task.taskId}`,
     );
     const observation = required(result.get(context.clusterId), `cluster ${context.clusterId}`);
@@ -586,13 +607,17 @@ async function prepareVerificationPlan(
     hashCanonicalFile(plan.verification.sandboxExecutable, true, 'verification sandbox executable'),
   ]);
   const provisionalTasks = await Promise.all(
-    plan.verification.tasks.map(async task => {
+    EffectArray.map(plan.verification.tasks, async task => {
       const context = required(
-        plan.taskContexts.find(candidate => candidate.taskId === task.taskId),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(plan.taskContexts, candidate => candidate.taskId === task.taskId),
+        ),
         `verification task context ${task.taskId}`,
       );
       const cluster = required(
-        plan.clusters.find(candidate => candidate.clusterId === context.clusterId),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(plan.clusters, candidate => candidate.clusterId === context.clusterId),
+        ),
         `verification cluster ${context.clusterId}`,
       );
       const base = required(clusterObservations.get(cluster.clusterId), `verification base ${cluster.clusterId}`);
@@ -613,11 +638,11 @@ async function prepareVerificationPlan(
         task,
         verificationTask: {
           calibration: createMatchedEvaluationVerificationCalibrationV1({
-            baseDiagnosticHash: '1'.repeat(64),
+            baseDiagnosticHash: Effect2.pipe('1', EffectString.repeat(64)),
             baseExitCode: 1,
             baseRepositoryFixtureHash: base.fixtureHash,
             baseRevision: base.revision,
-            fixDiagnosticHash: '2'.repeat(64),
+            fixDiagnosticHash: Effect2.pipe('2', EffectString.repeat(64)),
             fixExitCode: 0,
             fixRepositoryFixtureHash: fix.fixtureHash,
             fixRevision: fix.revision,
@@ -629,8 +654,8 @@ async function prepareVerificationPlan(
       };
     }),
   );
-  const corpusTaskIds = corpus.tasks.map(task => task.taskId).sort();
-  const verificationTaskIds = provisionalTasks.map(task => task.task.taskId).sort();
+  const corpusTaskIds = EffectArray.map(corpus.tasks, task => task.taskId).sort();
+  const verificationTaskIds = EffectArray.map(provisionalTasks, task => task.task.taskId).sort();
   if (JSON.stringify(corpusTaskIds) !== JSON.stringify(verificationTaskIds)) {
     throw new Error('Verification plan tasks must exactly cover the corpus.');
   }
@@ -654,7 +679,7 @@ async function prepareVerificationPlan(
       executableHash: sandboxExecutableHash,
       policy: 'darwin-seatbelt-v1',
     },
-    tasks: provisionalTasks.map(task => task.verificationTask),
+    tasks: EffectArray.map(provisionalTasks, task => task.verificationTask),
     timeoutMilliseconds: plan.verification.timeoutMilliseconds,
   });
   const calibratedTasks = [];
@@ -682,7 +707,9 @@ async function prepareVerificationPlan(
       qualificationTasks.push(
         await qualifyMatchedEvaluationKnownFixV1({
           base: task.base,
-          dependencyProjection: dependencyProjections.find(projection => projection.taskId === task.task.taskId),
+          dependencyProjection: EffectOption.getOrUndefined(
+            EffectArray.findFirst(dependencyProjections, projection => projection.taskId === task.task.taskId),
+          ),
           fix: task.fix,
           fixDirectory: task.fixDirectory,
           plan,
@@ -725,7 +752,9 @@ async function prepareVerificationPlan(
     timeoutMilliseconds: plan.verification.timeoutMilliseconds,
   });
   const qualificationWithoutHash = {
-    tasks: qualificationTasks.sort((left, right) => left.taskId.localeCompare(right.taskId)),
+    tasks: qualificationTasks.sort((left, right) =>
+      Effect2.pipe(left.taskId, EffectString.localeCompare(right.taskId)),
+    ),
     version: 1 as const,
   };
   return {
@@ -760,7 +789,10 @@ async function qualifyMatchedEvaluationKnownFixV1(input: {
     input.base.revision,
     input.fix.revision,
   );
-  const appliedPaths = changedPaths.filter(path => !input.task.protectedPaths.some(root => protectedPath(root, path)));
+  const appliedPaths = EffectArray.filter(
+    changedPaths,
+    path => !EffectArray.some(input.task.protectedPaths, root => protectedPath(root, path)),
+  );
   if (appliedPaths.length === 0) {
     throw new Error(`Known fix for ${input.task.taskId} has no production change outside protected paths.`);
   }
@@ -817,9 +849,15 @@ async function qualifyMatchedEvaluationKnownFixV1(input: {
 
     const commands = [];
     for (const [commandIndex, tokens] of input.task.qualificationCommands.entries()) {
-      const executableIndex = tokens.findIndex(token => !token.includes('='));
+      const executableIndex = EffectOption.getOrElse(
+        EffectArray.findFirstIndex(tokens, token => !Effect2.pipe(token, EffectString.includes('='))),
+        () => -1,
+      );
       const executableName = tokens[executableIndex];
-      const executables = input.plan.adapter.safeBinaries.filter(path => basename(path) === executableName);
+      const executables = EffectArray.filter(
+        input.plan.adapter.safeBinaries,
+        path => basename(path) === executableName,
+      );
       if (executables.length !== 1) {
         throw new Error(
           `Qualification command ${commandIndex} for ${input.task.taskId} must resolve to one pinned safe binary.`,
@@ -834,8 +872,15 @@ async function qualifyMatchedEvaluationKnownFixV1(input: {
         PATH: input.plan.adapter.safeExecutablePath,
       };
       for (const assignment of tokens.slice(0, executableIndex)) {
-        const separator = assignment.indexOf('=');
-        environment[assignment.slice(0, separator)] = assignment.slice(separator + 1);
+        const separator = Effect2.pipe(
+          assignment,
+          EffectString.indexOf('='),
+          Effect2.Option.getOrElse(() => -1),
+        );
+        environment[Effect2.pipe(assignment, EffectString.slice(0, separator))] = Effect2.pipe(
+          assignment,
+          EffectString.slice(separator + 1),
+        );
       }
       const result = await captureCodeMemoryLinkProcessGroup({
         allowFailure: true,
@@ -909,15 +954,14 @@ async function matchedEvaluationChangedPathsV1(
     maxOutputBytes: 4 * 1_024 * 1_024,
     timeoutMilliseconds: 60_000,
   });
-  return result.stdout
-    .split('\0')
-    .filter(Boolean)
-    .map((path, index) => safePlanRelativePath(path, `known-fix changed path ${index}`))
-    .sort();
+  return EffectArray.map(
+    EffectArray.filter(Effect2.pipe(result.stdout, EffectString.split('\0')), Boolean),
+    (path, index) => safePlanRelativePath(path, `known-fix changed path ${index}`),
+  ).sort();
 }
 
 function protectedPath(root: string, path: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
+  return path === root || Effect2.pipe(path, EffectString.startsWith(`${root}/`));
 }
 
 function qualificationGitEnvironment(): Readonly<Record<string, string>> {
@@ -956,18 +1000,24 @@ async function prepareTasks(input: {
   const prepared: PreparedTask[] = [];
   const linkedHomes = new Set<string>();
   for (const planContext of [...input.plan.taskContexts].sort((left, right) =>
-    left.taskId.localeCompare(right.taskId),
+    Effect2.pipe(left.taskId, EffectString.localeCompare(right.taskId)),
   )) {
     const task = required(
-      input.corpus.tasks.find(candidate => candidate.taskId === planContext.taskId),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(input.corpus.tasks, candidate => candidate.taskId === planContext.taskId),
+      ),
       `task ${planContext.taskId}`,
     );
     const manifestTask = required(
-      input.manifest.tasks.find(candidate => candidate.taskId === planContext.taskId),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(input.manifest.tasks, candidate => candidate.taskId === planContext.taskId),
+      ),
       `manifest task ${planContext.taskId}`,
     );
     const cluster = required(
-      input.plan.clusters.find(candidate => candidate.clusterId === planContext.clusterId),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(input.plan.clusters, candidate => candidate.clusterId === planContext.clusterId),
+      ),
       `cluster ${planContext.clusterId}`,
     );
     const observation = required(
@@ -982,17 +1032,19 @@ async function prepareTasks(input: {
     const graphMemories = await collectMemoryDocuments(graphHome, input.plan.project);
     if (graphMemories.length !== 0) throw new Error(`Task ${task.taskId} graph-only home contains memories.`);
     const linkedRecords = await collectMemoryDocuments(linkedHome, input.plan.project);
-    const linkedMemories = linkedRecords.filter(memory => memory.metadata.kind === 'durable');
-    const linkedHandoffs = linkedRecords.filter(memory => memory.metadata.kind === 'handoff');
+    const linkedMemories = EffectArray.filter(linkedRecords, memory => memory.metadata.kind === 'durable');
+    const linkedHandoffs = EffectArray.filter(linkedRecords, memory => memory.metadata.kind === 'handoff');
     if (linkedRecords.length !== linkedMemories.length + linkedHandoffs.length) {
       throw new Error(`Task ${task.taskId} linked home contains an unsupported memory kind.`);
     }
-    const preparedHandoffTopics = linkedHandoffs
-      .map(memory => memory.metadata.topic)
-      .sort((left, right) => String(left).localeCompare(String(right)));
-    const expectedHandoffTopics = [...planContext.activeHandoffTopics].sort((left, right) => left.localeCompare(right));
+    const preparedHandoffTopics = EffectArray.map(linkedHandoffs, memory => memory.metadata.topic).sort((left, right) =>
+      Effect2.pipe(String(left), EffectString.localeCompare(String(right))),
+    );
+    const expectedHandoffTopics = [...planContext.activeHandoffTopics].sort((left, right) =>
+      Effect2.pipe(left, EffectString.localeCompare(right)),
+    );
     if (
-      preparedHandoffTopics.some(topic => topic === undefined) ||
+      EffectArray.some(preparedHandoffTopics, topic => topic === undefined) ||
       JSON.stringify(preparedHandoffTopics) !== JSON.stringify(expectedHandoffTopics)
     ) {
       throw new Error(`Task ${task.taskId} linked home handoffs differ from the preparation plan.`);
@@ -1078,13 +1130,17 @@ async function prepareDependencyProjections(
   plan: PreparationPlanV1,
 ): Promise<readonly MatchedEvaluationDependencyProjectionV1[]> {
   return await Promise.all(
-    (plan.adapter.dependencyProjections ?? []).map(async projection => {
+    EffectArray.map(plan.adapter.dependencyProjections ?? [], async projection => {
       const task = required(
-        plan.taskContexts.find(candidate => candidate.taskId === projection.taskId),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(plan.taskContexts, candidate => candidate.taskId === projection.taskId),
+        ),
         `dependency projection task ${projection.taskId}`,
       );
       const cluster = required(
-        plan.clusters.find(candidate => candidate.clusterId === task.clusterId),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(plan.clusters, candidate => candidate.clusterId === task.clusterId),
+        ),
         `dependency projection cluster ${task.clusterId}`,
       );
       const sourceRepositoryDirectory = await canonicalDirectory(
@@ -1099,7 +1155,7 @@ async function prepareDependencyProjections(
       if (
         !sourceFromRepository ||
         sourceFromRepository === '..' ||
-        sourceFromRepository.startsWith(`..${sep}`) ||
+        Effect2.pipe(sourceFromRepository, EffectString.startsWith(`..${sep}`)) ||
         isAbsolute(sourceFromRepository)
       ) {
         throw new Error(`Dependency projection source for ${projection.taskId} escapes its repository.`);
@@ -1130,12 +1186,12 @@ function createAdapterConfigs(input: {
   readonly runtimeFileHashes: ReadonlyMap<string, string>;
   readonly verificationPlan: MatchedEvaluationVerificationPlanV1;
 }): readonly [MatchedEvaluationArm, MatchedEvaluationCodexAdapterConfigV1][] {
-  return MATCHED_EVALUATION_ARMS.map(arm => {
+  return EffectArray.map(MATCHED_EVALUATION_ARMS, arm => {
     const contextHomes =
       arm === 'threadnote-graph'
-        ? input.prepared.map(task => task.graphHome)
+        ? EffectArray.map(input.prepared, task => task.graphHome)
         : arm === 'threadnote-compact' || arm === 'threadnote-source'
-          ? input.prepared.map(task => task.linkedHome)
+          ? EffectArray.map(input.prepared, task => task.linkedHome)
           : [];
     const config = parseMatchedEvaluationCodexAdapterConfigV1({
       approvedCommands: input.plan.adapter.approvedCommands,
@@ -1165,7 +1221,7 @@ function createAdapterConfigs(input: {
       judgeModel: modelConfiguration(input.plan.adapter.judgeModel),
       model: modelConfiguration(input.plan.adapter.model),
       pricingMicrosPerMillionTokens: input.plan.adapter.pricingMicrosPerMillionTokens,
-      safeBinaries: input.plan.adapter.safeBinaries.map(path => ({
+      safeBinaries: EffectArray.map(input.plan.adapter.safeBinaries, path => ({
         path,
         sha256: required(input.runtimeFileHashes.get(path), `safe binary hash ${path}`),
       })),
@@ -1195,7 +1251,7 @@ function createRuntime(input: {
   return parseMatchedEvaluationRuntimeV1({
     arms: runtimeArms,
     artifactDirectory: resolve(input.outputRoot, 'artifacts'),
-    repositories: input.plan.clusters.map(cluster => ({
+    repositories: EffectArray.map(input.plan.clusters, cluster => ({
       clusterId: cluster.clusterId,
       repositoryDirectory: cluster.repositoryDirectory,
       repositoryIdentityHash: required(input.clusterObservations.get(cluster.clusterId), cluster.clusterId)
@@ -1238,7 +1294,7 @@ function armDefinitions(input: {
   readonly threadnoteArtifactHash: string;
   readonly threadnoteLockHash: string;
 }): readonly MatchedEvaluationArmDefinitionV1[] {
-  return MATCHED_EVALUATION_ARMS.map(arm => ({
+  return EffectArray.map(MATCHED_EVALUATION_ARMS, arm => ({
     adapterArtifactHash: input.adapterArtifactHash,
     adapterConfigurationHash: input.configHashes[arm],
     adapterProtocol: MATCHED_EVALUATION_ADAPTER_PROTOCOL,
@@ -1268,13 +1324,15 @@ function armDefinitions(input: {
 
 function placeholderArmDefinitions(): readonly MatchedEvaluationArmDefinitionV1[] {
   return armDefinitions({
-    adapterArtifactHash: '1'.repeat(64),
-    configHashes: Object.fromEntries(MATCHED_EVALUATION_ARMS.map(arm => [arm, '2'.repeat(64)])) as Readonly<
-      Record<MatchedEvaluationArm, string>
-    >,
-    referenceArtifactHash: '3'.repeat(64),
-    threadnoteArtifactHash: '4'.repeat(64),
-    threadnoteLockHash: '5'.repeat(64),
+    adapterArtifactHash: Effect2.pipe('1', EffectString.repeat(64)),
+    configHashes: Schema.decodeUnknownSync(Schema.Record(Schema.Literals(MATCHED_EVALUATION_ARMS), Schema.String))(
+      EffectRecord.fromEntries(
+        EffectArray.map(MATCHED_EVALUATION_ARMS, arm => [arm, Effect2.pipe('2', EffectString.repeat(64))]),
+      ),
+    ),
+    referenceArtifactHash: Effect2.pipe('3', EffectString.repeat(64)),
+    threadnoteArtifactHash: Effect2.pipe('4', EffectString.repeat(64)),
+    threadnoteLockHash: Effect2.pipe('5', EffectString.repeat(64)),
     productVersion: MATCHED_TOKEN_EFFICIENCY_REQUIRED_PRODUCT_VERSION,
   });
 }
@@ -1369,7 +1427,7 @@ async function assertGraphOnlyContextHasNoMemory(
   if (brief.type !== 'context-brief' || (brief.version !== 2 && brief.version !== 3)) {
     throw new Error('Graph-only home did not return a supported Context Brief.');
   }
-  if (!Array.isArray(brief.durableDecisions) || !Array.isArray(brief.activeHandoffs)) {
+  if (!EffectArray.isArray(brief.durableDecisions) || !EffectArray.isArray(brief.activeHandoffs)) {
     throw new Error('Graph-only Context Brief is missing its memory evidence arrays.');
   }
   if (brief.durableDecisions.length !== 0 || brief.activeHandoffs.length !== 0) {
@@ -1387,11 +1445,11 @@ async function assertLinkedContextSurfacesMemories(
   activeHandoffTopics: readonly string[],
   readAgentContextBrief: PreparationDependenciesV1['readAgentContextBrief'],
 ): Promise<void> {
-  const topics = memories.map(memory => memory.metadata.topic);
+  const topics = EffectArray.map(memories, memory => memory.metadata.topic);
   if (
-    topics.some(topic => topic === undefined) ||
+    EffectArray.some(topics, topic => topic === undefined) ||
     new Set(topics).size !== topics.length ||
-    memories.some(memory => memory.headerTitle !== 'MEMORY' || memory.metadata.kind !== 'durable')
+    EffectArray.some(memories, memory => memory.headerTitle !== 'MEMORY' || memory.metadata.kind !== 'durable')
   ) {
     throw new Error(`Task ${taskId} linked home requires unique durable memory topics.`);
   }
@@ -1405,13 +1463,8 @@ async function assertLinkedContextSurfacesMemories(
     safeExecutablePath: plan.adapter.safeExecutablePath,
     task,
   });
-  assertMatchedTokenEfficiencyLinkedBriefV1(
-    brief,
-    plan.project,
-    taskId,
-    topics as readonly string[],
-    activeHandoffTopics,
-  );
+  const definedTopics = Schema.decodeUnknownSync(Schema.Array(Schema.String))(topics);
+  assertMatchedTokenEfficiencyLinkedBriefV1(brief, plan.project, taskId, definedTopics, activeHandoffTopics);
 }
 
 async function readAgentContextBriefViaMcp(
@@ -1468,8 +1521,8 @@ export function parseMatchedTokenEfficiencyAgentContextBriefResultV1(value: unkn
     }
     return structured;
   }
-  if (!Array.isArray(result.content)) throw new Error('Agent Context Brief tool result is missing content.');
-  const text = result.content.flatMap((entry, index) => {
+  if (!EffectArray.isArray(result.content)) throw new Error('Agent Context Brief tool result is missing content.');
+  const text = EffectArray.flatMap(result.content, (entry, index) => {
     const content = object(entry, `agent Context Brief content ${index}`);
     return content.type === 'text' && typeof content.text === 'string' ? [content.text] : [];
   });
@@ -1496,38 +1549,42 @@ export function assertMatchedTokenEfficiencyLinkedBriefV1(
   }
   const durableDecisions = brief.durableDecisions ?? (isAgentView ? [] : undefined);
   const activeHandoffs = brief.activeHandoffs ?? (isAgentView ? [] : undefined);
-  if (!Array.isArray(durableDecisions) || !Array.isArray(activeHandoffs)) {
+  if (!EffectArray.isArray(durableDecisions) || !EffectArray.isArray(activeHandoffs)) {
     throw new Error('Linked-memory Context Brief is missing its memory evidence arrays.');
   }
   const surfacedHandoffTopics = isAgentView
     ? agentViewMemoryTopics(activeHandoffs, 'handoff', project, taskId)
-    : activeHandoffs.map((entry, index) => {
+    : EffectArray.map(activeHandoffs, (entry, index) => {
         const handoff = object(entry, `linked-memory Context Brief handoff ${index}`);
         if (handoff.kind !== 'handoff' || handoff.project !== project) {
           throw new Error(`Task ${taskId} linked-memory Context Brief exposes an unexpected handoff.`);
         }
         return boundedText(handoff.topic, 1, 512, `linked-memory Context Brief handoff ${index} topic`);
       });
-  const expectedHandoffs = [...expectedHandoffTopics].sort((left, right) => left.localeCompare(right));
-  const surfacedHandoffs = [...surfacedHandoffTopics].sort((left, right) => left.localeCompare(right));
+  const expectedHandoffs = [...expectedHandoffTopics].sort((left, right) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
+  );
+  const surfacedHandoffs = [...surfacedHandoffTopics].sort((left, right) =>
+    Effect2.pipe(left, EffectString.localeCompare(right)),
+  );
   if (JSON.stringify(surfacedHandoffs) !== JSON.stringify(expectedHandoffs)) {
     throw new Error(`Task ${taskId} linked-memory Context Brief exposes an unexpected handoff.`);
   }
   const surfacedTopics = isAgentView
     ? agentViewMemoryTopics(durableDecisions, 'durable', project, taskId)
-    : durableDecisions.map((entry, index) => {
+    : EffectArray.map(durableDecisions, (entry, index) => {
         const decision = object(entry, `linked-memory Context Brief decision ${index}`);
         if (decision.kind !== 'durable' || decision.project !== project) {
           throw new Error(`Task ${taskId} linked-memory Context Brief exposes an unexpected memory.`);
         }
         return boundedText(decision.topic, 1, 512, `linked-memory Context Brief decision ${index} topic`);
       });
-  const expected = [...expectedTopics].sort((left, right) => left.localeCompare(right));
-  const surfaced = [...surfacedTopics].sort((left, right) => left.localeCompare(right));
+  const expected = [...expectedTopics].sort((left, right) => Effect2.pipe(left, EffectString.localeCompare(right)));
+  const surfaced = [...surfacedTopics].sort((left, right) => Effect2.pipe(left, EffectString.localeCompare(right)));
   const durableRosterIsValid =
     expectedHandoffTopics.length === 0
       ? JSON.stringify(surfaced) === JSON.stringify(expected)
-      : surfaced.every(topic => expected.includes(topic));
+      : EffectArray.every(surfaced, topic => expected.includes(topic));
   if (!durableRosterIsValid) {
     throw new Error(`Task ${taskId} exact prompt does not surface its complete reviewed memory roster.`);
   }
@@ -1541,21 +1598,30 @@ function agentViewMemoryTopics(
 ): readonly string[] {
   const namespace =
     kind === 'durable' ? `/memories/durable/projects/${project}/` : `/memories/handoffs/active/${project}/`;
-  return entries.map((entry, index) => {
+  return EffectArray.map(entries, (entry, index) => {
     const memory = object(entry, `linked-memory agent Context Brief ${kind} ${index}`);
     const uri = boundedText(memory.uri, 1, 4_096, `linked-memory agent Context Brief ${kind} ${index} URI`);
-    const namespaceIndex = uri.indexOf(namespace);
-    const topicPath = namespaceIndex === -1 ? '' : uri.slice(namespaceIndex + namespace.length);
+    const namespaceIndex = Effect2.pipe(
+      uri,
+      EffectString.indexOf(namespace),
+      Effect2.Option.getOrElse(() => -1),
+    );
+    const topicPath =
+      namespaceIndex === -1 ? '' : Effect2.pipe(uri, EffectString.slice(namespaceIndex + namespace.length));
     if (
-      !uri.startsWith('threadnote://user/') ||
+      !Effect2.pipe(uri, EffectString.startsWith('threadnote://user/')) ||
       namespaceIndex === -1 ||
-      !topicPath.endsWith('.md') ||
+      !Effect2.pipe(topicPath, EffectString.endsWith('.md')) ||
       topicPath.length <= 3 ||
-      topicPath.slice(0, -3).includes('/')
+      Effect2.pipe(topicPath, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -3));
+        const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.includes('/'));
+        return __effectPipeStage1;
+      })
     ) {
       throw new Error(`Task ${taskId} linked-memory Context Brief exposes an unexpected ${kind}.`);
     }
-    return topicPath.slice(0, -3);
+    return Effect2.pipe(topicPath, EffectString.slice(0, -3));
   });
 }
 
@@ -1571,19 +1637,23 @@ function linkReceiptsForTask(
   }
   if (
     linkedMemoryIdentities.length !== task.memoryFixtures.length ||
-    task.memoryFixtures.some(
-      fixture => !linkedMemoryIdentities.some(identity => identity.fixtureMemoryId === fixture.memoryId),
+    EffectArray.some(
+      task.memoryFixtures,
+      fixture => !EffectArray.some(linkedMemoryIdentities, identity => identity.fixtureMemoryId === fixture.memoryId),
     )
   ) {
     throw new Error(`Task ${task.taskId} linked-memory identity roster differs from its corpus fixtures.`);
   }
   const used = new Set<MemoryRecord>();
-  const receipts = task.memoryFixtures.flatMap(fixture => {
+  const receipts = EffectArray.flatMap(task.memoryFixtures, fixture => {
     const plannedIdentity = required(
-      linkedMemoryIdentities.find(identity => identity.fixtureMemoryId === fixture.memoryId),
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(linkedMemoryIdentities, identity => identity.fixtureMemoryId === fixture.memoryId),
+      ),
       `managed memory identity for ${fixture.memoryId}`,
     );
-    const candidates = memories.filter(
+    const candidates = EffectArray.filter(
+      memories,
       memory =>
         memory.body === fixture.text &&
         memory.metadata.status === fixture.status &&
@@ -1595,7 +1665,10 @@ function linkReceiptsForTask(
     const memory = candidates[0];
     used.add(memory);
     if (fixture.source === null) return [];
-    const citations = (memory.metadata.codeCitations ?? []).filter(citation => citation.path === fixture.source?.path);
+    const citations = EffectArray.filter(
+      memory.metadata.codeCitations ?? [],
+      citation => citation.path === fixture.source?.path,
+    );
     if (citations.length !== 1) {
       throw new Error(`Task ${task.taskId} memory ${fixture.memoryId} lacks one exact source citation.`);
     }
@@ -1623,15 +1696,19 @@ function linkReceiptsForTask(
       },
     ];
   });
-  return receipts.sort((left, right) => left.memoryId.localeCompare(right.memoryId));
+  return receipts.sort((left, right) => Effect2.pipe(left.memoryId, EffectString.localeCompare(right.memoryId)));
 }
 
 async function collectMemoryDocuments(home: string, project: string): Promise<readonly MemoryRecord[]> {
   const files = await walkFiles(home);
   const records: MemoryRecord[] = [];
   for (const file of files) {
-    const normalized = relative(home, file).replaceAll('\\', '/');
-    if (!normalized.endsWith('.md') || !normalized.split('/').includes('memories')) continue;
+    const normalized = Effect2.pipe(relative(home, file), EffectString.replaceAll('\\', '/'));
+    if (
+      !Effect2.pipe(normalized, EffectString.endsWith('.md')) ||
+      !Effect2.pipe(normalized, EffectString.split('/')).includes('memories')
+    )
+      continue;
     const parsed = parseMemoryDocument(
       `threadnote://user/evaluation/memories/durable/projects/${project}/prepared-${records.length}.md`,
       await readFile(file, 'utf8'),
@@ -1705,9 +1782,10 @@ async function assertThreadnoteSourceAndExecutable(input: PreparationPlanV1['thr
   } else if (ancestry.exitCode !== 0) {
     throw new Error('Threadnote source commit does not contain the required local release commit.');
   }
-  const packageVersion = JSON.parse(await readFile(join(sourceDirectory, 'package.json'), 'utf8')) as {
-    version?: unknown;
-  };
+  const packageVersion = object(
+    JSON.parse(await readFile(join(sourceDirectory, 'package.json'), 'utf8')),
+    'Threadnote package.json',
+  );
   const expectedVersion = (() => {
     if (productionRelease !== undefined) return MATCHED_TOKEN_EFFICIENCY_PRODUCTION_PRODUCT_VERSION;
     if (
@@ -1792,10 +1870,10 @@ export function assertMatchedTokenEfficiencyThreadnoteVersionOutputV1(
   const localSeparator = productVersion === MATCHED_TOKEN_EFFICIENCY_BETA_PRODUCT_VERSION ? '.local.g' : '-local.g';
   const prefix = `threadnote v${productVersion}${localSeparator}`;
   const expectedOutput = `${prefix}${expectedCommit}`;
-  if (!output.trim().startsWith(prefix)) {
+  if (!Effect2.pipe(output, EffectString.trim, EffectString.startsWith(prefix))) {
     throw new Error(`Threadnote executable must be an exact commit-reporting ${productVersion} local build.`);
   }
-  if (output.trim() !== expectedOutput) {
+  if (Effect2.pipe(output, EffectString.trim) !== expectedOutput) {
     throw new Error('Threadnote local executable source commit differs from the reviewed source checkout.');
   }
 }
@@ -1850,22 +1928,22 @@ function parsePreparationPlanV1(value: unknown): PreparationPlanV1 {
     'user',
     ...(threadnote.productionRelease === undefined ? [] : ['productionRelease']),
   ]);
-  const clusters = array(plan.clusters, 'clusters').map(parseClusterPlan);
+  const clusters = EffectArray.map(array(plan.clusters, 'clusters'), parseClusterPlan);
   unique(
-    clusters.map(cluster => cluster.clusterId),
+    EffectArray.map(clusters, cluster => cluster.clusterId),
     'cluster ids',
   );
   unique(
-    clusters.map(cluster => cluster.repositoryDirectory),
+    EffectArray.map(clusters, cluster => cluster.repositoryDirectory),
     'cluster repositories',
   );
-  const taskContexts = array(plan.taskContexts, 'task contexts').map(parseTaskContextPlan);
+  const taskContexts = EffectArray.map(array(plan.taskContexts, 'task contexts'), parseTaskContextPlan);
   unique(
-    taskContexts.map(context => context.taskId),
+    EffectArray.map(taskContexts, context => context.taskId),
     'task context ids',
   );
   const pricing = adapter.pricingMicrosPerMillionTokens;
-  const safeBinaries = stringArray(adapter.safeBinaries, 'safe binaries').map((path, index) =>
+  const safeBinaries = EffectArray.map(stringArray(adapter.safeBinaries, 'safe binaries'), (path, index) =>
     absolutePath(path, `safe binary ${index}`),
   );
   const verification = object(plan.verification, 'verification plan');
@@ -1877,21 +1955,21 @@ function parsePreparationPlanV1(value: unknown): PreparationPlanV1 {
     'tasks',
     'timeoutMilliseconds',
   ]);
-  const verificationTasks = array(verification.tasks, 'verification tasks').map((value, index) => {
+  const verificationTasks = EffectArray.map(array(verification.tasks, 'verification tasks'), (value, index) => {
     const task = object(value, `verification task ${index}`);
     exactKeys(task, ['fixRepositoryDirectory', 'protectedPaths', 'qualificationCommands', 'selector', 'taskId']);
-    const protectedPaths = array(task.protectedPaths, `verification task ${index} protected paths`).map(
+    const protectedPaths = EffectArray.map(
+      array(task.protectedPaths, `verification task ${index} protected paths`),
       (path, pathIndex) => safePlanRelativePath(path, `verification task ${index} protected path ${pathIndex}`),
     );
     if (protectedPaths.length === 0 || protectedPaths.length > 256) {
       invalid(`verification task ${index} protected paths has invalid bounds`);
     }
     unique(protectedPaths, `verification task ${index} protected paths`);
-    const qualificationCommands = array(
-      task.qualificationCommands,
-      `verification task ${index} qualification commands`,
-    ).map((tokens, commandIndex) =>
-      parseCommandTokens(tokens, `verification task ${index} qualification command ${commandIndex}`),
+    const qualificationCommands = EffectArray.map(
+      array(task.qualificationCommands, `verification task ${index} qualification commands`),
+      (tokens, commandIndex) =>
+        parseCommandTokens(tokens, `verification task ${index} qualification command ${commandIndex}`),
     );
     if (qualificationCommands.length === 0 || qualificationCommands.length > 16) {
       invalid(`verification task ${index} qualification commands has invalid bounds`);
@@ -1905,17 +1983,19 @@ function parsePreparationPlanV1(value: unknown): PreparationPlanV1 {
     };
   });
   unique(
-    verificationTasks.map(task => task.taskId),
+    EffectArray.map(verificationTasks, task => task.taskId),
     'verification task ids',
   );
   unique(
-    verificationTasks.map(task => task.fixRepositoryDirectory),
+    EffectArray.map(verificationTasks, task => task.fixRepositoryDirectory),
     'verification fix repositories',
   );
   for (const [taskIndex, task] of verificationTasks.entries()) {
     for (const [commandIndex, tokens] of task.qualificationCommands.entries()) {
-      const executable = tokens.find(token => !token.includes('='));
-      if (safeBinaries.filter(path => basename(path) === executable).length !== 1) {
+      const executable = EffectOption.getOrUndefined(
+        EffectArray.findFirst(tokens, token => !Effect2.pipe(token, EffectString.includes('='))),
+      );
+      if (EffectArray.filter(safeBinaries, path => basename(path) === executable).length !== 1) {
         invalid(`verification task ${taskIndex} qualification command ${commandIndex} is not one pinned safe binary`);
       }
     }
@@ -1924,16 +2004,15 @@ function parsePreparationPlanV1(value: unknown): PreparationPlanV1 {
   exactKeys(taskBudget, ['steps', 'tokens']);
   const productionRelease =
     threadnote.productionRelease === undefined ? undefined : parseProductionRelease(threadnote.productionRelease);
-  const activeArms = array(plan.activeArms, 'active arms').map((arm, index) => {
-    if (!MATCHED_EVALUATION_ARMS.includes(arm as MatchedEvaluationArm)) invalid(`active arm ${index} is invalid`);
-    return arm as MatchedEvaluationArm;
-  });
+  const activeArms = EffectArray.map(array(plan.activeArms, 'active arms'), (arm, index) =>
+    literal(arm, MATCHED_EVALUATION_ARMS, `active arm ${index}`),
+  );
   unique(activeArms, 'active arms');
   if (activeArms.length === 0) invalid('active arms must not be empty');
   const targetArms =
     plan.targetArms === undefined
       ? undefined
-      : array(plan.targetArms, 'target arms').map((arm, index) => {
+      : EffectArray.map(array(plan.targetArms, 'target arms'), (arm, index) => {
           if (arm !== 'threadnote-compact' && arm !== 'threadnote-source') invalid(`target arm ${index} is invalid`);
           return arm;
         });
@@ -1941,20 +2020,20 @@ function parsePreparationPlanV1(value: unknown): PreparationPlanV1 {
   const approvedCommands =
     adapter.approvedCommands === undefined
       ? []
-      : array(adapter.approvedCommands, 'approved commands').map(parseApprovedCommandPlan);
+      : EffectArray.map(array(adapter.approvedCommands, 'approved commands'), parseApprovedCommandPlan);
   if (approvedCommands.length > 256) invalid('approved commands has invalid bounds');
   unique(
-    approvedCommands.map(command => `${command.taskId}\0${JSON.stringify(command.tokens)}`),
+    EffectArray.map(approvedCommands, command => `${command.taskId}\0${JSON.stringify(command.tokens)}`),
     'approved commands',
   );
-  const preparedTaskIds = new Set(taskContexts.map(context => context.taskId));
-  if (approvedCommands.some(command => !preparedTaskIds.has(command.taskId))) {
+  const preparedTaskIds = new Set(EffectArray.map(taskContexts, context => context.taskId));
+  if (EffectArray.some(approvedCommands, command => !preparedTaskIds.has(command.taskId))) {
     invalid('approved commands must reference prepared task contexts');
   }
   const dependencyProjections =
     adapter.dependencyProjections === undefined
       ? []
-      : array(adapter.dependencyProjections, 'dependency projections').map((value, index) => {
+      : EffectArray.map(array(adapter.dependencyProjections, 'dependency projections'), (value, index) => {
           const projection = object(value, `dependency projection ${index}`);
           exactKeys(projection, ['lockFileRelativePath', 'sourceDirectory', 'targetRelativePath', 'taskId']);
           return {
@@ -1974,10 +2053,10 @@ function parsePreparationPlanV1(value: unknown): PreparationPlanV1 {
           };
         });
   unique(
-    dependencyProjections.map(projection => projection.taskId),
+    EffectArray.map(dependencyProjections, projection => projection.taskId),
     'dependency projection task ids',
   );
-  if (dependencyProjections.some(projection => !preparedTaskIds.has(projection.taskId))) {
+  if (EffectArray.some(dependencyProjections, projection => !preparedTaskIds.has(projection.taskId))) {
     invalid('dependency projections must reference prepared task contexts');
   }
   return {
@@ -2017,10 +2096,53 @@ function parsePreparationPlanV1(value: unknown): PreparationPlanV1 {
       },
       temporaryRoot: absolutePath(adapter.temporaryRoot, 'temporary root'),
     },
-    bootstrap: plan.bootstrap as PreparationPlanV1['bootstrap'],
+    bootstrap: Schema.decodeUnknownSync(
+      Schema.Struct({confidenceLevelBasisPoints: Schema.Finite, iterations: Schema.Finite, seed: Schema.String}),
+    )(plan.bootstrap),
     clusters,
-    gates: plan.gates as PreparationPlanV1['gates'],
-    lifecycle: array(plan.lifecycle, 'lifecycle') as unknown as readonly MatchedTokenEfficiencyLifecycleArmV1[],
+    gates: Schema.decodeUnknownSync(
+      Schema.Struct({
+        completionNonInferiorityBasisPoints: Schema.Finite,
+        maximumAuthorizationLeaks: Schema.Finite,
+        maximumFalseCurrentOutcomes: Schema.Finite,
+        maximumHarmfulActions: Schema.Finite,
+        minimumCorrectnessScoreMilli: Schema.Finite,
+        minimumClusters: Schema.Finite,
+        minimumMemoryTokenReductionBasisPoints: Schema.Finite,
+        minimumTokenReductionBasisPoints: Schema.Finite,
+      }),
+    )(plan.gates),
+    lifecycle: Schema.decodeUnknownSync(
+      Schema.Array(
+        Schema.Struct({
+          arm: Schema.Literals(MATCHED_EVALUATION_ARMS),
+          setupMilliseconds: Schema.Finite,
+          setupUsage: Schema.Struct({
+            graphPreparation: Schema.Struct({
+              cachedInputTokens: Schema.Finite,
+              inputTokens: Schema.Finite,
+              outputTokens: Schema.Finite,
+              reasoningOutputTokens: Schema.Finite,
+              totalTokens: Schema.Finite,
+            }),
+            memoryAuthoring: Schema.Struct({
+              cachedInputTokens: Schema.Finite,
+              inputTokens: Schema.Finite,
+              outputTokens: Schema.Finite,
+              reasoningOutputTokens: Schema.Finite,
+              totalTokens: Schema.Finite,
+            }),
+            memoryReview: Schema.Struct({
+              cachedInputTokens: Schema.Finite,
+              inputTokens: Schema.Finite,
+              outputTokens: Schema.Finite,
+              reasoningOutputTokens: Schema.Finite,
+              totalTokens: Schema.Finite,
+            }),
+          }),
+        }),
+      ),
+    )(array(plan.lifecycle, 'lifecycle')),
     project: matching(plan.project, PROJECT, 'project'),
     repetitions: (() => {
       const repetitions = integer(plan.repetitions, 5, 1_000, 'repetitions');
@@ -2079,18 +2201,25 @@ function parseProductionRelease(value: unknown): MatchedTokenEfficiencyProductio
     'sourceCommit',
     'version',
   ]);
+  if (release.immutable !== true)
+    invalid('production release must be immutable version 5.0.7 at the approved artifact URLs');
   const parsed = {
     archiveSha256: matching(release.archiveSha256, HASH, 'production archive hash'),
-    archiveUrl: boundedText(release.archiveUrl, 1, 2_048, 'production archive URL') as typeof PRODUCTION_ARCHIVE_URL,
+    archiveUrl: boundedText(release.archiveUrl, 1, 2_048, 'production archive URL'),
     executableSha256: matching(release.executableSha256, HASH, 'production executable hash'),
-    immutable: release.immutable,
-    releaseUrl: boundedText(release.releaseUrl, 1, 2_048, 'production release URL') as typeof PRODUCTION_RELEASE_URL,
+    immutable: true as const,
+    releaseUrl: boundedText(release.releaseUrl, 1, 2_048, 'production release URL'),
     sourceCommit: matching(release.sourceCommit, COMMIT, 'production source commit'),
-    version: release.version,
+    version: MATCHED_TOKEN_EFFICIENCY_PRODUCTION_PRODUCT_VERSION,
   };
-  if (parsed.immutable !== true || parsed.version !== MATCHED_TOKEN_EFFICIENCY_PRODUCTION_PRODUCT_VERSION)
-    invalid('production release must be immutable version 5.0.7');
-  return parsed as MatchedTokenEfficiencyProductionReleaseV1;
+  if (
+    parsed.immutable !== true ||
+    parsed.version !== MATCHED_TOKEN_EFFICIENCY_PRODUCTION_PRODUCT_VERSION ||
+    parsed.archiveUrl !== PRODUCTION_ARCHIVE_URL ||
+    parsed.releaseUrl !== PRODUCTION_RELEASE_URL
+  )
+    invalid('production release must be immutable version 5.0.7 at the approved artifact URLs');
+  return {...parsed, archiveUrl: PRODUCTION_ARCHIVE_URL, releaseUrl: PRODUCTION_RELEASE_URL};
 }
 
 function parseTaskContextPlan(value: unknown, index: number): TaskContextPlanV1 {
@@ -2109,38 +2238,39 @@ function parseTaskContextPlan(value: unknown, index: number): TaskContextPlanV1 
   if (!['none', 'lacking', 'sufficient', 'excessive'].includes(String(context.sufficiency))) {
     invalid(`task context ${index} sufficiency is invalid`);
   }
-  const linkedMemoryIdentities = array(
-    task.linkedMemoryIdentities,
-    `task context ${index} linked-memory identities`,
-  ).map((value, memoryIndex) => {
-    const identity = object(value, `task context ${index} linked-memory identity ${memoryIndex}`);
-    exactKeys(identity, ['fixtureMemoryId', 'managedMemoryId']);
-    return {
-      fixtureMemoryId: matching(
-        identity.fixtureMemoryId,
-        FIXTURE_MEMORY_ID,
-        `task context ${index} fixture memory id ${memoryIndex}`,
-      ),
-      managedMemoryId: matching(
-        identity.managedMemoryId,
-        MANAGED_MEMORY_ID,
-        `task context ${index} managed memory id ${memoryIndex}`,
-      ),
-    };
-  });
+  const linkedMemoryIdentities = EffectArray.map(
+    array(task.linkedMemoryIdentities, `task context ${index} linked-memory identities`),
+    (value, memoryIndex) => {
+      const identity = object(value, `task context ${index} linked-memory identity ${memoryIndex}`);
+      exactKeys(identity, ['fixtureMemoryId', 'managedMemoryId']);
+      return {
+        fixtureMemoryId: matching(
+          identity.fixtureMemoryId,
+          FIXTURE_MEMORY_ID,
+          `task context ${index} fixture memory id ${memoryIndex}`,
+        ),
+        managedMemoryId: matching(
+          identity.managedMemoryId,
+          MANAGED_MEMORY_ID,
+          `task context ${index} managed memory id ${memoryIndex}`,
+        ),
+      };
+    },
+  );
   unique(
-    linkedMemoryIdentities.map(identity => identity.fixtureMemoryId),
+    EffectArray.map(linkedMemoryIdentities, identity => identity.fixtureMemoryId),
     `task context ${index} fixture memory ids`,
   );
   unique(
-    linkedMemoryIdentities.map(identity => identity.managedMemoryId),
+    EffectArray.map(linkedMemoryIdentities, identity => identity.managedMemoryId),
     `task context ${index} managed memory ids`,
   );
   const activeHandoffTopics =
     task.activeHandoffTopics === undefined
       ? []
-      : array(task.activeHandoffTopics, `task context ${index} active handoff topics`).map((topic, topicIndex) =>
-          boundedText(topic, 1, 512, `task context ${index} active handoff topic ${topicIndex}`),
+      : EffectArray.map(
+          array(task.activeHandoffTopics, `task context ${index} active handoff topics`),
+          (topic, topicIndex) => boundedText(topic, 1, 512, `task context ${index} active handoff topic ${topicIndex}`),
         );
   unique(activeHandoffTopics, `task context ${index} active handoff topics`);
   return {
@@ -2151,7 +2281,11 @@ function parseTaskContextPlan(value: unknown, index: number): TaskContextPlanV1 
         context.contentFile === null
           ? null
           : absolutePath(context.contentFile, `task context ${index} supplied context`),
-      sufficiency: context.sufficiency as TaskContextPlanV1['asIssuedContext']['sufficiency'],
+      sufficiency: literal(
+        context.sufficiency,
+        ['none', 'lacking', 'sufficient', 'excessive'] as const,
+        `task context ${index} sufficiency`,
+      ),
     },
     clusterId: matching(task.clusterId, CLUSTER_ID, `task context ${index} cluster`),
     graphHomeDirectory: absolutePath(task.graphHomeDirectory, `task context ${index} graph home`),
@@ -2187,8 +2321,13 @@ function parseApprovedCommandPlan(
 function parseCommandTokens(value: unknown, label: string): readonly string[] {
   const tokenInputs = array(value, `${label} tokens`);
   if (tokenInputs.length < 1 || tokenInputs.length > 64) invalid(`${label} tokens has invalid bounds`);
-  const tokens = tokenInputs.map((token, tokenIndex) => boundedText(token, 1, 1_024, `${label} token ${tokenIndex}`));
-  const executableIndex = tokens.findIndex(token => !token.includes('='));
+  const tokens = EffectArray.map(tokenInputs, (token, tokenIndex) =>
+    boundedText(token, 1, 1_024, `${label} token ${tokenIndex}`),
+  );
+  const executableIndex = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(tokens, token => !Effect2.pipe(token, EffectString.includes('='))),
+    () => -1,
+  );
   if (executableIndex < 0) invalid(`${label} lacks an executable`);
   for (const assignment of tokens.slice(0, executableIndex)) {
     if (assignment !== 'PYTHONPATH=src') invalid(`${label} has an unsupported environment assignment`);
@@ -2200,7 +2339,7 @@ function parseCommandTokens(value: unknown, label: string): readonly string[] {
     if (
       /[\0\r\n;&|<>`$(){}\\]/u.test(token) ||
       isAbsolute(token) ||
-      token.split('/').some(segment => segment === '..')
+      EffectArray.some(Effect2.pipe(token, EffectString.split('/')), segment => segment === '..')
     ) {
       invalid(`${label} argument is outside the sealed task-command grammar`);
     }
@@ -2238,9 +2377,9 @@ async function assertRepositoryRemote(repository: string, expected: string): Pro
 
 function normalizeRemote(value: string): string {
   const url = new URL(value);
-  const path = url.pathname.replace(/^\/+|\/+$/gu, '').replace(/\.git$/u, '');
+  const path = Effect2.pipe(url.pathname, EffectString.replace(/^\/+|\/+$/gu, ''), EffectString.replace(/\.git$/u, ''));
   if (!url.hostname || !path) throw new Error('Repository origin is invalid.');
-  return `${url.hostname.toLowerCase()}/${path}`;
+  return `${Effect2.pipe(url.hostname, EffectString.toLowerCase)}/${path}`;
 }
 
 async function captureGit(root: string, arguments_: readonly string[], allowFailure = false) {
@@ -2270,7 +2409,7 @@ export async function ensureMatchedEvaluationFixCommitAvailableV1(input: {
   const object = `${input.fixRevision}^{commit}`;
   if ((await captureGit(input.baseDirectory, ['cat-file', '-e', object], true)).exitCode === 0) return;
   const [baseCommonGitDirectory, fixCommonGitDirectory] = await Promise.all(
-    [input.baseDirectory, input.fixDirectory].map(async directory => {
+    EffectArray.map([input.baseDirectory, input.fixDirectory], async directory => {
       const result = await captureGit(directory, ['rev-parse', '--git-common-dir']);
       return realpath(resolve(directory, singleLine(result.stdout, 'repository common Git directory')));
     }),
@@ -2282,12 +2421,14 @@ export async function ensureMatchedEvaluationFixCommitAvailableV1(input: {
     if (typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'ENOENT') return '';
     throw cause;
   });
-  const alternates = current
-    .split(/\r?\n/gu)
-    .map(line => line.trim())
-    .filter(Boolean);
+  const alternates = EffectArray.filter(
+    EffectArray.map(Effect2.pipe(current, EffectString.split(/\r?\n/gu)), line =>
+      Effect2.pipe(line, EffectString.trim),
+    ),
+    Boolean,
+  );
   if (!alternates.includes(fixObjects)) {
-    const next = `${[...new Set([...alternates, fixObjects])].sort().join('\n')}\n`;
+    const next = `${EffectArray.join([...new Set([...alternates, fixObjects])].sort(), '\n')}\n`;
     const temporary = `${alternatesPath}.tmp-${process.pid}`;
     await mkdir(alternatesDirectory, {recursive: true, mode: 0o700});
     try {
@@ -2421,10 +2562,16 @@ async function assertAbsent(path: string, label: string): Promise<void> {
 }
 
 function containedPath(root: string, path: string): string {
-  if (!path || path.includes('\0') || isAbsolute(path)) throw new Error('Prepared output path is invalid.');
+  if (!path || Effect2.pipe(path, EffectString.includes('\0')) || isAbsolute(path))
+    throw new Error('Prepared output path is invalid.');
   const absolute = resolve(root, path);
   const fromRoot = relative(root, absolute);
-  if (!fromRoot || fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+  if (
+    !fromRoot ||
+    fromRoot === '..' ||
+    Effect2.pipe(fromRoot, EffectString.startsWith(`..${sep}`)) ||
+    isAbsolute(fromRoot)
+  ) {
     throw new Error('Prepared output path escaped its root.');
   }
   return absolute;
@@ -2435,10 +2582,13 @@ function safePlanRelativePath(value: unknown, label: string): string {
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > 4_096 ||
-    value.includes('\0') ||
-    value.includes('\\') ||
+    Effect2.pipe(value, EffectString.includes('\0')) ||
+    Effect2.pipe(value, EffectString.includes('\\')) ||
     isAbsolute(value) ||
-    value.split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..')
+    EffectArray.some(
+      Effect2.pipe(value, EffectString.split('/')),
+      segment => segment.length === 0 || segment === '.' || segment === '..',
+    )
   ) {
     invalid(`${label} must be one normalized relative path`);
   }
@@ -2492,28 +2642,33 @@ function sha256(bytes: Uint8Array): string {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  if (!EffectArray.isArray(value)) invalid(`${label} must be an array`);
   return value;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
   const expected = [...keys].sort();
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected))
     invalid('preparation plan contains unsupported or missing fields');
 }
 
 function stringArray(value: unknown, label: string): readonly string[] {
-  return array(value, label).map((entry, index) => boundedText(entry, 0, 4_096, `${label} ${index}`));
+  return EffectArray.map(array(value, label), (entry, index) => boundedText(entry, 0, 4_096, `${label} ${index}`));
 }
 
 function boundedText(value: unknown, minimum: number, maximum: number, label: string): string {
-  if (typeof value !== 'string' || value.length < minimum || value.length > maximum || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Effect2.pipe(value, EffectString.includes('\0'))
+  ) {
     invalid(`${label} is invalid`);
   }
   return value;
@@ -2525,6 +2680,18 @@ function integer(value: unknown, minimum: number, maximum: number, label: string
   return Number(value);
 }
 
+function literal<const Values extends readonly [string, ...string[]]>(
+  value: unknown,
+  values: Values,
+  label: string,
+): Values[number] {
+  try {
+    return Schema.decodeUnknownSync(Schema.Literals(values))(value);
+  } catch {
+    invalid(`${label} is invalid`);
+  }
+}
+
 function matching(value: unknown, pattern: RegExp, label: string): string {
   const parsed = boundedText(value, 1, 4_096, label);
   if (!pattern.test(parsed)) invalid(`${label} is invalid`);
@@ -2533,12 +2700,12 @@ function matching(value: unknown, pattern: RegExp, label: string): string {
 
 function absolutePath(value: unknown, label: string): string {
   const path = boundedText(value, 1, 4_096, label);
-  if (!isAbsolute(path) || path.includes('\0')) invalid(`${label} must be absolute`);
+  if (!isAbsolute(path) || Effect2.pipe(path, EffectString.includes('\0'))) invalid(`${label} must be absolute`);
   return path;
 }
 
 function singleLine(value: string, label: string): string {
-  const trimmed = value.trim();
+  const trimmed = Effect2.pipe(value, EffectString.trim);
   if (!trimmed || /[\r\n]/u.test(trimmed)) throw new Error(`${label} must be one line.`);
   return trimmed;
 }

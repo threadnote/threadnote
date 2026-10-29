@@ -122,7 +122,7 @@ function startWatch(fs: FileSystem.FileSystem, path: Path.Path, root: string, wa
     const notifications = yield* Queue.unbounded<string>();
     const classifications = yield* Queue.unbounded<{readonly accepted: boolean; readonly path: string}>();
     const options: CodeGraphWatchOptions = {cwd: watchCwd, key: 'fixture:watch', threadnoteHome: root};
-    const watchedFs = {...fs, watch: () => Stream.fromQueue(changes)} as FileSystem.FileSystem;
+    const watchedFs = FileSystem.makeNoop({...fs, watch: () => Stream.fromQueue(changes)});
     const ignorePolicy = yield* makeCodeGraphWatchIgnorePolicy(fs, path, root, watchCwd);
     yield* watchRepository(
       watchedFs,

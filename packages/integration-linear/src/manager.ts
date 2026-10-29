@@ -1,6 +1,8 @@
+import {isSafeInteger as checkedIsSafeInteger} from '@threadnote/platform/validation';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {admittedSourceFetch, cooldownSourceAccount} from '@threadnote/integration-core/source-coordinator';
 import {isLinearSource} from './config.js';
-import {Cause, Data, Effect, Redacted, Schema} from 'effect';
+import {Cause, Effect, Redacted, Schema} from 'effect';
 import type {LinearSource, ResolvedLinearSelection} from './manager-contracts.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ManagerIntegrationApiRequest} from '@threadnote/integration-core/manager-http';
@@ -28,12 +30,15 @@ import {
   runLinearSourceRemove,
   runLinearSourceSync,
 } from './source.js';
-class ManagerLinearError extends Data.TaggedError('ManagerLinearError')<{
-  readonly status: number;
-  readonly message: string;
-}> {}
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+class ManagerLinearError extends Schema.TaggedError<ManagerLinearError, {readonly brand: unique symbol}>()(
+  'ManagerLinearError',
+  {status: Schema.Int, message: Schema.String},
+) {}
 function invalid(message: string): never {
-  throw new ManagerLinearError({status: 400, message});
+  throw ManagerLinearError.make({status: 400, message});
 }
 function id(value: unknown): string {
   if (typeof value !== 'string') return invalid('Choose a valid source name.');
@@ -50,9 +55,9 @@ function env(value: unknown): string | undefined {
   return value;
 }
 function ids(value: unknown, maximum: number): readonly string[] {
-  if (!Array.isArray(value) || value.length > maximum) return invalid('Choose explicit UUID scope IDs.');
+  if (!EffectArray.isArray(value) || value.length > maximum) return invalid('Choose explicit UUID scope IDs.');
   try {
-    return value.map(linearUuid);
+    return EffectArray.map(value, linearUuid);
   } catch {
     return invalid('Choose explicit UUID scope IDs.');
   }
@@ -65,9 +70,11 @@ function checkedUuid(value: unknown): string {
   }
 }
 const existingSource = Effect.fn('manager.linearExisting')(function* (config: RuntimeConfig, sourceId: string) {
-  const s = (yield* readSourceConfiguration(config)).sources.find(x => x.id === sourceId);
+  const s = EffectOption.getOrUndefined(
+    EffectArray.findFirst((yield* readSourceConfiguration(config)).sources, x => x.id === sourceId),
+  );
   if (s && !isLinearSource(s))
-    return yield* new ManagerLinearError({status: 409, message: 'Another connection uses this source name.'});
+    return yield* ManagerLinearError.make({status: 409, message: 'Another connection uses this source name.'});
   return s;
 });
 export const resolveLinearSelection = Effect.fn('manager.linearResolve')(function* (
@@ -153,7 +160,7 @@ export const resolveLinearSelection = Effect.fn('manager.linearResolve')(functio
     return {...identity, teams, projects, issues} satisfies ResolvedLinearSelection;
   }).pipe(
     Effect.tapError(failure =>
-      failure instanceof LinearClientError && failure.code === 'quota-rejected'
+      Schema.is(LinearClientError)(failure) && failure.code === 'quota-rejected'
         ? cooldownSourceAccount(config, 'linear', token, failure.retryAfterMilliseconds ?? 60_000, 'POST')
         : Effect.void,
     ),
@@ -167,7 +174,7 @@ export const listLinearIntegrations = Effect.fn('manager.linearList')(function* 
     const credentialConfigured = yield* linearCredentialConfigured(config, source);
     const inventory = yield* runLinearSourceInventory(config, source.id);
     const access = yield* receipt(config, source.id);
-    const active = inventory.entries.filter(e => e.status === 'active');
+    const active = EffectArray.filter(inventory.entries, e => e.status === 'active');
     sources.push({
       ...source,
       credentialConfigured,
@@ -176,15 +183,19 @@ export const listLinearIntegrations = Effect.fn('manager.linearList')(function* 
         !credentialConfigured ||
         access === null ||
         access?.status === 'authentication-rejected' ||
-        inventory.entries.some(e => e.status === 'pending' || e.status === 'quarantined' || e.status === 'stale')
+        EffectArray.some(
+          inventory.entries,
+          e => e.status === 'pending' || e.status === 'quarantined' || e.status === 'stale',
+        )
           ? 'needs-attention'
           : access?.completedAt !== undefined && !inventory.progress
             ? 'active'
             : 'needs-sync',
-      issues: active.filter(e => e.documentId.startsWith('issue-')).length,
-      documents: active.filter(e => e.documentId.startsWith('document-')).length,
-      updates: active.filter(e => e.documentId.startsWith('update-')).length,
-      chunks: active.reduce((n, e) => n + e.chunks, 0),
+      issues: EffectArray.filter(active, e => Effect2.pipe(e.documentId, EffectString.startsWith('issue-'))).length,
+      documents: EffectArray.filter(active, e => Effect2.pipe(e.documentId, EffectString.startsWith('document-')))
+        .length,
+      updates: EffectArray.filter(active, e => Effect2.pipe(e.documentId, EffectString.startsWith('update-'))).length,
+      chunks: EffectArray.reduce(active, 0, (n, e) => n + e.chunks),
       coverage: LINEAR_COVERAGE,
       ...(access?.completedAt === undefined ? {} : {lastSyncedAt: access.completedAt}),
       ...(access?.nextAttemptAt === undefined ? {} : {nextAttemptAt: access.nextAttemptAt}),
@@ -209,7 +220,7 @@ const route = Effect.fn('manager.linearRoute')(function* (request: ManagerIntegr
         case 'save-source': {
           const existing = yield* existingSource(request.config, sourceId);
           if (!!existing !== (body.editing === true))
-            return yield* new ManagerLinearError({
+            return yield* ManagerLinearError.make({
               status: 409,
               message: 'This connection changed. Refresh connections before saving.',
             });
@@ -229,7 +240,7 @@ const route = Effect.fn('manager.linearRoute')(function* (request: ManagerIntegr
           )
             invalid('Provide an API key or environment credential.');
           if (typeof body.project !== 'string') invalid('Choose one local project.');
-          if (!Number.isSafeInteger(body.refreshIntervalMinutes) || !Number.isSafeInteger(body.maxStaleHours))
+          if (!checkedIsSafeInteger(body.refreshIntervalMinutes) || !checkedIsSafeInteger(body.maxStaleHours))
             invalid('Choose valid freshness settings.');
           yield* runLinearSourceAdd(request.config, {
             id: sourceId,
@@ -245,8 +256,8 @@ const route = Effect.fn('manager.linearRoute')(function* (request: ManagerIntegr
             credentialEnv: environment ?? existing?.credentialEnv,
             credentialStorage: token || (!environment && existing?.credentialStorage === 'local') ? 'local' : undefined,
             enabled: existing?.enabled ?? true,
-            refreshIntervalMinutes: body.refreshIntervalMinutes as number,
-            maxStaleHours: body.maxStaleHours as number,
+            refreshIntervalMinutes: body.refreshIntervalMinutes,
+            maxStaleHours: body.maxStaleHours,
             expectedFingerprint: existing ? sourceConfigurationFingerprint(existing) : null,
           });
           return {
@@ -302,7 +313,7 @@ export const handleManagerLinearIntegrationRequest = (request: ManagerIntegratio
   route(request).pipe(
     Effect.catchCause(cause => {
       const error = Cause.squash(cause);
-      if (error instanceof ManagerLinearError)
+      if (Schema.is(ManagerLinearError)(error))
         return Effect.succeed({status: error.status, body: {error: error.message}});
       if (Schema.is(LinearSourceConflictError)(error))
         return Effect.succeed({

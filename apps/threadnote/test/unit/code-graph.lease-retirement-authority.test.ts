@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
@@ -10,15 +11,17 @@ import {releaseSnapshotLease} from '@threadnote/graph/store/leases';
 import {initializeSchema} from '@threadnote/graph/store/schema/initialization';
 import {CODE_GRAPH_EXTRACTOR_GENERATION} from '@threadnote/graph/types';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const SNAPSHOT = 'cgsn_1111111111111111111111111111111111111111';
 const EXPIRED_SNAPSHOT = 'cgsn_2222222222222222222222222222222222222222';
-const WORKTREE = 'c'.repeat(64);
+const WORKTREE = Effect2.pipe('c', EffectString.repeat(64));
 // Scoped authority inspects its immutable definitions through sqlite_master;
 // the narrow lease path only checks lease/snapshot authority and never emits
 // this parameterized definition lookup.
 const cleanupObservation = (query: string) =>
-  query.includes('FROM sqlite_master WHERE name = ? COLLATE NOCASE LIMIT 2');
+  Effect2.pipe(query, EffectString.includes('FROM sqlite_master WHERE name = ? COLLATE NOCASE LIMIT 2'));
 
 describe('snapshot lease retirement authority', () => {
   effectIt.effect('skips unused full retirement observations for clean and already released leases', () =>
@@ -27,12 +30,18 @@ describe('snapshot lease retirement authority', () => {
         yield* seedLease(sql, 'clean', SNAPSHOT, false);
         const queries = yield* observeQueries();
         expect(yield* releaseSnapshotLease('clean')).toBe(false);
-        expect(queries.filter(cleanupObservation)).toHaveLength(0);
-        expect(queries.some(query => query.includes("pragma_table_xinfo('snapshot_leases')"))).toBe(true);
-        expect(queries.some(query => query.includes('WHERE lease.expires_at <= ?'))).toBe(true);
+        expect(EffectArray.filter(queries, cleanupObservation)).toHaveLength(0);
+        expect(
+          EffectArray.some(queries, query =>
+            Effect2.pipe(query, EffectString.includes("pragma_table_xinfo('snapshot_leases')")),
+          ),
+        ).toBe(true);
+        expect(
+          EffectArray.some(queries, query => Effect2.pipe(query, EffectString.includes('WHERE lease.expires_at <= ?'))),
+        ).toBe(true);
         queries.length = 0;
         expect(yield* releaseSnapshotLease('clean')).toBe(false);
-        expect(queries.filter(cleanupObservation)).toHaveLength(0);
+        expect(EffectArray.filter(queries, cleanupObservation)).toHaveLength(0);
         expect(yield* snapshotState(sql)).toBe('ready');
         expect(yield* sql`SELECT token FROM snapshot_leases`).toEqual([]);
       }),
@@ -46,13 +55,13 @@ describe('snapshot lease retirement authority', () => {
         yield* seedLease(sql, 'last', SNAPSHOT, false, 120_000);
         const queries = yield* observeQueries();
         expect(yield* releaseSnapshotLease('first')).toBe(false);
-        expect(queries.filter(cleanupObservation)).toHaveLength(0);
+        expect(EffectArray.filter(queries, cleanupObservation)).toHaveLength(0);
         expect(yield* sql`SELECT token, retire_when_inactive FROM snapshot_leases`).toEqual([
           {retire_when_inactive: 1, token: 'last'},
         ]);
         queries.length = 0;
         expect(yield* releaseSnapshotLease('last')).toBe(true);
-        expect(queries.some(cleanupObservation)).toBe(true);
+        expect(EffectArray.some(queries, cleanupObservation)).toBe(true);
         expect(yield* snapshotState(sql)).toBe('retired');
       }),
     ),
@@ -69,7 +78,7 @@ describe('snapshot lease retirement authority', () => {
           yield* sql.unsafe(mutation);
           const queries = yield* observeQueries();
           expect(yield* releaseSnapshotLease('last')).toBe(false);
-          expect(queries.some(cleanupObservation)).toBe(true);
+          expect(EffectArray.some(queries, cleanupObservation)).toBe(true);
           expect(yield* snapshotState(sql)).toBe('ready');
           expect(yield* sql`SELECT token FROM snapshot_leases`).toEqual([]);
         }),
@@ -114,10 +123,12 @@ describe('snapshot lease retirement authority', () => {
           LIMIT 1
         `;
         expect(trigger[0]?.name).toBeDefined();
-        yield* sql.unsafe(`DROP TRIGGER "${trigger[0]?.name?.replaceAll('"', '""')}"`);
+        yield* sql.unsafe(
+          `DROP TRIGGER "${Effect2.pipe(trigger[0]?.name, effectOptionalString => (effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.replaceAll('"', '""'))))}"`,
+        );
         const queries = yield* observeQueries();
         expect(yield* releaseSnapshotLease('clean')).toBe(false);
-        expect(queries.filter(cleanupObservation)).toHaveLength(0);
+        expect(EffectArray.filter(queries, cleanupObservation)).toHaveLength(0);
         expect(yield* snapshotState(sql)).toBe('ready');
         expect(yield* sql`SELECT token FROM snapshot_leases`).toEqual([]);
       }),
@@ -137,12 +148,16 @@ describe('snapshot lease retirement authority', () => {
         `;
         const name = trigger[0]?.name;
         expect(name).toBeDefined();
-        const escapedName = name?.replaceAll('"', '""');
+        const escapedName = Effect2.pipe(name, effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect2.pipe(effectOptionalString, EffectString.replaceAll('"', '""')),
+        );
         yield* sql.unsafe(`DROP TRIGGER "${escapedName}"`);
         yield* sql.unsafe(`CREATE TRIGGER "${escapedName}" AFTER INSERT ON removed_views BEGIN SELECT 1; END`);
         const queries = yield* observeQueries();
         expect(yield* releaseSnapshotLease('clean')).toBe(false);
-        expect(queries.filter(cleanupObservation)).toHaveLength(0);
+        expect(EffectArray.filter(queries, cleanupObservation)).toHaveLength(0);
         expect(yield* snapshotState(sql)).toBe('ready');
         expect(yield* sql`SELECT token FROM snapshot_leases`).toEqual([]);
       }),
@@ -157,7 +172,7 @@ describe('snapshot lease retirement authority', () => {
         yield* seedLease(sql, 'expired', EXPIRED_SNAPSHOT, true, 0);
         const queries = yield* observeQueries();
         expect(yield* releaseSnapshotLease('clean')).toBe(true);
-        expect(queries.some(cleanupObservation)).toBe(true);
+        expect(EffectArray.some(queries, cleanupObservation)).toBe(true);
         expect(yield* snapshotState(sql)).toBe('ready');
         expect(yield* snapshotState(sql, EXPIRED_SNAPSHOT)).toBe('retired');
         expect(yield* sql`SELECT token FROM snapshot_leases`).toEqual([]);
@@ -190,7 +205,7 @@ describe('snapshot lease retirement authority', () => {
     ({active, flagged, order}) =>
       withFixture(sql =>
         Effect.gen(function* () {
-          const tokens = order.map(index => `reader-${index}`);
+          const tokens = EffectArray.map(order, index => `reader-${index}`);
           const carrier = tokens[flagged % tokens.length];
           const remaining = new Set(tokens);
           for (const [index, token] of tokens.entries()) {
@@ -209,8 +224,10 @@ describe('snapshot lease retirement authority', () => {
             const leases = yield* sql<{readonly token: string; readonly retire_when_inactive: number}>`
               SELECT token, retire_when_inactive FROM snapshot_leases ORDER BY token
             `;
-            expect(leases.map(lease => lease.token)).toEqual([...remaining].sort());
-            expect(leases.filter(lease => lease.retire_when_inactive === 1)).toHaveLength(remaining.size > 0 ? 1 : 0);
+            expect(EffectArray.map(leases, lease => lease.token)).toEqual([...remaining].sort());
+            expect(EffectArray.filter(leases, lease => lease.retire_when_inactive === 1)).toHaveLength(
+              remaining.size > 0 ? 1 : 0,
+            );
           }
         }),
       ),
@@ -239,7 +256,7 @@ function seedSnapshot(sql: SqlClient.SqlClient, snapshotId: string) {
         extractor_set, dirty, overlay_fingerprint, state, file_count, symbol_count,
         edge_count, started_at, completed_at, failure_summary
       ) VALUES (
-        ${snapshotId}, 'repository', ${WORKTREE}, ${'1'.repeat(40)}, ${`cgc_${snapshotId.slice(-40)}`}, NULL,
+        ${snapshotId}, 'repository', ${WORKTREE}, ${Effect2.pipe('1', EffectString.repeat(40))}, ${`cgc_${Effect2.pipe(snapshotId, EffectString.slice(-40))}`}, NULL,
         'fixture', 0, NULL, 'ready', 0, 0, 0, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z', NULL
       )
     `;

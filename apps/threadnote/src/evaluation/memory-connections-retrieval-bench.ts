@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Path} from 'effect';
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {readMemoryRecordsByUri} from '../memory/commands.js';
@@ -53,20 +54,25 @@ export const runMemoryConnectionsRetrievalBench = Effect.fn('evaluation.memoryCo
         const serializedResult = `${JSON.stringify({
           connections: result.connections,
           coverage: result.coverage,
-          memories: result.candidates.map(candidate => ({memoryId: candidate.memoryId, uri: candidate.uri})),
+          memories: EffectArray.map(result.candidates, candidate => ({
+            memoryId: candidate.memoryId,
+            uri: candidate.uri,
+          })),
           premises: result.premises,
         })}\n`;
         const responseBytes = encoder.encode(serializedResult).byteLength;
         return {
           connectionCount: result.connections.length,
-          connectionStates: result.connections.map(connection => ({
+          connectionStates: EffectArray.map(result.connections, connection => ({
             currentness: connection.currentness,
             resolution: connection.resolution,
           })),
           elapsedMilliseconds: Number(finished - started) / 1_000_000,
           estimatedTokens: Math.ceil(responseBytes / 3),
-          memoryIds: result.candidates.flatMap(candidate => (candidate.memoryId ? [candidate.memoryId] : [])),
-          premiseStates: result.premises.map(premise => premise.state),
+          memoryIds: EffectArray.flatMap(result.candidates, candidate =>
+            candidate.memoryId ? [candidate.memoryId] : [],
+          ),
+          premiseStates: EffectArray.map(result.premises, premise => premise.state),
           queryId: testCase.id,
           responseBytes,
           serializedResult,

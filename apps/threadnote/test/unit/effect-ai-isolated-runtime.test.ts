@@ -1,8 +1,9 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it} from '@effect/vitest';
-import {Cause, Effect, Exit, Fiber, Layer} from 'effect';
+import {Cause, Effect, Exit, Fiber, Layer, Schema} from 'effect';
 import {describe} from 'vitest';
 import {
   isolatedLocalModelRuntimeLayer,
@@ -18,12 +19,18 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {fatalLocalModelWorkerHarness} from '../helpers/fatal-local-model-worker.js';
 import {anonymousTelemetryDiagnosticFromError} from '@threadnote/threadnote/telemetry/diagnostic';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const embeddingManifest = {
-  ...BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!,
+  ...EffectOption.getOrUndefined(
+    EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+  )!,
   dimensions: 2,
 };
-const generationManifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
+const generationManifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'generation'),
+)!;
 
 describe('isolated local model runtime', () => {
   it.effect('round-trips the effective native embedding context plan in diagnostics', () => {
@@ -76,7 +83,13 @@ describe('isolated local model runtime', () => {
 
       expect(options.executable).toBe('/runtime/bun');
       expect(options.arguments.at(-1)).toBe('--threadnote-local-model-worker');
-      expect(options.arguments.at(-2)?.replaceAll('\\', '/')).toMatch(/\/src\/standalone\.ts$/);
+      expect(
+        Effect2.pipe(options.arguments.at(-2), effectOptionalString =>
+          effectOptionalString == null
+            ? undefined
+            : Effect2.pipe(effectOptionalString, EffectString.replaceAll('\\', '/')),
+        ),
+      ).toMatch(/\/src\/standalone\.ts$/);
       expect(options.environment.THREADNOTE_TELEMETRY_SESSION_ID).toBe('tns_000102030405060708090a0b0c0d0e0f');
       expect(options.environment.THREADNOTE_TELEMETRY_CONSENT_GENERATION).toBe('tng_000102030405060708090a0b0c0d0e0f');
       expect(options.environment.THREADNOTE_TELEMETRY_CHILD).toBe('local-model-worker');
@@ -124,7 +137,7 @@ describe('isolated local model runtime', () => {
         }
         worker.respond(
           request,
-          request.payload.inputs.map((input: string) => [input.length, 1]),
+          EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, 1]),
         );
       });
       processes.push(worker);
@@ -156,7 +169,7 @@ describe('isolated local model runtime', () => {
       const worker = new FakeWorkerProcess(request => {
         worker.respond(
           request,
-          request.payload.inputs.map((input: string) => [input.length, 6]),
+          EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, 6]),
         );
       });
       processes.push(worker);
@@ -203,7 +216,7 @@ describe('isolated local model runtime', () => {
           expect(exit.cause.toString()).not.toContain('SECRET_INPUT_MUST_NOT_LEAK');
         }
         expect(processes).toHaveLength(2);
-        expect(processes.every(worker => worker.killed)).toBe(true);
+        expect(EffectArray.every(processes, worker => worker.killed)).toBe(true);
       }).pipe(provideTestLayer(runtimeLayer(spawn, 10)));
     },
   );
@@ -230,7 +243,7 @@ describe('isolated local model runtime', () => {
       );
       expect(Exit.isFailure(exit)).toBe(true);
       expect(processes).toHaveLength(2);
-      expect(processes.every(worker => worker.killed)).toBe(true);
+      expect(EffectArray.every(processes, worker => worker.killed)).toBe(true);
     }).pipe(provideTestLayer(runtimeLayer(spawn, 10)));
   });
 
@@ -238,8 +251,8 @@ describe('isolated local model runtime', () => {
     const processes: FakeWorkerProcess[] = [];
     const spawn: LocalModelWorkerSpawner = () => {
       const worker = new FakeWorkerProcess(() => {
-        worker.stdoutFeed.push('x'.repeat(33));
-        worker.stdoutFeed.push('y'.repeat(33));
+        worker.stdoutFeed.push(Effect2.pipe('x', EffectString.repeat(33)));
+        worker.stdoutFeed.push(Effect2.pipe('y', EffectString.repeat(33)));
       });
       processes.push(worker);
       return worker;
@@ -256,7 +269,7 @@ describe('isolated local model runtime', () => {
       );
       expect(Exit.isFailure(exit)).toBe(true);
       expect(processes).toHaveLength(2);
-      expect(processes.every(worker => worker.killed)).toBe(true);
+      expect(EffectArray.every(processes, worker => worker.killed)).toBe(true);
     }).pipe(provideTestLayer(runtimeLayer(spawn, 1_000, 64)));
   });
 
@@ -266,7 +279,7 @@ describe('isolated local model runtime', () => {
       const worker = new FakeWorkerProcess(request => {
         worker.respond(
           request,
-          request.payload.inputs.map((input: string) => [input.length, 2]),
+          EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, 2]),
         );
       });
       processes.push(worker);
@@ -291,9 +304,13 @@ describe('isolated local model runtime', () => {
       expect(first).toHaveLength(40);
       expect(second).toEqual([[5, 2]]);
       expect(processes).toHaveLength(1);
-      expect(processes[0].writes.map(request => request.payload.inputs.length)).toEqual([32, 8, 1]);
-      expect(processes[0].writes.map(request => request.payload.embeddingContextPoolSize)).toEqual([8, 8, undefined]);
-      expect(new Set(processes[0].writes.map(request => request.id)).size).toBe(3);
+      expect(EffectArray.map(processes[0].writes, request => fakeRequestInputs(request).length)).toEqual([32, 8, 1]);
+      expect(EffectArray.map(processes[0].writes, request => request.payload.embeddingContextPoolSize)).toEqual([
+        8,
+        8,
+        undefined,
+      ]);
+      expect(new Set(EffectArray.map(processes[0].writes, request => request.id)).size).toBe(3);
     }).pipe(provideTestLayer(runtimeLayer(spawn)));
   });
 
@@ -304,7 +321,7 @@ describe('isolated local model runtime', () => {
       const worker = new FakeWorkerProcess(request => {
         worker.respond(
           request,
-          request.payload.inputs.map((input: string) => [input.length, generation]),
+          EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, generation]),
         );
       });
       processes.push(worker);
@@ -353,7 +370,7 @@ describe('isolated local model runtime', () => {
         request => {
           worker.respond(
             request,
-            request.payload.inputs.map((input: string) => [input.length, generation]),
+            EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, generation]),
           );
         },
         undefined,
@@ -401,7 +418,7 @@ describe('isolated local model runtime', () => {
           active -= 1;
           worker.respond(
             request,
-            request.payload.inputs.map((input: string) => [input.length, 3]),
+            EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, 3]),
           );
         }, 5);
       });
@@ -433,7 +450,7 @@ describe('isolated local model runtime', () => {
       const worker = new FakeWorkerProcess(request => {
         worker.respond(
           request,
-          request.payload.inputs.map((input: string) => [input.length, 4]),
+          EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, 4]),
         );
       });
       processes.push(worker);
@@ -463,7 +480,7 @@ describe('isolated local model runtime', () => {
         request => {
           worker.respond(
             request,
-            request.payload.inputs.map((input: string) => [input.length, 5]),
+            EffectArray.map(fakeRequestInputs(request), (input: string) => [input.length, 5]),
           );
         },
         undefined,
@@ -569,9 +586,34 @@ interface FakeRequest {
   readonly operation: string;
   readonly payload: {
     readonly embeddingContextPoolSize?: 1 | 2 | 4 | 8;
-    readonly inputs: readonly string[];
+    readonly inputs?: readonly string[];
   };
   readonly protocol: number;
+}
+
+const FakeRequestSchema = Schema.StructWithRest(
+  Schema.Struct({
+    id: Schema.String,
+    operation: Schema.String,
+    payload: Schema.StructWithRest(
+      Schema.Struct({
+        embeddingContextPoolSize: Schema.optionalKey(Schema.Literals([1, 2, 4, 8])),
+        inputs: Schema.optionalKey(Schema.String.pipe(Schema.Array)),
+      }),
+      [Schema.Record(Schema.String, Schema.Unknown)],
+    ),
+    protocol: Schema.Finite,
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+
+function isFakeRequest(value: unknown): value is FakeRequest {
+  return Schema.is(FakeRequestSchema)(value);
+}
+
+function fakeRequestInputs(request: FakeRequest): readonly string[] {
+  if (!request.payload.inputs) throw TestError.make({message: 'Expected model inputs on a fake worker request.'});
+  return request.payload.inputs;
 }
 
 class FakeWorkerProcess implements LocalModelWorkerProcess {
@@ -624,7 +666,9 @@ class FakeWorkerProcess implements LocalModelWorkerProcess {
   }
 
   write(line: string): Promise<void> | void {
-    const request = JSON.parse(line) as FakeRequest;
+    const value: unknown = JSON.parse(line);
+    if (!isFakeRequest(value)) throw TestError.make({message: 'Invalid fake worker request.'});
+    const request = value;
     this.writes.push(request);
     this.onWrite(request);
     return this.writeResult?.();

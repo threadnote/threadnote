@@ -1,12 +1,33 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Schema} from 'effect';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
 import {renderNativeDocument, type NativeDocumentEnvelope} from '@threadnote/workflow-automations/documents';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {nativeWorkflowError} from './memory.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const utf8 = new TextEncoder();
 const failure = (message: string) => WorkflowAutomationError.make({code: 'invalid-authoring-artifact', message});
+function isWorkflowArtifact(value: unknown): value is WorkflowArtifact {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'uri' in value &&
+    typeof value.uri === 'string' &&
+    'memoryId' in value &&
+    typeof value.memoryId === 'string' &&
+    'revision' in value &&
+    typeof value.revision === 'string' &&
+    'body' in value &&
+    typeof value.body === 'string' &&
+    'storageKind' in value &&
+    (value.storageKind === 'durable' || value.storageKind === 'handoff') &&
+    'state' in value &&
+    (value.state === 'active' || value.state === 'archived')
+  );
+}
 const digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const uri = Schema.String.check(Schema.isPattern(/^threadnote:\/\/[^\s]+$/u), Schema.isMaxLength(4096));
 export const AuthoringReferenceSchema = Schema.Struct({
@@ -83,10 +104,15 @@ export function encodeAuthoringArtifact(title: string, summary: string, value: u
   return appendAuthoringPayload('# ' + title + '\n\n## Summary\n\n' + summary + '\n', value);
 }
 export function decodeAuthoringArtifact<A>(body: string, schema: Schema.ConstraintDecoder<A>): A {
-  const start = body.lastIndexOf('\n' + marker);
-  if (start < 0 || !body.endsWith(' -->\n')) throw failure('The native authoring marker is missing.');
+  const start = Effect2.pipe(
+    body,
+    EffectString.lastIndexOf('\n' + marker),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  if (start < 0 || !Effect2.pipe(body, EffectString.endsWith(' -->\n')))
+    throw failure('The native authoring marker is missing.');
   try {
-    const json = body.slice(start + 1 + marker.length, -' -->\n'.length);
+    const json = Effect2.pipe(body, EffectString.slice(start + 1 + marker.length, -' -->\n'.length));
     return Schema.decodeUnknownSync(schema, {onExcessProperty: 'error'})(JSON.parse(json));
   } catch {
     throw failure('The native authoring artifact is malformed. No legacy record was imported.');
@@ -118,14 +144,25 @@ const base64 = (content: string): string => {
 const fromBase64 = (content: string): string => {
   const binary = atob(content);
   if (btoa(binary) !== content) throw failure('The authoring data encoding is not canonical.');
-  return new TextDecoder('utf-8', {fatal: true}).decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
+  return new TextDecoder('utf-8', {fatal: true}).decode(
+    Uint8Array.from(binary, char =>
+      Effect2.pipe(
+        char,
+        EffectString.charCodeAt(0),
+        Effect2.Option.getOrElse(() => NaN),
+      ),
+    ),
+  );
 };
 
 export const authoringRelations = (context: readonly AuthoringReference[], children: readonly AuthoringReference[]) =>
-  [...new Map([...context, ...children].map(reference => [reference.uri, reference])).values()].map(reference => ({
-    type: 'references' as const,
-    uri: reference.uri,
-  }));
+  EffectArray.map(
+    [...new Map(EffectArray.map([...context, ...children], reference => [reference.uri, reference])).values()],
+    reference => ({
+      type: 'references' as const,
+      uri: reference.uri,
+    }),
+  );
 
 export function makeAuthoringArtifacts<R>(options: {
   readonly call: NativeAuthoringCall<R>;
@@ -154,7 +191,9 @@ export function makeAuthoringArtifacts<R>(options: {
       });
       if (typeof result !== 'object' || result === null || !('artifact' in result))
         return yield* failure('Native authoring readback did not return an artifact.');
-      const artifact = result.artifact as WorkflowArtifact;
+      const artifact = result.artifact;
+      if (!isWorkflowArtifact(artifact))
+        return yield* failure('Native authoring readback returned a malformed artifact.');
       if (
         artifact.uri !== reference.uri ||
         artifact.memoryId !== reference.memoryId ||
@@ -196,7 +235,8 @@ export function makeAuthoringArtifacts<R>(options: {
       });
       if (typeof result !== 'object' || result === null || !('artifact' in result))
         return yield* failure('Native authoring write did not return verified artifact readback.');
-      const artifact = result.artifact as WorkflowArtifact;
+      const artifact = result.artifact;
+      if (!isWorkflowArtifact(artifact)) return yield* failure('Native authoring write returned a malformed artifact.');
       if (artifact.state === 'active') ownedUris.add(artifact.uri);
       return artifact;
     });
@@ -277,7 +317,7 @@ export function makeAuthoringArtifacts<R>(options: {
           }
         }).pipe(Effect.ensuring(Effect.sync(() => active.delete(current.uri))));
       yield* visit(reference);
-      return texts.join('');
+      return EffectArray.join(texts, '');
     });
   return {read, write, writeData, readData};
 }

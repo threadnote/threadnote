@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it} from '@effect/vitest';
 import {Effect, Exit, FileSystem, Path} from 'effect';
 import {describe} from 'vitest';
@@ -12,6 +13,8 @@ import {resolveAuthoredMemoryRelations} from '@threadnote/threadnote/memory/rela
 import {loadRecallIndex} from '@threadnote/recall/index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('MCP personal-memory schema rewrite guard', () => {
   it.effect('preserves a receipt-witnessed identity when replacing an id-less destination by alias', () =>
@@ -42,7 +45,7 @@ describe('MCP personal-memory schema rewrite guard', () => {
           topic: 'mcp-receipt-target',
         };
         const original = formatMemoryDocument('MEMORY', metadata, 'MCP receipt replacement source.');
-        const missingIdentity = original.replace(`memory_id: ${memoryId}\n`, '');
+        const missingIdentity = Effect2.pipe(original, EffectString.replace(`memory_id: ${memoryId}\n`, ''));
         const store = yield* ResourceStore;
         const location = {account: config.account, home, user: config.user};
         yield* store.write(location, sourceUri, original, {mode: 'create'});
@@ -165,12 +168,20 @@ describe('MCP personal-memory schema rewrite guard', () => {
           topic: 'schema-race',
         };
         const original = formatMemoryDocument('MEMORY', metadata, 'Writer A observed schema v4.');
-        const future = original
-          .replace(
-            `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-            `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
-          )
-          .replace('\n\n', '\nfuture_writer_field: preserve-me\n\n');
+        const future = Effect2.pipe(original, __effectPipeInput => {
+          const __effectPipeStage0 = Effect2.pipe(
+            __effectPipeInput,
+            EffectString.replace(
+              `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+              `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+            ),
+          );
+          const __effectPipeStage1 = Effect2.pipe(
+            __effectPipeStage0,
+            EffectString.replace('\n\n', '\nfuture_writer_field: preserve-me\n\n'),
+          );
+          return __effectPipeStage1;
+        });
         const store = yield* ResourceStore;
         const location = {account: config.account, home: config.agentContextHome, user: config.user};
         yield* store.write(location, uri, original, {mode: 'create'});
@@ -183,7 +194,10 @@ describe('MCP personal-memory schema rewrite guard', () => {
 
         yield* store.write(location, uri, future, {mode: 'replace'});
         const result = yield* writeDurableMemory(config, {...params, prepared});
-        const text = result.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const text = EffectArray.join(
+          EffectArray.map(result.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
 
         expect(result.isError).toBe(true);
         expect(text).toContain('newer than supported');
@@ -237,7 +251,10 @@ describe('MCP personal-memory schema rewrite guard', () => {
 
         yield* store.write(location, targetUri, changed, {mode: 'replace'});
         const result = yield* writeDurableMemory(config, {...params, prepared});
-        const text = result.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const text = EffectArray.join(
+          EffectArray.map(result.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
 
         expect(result.isError).toBe(true);
         expect(text).toContain('changed after this mutation was planned');
@@ -302,7 +319,10 @@ describe('MCP personal-memory schema rewrite guard', () => {
           expectedSourceContent: authored.targets,
           metadata: sourceMetadata,
         });
-        const text = result.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const text = EffectArray.join(
+          EffectArray.map(result.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
 
         expect(result.isError).toBe(true);
         expect(text).toContain('identity became ambiguous or moved during the write');

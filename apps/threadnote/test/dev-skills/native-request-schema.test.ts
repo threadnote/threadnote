@@ -5,6 +5,8 @@ import fc from 'fast-check';
 import {nativeRequestSchema} from '../../src/workflow_automation/request_schema.js';
 import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
 import {provideNative} from './native-automation-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const base = {protocolVersion: 1, executorVersion: 1, action: 'request-schema'};
 const topics = [
@@ -62,7 +64,7 @@ describe('native request schema discovery', () => {
       {offsetBytes: 1},
       {maxBytes: 16385},
       {command: 'invented'},
-      {sourceDigest: 'a'.repeat(64)},
+      {sourceDigest: Effect2.pipe('a', EffectString.repeat(64))},
     ])
       expect(() => nativeRequestSchema({...base, topic: 'init', ...extra})).toThrow();
     expect(() => nativeRequestSchema({...base, topic: 'cycle', command: 'invented'})).toThrow();

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Path, PlatformError, Schema} from 'effect';
@@ -21,13 +22,17 @@ import {
   type CodeGraphSymbol,
 } from '../../src/types.js';
 import {isCodeGraphEmbeddingWorkerContention} from '../../src/vector/worker.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 const target: CodeGraphSnapshot = {
   id: 'publication-retry',
-  commit: 'c'.repeat(40),
-  repositoryId: 'a'.repeat(64),
-  worktreeId: 'b'.repeat(64),
+  commit: Effect2.pipe('c', EffectString.repeat(40)),
+  repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+  worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
   dirty: false,
   extractorSet: 'test',
   state: 'ready',
@@ -35,9 +40,9 @@ const target: CodeGraphSnapshot = {
   symbolCount: 2,
   edgeCount: 0,
 };
-const symbols: readonly CodeGraphSymbol[] = ['Alpha', 'Beta'].map((name, index) => ({
+const symbols: readonly CodeGraphSymbol[] = EffectArray.map(['Alpha', 'Beta'], (name, index) => ({
   id: `publication-${index}`,
-  contentHash: String(index).repeat(64),
+  contentHash: Effect2.pipe(String(index), EffectString.repeat(64)),
   documentation: `Coordinates ${name} publication.`,
   exported: true,
   kind: 'class',
@@ -121,7 +126,9 @@ const fixture = Effect.gen(function* () {
     embedMany: ({inputs}) =>
       Effect.sync(() => {
         batches.push(inputs.length);
-        return inputs.map((_, axis) => Array.from({length: manifest.dimensions}, (__, n) => (axis === n ? 1 : 0)));
+        return EffectArray.map(inputs, (_, axis) =>
+          Array.from({length: manifest.dimensions}, (__, n) => (axis === n ? 1 : 0)),
+        );
       }),
     generate: unexpected,
     rerank: unexpected,
@@ -226,7 +233,7 @@ effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer(BUI
             {
               validate: Effect.gen(function* () {
                 const current = yield* inspect(f.filename);
-                if (current.generations.some(row => row.state === state)) return yield* failure;
+                if (EffectArray.some(current.generations, row => row.state === state)) return yield* failure;
               }),
               attach: commit => commit,
             },

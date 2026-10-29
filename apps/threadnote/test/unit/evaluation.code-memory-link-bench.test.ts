@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -18,7 +19,7 @@ describe('CodeMemoryLinkBench runtime', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const fixture = JSON.parse(yield* fs.readFileString(yield* path.fromFileUrl(FIXTURE))) as unknown;
+      const fixture: unknown = JSON.parse(yield* fs.readFileString(yield* path.fromFileUrl(FIXTURE)));
       const result = yield* evaluateCodeMemoryLinkBenchRuntime(fixture);
 
       expect(codeMemoryLinkBenchFixtureHash(parseCodeMemoryLinkBenchFixtureV1(fixture))).toBe(
@@ -30,7 +31,11 @@ describe('CodeMemoryLinkBench runtime', () => {
       expect(result.metrics.falseCurrentCount).toBe(0);
       expect(result.metrics.coverageAccuracy).toBe(1);
       expect(result.metrics.warmIncrementalMilliseconds?.samples).toBe(25);
-      expect(result.queries.find(query => query.id === 'relocated-symbol-locator')).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(result.queries, query => query.id === 'relocated-symbol-locator'),
+        ),
+      ).toMatchObject({
         rankedUris: [
           'threadnote://user/code-memory-bench/memories/durable/projects/threadnote/relocated-symbol-locator-gold.md',
         ],
@@ -43,10 +48,15 @@ describe('CodeMemoryLinkBench runtime', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const fixture = JSON.parse(yield* fs.readFileString(yield* path.fromFileUrl(FIXTURE))) as {
-        queries: Array<{task: string}>;
+      const parsed = parseCodeMemoryLinkBenchFixtureV1(
+        JSON.parse(yield* fs.readFileString(yield* path.fromFileUrl(FIXTURE))),
+      );
+      const fixture = {
+        ...parsed,
+        queries: EffectArray.map(parsed.queries, (query, index) =>
+          index === 0 ? {...query, task: `${query.task} unreviewed`} : query,
+        ),
       };
-      fixture.queries[0].task = `${fixture.queries[0].task} unreviewed`;
 
       const exit = yield* Effect.exit(evaluateCodeMemoryLinkBenchRuntime(fixture));
       expect(String(exit)).toContain('is not the approved');

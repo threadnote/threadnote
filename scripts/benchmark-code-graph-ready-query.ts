@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Clock, DateTime, Effect, FileSystem, Option, Path} from 'effect';
@@ -78,6 +79,8 @@ import {
   type BenchmarkRuntimeProvenance,
 } from './benchmark-code-graph.js';
 import {atomicWrite, printJson, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 const MAX_GIT_OUTPUT_BYTES = 64 * 1_048_576;
@@ -240,10 +243,16 @@ export const preflightReadyQueryBenchmark = Effect.fn('readyQueryEvidence.prefli
   }
   const [commit, tree, dirty, origin, trackedFiles] = yield* Effect.all(
     [
-      git(repository, ['rev-parse', 'HEAD']).pipe(Effect.map(result => result.stdout.trim())),
-      git(repository, ['rev-parse', 'HEAD^{tree}']).pipe(Effect.map(result => result.stdout.trim())),
-      git(repository, CONFIG_NEUTRAL_STATUS_ARGUMENTS).pipe(Effect.map(result => result.stdout.trim())),
-      git(repository, ['remote', 'get-url', 'origin']).pipe(Effect.map(result => result.stdout.trim())),
+      git(repository, ['rev-parse', 'HEAD']).pipe(Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim))),
+      git(repository, ['rev-parse', 'HEAD^{tree}']).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
+      git(repository, CONFIG_NEUTRAL_STATUS_ARGUMENTS).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
+      git(repository, ['remote', 'get-url', 'origin']).pipe(
+        Effect.map(result => Effect2.pipe(result.stdout, EffectString.trim)),
+      ),
       trackedFileCount(repository),
     ],
     {concurrency: 5},
@@ -418,7 +427,7 @@ export const benchmarkReadyQueryEvidence = Effect.scoped(
             exact: timingSeries(
               'exact',
               exactResults,
-              exactResults.map(() => 0),
+              EffectArray.map(exactResults, () => 0),
             ),
           },
           requestProfile: READY_QUERY_REQUEST_PROFILE,
@@ -495,7 +504,8 @@ const runReadyQueryRequest = Effect.fn('readyQueryEvidence.request')(function* (
   return {
     digest: yield* queryResultDigest(result),
     freshness: expectedFreshness,
-    matched: result.nodes.some(
+    matched: EffectArray.some(
+      result.nodes,
       node => node.path === control.expectedPath && node.language === control.expectedLanguage,
     ),
     serviceMilliseconds,
@@ -538,53 +548,61 @@ function timingSeries(
     ['graph.query.execute', 'query-strict-reobservation'],
     ['graph.query.execute', 'query-serialization'],
   ] as const;
-  const expectedStageKeys = new Set(stageKeys.map(([phase, stage]) => `${phase}/${stage}`));
+  const expectedStageKeys = new Set(EffectArray.map(stageKeys, ([phase, stage]) => `${phase}/${stage}`));
   for (const result of results) {
-    const observedStageKeys = result.stages.map(stage => `${stage.phase}/${stage.stage}`);
+    const observedStageKeys = EffectArray.map(result.stages, stage => `${stage.phase}/${stage.stage}`);
     if (
       observedStageKeys.length !== expectedStageKeys.size ||
       new Set(observedStageKeys).size !== observedStageKeys.length ||
-      observedStageKeys.some(key => !expectedStageKeys.has(key))
+      EffectArray.some(observedStageKeys, key => !expectedStageKeys.has(key))
     ) {
       throw ScriptError.make({message: 'Ready-query stage coverage contains an unexpected or duplicate event.'});
     }
   }
-  const stages = stageKeys.map(([phase, stage]) => {
-    const observations = results.map(result => {
-      const matches = result.stages.filter(candidate => candidate.phase === phase && candidate.stage === stage);
+  const stages = EffectArray.map(stageKeys, ([phase, stage]) => {
+    const observations = EffectArray.map(results, result => {
+      const matches = EffectArray.filter(
+        result.stages,
+        candidate => candidate.phase === phase && candidate.stage === stage,
+      );
       if (matches.length !== 1) throw ScriptError.make({message: `Ready-query stage ${phase}/${stage} is incomplete.`});
       return matches[0];
     });
     const disposition = observations[0].disposition;
-    if (observations.some(observation => observation.disposition !== disposition)) {
+    if (EffectArray.some(observations, observation => observation.disposition !== disposition)) {
       throw ScriptError.make({message: `Ready-query stage ${phase}/${stage} disposition changed within the run.`});
     }
     return {
       disposition,
-      durationMilliseconds: observations.map(observation => observation.durationMilliseconds),
+      durationMilliseconds: EffectArray.map(observations, observation => observation.durationMilliseconds),
       phase,
       stage,
     } satisfies ReadyQueryStageSeriesV1;
   });
-  const serviceMilliseconds = results.map(result => result.serviceMilliseconds);
-  const attributed = results.map((_, index) =>
-    stages.reduce((sum, stage) => sum + stage.durationMilliseconds[index], 0),
+  const serviceMilliseconds = EffectArray.map(results, result => result.serviceMilliseconds);
+  const attributed = EffectArray.map(results, (_, index) =>
+    EffectArray.reduce(stages, 0, (sum, stage) => sum + stage.durationMilliseconds[index]),
   );
   return {
-    endToEndMilliseconds: serviceMilliseconds.map((service, index) => service + queueLatencyMilliseconds[index]),
+    endToEndMilliseconds: EffectArray.map(
+      serviceMilliseconds,
+      (service, index) => service + queueLatencyMilliseconds[index],
+    ),
     freshness: kind === 'exact' ? 'current' : 'deferred',
     ...(kind === 'deferred' ? {intervalMilliseconds: READY_QUERY_FIXED_RATE_INTERVAL_MILLISECONDS} : {}),
     maxConcurrency: 1,
     mode: kind === 'deferred' ? 'fixed-rate' : 'sequential',
     queueLatencyIncluded: true,
     queueLatencyMilliseconds,
-    resultDigests: results.map(result => result.digest),
+    resultDigests: EffectArray.map(results, result => result.digest),
     serviceMilliseconds,
-    snapshotDigests: results.map(result => result.snapshotDigest),
+    snapshotDigests: EffectArray.map(results, result => result.snapshotDigest),
     stages,
-    structuredResponseBytes: results.map(result => result.structuredResponseBytes),
-    textResponseBytes: results.map(result => result.textResponseBytes),
-    unattributedMilliseconds: serviceMilliseconds.map((service, index) => Math.max(0, service - attributed[index])),
+    structuredResponseBytes: EffectArray.map(results, result => result.structuredResponseBytes),
+    textResponseBytes: EffectArray.map(results, result => result.textResponseBytes),
+    unattributedMilliseconds: EffectArray.map(serviceMilliseconds, (service, index) =>
+      Math.max(0, service - attributed[index]),
+    ),
     warmups: READY_QUERY_MINIMUM_WARMUPS,
   };
 }
@@ -593,7 +611,7 @@ const queryResultDigest = Effect.fn('readyQueryEvidence.resultDigest')((result: 
   sha256Hex(
     JSON.stringify({
       edges: result.edges,
-      nodes: result.nodes.map(({contentHash: _contentHash, ...node}) => node),
+      nodes: EffectArray.map(result.nodes, ({contentHash: _contentHash, ...node}) => node),
       operation: result.operation,
     }),
   ),
@@ -624,7 +642,7 @@ const trackedFileCount = Effect.fn('readyQueryEvidence.trackedFileCount')((repos
   git(repository, ['ls-files', '-z']).pipe(
     Effect.map(result => {
       const output = result.stdout;
-      return output.length === 0 ? 0 : output.split('\0').length - 1;
+      return output.length === 0 ? 0 : Effect2.pipe(output, EffectString.split('\0')).length - 1;
     }),
   ),
 );
@@ -638,7 +656,12 @@ const git = Effect.fn('readyQueryEvidence.git')((repository: string, args: reado
 
 function pathIsWithin(path: Path.Path, candidate: string, root: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
+  return (
+    relative === '' ||
+    (!path.isAbsolute(relative) &&
+      relative !== '..' &&
+      !Effect2.pipe(relative, EffectString.startsWith(`..${path.sep}`)))
+  );
 }
 
 function encodedBytes(value: string): number {
@@ -686,23 +709,59 @@ function qualifyingReadyQuerySource(
   environment: Readonly<Record<string, string | undefined>>,
 ): ReadyQueryEvidenceV1['source'] {
   const github = {
-    environment: environment.THREADNOTE_READY_QUERY_ENVIRONMENT?.trim(),
-    environmentAttestation: environment.THREADNOTE_READY_QUERY_ENVIRONMENT_ATTESTATION?.trim(),
-    eventName: environment.GITHUB_EVENT_NAME?.trim(),
-    job: environment.GITHUB_JOB?.trim(),
-    ref: environment.GITHUB_REF?.trim(),
-    refProtected: environment.GITHUB_REF_PROTECTED?.trim(),
-    repository: environment.GITHUB_REPOSITORY?.trim(),
-    repositoryId: environment.GITHUB_REPOSITORY_ID?.trim(),
-    repositoryEnablement: environment.THREADNOTE_READY_QUERY_EVIDENCE_ENABLED?.trim(),
-    runnerArch: environment.RUNNER_ARCH?.trim(),
-    runnerEnvironment: environment.RUNNER_ENVIRONMENT?.trim(),
-    runnerOs: environment.RUNNER_OS?.trim(),
-    runAttempt: environment.GITHUB_RUN_ATTEMPT?.trim(),
-    runId: environment.GITHUB_RUN_ID?.trim(),
-    sha: environment.GITHUB_SHA?.trim(),
-    workflowRef: environment.GITHUB_WORKFLOW_REF?.trim(),
-    workflowSha: environment.GITHUB_WORKFLOW_SHA?.trim(),
+    environment: Effect2.pipe(environment.THREADNOTE_READY_QUERY_ENVIRONMENT, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    environmentAttestation: Effect2.pipe(
+      environment.THREADNOTE_READY_QUERY_ENVIRONMENT_ATTESTATION,
+      effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    eventName: Effect2.pipe(environment.GITHUB_EVENT_NAME, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    job: Effect2.pipe(environment.GITHUB_JOB, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    ref: Effect2.pipe(environment.GITHUB_REF, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    refProtected: Effect2.pipe(environment.GITHUB_REF_PROTECTED, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    repository: Effect2.pipe(environment.GITHUB_REPOSITORY, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    repositoryId: Effect2.pipe(environment.GITHUB_REPOSITORY_ID, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    repositoryEnablement: Effect2.pipe(environment.THREADNOTE_READY_QUERY_EVIDENCE_ENABLED, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    runnerArch: Effect2.pipe(environment.RUNNER_ARCH, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    runnerEnvironment: Effect2.pipe(environment.RUNNER_ENVIRONMENT, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    runnerOs: Effect2.pipe(environment.RUNNER_OS, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    runAttempt: Effect2.pipe(environment.GITHUB_RUN_ATTEMPT, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    runId: Effect2.pipe(environment.GITHUB_RUN_ID, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    sha: Effect2.pipe(environment.GITHUB_SHA, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    workflowRef: Effect2.pipe(environment.GITHUB_WORKFLOW_REF, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
+    workflowSha: Effect2.pipe(environment.GITHUB_WORKFLOW_SHA, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ),
   };
   if (
     provenance.mode !== 'github-actions-clean-source' ||
@@ -871,6 +930,7 @@ const canonicalizeProspectivePath = Effect.fn('readyQueryEvidence.canonicalizeOu
 });
 
 function required(value: string | undefined, option: string): string {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native optional chaining preserves the non-undefined return type after validation.
   if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }

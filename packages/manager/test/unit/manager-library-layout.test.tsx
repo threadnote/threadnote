@@ -39,7 +39,7 @@ beforeEach(() => {
     },
   );
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
-    () => ({width: availableWidth}) as DOMRect,
+    () => new DOMRect(0, 0, availableWidth, 0),
   );
   container = document.createElement('div');
   document.body.append(container);

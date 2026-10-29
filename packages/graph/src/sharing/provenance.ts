@@ -1,4 +1,4 @@
-import {Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, Effect, FileSystem, Path, Predicate} from 'effect';
 import {readJsonFile, writePrivateJsonFile} from './atomic.js';
 import {parseSha256Digest, SHA256_HEX, type Sha256Digest} from './digest.js';
 import {graphSharingFailure} from './errors.js';
@@ -133,18 +133,22 @@ export function sharedGraphQuerySource(
   };
 }
 
+function isSharedGraphImportAttemptReason(value: string): value is SharedGraphImportAttemptReason {
+  return EffectArray.some(SHARED_GRAPH_IMPORT_ATTEMPT_REASONS, reason => reason === value);
+}
+
 function parseImportAttempt(value: unknown): SharedGraphImportAttemptV1 {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (!Predicate.isObject(value)) {
     throw graphSharingFailure('Shared graph import attempt is invalid.');
   }
-  const record = value as Record<string, unknown>;
+  const record = value;
   if (typeof record.imported !== 'boolean' || typeof record.reason !== 'string') {
     throw graphSharingFailure('Shared graph import attempt is invalid.');
   }
-  if (!SHARED_GRAPH_IMPORT_ATTEMPT_REASONS.includes(record.reason as SharedGraphImportAttemptReason)) {
+  if (!isSharedGraphImportAttemptReason(record.reason)) {
     throw graphSharingFailure('Shared graph import attempt is invalid.');
   }
-  const reason = record.reason as SharedGraphImportAttemptReason;
+  const reason = record.reason;
   if (record.imported !== (reason === 'imported')) {
     throw graphSharingFailure('Shared graph import attempt is invalid.');
   }
@@ -168,10 +172,10 @@ function parseImportAttempt(value: unknown): SharedGraphImportAttemptV1 {
 }
 
 function parseProvenance(value: unknown): SharedGraphProvenanceV1 {
-  if (typeof value !== 'object' || value === null || Array.isArray(value) || !('schemaVersion' in value)) {
+  if (!Predicate.isObject(value) || !('schemaVersion' in value)) {
     throw graphSharingFailure('Shared graph provenance is invalid.');
   }
-  const record = value as Record<string, unknown>;
+  const record = value;
   if (
     record.schemaVersion !== 1 ||
     typeof record.snapshotId !== 'string' ||

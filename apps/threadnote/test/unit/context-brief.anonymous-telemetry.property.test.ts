@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
@@ -28,6 +29,9 @@ import {
 } from '@threadnote/threadnote/telemetry/context_brief';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Context Brief anonymous telemetry', () => {
   it('uses monotone power-of-two buckets and rejects invalid exact counts', () => {
@@ -74,18 +78,16 @@ describe('Context Brief anonymous telemetry', () => {
                 : ['code-anchors-unresolved']),
             privateSentinel,
           ];
-          const fields = contextBriefCodeAnchorTelemetryFields(
-            {
-              complete: resolved === requested,
-              gaps,
-              matchedMemories,
-              recoveryPresent,
-              requested,
-              resolved,
-              privateSelector: privateSentinel,
-            } as never,
-            truncated,
-          );
+          const summary = {
+            complete: resolved === requested,
+            gaps,
+            matchedMemories,
+            recoveryPresent,
+            requested,
+            resolved,
+            privateSelector: privateSentinel,
+          };
+          const fields = contextBriefCodeAnchorTelemetryFields(summary, truncated);
           expect(fields).toMatchObject({
             contextBriefCodeAnchorCoverage:
               resolved === requested ? 'complete' : resolved === 0 ? 'unavailable' : 'partial',
@@ -188,6 +190,7 @@ describe('Context Brief anonymous telemetry', () => {
           expect(serialized).not.toContain(path);
           expect(serialized).not.toContain(memory);
           expect(serialized).not.toContain(repository);
+          // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
           for (const exactCount of [3, 5, 8]) expect(Object.values(fields ?? {})).not.toContain(exactCount);
         },
       ),
@@ -360,7 +363,7 @@ describe('Context Brief anonymous telemetry', () => {
 
       expect(result).toBe('brief');
       expect(capture.spans).toHaveLength(5);
-      expect(capture.spans.slice(0, 4).map(span => spanAttributes(span)['threadnote.phase'])).toEqual([
+      expect(EffectArray.map(capture.spans.slice(0, 4), span => spanAttributes(span)['threadnote.phase'])).toEqual([
         'context.brief.graph',
         'context.brief.memory',
         'context.brief.citation-validation',
@@ -516,11 +519,11 @@ describe('Context Brief anonymous telemetry', () => {
       });
       expect(completion).not.toHaveProperty('threadnote.phase');
       for (const attributes of [failedProjection, completion]) {
-        for (const key of Object.keys(attributes)) {
+        for (const key of EffectRecord.keys(attributes)) {
           expect(key).not.toMatch(/^threadnote\.context_brief\.(?:citation_|.*_bucket|output_truncated)/u);
         }
       }
-      expect(JSON.stringify(capture.spans.map(spanAttributes))).not.toContain('/private/repository');
+      expect(JSON.stringify(EffectArray.map(capture.spans, spanAttributes))).not.toContain('/private/repository');
     }).pipe(provideTestLayer(anonymousTelemetryTestLayer({system: systemInfoStub(), tracer: capture.tracer})));
   });
 
@@ -559,7 +562,7 @@ describe('Context Brief anonymous telemetry', () => {
           'threadnote.outcome': 'success',
         });
         expect(completion).not.toHaveProperty('threadnote.phase');
-        for (const key of Object.keys(completion)) {
+        for (const key of EffectRecord.keys(completion)) {
           expect(key).not.toMatch(/^threadnote\.context_brief\.(?:citation_|.*_bucket|output_truncated)/u);
         }
       }).pipe(provideTestLayer(anonymousTelemetryTestLayer({system: systemInfoStub(), tracer: capture.tracer})));
@@ -607,24 +610,34 @@ describe('Context Brief anonymous telemetry', () => {
           'memory-recall-unavailable',
         ]),
       );
-      const attributes = capture.spans.map(spanAttributes);
+      const attributes = EffectArray.map(capture.spans, spanAttributes);
       for (const phase of [
         'context.brief.code-linked-memory',
         'context.brief.graph',
         'context.brief.memory',
         'context.brief.citation-validation',
       ]) {
-        expect(attributes.find(item => item['threadnote.phase'] === phase)).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(attributes, item => item['threadnote.phase'] === phase)),
+        ).toMatchObject({
           'threadnote.context_brief.scope': 'local',
           'threadnote.outcome': 'failure',
           'threadnote.phase': phase,
         });
       }
-      expect(attributes.find(item => item['threadnote.phase'] === 'context.brief.projection')).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(attributes, item => item['threadnote.phase'] === 'context.brief.projection'),
+        ),
+      ).toMatchObject({
         'threadnote.outcome': 'success',
         'threadnote.phase.outcome': 'success',
       });
-      expect(attributes.find(item => item['threadnote.event'] === 'completion')).toMatchObject({
+      expect(
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(attributes, item => item['threadnote.event'] === 'completion'),
+        ),
+      ).toMatchObject({
         'threadnote.outcome': 'success',
       });
       expect(JSON.stringify(attributes)).not.toContain('/private/repository');
@@ -668,9 +681,11 @@ describe('Context Brief anonymous telemetry', () => {
         }),
       );
 
-      const attributes = capture.spans.map(spanAttributes);
+      const attributes = EffectArray.map(capture.spans, spanAttributes);
       for (const phase of ['context.brief.code-linked-memory', 'context.brief.graph']) {
-        expect(attributes.find(item => item['threadnote.phase'] === phase)).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(EffectArray.findFirst(attributes, item => item['threadnote.phase'] === phase)),
+        ).toMatchObject({
           'threadnote.outcome': 'unavailable',
           'threadnote.phase.outcome': 'unavailable',
         });
@@ -713,7 +728,12 @@ describe('Context Brief anonymous telemetry', () => {
       );
 
       expect(
-        capture.spans.map(spanAttributes).find(item => item['threadnote.phase'] === 'context.brief.code-linked-memory'),
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(
+            EffectArray.map(capture.spans, spanAttributes),
+            item => item['threadnote.phase'] === 'context.brief.code-linked-memory',
+          ),
+        ),
       ).toMatchObject({
         'threadnote.outcome': 'success',
         'threadnote.phase.outcome': 'success',
@@ -764,9 +784,10 @@ describe('Context Brief anonymous telemetry', () => {
         }),
       );
 
-      const graphPhases = capture.spans
-        .map(spanAttributes)
-        .filter(item => item['threadnote.phase'] === 'context.brief.graph');
+      const graphPhases = EffectArray.filter(
+        EffectArray.map(capture.spans, spanAttributes),
+        item => item['threadnote.phase'] === 'context.brief.graph',
+      );
       expect(graphPhases).toHaveLength(2);
       expect(graphPhases).toEqual(
         expect.arrayContaining([
@@ -785,7 +806,7 @@ describe('Context Brief anonymous telemetry', () => {
     {
       token: fc
         .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 16, maxLength: 16})
-        .map(characters => characters.join('')),
+        .map(characters => EffectArray.join(characters, '')),
     },
     ({token}) => {
       const capture = capturingTracer();
@@ -826,7 +847,7 @@ describe('Context Brief anonymous telemetry', () => {
         );
 
         expect(result.structuredContent.version).toBe(3);
-        const serialized = JSON.stringify(capture.spans.map(spanAttributes));
+        const serialized = JSON.stringify(EffectArray.map(capture.spans, spanAttributes));
         for (const privateValue of [token, privatePath, privateNode, privateTask, privateMemory]) {
           expect(serialized).not.toContain(privateValue);
         }
@@ -869,14 +890,14 @@ function candidate(name: string, codeCitations: readonly MemoryCodeCitationV1[] 
 function citation(suffix: string): MemoryCodeCitationV1 {
   return {
     extractorSet: 'test',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
-    id: `tncc_${suffix.repeat(40)}`,
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
+    id: `tncc_${Effect2.pipe(suffix, EffectString.repeat(40))}`,
     path: 'src/private.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: 'local',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   };
@@ -896,7 +917,7 @@ function receipt(
     observedAt: '2026-08-26T00:00:00.000Z',
     reason,
     repositoryId,
-    snapshotId: `cgsn_${'e'.repeat(40)}`,
+    snapshotId: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`,
     status,
     strategy: 'file-path' as const,
     validatorVersion: 1 as const,
@@ -919,7 +940,7 @@ function unknownReceipt(citationId: string, reason: ContextBriefCitationValidati
 
 function bucketOrdinal(value: string | undefined): number {
   if (value === undefined) return Number.POSITIVE_INFINITY;
-  return value === '0' ? -1 : Number(value.slice(2));
+  return value === '0' ? -1 : Number(Effect2.pipe(value, EffectString.slice(2)));
 }
 
 interface CapturedSpan {
@@ -944,7 +965,7 @@ function capturingTracer(): {readonly spans: CapturedSpan[]; readonly tracer: Tr
 }
 
 function spanAttributes(captured: CapturedSpan): Record<string, unknown> {
-  return Object.fromEntries(captured.span.attributes);
+  return EffectRecord.fromEntries(captured.span.attributes);
 }
 
 function systemInfoStub(): SystemInfoShape {

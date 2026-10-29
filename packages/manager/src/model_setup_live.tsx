@@ -1,3 +1,4 @@
+import {isModelSetupStatus} from './api/response_guards.js';
 import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
 import {useManagerLiveQuery} from './live/provider.js';
 import {api} from './ui/support.js';
@@ -34,7 +35,8 @@ export function ModelSetupProvider({children}: {readonly children: React.ReactNo
   const live = useManagerLiveQuery<ModelSetupStatus>(
     demand > 0 ? {topic: 'model-setup', scope: 'account'} : undefined,
     'status',
-    signal => api<ModelSetupStatus>(endpoint, undefined, {signal, timeoutMilliseconds: 10_000}),
+    signal => api<ModelSetupStatus>(endpoint, undefined, {signal, timeoutMilliseconds: 10_000}, isModelSetupStatus),
+    isModelSetupStatus,
   );
   const fallback = !live.active || live.snapshot.status === 'unsupported';
   const [status, setStatus] = useState<ModelSetupStatus>();
@@ -76,10 +78,15 @@ export function ModelSetupProvider({children}: {readonly children: React.ReactNo
     const poll = async () => {
       if (controller.signal.aborted || busyRef.current || generation !== commandGeneration.current) return;
       try {
-        const next = await api<ModelSetupStatus>(endpoint, undefined, {
-          signal: controller.signal,
-          timeoutMilliseconds: 10_000,
-        });
+        const next = await api<ModelSetupStatus>(
+          endpoint,
+          undefined,
+          {
+            signal: controller.signal,
+            timeoutMilliseconds: 10_000,
+          },
+          isModelSetupStatus,
+        );
         if (controller.signal.aborted || busyRef.current || generation !== commandGeneration.current) return;
         failures = 0;
         accept(next);
@@ -143,6 +150,7 @@ export function ModelSetupProvider({children}: {readonly children: React.ReactNo
         endpoint,
         {...body, confirm: true, expectedEpoch: statusRef.current.intentEpoch},
         {signal: controller.signal, timeoutMilliseconds: 10_000},
+        isModelSetupStatus,
       );
       if (!controller.signal.aborted) {
         accept(next);

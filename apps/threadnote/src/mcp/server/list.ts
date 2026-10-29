@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, Result} from 'effect';
 import {
   cursorCloudMemoryScopeReceipt,
@@ -11,6 +12,8 @@ import {errorMessage} from '@threadnote/platform/errors';
 import {argumentError, optionalResourceUri, type RuntimeConfig} from './common.js';
 import {resolveMemoryScope, syncCursorCloudMemoryShares, type MemoryScopeSource} from './cursor_cloud_memory.js';
 import {runNativeListTool} from './memory.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function registerListTool(
   server: EffectMcpServerRegistry,
@@ -44,13 +47,26 @@ export function registerListTool(
       const requestedTeam = typeof team === 'string' ? team : undefined;
       const selectedShareResult = yield* Effect.try({
         try: () =>
-          memoryScope && requestedTeam?.trim() ? cursorCloudShareForTeam(memoryScope, requestedTeam) : undefined,
+          memoryScope &&
+          Effect2.pipe(requestedTeam, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+          )
+            ? cursorCloudShareForTeam(memoryScope, requestedTeam)
+            : undefined,
         catch: errorMessage,
       }).pipe(Effect.result);
       if (Result.isFailure(selectedShareResult)) return argumentError(selectedShareResult.failure);
       const selectedShare = selectedShareResult.success;
-      if (memoryScope && requestedTeam?.trim() && !selectedShare) {
-        return argumentError(`${name} team must be one of: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`);
+      if (
+        memoryScope &&
+        Effect2.pipe(requestedTeam, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) &&
+        !selectedShare
+      ) {
+        return argumentError(
+          `${name} team must be one of: ${EffectArray.join(cursorCloudScopeTeams(memoryScope), ', ')}.`,
+        );
       }
       const uriShare =
         memoryScope && checkedUri.value ? cursorCloudShareForUri(memoryScope, checkedUri.value) : undefined;

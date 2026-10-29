@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -6,11 +7,7 @@ import {describe, expect, it} from 'vitest';
 import {getAgentAdapter} from '@threadnote/threadnote/agent_integration/adapters';
 import type {AgentAdapter} from '@threadnote/threadnote/agent_integration/adapters/contract';
 import {planAgentSurface} from '@threadnote/threadnote/agent_integration/surfaces';
-import {
-  parseContextBriefRequestV1,
-  type ContextBriefGraphEvidenceV1,
-  type ProjectedContextBriefV1,
-} from '@threadnote/context/types';
+import {parseContextBriefRequestV1} from '@threadnote/context/types';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ApplicationLayer, type ApplicationServices} from '@threadnote/threadnote/effect/runtime';
@@ -52,8 +49,11 @@ import {readLocalValueEvents} from '@threadnote/threadnote/value_report/events';
 import {runCommand} from '@threadnote/threadnote/utils';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 const run = <A, E>(effect: Effect.Effect<A, E, ApplicationServices>) => effect.pipe(provideTestLayer(ApplicationLayer));
-const digest = 'a'.repeat(64);
+const digest = Effect2.pipe('a', EffectString.repeat(64));
 const EXPECTED_SETUP_TASK =
   'Orient this agent to the current repository architecture, durable decisions, active handoffs, and next safe step.';
 
@@ -85,7 +85,8 @@ describe('setup contracts', () => {
   it('derives resume and undo independently from status and proven setup ownership', () => {
     fc.assert(
       fc.property(fc.array(fc.boolean(), {maxLength: 8, minLength: 1}), reversible => {
-        const operations = reversible.map(
+        const operations = EffectArray.map(
+          reversible,
           (value, index) =>
             ({
               attempt: 1,
@@ -100,13 +101,16 @@ describe('setup contracts', () => {
         );
         const recovery = setupRecovery(operations);
         expect(recovery.resumeOperationIds).toEqual(
-          operations.filter(operation => operation.status === 'pending').map(operation => operation.id),
+          EffectArray.map(
+            EffectArray.filter(operations, operation => operation.status === 'pending'),
+            operation => operation.id,
+          ),
         );
         expect(recovery.undoOperationIds).toEqual(
-          operations
-            .filter(operation => operation.reversible)
-            .map(operation => operation.id)
-            .reverse(),
+          EffectArray.map(
+            EffectArray.reverse(EffectArray.filter(operations, operation => operation.reversible)),
+            operation => operation.id,
+          ),
         );
       }),
       {numRuns: 100},
@@ -130,7 +134,7 @@ describe('setup contracts', () => {
     const gemini = getAgentAdapter('gemini-cli')!;
     const qwen = getAgentAdapter('qwen-code')!;
     const shape = (adapter: typeof gemini) =>
-      setupOperationDefinitions(adapter).map(operation => ({
+      EffectArray.map(setupOperationDefinitions(adapter), operation => ({
         dependencyCount: operation.dependsOn.length,
         kind: operation.kind,
         reversible: operation.reversible,
@@ -168,10 +172,12 @@ describe('setup contracts', () => {
       ...withoutStrategy,
       hooks: {client: 'claude' as const, kind: 'legacy-client' as const},
     } satisfies AgentAdapter;
-    expect(setupOperationDefinitions(withoutStrategy).some(operation => operation.kind === 'surface.hooks')).toBe(
-      false,
-    );
-    expect(setupOperationDefinitions(withStrategy).some(operation => operation.kind === 'surface.hooks')).toBe(true);
+    expect(
+      EffectArray.some(setupOperationDefinitions(withoutStrategy), operation => operation.kind === 'surface.hooks'),
+    ).toBe(false);
+    expect(
+      EffectArray.some(setupOperationDefinitions(withStrategy), operation => operation.kind === 'surface.hooks'),
+    ).toBe(true);
   });
 
   it('classifies surface actions without treating disabled or stale installs as current', () => {
@@ -195,7 +201,7 @@ describe('setup contracts', () => {
       coverage: {gaps: [], graph: {complete: true}, omissions: {graphCards: 0, graphContracts: 0}},
       graph: {cards: [{}], contracts: []},
       scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
-    } as unknown as Parameters<typeof setupBriefIsSourceVerified>[0];
+    } satisfies Parameters<typeof setupBriefIsSourceVerified>[0];
     expect(setupBriefIsSourceVerified(brief)).toBe(true);
     expect(setupBriefIsSourceVerified({...brief, graph: {...brief.graph, cards: [], contracts: []}})).toBe(false);
     expect(setupBriefIsSourceVerified({...brief, scope: {...brief.scope, freshness: 'stale'}})).toBe(false);
@@ -206,7 +212,7 @@ describe('setup contracts', () => {
       coverage: {gaps: [], graph: {complete: true}, omissions: {graphCards: 1, graphContracts: 2}},
       graph: {cards: [], contracts: []},
       scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
-    } as unknown as Parameters<typeof setupBriefIsSourceVerified>[0];
+    } satisfies Parameters<typeof setupBriefIsSourceVerified>[0];
     expect(setupBriefIsSourceVerified(brief)).toBe(false);
   });
 
@@ -229,7 +235,7 @@ describe('setup contracts', () => {
               contracts: Array.from({length: contracts}, () => ({})),
             },
             scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
-          } as unknown as Parameters<typeof setupBriefIsSourceVerified>[0];
+          } satisfies Parameters<typeof setupBriefIsSourceVerified>[0];
           expect(setupBriefIsSourceVerified(brief)).toBe(
             cards + contracts > 0 && omittedCards === 0 && omittedContracts === 0,
           );
@@ -248,10 +254,10 @@ describe('setup contracts', () => {
   it('rejects graph query partiality but permits unrelated projected truncation with returned source evidence', () => {
     const brief = {
       coverage: {gaps: [], graph: {complete: true}, omissions: {graphCards: 0, graphContracts: 0}},
-      graph: {cards: [{ref: `cgs_${'a'.repeat(32)}`}], contracts: []},
+      graph: {cards: [{ref: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`}], contracts: []},
       output: {truncated: true},
       scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
-    } as unknown as Parameters<typeof setupBriefIsSourceVerified>[0];
+    } satisfies Parameters<typeof setupBriefIsSourceVerified>[0];
     expect(setupBriefIsSourceVerified(brief)).toBe(true);
     expect(
       setupBriefIsSourceVerified({...brief, coverage: {...brief.coverage, gaps: ['graph-evidence-partial']}}),
@@ -262,14 +268,14 @@ describe('setup contracts', () => {
   });
 
   it('selects the first graph card as the locator anchor before verifying the exact result', () => {
-    const anchor = `cgs_${'b'.repeat(32)}`;
+    const anchor = `cgs_${Effect2.pipe('b', EffectString.repeat(32))}`;
     const request = setupContextBriefRequest('/repository', 'verify setup', 'canonical-repository', anchor);
     expect(request).toMatchObject({
       codeRefs: [anchor],
       mode: 'locate',
       scope: {callerCwd: '/repository', kind: 'repository', project: 'canonical-repository'},
     });
-    const locator = {cards: [{ref: anchor}]} as unknown as Parameters<typeof setupContextBriefAnchor>[0];
+    const locator = {cards: [{ref: anchor}]} satisfies Parameters<typeof setupContextBriefAnchor>[0];
     const partialLocator = {
       ...locator,
       warnings: ['Graph traversal reached a configured result limit.'],
@@ -281,7 +287,7 @@ describe('setup contracts', () => {
         coverage: {gaps: [], graph: {complete: true}, omissions: {graphCards: 0, graphContracts: 0}},
         graph: {cards: [{ref: anchor}], contracts: []},
         scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
-      } as unknown as Parameters<typeof setupBriefIsSourceVerified>[0]),
+      } satisfies Parameters<typeof setupBriefIsSourceVerified>[0]),
     ).toBe(true);
   });
 });
@@ -289,14 +295,16 @@ describe('setup contracts', () => {
 describe('setup orchestration', () => {
   effectIt.effect('uses a graph-only locator and records only the delivered setup Context Brief', () =>
     Effect.gen(function* () {
-      const anchor = `cgs_${'c'.repeat(32)}`;
+      const anchor = `cgs_${Effect2.pipe('c', EffectString.repeat(32))}`;
       const calls: string[] = [];
       const valueEvents: string[] = [];
       const result = yield* verifySetupSourceVerificationWith(
         {
           compileFinal: request =>
             Effect.sync(() => {
-              calls.push(`final:${request.mode}:${request.codeRefs?.join(',')}:${request.scope.project}`);
+              calls.push(
+                `final:${request.mode}:${EffectOption.getOrUndefined(EffectOption.map(EffectOption.fromNullishOr(request.codeRefs), __effectArrayJoinReceiver => EffectArray.join(__effectArrayJoinReceiver, ',')))}:${request.scope.project}`,
+              );
               valueEvents.push('final-context-brief');
               return verifiedContextBrief(anchor);
             }),
@@ -306,7 +314,7 @@ describe('setup orchestration', () => {
               return {
                 cards: [{ref: anchor}],
                 warnings: ['Graph traversal reached a configured result limit.'],
-              } as unknown as ContextBriefGraphEvidenceV1;
+              };
             }),
           resolveProject: () => Effect.succeed('remote-less-repository'),
           sourceHash: () => Effect.succeed(digest),
@@ -330,7 +338,7 @@ describe('setup orchestration', () => {
       const result = yield* verifySetupSourceVerificationWith(
         {
           compileFinal: () => Effect.sync(() => ++finalCompiles).pipe(Effect.as(verifiedContextBrief(digest))),
-          graphLocator: () => Effect.succeed({cards: []} as unknown as ContextBriefGraphEvidenceV1),
+          graphLocator: () => Effect.succeed({cards: []}),
           resolveProject: () => Effect.succeed('remote-less-repository'),
           sourceHash: () => Effect.succeed(digest),
         },
@@ -719,9 +727,9 @@ describe('setup orchestration', () => {
         expect(second.output).toContain('Setup is already complete');
         expect(second.output).toContain('verified brief');
         const firstEvents = yield* readLocalValueEvents(home);
-        expect(firstEvents.filter(event => event.kind === 'setup')).toHaveLength(1);
-        const firstLifecycle = firstEvents.filter(event => event.kind === 'setup-lifecycle');
-        expect(firstLifecycle.map(event => event.phase)).toEqual(['started', 'completed']);
+        expect(EffectArray.filter(firstEvents, event => event.kind === 'setup')).toHaveLength(1);
+        const firstLifecycle = EffectArray.filter(firstEvents, event => event.kind === 'setup-lifecycle');
+        expect(EffectArray.map(firstLifecycle, event => event.phase)).toEqual(['started', 'completed']);
         expect(firstLifecycle[1]?.timeToFirstEvidenceMilliseconds).toBeGreaterThanOrEqual(0);
         expect(JSON.stringify(firstLifecycle)).not.toContain(repository);
         expect(JSON.stringify(firstLifecycle)).not.toContain('verify setup');
@@ -732,8 +740,11 @@ describe('setup orchestration', () => {
         );
         const previousVersionReceipt = parseSetupReceiptV1({
           ...first.value,
-          operations: first.value!.operations.map(operation => ({...operation, inputHash: 'b'.repeat(64)})),
-          planHash: 'b'.repeat(64),
+          operations: EffectArray.map(first.value!.operations, operation => ({
+            ...operation,
+            inputHash: Effect2.pipe('b', EffectString.repeat(64)),
+          })),
+          planHash: Effect2.pipe('b', EffectString.repeat(64)),
           threadnoteVersion: '4.9.0',
         });
         yield* fs.writeFileString(
@@ -743,7 +754,15 @@ describe('setup orchestration', () => {
         const upgraded = yield* captureConsole(
           runSetupWith(config, adapter, {apply: true, cwd: repository}, dependencies),
         );
-        expect(upgraded.value?.operations.find(operation => operation.kind === 'surface.ensure')).toMatchObject({
+        expect(
+          EffectOption.getOrUndefined(
+            EffectOption.map(EffectOption.fromNullishOr(upgraded.value?.operations), __effectArrayReceiver =>
+              EffectOption.getOrUndefined(
+                EffectArray.findFirst(__effectArrayReceiver, operation => operation.kind === 'surface.ensure'),
+              ),
+            ),
+          ),
+        ).toMatchObject({
           ownership: 'setup-created',
           ownershipEvidence: 'successful-mutation',
         });
@@ -759,14 +778,14 @@ describe('setup orchestration', () => {
         yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
         yield* captureConsole(runSetupWith(config, adapter, {apply: true, cwd: repository}, dependencies));
         expect(calls).toHaveLength(firstCalls.length * 3 + 2);
-        expect((yield* readLocalValueEvents(home)).filter(event => event.kind === 'setup')).toHaveLength(3);
+        expect(EffectArray.filter(yield* readLocalValueEvents(home), event => event.kind === 'setup')).toHaveLength(3);
         expect(
           parseSetupReceiptV1(JSON.parse(yield* fs.readFileString(`${home}/setup/${receiptFiles[0]}`))).status,
         ).toBe('completed');
         yield* fs.writeFileString(`${repository}/tracked.txt`, 'changed source\n');
         yield* captureConsole(runSetupWith(config, adapter, {apply: true, cwd: repository}, dependencies));
         expect(calls).toHaveLength(firstCalls.length * 4 + 2);
-        expect((yield* readLocalValueEvents(home)).filter(event => event.kind === 'setup')).toHaveLength(4);
+        expect(EffectArray.filter(yield* readLocalValueEvents(home), event => event.kind === 'setup')).toHaveLength(4);
         const undoPreview = yield* captureConsole(
           runSetupWith(config, adapter, {cwd: repository, undo: true}, dependencies),
         );
@@ -782,9 +801,10 @@ describe('setup orchestration', () => {
         expect(undone.value.recovery.resumeOperationIds).toEqual(['surface:gemini-cli']);
         expect(yield* fs.exists(config.manifestPath)).toBe(true);
         expect(calls.at(-1)).toBe('remove-surface');
-        expect((yield* readLocalValueEvents(home)).filter(event => event.kind === 'setup')).toHaveLength(4);
+        expect(EffectArray.filter(yield* readLocalValueEvents(home), event => event.kind === 'setup')).toHaveLength(4);
         const rollingBack = parseSetupReceiptV1({
-          ...Object.fromEntries(Object.entries(undone.value).filter(([key]) => key !== 'rolledBackAt')),
+          // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+          ...Object.fromEntries(EffectArray.filter(Object.entries(undone.value), ([key]) => key !== 'rolledBackAt')),
           status: 'rolling-back',
         });
         yield* fs.writeFileString(`${home}/setup/${receiptFiles[0]}`, `${JSON.stringify(rollingBack, undefined, 2)}\n`);
@@ -799,11 +819,12 @@ describe('setup orchestration', () => {
         expect(reapplied.value?.status).toBe('completed');
         expect(calls).toHaveLength(beforeReapply + firstCalls.length);
         expect(yield* fs.exists(config.manifestPath)).toBe(true);
-        expect((yield* readLocalValueEvents(home)).filter(event => event.kind === 'setup')).toHaveLength(5);
+        expect(EffectArray.filter(yield* readLocalValueEvents(home), event => event.kind === 'setup')).toHaveLength(5);
         expect(
-          (yield* readLocalValueEvents(home))
-            .filter(event => event.kind === 'setup-lifecycle')
-            .map(event => event.phase),
+          EffectArray.map(
+            EffectArray.filter(yield* readLocalValueEvents(home), event => event.kind === 'setup-lifecycle'),
+            event => event.phase,
+          ),
         ).toEqual([
           'started',
           'completed',
@@ -907,15 +928,15 @@ describe('setup orchestration', () => {
         expect(completed.value?.supportedAgentReuse).toBe(1);
         expect(calls).toEqual(['core', 'manifest', 'seed', 'surface', 'graph', 'graph', 'doctor', 'context-brief']);
         const events = yield* readLocalValueEvents(home);
-        expect(events.filter(event => event.kind === 'setup')).toEqual([
+        expect(EffectArray.filter(events, event => event.kind === 'setup')).toEqual([
           expect.objectContaining({completed: 1, supportedAgentReuse: 1}),
         ]);
-        expect(events.filter(event => event.kind === 'setup-lifecycle').map(event => event.phase)).toEqual([
-          'started',
-          'failed',
-          'started',
-          'completed',
-        ]);
+        expect(
+          EffectArray.map(
+            EffectArray.filter(events, event => event.kind === 'setup-lifecycle'),
+            event => event.phase,
+          ),
+        ).toEqual(['started', 'failed', 'started', 'completed']);
       }),
     ).pipe(TestClock.withLive, run),
   );
@@ -951,9 +972,9 @@ describe('setup orchestration', () => {
         const receiptId = yield* sha256Hex(
           JSON.stringify({projectRoot: resolvedRepository, scope: 'user', surfaceId: adapter.catalog.id}),
         );
-        const receiptPath = `${home}/setup/${adapter.catalog.id}-${receiptId.slice(0, 16)}.json`;
+        const receiptPath = `${home}/setup/${adapter.catalog.id}-${Effect2.pipe(receiptId, EffectString.slice(0, 16))}.json`;
         const verification = validVerification(yield* setupRepositorySourceHash(resolvedRepository));
-        const operations = plan.operations.map(operation => ({
+        const operations = EffectArray.map(plan.operations, operation => ({
           attempt: 1,
           id: operation.id,
           inputHash: operation.inputHash,
@@ -1017,7 +1038,11 @@ describe('setup orchestration', () => {
         const failed = parseSetupReceiptV1(JSON.parse(yield* fs.readFileString(receiptPath)));
         expect(failed.status).toBe('failed');
         expect(failed.verification).toBeUndefined();
-        expect(failed.operations.find(operation => operation.kind === 'context-brief.verify')?.status).toBe('failed');
+        expect(
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(failed.operations, operation => operation.kind === 'context-brief.verify'),
+          )?.status,
+        ).toBe('failed');
         const completed = yield* captureConsole(
           runSetupWith(config, adapter, {apply: true, cwd: repository}, dependencies),
         );
@@ -1025,7 +1050,7 @@ describe('setup orchestration', () => {
         expect(completed.value?.verification).toEqual(verification);
         expect(completed.output).toContain('re-delivered verified brief');
         expect(executions).toBe(2);
-        expect((yield* readLocalValueEvents(home)).filter(event => event.kind === 'setup')).toHaveLength(1);
+        expect(EffectArray.filter(yield* readLocalValueEvents(home), event => event.kind === 'setup')).toHaveLength(1);
       }),
     ).pipe(TestClock.withLive, run),
   );
@@ -1053,7 +1078,7 @@ function verifiedContextBrief(anchor: string) {
       graph: {cards: [{ref: anchor}], contracts: []},
       scope: {freshness: 'fresh', readyRepositories: 1, requestedRepositories: 1},
     },
-  } as unknown as ProjectedContextBriefV1;
+  };
 }
 
 function validReceipt() {

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
@@ -33,13 +34,16 @@ import {
   type Threadnote5LocalSubsystemReceiptRecordV1,
 } from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-receipts';
 import {buildKnowledgeDeltaGitProposalV1} from '@threadnote/threadnote/git_proposal/knowledge_delta';
-import {type CandidateReview} from '@threadnote/memory/candidate';
+import {parseCandidateReview, type CandidateReview} from '@threadnote/memory/candidate';
+import {isJsonObject} from '@threadnote/platform/json';
 import {buildContextHealthReport} from '@threadnote/context/health';
+import {deriveThreadnote5HealthClaimsV1} from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-health';
 import {aggregateContextHealthReportsV1, buildContextHealthSchedulePlanV1} from '@threadnote/context/health_schedule';
 import {canonicalMemoryDocumentContent} from '@threadnote/memory/document';
 import {projectKnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import {createProcedureVerificationReceipt, parseProcedureManifest} from '@threadnote/context/procedure/contract';
-import {aggregateValueReportV1} from '@threadnote/threadnote/value_report/index';
+import {aggregateValueReportV1, type ValueReportInputV1} from '@threadnote/threadnote/value_report/index';
+import type {RecallFeedbackEvent} from '@threadnote/recall/feedback';
 import {activationValueEventsV1} from '@threadnote/threadnote/activation/value';
 import {
   activationReceiptRevisionV1,
@@ -63,16 +67,66 @@ import {
 import {secondSurfaceChallengeIdV1} from '@threadnote/threadnote/activation/second/surface_store';
 import {summarizeLocalValueEvents} from '@threadnote/threadnote/value_report/events';
 import {renderManagedGuidanceBlock} from '@threadnote/threadnote/guidance/index';
-import {parseContextBriefV1, renderContextBriefText} from '@threadnote/context/projector';
+import {renderContextBriefText} from '@threadnote/context/projector';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
 import * as fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {emptyContextBriefContent} from '../helpers/threadnote-5-production-capture-fixture.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function requireJsonObject(value: unknown): Record<string, unknown> {
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object.');
+  return value;
+}
+
+function requireJsonObjectArray(value: unknown): Record<string, unknown>[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array of JSON objects.');
+  return EffectArray.map(value, requireJsonObject);
+}
+
+function requireUnknownArray(value: unknown): unknown[] {
+  if (!EffectArray.isArray(value)) throw new Error('Expected an array.');
+  return value;
+}
+
+function requireString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Expected a string.');
+  return value;
+}
+
+function isFeedbackAction(value: unknown): value is RecallFeedbackEvent['action'] {
+  return value === 'applied' || value === 'dismiss' || value === 'pin' || value === 'useful' || value === 'wrong';
+}
+
+function requireValueReportInput(value: unknown): ValueReportInputV1 {
+  const input = requireJsonObject(value);
+  const period = requireJsonObject(input.period);
+  const feedbackEvents = requireJsonObjectArray(input.feedbackEvents);
+  return {
+    feedbackEvents: EffectArray.map(feedbackEvents, event => {
+      if (!isFeedbackAction(event.action)) throw new Error('Invalid feedback action.');
+      return {
+        action: event.action,
+        ...(event.project === undefined ? {} : {project: requireString(event.project)}),
+        queryFingerprint: requireString(event.queryFingerprint),
+        rankerVersion: requireString(event.rankerVersion),
+        timestamp: requireString(event.timestamp),
+        uri: requireString(event.uri),
+        version: 1,
+      };
+    }),
+    period: {from: requireString(period.from), to: requireString(period.to)},
+    ...(input.project === undefined ? {} : {project: requireString(input.project)}),
+  };
+}
 
 const CANDIDATE: Threadnote5SourceV1 = {
-  commit: '1'.repeat(40),
-  executableSha256: '2'.repeat(64),
+  commit: Effect.pipe('1', EffectString.repeat(40)),
+  executableSha256: Effect.pipe('2', EffectString.repeat(64)),
   id: 'threadnote-5.0.0',
-  version: `5.0.0-local.g${'1'.repeat(40)}`,
+  version: `5.0.0-local.g${Effect.pipe('1', EffectString.repeat(40))}`,
 };
 
 describe('Threadnote 5 source-native receipt verification', () => {
@@ -91,16 +145,20 @@ describe('Threadnote 5 source-native receipt verification', () => {
         retainedRecords: [record],
       }),
     ).toMatchObject({reason: 'verifier-incomplete', state: 'unknown'});
-    expect(verify([observation], [record], authorityManifestFor([record]), 'f'.repeat(64))).toMatchObject({
+    expect(
+      verify([observation], [record], authorityManifestFor([record]), Effect.pipe('f', EffectString.repeat(64))),
+    ).toMatchObject({
       reason: 'records-invalid',
       state: 'unknown',
     });
 
+    const artifact = requireJsonObject(record.artifact);
+    const attempts = requireJsonObjectArray(artifact.attempts);
     const tampered = resealRecord(record, {
-      ...(record.artifact as {readonly attempts: readonly unknown[]}),
+      ...artifact,
       attempts: [
         {
-          ...((record.artifact as {readonly attempts: readonly Record<string, unknown>[]}).attempts[0] ?? {}),
+          ...(attempts[0] ?? {}),
           artifactText: 'changed',
         },
       ],
@@ -180,17 +238,19 @@ describe('Threadnote 5 source-native receipt verification', () => {
     );
     expect(verify([observation], [record])).toMatchObject({receiptCount: 1, state: 'verified'});
 
-    const artifact = record.artifact as {readonly attempts: readonly Record<string, unknown>[]};
-    const first = artifact.attempts[0];
-    const review = first.review as CandidateReview;
+    const artifact = requireJsonObject(record.artifact);
+    const attempts = requireJsonObjectArray(artifact.attempts);
+    const first = attempts[0];
+    if (first === undefined) throw new Error('Proposal fixture has no attempt.');
+    const review = parseCandidateReview(first.review);
     const forgedReview = {
       ...review,
-      candidates: review.candidates.map((candidate, index) =>
-        index === 0 ? {...candidate, applyContentHash: 'f'.repeat(64)} : candidate,
+      candidates: EffectArray.map(review.candidates, (candidate, index) =>
+        index === 0 ? {...candidate, applyContentHash: Effect.pipe('f', EffectString.repeat(64))} : candidate,
       ),
     };
     const forged = resealRecord(record, {
-      attempts: [{...first, review: forgedReview}, ...artifact.attempts.slice(1)],
+      attempts: [{...first, review: forgedReview}, ...attempts.slice(1)],
     });
     expect(
       verify([observed(forged, observationAssertions(observation), observation.transcript.measurements)], [forged]),
@@ -207,7 +267,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
       entries: [
         {
           ...proposalEntry,
-          trials: proposalEntry.trials.map((trial, index) =>
+          trials: EffectArray.map(proposalEntry.trials, (trial, index) =>
             index === 0 ? {...trial, providerApiCallCount: 1} : trial,
           ),
         },
@@ -239,13 +299,15 @@ describe('Threadnote 5 source-native receipt verification', () => {
       },
     ]);
 
-    const artifact = record.artifact as {readonly captures: readonly Record<string, unknown>[]};
-    const capture = artifact.captures[0];
-    const input = capture.input as Record<string, unknown>;
+    const artifact = requireJsonObject(record.artifact);
+    const captures = requireJsonObjectArray(artifact.captures);
+    const capture = captures[0];
+    if (capture === undefined) throw new Error('Value report fixture has no capture.');
+    const input = requireJsonObject(capture.input);
     const invalid = resealRecord(record, {
       captures: [
         {...capture, input: {...input, counts: {setup: {started: 0, supportedAgentReuse: 1}}}},
-        ...artifact.captures.slice(1),
+        ...captures.slice(1),
       ],
     });
     expect(
@@ -258,35 +320,28 @@ describe('Threadnote 5 source-native receipt verification', () => {
 
   it('rejects ValueReport feedback trials filtered by timestamp or project scope', () => {
     const record = valueReportRecord();
-    const artifact = record.artifact as {
-      readonly captures: readonly {readonly input: Record<string, unknown>; readonly report: unknown}[];
-      readonly feedbackTrials: readonly {
-        readonly event: Record<string, unknown>;
-        readonly laneId: string;
-        readonly offlineObservation: null;
-      }[];
-    };
-    const firstInput = artifact.captures[0].input as {
-      readonly feedbackEvents: readonly Record<string, unknown>[];
-      readonly period: unknown;
-    };
+    const artifact = requireJsonObject(record.artifact);
+    const captures = requireJsonObjectArray(artifact.captures);
+    const feedbackTrials = requireJsonObjectArray(artifact.feedbackTrials);
+    const firstCapture = captures[0];
+    if (firstCapture === undefined) throw new Error('Value report fixture has no captures.');
+    const firstInput = requireValueReportInput(firstCapture.input);
+    const firstFeedbackEvent = firstInput.feedbackEvents?.[0];
+    if (firstFeedbackEvent === undefined) throw new Error('Value report fixture has no feedback event.');
     const timestampInput = {
       ...firstInput,
-      feedbackEvents: [{...firstInput.feedbackEvents[0], timestamp: '2026-09-18T00:00:00.000Z'}],
+      feedbackEvents: [{...firstFeedbackEvent, timestamp: '2026-09-18T00:00:00.000Z'}],
     };
     const timestampFiltered = resealRecord(record, {
       ...artifact,
       captures: [
         {
           input: timestampInput,
-          report: aggregateValueReportV1(timestampInput as unknown as Parameters<typeof aggregateValueReportV1>[0]),
+          report: aggregateValueReportV1(timestampInput),
         },
-        ...artifact.captures.slice(1),
+        ...captures.slice(1),
       ],
-      feedbackTrials: [
-        {...artifact.feedbackTrials[0], event: timestampInput.feedbackEvents[0]},
-        ...artifact.feedbackTrials.slice(1),
-      ],
+      feedbackTrials: [{...feedbackTrials[0], event: timestampInput.feedbackEvents[0]}, ...feedbackTrials.slice(1)],
     });
     expect(
       verify(
@@ -297,7 +352,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
 
     const projectInput = {
       ...firstInput,
-      feedbackEvents: [{...firstInput.feedbackEvents[0], project: 'other-project'}],
+      feedbackEvents: [{...firstFeedbackEvent, project: 'other-project'}],
       project: 'threadnote',
     };
     const projectFiltered = resealRecord(record, {
@@ -305,14 +360,11 @@ describe('Threadnote 5 source-native receipt verification', () => {
       captures: [
         {
           input: projectInput,
-          report: aggregateValueReportV1(projectInput as unknown as Parameters<typeof aggregateValueReportV1>[0]),
+          report: aggregateValueReportV1(projectInput),
         },
-        ...artifact.captures.slice(1),
+        ...captures.slice(1),
       ],
-      feedbackTrials: [
-        {...artifact.feedbackTrials[0], event: projectInput.feedbackEvents[0]},
-        ...artifact.feedbackTrials.slice(1),
-      ],
+      feedbackTrials: [{...feedbackTrials[0], event: projectInput.feedbackEvents[0]}, ...feedbackTrials.slice(1)],
     });
     expect(
       verify(
@@ -349,21 +401,26 @@ describe('Threadnote 5 source-native receipt verification', () => {
     expect(verify([observation], records)).toMatchObject({receiptCount: 3, state: 'verified'});
 
     const authority = authorityManifestFor(records);
-    const activationAuthority = authority.entries.find(entry => entry.type === 'activation-verification');
+    const activationAuthority = EffectOption.getOrUndefined(
+      EffectArray.findFirst(authority.entries, entry => entry.type === 'activation-verification'),
+    );
     if (activationAuthority?.type !== 'activation-verification') throw new Error('Expected activation authority.');
     const wrongAuthority: Threadnote5LocalAuthorityManifestV1 = {
       ...authority,
       entries: [
         {
           ...activationAuthority,
-          trials: activationAuthority.trials.map(trial => ({...trial, attestationDigest: '0'.repeat(64)})),
+          trials: EffectArray.map(activationAuthority.trials, trial => ({
+            ...trial,
+            attestationDigest: Effect.pipe('0', EffectString.repeat(64)),
+          })),
         },
       ],
     };
     expect(verify([observation], records, wrongAuthority)).toMatchObject({reason: 'records-invalid', state: 'unknown'});
 
     const {proofHash: _, ...proofBody} = journey.proof;
-    const unrelatedBody = {...proofBody, activationId: 'c'.repeat(64)};
+    const unrelatedBody = {...proofBody, activationId: Effect.pipe('c', EffectString.repeat(64))};
     const unrelatedProof = {...unrelatedBody, proofHash: secondSurfaceProofHashV1(unrelatedBody)};
     const unrelatedRecall = makeRecord('two-agent', 'recall', {trials: [{proof: unrelatedProof}]});
     const uncorrelatedObservation = observed(activation, assertions, measurements, [
@@ -379,20 +436,21 @@ describe('Threadnote 5 source-native receipt verification', () => {
       },
     ]);
 
-    const valueArtifact = value.artifact as {
-      readonly activationTrials: readonly Record<string, unknown>[];
-      readonly captures: readonly unknown[];
-    };
-    const activationTrial = valueArtifact.activationTrials[0];
-    const events = activationTrial.events as readonly Record<string, unknown>[];
+    const valueArtifact = requireJsonObject(value.artifact);
+    const activationTrials = requireJsonObjectArray(valueArtifact.activationTrials);
+    const activationTrial = activationTrials[0];
+    if (activationTrial === undefined) throw new Error('Activation fixture has no trial.');
+    const events = requireJsonObjectArray(activationTrial.events);
     const tamperedValue = resealRecord(value, {
       activationTrials: [
         {
           ...activationTrial,
-          events: events.map((event, index) => (index === 0 ? {...event, durationMilliseconds: 1} : event)),
+          events: EffectArray.map(events, (event, index) =>
+            index === 0 ? {...event, durationMilliseconds: 1} : event,
+          ),
         },
       ],
-      captures: valueArtifact.captures,
+      captures: requireUnknownArray(valueArtifact.captures),
     });
     const tamperedObservation = observed(activation, assertions, measurements, [
       {digest: recall.digest, kind: recall.kind},
@@ -405,8 +463,8 @@ describe('Threadnote 5 source-native receipt verification', () => {
 
     const forgedReceipt = {
       ...journey.finalReceipt,
-      operations: journey.finalReceipt.operations.map((operation, index) =>
-        index === 0 ? {...operation, subsystemReceiptHash: '0'.repeat(64)} : operation,
+      operations: EffectArray.map(journey.finalReceipt.operations, (operation, index) =>
+        index === 0 ? {...operation, subsystemReceiptHash: Effect.pipe('0', EffectString.repeat(64))} : operation,
       ),
     };
     const forgedValue = makeRecord(
@@ -423,7 +481,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
       state: 'unknown',
     });
 
-    const unrelatedJourney = activationJourneyFixture('c'.repeat(64));
+    const unrelatedJourney = activationJourneyFixture(Effect.pipe('c', EffectString.repeat(64)));
     const unrelatedValue = makeRecord(
       'two-agent',
       'value-report',
@@ -458,7 +516,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
     expect(verify([observation], [sharing, recall])).toMatchObject({receiptCount: 2, state: 'verified'});
 
     const {proofHash: _, ...proofBody} = journey.proof;
-    const unrelatedBody = {...proofBody, decisionContentHash: '0'.repeat(64)};
+    const unrelatedBody = {...proofBody, decisionContentHash: Effect.pipe('0', EffectString.repeat(64))};
     const unrelatedProof = {...unrelatedBody, proofHash: secondSurfaceProofHashV1(unrelatedBody)};
     const unrelatedRecall = makeRecord('git-shared', 'recall', {trials: [{proof: unrelatedProof}]});
     const uncorrelated = observed(
@@ -504,15 +562,15 @@ describe('Threadnote 5 source-native receipt verification', () => {
     });
 
     const pendingPlan = createActivationPlanV1({
-      catalogSnapshotHash: 'a'.repeat(64),
+      catalogSnapshotHash: Effect.pipe('a', EffectString.repeat(64)),
       primarySurfaceId: 'codex-cli',
       publicationMode: 'direct',
-      repositoryIdentityHash: '3'.repeat(64),
+      repositoryIdentityHash: Effect.pipe('3', EffectString.repeat(64)),
       secondarySurfaceId: 'claude-code',
-      selectedSourceSetHash: 'c'.repeat(64),
-      taskHash: 'd'.repeat(64),
+      selectedSourceSetHash: Effect.pipe('c', EffectString.repeat(64)),
+      taskHash: Effect.pipe('d', EffectString.repeat(64)),
       teamId: 'default',
-      teamShareStateHash: 'e'.repeat(64),
+      teamShareStateHash: Effect.pipe('e', EffectString.repeat(64)),
       threadnoteVersion: '5.0.0-test',
     });
     const pendingReceipt = createActivationReceiptV1(pendingPlan, '2026-09-18T09:00:00.000Z');
@@ -600,7 +658,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
           trials: [
             {
               ...artifact.trials[0],
-              receiptChain: chain.filter((_receipt, index) => index !== omitted),
+              receiptChain: EffectArray.filter(chain, (_receipt, index) => index !== omitted),
             },
           ],
         });
@@ -623,7 +681,15 @@ describe('Threadnote 5 source-native receipt verification', () => {
     const trial = artifact.trials[0];
     const approval = trial.approvals[0];
     const invalidApproval = resealRecord(record, {
-      trials: [{...trial, approvals: [{...approval, reviewRevisionHash: '0'.repeat(64)}, ...trial.approvals.slice(1)]}],
+      trials: [
+        {
+          ...trial,
+          approvals: [
+            {...approval, reviewRevisionHash: Effect.pipe('0', EffectString.repeat(64))},
+            ...trial.approvals.slice(1),
+          ],
+        },
+      ],
     });
     expect(
       verify(
@@ -674,7 +740,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
       fc.property(fc.integer({min: 1, max: chain.length - 2}), operationIndex => {
         const initial = chain[0];
         const source = chain[operationIndex + 1];
-        const operations = initial.operations.map((operation, index) =>
+        const operations = EffectArray.map(initial.operations, (operation, index) =>
           index === operationIndex ? source.operations[index] : operation,
         );
         const body: Omit<ActivationReceiptV1, 'revision'> = {
@@ -727,9 +793,11 @@ describe('Threadnote 5 source-native receipt verification', () => {
     ]);
     expect(verify([observation], [record])).toMatchObject({receiptCount: 1, state: 'verified'});
 
-    const artifact = record.artifact as {readonly reports: readonly Record<string, unknown>[]};
-    const capture = artifact.reports[0];
-    const report = capture.report as Record<string, unknown>;
+    const artifact = requireJsonObject(record.artifact);
+    const reports = requireJsonObjectArray(artifact.reports);
+    const capture = reports[0];
+    if (capture === undefined) throw new Error('Context health fixture has no report.');
+    const report = requireJsonObject(capture.report);
     const tampered = resealRecord(record, {
       repairs: [],
       reports: [{...capture, report: {...report, status: 'clean'}}],
@@ -738,6 +806,45 @@ describe('Threadnote 5 source-native receipt verification', () => {
       reason: 'records-invalid',
       state: 'unknown',
     });
+  });
+
+  it('parses complete personal and team aggregate source variants', () => {
+    const now = new Date('2026-09-17T00:00:00.000Z');
+    const report = buildContextHealthReport({now, project: 'threadnote', records: []});
+    const aggregateInput = {
+      personal: {
+        evidenceRevision: sha256HexSync('personal'),
+        report,
+        scope: 'personal' as const,
+        state: 'complete' as const,
+      },
+      project: 'threadnote',
+      teams: [
+        {
+          evidenceRevision: sha256HexSync('team'),
+          report,
+          scope: 'team' as const,
+          state: 'complete' as const,
+          team: 'runtime',
+        },
+      ],
+    };
+    const scheduleInput = {cadenceMinutes: 60, project: 'threadnote', teams: ['runtime']};
+    const plan = buildContextHealthSchedulePlanV1(scheduleInput);
+    const result = deriveThreadnote5HealthClaimsV1(
+      'health-maintenance',
+      {
+        aggregate: {aggregate: aggregateContextHealthReportsV1(aggregateInput), input: aggregateInput},
+        repairs: [],
+        reports: [],
+        schedule: {input: scheduleInput, observedArgv: ['threadnote', ...plan.argv], plan},
+      },
+      undefined,
+    );
+    expect(result.missingKinds).toEqual([
+      'context-health-schedule-authority',
+      'context-health-team-aggregate-authority',
+    ]);
   });
 
   it('replays read-only scheduled configured-team health evidence only with its bound authority', () => {
@@ -772,15 +879,12 @@ describe('Threadnote 5 source-native receipt verification', () => {
       }),
     ).toMatchObject({reason: 'records-invalid', state: 'unknown'});
 
-    const artifact = record.artifact as {
-      readonly aggregate: unknown;
-      readonly repairs: readonly unknown[];
-      readonly reports: readonly unknown[];
-      readonly schedule: {readonly input: unknown; readonly observedArgv: readonly string[]; readonly plan: unknown};
-    };
+    const artifact = requireJsonObject(record.artifact);
+    const schedule = requireJsonObject(artifact.schedule);
+    const observedArgv = EffectArray.map(requireUnknownArray(schedule.observedArgv), requireString);
     const argvTampered = resealRecord(record, {
       ...artifact,
-      schedule: {...artifact.schedule, observedArgv: [...artifact.schedule.observedArgv, '--team', 'forged']},
+      schedule: {...schedule, observedArgv: [...observedArgv, '--team', 'forged']},
     });
     expect(
       verify(
@@ -795,11 +899,11 @@ describe('Threadnote 5 source-native receipt verification', () => {
     const aggregateTampered = resealRecord(record, {
       ...artifact,
       aggregate: {
-        ...(artifact.aggregate as {readonly input: Record<string, unknown>}),
+        ...requireJsonObject(artifact.aggregate),
         input: {
-          ...(artifact.aggregate as {readonly input: Record<string, unknown>}).input,
+          ...requireJsonObject(requireJsonObject(artifact.aggregate).input),
           personal: {
-            ...(artifact.aggregate as {readonly input: {readonly personal: Record<string, unknown>}}).input.personal,
+            ...requireJsonObject(requireJsonObject(requireJsonObject(artifact.aggregate).input).personal),
             forged: true,
           },
         },
@@ -861,7 +965,9 @@ describe('Threadnote 5 source-native receipt verification', () => {
       ],
     };
     expect(() => threadnote5LocalAuthorityManifestHash(duplicateAuthority)).toThrow(/teams must be unique/u);
-    expect(verify([observation], [record], duplicateAuthority, '0'.repeat(64))).toMatchObject({
+    expect(
+      verify([observation], [record], duplicateAuthority, Effect.pipe('0', EffectString.repeat(64))),
+    ).toMatchObject({
       reason: 'records-invalid',
       state: 'unknown',
     });
@@ -878,8 +984,10 @@ describe('Threadnote 5 source-native receipt verification', () => {
               aggregate: {
                 ...healthAuthority.aggregate,
                 teamSnapshots: tamper
-                  ? snapshots.map((snapshot, index) =>
-                      index === 0 ? {...snapshot, postWorktreeDigest: 'f'.repeat(64)} : snapshot,
+                  ? EffectArray.map(snapshots, (snapshot, index) =>
+                      index === 0
+                        ? {...snapshot, postWorktreeDigest: Effect.pipe('f', EffectString.repeat(64))}
+                        : snapshot,
                     )
                   : snapshots,
               },
@@ -929,8 +1037,8 @@ describe('Threadnote 5 source-native receipt verification', () => {
     const observation = observed(record, observationAssertionsForProcedure());
     const otherCandidate: Threadnote5SourceV1 = {
       ...CANDIDATE,
-      commit: '3'.repeat(40),
-      version: `5.0.0-local.g${'3'.repeat(40)}`,
+      commit: Effect.pipe('3', EffectString.repeat(40)),
+      version: `5.0.0-local.g${Effect.pipe('3', EffectString.repeat(40))}`,
     };
     const wrongCandidateRecord = makeRecord(record.scenario, record.kind, record.artifact, otherCandidate);
     expect(
@@ -944,7 +1052,9 @@ describe('Threadnote 5 source-native receipt verification', () => {
     const extra = makeRecord('output-budgets', 'procedure', record.artifact);
     expect(verify([observation], [record, extra])).toMatchObject({reason: 'records-mismatched', state: 'unknown'});
 
-    const oversized = makeRecord('verified-procedures', 'procedure', {padding: 'x'.repeat(1024 * 1024)});
+    const oversized = makeRecord('verified-procedures', 'procedure', {
+      padding: Effect.pipe('x', EffectString.repeat(1024 * 1024)),
+    });
     expect(verify([observed(oversized, observationAssertionsForProcedure())], [oversized])).toMatchObject({
       reason: 'records-invalid',
       state: 'unknown',
@@ -983,17 +1093,27 @@ describe('Threadnote 5 source-native receipt verification', () => {
     const record = procedureRecord();
     const verification = verify([observed(record, observationAssertionsForProcedure())], [record]);
     const artifact = threadnote5LocalReceiptVerificationArtifact(verification);
-    expect(Object.keys(artifact).sort()).toEqual(['verification', 'verificationHash', 'version']);
+    expect(EffectRecord.keys(artifact).sort()).toEqual(['verification', 'verificationHash', 'version']);
     expect(canonicalJson(artifact)).not.toContain('/Users/');
     expect(canonicalJson(artifact)).not.toContain('artifactText');
   });
 
   it('canonicalizes external authority entries independently of input order and rejects surplus coverage', () => {
     const entries: Threadnote5LocalAuthorityEntryV1[] = [
-      {assertions: ['migration-runtime-executed'], recordDigest: 'a'.repeat(64), type: 'migration-execution'},
       {
-        recordDigest: 'b'.repeat(64),
-        trials: [{attemptDigest: 'c'.repeat(64), firstPlanCorrect: true, firstPlanSourceCited: true}],
+        assertions: ['migration-runtime-executed'],
+        recordDigest: Effect.pipe('a', EffectString.repeat(64)),
+        type: 'migration-execution',
+      },
+      {
+        recordDigest: Effect.pipe('b', EffectString.repeat(64)),
+        trials: [
+          {
+            attemptDigest: Effect.pipe('c', EffectString.repeat(64)),
+            firstPlanCorrect: true,
+            firstPlanSourceCited: true,
+          },
+        ],
         type: 'context-brief-plan-citation',
       },
     ];
@@ -1016,7 +1136,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
           ...entries,
           {
             assertions: ['dirty-evidence-not-current', 'outcome-unknown'],
-            recordDigest: 'a'.repeat(64),
+            recordDigest: Effect.pipe('a', EffectString.repeat(64)),
             type: 'context-check-read-fence',
           },
         ],
@@ -1026,7 +1146,11 @@ describe('Threadnote 5 source-native receipt verification', () => {
   });
 
   it('keeps current and legacy dirty Context Check evidence unknown and requires its bound authority', () => {
-    const boundary = (extra: Record<string, unknown>) => ({candidate: CANDIDATE, digest: 'c'.repeat(64), ...extra});
+    const boundary = (extra: Record<string, unknown>) => ({
+      candidate: CANDIDATE,
+      digest: Effect.pipe('c', EffectString.repeat(64)),
+      ...extra,
+    });
     const capture = {
       graphEvidence: boundary({state: 'incomplete'}),
       readFence: boundary({state: 'unknown'}),
@@ -1097,13 +1221,13 @@ describe('Threadnote 5 source-native receipt verification', () => {
   it('requires external runtime execution authority for migration receipts', () => {
     const baseline = {
       commit: THREADNOTE_5_BASELINE_COMMIT,
-      executableSha256: '4'.repeat(64),
+      executableSha256: Effect.pipe('4', EffectString.repeat(64)),
       id: 'threadnote-4.7.x',
       version: THREADNOTE_5_BASELINE_VERSION,
     } as const;
     const execution = (from: Threadnote5SourceV1, to: Threadnote5SourceV1, outcome: 'readable' | 'safe-refusal') => ({
-      afterDigest: 'a'.repeat(64),
-      beforeDigest: 'b'.repeat(64),
+      afterDigest: Effect.pipe('a', EffectString.repeat(64)),
+      beforeDigest: Effect.pipe('b', EffectString.repeat(64)),
       from,
       outcome,
       protectedWriteCount: 0,
@@ -1134,7 +1258,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
     };
     expect(verify([observation], [record], authority)).toMatchObject({state: 'verified'});
     const tampered = resealRecord(record, {
-      ...(record.artifact as Record<string, unknown>),
+      ...requireJsonObject(record.artifact),
       upgrade: execution(baseline, CANDIDATE, 'safe-refusal'),
     });
     expect(verify([observed(tampered, observationAssertions(observation))], [tampered], authority)).toMatchObject({
@@ -1166,12 +1290,13 @@ describe('Threadnote 5 source-native receipt verification', () => {
       previousManagedBlockHash: null,
       project: 'threadnote',
       removeTargetWhenEmpty: false,
-      repositoryId: 'e'.repeat(64),
-      sources: [...receiptSources]
-        .sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0))
-        .map(({contentHash, uri}) => ({contentHash, uri})),
+      repositoryId: Effect.pipe('e', EffectString.repeat(64)),
+      sources: EffectArray.map(
+        [...receiptSources].sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0)),
+        ({contentHash, uri}) => ({contentHash, uri}),
+      ),
       state: 'current' as const,
-      targetIdentity: 'f'.repeat(64),
+      targetIdentity: Effect.pipe('f', EffectString.repeat(64)),
       targetPath: 'AGENTS.md',
       version: 2 as const,
       wrapperOwned: false,
@@ -1253,33 +1378,7 @@ describe('Threadnote 5 source-native receipt verification', () => {
   });
 
   it('replays ten measured Context Brief attempts with authority-gated solo claims and local output budgets', () => {
-    const structuredContent = parseContextBriefV1({
-      activeHandoffs: [],
-      coverage: {
-        gaps: [],
-        memory: {},
-        omissions: {
-          activeHandoffs: 0,
-          coverageGaps: 0,
-          durableDecisions: 0,
-          graphCards: 0,
-          graphContracts: 0,
-          recommendedFollowUps: 0,
-          stalenessAndConflicts: 0,
-        },
-      },
-      durableDecisions: [],
-      graph: {cards: [], contracts: []},
-      mode: 'brief',
-      output: {omittedItems: 0, projectorVersion: 2, returnedItems: 0, truncated: false},
-      recommendedFollowUps: [],
-      scope: {},
-      stalenessAndConflicts: [],
-      task: {summary: 'x', truncated: false},
-      trust: {},
-      type: 'context-brief',
-      version: 2,
-    });
+    const structuredContent = emptyContextBriefContent();
     const attempt = {
       event: {candidate: CANDIDATE},
       request: {budgetTokens: 1_500, mode: 'brief', scope: {callerCwd: '/repo', kind: 'repository'}, task: 'x'},
@@ -1366,24 +1465,24 @@ function resealRecord(
 function authorityManifestFor(
   records: readonly Threadnote5LocalSubsystemReceiptRecordV1[],
 ): Threadnote5LocalAuthorityManifestV1 {
-  const uniqueRecords = [...new Map(records.map(record => [record.digest, record] as const)).values()];
+  const uniqueRecords = [...new Map(EffectArray.map(records, record => [record.digest, record] as const)).values()];
   const entries: Threadnote5LocalAuthorityEntryV1[] = [];
   for (const record of uniqueRecords) {
     if (record.kind === 'activation') {
-      const trials = (record.artifact as {readonly trials: readonly Record<string, unknown>[]}).trials;
+      const trials = requireJsonObjectArray(requireJsonObject(record.artifact).trials);
       entries.push({
         recordDigest: record.digest,
-        trials: trials.map(trial => {
-          const state = trial.state as {
-            readonly plan: {readonly activationId: string};
-            readonly receipt: {readonly revision: string};
-          };
-          const challenge = (trial.secondSurface as {readonly challenge?: unknown} | undefined)?.challenge;
+        trials: EffectArray.map(trials, trial => {
+          const state = requireJsonObject(trial.state);
+          const plan = requireJsonObject(state.plan);
+          const receipt = requireJsonObject(state.receipt);
+          const secondSurface = trial.secondSurface === undefined ? undefined : requireJsonObject(trial.secondSurface);
+          const challenge = secondSurface?.challenge;
           const offlineObservation = trial.offlineObservation;
           return {
-            activationId: state.plan.activationId,
+            activationId: requireString(plan.activationId),
             attestationDigest: challenge === undefined ? null : threadnote5ActivationAttestationDigest(challenge),
-            finalReceiptRevision: state.receipt.revision,
+            finalReceiptRevision: requireString(receipt.revision),
             offlineObservationDigest:
               offlineObservation === undefined
                 ? null
@@ -1397,10 +1496,10 @@ function authorityManifestFor(
       continue;
     }
     if (record.kind === 'context-brief' && record.scenario === 'solo') {
-      const attempts = (record.artifact as {readonly attempts: readonly unknown[]}).attempts;
+      const attempts = requireUnknownArray(requireJsonObject(record.artifact).attempts);
       entries.push({
         recordDigest: record.digest,
-        trials: attempts.map(attempt => ({
+        trials: EffectArray.map(attempts, attempt => ({
           attemptDigest: threadnote5ContextBriefAttemptDigest(attempt),
           firstPlanCorrect: true,
           firstPlanSourceCited: true,
@@ -1410,40 +1509,36 @@ function authorityManifestFor(
       continue;
     }
     if (record.kind === 'value-report') {
-      const trials = (
-        record.artifact as {
-          readonly feedbackTrials?: readonly {
-            readonly event: unknown;
-            readonly laneId: string;
-            readonly offlineObservation: unknown | null;
-          }[];
-        }
-      ).feedbackTrials;
-      if (trials === undefined) continue;
+      const artifact = requireJsonObject(record.artifact);
+      if (artifact.feedbackTrials === undefined) continue;
+      const trials = requireJsonObjectArray(artifact.feedbackTrials);
       entries.push({
         recordDigest: record.digest,
-        trials: trials.map(trial => ({
+        trials: EffectArray.map(trials, trial => ({
           feedbackEventDigest: threadnote5RecallFeedbackEventDigest(trial.event),
-          laneId: trial.laneId,
+          laneId: requireString(trial.laneId),
           offlineObservationDigest:
             trial.offlineObservation === null
               ? null
-              : threadnote5ValueReportOfflineObservationDigest(trial.offlineObservation),
+              : trial.offlineObservation === undefined
+                ? null
+                : threadnote5ValueReportOfflineObservationDigest(trial.offlineObservation),
         })),
         type: 'value-report-verification',
       });
       continue;
     }
     if (record.kind === 'procedure') {
-      const attempts = (record.artifact as {readonly attempts?: readonly Record<string, unknown>[]}).attempts;
+      const artifact = requireJsonObject(record.artifact);
+      const attempts = artifact.attempts === undefined ? undefined : requireJsonObjectArray(artifact.attempts);
       const attempt = attempts?.[0];
       if (attempt === undefined) continue;
       const manifest = parseProcedureManifest(attempt.manifest);
-      const statusInput = attempt.statusInput as {readonly receipt: unknown};
+      const statusInput = requireJsonObject(attempt.statusInput);
       entries.push({
         artifactId: manifest.artifact.id,
         automaticExecutionCount: 0,
-        commandResults: manifest.verification.commands.map(command => ({
+        commandResults: EffectArray.map(manifest.verification.commands, command => ({
           commandId: command.id,
           exitCode: 0,
           outputDigest: sha256HexSync(`verified-output:${command.id}`),
@@ -1456,33 +1551,32 @@ function authorityManifestFor(
       continue;
     }
     if (record.kind === 'git-proposal') {
-      const attempts = (record.artifact as {readonly attempts: readonly Record<string, unknown>[]}).attempts;
+      const attempts = requireJsonObjectArray(requireJsonObject(record.artifact).attempts);
       entries.push({
         recordDigest: record.digest,
-        trials: attempts.map(attempt => {
-          const proposal = attempt.proposal as {readonly proposalHash: string};
-          const candidateReview = attempt.review as CandidateReview;
-          const input = attempt.input as {
-            readonly mutations: readonly {
-              readonly approval: {readonly expectedSourceContentHash: string};
-              readonly candidateId: string;
-              readonly sourceUri: string;
-            }[];
-          };
+        trials: EffectArray.map(attempts, attempt => {
+          const proposal = requireJsonObject(attempt.proposal);
+          const candidateReview = parseCandidateReview(attempt.review);
+          const mutations = requireJsonObjectArray(requireJsonObject(attempt.input).mutations);
           return {
-            approvals: input.mutations.map(mutation => {
-              const applyEvent = candidateReview.auditEvents.find(
-                event => event.action === 'apply' && event.candidateId === mutation.candidateId,
+            approvals: EffectArray.map(mutations, mutation => {
+              const candidateId = requireString(mutation.candidateId);
+              const approval = requireJsonObject(mutation.approval);
+              const applyEvent = EffectOption.getOrUndefined(
+                EffectArray.findFirst(
+                  candidateReview.auditEvents,
+                  event => event.action === 'apply' && event.candidateId === candidateId,
+                ),
               );
               if (applyEvent === undefined) throw new Error('Proposal fixture has no apply audit event.');
               return {
                 applyAuditDigest: threadnote5ApplyAuditDigest(applyEvent),
-                approvedContentHash: mutation.approval.expectedSourceContentHash,
-                candidateId: mutation.candidateId,
-                sourceUriHash: threadnote5ApprovedSourceUriHash(mutation.sourceUri),
+                approvedContentHash: requireString(approval.expectedSourceContentHash),
+                candidateId,
+                sourceUriHash: threadnote5ApprovedSourceUriHash(requireString(mutation.sourceUri)),
               };
             }),
-            proposalHash: proposal.proposalHash,
+            proposalHash: requireString(proposal.proposalHash),
             providerApiCallCount: 0,
             reviewId: candidateReview.reviewId,
             revision: candidateReview.revision,
@@ -1492,32 +1586,31 @@ function authorityManifestFor(
       });
     }
     if (record.kind === 'context-health' && record.scenario === 'health-maintenance') {
-      const artifact = record.artifact as {
-        readonly aggregate: {
-          readonly input: {
-            readonly teams: readonly (
-              {readonly scope: 'team'; readonly team: string} | {readonly scope: 'team-selection'}
-            )[];
-          };
-        };
-      };
+      const artifact = requireJsonObject(record.artifact);
+      const aggregate = requireJsonObject(artifact.aggregate);
+      const input = requireJsonObject(aggregate.input);
+      const teams = requireJsonObjectArray(input.teams);
       entries.push({
         aggregate: {
           networkActivityCount: 0,
-          teamSnapshots: artifact.aggregate.input.teams.flatMap((source, index) =>
+          teamSnapshots: EffectArray.flatMap(teams, (source, index) =>
             source.scope === 'team'
               ? [
                   {
-                    postHead: String(index + 1).repeat(40),
-                    postIndexDigest: String(index + 3).repeat(64),
-                    postWorktreeDigest: String(index + 5).repeat(64),
-                    preHead: String(index + 1).repeat(40),
-                    preIndexDigest: String(index + 3).repeat(64),
-                    preWorktreeDigest: String(index + 5).repeat(64),
-                    team: source.team,
+                    postHead: Effect.pipe(String(index + 1), EffectString.repeat(40)),
+                    postIndexDigest: Effect.pipe(String(index + 3), EffectString.repeat(64)),
+                    postWorktreeDigest: Effect.pipe(String(index + 5), EffectString.repeat(64)),
+                    preHead: Effect.pipe(String(index + 1), EffectString.repeat(40)),
+                    preIndexDigest: Effect.pipe(String(index + 3), EffectString.repeat(64)),
+                    preWorktreeDigest: Effect.pipe(String(index + 5), EffectString.repeat(64)),
+                    team: requireString(source.team),
                   },
                 ]
-              : [],
+              : source.scope === 'team-selection'
+                ? []
+                : (() => {
+                    throw new Error('Unexpected context-health team scope.');
+                  })(),
           ),
           writeActivityCount: 0,
         },
@@ -1537,7 +1630,7 @@ function observed(
   additionalReceipts: Threadnote5ObservationV1['attestation']['subsystemReceipts'] = [],
 ): Threadnote5ObservationV1 {
   const transcript = {
-    assertionResults: assertions.map(id => ({id, observed: true})),
+    assertionResults: EffectArray.map(assertions, id => ({id, observed: true})),
     measurements,
     outcome: 'passed' as const,
     reason: null,
@@ -1551,7 +1644,7 @@ function observed(
       subsystemReceipts: [...additionalReceipts, {digest: record.digest, kind: record.kind}],
       transcriptDigest: threadnote5ObservationTranscriptHash(transcript),
     },
-    observationId: `obs_${sha256HexSync(`${record.scenario}\0${record.digest}`).slice(0, 32)}`,
+    observationId: `obs_${Effect.pipe(sha256HexSync(`${record.scenario}\0${record.digest}`), EffectString.slice(0, 32))}`,
     scenario: record.scenario,
     sourceHash: threadnote5SourceHash(CANDIDATE),
     transcript,
@@ -1561,7 +1654,7 @@ function observed(
 }
 
 function observationAssertions(observation: Threadnote5ObservationV1): readonly string[] {
-  return observation.transcript.assertionResults.map(result => result.id);
+  return EffectArray.map(observation.transcript.assertionResults, result => result.id);
 }
 
 function observationAssertionsForProcedure(): readonly string[] {
@@ -1608,23 +1701,29 @@ function closeoutRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
 function activationSoloArtifact() {
   const {approvals, plan, receipt, receiptChain} = activationChainBeforeSecondSurface();
   const operation = plan.operations.at(-1)!;
-  const result = recordSuccessfulActivationOperation(plan, receipt, operation, 'a'.repeat(64), approvals);
+  const result = recordSuccessfulActivationOperation(
+    plan,
+    receipt,
+    operation,
+    Effect.pipe('a', EffectString.repeat(64)),
+    approvals,
+  );
   return {trials: [{approvals, receiptChain: [...receiptChain, result], state: {plan, receipt: result}}]};
 }
 
-function activationJourneyFixture(repositoryIdentityHash = 'b'.repeat(64)) {
+function activationJourneyFixture(repositoryIdentityHash = Effect.pipe('b', EffectString.repeat(64))) {
   const {
     approvals,
     plan,
     receipt: publicationReceipt,
     receiptChain,
   } = activationChainBeforeSecondSurface(repositoryIdentityHash);
-  const publicationReceiptHash = publicationReceipt.operations.find(
-    operation => operation.kind === 'decision.publish',
+  const publicationReceiptHash = EffectOption.getOrUndefined(
+    EffectArray.findFirst(publicationReceipt.operations, operation => operation.kind === 'decision.publish'),
   )!.subsystemReceiptHash!;
   const decision = {
     canonicalUri: 'threadnote://user/test/memories/shared/default/durable/projects/threadnote/activation.md',
-    contentHash: 'd'.repeat(64),
+    contentHash: Effect.pipe('d', EffectString.repeat(64)),
     memoryId: 'tn_activation_decision',
     publicationReceiptHash,
   };
@@ -1636,25 +1735,25 @@ function activationJourneyFixture(repositoryIdentityHash = 'b'.repeat(64)) {
     decision,
     primary: {
       access: 'local-stdio',
-      capabilitiesFingerprint: '1'.repeat(64),
+      capabilitiesFingerprint: Effect.pipe('1', EffectString.repeat(64)),
       configurationState: 'current',
       mcpCapability: 'managed',
-      mcpConfigFingerprint: '2'.repeat(64),
-      mcpReceiptFingerprint: '3'.repeat(64),
-      mcpServerFingerprint: '9'.repeat(64),
+      mcpConfigFingerprint: Effect.pipe('2', EffectString.repeat(64)),
+      mcpReceiptFingerprint: Effect.pipe('3', EffectString.repeat(64)),
+      mcpServerFingerprint: Effect.pipe('9', EffectString.repeat(64)),
       surfaceId: plan.primarySurfaceId,
     },
-    queryFingerprint: '5'.repeat(64),
+    queryFingerprint: Effect.pipe('5', EffectString.repeat(64)),
     repositoryIdentityHash: plan.repositoryIdentityHash,
     repositoryState: 'clean',
     secondary: {
       access: 'local-stdio',
-      capabilitiesFingerprint: '6'.repeat(64),
+      capabilitiesFingerprint: Effect.pipe('6', EffectString.repeat(64)),
       configurationState: 'current',
       mcpCapability: 'managed',
-      mcpConfigFingerprint: '7'.repeat(64),
-      mcpReceiptFingerprint: '8'.repeat(64),
-      mcpServerFingerprint: '9'.repeat(64),
+      mcpConfigFingerprint: Effect.pipe('7', EffectString.repeat(64)),
+      mcpReceiptFingerprint: Effect.pipe('8', EffectString.repeat(64)),
+      mcpServerFingerprint: Effect.pipe('9', EffectString.repeat(64)),
       surfaceId: plan.secondarySurfaceId,
     },
     startedAt: publicationReceipt.updatedAt,
@@ -1676,10 +1775,10 @@ function activationJourneyFixture(repositoryIdentityHash = 'b'.repeat(64)) {
   const recall: SecondSurfaceRecallObservationV1 = {
     ...commonObservation,
     complete: true,
-    invocationId: 'a'.repeat(64),
+    invocationId: Effect.pipe('a', EffectString.repeat(64)),
     observedAt: new Date(Date.parse(context.startedAt) + 1_000).toISOString(),
     queryFingerprint: context.queryFingerprint,
-    responseFingerprint: 'b'.repeat(64),
+    responseFingerprint: Effect.pipe('b', EffectString.repeat(64)),
     results: [{canonicalUri: decision.canonicalUri, identityConflict: false, memoryId: decision.memoryId}],
     returnedResults: 1,
     totalResults: 1,
@@ -1690,7 +1789,7 @@ function activationJourneyFixture(repositoryIdentityHash = 'b'.repeat(64)) {
     canonicalUri: decision.canonicalUri,
     complete: true,
     contentHash: decision.contentHash,
-    invocationId: 'c'.repeat(64),
+    invocationId: Effect.pipe('c', EffectString.repeat(64)),
     memoryId: decision.memoryId,
     observedAt: new Date(Date.parse(context.startedAt) + 2_000).toISOString(),
     readable: true,
@@ -1698,7 +1797,7 @@ function activationJourneyFixture(repositoryIdentityHash = 'b'.repeat(64)) {
     requestedMemoryId: decision.memoryId,
     requestedUri: decision.canonicalUri,
     resourceCount: 1,
-    responseFingerprint: 'd'.repeat(64),
+    responseFingerprint: Effect.pipe('d', EffectString.repeat(64)),
   };
   const proofResult = completeSecondSurfaceProofV1(context, recall, read);
   if (proofResult.status !== 'verified') {
@@ -1714,7 +1813,7 @@ function activationJourneyFixture(repositoryIdentityHash = 'b'.repeat(64)) {
   );
   const challengeId = secondSurfaceChallengeIdV1(context);
   const contextHash = secondSurfaceProofContextHashV1(context);
-  const nonceHash = 'e'.repeat(64);
+  const nonceHash = Effect.pipe('e', EffectString.repeat(64));
   const challenge = {
     challengeId,
     context,
@@ -1722,7 +1821,7 @@ function activationJourneyFixture(repositoryIdentityHash = 'b'.repeat(64)) {
     issuedAt: context.startedAt,
     nonceHash,
     receipt: {
-      attestationHash: 'f'.repeat(64),
+      attestationHash: Effect.pipe('f', EffectString.repeat(64)),
       challengeId,
       contextHash,
       nonceHash,
@@ -1783,17 +1882,17 @@ function activationValueArtifact(
   };
 }
 
-function activationChainBeforeSecondSurface(repositoryIdentityHash = 'b'.repeat(64)) {
+function activationChainBeforeSecondSurface(repositoryIdentityHash = Effect.pipe('b', EffectString.repeat(64))) {
   const plan = createActivationPlanV1({
-    catalogSnapshotHash: 'a'.repeat(64),
+    catalogSnapshotHash: Effect.pipe('a', EffectString.repeat(64)),
     primarySurfaceId: 'codex-cli',
     publicationMode: 'direct',
     repositoryIdentityHash,
     secondarySurfaceId: 'claude-code',
-    selectedSourceSetHash: 'c'.repeat(64),
-    taskHash: 'd'.repeat(64),
+    selectedSourceSetHash: Effect.pipe('c', EffectString.repeat(64)),
+    taskHash: Effect.pipe('d', EffectString.repeat(64)),
     teamId: 'default',
-    teamShareStateHash: 'e'.repeat(64),
+    teamShareStateHash: Effect.pipe('e', EffectString.repeat(64)),
     threadnoteVersion: '5.0.0-test',
   });
   let receipt = createActivationReceiptV1(plan, '2026-09-18T08:00:00.000Z');
@@ -1804,7 +1903,7 @@ function activationChainBeforeSecondSurface(repositoryIdentityHash = 'b'.repeat(
       plan,
       receipt,
       operation,
-      (index + 1).toString(16).padStart(64, '0'),
+      Effect.pipe((index + 1).toString(16), EffectString.padStart(64, '0')),
       approvals,
     );
     receiptChain.push(receipt);
@@ -1822,7 +1921,7 @@ function recordSuccessfulActivationOperation(
   const approval =
     operation.approvalKind === undefined
       ? undefined
-      : bindActivationApprovalV1(plan, receipt, operation.id, 'f'.repeat(64));
+      : bindActivationApprovalV1(plan, receipt, operation.id, Effect.pipe('f', EffectString.repeat(64)));
   if (approval !== undefined) approvals?.push(approval);
   const result = recordActivationOutcomeV1({
     approval,
@@ -1845,7 +1944,7 @@ function review(
   index: number,
   application?: {readonly contentHash: string; readonly sourceUri: string},
 ): CandidateReview {
-  const reviewId = `review-${index.toString(16).padStart(16, '0')}`;
+  const reviewId = `review-${Effect.pipe(index.toString(16), EffectString.padStart(16, '0'))}`;
   const candidateId = `${reviewId}-1`;
   const sourceUri =
     application?.sourceUri ?? `threadnote://user/test/memories/durable/projects/threadnote/topic-${index}.md`;
@@ -1910,7 +2009,7 @@ function review(
 function proposalRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
   const attempts = Array.from({length: 10}, (_value, index) => {
     const number = index + 1;
-    const reviewId = `review-${number.toString(16).padStart(16, '0')}`;
+    const reviewId = `review-${Effect.pipe(number.toString(16), EffectString.padStart(16, '0'))}`;
     const candidateId = `${reviewId}-1`;
     const topic = `topic-${number}`;
     const sourceUri = `threadnote://user/test/memories/durable/projects/threadnote/${topic}.md`;
@@ -1918,7 +2017,7 @@ function proposalRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
     const contentHash = sha256HexSync(canonicalMemoryDocumentContent(sourceContent));
     const candidateReview = review(number, {contentHash, sourceUri});
     const input = {
-      baseCommit: 'a'.repeat(40),
+      baseCommit: Effect.pipe('a', EffectString.repeat(40)),
       mutations: [
         {
           approval: {expectedSourceContentHash: contentHash, reviewId, revision: 2, share: true as const},
@@ -1930,7 +2029,7 @@ function proposalRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
         },
       ],
       project: 'threadnote',
-      target: {repositoryId: 'b'.repeat(64), team: 'default'},
+      target: {repositoryId: Effect.pipe('b', EffectString.repeat(64)), team: 'default'},
     };
     const built = buildKnowledgeDeltaGitProposalV1({...input, delta: projectKnowledgeDeltaV1(candidateReview)});
     return {artifact: built.artifact, input, proposal: built.proposal, review: candidateReview};
@@ -1939,23 +2038,26 @@ function proposalRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
 }
 
 function approvedSource(candidateId: string, topic: string, index: number): string {
-  return [
-    'MEMORY',
-    'kind: durable',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    'source_agent_client: codex',
-    'timestamp: 2026-09-17T00:00:00.000Z',
-    'schema_version: 5',
-    `memory_id: tn_release_${index}`,
-    'visibility: personal',
-    'authority: user_approved',
-    'trust: approved',
-    `candidate_id: ${candidateId}`,
-    '',
-    `Approved decision ${index}.`,
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: durable',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      'source_agent_client: codex',
+      'timestamp: 2026-09-17T00:00:00.000Z',
+      'schema_version: 5',
+      `memory_id: tn_release_${index}`,
+      'visibility: personal',
+      'authority: user_approved',
+      'trust: approved',
+      `candidate_id: ${candidateId}`,
+      '',
+      `Approved decision ${index}.`,
+    ],
+    '\n',
+  );
 }
 
 function valueReportRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
@@ -1980,7 +2082,7 @@ function valueReportRecord(): Threadnote5LocalSubsystemReceiptRecordV1 {
   });
   return makeRecord('two-agent', 'value-report', {
     captures,
-    feedbackTrials: captures.map((capture, index) => ({
+    feedbackTrials: EffectArray.map(captures, (capture, index) => ({
       event: capture.input.feedbackEvents[0],
       laneId: sha256HexSync(`value-report-lane-${index}`),
       offlineObservation: null,

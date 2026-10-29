@@ -1,3 +1,5 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {isReadonlyArray} from '@threadnote/platform/readonly-array';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Schema} from 'effect';
 import {parseResourceId} from '@threadnote/store/resource-id';
@@ -16,6 +18,8 @@ import {
 } from './code/citation.js';
 import type {MemoryKind, MemoryStatus} from './types.js';
 import type {TopicMaintenanceManifestV2, TopicMaintenanceCodeManifestV3} from './topic-maintenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface ConsolidationSource {
   readonly uri: string;
@@ -164,13 +168,17 @@ const ProvenanceV2Schema = Schema.Struct({
   }),
 });
 
+export function isConsolidationReceiptShape(value: unknown): value is ConsolidationReceipt {
+  return Schema.is(ProvenanceSchema)(value) || Schema.is(ProvenanceV2Schema)(value);
+}
 /** Blank-line-delimited paragraphs, including Markdown headings and code blocks, are reviewed verbatim. */
 export function consolidationSections(body: string): readonly string[] {
-  const sections = body
-    .trim()
-    .split(/\n[\t ]*\n/)
-    .map(section => section.trim())
-    .filter(Boolean);
+  const sections = EffectArray.filter(
+    EffectArray.map(Effect.pipe(body, EffectString.trim, EffectString.split(/\n[\t ]*\n/)), section =>
+      Effect.pipe(section, EffectString.trim),
+    ),
+    Boolean,
+  );
   if (!sections.length || sections.length > 64 || bytes(body) > 32 * 1024)
     fail('draft must contain 1–64 paragraphs within 32 KiB.');
   return sections;
@@ -200,10 +208,15 @@ export function captureConsolidationSource(source: {
   ) {
     fail(`source ${source.uri} has private evidence that consolidation cannot preserve yet.`);
   }
-  const relationHeaders = source.content
-    .split(/\r?\n\r?\n/, 1)[0]
-    .split(/\r?\n/)
-    .filter(line => /^\s*relation\s*:/u.test(line));
+  const relationHeaders = EffectArray.filter(
+    Effect.pipe(
+      source.content
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
+        .split(/\r?\n\r?\n/, 1)[0],
+      EffectString.split(/\r?\n/),
+    ),
+    __effectArrayValue => !!(line => /^\s*relation\s*:/u.test(line))(__effectArrayValue),
+  );
   if (relationHeaders.length !== (record.metadata.relations?.length ?? 0))
     fail(`source ${source.uri} has invalid relation metadata.`);
   const captured = {
@@ -236,32 +249,36 @@ export function reviewConsolidation(
   if (reviews.length !== sections.length) fail('every final paragraph needs an explicit evidence review.');
   const citations = new Map<string, MemoryCodeCitationV1>();
   const relations = new Map<string, MemoryRelation>();
-  reviews.forEach((review, index) => {
+  EffectArray.forEach(reviews, (review, index) => {
     if (
       !review ||
       review.section !== sections[index] ||
       !['direct', 'contextual', 'unsupported'].includes(review.disposition) ||
-      !Array.isArray(review.supports) ||
+      !EffectArray.isArray(review.supports) ||
       review.supports.length > 16
     )
       fail(`paragraph ${index + 1} has missing or stale review bindings.`);
     if (review.disposition === 'unsupported' ? review.supports.length !== 0 : review.supports.length === 0)
       fail(`paragraph ${index + 1} needs applicable support or an explicit unsupported decision.`);
     for (const support of review.supports) {
-      const source = sources.find(source => source.uri === support.sourceUri);
+      const source = EffectOption.getOrUndefined(
+        EffectArray.findFirst(sources, source => source.uri === support.sourceUri),
+      );
       if (
         !source ||
         !Number.isSafeInteger(support.fragment) ||
         support.fragment < 0 ||
         support.fragment >= source.fragments.length ||
-        !Array.isArray(support.citationIds) ||
+        !EffectArray.isArray(support.citationIds) ||
         support.citationIds.length > 8 ||
-        !Array.isArray(support.relationIndexes) ||
+        !EffectArray.isArray(support.relationIndexes) ||
         support.relationIndexes.length > 16
       )
         fail(`paragraph ${index + 1} selects invalid source evidence.`);
       for (const id of support.citationIds) {
-        const citation = source.codeCitations.find(citation => citation.id === id);
+        const citation = EffectOption.getOrUndefined(
+          EffectArray.findFirst(source.codeCitations, citation => citation.id === id),
+        );
         if (!citation) fail(`paragraph ${index + 1} selects unknown citation ${id}.`);
         if (review.disposition === 'direct') {
           const previous = citations.get(id);
@@ -280,19 +297,30 @@ export function reviewConsolidation(
   });
   if (citations.size > MAX_MEMORY_CODE_CITATIONS)
     fail(
-      `${citations.size} selected citations exceed the limit of ${MAX_MEMORY_CODE_CITATIONS}; deselect evidence or split the draft. Selected: ${[...citations.values()].map(c => c.path).join(', ')}`,
+      `${citations.size} selected citations exceed the limit of ${MAX_MEMORY_CODE_CITATIONS}; deselect evidence or split the draft. Selected: ${EffectArray.join(
+        EffectArray.map([...citations.values()], c => c.path),
+        ', ',
+      )}`,
     );
   if (relations.size > MAX_MEMORY_RELATIONS)
     fail(
       `${relations.size} selected relations exceed the limit of ${MAX_MEMORY_RELATIONS}; deselect evidence or split the draft.`,
     );
-  const payload = {version: 1 as const, ...options, bodyHash: consolidationRevision(body.trim()), sources, reviews};
+  const payload = {
+    version: 1 as const,
+    ...options,
+    bodyHash: consolidationRevision(Effect.pipe(body, EffectString.trim)),
+    sources,
+    reviews,
+  };
   const provenance: ConsolidationProvenance = {...payload, requestHash: sha256HexSync(JSON.stringify(payload))};
   if (bytes(JSON.stringify(provenance)) > MAX_CONSOLIDATION_BYTES)
     fail('captured provenance exceeds 60 KiB; use fewer sources or split the draft.');
   return {
-    codeCitations: [...citations.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    relations: [...relations.values()].sort((a, b) => `${a.type} ${a.uri}`.localeCompare(`${b.type} ${b.uri}`)),
+    codeCitations: [...citations.values()].sort((a, b) => Effect.pipe(a.id, EffectString.localeCompare(b.id))),
+    relations: [...relations.values()].sort((a, b) =>
+      Effect.pipe(`${a.type} ${a.uri}`, EffectString.localeCompare(`${b.type} ${b.uri}`)),
+    ),
     provenance,
   };
 }
@@ -308,16 +336,17 @@ function validateOptions(options: ConsolidationOptions): void {
     fail('invalid operation receipt.');
   const t = options.target;
   Schema.decodeSync(ConsolidationTargetSchema, strict)(t);
-  if ([t.project, t.topic, t.sourceAgentClient].some(value => bytes(value) > 512)) fail('invalid target receipt.');
+  if (EffectArray.some([t.project, t.topic, t.sourceAgentClient], value => bytes(value) > 512))
+    fail('invalid target receipt.');
 }
 
 function validateSources(sources: readonly ConsolidationSource[]): void {
   Schema.decodeSync(Schema.Array(SourceSchema), strict)(sources);
   if (
-    !Array.isArray(sources) ||
+    !isReadonlyArray(sources) ||
     sources.length < 1 ||
     sources.length > MAX_CONSOLIDATION_SOURCES ||
-    new Set(sources.map(s => s.uri)).size !== sources.length
+    new Set(EffectArray.map(sources, s => s.uri)).size !== sources.length
   )
     fail('select 1–16 distinct source revisions.');
   for (const source of sources) {
@@ -326,14 +355,16 @@ function validateSources(sources: readonly ConsolidationSource[]): void {
       typeof source.uri !== 'string' ||
       parseResourceId(source.uri).canonicalUri !== source.uri ||
       !digest.test(source.revision) ||
-      !Array.isArray(source.fragments) ||
+      !EffectArray.isArray(source.fragments) ||
       source.fragments.length < 1 ||
       source.fragments.length > 64 ||
-      source.fragments.some(
-        (fragment: unknown) => typeof fragment !== 'string' || !fragment.trim() || bytes(fragment) > 32 * 1024,
+      EffectArray.some(
+        source.fragments,
+        (fragment: unknown) =>
+          typeof fragment !== 'string' || !Effect.pipe(fragment, EffectString.trim) || bytes(fragment) > 32 * 1024,
       ) ||
-      !Array.isArray(source.codeCitations) ||
-      !Array.isArray(source.relations) ||
+      !EffectArray.isArray(source.codeCitations) ||
+      !EffectArray.isArray(source.relations) ||
       source.relations.length > 16
     )
       fail('invalid captured source revision.');
@@ -360,17 +391,17 @@ export function validateConsolidationProvenance(
   // Lifecycle archives can themselves be archived; their fixed wrapper adds no reviewed claim.
   while (
     archived &&
-    provenance.bodyHash !== consolidationRevision(effectiveBody.trim()) &&
-    effectiveBody.startsWith('Archived original Threadnote memory.\n\n')
+    provenance.bodyHash !== consolidationRevision(Effect.pipe(effectiveBody, EffectString.trim)) &&
+    Effect.pipe(effectiveBody, EffectString.startsWith('Archived original Threadnote memory.\n\n'))
   ) {
-    effectiveBody = effectiveBody.slice('Archived original Threadnote memory.\n\n'.length);
+    effectiveBody = Effect.pipe(effectiveBody, EffectString.slice('Archived original Threadnote memory.\n\n'.length));
   }
   if (
     !provenance ||
     provenance.version !== 1 ||
     !digest.test(provenance.bodyHash) ||
     !digest.test(provenance.requestHash) ||
-    provenance.bodyHash !== consolidationRevision(effectiveBody.trim())
+    provenance.bodyHash !== consolidationRevision(Effect.pipe(effectiveBody, EffectString.trim))
   )
     fail('persisted derivation is malformed or bound to a different body; review the edited draft.');
   const result = reviewConsolidation(effectiveBody, provenance.sources, provenance.reviews, {
@@ -400,10 +431,10 @@ export function buildConsolidationProvenanceV2(
   const originalSections = consolidationSections(originBody);
   if (sections.length !== originalSections.length || manifest.paragraphs.length !== sections.length)
     fail('maintenance must preserve the original paragraph geometry.');
-  const paragraphs = sections.map((section, ordinal) => {
+  const paragraphs = EffectArray.map(sections, (section, ordinal) => {
     const review = origin.reviews[ordinal];
     const citationIds = manifest.paragraphs[ordinal].citationIds;
-    const oldIds = [...new Set(review.supports.flatMap(support => support.citationIds))].sort();
+    const oldIds = [...new Set(EffectArray.flatMap(review.supports, support => support.citationIds))].sort();
     const evidence =
       section === review.section && JSON.stringify([...citationIds].sort()) === JSON.stringify(oldIds)
         ? ('origin' as const)
@@ -420,7 +451,7 @@ export function buildConsolidationProvenanceV2(
     version: 2 as const,
     origin,
     originBody,
-    bodyHash: consolidationRevision(body.trim()),
+    bodyHash: consolidationRevision(Effect.pipe(body, EffectString.trim)),
     acceptance: {...acceptance, paragraphs},
   };
   const receipt: ConsolidationProvenanceV2 = {...payload, requestHash: sha256HexSync(JSON.stringify(payload))};
@@ -430,7 +461,9 @@ export function buildConsolidationProvenanceV2(
 
 export function validateConsolidationProvenanceV2(value: unknown, body: string): ConsolidationProvenanceV2 {
   const receipt = Schema.decodeUnknownSync(ProvenanceV2Schema, strict)(value);
-  const stored = value as ConsolidationProvenanceV2;
+  // Keep the original ordering used by the reviewed provenance digest.
+  if (!Schema.is(ProvenanceV2Schema)(value)) fail('maintenance provenance has an invalid shape.');
+  const stored = value;
   if (bytes(JSON.stringify(receipt)) > MAX_CONSOLIDATION_V2_BYTES)
     fail('maintenance provenance exceeds the 128 KiB limit.');
   if (bytes(receipt.originBody) > 32 * 1024 || receipt.originBody.length === 0)
@@ -439,7 +472,7 @@ export function validateConsolidationProvenanceV2(value: unknown, body: string):
   const sections = consolidationSections(body);
   if (
     sections.length !== consolidationSections(receipt.originBody).length ||
-    receipt.bodyHash !== consolidationRevision(body.trim()) ||
+    receipt.bodyHash !== consolidationRevision(Effect.pipe(body, EffectString.trim)) ||
     !digest.test(receipt.bodyHash) ||
     !digest.test(receipt.requestHash) ||
     !digest.test(receipt.acceptance.targetBeforeHash) ||
@@ -451,13 +484,13 @@ export function validateConsolidationProvenanceV2(value: unknown, body: string):
     fail('maintenance derivation is stale or malformed.');
   for (const [ordinal, paragraph] of receipt.acceptance.paragraphs.entries()) {
     const originReview = receipt.origin.reviews[ordinal];
-    const oldIds = [...new Set(originReview.supports.flatMap(support => support.citationIds))].sort();
+    const oldIds = [...new Set(EffectArray.flatMap(originReview.supports, support => support.citationIds))].sort();
     if (
       paragraph.ordinal !== ordinal ||
       paragraph.originOrdinal !== ordinal ||
       paragraph.hash !== consolidationRevision(sections[ordinal]) ||
       new Set(paragraph.citationIds).size !== paragraph.citationIds.length ||
-      paragraph.citationIds.some(id => !/^tncc_[a-f0-9]{40}$/u.test(id)) ||
+      EffectArray.some(paragraph.citationIds, id => !/^tncc_[a-f0-9]{40}$/u.test(id)) ||
       (paragraph.evidence === 'origin' &&
         (sections[ordinal] !== originReview.section ||
           JSON.stringify([...paragraph.citationIds].sort()) !== JSON.stringify(oldIds))) ||
@@ -492,13 +525,13 @@ export function validateConsolidationV2ActiveEvidence(
     if (JSON.stringify(paragraph.citationIds) !== JSON.stringify(manifest.paragraphs[ordinal].citationIds))
       fail(`maintenance paragraph ${ordinal + 1} cites different reviewed support.`);
   const required = new Set([
-    ...origin.codeCitations.map(citation => citation.id),
+    ...EffectArray.map(origin.codeCitations, citation => citation.id),
     ...manifest.originCitationIds,
-    ...manifest.paragraphs.flatMap(paragraph => paragraph.citationIds),
-    ...manifest.additionalDependencies.map(dependency => dependency.citationId),
-    ...manifest.acceptedSources.map(source => source.acceptedCitationId),
+    ...EffectArray.flatMap(manifest.paragraphs, paragraph => paragraph.citationIds),
+    ...EffectArray.map(manifest.additionalDependencies, dependency => dependency.citationId),
+    ...EffectArray.map(manifest.acceptedSources, source => source.acceptedCitationId),
   ]);
-  const actual = new Map(citations.map(citation => [citation.id, citation]));
+  const actual = new Map(EffectArray.map(citations, citation => [citation.id, citation]));
   if (required.size !== citations.length || required.size > MAX_MEMORY_CODE_CITATIONS)
     fail('maintenance active citation union exceeds eight or differs from reviewed support.');
   for (const id of required) if (!actual.has(id)) fail('maintenance omitted a reviewed citation.');

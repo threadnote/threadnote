@@ -23,10 +23,15 @@ import {
   reconcileAcceptedTopicMaintenanceCase,
   recordTopicMaintenanceReviewDecision,
 } from './maintenance.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class TopicReviewError extends Schema.TaggedError<TopicReviewError>()('TopicReviewError', {
-  message: Schema.String,
-}) {}
+export class TopicReviewError extends Schema.TaggedError<TopicReviewError, {readonly brand: unique symbol}>()(
+  'TopicReviewError',
+  {
+    message: Schema.String,
+  },
+) {}
 const fail = (message: string) => TopicReviewError.make({message});
 
 export interface TopicReviewDecisionInput {
@@ -149,8 +154,9 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
       const uri = approval.preview.targetUri;
       if (
         payload.version === 3
-          ? !uri.startsWith(`threadnote://user/${config.user}/memories/`) || isSharedMemoryUri(uri)
-          : !uri.startsWith(`threadnote://user/${config.user}/memories/durable/`)
+          ? !Effect2.pipe(uri, EffectString.startsWith(`threadnote://user/${config.user}/memories/`)) ||
+            isSharedMemoryUri(uri)
+          : !Effect2.pipe(uri, EffectString.startsWith(`threadnote://user/${config.user}/memories/durable/`))
       )
         return yield* fail(
           'Use the authorized shared Git owner/publication flow for shared targets; personal approval applies only to your exact ordinary memory.',

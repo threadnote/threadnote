@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -10,6 +11,8 @@ import {
 } from '@threadnote/graph/cross_repository/resolver';
 import {codeGraphPackageMoniker, codeGraphProtobufMoniker} from '@threadnote/graph/cross_repository/monikers';
 import type {CodeGraphMonikerV1, CodeGraphProtobufMonikerKind} from '@threadnote/graph/cross_repository/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const span = {column: 1, endColumn: 12, endLine: 1, line: 1} as const;
 
@@ -80,27 +83,36 @@ describe('cross-repository bridge resolver', () => {
     const consumer = repository(
       'protobuf-consumer',
       'services/gateway',
-      identities.map((identity, index) => protobufMoniker('import', identity, `consumer-${index}`)),
+      EffectArray.map(identities, (identity, index) => protobufMoniker('import', identity, `consumer-${index}`)),
     );
     const producer = repository(
       'protobuf-producer',
       'services/orders-api',
-      identities.map((identity, index) => protobufMoniker('export', identity, `producer-${index}`)),
+      EffectArray.map(identities, (identity, index) => protobufMoniker('export', identity, `producer-${index}`)),
     );
 
     const result = resolveCodeGraphCrossRepositoryBridges([producer, consumer]);
 
     expect(result.rejections).toEqual([]);
-    expect(result.bridges.map(bridge => bridge.kind)).toEqual(['file', 'message', 'package', 'rpc', 'service']);
-    expect(result.bridges.every(bridge => bridge.relation === 'imports')).toBe(true);
-    expect(result.bridges.every(bridge => bridge.resolver.reason === 'exact-protobuf-identity')).toBe(true);
-    expect(result.bridges.every(bridge => bridge.source.reference.kind === 'qualified-ref')).toBe(true);
-    expect(result.bridges.every(bridge => bridge.target.reference.kind === 'qualified-ref')).toBe(true);
+    expect(EffectArray.map(result.bridges, bridge => bridge.kind)).toEqual([
+      'file',
+      'message',
+      'package',
+      'rpc',
+      'service',
+    ]);
+    expect(EffectArray.every(result.bridges, bridge => bridge.relation === 'imports')).toBe(true);
+    expect(EffectArray.every(result.bridges, bridge => bridge.resolver.reason === 'exact-protobuf-identity')).toBe(
+      true,
+    );
+    expect(EffectArray.every(result.bridges, bridge => bridge.source.reference.kind === 'qualified-ref')).toBe(true);
+    expect(EffectArray.every(result.bridges, bridge => bridge.target.reference.kind === 'qualified-ref')).toBe(true);
     expect(
-      result.bridges.every(
+      EffectArray.every(
+        result.bridges,
         bridge =>
-          bridge.source.evidence.path.startsWith('proto/consumer-') &&
-          bridge.target.evidence.path.startsWith('proto/producer-'),
+          Effect.pipe(bridge.source.evidence.path, EffectString.startsWith('proto/consumer-')) &&
+          Effect.pipe(bridge.target.evidence.path, EffectString.startsWith('proto/producer-')),
       ),
     ).toBe(true);
   });
@@ -222,10 +234,13 @@ describe('cross-repository bridge resolver', () => {
     ({reverseMonikers, rotation}) => {
       const repositories = orderingFixture();
       const baseline = resolveCodeGraphCrossRepositoryBridges(repositories);
-      const rotated = [...repositories.slice(rotation), ...repositories.slice(0, rotation)].map(repository => ({
-        ...repository,
-        monikers: reverseMonikers ? [...repository.monikers].reverse() : [...repository.monikers],
-      }));
+      const rotated = EffectArray.map(
+        [...repositories.slice(rotation), ...repositories.slice(0, rotation)],
+        repository => ({
+          ...repository,
+          monikers: reverseMonikers ? [...repository.monikers].reverse() : [...repository.monikers],
+        }),
+      );
 
       expect(resolveCodeGraphCrossRepositoryBridges(rotated)).toEqual(baseline);
     },
@@ -279,7 +294,9 @@ describe('cross-repository bridge resolver', () => {
       const result = resolveCodeGraphCrossRepositoryBridges([producer, consumer]);
 
       expect(result.bridges).toEqual([]);
-      expect(result.rejections.map(rejection => rejection.reason)).toEqual(['incompatible-package-version']);
+      expect(EffectArray.map(result.rejections, rejection => rejection.reason)).toEqual([
+        'incompatible-package-version',
+      ]);
     },
     {fastCheck: {numRuns: 80}},
   );
@@ -338,7 +355,7 @@ function packageMoniker(
   seed: string,
 ) {
   return codeGraphPackageMoniker({
-    componentId: `cgp_${digest(`component:${seed}`).slice(0, 32)}`,
+    componentId: `cgp_${Effect.pipe(digest(`component:${seed}`), EffectString.slice(0, 32))}`,
     ...(role === 'import' ? {dependencyKind: 'runtime' as const} : {}),
     evidence: {path: `${seed}/package.json`, span},
     packageName,
@@ -361,12 +378,12 @@ function protobufMoniker(
     evidence: {path: `proto/${seed}.proto`, span},
     ...identity,
     role,
-    symbolId: `cgs_${digest(`symbol:${seed}`).slice(0, 32)}`,
+    symbolId: `cgs_${Effect.pipe(digest(`symbol:${seed}`), EffectString.slice(0, 32))}`,
   });
 }
 
 function snapshotId(seed: string): string {
-  return `cgsn_${digest(`snapshot:${seed}`).slice(0, 40)}`;
+  return `cgsn_${Effect.pipe(digest(`snapshot:${seed}`), EffectString.slice(0, 40))}`;
 }
 
 function digest(value: string): string {

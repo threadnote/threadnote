@@ -1,4 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import catalog from '@threadnote/integrations/catalog.json' with {type: 'json'};
+import {validateAgentCatalog} from '@threadnote/integrations/catalog';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type AgentCapabilityName = 'mcp' | 'instructions' | 'skills' | 'hooks';
 export type AgentCapabilityStatus = 'managed' | 'partial' | 'unsupported';
@@ -34,12 +38,10 @@ export interface AgentIntegration {
       }>;
 }
 
-interface AgentIntegrationCatalog {
-  readonly version: number;
-  readonly agents: readonly AgentIntegration[];
-}
-
-const agentIntegrationCatalog = catalog as unknown as AgentIntegrationCatalog;
+const agentIntegrationCatalog = {
+  version: 1 as const,
+  agents: validateAgentCatalog(catalog),
+};
 
 export const agentIntegrationCatalogVersion = agentIntegrationCatalog.version;
 export const agentIntegrations = agentIntegrationCatalog.agents;
@@ -54,11 +56,17 @@ export const tierLabels: Readonly<Record<AgentIntegrationTier, string>> = {
 };
 
 export function capabilityLabel(capability: AgentCapabilityName): string {
-  return capability === 'mcp' ? 'MCP' : capability[0].toUpperCase() + capability.slice(1);
+  return capability === 'mcp'
+    ? 'MCP'
+    : Effect.pipe(capability[0], EffectString.toUpperCase) + Effect.pipe(capability, EffectString.slice(1));
 }
 
 export function capabilitySummary(integration: AgentIntegration): string {
-  return agentCapabilityNames
-    .map(capability => `${capabilityLabel(capability)}: ${integration.capabilities[capability].status}`)
-    .join(' · ');
+  return EffectArray.join(
+    EffectArray.map(
+      agentCapabilityNames,
+      capability => `${capabilityLabel(capability)}: ${integration.capabilities[capability].status}`,
+    ),
+    ' · ',
+  );
 }

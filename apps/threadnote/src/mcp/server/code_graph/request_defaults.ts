@@ -1,4 +1,6 @@
 import type {CodeGraphAnalysisBudget} from '@threadnote/graph/analysis';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 type CodeGraphMcpOperation = 'explain' | 'impact' | 'neighbors' | 'node' | 'path' | 'query' | 'topology';
 
@@ -18,7 +20,10 @@ export function codeGraphMcpRequestDefaults(
     readonly workset?: string;
   },
 ) {
-  const localQuery = !input.workset?.trim() && operation === 'query';
+  const localQuery =
+    !Effect.pipe(input.workset, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    ) && operation === 'query';
   return {
     budgetTokens: localQuery
       ? (input.budgetTokens ?? MCP_CODE_GRAPH_LOCAL_QUERY_DEFAULT_BUDGET_TOKENS)

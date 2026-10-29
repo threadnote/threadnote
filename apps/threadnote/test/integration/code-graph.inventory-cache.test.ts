@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -17,6 +18,8 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph inventory cache rehydration', () => {
   const roots: string[] = [];
@@ -38,8 +41,8 @@ describe('code graph inventory cache rehydration', () => {
         });
       }),
     );
-    const firstByPath = new Map(first.files.map(file => [file.path, file]));
-    const rawByPath = new Map(firstBatches.flat().map(file => [file.path, file.content]));
+    const firstByPath = new Map(EffectArray.map(first.files, file => [file.path, file]));
+    const rawByPath = new Map(EffectArray.map(firstBatches.flat(), file => [file.path, file.content]));
 
     for (const path of ['go.mod', 'package.json', 'packages/library/package.json', 'tsconfig.json']) {
       const retained = firstByPath.get(path);
@@ -61,7 +64,10 @@ describe('code graph inventory cache rehydration', () => {
     expect(firstByPath.get('tsconfig.json')?.content).toContain('"@alias/*"');
 
     const cachedCommittedFileKeys = new Set(
-      first.files.filter(file => file.path !== 'src/helper.ts').map(inventoryCacheKey),
+      EffectArray.map(
+        EffectArray.filter(first.files, file => file.path !== 'src/helper.ts'),
+        inventoryCacheKey,
+      ),
     );
     const secondBatches: CodeGraphInventoryFile[][] = [];
     const second = await runEffect(
@@ -74,27 +80,36 @@ describe('code graph inventory cache rehydration', () => {
       }),
     );
 
-    expect(secondBatches.map(batch => batch.map(file => file.path))).toEqual([['src/helper.ts']]);
+    expect(EffectArray.map(secondBatches, batch => EffectArray.map(batch, file => file.path))).toEqual([
+      ['src/helper.ts'],
+    ]);
     expect(second.parsedFiles).toBe(1);
-    expect(second.files.map(file => [file.path, file.contentHash])).toEqual(
-      first.files.map(file => [file.path, file.contentHash]),
+    expect(EffectArray.map(second.files, file => [file.path, file.contentHash])).toEqual(
+      EffectArray.map(first.files, file => [file.path, file.contentHash]),
     );
     for (const path of ['go.mod', 'package.json', 'packages/library/package.json', 'tsconfig.json']) {
-      expect(second.files.find(file => file.path === path)?.content).toBe(firstByPath.get(path)?.content);
+      expect(Option.getOrUndefined(EffectArray.findFirst(second.files, file => file.path === path))?.content).toBe(
+        firstByPath.get(path)?.content,
+      );
     }
 
     const initialFacts = extractRepositoryFileFacts(firstBatches.flat());
-    const cachedFacts = initialFacts.filter(facts => facts.path !== 'src/helper.ts');
+    const cachedFacts = EffectArray.filter(initialFacts, facts => facts.path !== 'src/helper.ts');
     const freshFacts = extractRepositoryFileFacts(secondBatches.flat());
     const attributed = createPackageAttributor(second.files)([...cachedFacts, ...freshFacts]);
     const resolved = resolveExtractedRepositoryFacts(attributed, second.files);
-    const symbols = resolved.flatMap(facts => facts.symbols);
-    const edges = resolved.flatMap(facts => facts.edges);
+    const symbols = EffectArray.flatMap(resolved, facts => facts.symbols);
+    const edges = EffectArray.flatMap(resolved, facts => facts.edges);
 
-    expect(symbols.find(symbol => symbol.name === 'entryFunction')?.packageName).toBe('@fixture/root');
-    expect(symbols.find(symbol => symbol.name === 'libraryFunction')?.packageName).toBe('@fixture/library');
     expect(
-      edges.some(
+      Option.getOrUndefined(EffectArray.findFirst(symbols, symbol => symbol.name === 'entryFunction'))?.packageName,
+    ).toBe('@fixture/root');
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(symbols, symbol => symbol.name === 'libraryFunction'))?.packageName,
+    ).toBe('@fixture/library');
+    expect(
+      EffectArray.some(
+        edges,
         edge =>
           edge.sourceName === 'entryFunction' &&
           edge.targetName === 'helperFunction' &&
@@ -103,7 +118,8 @@ describe('code graph inventory cache rehydration', () => {
       ),
     ).toBe(true);
     expect(
-      edges.some(
+      EffectArray.some(
+        edges,
         edge =>
           edge.sourceName === 'entryFunction' &&
           edge.targetName === 'libraryFunction' &&
@@ -112,7 +128,8 @@ describe('code graph inventory cache rehydration', () => {
       ),
     ).toBe(true);
     expect(
-      edges.some(
+      EffectArray.some(
+        edges,
         edge =>
           edge.sourceName === 'example.com/cache-fixture' &&
           edge.relation === 'depends_on' &&
@@ -125,7 +142,7 @@ describe('code graph inventory cache rehydration', () => {
     const root = mkdtempSync(join(tmpdir(), 'threadnote-inventory-invalid-context-'));
     roots.push(root);
     execFileSync('git', ['-C', root, 'init', '-q']);
-    const manifestContent = `{"name":"broken",${'x'.repeat(2 * 1_048_576)}`;
+    const manifestContent = `{"name":"broken",${Effect2.pipe('x', EffectString.repeat(2 * 1_048_576))}`;
     writeFileSync(join(root, 'package.json'), manifestContent);
     writeFileSync(join(root, 'source.ts'), 'export const source = 1;\n');
     execFileSync('git', ['-C', root, 'add', '.']);
@@ -148,13 +165,17 @@ describe('code graph inventory cache rehydration', () => {
         return yield* inventoryRepository(identity, {
           onContentBatch: files =>
             Effect.sync(() => {
-              extractedBytes += files.reduce((total, file) => total + Buffer.byteLength(file.content ?? ''), 0);
+              extractedBytes += EffectArray.reduce(
+                files,
+                0,
+                (total, file) => total + Buffer.byteLength(file.content ?? ''),
+              );
             }),
         });
       }),
     );
     expect(extractedBytes).toBe(Buffer.byteLength('export const source = 1;\n'));
-    expect(inventory.files.map(file => file.path)).toEqual(['source.ts']);
+    expect(EffectArray.map(inventory.files, file => file.path)).toEqual(['source.ts']);
     expect(inventory.skipped).toBe(1);
     expect(inventory.policyExclusions).toMatchObject({
       bytes: Buffer.byteLength(manifestContent),
@@ -198,7 +219,9 @@ describe('code graph inventory cache rehydration', () => {
         return yield* inventoryRepository(identity);
       }),
     );
-    const donor = first.committedFiles.find(file => file.path === 'config/donor.json')!;
+    const donor = Option.getOrUndefined(
+      EffectArray.findFirst(first.committedFiles, file => file.path === 'config/donor.json'),
+    )!;
     const cacheIdentity = Option.getOrThrow(BUILTIN_LANGUAGE_PACK_REGISTRY.cacheIdentityForPath(donor.path));
     const reuseKey = codeGraphBlobReuseCacheKey(donor, cacheIdentity)!;
     const batches: CodeGraphInventoryFile[][] = [];
@@ -215,8 +238,11 @@ describe('code graph inventory cache rehydration', () => {
 
     expect(batches).toEqual([]);
     expect(second.parsedFiles).toBe(0);
-    expect(second.files.map(file => file.path)).toEqual(['config/copies/target.json', 'config/donor.json']);
-    expect(second.files.every(file => file.content === undefined)).toBe(true);
+    expect(EffectArray.map(second.files, file => file.path)).toEqual([
+      'config/copies/target.json',
+      'config/donor.json',
+    ]);
+    expect(EffectArray.every(second.files, file => file.content === undefined)).toBe(true);
   });
 
   it('rehydrates cached manifests during a new-commit rebuild without losing attribution or resolution', async () => {
@@ -261,16 +287,24 @@ describe('code graph inventory cache rehydration', () => {
     expect(rebuilt.indexed.snapshot.id).not.toBe(first.snapshot.id);
     expect(rebuilt.indexed.reusedFiles).toBeGreaterThanOrEqual(rebuilt.indexed.snapshot.fileCount - 1);
     expect(
-      rebuilt.graph.symbols.find(symbol => symbol.name === 'entryFunction' && symbol.path === 'src/entry.ts')
-        ?.packageName,
+      Option.getOrUndefined(
+        EffectArray.findFirst(
+          rebuilt.graph.symbols,
+          symbol => symbol.name === 'entryFunction' && symbol.path === 'src/entry.ts',
+        ),
+      )?.packageName,
     ).toBe('@fixture/root');
     expect(
-      rebuilt.graph.symbols.find(
-        symbol => symbol.name === 'libraryFunction' && symbol.path === 'packages/library/src/index.ts',
+      Option.getOrUndefined(
+        EffectArray.findFirst(
+          rebuilt.graph.symbols,
+          symbol => symbol.name === 'libraryFunction' && symbol.path === 'packages/library/src/index.ts',
+        ),
       )?.packageName,
     ).toBe('@fixture/library');
     expect(
-      rebuilt.graph.edges.some(
+      EffectArray.some(
+        rebuilt.graph.edges,
         edge =>
           edge.sourceName === 'entryFunction' &&
           edge.targetName === 'helperFunction' &&
@@ -279,7 +313,8 @@ describe('code graph inventory cache rehydration', () => {
       ),
     ).toBe(true);
     expect(
-      rebuilt.graph.edges.some(
+      EffectArray.some(
+        rebuilt.graph.edges,
         edge =>
           edge.sourceName === 'entryFunction' &&
           edge.targetName === 'libraryFunction' &&
@@ -288,7 +323,8 @@ describe('code graph inventory cache rehydration', () => {
       ),
     ).toBe(true);
     expect(
-      rebuilt.graph.edges.some(
+      EffectArray.some(
+        rebuilt.graph.edges,
         edge =>
           edge.sourceName === 'example.com/cache-fixture' &&
           edge.relation === 'depends_on' &&
@@ -302,7 +338,7 @@ function createResolutionFixture(root: string): void {
   execFileSync('git', ['-C', root, 'init', '-q']);
   mkdirSync(join(root, 'packages', 'library', 'src'), {recursive: true});
   mkdirSync(join(root, 'src'), {recursive: true});
-  const padding = 'x'.repeat(128 * 1_024);
+  const padding = Effect2.pipe('x', EffectString.repeat(128 * 1_024));
   writeFileSync(
     join(root, 'package.json'),
     `${JSON.stringify(
@@ -334,25 +370,31 @@ function createResolutionFixture(root: string): void {
   );
   writeFileSync(
     join(root, 'go.mod'),
-    [
-      'module example.com/cache-fixture',
-      '',
-      'require (',
-      '  example.com/cache-dependency v1.2.3',
-      ')',
-      '',
-      `// ${padding}`,
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'module example.com/cache-fixture',
+        '',
+        'require (',
+        '  example.com/cache-dependency v1.2.3',
+        ')',
+        '',
+        `// ${padding}`,
+        '',
+      ],
+      '\n',
+    ),
   );
   writeFileSync(
     join(root, 'src', 'entry.ts'),
-    [
-      "import {helperFunction} from '@alias/helper';",
-      "import {libraryFunction} from '@fixture/library';",
-      'export function entryFunction(): number { return helperFunction() + libraryFunction(); }',
-      '',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        "import {helperFunction} from '@alias/helper';",
+        "import {libraryFunction} from '@fixture/library';",
+        'export function entryFunction(): number { return helperFunction() + libraryFunction(); }',
+        '',
+      ],
+      '\n',
+    ),
   );
   writeFileSync(join(root, 'src', 'helper.ts'), 'export function helperFunction(): number { return 1; }\n');
   writeFileSync(

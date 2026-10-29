@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -20,6 +21,9 @@ import {
   type WorkflowBinding,
   type WorkflowRequest,
 } from './protocol.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 /** Resolve authority from configured profiles. A request cannot opt out of a cloud profile. */
 const resolveConfiguredWorkflowProfile = Effect.fn('workflowMemory.resolveConfiguredProfile')(function* (
@@ -28,8 +32,12 @@ const resolveConfiguredWorkflowProfile = Effect.fn('workflowMemory.resolveConfig
 ) {
   const system = yield* SystemInfo;
   const environment = system.environment();
-  const mode = environment.THREADNOTE_CURSOR_CLOUD_MODE?.trim();
-  const toolset = environment.THREADNOTE_MCP_TOOLSET?.trim();
+  const mode = Effect2.pipe(environment.THREADNOTE_CURSOR_CLOUD_MODE, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
+  const toolset = Effect2.pipe(environment.THREADNOTE_MCP_TOOLSET, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (
     (mode && mode !== 'personal') ||
     environment.THREADNOTE_CURSOR_MEMORY_ENDPOINT ||
@@ -43,7 +51,7 @@ const resolveConfiguredWorkflowProfile = Effect.fn('workflowMemory.resolveConfig
   }
   const codex = yield* readCodexCloudProfile(config.agentContextHome);
   const cursor = yield* readCursorCloudIdentityProfile(config.agentContextHome);
-  if ([codex, cursor].some(profile => profile && !sameCloudIdentity(profile, config)))
+  if (EffectArray.some([codex, cursor], profile => Boolean(profile && !sameCloudIdentity(profile, config))))
     return yield* workflowError('identity-drift', 'The configured cloud identity differs from this runtime.');
   const detected =
     codex && cursor ? requested : codex ? 'codex-cloud-personal' : cursor ? 'cursor-cloud-personal' : 'desktop';
@@ -54,7 +62,19 @@ const resolveConfiguredWorkflowProfile = Effect.fn('workflowMemory.resolveConfig
     );
   if (
     detected === 'desktop' &&
-    (codex || cursor || mode || toolset?.startsWith('cursor-cloud') || toolset?.startsWith('codex-cloud'))
+    (codex ||
+      cursor ||
+      mode ||
+      Effect2.pipe(toolset, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect2.pipe(effectOptionalString, EffectString.startsWith('cursor-cloud')),
+      ) ||
+      Effect2.pipe(toolset, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect2.pipe(effectOptionalString, EffectString.startsWith('codex-cloud')),
+      ))
   )
     return yield* workflowError(
       'profile-missing',
@@ -86,12 +106,12 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
   if (detected === 'cursor-cloud-personal')
     yield* assertCursorCloudMemoryTeamsReady(
       config,
-      scope!.shares.map(share => share.team),
+      EffectArray.map(scope!.shares, share => share.team),
     );
   if (scope && scope.shares.length > 1 && !request.team)
     return yield* workflowError('team-required', 'Select one configured personal share for this workflow.');
   const team = scope ? (request.team ?? scope.shares[0]?.team) : undefined;
-  if (scope && (!team || !scope.shares.some(share => share.team === team)))
+  if (scope && (!team || !EffectArray.some(scope.shares, share => share.team === team)))
     return yield* workflowError('team-out-of-scope', 'The selected share is outside the personal profile.');
   if (!scope && request.team)
     return yield* workflowError('team-out-of-scope', 'Desktop private workflow bindings do not select a cloud share.');
@@ -122,7 +142,12 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
     user: config.user,
     agentId: config.agentId,
     ...(selected ? {team, remote: selected.config.remote, branch} : {}),
-    sharedRoots: scope?.shares.map(share => share.root).sort() ?? [],
+    sharedRoots: Effect2.Option.getOrElse(
+      Effect2.Option.map(Effect2.Option.fromNullishOr(scope?.shares), shares =>
+        EffectArray.map(shares, share => share.root).sort(),
+      ),
+      () => [],
+    ),
     artifactLifetime: detected === 'desktop' ? ('local-home' as const) : ('possibly-ephemeral-workspace' as const),
   };
   return {...context, bindingId: yield* sha256Hex(stableJson(context))} satisfies WorkflowBinding;
@@ -168,7 +193,7 @@ export const readWorkflowReadiness = Effect.fn('workflowMemory.readReadiness')(f
     if (scope && profile === 'cursor-cloud-personal')
       yield* assertCursorCloudMemoryTeamsReady(
         config,
-        scope.shares.map(share => share.team),
+        EffectArray.map(scope.shares, share => share.team),
       );
     const planning: WorkflowOperationReadiness = {
       state: 'unchecked',
@@ -183,8 +208,11 @@ export const readWorkflowReadiness = Effect.fn('workflowMemory.readReadiness')(f
     const publication = yield* Effect.gen(function* () {
       const teams = yield* readTeamsFile(config);
       const selected = scope
-        ? scope.shares.map(share => teams.teams[share.team]).filter(team => team !== undefined)
-        : Object.values(teams.teams).filter(team => shareTeamAccess(team) === 'read-write');
+        ? EffectArray.filter(
+            EffectArray.map(scope.shares, share => teams.teams[share.team]),
+            team => team !== undefined,
+          )
+        : EffectArray.filter(EffectRecord.values(teams.teams), team => shareTeamAccess(team) === 'read-write');
       if (selected.length === 0)
         return blockedReadiness(
           'share-missing',

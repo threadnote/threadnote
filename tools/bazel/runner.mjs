@@ -11,6 +11,8 @@ import {
   symlinkSync,
 } from 'node:fs';
 import {delimiter, dirname, join, relative, resolve} from 'node:path';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const [manifestPath, destination, ...testArgs] = process.argv.slice(2);
 const manifest = await Bun.file(manifestPath).json();
@@ -51,7 +53,8 @@ const stage = mkdtempSync(join(temporaryRoot, '.bun-stage-'));
 try {
   for (const file of manifest.files) {
     const target = resolve(stage, file.destination);
-    if (!target.startsWith(stage + '/')) throw new Error(`Input escapes stage: ${file.destination}`);
+    if (!Effect.pipe(target, EffectString.startsWith(stage + '/')))
+      throw new Error(`Input escapes stage: ${file.destination}`);
     mkdirSync(dirname(target), {recursive: true});
     const source = resolve(inputRoot, file.source);
     if (statSync(source).isDirectory()) cpSync(source, target, {recursive: true, dereference: true});
@@ -66,7 +69,8 @@ try {
     const pkg = await Bun.file(packagePath).json();
     if (!pkg.private || !pkg.name) continue;
     const link = resolve(stage, 'node_modules', pkg.name);
-    if (!link.startsWith(join(stage, 'node_modules') + '/')) throw new Error(`Invalid workspace name: ${pkg.name}`);
+    if (!Effect.pipe(link, EffectString.startsWith(join(stage, 'node_modules') + '/')))
+      throw new Error(`Invalid workspace name: ${pkg.name}`);
     mkdirSync(dirname(link), {recursive: true});
     symlinkSync(relative(dirname(link), dirname(packagePath)), link);
   }

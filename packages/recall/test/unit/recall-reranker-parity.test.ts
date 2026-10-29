@@ -4,6 +4,8 @@ import {
   parseRecallRerankerParityFixtureV1,
   type RecallRerankerParityFixtureV1,
 } from '../../../../scripts/training/recall-reranker-parity.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('recall reranker Python/native parity', () => {
   it('passes bounded score drift while preserving meaningful Python ordering', () => {
@@ -61,11 +63,11 @@ describe('recall reranker Python/native parity', () => {
 
 function parityFixture(): RecallRerankerParityFixtureV1 {
   return {
-    configurationSha256: 'a'.repeat(64),
+    configurationSha256: Effect.pipe('a', EffectString.repeat(64)),
     dataset: {
-      groupFileSha256: 'b'.repeat(64),
-      groupsSha256: 'c'.repeat(64),
-      manifestSha256: 'd'.repeat(64),
+      groupFileSha256: Effect.pipe('b', EffectString.repeat(64)),
+      groupsSha256: Effect.pipe('c', EffectString.repeat(64)),
+      manifestSha256: Effect.pipe('d', EffectString.repeat(64)),
       purpose: 'harness_smoke',
     },
     groups: [
@@ -81,9 +83,9 @@ function parityFixture(): RecallRerankerParityFixtureV1 {
     ],
     kind: 'threadnote_recall_reranker_python_parity',
     run: {
-      modelTreeSha256: 'e'.repeat(64),
-      runJsonSha256: 'f'.repeat(64),
-      trainingCodeRevision: '1'.repeat(40),
+      modelTreeSha256: Effect.pipe('e', EffectString.repeat(64)),
+      runJsonSha256: Effect.pipe('f', EffectString.repeat(64)),
+      trainingCodeRevision: Effect.pipe('1', EffectString.repeat(40)),
     },
     runtimeTarget: {
       architecture: 'jina-bert',

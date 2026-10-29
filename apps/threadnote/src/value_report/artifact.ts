@@ -1,10 +1,15 @@
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {VALUE_REPORT_EXPORT_DIRECTORY, withValueReportStorageLock, removeStaleValueReportStaging} from './storage.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class ValueArtifactError extends Schema.TaggedError<ValueArtifactError>()('ValueArtifactError', {
-  message: Schema.String,
-}) {}
+export class ValueArtifactError extends Schema.TaggedError<ValueArtifactError, {readonly brand: unique symbol}>()(
+  'ValueArtifactError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export const writeValueArtifactUnderLock = Effect.fn('valueReport.writeArtifactUnderLock')(function* (
   agentContextHome: string,
@@ -15,8 +20,11 @@ export const writeValueArtifactUnderLock = Effect.fn('valueReport.writeArtifactU
   const path = yield* Path.Path;
   yield* removeStaleValueReportStaging(agentContextHome);
   const digest = yield* sha256Hex(serialized);
-  const directory = path.join(agentContextHome, ...VALUE_REPORT_EXPORT_DIRECTORY.split('/'));
-  const output = path.join(directory, `${prefix}-${digest.slice(0, 24)}.json`);
+  const directory = path.join(
+    agentContextHome,
+    ...Effect2.pipe(VALUE_REPORT_EXPORT_DIRECTORY, EffectString.split('/')),
+  );
+  const output = path.join(directory, `${prefix}-${Effect2.pipe(digest, EffectString.slice(0, 24))}.json`);
   if (yield* fs.exists(output)) {
     if ((yield* fs.readFileString(output)) !== serialized)
       return yield* ValueArtifactError.make({message: 'Value export digest conflict.'});
@@ -26,7 +34,7 @@ export const writeValueArtifactUnderLock = Effect.fn('valueReport.writeArtifactU
   }
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* fs.chmod(directory, 0o700);
-  const staging = path.join(directory, `.${prefix}-${digest.slice(0, 24)}.staging`);
+  const staging = path.join(directory, `.${prefix}-${Effect2.pipe(digest, EffectString.slice(0, 24))}.staging`);
   yield* fs.makeDirectory(staging, {mode: 0o700});
   const temporary = path.join(staging, 'report.json');
   yield* Effect.gen(function* () {

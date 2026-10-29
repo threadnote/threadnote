@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphBuildCapacityFailure} from '@threadnote/graph/build_status';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -16,27 +17,33 @@ import {
   projectCodeGraphStatusBuildSummaryV5,
   projectCodeGraphStatusLanguagePacksV4,
 } from '@threadnote/graph/status/projection';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
+const capacityRoles: readonly ('durable' | 'shared' | 'temporary')[] = ['durable', 'shared', 'temporary'];
 const capacityFailure: CodeGraphBuildCapacityFailure = {
   code: 'no-space',
   operation: 'stage persistent code graph facts',
   evidence: {
-    activeReservations: ['durable', 'shared', 'temporary'].map(role => ({
-      role: role as 'durable' | 'shared' | 'temporary',
+    activeReservations: EffectArray.map(capacityRoles, role => ({
+      role,
       bytes: Number.MAX_SAFE_INTEGER,
     })),
-    calibrationIdentity: 'c'.repeat(256),
+    calibrationIdentity: Effect.pipe('c', EffectString.repeat(256)),
     decisionLayer: 'bounded-write-reservation',
     estimateBasis: 'final-fact-bytes-and-row-count',
-    filesystems: ['durable', 'shared', 'temporary'].map(role => ({
-      role: role as 'durable' | 'shared' | 'temporary',
+    filesystems: EffectArray.map(capacityRoles, role => ({
+      role,
       availableBytes: Number.MAX_SAFE_INTEGER,
       requiredBytes: Number.MAX_SAFE_INTEGER,
     })),
     modelVersion: Number.MAX_SAFE_INTEGER,
     recovery: 'free-space',
     retryable: false,
-    scope: {checkoutId: 'a'.repeat(64), scopeId: `code-graph-scope:${'b'.repeat(64)}`},
+    scope: {
+      checkoutId: Effect.pipe('a', EffectString.repeat(64)),
+      scopeId: `code-graph-scope:${Effect.pipe('b', EffectString.repeat(64))}`,
+    },
   },
 };
 
@@ -54,7 +61,7 @@ describe('code graph status JSON projection', () => {
       identity: {worktreeId: currentWorktreeId},
     });
     expect(result.builds).toHaveLength(8);
-    expect(result.builds.map(build => build.identity.worktreeId)).toContain(currentWorktreeId);
+    expect(EffectArray.map(result.builds, build => build.identity.worktreeId)).toContain(currentWorktreeId);
     expect(result.waiters).toHaveLength(8);
     expect(result.queuedWorktreeIds).toHaveLength(8);
     expect(result.projection).toEqual({
@@ -80,15 +87,15 @@ describe('code graph status JSON projection', () => {
             status(1_000 + Math.floor(index / 2), 'active'),
           );
           const current = buildCount === 0 ? hexId(10_000) : builds[currentSeed % buildCount].identity.worktreeId;
-          const originalBuildOrder = builds.map(build => build.identity.worktreeId);
-          const originalWaiterOrder = waiters.map(waiter => waiter.identity.worktreeId);
+          const originalBuildOrder = EffectArray.map(builds, build => build.identity.worktreeId);
+          const originalWaiterOrder = EffectArray.map(waiters, waiter => waiter.identity.worktreeId);
 
           const first = projectCodeGraphStatusActivityV5({builds, waiters}, current, limit);
           const second = projectCodeGraphStatusActivityV5({builds, waiters}, current, limit);
 
           expect(second).toEqual(first);
-          expect(builds.map(build => build.identity.worktreeId)).toEqual(originalBuildOrder);
-          expect(waiters.map(waiter => waiter.identity.worktreeId)).toEqual(originalWaiterOrder);
+          expect(EffectArray.map(builds, build => build.identity.worktreeId)).toEqual(originalBuildOrder);
+          expect(EffectArray.map(waiters, waiter => waiter.identity.worktreeId)).toEqual(originalWaiterOrder);
           expect(first.builds.length).toBeLessThanOrEqual(limit);
           expect(first.waiters.length).toBeLessThanOrEqual(limit);
           expect(first.queuedWorktreeIds.length).toBeLessThanOrEqual(limit);
@@ -105,7 +112,7 @@ describe('code graph status JSON projection', () => {
             returned: first.waiters.length,
             total: waiterCount,
           });
-          const queuedTotal = new Set(waiters.map(waiter => waiter.identity.worktreeId)).size;
+          const queuedTotal = new Set(EffectArray.map(waiters, waiter => waiter.identity.worktreeId)).size;
           expect(first.projection.queuedWorktreeIds).toEqual({
             limit,
             omitted: queuedTotal - first.queuedWorktreeIds.length,
@@ -114,7 +121,7 @@ describe('code graph status JSON projection', () => {
           });
           if (buildCount > 0) {
             expect(first.build?.worktreeId).toBe(current);
-            expect(first.builds.map(build => build.identity.worktreeId)).toContain(current);
+            expect(EffectArray.map(first.builds, build => build.identity.worktreeId)).toContain(current);
             expect(first.builds[first.build!.index]?.buildId).toBe(first.build?.buildId);
           }
         },
@@ -126,6 +133,7 @@ describe('code graph status JSON projection', () => {
   it('strips rich diagnostics and bounds live activity without mutating adversarial source records', () => {
     fc.assert(
       fc.property(fc.integer({max: 60_000, min: 0}), fc.constantFrom('x', 'é', '混', '🧠'), (size, unit) => {
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
         const noise = unit.repeat(size);
         const source = {
           ...status(size, 'active'),
@@ -200,11 +208,11 @@ describe('code graph status JSON projection', () => {
             unexpected: noise,
             updatedAt: noise,
           },
-        } as unknown as ObservedCodeGraphBuildStatus;
+        };
         const original = JSON.stringify(source);
 
-        const first = projectCodeGraphStatusBuildSummaryV5(source);
-        const second = projectCodeGraphStatusBuildSummaryV5(source);
+        const first = projectMalformedBuildStatus(source);
+        const second = projectMalformedBuildStatus(source);
 
         expect(second).toEqual(first);
         expect(JSON.stringify(source)).toBe(original);
@@ -227,16 +235,12 @@ describe('code graph status JSON projection', () => {
   it('keeps a rich 74-build default activity catalog below a deterministic byte ceiling', () => {
     const richBuilds = Array.from({length: 74}, (_, index) => ({
       ...status(index, 'completed'),
-      extraction: {metrics: {noise: 'x'.repeat(8_000)}},
-      materialization: {metrics: {noise: 'y'.repeat(8_000)}},
-    })) as unknown as readonly ObservedCodeGraphBuildStatus[];
+      extraction: {metrics: {noise: Effect.pipe('x', EffectString.repeat(8_000))}},
+      materialization: {metrics: {noise: Effect.pipe('y', EffectString.repeat(8_000))}},
+    }));
     const currentWorktreeId = richBuilds[73].identity.worktreeId;
 
-    const result = projectCodeGraphStatusActivityV5(
-      {builds: richBuilds, waiters: []},
-      currentWorktreeId,
-      CODE_GRAPH_STATUS_DEFAULT_BUILD_LIMIT,
-    );
+    const result = projectMalformedBuildActivity(richBuilds, currentWorktreeId, CODE_GRAPH_STATUS_DEFAULT_BUILD_LIMIT);
 
     expect(result.projection.builds).toEqual({limit: 4, omitted: 70, returned: 4, total: 74});
     expect(result.builds[result.build!.index]?.identity.worktreeId).toBe(currentWorktreeId);
@@ -278,15 +282,15 @@ describe('code graph status JSON projection', () => {
         (packCount, limit) => {
           const languagePacks = Array.from({length: packCount}, (_, index) => ({
             ...builtins[index % builtins.length],
-            id: `pack-${index.toString().padStart(3, '0')}`,
+            id: `pack-${Effect.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
           }));
-          const originalIds = languagePacks.map(pack => pack.id);
+          const originalIds = EffectArray.map(languagePacks, pack => pack.id);
 
           const first = projectCodeGraphStatusLanguagePacksV4(languagePacks, limit);
           const second = projectCodeGraphStatusLanguagePacksV4(languagePacks, limit);
 
           expect(second).toEqual(first);
-          expect(languagePacks.map(pack => pack.id)).toEqual(originalIds);
+          expect(EffectArray.map(languagePacks, pack => pack.id)).toEqual(originalIds);
           expect(first.items).toEqual(languagePacks.slice(0, limit));
           expect(first.items.length).toBeLessThanOrEqual(limit);
           expect(first.receipt).toEqual({
@@ -316,11 +320,11 @@ describe('code graph status JSON projection', () => {
 function status(index: number, liveness: 'active' | 'completed'): ObservedCodeGraphBuildStatus {
   const timestamp = new Date(index * 1_000).toISOString();
   return {
-    buildId: `build-${index.toString(16).padStart(16, '0')}`,
+    buildId: `build-${Effect.pipe(index.toString(16), EffectString.padStart(16, '0'))}`,
     counters: {completed: index, total: index + 1, unit: 'files'},
     identity: {
       checkoutId: hexId(200_000),
-      commit: hexId(index).slice(0, 40),
+      commit: Effect.pipe(hexId(index), EffectString.slice(0, 40)),
       repositoryId: hexId(300_000),
       worktreeId: hexId(index),
     },
@@ -341,9 +345,19 @@ function status(index: number, liveness: 'active' | 'completed'): ObservedCodeGr
 }
 
 function hexId(index: number): string {
-  return index.toString(16).padStart(64, '0');
+  return Effect.pipe(index.toString(16), EffectString.padStart(64, '0'));
 }
 
 function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function projectMalformedBuildStatus(source: unknown) {
+  // @ts-expect-error -- this test deliberately projects malformed runtime fields to verify sanitization.
+  return projectCodeGraphStatusBuildSummaryV5(source);
+}
+
+function projectMalformedBuildActivity(builds: unknown, currentWorktreeId: string, limit: number) {
+  // @ts-expect-error -- this test deliberately supplies oversized malformed build details to verify projection bounds.
+  return projectCodeGraphStatusActivityV5({builds, waiters: []}, currentWorktreeId, limit);
 }

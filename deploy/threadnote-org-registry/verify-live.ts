@@ -1,3 +1,5 @@
+import * as Effect from 'effect';
+import * as EffectString from 'effect/String';
 import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {parseGraphShareRegistryChallenge} from '@threadnote/graph/sharing/registry/auth';
@@ -71,7 +73,9 @@ async function exchange(
   const path = method === 'POST' ? `/v2/${repository}/blobs/uploads/` : `/v2/${repository}/tags/list`;
   const challengeResponse = await request(origin, path, method);
   expectStatus(challengeResponse, [401], 'Registry authentication challenge');
-  const target = parseGraphShareRegistryTarget(`oci://${origin.slice('https://'.length)}/${repository}`);
+  const target = parseGraphShareRegistryTarget(
+    `oci://${Effect.pipe(origin, EffectString.slice('https://'.length))}/${repository}`,
+  );
   const challenge = parseGraphShareRegistryChallenge(
     challengeResponse.headers.get('www-authenticate') ?? undefined,
     target,
@@ -107,7 +111,7 @@ async function upload(origin: string, repository: string, credential: string): P
   const location = start.headers.get('location');
   if (location === null) throw new Error('Upload response omitted Location');
   const url = new URL(location, origin);
-  if (url.origin !== origin || !url.pathname.startsWith(`/v2/${repository}/blobs/uploads/`))
+  if (url.origin !== origin || !Effect.pipe(url.pathname, EffectString.startsWith(`/v2/${repository}/blobs/uploads/`)))
     throw new Error('Upload Location escaped the approved registry repository');
   url.searchParams.set('digest', DIGEST);
   const finish = await request(origin, url.href, 'PUT', credential, CANARY);
@@ -144,7 +148,12 @@ async function main(): Promise<void> {
 
   const anonymous = await request(origin, `/v2/${canonical}/tags/list`, 'GET');
   expectStatus(anonymous, [401], 'Anonymous canonical read');
-  if (anonymous.headers.get('www-authenticate')?.includes(`realm="${origin}/zot/auth/token"`) !== true)
+  if (
+    !Effect.pipe(
+      anonymous.headers.get('www-authenticate') ?? '',
+      EffectString.includes(`realm="${origin}/zot/auth/token"`),
+    )
+  )
     throw new Error('Registry challenge realm differs from the approved HTTPS origin');
 
   for (const [identity, repository] of [

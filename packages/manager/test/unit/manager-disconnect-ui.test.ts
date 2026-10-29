@@ -1,7 +1,11 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 
 import React, {act} from 'react';
 import {describe, expect, it, vi} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 vi.mock('../../src/memory_editor.js', () => ({
   MemoryEditor: (props: {content: string; disabled: boolean; onChange: (value: string) => void}) =>
@@ -46,6 +50,7 @@ describe('Manager disconnect recovery', () => {
         // Exercise REST loss/recovery with an explicitly unsupported live endpoint.
         if (path === '/api/live-session')
           return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
+        if (path === '/api/processes') return json({processes: [], schemaVersion: 1, truncated: false});
         if (path === '/api/state')
           return json({
             agents: [],
@@ -104,37 +109,70 @@ describe('Manager disconnect recovery', () => {
               items: [
                 {
                   candidateId: 'candidate-1',
-                  mutationPreview: {operation: 'replace', truncated: false},
+                  comparison: 'new',
+                  comparisonReason: 'A new handoff is ready for review.',
+                  confidence: 1,
+                  mutationPreview: {bodyText: 'Updated handoff', operation: 'replace', truncated: false},
+                  proposedDestination: {
+                    kind: 'handoff',
+                    project: 'threadnote',
+                    targetUri: firstAliasUri,
+                    topic: 'manager',
+                  },
+                  recommendation: 'replace',
+                  sourceEvidence: [],
+                  state: 'pending',
+                  truncated: false,
+                  type: 'handoff-state',
                 },
               ],
+              noAction: false,
+              reviewId: 'review-1',
+              revision: 1,
+              type: 'knowledge-delta',
+              version: 1,
             },
             review: {
+              auditEvents: [],
               candidates: [
                 {
                   applyBodyText: 'Updated handoff',
                   candidateId: 'candidate-1',
+                  categories: ['handoff'],
+                  comparison: 'new',
+                  confidence: 1,
                   evidence: [],
                   kind: 'handoff',
+                  project: 'threadnote',
                   proposedText: 'Updated handoff',
                   reason: 'Review the current handoff',
+                  recommendation: 'replace',
                   state: 'pending',
                   targetUri: firstAliasUri,
                   topic: 'manager',
                 },
               ],
+              codeCitations: [],
+              createdAt: '2026-09-28T00:00:00Z',
+              project: 'threadnote',
+              reviewId: 'review-1',
               revision: 1,
               task: 'Review alias navigation',
+              topic: 'manager',
+              version: 2,
             },
           });
         if (path === '/api/home')
           return json({
+            version: 1,
             handoffs: [],
             lanes: [],
             project: 'threadnote',
             stats: {memories: 2, outcomes: 0, pending: 1},
           });
         if (path === '/api/shares') return json({shares: []});
-        if (path === '/api/graphs') return json({repositories: [], builds: [], diagnostics: [], views: []});
+        if (path === '/api/graphs')
+          return json({repositories: [], builds: [], diagnostics: [], waiterCount: 0, waiters: []});
         if (path === '/api/graphs/diagnostics')
           return new Response(JSON.stringify({error: 'Diagnostics unavailable in this fixture'}), {status: 503});
         if (path === '/api/graphs/status') return json({builds: [], catalogRevision: 'test'});
@@ -162,10 +200,27 @@ describe('Manager disconnect recovery', () => {
       await clickButton('Reviews');
       for (let attempt = 0; attempt < 20; attempt += 1) {
         await flush();
-        if (root.textContent?.includes('Review and decide')) break;
+        if (
+          Effect.pipe(root.textContent, effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.includes('Review and decide')),
+          )
+        )
+          break;
       }
       await clickButton('Review and decide →');
       await flush();
+      for (
+        let attempt = 0;
+        attempt < 20 &&
+        !EffectArray.some(
+          [...document.querySelectorAll('button')],
+          button => EffectString.trim(button.textContent ?? '') === 'Inspect existing memory in Library',
+        );
+        attempt++
+      )
+        await flush();
       await clickButton('Inspect existing memory in Library');
       for (let attempt = 0; attempt < 20; attempt += 1) {
         await flush();
@@ -251,12 +306,28 @@ async function flush(): Promise<void> {
 }
 
 async function clickButton(label: string): Promise<void> {
-  const button = [...document.querySelectorAll('button')].find(
-    candidate => candidate.textContent?.trim() === label || candidate.querySelector('strong')?.textContent === label,
+  const button = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      candidate =>
+        Effect.pipe(candidate.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label || candidate.querySelector('strong')?.textContent === label,
+    ),
   );
   expect(
     button,
-    `${label}: ${[...document.querySelectorAll('button')].map(candidate => candidate.textContent?.trim()).join(' | ')}`,
+    `${label}: ${EffectArray.join(
+      EffectArray.map(
+        EffectArray.map([...document.querySelectorAll('button')], candidate =>
+          Effect.pipe(candidate.textContent, effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+          ),
+        ),
+        item => (item === null || item === undefined ? '' : String(item)),
+      ),
+      ' | ',
+    )}`,
   ).toBeDefined();
   await act(async () => button?.click());
   await flush();
@@ -272,14 +343,26 @@ async function refresh(): Promise<void> {
 async function selectMemory(uri: string, edit = true): Promise<void> {
   if (!document.querySelector(`.tree-file[title="${uri}"]`)) {
     await clickButton('Back to Library');
-    if (document.querySelector('dialog')?.textContent?.includes('Discard unsaved changes?'))
+    if (
+      Effect.pipe(document.querySelector('dialog')?.textContent, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect.pipe(effectOptionalString, EffectString.includes('Discard unsaved changes?')),
+      )
+    )
       await clickButton('Discard changes');
   }
   const button = document.querySelector<HTMLButtonElement>(`.tree-file[title="${uri}"]`);
   expect(button).not.toBeNull();
   await act(async () => button?.click());
   await flush();
-  if (document.querySelector('dialog')?.textContent?.includes('Discard unsaved changes?'))
+  if (
+    Effect.pipe(document.querySelector('dialog')?.textContent, effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect.pipe(effectOptionalString, EffectString.includes('Discard unsaved changes?')),
+    )
+  )
     await clickButton('Discard changes');
   if (edit) {
     for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -308,9 +391,15 @@ function editor(): HTMLTextAreaElement | null {
 }
 
 function actionButton(label: string): HTMLButtonElement | undefined {
-  return [
-    ...document.querySelectorAll<HTMLButtonElement>('.editor-pane .action-row button, .topbar .action-row button'),
-  ].find(button => button.textContent?.trim() === label);
+  return EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll<HTMLButtonElement>('.editor-pane .action-row button, .topbar .action-row button')],
+      button =>
+        Effect.pipe(button.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label,
+    ),
+  );
 }
 
 async function openSelectedMenu(): Promise<void> {

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Schema} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
@@ -7,6 +8,9 @@ import {ManagerDialogProvider} from '../../src/dialog.js';
 import {filteredIntegrationProducts, type IntegrationProduct} from '../../src/integration_catalog.js';
 import {defineIntegration} from '../../src/integration_registration.js';
 import {IntegrationsPanel} from '../../src/integrations_view.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 const products: readonly IntegrationProduct[] = [
   {
@@ -27,24 +31,38 @@ const products: readonly IntegrationProduct[] = [
   },
 ];
 type Connections = {readonly sources: readonly {readonly id: string}[]};
-const integrations = products.map(product =>
+const integrations = EffectArray.map(products, product =>
   defineIntegration<Connections>({
     product,
-    count: (data, query) => (data?.sources ?? []).filter(source => source.id.includes(query)).length,
-    View: ({data, visible, query, setupAction, onSetupClosed}) => (
-      <>
-        {visible
-          ? (data?.sources ?? [])
-              .filter(source => source.id.includes(query))
-              .map(source => (
-                <p className="integration-row" key={source.id}>
-                  {source.id}
-                </p>
-              ))
-          : null}
-        {setupAction ? <button onClick={onSetupClosed}>Close setup</button> : null}
-      </>
-    ),
+    isData: Schema.is(Schema.Struct({sources: Schema.Array(Schema.Struct({id: Schema.String}))})),
+    count: (data, query) => {
+      const sources = data?.sources ?? [];
+      return EffectArray.filter(
+        sources,
+        (source, index) => index in sources && Effect.pipe(source.id, EffectString.includes(query)),
+      ).length;
+    },
+    View: ({data, visible, query, setupAction, onSetupClosed}) => {
+      const sources = data?.sources ?? [];
+      return (
+        <>
+          {visible
+            ? EffectArray.map(
+                EffectArray.filter(
+                  sources,
+                  (source, index) => index in sources && Effect.pipe(source.id, EffectString.includes(query)),
+                ),
+                source => (
+                  <p className="integration-row" key={source.id}>
+                    {source.id}
+                  </p>
+                ),
+              )
+            : null}
+          {setupAction ? <button onClick={onSetupClosed}>Close setup</button> : null}
+        </>
+      );
+    },
   }),
 );
 let root: Root | undefined;
@@ -55,7 +73,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 async function render(): Promise<void> {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
@@ -68,7 +86,22 @@ async function render(): Promise<void> {
   );
 }
 function button(label: string): HTMLButtonElement {
-  const match = [...document.querySelectorAll('button')].find(item => item.textContent?.trim().startsWith(label));
+  const match = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      __effectArrayValue =>
+        !!(item =>
+          Effect.pipe(
+            item.textContent,
+            effectOptionalString =>
+              effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+            effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect.pipe(effectOptionalString, EffectString.startsWith(label)),
+          ))(__effectArrayValue),
+    ),
+  );
   if (!match) throw new Error('Button not found: ' + label);
   return match;
 }
@@ -78,9 +111,11 @@ describe('Generic integration catalog', () => {
     fc.assert(
       fc.property(fc.constantFrom('Notes', 'documents', 'read only', 'export', 'missing'), query => {
         const filtered = filteredIntegrationProducts(products, query);
-        expect(filtered).toEqual(filteredIntegrationProducts(products, `  ${query.toUpperCase()}  `));
-        expect(filtered.map(product => products.indexOf(product))).toEqual(
-          [...filtered.map(product => products.indexOf(product))].sort((a, b) => a - b),
+        expect(filtered).toEqual(
+          filteredIntegrationProducts(products, `  ${Effect.pipe(query, EffectString.toUpperCase)}  `),
+        );
+        expect(EffectArray.map(filtered, product => products.indexOf(product))).toEqual(
+          [...EffectArray.map(filtered, product => products.indexOf(product))].sort((a, b) => a - b),
         );
       }),
       {numRuns: 30},
@@ -117,7 +152,7 @@ describe('Generic integration catalog', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((_path: string, init: RequestInit) => {
-        signal = init.signal as AbortSignal;
+        signal = init.signal ?? undefined;
         return response.promise;
       }),
     );

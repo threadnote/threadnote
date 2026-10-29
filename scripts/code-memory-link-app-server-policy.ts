@@ -1,9 +1,13 @@
+import {Array as EffectArray, Predicate} from 'effect';
 import {Schema} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed adapter validates app-server actions before execution. */
 import {createHash} from 'node:crypto';
 import {realpathSync} from 'node:fs';
 import {isAbsolute, relative, resolve, sep} from 'node:path';
 import {codeMemoryLinkAppServerOpaqueIdDigest} from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface CodeMemoryLinkAppServerApprovalReceiptV1 {
   readonly itemIdDigest: string;
@@ -37,13 +41,13 @@ const SIMPLE_FLAGS = new Map<string, ReadonlySet<string>>([
 ]);
 
 /** A reviewed action was well-formed but is outside the experiment's execution policy. */
-export class CodeMemoryLinkActionDeniedError extends Schema.TaggedError<CodeMemoryLinkActionDeniedError>()(
-  'CodeMemoryLinkActionDeniedError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {
+export class CodeMemoryLinkActionDeniedError extends Schema.TaggedError<
+  CodeMemoryLinkActionDeniedError,
+  {readonly brand: unique symbol}
+>()('CodeMemoryLinkActionDeniedError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {
   static of(message: string, options?: ErrorOptions): CodeMemoryLinkActionDeniedError {
     return CodeMemoryLinkActionDeniedError.make({
       message,
@@ -146,7 +150,7 @@ function approveCommand(
 function assertTemporaryCommandApproval(params: Record<string, unknown>): void {
   if (params.availableDecisions == null) return;
   if (
-    !Array.isArray(params.availableDecisions) ||
+    !EffectArray.isArray(params.availableDecisions) ||
     !params.availableDecisions.includes('accept') ||
     !params.availableDecisions.includes('cancel') ||
     new TextEncoder().encode(JSON.stringify(params.availableDecisions)).byteLength > 4_096
@@ -158,9 +162,12 @@ function assertTemporaryCommandApproval(params: Record<string, unknown>): void {
 function assertProposedExecpolicyAmendment(value: unknown): void {
   if (value == null) return;
   if (
-    !Array.isArray(value) ||
+    !EffectArray.isArray(value) ||
     value.length > 256 ||
-    value.some(token => typeof token !== 'string' || token.length > 1_024 || token.includes('\0')) ||
+    EffectArray.some(
+      value,
+      token => typeof token !== 'string' || token.length > 1_024 || Effect.pipe(token, EffectString.includes('\0')),
+    ) ||
     new TextEncoder().encode(JSON.stringify(value)).byteLength > 64 * 1_024
   ) {
     throw new Error('Code Memory Link command approval proposes an invalid execpolicy amendment.');
@@ -212,8 +219,8 @@ function assertReadCommand(
   const commands = reviewableCommands(item, repositoryRoot, cwd);
   if (
     commands.length !== 1 &&
-    commands.some(candidate =>
-      commandPolicy.approvedCommandTokens.some(approved =>
+    EffectArray.some(commands, candidate =>
+      EffectArray.some(commandPolicy.approvedCommandTokens, approved =>
         equalTokens(tokenizeCodeMemoryLinkCommandV1(candidate), approved),
       ),
     )
@@ -222,10 +229,10 @@ function assertReadCommand(
   }
   for (const command of commands) assertSingleReadCommand(command, repositoryRoot, cwd, commandPolicy);
   if (tokenizeCodeMemoryLinkCommandV1(command)[0] !== '/bin/zsh') {
-    if (!Array.isArray(item.commandActions) || item.commandActions.length === 0) {
+    if (!EffectArray.isArray(item.commandActions) || item.commandActions.length === 0) {
       throw new Error('Code Memory Link command lacks a reviewable read-only action projection.');
     }
-    assertReadOnlyActionProjection(item.commandActions as readonly unknown[], repositoryRoot, cwd);
+    assertReadOnlyActionProjection(item.commandActions, repositoryRoot, cwd);
   }
 }
 
@@ -236,9 +243,13 @@ function assertSingleReadCommand(
   commandPolicy: CodeMemoryLinkCommandPolicyV1,
 ): void {
   const tokens = tokenizeCodeMemoryLinkCommandV1(command);
-  if (commandPolicy.approvedCommandTokens.some(approved => equalTokens(tokens, approved))) return;
+  if (EffectArray.some(commandPolicy.approvedCommandTokens, approved => equalTokens(tokens, approved))) return;
   const executable = tokens[0];
-  if (!executable || executable.includes('/') || executable.includes('\\')) {
+  if (
+    !executable ||
+    Effect.pipe(executable, EffectString.includes('/')) ||
+    Effect.pipe(executable, EffectString.includes('\\'))
+  ) {
     throw new Error('Code Memory Link commands require one bare reviewed executable name.');
   }
   if (executable === 'pwd') {
@@ -260,7 +271,7 @@ function assertSingleReadCommand(
 }
 
 function equalTokens(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((token, index) => token === right[index]);
+  return left.length === right.length && EffectArray.every(left, (token, index) => token === right[index]);
 }
 
 function safeExecutableLabel(executable: string): string {
@@ -277,14 +288,14 @@ function reviewableCommands(item: Record<string, unknown>, repositoryRoot: strin
       throw new Error('Code Memory Link shell command uses an unsupported invocation shape.');
     }
     if (
-      !Array.isArray(item.commandActions) ||
+      !EffectArray.isArray(item.commandActions) ||
       item.commandActions.length === 0 ||
       item.commandActions.length > 32 ||
       (item.source !== 'agent' && item.source !== 'unifiedExecStartup')
     ) {
       throw new Error('Code Memory Link shell command lacks bounded reviewed local action projections.');
     }
-    const actions = item.commandActions.map(action => object(action, 'command action'));
+    const actions = EffectArray.map(item.commandActions, action => object(action, 'command action'));
     const projected = shellTokens[2];
     for (const action of actions) {
       if (action.type === 'unknown') {
@@ -334,27 +345,27 @@ function splitReadCommandChain(command: string): readonly string[] {
     else if (character === '"') quote = 'double';
     else if (character === '&') {
       if (command[index + 1] !== '&') throw new Error('Command chain contains unsupported shell control.');
-      commands.push(nonemptyCommand(command.slice(start, index)));
+      commands.push(nonemptyCommand(Effect.pipe(command, EffectString.slice(start, index))));
       start = index + 2;
       index += 1;
     } else if (character === ';') {
-      commands.push(nonemptyCommand(command.slice(start, index)));
+      commands.push(nonemptyCommand(Effect.pipe(command, EffectString.slice(start, index))));
       start = index + 1;
     } else if (character === '|') {
       if (command[index + 1] === '|') throw new Error('Command chain contains unsupported shell control.');
-      commands.push(nonemptyCommand(command.slice(start, index)));
+      commands.push(nonemptyCommand(Effect.pipe(command, EffectString.slice(start, index))));
       start = index + 1;
-    } else if ('<>`$(){}\\'.includes(character)) {
+    } else if (Effect.pipe('<>`$(){}\\', EffectString.includes(character))) {
       throw new Error('Command chain contains unsupported shell control or expansion.');
     }
   }
   if (quote !== null) throw new Error('Command chain contains an unterminated quote.');
-  commands.push(nonemptyCommand(command.slice(start)));
+  commands.push(nonemptyCommand(Effect.pipe(command, EffectString.slice(start))));
   return commands;
 }
 
 function nonemptyCommand(value: string): string {
-  const command = value.trim();
+  const command = Effect.pipe(value, EffectString.trim);
   if (!command) throw new Error('Command chain contains an empty command.');
   return command;
 }
@@ -371,7 +382,8 @@ function assertSimpleRead(executable: string, args: readonly string[], root: str
       continue;
     }
     if (/^-[0-9]+$/u.test(value) && (executable === 'head' || executable === 'tail')) continue;
-    if (value.startsWith('-')) throw new Error(`${executable} option is outside the reviewed grammar.`);
+    if (Effect.pipe(value, EffectString.startsWith('-')))
+      throw new Error(`${executable} option is outside the reviewed grammar.`);
     paths.push(value);
   }
   if (paths.length === 0 && !STDIN_READ_EXECUTABLES.has(executable)) {
@@ -403,7 +415,8 @@ function assertOd(args: readonly string[], root: string, cwd: string): void {
     ) {
       continue;
     }
-    if (!optionsEnded && value.startsWith('-')) throw new Error('od option is outside the reviewed grammar.');
+    if (!optionsEnded && Effect.pipe(value, EffectString.startsWith('-')))
+      throw new Error('od option is outside the reviewed grammar.');
     paths.push(value);
   }
   for (const path of paths) containedPath(path, root, cwd);
@@ -425,7 +438,7 @@ function assertLs(args: readonly string[], root: string, cwd: string): void {
   const paths: string[] = [];
   for (const value of args) {
     if (value === '--' || /^-[1aFlhR]+$/u.test(value)) continue;
-    if (value.startsWith('-')) throw new Error('ls option is outside the reviewed grammar.');
+    if (Effect.pipe(value, EffectString.startsWith('-'))) throw new Error('ls option is outside the reviewed grammar.');
     paths.push(value);
   }
   for (const path of paths.length === 0 ? ['.'] : paths) containedPath(path, root, cwd);
@@ -468,7 +481,7 @@ function assertGit(args: readonly string[], root: string, cwd: string): void {
       '--untracked-files=no',
       '--untracked-files=normal',
     ]);
-    if (subcommandArgs.some(value => !flags.has(value))) {
+    if (EffectArray.some(subcommandArgs, value => !flags.has(value))) {
       throw new Error('git status option is outside the reviewed grammar.');
     }
     return;
@@ -501,7 +514,7 @@ function assertGit(args: readonly string[], root: string, cwd: string): void {
         continue;
       }
       if (!optionsEnded && flags.has(value)) continue;
-      if (!optionsEnded && value.startsWith('-')) {
+      if (!optionsEnded && Effect.pipe(value, EffectString.startsWith('-'))) {
         throw new Error('git ls-files option is outside the reviewed grammar.');
       }
       containedPath(value, root, cwd);
@@ -514,7 +527,7 @@ function assertGit(args: readonly string[], root: string, cwd: string): void {
 function assertFind(args: readonly string[], root: string, cwd: string): void {
   const paths: string[] = [];
   let index = 0;
-  while (index < args.length && !args[index].startsWith('-')) {
+  while (index < args.length && !Effect.pipe(args[index], EffectString.startsWith('-'))) {
     paths.push(args[index]);
     index += 1;
   }
@@ -550,7 +563,7 @@ function assertSed(args: readonly string[], root: string, cwd: string): void {
     throw new Error('sed is limited to one numeric print range.');
   }
   for (const path of args.slice(2)) {
-    if (path.startsWith('-')) throw new Error('sed path is invalid.');
+    if (Effect.pipe(path, EffectString.startsWith('-'))) throw new Error('sed path is invalid.');
     containedPath(path, root, cwd);
   }
 }
@@ -601,7 +614,7 @@ function assertRipgrep(args: readonly string[], root: string, cwd: string): void
       else if (value !== '--type') positiveCount(optionValue, `rg ${value}`);
       continue;
     }
-    if (value.startsWith('-')) throw new Error('rg option is outside the reviewed grammar.');
+    if (Effect.pipe(value, EffectString.startsWith('-'))) throw new Error('rg option is outside the reviewed grammar.');
     positionals.push(value);
   }
   const paths = filesMode ? positionals : positionals.slice(1);
@@ -672,7 +685,8 @@ function assertGrep(args: readonly string[], root: string, cwd: string): void {
       explicitPatterns += 1;
       continue;
     }
-    if (value.startsWith('-')) throw new Error('grep option is outside the reviewed grammar.');
+    if (Effect.pipe(value, EffectString.startsWith('-')))
+      throw new Error('grep option is outside the reviewed grammar.');
     positionals.push(value);
   }
   const implicitPatternCount = explicitPatterns === 0 ? 1 : 0;
@@ -682,7 +696,7 @@ function assertGrep(args: readonly string[], root: string, cwd: string): void {
 }
 
 function assertFileChanges(item: Record<string, unknown>, repositoryRoot: string): void {
-  if (!Array.isArray(item.changes) || item.changes.length === 0) {
+  if (!EffectArray.isArray(item.changes) || item.changes.length === 0) {
     throw new Error('Code Memory Link file change has no paths.');
   }
   for (const changeInput of item.changes) {
@@ -754,7 +768,7 @@ export function tokenizeCodeMemoryLinkCommandV1(command: string): readonly strin
         active = false;
       }
     } else {
-      if (';&|<>`$(){}\\*?[]'.includes(character)) {
+      if (Effect.pipe(';&|<>`$(){}\\*?[]', EffectString.includes(character))) {
         throw new Error('Command contains shell control, expansion, or an unquoted glob.');
       }
       token += character;
@@ -768,19 +782,21 @@ export function tokenizeCodeMemoryLinkCommandV1(command: string): readonly strin
 }
 
 function containedPath(value: string, rootInput: string, cwdInput = rootInput): string {
-  if (value.includes('\0') || value.includes('\\')) throw new Error('Repository path is invalid.');
-  const segments = value.split('/');
-  if (segments.some(segment => segment === '..')) {
+  if (Effect.pipe(value, EffectString.includes('\0')) || Effect.pipe(value, EffectString.includes('\\')))
+    throw new Error('Repository path is invalid.');
+  const segments = Effect.pipe(value, EffectString.split('/'));
+  if (EffectArray.some(segments, segment => segment === '..')) {
     throw new Error('Repository path contains a forbidden parent or control segment.');
   }
   const root = resolve(rootInput);
   const cwd = resolve(cwdInput);
   const candidate = resolve(isAbsolute(value) ? value : resolve(cwd, value));
-  if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) {
+  if (candidate !== root && !Effect.pipe(candidate, EffectString.startsWith(`${root}${sep}`))) {
     throw new Error('App-server action referenced a path outside the public task repository.');
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
   const repositoryRelativeSegments = candidate === root ? [] : relative(root, candidate).split(sep);
-  if (repositoryRelativeSegments.some(segment => FORBIDDEN_PATH_SEGMENTS.has(segment))) {
+  if (EffectArray.some(repositoryRelativeSegments, segment => FORBIDDEN_PATH_SEGMENTS.has(segment))) {
     throw new Error('Repository path contains a forbidden parent or control segment.');
   }
   return candidate;
@@ -796,7 +812,10 @@ function containedExistingPath(value: string, rootInput: string, cwdInput = root
   try {
     const canonicalRoot = realpathSync(resolve(rootInput));
     const canonicalCandidate = realpathSync(candidate);
-    if (canonicalCandidate !== canonicalRoot && !canonicalCandidate.startsWith(`${canonicalRoot}${sep}`)) {
+    if (
+      canonicalCandidate !== canonicalRoot &&
+      !Effect.pipe(canonicalCandidate, EffectString.startsWith(`${canonicalRoot}${sep}`))
+    ) {
       throw new Error('App-server action referenced a symlink target outside the public task repository.');
     }
   } catch (cause) {
@@ -816,7 +835,7 @@ function isMissingPath(cause: unknown): boolean {
 }
 
 function safeGlob(value: string): void {
-  if (!value || value.length > 256 || value.includes('..') || /[{}\\]/u.test(value)) {
+  if (!value || value.length > 256 || Effect.pipe(value, EffectString.includes('..')) || /[{}\\]/u.test(value)) {
     throw new Error('rg glob is outside the reviewed grammar.');
   }
 }
@@ -826,7 +845,8 @@ function positiveCount(value: string | undefined, label: string): void {
 }
 
 function boundedLiteral(value: string | undefined, label: string): string {
-  if (!value || value.length > 256 || value.includes('\0')) throw new Error(`${label} requires a bounded value.`);
+  if (!value || value.length > 256 || Effect.pipe(value, EffectString.includes('\0')))
+    throw new Error(`${label} requires a bounded value.`);
   return value;
 }
 
@@ -848,18 +868,23 @@ function digest(domain: string, value: string): string {
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string, optional: boolean): void {
   const allowedSet = new Set(allowed);
-  if (Object.keys(value).some(key => !allowedSet.has(key))) throw new Error(`${label} has unsupported fields.`);
-  if (!optional && allowed.some(key => !(key in value))) throw new Error(`${label} has missing fields.`);
+  if (EffectArray.some(EffectRecord.keys(value), key => !allowedSet.has(key)))
+    throw new Error(`${label} has unsupported fields.`);
+  if (!optional && EffectArray.some(allowed, key => !(key in value))) throw new Error(`${label} has missing fields.`);
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object.`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error(`${label} must be an object.`);
+  return value;
 }
 
 function text(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 16_384 || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 16_384 ||
+    Effect.pipe(value, EffectString.includes('\0'))
+  ) {
     throw new Error(`${label} must be bounded nonempty text.`);
   }
   return value;

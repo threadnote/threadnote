@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 // External module resolution can affect every target even when bazel-diff reports no local impact.
 const globalInputs = new Set(['MODULE.bazel.lock']);
 
@@ -23,28 +27,39 @@ export function selectTargets({
 }) {
   const all = [...new Set(inventory)].sort();
   const known = new Set([...knownInputs, ...globalInputs]);
-  const unknown = changedFiles.filter(path => !known.has(path)).sort();
+  const unknown = EffectArray.filter(changedFiles, path => !known.has(path)).sort();
   if (failure || unknown.length)
     return {mode: 'fallback', reason: failure ?? 'unmodeled-inputs', unknown, targets: all};
-  if (!Array.isArray(impacted) || impacted.some(label => typeof label !== 'string' || !label.startsWith('//'))) {
+  if (
+    !EffectArray.isArray(impacted) ||
+    EffectArray.some(impacted, label => typeof label !== 'string' || !Effect.pipe(label, EffectString.startsWith('//')))
+  ) {
     return {mode: 'fallback', reason: 'invalid-impacted-targets', unknown: [], targets: all};
   }
-  if (changedFiles.some(path => globalInputs.has(path)))
+  if (EffectArray.some(changedFiles, path => globalInputs.has(path)))
     return {mode: 'fallback', reason: 'global-inputs', unknown: [], targets: all};
   const affected = new Set(impacted);
   const changed = new Set(changedFiles);
   for (const label of all) {
-    if ((targetInputs[label] ?? []).some(path => changed.has(path))) affected.add(label);
+    if (EffectArray.some(targetInputs[label] ?? [], path => changed.has(path))) affected.add(label);
   }
   let propagated = true;
   while (propagated) {
     propagated = false;
     for (const label of all) {
-      if (affected.has(label) || !(targetDependencies[label] ?? []).some(dependency => affected.has(dependency)))
+      if (
+        affected.has(label) ||
+        !EffectArray.some(targetDependencies[label] ?? [], dependency => affected.has(dependency))
+      )
         continue;
       affected.add(label);
       propagated = true;
     }
   }
-  return {mode: 'selective', reason: 'bazel-diff', unknown: [], targets: all.filter(label => affected.has(label))};
+  return {
+    mode: 'selective',
+    reason: 'bazel-diff',
+    unknown: [],
+    targets: EffectArray.filter(all, label => affected.has(label)),
+  };
 }

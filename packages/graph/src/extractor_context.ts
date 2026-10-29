@@ -5,6 +5,7 @@ import {
   discoverResolutionAliases,
 } from './extractor.js';
 import {compareCodeUnits} from './ordering.js';
+import {Array as EffectArray, pipe as EffectPipe} from 'effect';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from './types.js';
 
 export interface RepositoryFactAttributionContext {
@@ -34,7 +35,12 @@ export function createRepositoryFactAttributorFromContext(
 export function createRepositoryFactAttributionContext(
   contextFiles: readonly CodeGraphInventoryFile[],
 ): RepositoryFactAttributionContext {
-  const attributionFiles = contextFiles.filter(file => isRepositoryFactAttributionContextPath(file.path));
+  const attributionFiles = EffectPipe(contextFiles, values =>
+    EffectArray.filter<CodeGraphInventoryFile>(
+      values,
+      (file, index) => index in values && isRepositoryFactAttributionContextPath(file.path),
+    ),
+  );
   const packages = discoverPackages(attributionFiles);
   const aliases = discoverResolutionAliases(attributionFiles, {});
   const attributePackages = createPackageAttributorFromIndex(packages);

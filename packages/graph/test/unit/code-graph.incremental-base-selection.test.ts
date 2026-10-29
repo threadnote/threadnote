@@ -1,9 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {gitCommitDistanceGroups} from '@threadnote/graph/incremental/base_selection';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function objectId(index: number): string {
-  return index.toString(16).padStart(40, '0');
+  return Effect.pipe(index.toString(16), EffectString.padStart(40, '0'));
 }
 
 describe('incremental clean-base ancestry', () => {
@@ -15,7 +18,7 @@ describe('incremental clean-base ancestry', () => {
 
     expect(
       gitCommitDistanceGroups(
-        [`${head} ${left} ${right}`, `${right} ${base}`, `${left} ${base}`, base].join('\n'),
+        EffectArray.join([`${head} ${left} ${right}`, `${right} ${base}`, `${left} ${base}`, base], '\n'),
         head,
       ),
     ).toEqual([[head], [left, right], [base]]);
@@ -42,22 +45,25 @@ describe('incremental clean-base ancestry', () => {
         fc.array(fc.integer(), {maxLength: 6, minLength: 6}),
         fc.array(fc.boolean(), {maxLength: 6, minLength: 6}),
         (masks, priorities, reverseParents) => {
-          const ids = masks.map((_, index) => objectId(index + 1));
-          const parents = ids.map((_, source) =>
-            ids.filter((__, target) => target > source && (masks[source] & (1 << target)) !== 0),
+          const ids = EffectArray.map(masks, (_, index) => objectId(index + 1));
+          const parents = EffectArray.map(ids, (_, source) =>
+            EffectArray.filter(ids, (__, target) => target > source && (masks[source] & (1 << target)) !== 0),
           );
-          const lines = ids
-            .map((id, index) => ({
+          const lines = EffectArray.map(
+            EffectArray.map(ids, (id, index) => ({
               id,
               index,
               parents: reverseParents[index] ? [...parents[index]].reverse() : parents[index],
               priority: priorities[index] ?? 0,
-            }))
-            .sort((left, right) => left.priority - right.priority || left.index - right.index)
-            .map(row => [row.id, ...row.parents].join(' '));
+            })).sort((left, right) => left.priority - right.priority || left.index - right.index),
+            row => EffectArray.join([row.id, ...row.parents], ' '),
+          );
 
-          expect(gitCommitDistanceGroups(lines.join('\n'), ids[0])).toEqual(
-            independentDistanceGroups(ids[0], new Map(ids.map((id, index) => [id, parents[index]] as const))),
+          expect(gitCommitDistanceGroups(EffectArray.join(lines, '\n'), ids[0])).toEqual(
+            independentDistanceGroups(
+              ids[0],
+              new Map(EffectArray.map(ids, (id, index) => [id, parents[index]] as const)),
+            ),
           );
         },
       ),
@@ -85,5 +91,8 @@ function independentDistanceGroups(
   }
   const groups = new Map<number, string[]>();
   for (const [commit, value] of distance) groups.set(value, [...(groups.get(value) ?? []), commit]);
-  return [...groups.entries()].sort(([left], [right]) => left - right).map(([, commits]) => commits.sort());
+  return EffectArray.map(
+    [...groups.entries()].sort(([left], [right]) => left - right),
+    ([, commits]) => commits.sort(),
+  );
 }

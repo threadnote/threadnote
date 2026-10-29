@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {AuthorizedRemotePrincipal, RemoteMemoryScope} from './authorization.js';
 import {canonicalCursorRepositoryBinding} from './cursor_oidc.js';
@@ -12,11 +14,11 @@ export function orgCloudRepositorySetDigest(shareId: string, repositories: reado
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(shareId) ||
     repositories.length > 4_096 ||
-    repositories.some(repository => repository.length > 2_048)
+    EffectArray.some(repositories, repository => repository.length > 2_048)
   ) {
     throw remoteMemoryError('invalid_request', 'Organization Cloud requires one share and 1–256 repository bindings.');
   }
-  const canonical = [...new Set(repositories.map(canonicalCursorRepositoryBinding))].sort();
+  const canonical = [...new Set(EffectArray.map(repositories, canonicalCursorRepositoryBinding))].sort();
   if (canonical.length === 0 || canonical.length > 256) {
     throw remoteMemoryError('invalid_request', 'Organization Cloud requires one share and 1–256 repository bindings.');
   }
@@ -56,8 +58,13 @@ export function admitOrgCloudRequest(
     throw deny();
   }
   if (digest !== expected) throw deny();
-  const scopes = orgCloudScopes(access).filter(
-    scope => principal.OAuth.scopes.has(scope) || principal.OAuth.scopes.has('memory:admin'),
+  const scopes = EffectArrayPipe(orgCloudScopes(access), __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (scope, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues &&
+        (principal.OAuth.scopes.has(scope) || principal.OAuth.scopes.has('memory:admin')),
+    ),
   );
   return {
     ...principal,

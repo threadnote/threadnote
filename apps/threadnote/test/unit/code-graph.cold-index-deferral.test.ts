@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Exit, Fiber, FileSystem, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -29,6 +30,9 @@ import type {
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('code graph cold query-index deferral', () => {
   it('admits exactly stores with no visible or reusable graph state', () => {
@@ -42,7 +46,7 @@ describe('code graph cold query-index deferral', () => {
           symbolPresent: fc.boolean(),
         }),
         observation => {
-          const expected = Object.values(observation).every(present => !present);
+          const expected = EffectArray.every(EffectRecord.values(observation), present => !present);
           expect(codeGraphColdIndexDeferralEligible(observation)).toBe(expected);
         },
       ),
@@ -53,8 +57,8 @@ describe('code graph cold query-index deferral', () => {
   it('defers only when file count or source bytes reaches the bulk-build envelope', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({min: 0, max: 256 * 1_024}), {maxLength: 511}), sizes => {
-        const files = sizes.map(size => ({size}));
-        const totalBytes = sizes.reduce((total, size) => total + size, 0);
+        const files = EffectArray.map(sizes, size => ({size}));
+        const totalBytes = EffectArray.reduce(sizes, 0, (total, size) => total + size);
         expect(codeGraphColdIndexDeferralWorthwhile(files)).toBe(totalBytes >= 16 * 1_048_576);
       }),
       {numRuns: 150},
@@ -101,9 +105,9 @@ describe('code graph cold query-index deferral', () => {
               undefined,
               ownerToken,
             );
-            expect((yield* inspectCodeGraphQueryIndexes(sql)).missing.map(definition => definition.name)).toEqual(
-              CODE_GRAPH_QUERY_INDEX_DEFINITIONS.map(definition => definition.name),
-            );
+            expect(
+              EffectArray.map((yield* inspectCodeGraphQueryIndexes(sql)).missing, definition => definition.name),
+            ).toEqual(EffectArray.map(CODE_GRAPH_QUERY_INDEX_DEFINITIONS, definition => definition.name));
             expect(yield* codeGraphSchemaInitializationReceiptCurrent(sql)).toBe(false);
 
             yield* store.stageActivationFactBatches(fixture.databasePath, [
@@ -141,7 +145,8 @@ describe('code graph cold query-index deferral', () => {
           {writerLockPath: fixture.writerLockPath},
         );
 
-        const restorationBoundaries = boundaries.filter(
+        const restorationBoundaries = EffectArray.filter(
+          boundaries,
           boundary => boundary.operation === 'restore persistent code graph query indexes',
         );
         expect(restorationBoundaries).toHaveLength(2);
@@ -152,17 +157,18 @@ describe('code graph cold query-index deferral', () => {
           rowCount:
             1 +
             CODE_GRAPH_QUERY_INDEX_DEFINITIONS.length +
-            CODE_GRAPH_QUERY_INDEX_DEFINITIONS.filter(definition => definition.table === 'edges').length +
-            CODE_GRAPH_QUERY_INDEX_DEFINITIONS.filter(definition => definition.table === 'symbols').length,
+            EffectArray.filter(CODE_GRAPH_QUERY_INDEX_DEFINITIONS, definition => definition.table === 'edges').length +
+            EffectArray.filter(CODE_GRAPH_QUERY_INDEX_DEFINITIONS, definition => definition.table === 'symbols').length,
         });
-        expect(progress.map(observation => observation.completed)).toEqual(
+        expect(EffectArray.map(progress, observation => observation.completed)).toEqual(
           Array.from({length: CODE_GRAPH_QUERY_INDEX_DEFINITIONS.length + 1}, (_, index) => index),
         );
-        expect(progress.every(observation => observation.total === CODE_GRAPH_QUERY_INDEX_DEFINITIONS.length)).toBe(
-          true,
-        );
         expect(
-          progress.every(
+          EffectArray.every(progress, observation => observation.total === CODE_GRAPH_QUERY_INDEX_DEFINITIONS.length),
+        ).toBe(true);
+        expect(
+          EffectArray.every(
+            progress,
             (observation, index) =>
               index === 0 || observation.elapsedMilliseconds >= progress[index - 1].elapsedMilliseconds,
           ),
@@ -382,7 +388,7 @@ describe('code graph cold query-index deferral', () => {
             );
 
             const sql = yield* SqlClient.SqlClient;
-            const secondIdentity = {...fixture.identity, worktreeId: 'v'.repeat(64)};
+            const secondIdentity = {...fixture.identity, worktreeId: Effect2.pipe('v', EffectString.repeat(64))};
             const secondSnapshot = {
               ...fixture.snapshot,
               id: 'claim-race-second-snapshot',
@@ -409,7 +415,7 @@ describe('code graph cold query-index deferral', () => {
               secondSnapshot,
               'claim-race-owner-token',
               {
-                logicalSnapshotId: `cgsn_${'0'.repeat(40)}`,
+                logicalSnapshotId: `cgsn_${Effect2.pipe('0', EffectString.repeat(40))}`,
                 owner: {buildId: '11111111-1111-1111', processId: process.pid},
               },
               writerGate,
@@ -472,18 +478,18 @@ const coldIndexFixture = Effect.fn('test.coldIndexFixture')(function* (suffix: s
   const root = yield* fs.makeTempDirectoryScoped({prefix: `threadnote-cold-index-${suffix}-`});
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: `cold-index-${suffix}`,
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'r'.repeat(64),
-    worktreeId: 'w'.repeat(64),
+    repositoryId: Effect2.pipe('r', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('w', EffectString.repeat(64)),
   };
   const file: CodeGraphInventoryFile = {
-    blobId: 'b'.repeat(40),
-    contentHash: 'h'.repeat(64),
+    blobId: Effect2.pipe('b', EffectString.repeat(40)),
+    contentHash: Effect2.pipe('h', EffectString.repeat(64)),
     language: 'typescript',
     mode: '100644',
     path: 'src/cold-index.ts',
@@ -523,7 +529,7 @@ const coldIndexFixture = Effect.fn('test.coldIndexFixture')(function* (suffix: s
     edgeCount: 1,
     extractorSet: 'cold-index-test',
     fileCount: 1,
-    id: `cgsn_${suffix.padEnd(40, '0').slice(0, 40)}`,
+    id: `cgsn_${Effect2.pipe(suffix, EffectString.padEnd(40, '0'), EffectString.slice(0, 40))}`,
     repositoryId: identity.repositoryId,
     state: 'building',
     symbolCount: 1,

@@ -1,10 +1,15 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import type {LocalModelCatalogShape, LocalModelRole} from './catalog.js';
+import * as EffectRecord from 'effect/Record';
 
-class ModelSelectionError extends Schema.TaggedError<ModelSelectionError>()('ModelSelectionError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ModelSelectionError extends Schema.TaggedError<ModelSelectionError, {readonly brand: unique symbol}>()(
+  'ModelSelectionError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 export const MODEL_SELECTION_VERSION = 1 as const;
 
@@ -89,18 +94,20 @@ export const clearLocalModelSelection = Effect.fn('models.clearSelection')(funct
 });
 
 function isModelSelection(value: unknown): value is ModelSelection {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  if (Object.keys(value).some(key => key !== 'version' && key !== 'roles')) return false;
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  if (EffectArray.some(EffectRecord.keys(value), key => key !== 'version' && key !== 'roles')) return false;
   const candidate = value as Partial<ModelSelection>;
   if (
     candidate.version !== MODEL_SELECTION_VERSION ||
     typeof candidate.roles !== 'object' ||
     !candidate.roles ||
-    Array.isArray(candidate.roles)
+    EffectArray.isArray(candidate.roles)
   ) {
     return false;
   }
-  return Object.entries(candidate.roles).every(
+  return EffectArray.every(
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
+    Object.entries(candidate.roles),
     ([role, id]) =>
       ['embedding', 'generation', 'reranker'].includes(role) &&
       typeof id === 'string' &&

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Option} from 'effect';
 import {TestClock} from 'effect/testing';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -135,7 +136,10 @@ export const closeoutDiagnostics = (now = () => performance.now()) => {
               totals,
               activeCount,
               unlistedActiveCount: activeCount - active.size,
-              active: [...active.values()].map(entry => ({...entry, elapsedMs: bounded(at - entry.startedMs)})),
+              active: EffectArray.map([...active.values()], entry => ({
+                ...entry,
+                elapsedMs: bounded(at - entry.startedMs),
+              })),
               recent,
               recentDropped,
               spans: spans.snapshot(),

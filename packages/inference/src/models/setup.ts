@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {
   type ModelArtifactFileIdentity as ModelSetupFileIdentity,
@@ -129,7 +130,8 @@ export function parseModelSetup(raw: string): ModelSetupInspection {
     (state.reason !== undefined && !/^[a-z0-9][a-z0-9-]{0,79}$/.test(state.reason)) ||
     (state.bytes !== undefined && (!Number.isSafeInteger(state.bytes) || state.bytes < 0)) ||
     (state.nextAttemptAt !== undefined && (!Number.isSafeInteger(state.nextAttemptAt) || state.nextAttemptAt < 0)) ||
-    [state.owner, state.drainingOwner].some(
+    EffectArray.some(
+      [state.owner, state.drainingOwner],
       owner =>
         owner !== undefined &&
         (!owner.token ||
@@ -334,13 +336,19 @@ export const readModelSetup = Effect.fn('models.readSetup')(function* (home: str
   return parseModelSetup(yield* fs.readFileString(file));
 });
 
-export class ModelSetupStateInvalid extends Schema.TaggedError<ModelSetupStateInvalid>()('ModelSetupStateInvalid', {
+export class ModelSetupStateInvalid extends Schema.TaggedError<
+  ModelSetupStateInvalid,
+  {readonly brand: unique symbol}
+>()('ModelSetupStateInvalid', {
   message: Schema.String,
 }) {}
 
-export class ModelSetupConflict extends Schema.TaggedError<ModelSetupConflict>()('ModelSetupConflict', {
-  message: Schema.String,
-}) {
+export class ModelSetupConflict extends Schema.TaggedError<ModelSetupConflict, {readonly brand: unique symbol}>()(
+  'ModelSetupConflict',
+  {
+    message: Schema.String,
+  },
+) {
   static stale(): ModelSetupConflict {
     return ModelSetupConflict.make({message: 'Model setup changed. Refresh its status and try again.'});
   }

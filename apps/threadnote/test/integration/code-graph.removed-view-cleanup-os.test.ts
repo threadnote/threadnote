@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
@@ -7,19 +8,15 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CODE_GRAPH_REMOVED_VIEW_CLEANUP_CLAIM_LEASE_MILLISECONDS, CodeGraphStore} from '@threadnote/graph/store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
 const REMOVED_AT = new Date(0).toISOString();
 const OS_ROWS = 64;
 const CHILD_MARKER_TIMEOUT_MILLISECONDS = 45_000;
 
-interface CleanupChildProcess {
-  readonly exited: Promise<number>;
-  readonly exitCode: number | null;
-  readonly stderr: ReadableStream<Uint8Array>;
-  readonly stdout: ReadableStream<Uint8Array>;
-  readonly kill: (signal?: NodeJS.Signals | number) => void;
-}
+type CleanupChildProcess = Bun.Subprocess<'ignore', 'pipe', 'pipe'>;
 
 interface CleanupChildMarker {
   readonly event: 'claim-committed';
@@ -66,7 +63,7 @@ describe('removed code graph view cleanup OS crash coordination', () => {
                       expect(marker).toMatchObject({event: 'claim-committed', revisions: Array(32).fill(1)});
                       expect(marker.worktreeIds).toEqual(expectedKilled);
                       expect(readLeasedRows(databasePath, expectedKilled)).toEqual(
-                        expectedKilled.map(worktreeId => ({
+                        EffectArray.map(expectedKilled, worktreeId => ({
                           next_attempt_at: now + 30_000,
                           revision: 1,
                           worktree_id: worktreeId,
@@ -76,7 +73,7 @@ describe('removed code graph view cleanup OS crash coordination', () => {
                       child.kill('SIGKILL');
                       yield* Effect.promise(() => child.exited);
                       expect(readLeasedRows(databasePath, expectedKilled)).toEqual(
-                        expectedKilled.map(worktreeId => ({
+                        EffectArray.map(expectedKilled, worktreeId => ({
                           next_attempt_at: now + 30_000,
                           revision: 1,
                           worktree_id: worktreeId,
@@ -87,7 +84,7 @@ describe('removed code graph view cleanup OS crash coordination', () => {
                         waitTimeoutMilliseconds: 30_000,
                       });
                       const expectedSuccessor = Array.from({length: 32}, (_, index) => worktreeId(index + 32));
-                      expect(successor.map(entry => entry.worktreeId)).toEqual(expectedSuccessor);
+                      expect(EffectArray.map(successor, entry => entry.worktreeId)).toEqual(expectedSuccessor);
                       expect(new Set([...marker.worktreeIds, ...expectedSuccessor])).toHaveLength(OS_ROWS);
                       expect(yield* store.claimRemovedViewCleanupCandidates(databasePath, now, 32)).toEqual([]);
                       expect(
@@ -103,8 +100,8 @@ describe('removed code graph view cleanup OS crash coordination', () => {
                         now + CODE_GRAPH_REMOVED_VIEW_CLEANUP_CLAIM_LEASE_MILLISECONDS,
                         32,
                       );
-                      expect(reclaimed.map(entry => entry.worktreeId)).toEqual(expectedKilled);
-                      expect(reclaimed.map(entry => entry.revision)).toEqual(Array(32).fill(2));
+                      expect(EffectArray.map(reclaimed, entry => entry.worktreeId)).toEqual(expectedKilled);
+                      expect(EffectArray.map(reclaimed, entry => entry.revision)).toEqual(Array(32).fill(2));
                     }),
                   terminateCleanupChild,
                 ),
@@ -141,7 +138,7 @@ describe('removed code graph view cleanup OS crash coordination', () => {
             32,
           );
           expect(claimed).toHaveLength(32);
-          expect(claimed.map(entry => entry.revision)).toEqual(Array(32).fill(1));
+          expect(EffectArray.map(claimed, entry => entry.revision)).toEqual(Array(32).fill(1));
         }),
       ),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -223,27 +220,21 @@ function holdSqliteWriter(databasePath: string): CleanupSqliteBlocker {
   };
 }
 
-function startCleanupChild(
-  databasePath: string,
-  now: number,
-  markerPath: string,
-  contentionMarkerPath: string,
-): Effect.Effect<CleanupChildProcess> {
-  return Effect.sync(
-    () =>
-      Bun.spawn({
-        cmd: [
-          process.execPath,
-          'run',
-          `${process.cwd()}/apps/threadnote/test/helpers/code-graph-removed-view-cleanup-child.ts`,
-          databasePath,
-          String(now),
-          markerPath,
-          contentionMarkerPath,
-        ],
-        stderr: 'pipe',
-        stdout: 'pipe',
-      }) as CleanupChildProcess,
+function startCleanupChild(databasePath: string, now: number, markerPath: string, contentionMarkerPath: string) {
+  return Effect.sync(() =>
+    Bun.spawn({
+      cmd: [
+        process.execPath,
+        'run',
+        `${process.cwd()}/apps/threadnote/test/helpers/code-graph-removed-view-cleanup-child.ts`,
+        databasePath,
+        String(now),
+        markerPath,
+        contentionMarkerPath,
+      ],
+      stderr: 'pipe',
+      stdout: 'pipe',
+    }),
   );
 }
 
@@ -282,8 +273,12 @@ function waitForMarker(fs: FileSystem.FileSystem, markerPath: string, child: Cle
 function collectChildStreams(child: CleanupChildProcess) {
   return Effect.all(
     {
-      stderr: readBoundedChildStream(child.stderr, 4_096).pipe(Effect.map(output => output.trim())),
-      stdout: readBoundedChildStream(child.stdout, 4_096).pipe(Effect.map(output => output.trim())),
+      stderr: readBoundedChildStream(child.stderr, 4_096).pipe(
+        Effect.map(output => Effect2.pipe(output, EffectString.trim)),
+      ),
+      stdout: readBoundedChildStream(child.stdout, 4_096).pipe(
+        Effect.map(output => Effect2.pipe(output, EffectString.trim)),
+      ),
     },
     {concurrency: 2},
   );
@@ -316,20 +311,31 @@ function readMarker(fs: FileSystem.FileSystem, markerPath: string) {
   return fs.readFileString(markerPath).pipe(
     Effect.flatMap(content =>
       Effect.try({
-        try: () => JSON.parse(content) as CleanupChildMarker,
+        try: () => JSON.parse(content) as unknown,
         catch: cause => TestError.make({message: 'Cleanup child marker was invalid.', cause}),
       }),
     ),
-    Effect.filterOrFail(
-      marker =>
-        marker.event === 'claim-committed' &&
-        Number.isSafeInteger(marker.processId) &&
-        marker.worktreeIds.length === 32 &&
-        marker.revisions.length === 32 &&
-        marker.worktreeIds.every(value => /^[0-9a-f]{64}$/u.test(value)) &&
-        marker.revisions.every(value => Number.isSafeInteger(value)),
-      () => TestError.make({message: 'Cleanup child marker shape was invalid.'}),
+    Effect.filterOrFail(isCleanupChildMarker, () =>
+      TestError.make({message: 'Cleanup child marker shape was invalid.'}),
     ),
+  );
+}
+
+function isCleanupChildMarker(value: unknown): value is CleanupChildMarker {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  return (
+    'event' in value &&
+    value.event === 'claim-committed' &&
+    'processId' in value &&
+    Number.isSafeInteger(value.processId) &&
+    'worktreeIds' in value &&
+    EffectArray.isArray(value.worktreeIds) &&
+    value.worktreeIds.length === 32 &&
+    EffectArray.every(value.worktreeIds, id => typeof id === 'string' && /^[0-9a-f]{64}$/u.test(id)) &&
+    'revisions' in value &&
+    EffectArray.isArray(value.revisions) &&
+    value.revisions.length === 32 &&
+    EffectArray.every(value.revisions, revision => typeof revision === 'number' && Number.isSafeInteger(revision))
   );
 }
 
@@ -345,7 +351,7 @@ function readLeasedRows(databasePath: string, worktreeIds: readonly string[]) {
        FROM removed_view_cleanup WHERE worktree_id = ?`,
     );
     statements.push(select);
-    return worktreeIds.map(worktreeId => select.get(worktreeId)!);
+    return EffectArray.map(worktreeIds, worktreeId => select.get(worktreeId)!);
   } finally {
     finalizeStatementsAndClose(database, statements);
   }
@@ -398,9 +404,9 @@ function finalizeStatementsAndClose(database: Database, statements: readonly Cle
 }
 
 function worktreeId(index: number): string {
-  return index.toString(16).padStart(64, '0');
+  return Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'));
 }
 
 function snapshotId(index: number): string {
-  return `cgsn_${index.toString(16).padStart(40, '0')}`;
+  return `cgsn_${Effect2.pipe(index.toString(16), EffectString.padStart(40, '0'))}`;
 }

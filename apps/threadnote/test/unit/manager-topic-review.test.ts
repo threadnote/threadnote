@@ -1,9 +1,10 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Effect, Predicate} from 'effect';
 import fc from 'fast-check';
 import {beforeEach, describe, expect, vi} from 'vitest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {CandidateReview} from '@threadnote/memory/candidate';
+import type {MemoryObsidianEvidenceV1} from '@threadnote/memory/document';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {handleManagerTopicReview, projectManagerTopicReview} from '../../src/manager/topic_review.js';
@@ -16,6 +17,8 @@ import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 import {maintenanceContentHash} from '../../src/memory/context/maintenance_policy.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -74,13 +77,38 @@ const config = {
   user: 'tester',
   account: 'local',
   agentId: 'threadnote',
-} as RuntimeConfig;
-const reviewId = `review-${'a'.repeat(24)}`;
-const caseId = `health-case-${'b'.repeat(40)}`;
-const hash = 'c'.repeat(64);
+} satisfies RuntimeConfig;
+const approvalDigestFromBody = (body: unknown): string | undefined => {
+  if (!Predicate.isObject(body) || !Predicate.isObject(body.approval)) return undefined;
+  return typeof body.approval.approvalDigest === 'string' ? body.approval.approvalDigest : undefined;
+};
+const caseIdFromBody = (body: unknown): string => {
+  if (!Predicate.isObject(body) || typeof body.caseId !== 'string')
+    throw new Error('Topic review response has no caseId.');
+  return body.caseId;
+};
+const reviewId = `review-${Effect2.pipe('a', EffectString.repeat(24))}`;
+const caseId = `health-case-${Effect2.pipe('b', EffectString.repeat(40))}`;
+const hash = Effect2.pipe('c', EffectString.repeat(64));
 const targetUri = 'threadnote://user/tester/memories/durable/topic.md';
+const importedEvidence: MemoryObsidianEvidenceV1 = {
+  version: 1,
+  sourceId: 'notes',
+  sourceInstanceId: '11111111-1111-4111-8111-111111111111',
+  vaultHash: Effect2.pipe('d', EffectString.repeat(64)),
+  accessHash: Effect2.pipe('e', EffectString.repeat(64)),
+  noteId: '22222222-2222-4222-8222-222222222222',
+  relativePath: 'Decision.md',
+  revisionHash: Effect2.pipe('f', EffectString.repeat(64)),
+  sanitizerVersion: 'scrubber-redact-v1',
+  fragmentHash: Effect2.pipe('a', EffectString.repeat(64)),
+  fragmentStart: 0,
+  fragmentEnd: 14,
+  pinId: '33333333-3333-4333-8333-333333333333',
+  expiresAt: '2027-01-01T00:00:00.000Z',
+};
 const review = {
-  version: 2,
+  version: 3,
   reviewId,
   revision: 3,
   project: 'alpha',
@@ -91,7 +119,23 @@ const review = {
   createdAt: '2026-10-01T00:00:00.000Z',
   auditEvents: [],
   codeCitations: [],
-  candidates: [{candidateId: `${reviewId}-1`, state: 'pending', evidence: ['Advisory warning'], targetUri}],
+  candidates: [
+    {
+      candidateId: `${reviewId}-1`,
+      categories: ['decision'],
+      comparison: 'new',
+      confidence: 0.9,
+      evidence: ['Advisory warning'],
+      kind: 'durable',
+      project: 'alpha',
+      proposedText: 'Proposed body',
+      reason: 'Advisory warning',
+      recommendation: 'manual_review',
+      state: 'pending',
+      targetUri,
+      topic: 'topic',
+    },
+  ],
   maintenance: {
     version: 1,
     basis: {
@@ -125,7 +169,7 @@ const review = {
               ordinal: 1,
               beforeHash: hash,
               disposition: 'revalidate',
-              supportHandles: [`current:tncc_${'a'.repeat(40)}`],
+              supportHandles: [`current:tncc_${Effect2.pipe('a', EffectString.repeat(40))}`],
               rationale: 'Checked.',
             },
           ],
@@ -143,16 +187,61 @@ const review = {
     reviewRevision: 3,
     stage: 'preview',
     preview: {
+      version: 1,
+      reviewId,
+      approvedAt: '2026-10-01T00:00:00.000Z',
+      targetUri,
       approvalDigest: hash,
       beforeContent: 'PRIVATE BASELINE',
       content: 'FINAL DOCUMENT',
       contentHash: hash,
       beforeContentHash: hash,
+      approvedProposal: {
+        version: 1,
+        draft: {
+          version: 1,
+          targetHash: hash,
+          observationRevision: hash,
+          packetDigest: hash,
+          outcome: 'propose-revalidation',
+          operations: [],
+          reviewedHandles: [],
+          rationale: 'Current',
+          unresolvedQuestions: [],
+          removedClaims: [],
+          paragraphDispositions: {
+            version: 1,
+            entries: [
+              {
+                ordinal: 1,
+                beforeHash: hash,
+                disposition: 'revalidate',
+                supportHandles: [`current:tncc_${Effect2.pipe('a', EffectString.repeat(40))}`],
+                rationale: 'Reviewed.',
+              },
+            ],
+          },
+        },
+        body: 'Proposed body',
+        finalBodyHash: hash,
+        changedOrdinals: [],
+      },
+      manifest: {
+        version: 2,
+        memoryId: 'tn_topic',
+        repositoryId: 'synthetic',
+        bodyHash: hash,
+        coverage: 'declared-only',
+        paragraphs: [{ordinal: 1, hash, role: 'descriptive', support: 'direct', citationIds: []}],
+        additionalDependencies: [],
+        originCitationIds: [],
+        acceptedSources: [],
+      },
       metadataDiff: [{field: 'topicMaintenance', beforeHash: hash, afterHash: hash}],
-      codeCitations: [{private: 'pin'}],
+      codeCitations: [],
     },
   },
-} as unknown as CandidateReview;
+} satisfies CandidateReview;
 
 function call(method: string, route: string, body: Record<string, unknown> = {}) {
   return handleManagerTopicReview({
@@ -198,26 +287,26 @@ beforeEach(() => {
 describe('Manager topic review adapter', () => {
   effectIt.effect('finds only a persisted stale written review by exact case selector after packet refusal', () =>
     Effect.gen(function* () {
-      const exactId = `review-${sha256HexSync(`topic-maintenance\0${targetUri}`).slice(0, 24)}`;
+      const exactId = `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${targetUri}`), EffectString.slice(0, 24))}`;
       const oldHash = maintenanceContentHash('PRIVATE BASELINE');
       const savedHash = maintenanceContentHash('FINAL DOCUMENT');
       const written = {
         ...review,
         reviewId: exactId,
         candidates: [{...review.candidates[0], state: 'applied' as const}],
-        maintenance: {...review.maintenance!, basis: {...review.maintenance!.basis, targetHash: oldHash}},
+        maintenance: {...review.maintenance, basis: {...review.maintenance.basis, targetHash: oldHash}},
         maintenanceApproval: {
-          ...review.maintenanceApproval!,
+          ...review.maintenanceApproval,
           stage: 'written' as const,
           preview: {
-            ...review.maintenanceApproval!.preview,
+            ...review.maintenanceApproval.preview,
             reviewId: exactId,
             targetUri,
             beforeContentHash: oldHash,
             contentHash: savedHash,
           },
         },
-      } as CandidateReview;
+      } satisfies CandidateReview;
       mocks.list.mockReturnValue(Effect.succeed([written]));
       mocks.load.mockReturnValue(Effect.succeed(written));
       mocks.records.mockReturnValue(
@@ -252,8 +341,8 @@ describe('Manager topic review adapter', () => {
         {...staleCase, memoryId: 'other'},
         {...staleCase, slot: 'other'},
         {...staleCase, subjectUri: `${targetUri}-other`},
-        {...staleCase, evidenceRevision: 'd'.repeat(64)},
-        {...staleCase, subjectContentHashes: [{uri: targetUri, hash: 'd'.repeat(64)}]},
+        {...staleCase, evidenceRevision: Effect2.pipe('d', EffectString.repeat(64))},
+        {...staleCase, subjectContentHashes: [{uri: targetUri, hash: Effect2.pipe('d', EffectString.repeat(64))}]},
       ]) {
         mocks.status.mockReturnValue(Effect.succeed({cases: [changed]}));
         expect((yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`))?.status).toBe(404);
@@ -274,16 +363,17 @@ describe('Manager topic review adapter', () => {
         Effect.succeed({
           ...written,
           maintenanceApproval: {
-            ...written.maintenanceApproval!,
+            ...written.maintenanceApproval,
             preview: {
-              ...written.maintenanceApproval!.preview,
+              ...written.maintenanceApproval.preview,
               reviewId: reviewId,
             },
           },
         }),
       );
       expect((yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`))?.status).toBe(404);
-      const imported = {...written, maintenance: {...written.maintenance!, version: 2 as const}} as CandidateReview;
+      // @ts-expect-error Persisted malformed import intentionally mismatches the v1 payload and v2 review marker.
+      const imported: CandidateReview = {...written, maintenance: {...written.maintenance, version: 2 as const}};
       mocks.load.mockReturnValue(Effect.succeed(imported));
       mocks.read.mockReturnValue(Effect.fail(TopicReviewError.make({message: 'Imported access expired.'})));
       expect((yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`))?.status).toBe(404);
@@ -371,11 +461,27 @@ describe('Manager topic review adapter', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  const importedReview = () =>
-    ({
+  const importedReview = () => {
+    const maintenance = review.maintenance;
+    if (maintenance?.version !== 1) throw new Error('Expected the frozen v1 maintenance fixture.');
+    return {
       ...review,
-      maintenance: {...review.maintenance!, version: 2, sourceKind: 'obsidian'},
-    }) as unknown as CandidateReview;
+      maintenance: {
+        ...maintenance,
+        version: 2,
+        sourceKind: 'obsidian',
+        basis: {
+          ...maintenance.basis,
+          version: 2,
+          sourceKind: 'obsidian',
+          originEvidence: importedEvidence,
+          activeEvidence: importedEvidence,
+          currentEvidence: importedEvidence,
+        },
+        reviewEvidence: [],
+      },
+    } satisfies CandidateReview;
+  };
 
   effectIt.effect('reauthorizes imported review text and skips checkout selection for preview and apply', () =>
     Effect.gen(function* () {
@@ -445,7 +551,7 @@ describe('Manager topic review adapter', () => {
         topic: 'PRIVATE_TOPIC',
         task: 'PRIVATE_TASK',
         candidates: [{...imported.candidates[0], proposedText: 'PRIVATE_PROPOSAL', reason: 'PRIVATE_REASON'}],
-      } as CandidateReview;
+      } satisfies CandidateReview;
       mocks.list.mockReturnValue(Effect.succeed([privateEntry]));
       mocks.read.mockReturnValue(Effect.fail(TopicReviewError.make({message: 'source denied'})));
       const result = yield* handleManagerAttentionRequest({
@@ -467,14 +573,14 @@ describe('Manager topic review adapter', () => {
       const pending = importedReview();
       const deferred = {
         ...pending,
-        reviewId: `review-${'b'.repeat(24)}`,
+        reviewId: `review-${Effect2.pipe('b', EffectString.repeat(24))}`,
         candidates: [{...pending.candidates[0], state: 'deferred' as const}],
-      } as CandidateReview;
+      } satisfies CandidateReview;
       const history = {
         ...pending,
-        reviewId: `review-${'c'.repeat(24)}`,
+        reviewId: `review-${Effect2.pipe('c', EffectString.repeat(24))}`,
         candidates: [{...pending.candidates[0], state: 'rejected' as const}],
-      } as CandidateReview;
+      } satisfies CandidateReview;
       mocks.list.mockReturnValue(Effect.succeed([pending, deferred, history]));
       mocks.read.mockImplementation((_config: RuntimeConfig, id: string) =>
         id === pending.reviewId
@@ -497,8 +603,38 @@ describe('Manager topic review adapter', () => {
       const {maintenance: _maintenance, maintenanceApproval: _approval, ...base} = review;
       const journal = {
         ...base,
-        maintenanceCapture: {input: {fragment: 'PRIVATE_CAPTURE'}},
-      } as unknown as CandidateReview;
+        version: 3,
+        maintenanceCapture: {
+          version: 1,
+          sourceKind: 'obsidian',
+          stage: 'reserved',
+          targetUri,
+          targetHash: hash,
+          observationRevision: hash,
+          inspectionDigest: hash,
+          input: {
+            sourceId: 'notes',
+            relativePath: 'Decision.md',
+            fragment: 'PRIVATE_CAPTURE',
+            expectedSourceInstanceId: importedEvidence.sourceInstanceId,
+            expectedNoteId: importedEvidence.noteId,
+            expectedRevisionHash: importedEvidence.revisionHash,
+            expectedSanitizerVersion: importedEvidence.sanitizerVersion,
+            retentionDays: 30,
+            reservation: {
+              version: 1,
+              operationId: 'capture-private-fragment',
+              pinId: importedEvidence.pinId,
+              capturedAt: '2026-10-01T00:00:00.000Z',
+              expiresAt: importedEvidence.expiresAt,
+              accessHash: importedEvidence.accessHash,
+              vaultHash: importedEvidence.vaultHash,
+              fragmentStart: 0,
+              fragmentEnd: 15,
+            },
+          },
+        },
+      } satisfies CandidateReview;
       mocks.list.mockReturnValue(Effect.succeed([journal]));
       mocks.load.mockReturnValue(Effect.succeed(journal));
       const inbox = yield* handleManagerAttentionRequest({
@@ -560,8 +696,8 @@ describe('Manager topic review adapter', () => {
           const payload = {
             ...imported,
             topic: text,
-            maintenance: {...imported.maintenance!, basis: {...imported.maintenance!.basis, body: text}},
-          } as CandidateReview;
+            maintenance: {...imported.maintenance, basis: {...imported.maintenance.basis, body: text}},
+          } satisfies CandidateReview;
           expect(projectManagerTopicReview(payload, {caseId, observationMatches: true})).toBeUndefined();
           expect(
             projectManagerTopicReview(payload, {
@@ -643,7 +779,7 @@ describe('Manager topic review adapter', () => {
         approvalDigest: hash,
         approved: true,
       });
-      expect((applied?.body as {approval?: {approvalDigest: string}} | undefined)?.approval?.approvalDigest).toBe(hash);
+      expect(approvalDigestFromBody(applied?.body)).toBe(hash);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -690,7 +826,17 @@ describe('Manager topic review adapter', () => {
           revision: 4,
           candidates: [{...review.candidates[0], state: 'applying' as const}],
           maintenance: {...payload, proposal: {...payload.proposal, draft: legacyDraft}},
-          maintenanceApproval: {...review.maintenanceApproval!, stage: 'prepared' as const},
+          maintenanceApproval: {
+            ...review.maintenanceApproval,
+            stage: 'prepared' as const,
+            preview: {
+              ...review.maintenanceApproval.preview,
+              approvedProposal: {
+                ...review.maintenanceApproval.preview.approvedProposal,
+                draft: legacyDraft,
+              },
+            },
+          },
         };
         mocks.list.mockReturnValue(Effect.succeed([legacy]));
         const read = () => call('GET', `/api/attention/topic-review?project=alpha&reviewId=${reviewId}`);
@@ -713,7 +859,7 @@ describe('Manager topic review adapter', () => {
     'returns bounded exact-review recovery only after validating review identity, target and project',
     () =>
       Effect.gen(function* () {
-        const exactId = `review-${sha256HexSync(`topic-maintenance\0${targetUri}`).slice(0, 24)}`;
+        const exactId = `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${targetUri}`), EffectString.slice(0, 24))}`;
         const blocked = {
           ...review,
           reviewId: exactId,
@@ -752,8 +898,8 @@ describe('Manager topic review adapter', () => {
           {
             ...blocked,
             maintenance: {
-              ...blocked.maintenance!,
-              basis: {...blocked.maintenance!.basis, targetUri: targetUri + '-other'},
+              ...blocked.maintenance,
+              basis: {...blocked.maintenance.basis, targetUri: targetUri + '-other'},
             },
           },
         ]) {
@@ -781,7 +927,7 @@ describe('Manager topic review adapter', () => {
         project: 'alpha',
         reviewId,
         revision: 3,
-        caseId: `health-case-${'e'.repeat(40)}`,
+        caseId: `health-case-${Effect2.pipe('e', EffectString.repeat(40))}`,
       });
       expect(stale?.status).toBe(409);
       expect(mocks.decide).toHaveBeenCalledTimes(1);
@@ -855,7 +1001,7 @@ describe('Manager topic review adapter', () => {
           ...review,
           revision: 4,
           candidates: [{...review.candidates[0], state: 'applying' as const}],
-          maintenanceApproval: {...review.maintenanceApproval!, stage: 'prepared' as const},
+          maintenanceApproval: {...review.maintenanceApproval, stage: 'prepared' as const},
         };
         mocks.load.mockReturnValue(Effect.succeed(prepared));
         mocks.list.mockReturnValue(Effect.succeed([prepared]));
@@ -888,7 +1034,7 @@ describe('Manager topic review adapter', () => {
 
   effectIt.effect('permits old-evidence reject and defer for the same case, including conflict closure', () =>
     Effect.gen(function* () {
-      const newer = 'd'.repeat(64);
+      const newer = Effect2.pipe('d', EffectString.repeat(64));
       mocks.status.mockReturnValue(
         Effect.succeed({
           cases: [
@@ -916,7 +1062,7 @@ describe('Manager topic review adapter', () => {
         ...review,
         revision: 4,
         candidates: [{...review.candidates[0], state: 'conflict' as const}],
-        maintenanceApproval: {...review.maintenanceApproval!, stage: 'conflict' as const},
+        maintenanceApproval: {...review.maintenanceApproval, stage: 'conflict' as const},
       };
       mocks.load.mockReturnValue(Effect.succeed(conflicted));
       const closed = yield* call('POST', '/api/attention/topic-review', {
@@ -954,7 +1100,7 @@ describe('Manager topic review adapter', () => {
                 family: 'topic-maintenance',
                 slot: 'declared-support',
                 subjectUri: targetUri,
-                evidenceRevision: 'd'.repeat(64),
+                evidenceRevision: Effect2.pipe('d', EffectString.repeat(64)),
               },
             ],
           }),
@@ -962,7 +1108,7 @@ describe('Manager topic review adapter', () => {
         const inbox = yield* call('GET', `/api/attention/topic-review?project=alpha&reviewId=${reviewId}`);
         expect(inbox?.status).toBe(200);
         expect(inbox?.body).toMatchObject({caseId, caseObservationMatches: false, canApply: false});
-        const projectedCaseId = (inbox!.body as {caseId: string}).caseId;
+        const projectedCaseId = caseIdFromBody(inbox!.body);
         const deferred = yield* call('POST', '/api/attention/topic-review', {
           action: 'defer',
           project: 'alpha',
@@ -1001,7 +1147,7 @@ describe('Manager topic review adapter', () => {
           ...review,
           revision: 4,
           candidates: [{...review.candidates[0], state: 'conflict' as const}],
-          maintenanceApproval: {...review.maintenanceApproval!, stage: 'conflict' as const},
+          maintenanceApproval: {...review.maintenanceApproval, stage: 'conflict' as const},
         };
         mocks.list.mockReturnValue(Effect.succeed([conflicted]));
         mocks.load.mockReturnValue(Effect.succeed(conflicted));
@@ -1012,7 +1158,7 @@ describe('Manager topic review adapter', () => {
           project: 'alpha',
           reviewId,
           revision: 4,
-          caseId: (conflictInbox!.body as {caseId: string}).caseId,
+          caseId: caseIdFromBody(conflictInbox!.body),
         });
         expect(closed?.status).toBe(200);
         expect(mocks.decide).toHaveBeenCalledWith(config, {reviewId, revision: 4, action: 'reject', caseId});
@@ -1052,14 +1198,14 @@ describe('topic projection invariant', () => {
           createMemoryCodeCitation({
             version: 1,
             evidenceRetention: 'capsule-retained',
-            repositoryId: '1'.repeat(64),
+            repositoryId: Effect2.pipe('1', EffectString.repeat(64)),
             repositoryIdentityKind: 'local',
-            sourceCommit: '2'.repeat(40),
-            sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
+            sourceCommit: Effect2.pipe('2', EffectString.repeat(40)),
+            sourceSnapshotId: `cgsn_${Effect2.pipe('3', EffectString.repeat(40))}`,
             sourceDirty: false,
             extractorSet: 'test',
             path: 'source.ts',
-            fileContentHash: {algorithm: 'sha256', value: value.repeat(64)},
+            fileContentHash: {algorithm: 'sha256', value: Effect2.pipe(value, EffectString.repeat(64))},
             target: {kind: 'file'},
           });
         const origin = citation('4');
@@ -1112,9 +1258,9 @@ describe('topic projection invariant', () => {
           ...review,
           candidates: [{...review.candidates[0], state: 'applied'}],
           maintenance: {
-            ...review.maintenance!,
+            ...review.maintenance,
             basis: {
-              ...review.maintenance!.basis,
+              ...review.maintenance.basis,
               targetUri: receiptUri,
               targetHash: contentHash(beforeContent),
               handles: [{id: `current:${origin.id}`, citationId: origin.id, variant: 'current'}],
@@ -1123,7 +1269,20 @@ describe('topic projection invariant', () => {
               {
                 handleId: `current:${origin.id}`,
                 citation: current,
-                source: {path: current.path},
+                content: 'Current source excerpt.',
+                excerptHash: hash,
+                fileBytesHash: current.fileContentHash.value,
+                startLine: 1,
+                endLine: 1,
+                source: {
+                  extractorSet: current.extractorSet,
+                  fileContentHash: current.fileContentHash.value,
+                  path: current.path,
+                  repositoryId: current.repositoryId,
+                  sourceCommit: current.sourceCommit,
+                  sourceDirty: current.sourceDirty,
+                  sourceSnapshotId: current.sourceSnapshotId,
+                },
                 provenance: 'current-verified',
                 supportsCitation: true,
                 truncated: false,
@@ -1131,10 +1290,10 @@ describe('topic projection invariant', () => {
             ],
           },
           maintenanceApproval: {
-            ...review.maintenanceApproval!,
+            ...review.maintenanceApproval,
             stage: 'written',
             preview: {
-              ...review.maintenanceApproval!.preview,
+              ...review.maintenanceApproval.preview,
               targetUri: receiptUri,
               beforeContent,
               beforeContentHash: contentHash(beforeContent),
@@ -1142,34 +1301,34 @@ describe('topic projection invariant', () => {
               contentHash: contentHash(afterContent),
             },
           },
-        } as unknown as CandidateReview;
+        } satisfies CandidateReview;
         const value = projectManagerTopicReview(fixture)!;
         expect(value.resolvedCitationIds).toEqual([previous.id]);
         expect(JSON.stringify(value)).not.toContain(beforeContent);
         const retainedOnly = {
           ...fixture,
           maintenanceApproval: {
-            ...fixture.maintenanceApproval!,
+            ...fixture.maintenanceApproval,
             preview: {
-              ...fixture.maintenanceApproval!.preview,
+              ...fixture.maintenanceApproval.preview,
               content: beforeContent,
               contentHash: contentHash(beforeContent),
             },
           },
-        } as CandidateReview;
+        } satisfies CandidateReview;
         expect(projectManagerTopicReview(retainedOnly)!.resolvedCitationIds).toEqual([]);
         const malformed = {
           ...fixture,
           maintenanceApproval: {
-            ...fixture.maintenanceApproval!,
-            preview: {...fixture.maintenanceApproval!.preview, beforeContent: 'unavailable'},
+            ...fixture.maintenanceApproval,
+            preview: {...fixture.maintenanceApproval.preview, beforeContent: 'unavailable'},
           },
-        } as CandidateReview;
+        } satisfies CandidateReview;
         expect(projectManagerTopicReview(malformed)!.resolvedCitationIds).toBeUndefined();
         const unwritten = {
           ...fixture,
           candidates: [{...fixture.candidates[0], state: 'applying' as const}],
-        } as CandidateReview;
+        } satisfies CandidateReview;
         expect(projectManagerTopicReview(unwritten)!.resolvedCitationIds).toBeUndefined();
       }),
   );
@@ -1188,7 +1347,7 @@ describe('topic projection invariant', () => {
         ...payload.proposal,
         draft: editedDraft,
         body: 'Approved edited body',
-        finalBodyHash: 'e'.repeat(64),
+        finalBodyHash: Effect2.pipe('e', EffectString.repeat(64)),
         changedOrdinals: [0],
       };
       const withApproval = {
@@ -1202,7 +1361,7 @@ describe('topic projection invariant', () => {
       expect(projected.draft).toEqual(editedDraft);
       expect(projected.proposal).toMatchObject({
         body: 'Approved edited body',
-        finalBodyHash: 'e'.repeat(64),
+        finalBodyHash: Effect2.pipe('e', EffectString.repeat(64)),
         changedOrdinals: [0],
       });
       expect(payload.proposal.draft.rationale).toBe('Current');

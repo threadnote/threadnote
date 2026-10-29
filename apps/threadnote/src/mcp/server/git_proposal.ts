@@ -4,6 +4,8 @@ import {buildReviewedGitProposal} from '../../git_proposal/commands.js';
 import {proposeSharedTopicMaintenance} from '../../git_proposal/topic_maintenance_commands.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {argumentError, mcpErrorResult, requiredText} from './common.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export function registerKnowledgeDeltaGitProposalTool(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
@@ -41,7 +43,7 @@ export function registerKnowledgeDeltaGitProposalTool(server: EffectMcpServerAda
         team,
       }).pipe(
         Effect.map(built => ({
-          content: [{type: 'text' as const, text: built.artifact.trimEnd()}],
+          content: [{type: 'text' as const, text: Effect2.pipe(built.artifact, EffectString.trimEnd)}],
           structuredContent: built.proposal,
         })),
         Effect.catch(error => Effect.succeed(mcpErrorResult(error))),

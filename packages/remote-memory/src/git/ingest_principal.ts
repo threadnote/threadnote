@@ -1,13 +1,15 @@
-import type {TransactionSql} from 'postgres';
+import type {ISql} from 'postgres';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {remoteMemoryError} from '../errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function remoteGitIngestPrincipalId(tenantId: string, shareId: string): string {
-  return `system:git-ingest:${sha256HexSync(JSON.stringify([tenantId, shareId])).slice(0, 32)}`;
+  return `system:git-ingest:${Effect.pipe(sha256HexSync(JSON.stringify([tenantId, shareId])), EffectString.slice(0, 32))}`;
 }
 
 export async function provisionGitIngestPrincipal(
-  transaction: TransactionSql,
+  transaction: ISql,
   input: {readonly tenantId: string; readonly shareId: string},
 ): Promise<void> {
   const principalId = remoteGitIngestPrincipalId(input.tenantId, input.shareId);

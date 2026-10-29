@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Path} from 'effect';
 import type {DevSkillsBundle, DevSkillsConsumer} from './contract.js';
 import {
@@ -27,6 +29,9 @@ import {
   runtimeIndexPath,
 } from './registry.js';
 import type {FileChange, PlannedMutation} from './plan.js';
+import * as EffectRecord from 'effect/Record';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 interface Journal {
   readonly schemaVersion: 1;
@@ -43,11 +48,11 @@ function parseBundle(value: unknown): DevSkillsBundle | null {
   const manifest = parseHistoricalDevSkillsManifest(value.manifest);
   const files: Record<string, string> = {};
   requireValue(
-    Object.keys(value.files).length === Object.keys(manifest.hashes).length,
+    EffectRecord.keys(value.files).length === EffectRecord.keys(manifest.hashes).length,
     'Invalid transaction inventory.',
   );
   let size = 0;
-  for (const [file, digest] of Object.entries(manifest.hashes)) {
+  for (const [file, digest] of EffectRecord.toEntries(manifest.hashes)) {
     const encoded = value.files[file];
     requireValue(typeof encoded === 'string', 'Missing transaction payload.');
     const bytes = Buffer.from(encoded, 'base64');
@@ -64,7 +69,9 @@ function assertTransition(journal: Journal, path: Path.Path) {
   const {consumer, changes, generation} = journal;
   const target = consumer.target;
   const id = consumerId(consumer);
-  const receiptChange = changes.find(change => change.path === receiptPath(path, target.skillRoot));
+  const receiptChange = EffectOption.getOrUndefined(
+    EffectArray.findFirst(changes, change => change.path === receiptPath(path, target.skillRoot)),
+  );
   requireValue(
     receiptChange?.after !== null && receiptChange?.after !== undefined,
     'A transaction requires its physical ownership transition.',
@@ -72,7 +79,7 @@ function assertTransition(journal: Journal, path: Path.Path) {
   const before = receiptChange.before === null ? undefined : parseReceipt(JSON.parse(receiptChange.before));
   const after = parseReceipt(JSON.parse(receiptChange.after));
   const others = (values: Readonly<Record<string, unknown>>) =>
-    Object.fromEntries(Object.entries(values).filter(([key]) => key !== id));
+    EffectRecord.fromEntries(EffectArray.filter(EffectRecord.toEntries(values), ([key]) => key !== id));
   requireValue(
     stableJson(others(before?.consumers ?? {})) === stableJson(others(after.consumers)),
     'A transaction cannot change another consumer.',
@@ -92,12 +99,16 @@ function assertTransition(journal: Journal, path: Path.Path) {
         !(id in after.consumers) &&
         stableJson(before.manifest) === stableJson(after.manifest) &&
         stableJson(before.generations) === stableJson(after.generations) &&
-        stableJson(after.entrypoints) === stableJson(Object.keys(after.consumers).length ? before.entrypoints : {}),
+        stableJson(after.entrypoints) ===
+          stableJson(EffectRecord.keys(after.consumers).length ? before.entrypoints : {}),
       'Removal lacks prior ownership or changes retained resources.',
     );
   }
   for (const change of changes) {
-    const relative = path.relative(target.skillRoot, change.path).split(path.sep).join('/');
+    const relative = EffectArray.join(
+      Effect2.pipe(path.relative(target.skillRoot, change.path), EffectString.split(path.sep)),
+      '/',
+    );
     if (relative in (before?.entrypoints ?? {}) || relative in after.entrypoints)
       requireValue(
         change.before === (before?.entrypoints[relative] ?? null) &&
@@ -143,7 +154,7 @@ function parseJournal(value: unknown, path: Path.Path): Journal {
       path.isAbsolute(value.consumer.installationRoot) &&
       typeof value.previewDigest === 'string' &&
       /^[a-f0-9]{64}$/u.test(value.previewDigest) &&
-      Array.isArray(value.changes) &&
+      EffectArray.isArray(value.changes) &&
       value.changes.length <= DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS + 4 + 3,
     'Invalid development skills transaction.',
   );
@@ -159,8 +170,12 @@ function parseJournal(value: unknown, path: Path.Path): Journal {
     [runtimeIndexPath(path, consumer.installationRoot), 'runtime'],
     [receiptPath(path, target.skillRoot), 'receipt'],
   ]);
-  const ownershipChange = value.changes.find(
-    item => isRecord(item) && item.path === receiptPath(path, target.skillRoot),
+  const ownershipChange = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      value.changes,
+      __effectArrayValue =>
+        !!(item => isRecord(item) && item.path === receiptPath(path, target.skillRoot))(__effectArrayValue),
+    ),
   );
   requireValue(isRecord(ownershipChange), 'A transaction requires its physical ownership transition.');
   const entrypoints = new Set<string>();
@@ -168,7 +183,8 @@ function parseJournal(value: unknown, path: Path.Path): Journal {
     if (content === null) continue;
     requireValue(typeof content === 'string', 'Invalid ownership transition content.');
     const receipt = parseReceipt(JSON.parse(content));
-    for (const relative of Object.keys(receipt.entrypoints)) entrypoints.add(path.join(target.skillRoot, relative));
+    for (const relative of EffectRecord.keys(receipt.entrypoints))
+      entrypoints.add(path.join(target.skillRoot, relative));
   }
   const projected = generation ? renderEntrypoints(path, target, generation) : undefined;
   const changes: FileChange[] = [];
@@ -206,13 +222,19 @@ function parseJournal(value: unknown, path: Path.Path): Journal {
       }
     else if (item.after !== null)
       requireValue(
-        projected && projected[path.relative(target.skillRoot, item.path).split(path.sep).join('/')] === item.after,
+        projected &&
+          projected[
+            EffectArray.join(
+              Effect2.pipe(path.relative(target.skillRoot, item.path), EffectString.split(path.sep)),
+              '/',
+            )
+          ] === item.after,
         'Transaction entrypoint differs from the immutable generation.',
       );
     changes.push({path: item.path, before: item.before, after: item.after});
   }
   requireValue(
-    new Set(changes.map(change => change.path)).size === changes.length,
+    new Set(EffectArray.map(changes, change => change.path)).size === changes.length,
     'Duplicate transaction destination.',
   );
   requireValue(value.enabled === undefined || typeof value.enabled === 'boolean', 'Invalid transaction enablement.');
@@ -249,7 +271,7 @@ const assertJournalCoverage = Effect.fn('devSkills.assertJournalCoverage')(funct
   for (const kind of ['home', 'runtime'] as const) {
     const file =
       kind === 'home' ? homeIndexPath(path, consumer.home) : runtimeIndexPath(path, consumer.installationRoot);
-    if (changes.some(change => change.path === file)) continue;
+    if (EffectArray.some(changes, change => change.path === file)) continue;
     const content = yield* readOptional(file);
     const present =
       content === null
@@ -260,13 +282,18 @@ const assertJournalCoverage = Effect.fn('devSkills.assertJournalCoverage')(funct
     if (stableJson(present) !== stableJson(expected))
       return yield* fail('invalid-state', `Transaction omits its required enrollment transition: ${file}`);
   }
-  const transition = changes.find(change => change.path === receiptPath(path, consumer.target.skillRoot))!;
+  const transition = EffectOption.getOrUndefined(
+    EffectArray.findFirst(changes, change => change.path === receiptPath(path, consumer.target.skillRoot)),
+  )!;
   const before = transition.before === null ? undefined : yield* decode(transition.before, parseReceipt);
   const after = yield* decode(transition.after!, parseReceipt);
   if (before) yield* verifyHistoricalProjection(consumer.target, before);
-  for (const relative of new Set([...Object.keys(before?.entrypoints ?? {}), ...Object.keys(after.entrypoints)])) {
+  for (const relative of new Set([
+    ...EffectRecord.keys(before?.entrypoints ?? {}),
+    ...EffectRecord.keys(after.entrypoints),
+  ])) {
     const file = path.join(consumer.target.skillRoot, relative);
-    if (changes.some(change => change.path === file)) continue;
+    if (EffectArray.some(changes, change => change.path === file)) continue;
     const actual = yield* readOptional(file);
     const desired = after.entrypoints[relative] ?? null;
     // Final removal deliberately preserves edited files; unchanged owned bytes must be removed.
@@ -286,7 +313,7 @@ const stageGeneration = Effect.fn('devSkills.stageGeneration')(function* (journa
   }
   const staging = `${root}.staging-${journal.previewDigest}`;
   yield* verifyGeneration(staging, manifest, true);
-  for (const [relative, content] of Object.entries(files)) {
+  for (const [relative, content] of EffectRecord.toEntries(files)) {
     const file = path.join(staging, relative);
     if (yield* statOptional(file)) continue; // Existing staged bytes were verified above.
     yield* assertSafePath(file);

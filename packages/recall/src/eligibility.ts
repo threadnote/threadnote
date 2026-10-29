@@ -1,5 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import type {MemoryAuthority, MemoryTrust} from '@threadnote/memory/document';
 import type {MemoryKind} from '@threadnote/memory/types';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type RecallAuthorityEligibility = 'any' | 'approved-authoritative';
 
@@ -128,7 +131,17 @@ const QUERY_WORD = /[\p{L}\p{N}_]+/gu;
 const MAX_INTENT_TERM_DISTANCE = 8;
 
 export function normalizeRecallProject(value: string | undefined): string | undefined {
-  const normalized = value?.normalize('NFC').trim().toLowerCase().normalize('NFC');
+  const normalized = Effect.pipe(
+    value,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.normalize('NFC')),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.normalize('NFC')),
+  );
   return normalized ? normalized : undefined;
 }
 
@@ -146,14 +159,27 @@ export function normalizeRecallProjectNames(values: readonly string[]): readonly
  * pass only the original user query, never an AI-generated rewrite.
  */
 export function originalQueryRequestsApprovedGuidance(originalQuery: string): boolean {
-  const clauses = originalQuery.normalize('NFC').toLowerCase().split(QUERY_CLAUSE_BOUNDARY);
-  return clauses.some(clause => {
-    const terms = clause.match(QUERY_WORD) ?? [];
-    if (terms.some(term => NEGATIVE_INTENT_TERMS.has(term))) return false;
+  const clauses = Effect.pipe(
+    originalQuery,
+    EffectString.normalize('NFC'),
+    EffectString.toLowerCase,
+    EffectString.split(QUERY_CLAUSE_BOUNDARY),
+  );
+  return EffectArray.some(clauses, clause => {
+    const terms =
+      Effect.pipe(
+        clause,
+        EffectString.match(QUERY_WORD),
+        Effect.Option.getOrElse(() => null),
+      ) ?? [];
+    if (EffectArray.some(terms, term => NEGATIVE_INTENT_TERMS.has(term))) return false;
     const authorityIndexes = termIndexes(terms, AUTHORITY_INTENT_TERMS);
     const guidanceIndexes = termIndexes(terms, GUIDANCE_INTENT_TERMS);
-    return authorityIndexes.some(authorityIndex =>
-      guidanceIndexes.some(guidanceIndex => Math.abs(authorityIndex - guidanceIndex) <= MAX_INTENT_TERM_DISTANCE),
+    return EffectArray.some(authorityIndexes, authorityIndex =>
+      EffectArray.some(
+        guidanceIndexes,
+        guidanceIndex => Math.abs(authorityIndex - guidanceIndex) <= MAX_INTENT_TERM_DISTANCE,
+      ),
     );
   });
 }
@@ -177,7 +203,7 @@ export function deriveRecallEligibilityPolicy(input: DeriveRecallEligibilityPoli
         : explicitProject
       : explicitProject[0] === undefined
         ? resolvedWorksetProjects
-        : resolvedWorksetProjects.filter(project => project === explicitProject[0]);
+        : EffectArray.filter(resolvedWorksetProjects, project => project === explicitProject[0]);
 
   const projectEligibility: RecallProjectEligibility =
     resolvedWorksetProjects !== undefined && projects.length === 0

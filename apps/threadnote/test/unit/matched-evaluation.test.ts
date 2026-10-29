@@ -1,6 +1,8 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {readFile} from '@threadnote/testing/node-fs-promises';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {Schema} from 'effect';
 import {
   createMatchedEvaluationManifestV1,
   matchedEvaluationReferenceEnvironmentPolicyHashV1,
@@ -21,6 +23,47 @@ import {
   type MatchedEvaluationMetricsV1,
   type MatchedEvaluationObservationV1,
 } from '@threadnote/threadnote/evaluation/matched-evaluation-runner';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+const unknownFields = [Schema.Record(Schema.String, Schema.Unknown)];
+const matchedProvenanceContextSchema = Schema.StructWithRest(
+  Schema.Struct({
+    assessmentFile: Schema.String,
+    contentFile: Schema.NullOr(Schema.String),
+    sufficiency: Schema.String,
+  }),
+  unknownFields,
+);
+const matchedProvenanceSchema = Schema.StructWithRest(
+  Schema.Struct({
+    repositories: Schema.Array(
+      Schema.StructWithRest(
+        Schema.Struct({clusterId: Schema.String, repository: Schema.String, repositoryFixtureHash: Schema.String}),
+        unknownFields,
+      ),
+    ),
+    tasks: Schema.Array(
+      Schema.StructWithRest(
+        Schema.Struct({
+          contextAssessment: matchedProvenanceContextSchema,
+          promptSource: Schema.StructWithRest(
+            Schema.Struct({lastEditedAt: Schema.NullOr(Schema.String)}),
+            unknownFields,
+          ),
+          targetRepository: Schema.String,
+          taskId: Schema.String,
+        }),
+        unknownFields,
+      ),
+    ),
+  }),
+  unknownFields,
+);
+const matchedAssessmentSchema = Schema.StructWithRest(
+  Schema.Struct({sufficiency: Schema.String, taskId: Schema.String}),
+  unknownFields,
+);
 
 describe('matched Threadnote, reference, and files evaluation', () => {
   it('builds a content-addressed corpus and balanced blinded repeated schedule', async () => {
@@ -28,19 +71,21 @@ describe('matched Threadnote, reference, and files evaluation', () => {
     const manifest = createManifest(corpus);
 
     expect(manifest.tasks).toHaveLength(6);
-    expect(new Set(manifest.tasks.map(task => task.category))).toEqual(new Set(MATCHED_EVALUATION_TASK_CATEGORIES));
+    expect(new Set(EffectArray.map(manifest.tasks, task => task.category))).toEqual(
+      new Set(MATCHED_EVALUATION_TASK_CATEGORIES),
+    );
     expect(manifest.schedule).toHaveLength(6 * 5 * 5);
     expect(parseMatchedEvaluationManifestV1(manifest)).toEqual(manifest);
 
     for (const task of manifest.tasks) {
-      const entries = manifest.schedule.filter(entry => entry.taskId === task.taskId);
+      const entries = EffectArray.filter(manifest.schedule, entry => entry.taskId === task.taskId);
       for (const label of MATCHED_EVALUATION_BLIND_LABELS) {
-        expect(entries.filter(entry => entry.blindLabel === label)).toHaveLength(5);
+        expect(EffectArray.filter(entries, entry => entry.blindLabel === label)).toHaveLength(5);
         expect(
-          entries
-            .filter(entry => entry.blindLabel === label)
-            .map(entry => entry.position)
-            .sort(),
+          EffectArray.map(
+            EffectArray.filter(entries, entry => entry.blindLabel === label),
+            entry => entry.position,
+          ).sort(),
         ).toEqual([1, 2, 3, 4, 5]);
       }
     }
@@ -60,8 +105,8 @@ describe('matched Threadnote, reference, and files evaluation', () => {
     });
     expect(manifest.activeArms).toEqual(['files', 'threadnote-graph', 'threadnote-compact']);
     expect(manifest.schedule).toHaveLength(6 * 6 * 3);
-    expect(new Set(manifest.schedule.map(entry => entry.position))).toEqual(new Set([1, 2, 3]));
-    expect(new Set(manifest.schedule.map(entry => manifest.blindAssignment[entry.blindLabel]))).toEqual(
+    expect(new Set(EffectArray.map(manifest.schedule, entry => entry.position))).toEqual(new Set([1, 2, 3]));
+    expect(new Set(EffectArray.map(manifest.schedule, entry => manifest.blindAssignment[entry.blindLabel]))).toEqual(
       new Set(manifest.activeArms),
     );
     expect(parseMatchedEvaluationManifestV1(manifest)).toEqual(manifest);
@@ -88,12 +133,12 @@ describe('matched Threadnote, reference, and files evaluation', () => {
           repository: full.repository,
           scheduleSeed: full.scheduleSeed,
         });
-        expect(new Set(candidate.schedule.map(entry => candidate.blindAssignment[entry.blindLabel]))).toEqual(
-          new Set(selected),
-        );
+        expect(
+          new Set(EffectArray.map(candidate.schedule, entry => candidate.blindAssignment[entry.blindLabel])),
+        ).toEqual(new Set(selected));
         for (const task of candidate.tasks) {
-          const entries = candidate.schedule.filter(entry => entry.taskId === task.taskId);
-          expect(new Set(entries.map(entry => entry.position))).toEqual(
+          const entries = EffectArray.filter(candidate.schedule, entry => entry.taskId === task.taskId);
+          expect(new Set(EffectArray.map(entries, entry => entry.position))).toEqual(
             new Set(Array.from({length: selected.length}, (_, index) => index + 1)),
           );
         }
@@ -107,14 +152,16 @@ describe('matched Threadnote, reference, and files evaluation', () => {
     const corpus = await fixture();
     const historical = {
       ...corpus,
-      tasks: corpus.tasks.map(task => ({...task, pairId: null, variant: 'historical-as-issued' as const})),
+      tasks: EffectArray.map(corpus.tasks, task => ({...task, pairId: null, variant: 'historical-as-issued' as const})),
     };
 
     expect(parseMatchedEvaluationCorpusV1(historical).tasks).toHaveLength(6);
     expect(() =>
       parseMatchedEvaluationCorpusV1({
         ...historical,
-        tasks: historical.tasks.map((task, index) => (index === 0 ? {...task, variant: 'exact-name' as const} : task)),
+        tasks: EffectArray.map(historical.tasks, (task, index) =>
+          index === 0 ? {...task, variant: 'exact-name' as const} : task,
+        ),
       }),
     ).toThrow('cannot mix with synthetic variants');
   });
@@ -123,9 +170,10 @@ describe('matched Threadnote, reference, and files evaluation', () => {
     const corpus = await fixture();
     const onePerCategory = {
       ...corpus,
-      tasks: corpus.tasks
-        .filter(task => task.taskId !== 'tsk_2222222222222222')
-        .map(task => ({...task, pairId: null, variant: 'historical-as-issued' as const})),
+      tasks: EffectArray.map(
+        EffectArray.filter(corpus.tasks, task => task.taskId !== 'tsk_2222222222222222'),
+        task => ({...task, pairId: null, variant: 'historical-as-issued' as const}),
+      ),
     };
 
     expect(parseMatchedEvaluationCorpusV1(onePerCategory).tasks).toHaveLength(5);
@@ -135,43 +183,34 @@ describe('matched Threadnote, reference, and files evaluation', () => {
   it('admits the reviewed historical external corpus with unedited prompt and context provenance', async () => {
     const root = new URL('../evaluation/corpora/token-efficiency-historical-v1/', import.meta.url);
     const corpus = parseMatchedEvaluationCorpusV1(JSON.parse(await readFile(new URL('corpus.json', root), 'utf8')));
-    const provenance = JSON.parse(await readFile(new URL('provenance.json', root), 'utf8')) as {
-      readonly repositories: readonly {
-        readonly clusterId: string;
-        readonly repository: string;
-        readonly repositoryFixtureHash: string;
-      }[];
-      readonly tasks: readonly {
-        readonly contextAssessment: {
-          readonly assessmentFile: string;
-          readonly contentFile: string | null;
-          readonly sufficiency: string;
-        };
-        readonly promptSource: {readonly lastEditedAt: string | null};
-        readonly targetRepository: string;
-        readonly taskId: string;
-      }[];
-    };
+    const provenance = Schema.decodeUnknownSync(matchedProvenanceSchema)(
+      JSON.parse(await readFile(new URL('provenance.json', root), 'utf8')),
+    );
 
     expect(corpus.tasks).toHaveLength(6);
-    expect(new Set(corpus.tasks.map(task => task.variant))).toEqual(new Set(['historical-as-issued']));
-    expect(new Set(provenance.repositories.map(repository => repository.repository)).size).toBe(6);
-    expect(new Set(provenance.repositories.map(repository => repository.clusterId)).size).toBe(6);
-    expect(new Set(provenance.tasks.map(task => task.contextAssessment.sufficiency))).toEqual(
+    expect(new Set(EffectArray.map(corpus.tasks, task => task.variant))).toEqual(new Set(['historical-as-issued']));
+    expect(new Set(EffectArray.map(provenance.repositories, repository => repository.repository)).size).toBe(6);
+    expect(new Set(EffectArray.map(provenance.repositories, repository => repository.clusterId)).size).toBe(6);
+    expect(new Set(EffectArray.map(provenance.tasks, task => task.contextAssessment.sufficiency))).toEqual(
       new Set(['none', 'lacking', 'sufficient', 'excessive']),
     );
 
     for (const taskProvenance of provenance.tasks) {
-      const task = corpus.tasks.find(candidate => candidate.taskId === taskProvenance.taskId);
+      const task = EffectOption.getOrUndefined(
+        EffectArray.findFirst(corpus.tasks, candidate => candidate.taskId === taskProvenance.taskId),
+      );
       if (!task) throw new Error(`missing corpus task ${taskProvenance.taskId}`);
       expect(taskProvenance.promptSource.lastEditedAt).toBeNull();
-      const repository = provenance.repositories.find(
-        candidate => candidate.repository === taskProvenance.targetRepository,
+      const repository = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          provenance.repositories,
+          candidate => candidate.repository === taskProvenance.targetRepository,
+        ),
       );
       expect(repository?.repositoryFixtureHash).toBe(task.repositoryFixtureHash);
-      const assessment = JSON.parse(
-        await readFile(new URL(taskProvenance.contextAssessment.assessmentFile, root), 'utf8'),
-      ) as {readonly sufficiency: string; readonly taskId: string};
+      const assessment = Schema.decodeUnknownSync(matchedAssessmentSchema)(
+        JSON.parse(await readFile(new URL(taskProvenance.contextAssessment.assessmentFile, root), 'utf8')),
+      );
       expect(assessment).toMatchObject({
         sufficiency: taskProvenance.contextAssessment.sufficiency,
         taskId: taskProvenance.taskId,
@@ -179,7 +218,16 @@ describe('matched Threadnote, reference, and files evaluation', () => {
       if (taskProvenance.contextAssessment.contentFile === null) {
         expect(taskProvenance.contextAssessment.sufficiency).toBe('none');
       } else {
-        const promptBody = task.prompt.slice(task.prompt.indexOf('\n\n') + 2);
+        const promptBody = Effect.pipe(
+          task.prompt,
+          EffectString.slice(
+            Effect.pipe(
+              task.prompt,
+              EffectString.indexOf('\n\n'),
+              Effect.Option.getOrElse(() => -1),
+            ) + 2,
+          ),
+        );
         expect(await readFile(new URL(taskProvenance.contextAssessment.contentFile, root), 'utf8')).toBe(
           `${promptBody}\n`,
         );
@@ -193,7 +241,7 @@ describe('matched Threadnote, reference, and files evaluation', () => {
       fc.property(
         fc
           .array(fc.constantFrom(...'0123456789abcdef'), {minLength: 64, maxLength: 64})
-          .map(characters => characters.join('')),
+          .map(characters => EffectArray.join(characters, '')),
         fc.boolean(),
         fc.integer({min: 0, max: corpus.tasks.length - 1}),
         (seed, reverseArms, rotation) => {
@@ -205,13 +253,13 @@ describe('matched Threadnote, reference, and files evaluation', () => {
 
           expect(first).toEqual(second);
           for (const task of first.tasks) {
-            const entries = first.schedule.filter(entry => entry.taskId === task.taskId);
+            const entries = EffectArray.filter(first.schedule, entry => entry.taskId === task.taskId);
             for (const label of MATCHED_EVALUATION_BLIND_LABELS) {
               expect(
-                entries
-                  .filter(entry => entry.blindLabel === label)
-                  .map(entry => entry.position)
-                  .sort(),
+                EffectArray.map(
+                  EffectArray.filter(entries, entry => entry.blindLabel === label),
+                  entry => entry.position,
+                ).sort(),
               ).toEqual([1, 2, 3, 4, 5]);
             }
           }
@@ -227,18 +275,22 @@ describe('matched Threadnote, reference, and files evaluation', () => {
     const changedModel = createMatchedEvaluationManifestV1({
       arms: manifest.arms,
       corpus,
-      model: {...manifest.model, parametersHash: 'f'.repeat(64)},
+      model: {...manifest.model, parametersHash: Effect.pipe('f', EffectString.repeat(64))},
       repetitions: manifest.repetitions,
       repository: manifest.repository,
       scheduleSeed: manifest.scheduleSeed,
     });
     const changedCorpus = {
       ...corpus,
-      tasks: corpus.tasks.map((task, index) => (index === 0 ? {...task, prompt: `${task.prompt} Changed.`} : task)),
+      tasks: EffectArray.map(corpus.tasks, (task, index) =>
+        index === 0 ? {...task, prompt: `${task.prompt} Changed.`} : task,
+      ),
     };
     const changedTask = createManifest(changedCorpus);
     const changedAdapterConfig = createMatchedEvaluationManifestV1({
-      arms: manifest.arms.map((arm, index) => (index === 0 ? {...arm, adapterConfigurationHash: '0'.repeat(64)} : arm)),
+      arms: EffectArray.map(manifest.arms, (arm, index) =>
+        index === 0 ? {...arm, adapterConfigurationHash: Effect.pipe('0', EffectString.repeat(64))} : arm,
+      ),
       corpus,
       model: manifest.model,
       repetitions: manifest.repetitions,
@@ -249,14 +301,18 @@ describe('matched Threadnote, reference, and files evaluation', () => {
     expect(changedModel.manifestHash).not.toBe(manifest.manifestHash);
     expect(changedTask.manifestHash).not.toBe(manifest.manifestHash);
     expect(changedAdapterConfig.manifestHash).not.toBe(manifest.manifestHash);
-    expect(manifest.arms.find(arm => arm.arm === 'reference-scope')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(manifest.arms, arm => arm.arm === 'reference-scope')),
+    ).toMatchObject({
       environmentPolicyHash: matchedEvaluationReferenceEnvironmentPolicyHashV1(),
       tool: {name: 'reference-context-tool', version: 'pinned-v1'},
     });
     expect(() =>
       createMatchedEvaluationManifestV1({
-        arms: manifest.arms.map(arm =>
-          arm.arm === 'reference-scope' ? {...arm, environmentPolicyHash: '0'.repeat(64)} : arm,
+        arms: EffectArray.map(manifest.arms, arm =>
+          arm.arm === 'reference-scope'
+            ? {...arm, environmentPolicyHash: Effect.pipe('0', EffectString.repeat(64))}
+            : arm,
         ),
         corpus,
         model: manifest.model,
@@ -287,8 +343,12 @@ describe('matched Threadnote, reference, and files evaluation', () => {
 
     expect(outcomes).toHaveLength(manifest.schedule.length);
     expect(assertMatchedEvaluationOutcomePrefixV1(manifest, outcomes)).toEqual(outcomes);
-    expect(summary.arms.find(arm => arm.arm === 'reference-scope')).toMatchObject({completed: 0, unavailable: 30});
-    expect(summary.arms.find(arm => arm.arm === 'threadnote-source')).toMatchObject({
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(summary.arms, arm => arm.arm === 'reference-scope')),
+    ).toMatchObject({completed: 0, unavailable: 30});
+    expect(
+      EffectOption.getOrUndefined(EffectArray.findFirst(summary.arms, arm => arm.arm === 'threadnote-source')),
+    ).toMatchObject({
       completed: 30,
       unavailable: 0,
     });
@@ -520,18 +580,22 @@ async function fixture(): Promise<MatchedEvaluationCorpusV1> {
 
 function createManifest(
   corpus: MatchedEvaluationCorpusV1 | unknown,
-  scheduleSeed = 'a'.repeat(64),
+  scheduleSeed = Effect.pipe('a', EffectString.repeat(64)),
   arms = armDefinitions(),
 ): MatchedEvaluationManifestV1 {
   return createMatchedEvaluationManifestV1({
     arms,
     corpus,
-    model: {model: 'test-model', parametersHash: 'b'.repeat(64), provider: 'provider-neutral'},
+    model: {
+      model: 'test-model',
+      parametersHash: Effect.pipe('b', EffectString.repeat(64)),
+      provider: 'provider-neutral',
+    },
     repetitions: 5,
     repository: {
       dirty: true,
-      fixtureHash: 'c'.repeat(64),
-      identityHash: 'd'.repeat(64),
+      fixtureHash: Effect.pipe('c', EffectString.repeat(64)),
+      identityHash: Effect.pipe('d', EffectString.repeat(64)),
       revision: 'fixture-revision-v1',
     },
     scheduleSeed,
@@ -539,26 +603,28 @@ function createManifest(
 }
 
 function armDefinitions(): readonly MatchedEvaluationArmDefinitionV1[] {
-  return MATCHED_EVALUATION_ARMS.map((arm, index) => ({
-    adapterArtifactHash: String(index + 1).repeat(64),
-    adapterConfigurationHash: (index + 6).toString(16).repeat(64),
+  return EffectArray.map(MATCHED_EVALUATION_ARMS, (arm, index) => ({
+    adapterArtifactHash: Effect.pipe(String(index + 1), EffectString.repeat(64)),
+    adapterConfigurationHash: Effect.pipe((index + 6).toString(16), EffectString.repeat(64)),
     adapterProtocol: 'matched-evaluation-adapter-v5',
     arm,
     environmentPolicyHash:
-      arm === 'reference-scope' ? matchedEvaluationReferenceEnvironmentPolicyHashV1() : 'e'.repeat(64),
+      arm === 'reference-scope'
+        ? matchedEvaluationReferenceEnvironmentPolicyHashV1()
+        : Effect.pipe('e', EffectString.repeat(64)),
     tool:
       arm === 'files'
         ? {artifactHash: null, lockIdentityHash: null, name: 'repository-files', version: 'builtin-v1'}
         : arm === 'reference-scope'
           ? {
-              artifactHash: '9'.repeat(64),
-              lockIdentityHash: '8'.repeat(64),
+              artifactHash: Effect.pipe('9', EffectString.repeat(64)),
+              lockIdentityHash: Effect.pipe('8', EffectString.repeat(64)),
               name: 'reference-context-tool',
               version: 'pinned-v1',
             }
           : {
-              artifactHash: '7'.repeat(64),
-              lockIdentityHash: '6'.repeat(64),
+              artifactHash: Effect.pipe('7', EffectString.repeat(64)),
+              lockIdentityHash: Effect.pipe('6', EffectString.repeat(64)),
               name: 'threadnote',
               version: '5.0.4',
             },
@@ -567,9 +633,9 @@ function armDefinitions(): readonly MatchedEvaluationArmDefinitionV1[] {
 
 function observation(runOrder: number): MatchedEvaluationObservationV1 {
   return {
-    artifactHash: runOrder.toString(16).padStart(64, '0'),
+    artifactHash: Effect.pipe(runOrder.toString(16), EffectString.padStart(64, '0')),
     metrics: metrics(),
-    transcriptHash: (runOrder + 1).toString(16).padStart(64, '0'),
+    transcriptHash: Effect.pipe((runOrder + 1).toString(16), EffectString.padStart(64, '0')),
     version: 5,
   };
 }

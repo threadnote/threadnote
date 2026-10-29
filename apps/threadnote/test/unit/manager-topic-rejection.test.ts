@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Result} from 'effect';
@@ -16,12 +17,15 @@ import {managerImportedTopicFixture} from '../helpers/manager-imported-topic.js'
 import {requestTopicMaintenanceDraft} from '../../src/memory/context/maintenance_draft.js';
 import {readContextMaintenancePacket, runContextMaintenance} from '../../src/memory/context/maintenance.js';
 import {runSelectedDraft} from '../../src/manager/selected_draft.js';
-import type {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
 import {runContextMaintainCommand} from '../../src/memory/context/maintenance_commands.js';
 import {captureConsole} from '../../src/effect/console.js';
 import {projectTopicReviewRecovery} from '../../src/memory/context/maintenance_review_projection.js';
 import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const modelReviewedFixture = Effect.gen(function* () {
   const f = yield* managerImportedTopicFixture();
@@ -45,7 +49,9 @@ const modelReviewedFixture = Effect.gen(function* () {
     Effect.sync(() => {
       if (basis?.version !== 2) throw new Error('Expected imported model basis.');
       const draft = makeTopicDraftWireFixture(basis, 'update', topicDraftEvidenceFromPrompt(prompt, basis));
-      const first = draft.facts.entries.find(entry => entry.ordinal === 0);
+      const first = EffectOption.getOrUndefined(
+        EffectArray.findFirst(draft.facts.entries, entry => entry.ordinal === 0),
+      );
       if (!first || first.disposition !== 'update') throw new Error('Expected editable imported claim.');
       first.text = 'Model proposed current claim.';
       return {
@@ -90,7 +96,8 @@ function expectRedacted(body: unknown, f: Reviewed, state: string) {
     caseId: f.caseId,
     state,
   });
-  expect(Object.keys(body as object).sort()).toEqual(
+  if (!Effect2.Predicate.isObject(body)) throw new Error('Expected a redacted topic review response.');
+  expect(EffectRecord.keys(body).sort()).toEqual(
     state === 'rejected'
       ? ['caseId', 'kind', 'project', 'reviewId', 'revision', 'state', 'version']
       : ['caseId', 'kind', 'project', 'recovery', 'reviewId', 'revision', 'state', 'version'],
@@ -104,7 +111,8 @@ const refreshCase = (f: Reviewed) =>
     for (let tick = 0; tick < 12; tick += 1) {
       const status = yield* runContextMaintenance(f.config, {cwd: f.home, project: 'notes', maxRecords: 4});
       if (
-        status.cases.some(
+        EffectArray.some(
+          status.cases,
           item => item.caseId === f.caseId && item.evidenceRevision !== f.review.maintenance!.basis.observationRevision,
         )
       )
@@ -149,7 +157,7 @@ effectIt.effect('rejects a stale model-created imported preview through Manager 
     expect(read?.body).toMatchObject({recovery: {action: 'reject'}, revision: f.review.revision});
     for (const wrong of [
       {...f.reject, project: 'other'},
-      {...f.reject, caseId: `health-case-${'0'.repeat(40)}`},
+      {...f.reject, caseId: `health-case-${Effect2.pipe('0', EffectString.repeat(40))}`},
       {...f.reject, revision: f.review.revision + 9},
     ]) {
       expect((yield* f.request('POST', '/api/attention/topic-review', wrong))?.status).not.toBe(200);
@@ -253,7 +261,7 @@ effectIt.effect(
               topic: text,
               task: text,
               outcome: text,
-              candidates: f.review.candidates.map(candidate => ({
+              candidates: EffectArray.map(f.review.candidates, candidate => ({
                 ...candidate,
                 proposedText: text,
                 reason: text,
@@ -279,16 +287,10 @@ effectIt.effect('MCP acknowledges a revoked imported rejection without a private
     const f = yield* modelReviewedFixture;
     const before = yield* f.store.read(f.location, f.uri);
     yield* runObsidianSourceRemove(f.config, {apply: true, id: 'notes'});
-    type ToolResult = {readonly isError?: boolean; readonly structuredContent?: unknown};
-    const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
-    const server = {
-      registerTool: (name: string, _definition: unknown, handler: unknown) => {
-        handlers.set(name, handler as (input: Record<string, unknown>) => Effect.Effect<ToolResult>);
-      },
-    } as unknown as EffectMcpServerAdapter;
+    const server = new EffectMcpServerAdapter('manager-topic-rejection-test', '1.0.0', '');
     registerContextMaintenanceTools(server, f.config);
     const {project: _project, ...selection} = f.reject;
-    const result = yield* handlers.get('context_maintenance_review')!(selection);
+    const result = yield* server.invokeTool('context_maintenance_review', selection);
     expect(result.isError).not.toBe(true);
     expectRedacted(result.structuredContent, f, 'rejected');
     expect((yield* loadCandidateReview(f.home, f.review.reviewId)).candidates[0].state).toBe('rejected');

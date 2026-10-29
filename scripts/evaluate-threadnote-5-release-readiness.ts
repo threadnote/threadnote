@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect, Path} from 'effect';
@@ -10,6 +11,8 @@ import {
 import {evaluateThreadnote5ReleaseReadiness} from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, printJson, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_FIXTURE = new URL(
   '../apps/threadnote/test/evaluation/fixtures/threadnote-5-task-loop-v1/fixture.json',
@@ -65,7 +68,7 @@ const program = Effect.gen(function* () {
   yield* printJson(result);
   if (result.gate.status !== 'passed') {
     return yield* ScriptError.make({
-      message: [...result.gate.qualityFailures, ...result.gate.insufficiencies].join('\n'),
+      message: EffectArray.join([...result.gate.qualityFailures, ...result.gate.insufficiencies], '\n'),
     });
   }
 });
@@ -139,13 +142,10 @@ function parseArguments(args: readonly string[]): {
         'Release-readiness evaluation requires --candidate-commit <40-hex>, --candidate-executable-sha256 <64-hex>, --capture-manifest-sha256 <64-hex>, and --evidence <json>.',
     });
   }
-  const baselineValues = [
-    baselineCommit,
-    baselineExecutableSha256,
-    baselineVersion,
-    baselineTrialLedgerPath,
-    baselineTrialLedgerSha256,
-  ].filter(value => value !== undefined).length;
+  const baselineValues = EffectArray.filter(
+    [baselineCommit, baselineExecutableSha256, baselineVersion, baselineTrialLedgerPath, baselineTrialLedgerSha256],
+    value => value !== undefined,
+  ).length;
   if (baselineValues !== 0 && baselineValues !== 5) {
     throw ScriptError.make({
       message:
@@ -191,26 +191,34 @@ function parseArguments(args: readonly string[]): {
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value`});
   return value;
 }
 
 function usage(): string {
-  return [
-    'Usage: bun run eval:threadnote-5-release-readiness -- [options]',
-    '',
-    'Evaluates bounded Threadnote 5 release-readiness evidence and emits a release gate result.',
-    'Required options: --candidate-commit <40-hex> --candidate-executable-sha256 <64-hex>',
-    '  --capture-manifest-sha256 <64-hex> --evidence <json>',
-    'Optional:',
-    '  --fixture <json> --output <json> --retained-subsystem-receipts <json>',
-    '  Trusted baseline comparison (all five together):',
-    '    --baseline-version <version> --baseline-commit <40-hex>',
-    '    --baseline-executable-sha256 <64-hex> --baseline-trial-ledger <json>',
-    '    --baseline-trial-ledger-sha256 <64-hex>',
-    '  Local authority verification (both together):',
-    '    --authority-manifest <json> --authority-manifest-sha256 <64-hex>',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Usage: bun run eval:threadnote-5-release-readiness -- [options]',
+      '',
+      'Evaluates bounded Threadnote 5 release-readiness evidence and emits a release gate result.',
+      'Required options: --candidate-commit <40-hex> --candidate-executable-sha256 <64-hex>',
+      '  --capture-manifest-sha256 <64-hex> --evidence <json>',
+      'Optional:',
+      '  --fixture <json> --output <json> --retained-subsystem-receipts <json>',
+      '  Trusted baseline comparison (all five together):',
+      '    --baseline-version <version> --baseline-commit <40-hex>',
+      '    --baseline-executable-sha256 <64-hex> --baseline-trial-ledger <json>',
+      '    --baseline-trial-ledger-sha256 <64-hex>',
+      '  Local authority verification (both together):',
+      '    --authority-manifest <json> --authority-manifest-sha256 <64-hex>',
+    ],
+    '\n',
+  );
 }
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(program, ApplicationLayer));

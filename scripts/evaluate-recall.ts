@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import {BunRuntime} from '@effect/platform-bun';
 import {Clock, Console, DateTime, Effect, FileSystem, Option, Path} from 'effect';
@@ -18,6 +19,8 @@ import {
   writeRecallEvaluationDiagnosticsAndEnforce,
   type RecallEvaluationSample,
 } from './evaluate-recall-diagnostics.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const FIXTURE_PATH = 'apps/threadnote/test/evaluation/fixtures/recall-v1/fixture.json';
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
@@ -91,7 +94,7 @@ const runProductionBenchmark = Effect.scoped(
       Array.from({length: PRODUCTION_BENCHMARK_DOCUMENT_COUNT}, (_unused, index) => index),
       index =>
         fs.writeFileString(
-          pathService.join(resourceRoot, `${String(index).padStart(5, '0')}.md`),
+          pathService.join(resourceRoot, `${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}.md`),
           index === PRODUCTION_BENCHMARK_DOCUMENT_COUNT - 1
             ? '# Production benchmark target\n\ncommon retrieval benchmark-anchor-9999 bounded retrieval'
             : `# Production benchmark ${index}\n\ncommon retrieval document ${index}`,
@@ -143,8 +146,12 @@ const runProductionBenchmark = Effect.scoped(
     const config = {account: 'local', agentContextHome, manifestPath, user: 'benchmark'};
     const initialIndex = yield* loadRecallIndex(config, {forceRefresh: true, includeInactive: false});
     if (
-      initialIndex.find(candidate => candidate.uri === 'threadnote://resources/repos/threadnote/09999.md')
-        ?.authority !== 'canonical_repo'
+      Option.getOrUndefined(
+        EffectArray.findFirst(
+          initialIndex,
+          candidate => candidate.uri === 'threadnote://resources/repos/threadnote/09999.md',
+        ),
+      )?.authority !== 'canonical_repo'
     ) {
       return yield* ScriptError.make({message: 'Production benchmark target did not receive verified seed authority.'});
     }
@@ -163,7 +170,7 @@ const runProductionBenchmark = Effect.scoped(
     const prepare = prepareForQuery(`common retrieval ${PRODUCTION_BENCHMARK_QUERY}`);
     for (let index = 0; index < PRODUCTION_BENCHMARK_WARMUP_COUNT; index += 1) {
       const warmup = yield* prepare;
-      if (!warmup.ranked.some(hit => hit.uri === 'threadnote://resources/repos/threadnote/09999.md')) {
+      if (!EffectArray.some(warmup.ranked, hit => hit.uri === 'threadnote://resources/repos/threadnote/09999.md')) {
         return yield* ScriptError.make({message: 'Production benchmark failed to retrieve its exact target.'});
       }
     }
@@ -180,7 +187,7 @@ const runProductionBenchmark = Effect.scoped(
           yield* beforeSample(sample);
           const measured = yield* measureRecallEvaluationSample(() => runSample(sample), {trace: true});
           const result = measured.result;
-          if (!result.ranked.some(hit => hit.uri === targetUri)) {
+          if (!EffectArray.some(result.ranked, hit => hit.uri === targetUri)) {
             return yield* ScriptError.make({message: 'Production benchmark failed to retrieve its target.'});
           }
           observations.push({...measured.observation, resultCount: result.ranked.length});
@@ -203,7 +210,7 @@ const runProductionBenchmark = Effect.scoped(
             }),
           );
           const matches = measured.result;
-          const found = matches.some(match => match.uri === targetUri);
+          const found = EffectArray.some(matches, match => match.uri === targetUri);
           if ((expected === 'hit' && !found) || (expected === 'no-hit' && matches.length > 0)) {
             return yield* ScriptError.make({
               message: `Production exact-search benchmark produced an unexpected ${expected}.`,
@@ -229,7 +236,7 @@ const runProductionBenchmark = Effect.scoped(
       INCREMENTAL_UPDATE_P95_LIMIT_MILLISECONDS,
       sample =>
         Effect.gen(function* () {
-          const content = `# Production benchmark target\n\ncommon retrieval ${PRODUCTION_BENCHMARK_QUERY} benchmark-update-${String(sample).padStart(3, '0')}`;
+          const content = `# Production benchmark target\n\ncommon retrieval ${PRODUCTION_BENCHMARK_QUERY} benchmark-update-${Effect2.pipe(String(sample), EffectString.padStart(3, '0'))}`;
           yield* Effect.all([
             fs.writeFileString(targetResourcePath, content),
             fs.writeFileString(targetRepoPath, content),
@@ -244,10 +251,10 @@ const runProductionBenchmark = Effect.scoped(
           yield* writeSeedState;
           yield* expireRecallIndexValidation(agentContextHome, false, [targetUri]);
         }),
-      sample => prepareForQuery(`benchmark-update-${String(sample).padStart(3, '0')}`),
+      sample => prepareForQuery(`benchmark-update-${Effect2.pipe(String(sample), EffectString.padStart(3, '0'))}`),
     );
     const finalUnchangedQuery = yield* prepare;
-    if (!finalUnchangedQuery.ranked.some(hit => hit.uri === targetUri)) {
+    if (!EffectArray.some(finalUnchangedQuery.ranked, hit => hit.uri === targetUri)) {
       return yield* ScriptError.make({
         message: 'Production benchmark lost an unchanged-term target after sustained incremental updates.',
       });

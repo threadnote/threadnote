@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Option, Path} from 'effect';
 import {describe} from 'vitest';
@@ -13,6 +14,8 @@ import {
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('MCP compact archive citation persistence', () => {
   it.effect('retains valid schema-v4 citation and source provenance as archive metadata', () =>
@@ -72,11 +75,14 @@ describe('MCP compact archive citation persistence', () => {
         });
         expect(archived?.metadata.citationErrors).toBeUndefined();
         expect(archived?.body).toBe(
-          [
-            'Archived original Threadnote memory.',
-            '',
-            'Compact must retain the precise evidence when archiving this handoff.',
-          ].join('\n'),
+          EffectArray.join(
+            [
+              'Archived original Threadnote memory.',
+              '',
+              'Compact must retain the precise evidence when archiving this handoff.',
+            ],
+            '\n',
+          ),
         );
         expect(archived?.body).not.toContain(citation.id);
         expect(archived?.body).not.toContain(citation.fileContentHash.value);
@@ -99,7 +105,10 @@ describe('MCP compact archive citation persistence', () => {
           yield* store.write(location, sourceUri, original, {mode: 'create'});
 
           const result = yield* archiveMemoryForCompact(config, compactArchiveAction(sourceUri, original));
-          const text = result.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+          const text = EffectArray.join(
+            EffectArray.map(result.content, item => (item.type === 'text' ? item.text : '')),
+            '\n',
+          );
 
           expect(result.isError).toBe(true);
           expect(text).toContain('newer than supported');
@@ -127,7 +136,10 @@ describe('MCP compact archive citation persistence', () => {
         yield* store.write(location, sourceUri, original, {mode: 'create'});
 
         const result = yield* archiveMemoryForCompact(config, compactArchiveAction(sourceUri, original));
-        const text = result.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        const text = EffectArray.join(
+          EffectArray.map(result.content, item => (item.type === 'text' ? item.text : '')),
+          '\n',
+        );
 
         expect(result.isError).toBe(true);
         expect(text).toContain('malformed code citation metadata (invalid-json)');
@@ -162,7 +174,9 @@ function compactArchiveAction(uri: string, expectedContent: string): ArchiveActi
     project: 'threadnote',
     reason: 'older handoff for threadnote',
     sourceUris: [uri],
-    topic: uri.split('/').at(-1)?.replace(/\.md$/u, ''),
+    topic: Effect2.pipe(Effect2.pipe(uri, EffectString.split('/')).at(-1), effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.replace(/\.md$/u, '')),
+    ),
     uri,
   };
 }
@@ -172,30 +186,33 @@ function compactSourceUri(topic: string): string {
 }
 
 function compactRawMemory(topic: string, ...extraHeaderLines: readonly string[]): string {
-  return [
-    'MEMORY',
-    'kind: handoff',
-    'status: active',
-    'project: threadnote',
-    `topic: ${topic}`,
-    'source_agent_client: codex',
-    'timestamp: 2026-08-26T20:00:00.000Z',
-    ...extraHeaderLines,
-    '',
-    'This source must remain byte-for-byte intact when compact refuses to archive it.',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'MEMORY',
+      'kind: handoff',
+      'status: active',
+      'project: threadnote',
+      `topic: ${topic}`,
+      'source_agent_client: codex',
+      'timestamp: 2026-08-26T20:00:00.000Z',
+      ...extraHeaderLines,
+      '',
+      'This source must remain byte-for-byte intact when compact refuses to archive it.',
+    ],
+    '\n',
+  );
 }
 
 function compactArchiveCitation() {
   return createMemoryCodeCitation({
     extractorSet: 'native-code-graph-13',
-    fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+    fileContentHash: {algorithm: 'sha256', value: Effect2.pipe('a', EffectString.repeat(64))},
     path: 'src/mcp_server_memory.ts',
-    repositoryId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
     repositoryIdentityKind: 'remote',
-    sourceCommit: 'c'.repeat(40),
+    sourceCommit: Effect2.pipe('c', EffectString.repeat(40)),
     sourceDirty: false,
-    sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+    sourceSnapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}`,
     target: {kind: 'file'},
     version: 1,
   });

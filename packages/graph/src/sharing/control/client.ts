@@ -25,6 +25,8 @@ import {
 import {GRAPH_SHARE_HTTP_CAS_MAX_BYTES, graphSharePayloadLooksLikeGitObject} from '../oci.js';
 import {parseGraphShareCoordinatorUrl} from '../profile.js';
 import type {GraphShareResultAnnouncementV1} from '../receipts.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const dynamicFetch = Object.assign((...args: Parameters<typeof globalThis.fetch>) => globalThis.fetch(...args), {
   preconnect: (...args: Parameters<typeof globalThis.fetch.preconnect>) => globalThis.fetch.preconnect(...args),
@@ -263,7 +265,7 @@ export const mirrorCoordinatorCasBlob = Effect.fn('codeGraph.sharing.mirrorCoord
 });
 
 function coordinatorPath(coordinatorUrl: string, pathname: string): string {
-  return `${parseGraphShareCoordinatorUrl(coordinatorUrl)}${pathname.startsWith('/') ? pathname : `/${pathname}`}`;
+  return `${parseGraphShareCoordinatorUrl(coordinatorUrl)}${Effect2.pipe(pathname, EffectString.startsWith('/')) ? pathname : `/${pathname}`}`;
 }
 
 function execute(request: HttpClientRequest.HttpClientRequest, urlText: string, timeoutMs: number) {

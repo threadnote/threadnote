@@ -8,7 +8,8 @@
     "./installation": "./src/installation.ts",
     "./manifest": "./src/manifest.ts",
     "./runtime-version": "./src/runtime-version.ts",
-    "./test/helpers/image-projection-runtime-config": "./test/helpers/image-projection-runtime-config.ts"
+    "./test/helpers/image-projection-runtime-config": "./test/helpers/image-projection-runtime-config.ts",
+    "./test/helpers/runtime-config": "./test/helpers/runtime-config.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

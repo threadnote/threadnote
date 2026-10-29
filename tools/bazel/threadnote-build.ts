@@ -1,10 +1,11 @@
+import {Array as EffectArray} from 'effect';
 /* oxlint-disable effecttsgo/node-builtin-import -- This file is the Bazel build process boundary. */
 import {cpSync, existsSync} from 'node:fs';
 import {resolve} from 'node:path';
 
 function run(arguments_: readonly string[]): void {
   const result = Bun.spawnSync([process.execPath, ...arguments_], {stderr: 'inherit', stdout: 'inherit'});
-  if (result.exitCode !== 0) throw new Error(`${arguments_.join(' ')} exited with ${result.exitCode}`);
+  if (result.exitCode !== 0) throw new Error(`${EffectArray.join(arguments_, ' ')} exited with ${result.exitCode}`);
 }
 
 run(['scripts/check-embedded-core-model.ts']);

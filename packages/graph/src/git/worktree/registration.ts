@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandTimedOut, runBinaryCommandEffect} from '@threadnote/platform/command';
@@ -13,12 +14,27 @@ import {
 import {CODE_GRAPH_GIT_WORKTREE_REGISTRATION_WORKER_ARGUMENT} from '@threadnote/graph/worker_protocol';
 import {observeCodeGraphGitdirBacklinkMatches} from './backlink.js';
 import type {RepositoryIdentity} from '../../types.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const PROTOCOL_VERSION = 1 as const;
 const BATCH_PROTOCOL_VERSION = 2 as const;
 const AUTHORITY_PROTOCOL_VERSION = 3 as const;
 const HASH_ID = /^[0-9a-f]{64}$/;
 const UTF8 = new TextEncoder();
+
+function isArrayOf<T>(value: unknown, predicate: (item: unknown) => item is T): value is readonly T[] {
+  return EffectArray.isArray(value) && EffectArray.every(value, predicate);
+}
+
+function isRegistryState(value: unknown): value is 'absent' | 'present' {
+  return value === 'absent' || value === 'present';
+}
+
+function isPathState(value: unknown): value is 'missing' | 'present' {
+  return value === 'missing' || value === 'present';
+}
 
 export const CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS = {
   gitDirectoryOutputBytes: 16 * 1_024,
@@ -124,14 +140,14 @@ export interface ObserveCodeGraphGitWorktreeRegistryOptions {
   readonly timeoutMilliseconds?: number;
 }
 
-export class CodeGraphGitWorktreeRegistrationError extends Schema.TaggedError<CodeGraphGitWorktreeRegistrationError>()(
-  'CodeGraphGitWorktreeRegistrationError',
-  {
-    message: Schema.String.pipe(
-      Schema.withConstructorDefault(Effect.succeed('Unable to verify the Git worktree registration.')),
-    ),
-  },
-) {}
+export class CodeGraphGitWorktreeRegistrationError extends Schema.TaggedError<
+  CodeGraphGitWorktreeRegistrationError,
+  {readonly brand: unique symbol}
+>()('CodeGraphGitWorktreeRegistrationError', {
+  message: Schema.String.pipe(
+    Schema.withConstructorDefault(Effect.succeed('Unable to verify the Git worktree registration.')),
+  ),
+}) {}
 
 /**
  * Capture the current worktree's administrative registration while that worktree is live.
@@ -185,9 +201,9 @@ export const captureCodeGraphGitWorktreeRegistration = Effect.fn('codeGraph.capt
     if (
       adminName.length === 0 ||
       adminNameBytes.byteLength > CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.maxAdminNameBytes ||
-      adminName.includes('\0') ||
-      adminName.includes('\r') ||
-      adminName.includes('\n')
+      Effect2.pipe(adminName, EffectString.includes('\0')) ||
+      Effect2.pipe(adminName, EffectString.includes('\r')) ||
+      Effect2.pipe(adminName, EffectString.includes('\n'))
     ) {
       return yield* CodeGraphGitWorktreeRegistrationError.make({
         message: 'Unable to verify the Git worktree registration.',
@@ -268,11 +284,11 @@ export const observeCodeGraphGitWorktreeRegistryBatch = Effect.fn('codeGraph.obs
     if (
       registrations.length === 0 ||
       registrations.length > CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.maxBatchTargets ||
-      registrations.some(registration => registration.kind !== 'linked')
+      EffectArray.some(registrations, registration => registration.kind !== 'linked')
     ) {
       return {reason: 'invalid', state: 'unknown'} satisfies CodeGraphGitWorktreeRegistryBatchObservation;
     }
-    const adminNameKeySets = registrations.map(registration =>
+    const adminNameKeySets = EffectArray.map(registrations, registration =>
       registration.kind === 'linked' ? registration.adminNameKeys : [],
     );
     const request = {
@@ -392,7 +408,7 @@ export async function scanCodeGraphWorktreeAuthorityWorkerRequest(
   const paths =
     request.kind === 'paths'
       ? request.canonicalWorktreePaths
-      : request.targets.map(target => target.canonicalWorktreePath);
+      : EffectArray.map(request.targets, target => target.canonicalWorktreePath);
   const pathStates: ('missing' | 'present')[] = [];
   for (const path of paths) {
     const state = await directWorktreePathState(path);
@@ -403,8 +419,8 @@ export async function scanCodeGraphWorktreeAuthorityWorkerRequest(
   const registry = await scanCodeGraphGitWorktreeRegistryTargetSets(
     request.checkoutId,
     request.gitCommonDirectory,
-    request.targets.map(target => target.adminNameKeys),
-    request.targets.map(target => target.canonicalWorktreePath),
+    EffectArray.map(request.targets, target => target.adminNameKeys),
+    EffectArray.map(request.targets, target => target.canonicalWorktreePath),
   );
   if (registry.state === 'unknown') return registry;
   return {
@@ -473,7 +489,7 @@ async function scanCodeGraphGitWorktreeRegistryTargetSets(
         entryCount: 0,
         registryRootIdentity: statsIdentity('missing', checkoutId, commonBefore),
         registryRootKind: 'missing',
-        states: adminNameKeySets.map(() => 'absent'),
+        states: EffectArray.map(adminNameKeySets, () => 'absent'),
         state: 'complete',
       };
     }
@@ -484,7 +500,7 @@ async function scanCodeGraphGitWorktreeRegistryTargetSets(
     const exactEntryKeys: string[] = [];
     let entryCount = 0;
     let totalNameBytes = 0;
-    const targetPresence = adminNameKeySets.map(() => false);
+    const targetPresence = EffectArray.map(adminNameKeySets, () => false);
     const targetIndexesByKey = new Map<string, number[]>();
     for (const [index, keys] of adminNameKeySets.entries()) {
       for (const key of keys) targetIndexesByKey.set(key, [...(targetIndexesByKey.get(key) ?? []), index]);
@@ -518,7 +534,7 @@ async function scanCodeGraphGitWorktreeRegistryTargetSets(
         const matches = await observeCodeGraphGitdirBacklinkMatches(
           registryRoot,
           nameBytes,
-          indexes.map(index => canonicalWorktreePaths[index]),
+          EffectArray.map(indexes, index => canonicalWorktreePaths[index]),
         );
         if (matches === undefined) return {reason: 'ambiguous', state: 'unknown'};
         for (const [matchIndex, matchesTarget] of matches.entries()) {
@@ -540,7 +556,7 @@ async function scanCodeGraphGitWorktreeRegistryTargetSets(
       entryCount,
       registryRootIdentity: statsIdentity('directory', checkoutId, rootBefore),
       registryRootKind: 'directory',
-      states: targetPresence.map(present => (present ? 'present' : 'absent')),
+      states: EffectArray.map(targetPresence, present => (present ? 'present' : 'absent')),
       state: 'complete',
     };
   } catch {
@@ -560,7 +576,7 @@ export function codeGraphGitWorktreeAdminNameKeys(
   const keys = [hashBytes('threadnote-git-worktree-admin-exact-v1', checkoutId, bytes)];
   try {
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes);
-    const folded = UTF8.encode(decoded.normalize('NFC').toLowerCase());
+    const folded = UTF8.encode(Effect2.pipe(decoded, EffectString.normalize('NFC'), EffectString.toLowerCase));
     keys.push(hashBytes('threadnote-git-worktree-admin-folded-v1', checkoutId, folded));
   } catch {
     // Exact raw-byte matching remains available for POSIX names that are not UTF-8.
@@ -577,9 +593,15 @@ export function parseBoundedGitDirectoryOutput(output: Uint8Array): string | und
   }
   try {
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output);
-    if (!decoded.endsWith('\n')) return undefined;
-    const value = decoded.slice(0, -1);
-    if (!value || value.includes('\0') || value.includes('\r') || value.includes('\n')) return undefined;
+    if (!Effect2.pipe(decoded, EffectString.endsWith('\n'))) return undefined;
+    const value = Effect2.pipe(decoded, EffectString.slice(0, -1));
+    if (
+      !value ||
+      Effect2.pipe(value, EffectString.includes('\0')) ||
+      Effect2.pipe(value, EffectString.includes('\r')) ||
+      Effect2.pipe(value, EffectString.includes('\n'))
+    )
+      return undefined;
     return value;
   } catch {
     return undefined;
@@ -602,7 +624,7 @@ export function sameCodeGraphGitWorktreeRegistration(
     (left.kind === 'main' ||
       (right.kind === 'linked' &&
         left.adminNameKeys.length === right.adminNameKeys.length &&
-        left.adminNameKeys.every((key, index) => key === right.adminNameKeys[index])))
+        EffectArray.every(left.adminNameKeys, (key, index) => key === right.adminNameKeys[index])))
   );
 }
 
@@ -627,10 +649,10 @@ export function validCodeGraphWorktreeAuthorityWorkerRequest(
 function validAuthorityWorkerRequest(value: unknown): value is CodeGraphWorktreeAuthorityWorkerRequest {
   if (!Predicate.isObject(value) || value.protocol !== AUTHORITY_PROTOCOL_VERSION) return false;
   const validPaths = (paths: unknown): paths is readonly string[] =>
-    Array.isArray(paths) &&
+    EffectArray.isArray(paths) &&
     paths.length >= 1 &&
     paths.length <= CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.maxBatchTargets &&
-    paths.every(isSafeAbsolutePath);
+    EffectArray.every(paths, isSafeAbsolutePath);
   const valid =
     value.kind === 'paths'
       ? validPaths(value.canonicalWorktreePaths)
@@ -638,10 +660,11 @@ function validAuthorityWorkerRequest(value: unknown): value is CodeGraphWorktree
         typeof value.checkoutId === 'string' &&
         HASH_ID.test(value.checkoutId) &&
         isSafeAbsolutePath(value.gitCommonDirectory) &&
-        Array.isArray(value.targets) &&
+        EffectArray.isArray(value.targets) &&
         value.targets.length >= 1 &&
         value.targets.length <= CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.maxBatchTargets &&
-        value.targets.every(
+        EffectArray.every(
+          value.targets,
           target =>
             Predicate.isObject(target) &&
             isHash(target.evidenceToken) &&
@@ -668,33 +691,43 @@ function validBatchWorkerRequest(value: unknown): value is CodeGraphGitWorktreeR
     typeof value.checkoutId === 'string' &&
     HASH_ID.test(value.checkoutId) &&
     isSafeAbsolutePath(value.gitCommonDirectory) &&
-    Array.isArray(value.adminNameKeySets) &&
+    EffectArray.isArray(value.adminNameKeySets) &&
     value.adminNameKeySets.length >= 1 &&
     value.adminNameKeySets.length <= CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.maxBatchTargets &&
-    value.adminNameKeySets.every(validAdminNameKeys) &&
+    EffectArray.every(value.adminNameKeySets, validAdminNameKeys) &&
     UTF8.encode(`${JSON.stringify(value)}\n`).byteLength <=
       CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.batchWorkerInputBytes
   );
 }
 
+const isStringArray = (value: unknown): value is readonly string[] =>
+  EffectArray.isArray(value) && EffectArray.every(value, (key): key is string => typeof key === 'string');
+
 function validAdminNameKeys(value: unknown): value is readonly string[] {
   return (
-    Array.isArray(value) &&
+    isStringArray(value) &&
     value.length >= 1 &&
     value.length <= 4 &&
-    value.every(key => typeof key === 'string' && HASH_ID.test(key)) &&
+    EffectArray.every(value, key => HASH_ID.test(key)) &&
     new Set(value).size === value.length &&
-    value.every((key, index) => index === 0 || value[index - 1]! < key)
+    EffectArray.every(value, (key, index) => index === 0 || value[index - 1] < key)
   );
 }
 
 function parseWorkerResponse(output: Uint8Array): CodeGraphGitWorktreeRegistryObservation {
   try {
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output);
-    if (!decoded.endsWith('\n') || decoded.slice(0, -1).includes('\n')) {
+    if (
+      !Effect2.pipe(decoded, EffectString.endsWith('\n')) ||
+      Effect2.pipe(decoded, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+        const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.includes('\n'));
+        return __effectPipeStage1;
+      })
+    ) {
       return {reason: 'unavailable', state: 'unknown'};
     }
-    const value: unknown = JSON.parse(decoded.slice(0, -1));
+    const value: unknown = JSON.parse(Effect2.pipe(decoded, EffectString.slice(0, -1)));
     if (!Predicate.isObject(value)) return {reason: 'unavailable', state: 'unknown'};
     if (value.state === 'unknown') {
       return value.reason === 'ambiguous' || value.reason === 'invalid' || value.reason === 'unavailable'
@@ -730,10 +763,17 @@ function parseBatchWorkerResponse(
 ): CodeGraphGitWorktreeRegistryBatchObservation {
   try {
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output);
-    if (!decoded.endsWith('\n') || decoded.slice(0, -1).includes('\n')) {
+    if (
+      !Effect2.pipe(decoded, EffectString.endsWith('\n')) ||
+      Effect2.pipe(decoded, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+        const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.includes('\n'));
+        return __effectPipeStage1;
+      })
+    ) {
       return {reason: 'unavailable', state: 'unknown'};
     }
-    const value: unknown = JSON.parse(decoded.slice(0, -1));
+    const value: unknown = JSON.parse(Effect2.pipe(decoded, EffectString.slice(0, -1)));
     if (!Predicate.isObject(value)) return {reason: 'unavailable', state: 'unknown'};
     if (value.state === 'unknown') {
       return value.reason === 'ambiguous' || value.reason === 'invalid' || value.reason === 'unavailable'
@@ -748,9 +788,8 @@ function parseBatchWorkerResponse(
       !Number.isSafeInteger(value.entryCount) ||
       Number(value.entryCount) < 0 ||
       Number(value.entryCount) > CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.maxAdminNames ||
-      !Array.isArray(value.states) ||
-      value.states.length !== targetCount ||
-      value.states.some(state => state !== 'absent' && state !== 'present')
+      !isArrayOf(value.states, isRegistryState) ||
+      value.states.length !== targetCount
     ) {
       return {reason: 'unavailable', state: 'unknown'};
     }
@@ -759,7 +798,7 @@ function parseBatchWorkerResponse(
       entryCount: Number(value.entryCount),
       registryRootIdentity: value.registryRootIdentity,
       registryRootKind: value.registryRootKind,
-      states: [...value.states] as readonly ('absent' | 'present')[],
+      states: [...value.states],
       state: 'complete',
     };
   } catch {
@@ -789,13 +828,12 @@ function parsePathBatchWorkerResponse(
   if (
     !hasExactKeys(value, ['pathStates', 'state']) ||
     value.state !== 'complete' ||
-    !Array.isArray(value.pathStates) ||
-    value.pathStates.length !== targetCount ||
-    value.pathStates.some(state => state !== 'missing' && state !== 'present')
+    !isArrayOf(value.pathStates, isPathState) ||
+    value.pathStates.length !== targetCount
   ) {
     return {reason: 'unavailable', state: 'unknown'};
   }
-  return {pathStates: [...value.pathStates] as readonly ('missing' | 'present')[], state: 'complete'};
+  return {pathStates: [...value.pathStates], state: 'complete'};
 }
 
 /** @internal Strict protocol-v3 parser retained for malformed-boundary tests. */
@@ -835,22 +873,20 @@ function parseAuthorityWorkerResponse(
     !Number.isSafeInteger(value.entryCount) ||
     Number(value.entryCount) < 0 ||
     Number(value.entryCount) > CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.maxAdminNames ||
-    !Array.isArray(value.pathStates) ||
+    !isArrayOf(value.pathStates, isPathState) ||
     value.pathStates.length !== targetCount ||
-    value.pathStates.some(state => state !== 'missing' && state !== 'present') ||
-    !Array.isArray(value.registryStates) ||
-    value.registryStates.length !== targetCount ||
-    value.registryStates.some(state => state !== 'absent' && state !== 'present')
+    !isArrayOf(value.registryStates, isRegistryState) ||
+    value.registryStates.length !== targetCount
   ) {
     return {reason: 'unavailable', state: 'unknown'};
   }
   return {
     contentDigest: value.contentDigest,
     entryCount: Number(value.entryCount),
-    pathStates: [...value.pathStates] as readonly ('missing' | 'present')[],
+    pathStates: [...value.pathStates],
     registryRootIdentity: value.registryRootIdentity,
     registryRootKind: value.registryRootKind,
-    registryStates: [...value.registryStates] as readonly ('absent' | 'present')[],
+    registryStates: [...value.registryStates],
     state: 'complete',
   };
 }
@@ -859,8 +895,16 @@ function parseWorkerJson(output: Uint8Array): Record<string, unknown> | undefine
   try {
     if (output.byteLength > CODE_GRAPH_GIT_WORKTREE_REGISTRATION_LIMITS.workerOutputBytes) return undefined;
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output);
-    if (!decoded.endsWith('\n') || decoded.slice(0, -1).includes('\n')) return undefined;
-    const value: unknown = JSON.parse(decoded.slice(0, -1));
+    if (
+      !Effect2.pipe(decoded, EffectString.endsWith('\n')) ||
+      Effect2.pipe(decoded, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice(0, -1));
+        const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.includes('\n'));
+        return __effectPipeStage1;
+      })
+    )
+      return undefined;
+    const value: unknown = JSON.parse(Effect2.pipe(decoded, EffectString.slice(0, -1)));
     return Predicate.isObject(value) ? value : undefined;
   } catch {
     return undefined;
@@ -868,13 +912,20 @@ function parseWorkerJson(output: Uint8Array): Record<string, unknown> | undefine
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const observed = Object.keys(value).sort();
+  const observed = EffectRecord.keys(value).sort();
   const sortedExpected = [...expected].sort();
-  return observed.length === sortedExpected.length && observed.every((key, index) => key === sortedExpected[index]);
+  return (
+    observed.length === sortedExpected.length &&
+    EffectArray.every(observed, (key, index) => key === sortedExpected[index])
+  );
 }
 
 function gitWorktreeRegistrationWorkerSpawnPlan(system: SystemInfoShape) {
-  const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1);
+  const executableName = Effect2.pipe(
+    system.executablePath,
+    EffectString.replaceAll('\\', '/'),
+    EffectString.split('/'),
+  ).at(-1);
   const candidate = system.processArguments[1];
   const script =
     executableName === 'bun' || executableName === 'bun.exe'
@@ -960,7 +1011,7 @@ function hashBytes(domain: string, checkoutId: string, bytes: Uint8Array): strin
 }
 
 function hashParts(domain: string, parts: readonly string[]): string {
-  return sha256HexSync(`${domain}\0${parts.join('\0')}`);
+  return sha256HexSync(`${domain}\0${EffectArray.join(parts, '\0')}`);
 }
 
 function isSafeAbsolutePath(value: unknown): value is string {
@@ -971,9 +1022,9 @@ function isSafeAbsolutePath(value: unknown): value is string {
     UTF8.encode(value).byteLength <= 4_096 &&
     path.isAbsolute(value) &&
     path.normalize(value) === value &&
-    !value.includes('\0') &&
-    !value.includes('\r') &&
-    !value.includes('\n')
+    !Effect2.pipe(value, EffectString.includes('\0')) &&
+    !Effect2.pipe(value, EffectString.includes('\r')) &&
+    !Effect2.pipe(value, EffectString.includes('\n'))
   );
 }
 

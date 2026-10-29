@@ -1,7 +1,9 @@
-import type {Sql} from 'postgres';
+import {Array as EffectArray, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {trimTrailingCharacters} from '@threadnote/platform/string-boundaries';
 import {remoteMemoryError} from './errors.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const STANDALONE_REMOTE_MEMORY_MIGRATION_DIRECTORY = 'remote-memory/migrations';
 
@@ -10,10 +12,18 @@ export function standaloneMigrationFilePath(executablePath: string, name: string
     throw remoteMemoryError('invalid_request', 'Remote memory migration file name is invalid.');
   }
   const trimmed = trimTrailingCharacters(executablePath, '/\\');
-  const separator = trimmed.includes('\\') && !trimmed.includes('/') ? '\\' : '/';
-  const slash = trimmed.lastIndexOf(separator);
-  const root = slash <= 0 ? trimmed : trimmed.slice(0, slash);
-  return [root, ...STANDALONE_REMOTE_MEMORY_MIGRATION_DIRECTORY.split('/'), name].join(separator);
+  const separator =
+    Effect.pipe(trimmed, EffectString.includes('\\')) && !Effect.pipe(trimmed, EffectString.includes('/')) ? '\\' : '/';
+  const slash = Effect.pipe(
+    trimmed,
+    EffectString.lastIndexOf(separator),
+    Effect.Option.getOrElse(() => -1),
+  );
+  const root = slash <= 0 ? trimmed : Effect.pipe(trimmed, EffectString.slice(0, slash));
+  return EffectArray.join(
+    [root, ...Effect.pipe(STANDALONE_REMOTE_MEMORY_MIGRATION_DIRECTORY, EffectString.split('/')), name],
+    separator,
+  );
 }
 
 function migrationFile(name: string, executablePath: string | undefined): string | URL {
@@ -43,11 +53,21 @@ const MIGRATIONS = [
 const MIGRATION_LOCK = 7_427_190_041;
 
 export function remoteMemoryMigrationVersions(): readonly number[] {
-  return MIGRATIONS.map(migration => migration.version);
+  return EffectArray.map(MIGRATIONS, migration => migration.version);
+}
+
+interface RemoteMemoryMigrationConnection {
+  (template: TemplateStringsArray, ...values: readonly (number | string)[]): PromiseLike<readonly unknown[]>;
+  release(): void;
+  unsafe(query: string): PromiseLike<readonly unknown[]>;
+}
+
+interface RemoteMemoryMigrationDatabase {
+  reserve(): Promise<RemoteMemoryMigrationConnection>;
 }
 
 export async function migrateRemoteMemoryDatabase(
-  sql: Sql,
+  sql: RemoteMemoryMigrationDatabase,
   options: {readonly executablePath?: string} = {},
 ): Promise<void> {
   const connection = await sql.reserve();
@@ -60,9 +80,11 @@ export async function migrateRemoteMemoryDatabase(
     for (const migration of MIGRATIONS) {
       const source = await Bun.file(migrationFile(migration.name, options.executablePath)).text();
       const checksum = sha256HexSync(source);
-      const applied = await connection<{checksum: string}[]>`
-        SELECT checksum FROM remote_memory.schema_migrations WHERE version = ${migration.version}
-      `;
+      const applied = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({checksum: Schema.String})))(
+        await connection`
+          SELECT checksum FROM remote_memory.schema_migrations WHERE version = ${migration.version}
+        `,
+      );
       if (applied[0]) {
         if (applied[0].checksum !== checksum) {
           throw remoteMemoryError(
@@ -80,9 +102,11 @@ export async function migrateRemoteMemoryDatabase(
           VALUES (${migration.version}, ${checksum})
           ON CONFLICT (version) DO NOTHING
         `;
-        const recorded = await connection<{checksum: string}[]>`
-          SELECT checksum FROM remote_memory.schema_migrations WHERE version = ${migration.version}
-        `;
+        const recorded = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({checksum: Schema.String})))(
+          await connection`
+            SELECT checksum FROM remote_memory.schema_migrations WHERE version = ${migration.version}
+          `,
+        );
         if (recorded[0]?.checksum !== checksum) {
           throw remoteMemoryError(
             'service_unavailable',

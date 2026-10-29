@@ -29,6 +29,9 @@ import {CommandExecutor} from '@threadnote/platform/command';
 import {HttpService} from '@threadnote/platform/http';
 import {CliOutput} from '../../src/effect/cli/output.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const AutoUpdateTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
 const WorkerBoundaryLayer = Layer.mergeAll(
@@ -236,7 +239,12 @@ describe('automatic update state', () => {
   it('round-trips every valid fully populated state through JSON parsing', () => {
     const version = fc
       .tuple(fc.integer({max: 100, min: 0}), fc.integer({max: 100, min: 0}), fc.integer({max: 100, min: 0}))
-      .map(parts => parts.join('.'));
+      .map(parts =>
+        EffectArray.join(
+          EffectArray.map(parts, item => (item === null || item === undefined ? '' : String(item))),
+          '.',
+        ),
+      );
     const timestamp = fc
       .integer({max: Date.parse('2099-12-31T23:59:59.999Z'), min: Date.parse('2000-01-01T00:00:00.000Z')})
       .map(milliseconds => new Date(milliseconds).toISOString());
@@ -292,7 +300,7 @@ describe('automatic update state', () => {
 
   it('never permits unattended replacement of a SHA-bound development runtime', () => {
     expect(isAutoUpdateVersionEligible('4.2.2')).toBe(true);
-    expect(isAutoUpdateVersionEligible(`4.2.2-local.g${'a'.repeat(40)}`)).toBe(false);
+    expect(isAutoUpdateVersionEligible(`4.2.2-local.g${Effect2.pipe('a', EffectString.repeat(40))}`)).toBe(false);
   });
 
   it('projects every closed worker result without inventing a repair state', () => {

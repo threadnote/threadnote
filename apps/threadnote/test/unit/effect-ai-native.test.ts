@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it} from '@effect/vitest';
@@ -15,6 +16,8 @@ import {
   LocalModelRuntime,
 } from '@threadnote/inference/engine/local-model-runtime';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('Effect AI native harness', () => {
   it.effect('uses the reviewed ModernBERT pair template without duplicate separator tokens', () => {
@@ -30,14 +33,16 @@ describe('Effect AI native harness', () => {
             loadOptions = options;
             return {
               modelId: options.modelId,
-              rank: (_query, documents) => Effect.succeed(documents.map(() => 0.5)),
+              rank: (_query, documents) => Effect.succeed(EffectArray.map(documents, () => 0.5)),
             };
           }),
       }),
     );
     return Effect.scoped(
       Effect.gen(function* () {
-        const builtin = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'reranker')!;
+        const builtin = EffectOption.getOrUndefined(
+          EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'reranker'),
+        )!;
         const manifest = {...builtin, architecture: 'modern-bert'};
         const runtime = yield* LocalModelRuntime;
         yield* runtime.rerank({
@@ -52,7 +57,9 @@ describe('Effect AI native harness', () => {
   });
 
   it('sizes generation context for the request while preserving the model limit for large prompts', () => {
-    const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
+    const manifest = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'generation'),
+    )!;
     const small = localGenerationContextSize({
       jsonSchema: {properties: {searchPhrases: {type: 'array'}}, type: 'object'},
       manifest,
@@ -66,6 +73,7 @@ describe('Effect AI native harness', () => {
       manifest,
       maxTokens: 4_000,
       modelPath: '/models/generation.gguf',
+      // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
       prompt: 'x'.repeat(manifest.contextLimit),
       system: 'Return JSON.',
     });
@@ -75,7 +83,9 @@ describe('Effect AI native harness', () => {
   });
 
   it('limits the built-in embedding model to zero GPU layers only on Darwin arm64', () => {
-    const embedding = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!;
+    const embedding = EffectOption.getOrUndefined(
+      EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+    )!;
     const modelDarwinArm64GpuLayers =
       'darwinArm64EmbeddingGpuLayers' in embedding.runtime
         ? embedding.runtime.darwinArm64EmbeddingGpuLayers
@@ -117,7 +127,7 @@ describe('Effect AI native harness', () => {
               embedMany: inputs =>
                 Effect.sync(() => {
                   batches.push([...inputs]);
-                  return inputs.map((input, index) => [input.length, index]);
+                  return EffectArray.map(inputs, (input, index) => [input.length, index]);
                 }),
               modelId: options.modelId,
             }),
@@ -137,7 +147,7 @@ describe('Effect AI native harness', () => {
           }).pipe(Layer.provide(engine)),
         ),
       );
-      expect(result.embeddings.map(item => item.vector)).toEqual([
+      expect(EffectArray.map(result.embeddings, item => item.vector)).toEqual([
         [5, 0],
         [1, 1],
       ]);
@@ -158,7 +168,7 @@ describe('Effect AI native harness', () => {
               embedMany: inputs =>
                 Effect.sync(() => {
                   batches.push([...inputs]);
-                  return inputs.map(input => [input.length]);
+                  return EffectArray.map(inputs, input => [input.length]);
                 }),
               modelId: options.modelId,
             }),
@@ -181,7 +191,7 @@ describe('Effect AI native harness', () => {
           }).pipe(Layer.provide(engine)),
         ),
       );
-      expect(result.map(item => item.vector)).toEqual([[3], [5]]);
+      expect(EffectArray.map(result, item => item.vector)).toEqual([[3], [5]]);
       expect(batches).toEqual([['one', 'three']]);
     }),
   );
@@ -229,7 +239,14 @@ describe('Effect AI native harness', () => {
                       events.push('model:dispose');
                       return Promise.resolve();
                     },
-                    tokenize: (text: string) => [...text].map(character => character.codePointAt(0)!),
+                    tokenize: (text: string) =>
+                      EffectArray.map([...text], character =>
+                        Effect2.pipe(
+                          character,
+                          EffectString.codePointAt(0),
+                          Effect2.Option.getOrElse(() => undefined),
+                        )!,
+                      ),
                   });
                 },
               });
@@ -261,7 +278,11 @@ describe('Effect AI native harness', () => {
           usePrebuiltBinaries: true,
         },
       ]);
-      const nativeLogger = (calls[0] as {readonly logger: (level: string, message: string) => void}).logger;
+      const call = calls[0];
+      if (typeof call !== 'object' || call === null || !('logger' in call) || typeof call.logger !== 'function') {
+        throw new Error('Expected native logger options in the first model load call.');
+      }
+      const nativeLogger = call.logger;
       expect(nativeLogger('error', '[node-llama-cpp] load warning')).toBeUndefined();
       expect(modelLoadCalls).toEqual([
         {
@@ -318,7 +339,14 @@ describe('Effect AI native harness', () => {
                     detokenize: (tokens: readonly number[]) => String.fromCodePoint(...tokens),
                     disposed: false,
                     dispose: () => Promise.resolve(),
-                    tokenize: (text: string) => [...text].map(character => character.codePointAt(0)!),
+                    tokenize: (text: string) =>
+                      EffectArray.map([...text], character =>
+                        Effect2.pipe(
+                          character,
+                          EffectString.codePointAt(0),
+                          Effect2.Option.getOrElse(() => undefined),
+                        )!,
+                      ),
                   }),
               }),
           }),
@@ -338,12 +366,12 @@ describe('Effect AI native harness', () => {
       ).pipe(provideTestLayer(layer));
 
       expect(embeddedWindows).toEqual([
-        input.slice(0, 16),
-        input.slice(14, 30),
-        input.slice(28, 44),
-        input.slice(42, 58),
-        input.slice(56, 72),
-        input.slice(70, 80),
+        Effect2.pipe(input, EffectString.slice(0, 16)),
+        Effect2.pipe(input, EffectString.slice(14, 30)),
+        Effect2.pipe(input, EffectString.slice(28, 44)),
+        Effect2.pipe(input, EffectString.slice(42, 58)),
+        Effect2.pipe(input, EffectString.slice(56, 72)),
+        Effect2.pipe(input, EffectString.slice(70, 80)),
         'tail',
       ]);
       expect(maximumActiveEmbeddings).toBe(1);
@@ -392,7 +420,14 @@ describe('Effect AI native harness', () => {
           events.push('model:dispose');
           return Promise.resolve();
         },
-        tokenize: (text: string) => [...text].map(character => character.codePointAt(0)!),
+        tokenize: (text: string) =>
+          EffectArray.map([...text], character =>
+            Effect2.pipe(
+              character,
+              EffectString.codePointAt(0),
+              Effect2.Option.getOrElse(() => undefined),
+            )!,
+          ),
       };
       const nativeLlama = {
         buildType: 'prebuilt' as const,
@@ -452,10 +487,13 @@ describe('Effect AI native harness', () => {
 
   it.effect('returns an actionable typed error when no prebuilt exists', () =>
     Effect.gen(function* () {
-      class NoBinaryFoundError extends Schema.TaggedError<NoBinaryFoundError>()('NoBinaryFoundError', {
-        cause: Schema.optionalKey(Schema.Defect()),
-        message: Schema.String,
-      }) {}
+      class NoBinaryFoundError extends Schema.TaggedError<NoBinaryFoundError, {readonly brand: unique symbol}>()(
+        'NoBinaryFoundError',
+        {
+          cause: Schema.optionalKey(Schema.Defect()),
+          message: Schema.String,
+        },
+      ) {}
       const exit = yield* LlamaCppEngine.pipe(
         provideTestLayer(
           nodeLlamaCppEngineLayer({
@@ -489,7 +527,8 @@ describe('Effect AI native harness', () => {
             embeddingLoadOptions.push(options);
             return {
               dimensions: options.dimensions,
-              embedMany: inputs => Effect.succeed(inputs.map(input => Array(options.dimensions).fill(input.length))),
+              embedMany: inputs =>
+                Effect.succeed(EffectArray.map(inputs, input => Array(options.dimensions).fill(input.length))),
               modelId: options.modelId,
             };
           }),
@@ -509,16 +548,22 @@ describe('Effect AI native harness', () => {
             loads.reranker += 1;
             return {
               modelId: options.modelId,
-              rank: (_query, documents) => Effect.succeed(documents.map((_, index) => index / 10)),
+              rank: (_query, documents) => Effect.succeed(EffectArray.map(documents, (_, index) => index / 10)),
             };
           }),
       }),
     );
     return Effect.scoped(
       Effect.gen(function* () {
-        const embedding = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!;
-        const generation = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
-        const reranker = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'reranker')!;
+        const embedding = EffectOption.getOrUndefined(
+          EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+        )!;
+        const generation = EffectOption.getOrUndefined(
+          EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'generation'),
+        )!;
+        const reranker = EffectOption.getOrUndefined(
+          EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'reranker'),
+        )!;
 
         const runtime = yield* LocalModelRuntime;
         for (let index = 0; index < 2; index += 1) {
@@ -567,7 +612,7 @@ describe('Effect AI native harness', () => {
                         operation: 'embedding',
                       }),
                     )
-                  : Effect.succeed(inputs.map(input => Array(options.dimensions).fill(input.length))),
+                  : Effect.succeed(EffectArray.map(inputs, input => Array(options.dimensions).fill(input.length))),
               modelId: options.modelId,
             };
           }),
@@ -587,15 +632,19 @@ describe('Effect AI native harness', () => {
                         operation: 'reranking',
                       }),
                     )
-                  : Effect.succeed(documents.map((_, index) => index / 10)),
+                  : Effect.succeed(EffectArray.map(documents, (_, index) => index / 10)),
             };
           }),
       }),
     );
     return Effect.scoped(
       Effect.gen(function* () {
-        const embedding = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'embedding')!;
-        const reranker = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'reranker')!;
+        const embedding = EffectOption.getOrUndefined(
+          EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'embedding'),
+        )!;
+        const reranker = EffectOption.getOrUndefined(
+          EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'reranker'),
+        )!;
         const runtime = yield* LocalModelRuntime;
 
         expect(
@@ -658,7 +707,9 @@ describe('Effect AI native harness', () => {
     );
     return Effect.scoped(
       Effect.gen(function* () {
-        const generation = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
+        const generation = EffectOption.getOrUndefined(
+          EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'generation'),
+        )!;
         const runtime = yield* LocalModelRuntime;
         const fiber = yield* Effect.forkChild(
           runtime.generate({

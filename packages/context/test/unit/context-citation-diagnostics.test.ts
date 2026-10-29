@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import {
   createMemoryCodeCitation,
@@ -10,11 +11,15 @@ import {parseMemoryDocument} from '@threadnote/memory/document';
 import {contextBriefMemoryCandidate} from '../../src/memory-evidence.js';
 import {assembleContextBriefLogicalResult, planContextBrief} from '../../src/planner.js';
 import type {ContextBriefGraphEvidenceV1} from '../../src/types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('Context Brief citation metadata diagnostics', () => {
   it('keeps valid supported citations free of metadata warnings', () => {
     const {logical} = diagnostic([citationLine(0)], MEMORY_SCHEMA_VERSION);
-    expect(logical.stalenessAndConflicts.some(issue => issue.kind === 'invalid-code-citation')).toBe(false);
+    expect(EffectArray.some(logical.stalenessAndConflicts, issue => issue.kind === 'invalid-code-citation')).toBe(
+      false,
+    );
     expect(logical.activeHandoffs[0].preciseStatus).toBe('exact');
   });
 
@@ -42,9 +47,11 @@ describe('Context Brief citation metadata diagnostics', () => {
 });
 
 function expectMetadataWarning(logical: ReturnType<typeof assembleContextBriefLogicalResult>, count: number) {
-  expect(logical.stalenessAndConflicts.find(issue => issue.kind === 'invalid-code-citation')?.summary).toBe(
-    `${count} code citation metadata error(s) were detected for synthetic-citation-diagnostic.`,
-  );
+  expect(
+    EffectOption.getOrUndefined(
+      EffectArray.findFirst(logical.stalenessAndConflicts, issue => issue.kind === 'invalid-code-citation'),
+    )?.summary,
+  ).toBe(`${count} code citation metadata error(s) were detected for synthetic-citation-diagnostic.`);
   expect(logical.activeHandoffs[0].preciseStatus).toBe('unknown');
   expect(logical.coverage.memory.unknown).toBe(1);
   expect(logical.coverage.gaps).toContain('memory-code-citations-invalid');
@@ -54,14 +61,14 @@ function citationLine(index: number): string {
   return formatMemoryCodeCitation(
     createMemoryCodeCitation({
       extractorSet: 'native-code-graph-13',
-      fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+      fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
       path: `src/citation-${index}.ts`,
-      repositoryId: '1'.repeat(64),
+      repositoryId: Effect.pipe('1', EffectString.repeat(64)),
       repositoryIdentityKind: 'remote',
-      sourceCommit: '2'.repeat(40),
+      sourceCommit: Effect.pipe('2', EffectString.repeat(40)),
       sourceDirty: false,
-      sourceGraphContentId: `cgc_${'3'.repeat(40)}`,
-      sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
+      sourceGraphContentId: `cgc_${Effect.pipe('3', EffectString.repeat(40))}`,
+      sourceSnapshotId: `cgsn_${Effect.pipe('4', EffectString.repeat(40))}`,
       target: {kind: 'file'},
       version: 1,
     }),
@@ -72,16 +79,19 @@ function diagnostic(lines: readonly string[], schemaVersion: number) {
   const uri = 'threadnote://user/tester/memories/handoffs/active/synthetic/synthetic-citation-diagnostic.md';
   const record = parseMemoryDocument(
     uri,
-    [
-      'MEMORY',
-      'kind: handoff',
-      'status: active',
-      'topic: synthetic-citation-diagnostic',
-      `schema_version: ${schemaVersion}`,
-      ...lines.map(line => `code_citation: ${line}`),
-      '',
-      'Synthetic diagnostic evidence.',
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'MEMORY',
+        'kind: handoff',
+        'status: active',
+        'topic: synthetic-citation-diagnostic',
+        `schema_version: ${schemaVersion}`,
+        ...EffectArray.map(lines, line => `code_citation: ${line}`),
+        '',
+        'Synthetic diagnostic evidence.',
+      ],
+      '\n',
+    ),
   )!;
   const candidate = contextBriefMemoryCandidate(record, 0, undefined);
   const graph: ContextBriefGraphEvidenceV1 = {
@@ -101,7 +111,7 @@ function diagnostic(lines: readonly string[], schemaVersion: number) {
       citationValidations: [
         {
           uri,
-          receipts: candidate.codeCitations.map(citation => ({
+          receipts: EffectArray.map(candidate.codeCitations, citation => ({
             candidateCount: 1,
             citationId: citation.id,
             coverage: 'current-complete' as const,

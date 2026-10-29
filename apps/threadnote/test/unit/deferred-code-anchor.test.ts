@@ -1,6 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Option, Path, PlatformError, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
+import * as Schema from 'effect/Schema';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -9,7 +11,6 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
 import {CodeGraphStoreBusyError, type CodeGraphInventoryFile, type CodeGraphStatus} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -42,6 +43,31 @@ import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@t
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code_anchor_scheduler.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const IntentRouteSchema = withRest(Schema.Struct({repositoryId: Schema.String, worktreeId: Schema.String}));
+const IntentAddressSchema = withRest(
+  Schema.Struct({
+    codeRefs: Schema.Array(Schema.String),
+    memoryUri: Schema.String,
+    repositoryId: Schema.String,
+    worktreeId: Schema.String,
+  }),
+);
+const RecoveryMutationSchema = withRest(
+  Schema.Struct({
+    recovery: withRest(
+      Schema.Struct({
+        preparation: Schema.optionalKey(Schema.Unknown),
+        observedGraph: withRest(Schema.Struct({stale: Schema.Boolean})),
+      }),
+    ),
+  }),
+);
 
 const MEMORY_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/deferred.md';
 const TEST_ROUTE_PASS_TIMEOUT_MILLISECONDS = 5_000;
@@ -75,12 +101,17 @@ describe('deferred code-anchor outbox', () => {
       const [file] = yield* fixtureIntentPaths(fixture);
       for (const mutation of ['preparation', 'stale'] as const) {
         yield* stage();
-        const stored = JSON.parse(yield* fixture.fs.readFileString(file)) as {
-          recovery: {preparation?: unknown; observedGraph: {stale: boolean}};
-        };
-        if (mutation === 'preparation') stored.recovery.preparation = deferredRequest(fixture.repository, []).recovery;
-        else stored.recovery.observedGraph.stale = true;
-        yield* fixture.fs.writeFileString(file, JSON.stringify(stored), {mode: 0o600});
+        const stored = yield* Schema.decodeUnknownEffect(RecoveryMutationSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(file)),
+        ).pipe(Effect.orDie);
+        const changed =
+          mutation === 'preparation'
+            ? {...stored, recovery: {...stored.recovery, preparation: deferredRequest(fixture.repository, []).recovery}}
+            : {
+                ...stored,
+                recovery: {...stored.recovery, observedGraph: {...stored.recovery.observedGraph, stale: true}},
+              };
+        yield* fixture.fs.writeFileString(file, JSON.stringify(changed), {mode: 0o600});
         expect(yield* listDeferredCodeAnchorIntents(fixture.config)).toEqual([
           expect.objectContaining({kind: 'invalid'}),
         ]);
@@ -217,8 +248,8 @@ describe('deferred code-anchor outbox', () => {
         );
         expect(selected.project).toBe('app-a');
         expect(selected.projectScope).toEqual({
-          closureDigest: 'b'.repeat(64),
-          definitionDigest: 'a'.repeat(64),
+          closureDigest: Effect2.pipe('b', EffectString.repeat(64)),
+          definitionDigest: Effect2.pipe('a', EffectString.repeat(64)),
           project: 'app-a',
           scopeKey: 'code-graph-scope:app-a',
         });
@@ -240,12 +271,23 @@ describe('deferred code-anchor outbox', () => {
         );
         expect(legacy.project).toBeUndefined();
         expect(legacy.projectScope).toBeUndefined();
-        const legacyPath = (yield* fixtureIntentPaths(fixture)).find(path => path.includes(legacy.intentId));
-        const legacyContent = JSON.parse(yield* fixture.fs.readFileString(legacyPath!)) as Record<string, unknown>;
+        const legacyPath = Option.getOrUndefined(
+          EffectArray.findFirst(
+            yield* fixtureIntentPaths(fixture),
+            __effectArrayValue =>
+              !!(path => Effect2.pipe(path, EffectString.includes(legacy.intentId)))(__effectArrayValue),
+          ),
+        );
+        const legacyContent = yield* Schema.decodeUnknownEffect(JsonRecordSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(legacyPath!)),
+        ).pipe(Effect.orDie);
         expect(legacyContent).not.toHaveProperty('project');
         expect(legacyContent).not.toHaveProperty('projectScope');
-        const loadedLegacy = (yield* listDeferredCodeAnchorIntents(fixture.config)).find(
-          entry => entry.kind === 'valid' && entry.intent.intentId === legacy.intentId,
+        const loadedLegacy = Option.getOrUndefined(
+          EffectArray.findFirst(
+            yield* listDeferredCodeAnchorIntents(fixture.config),
+            entry => entry.kind === 'valid' && entry.intent.intentId === legacy.intentId,
+          ),
         );
         expect(loadedLegacy).toMatchObject({intent: {intentId: legacy.intentId}});
         if (loadedLegacy?.kind === 'valid') {
@@ -322,8 +364,11 @@ describe('deferred code-anchor outbox', () => {
             }),
           ),
         );
-        const fullIntent = (yield* listDeferredCodeAnchorIntents(fullFixture.config)).find(
-          entry => entry.kind === 'valid',
+        const fullIntent = Option.getOrUndefined(
+          EffectArray.findFirst(
+            yield* listDeferredCodeAnchorIntents(fullFixture.config),
+            entry => entry.kind === 'valid',
+          ),
         );
         expect(fullIntent).toMatchObject({kind: 'valid', intent: {projectScope: {kind: 'full'}}});
         const graph = yield* exactCurrentCitationGraph(fullFixture, []);
@@ -435,14 +480,27 @@ describe('deferred code-anchor outbox', () => {
     ({items}) => {
       const selected = finalizedDeferredCodeAnchorUris(items);
       expect(new Set(selected).size).toBe(selected.length);
-      expect(selected.every(uri => items.some(item => item.state === 'finalized' && item.memoryUri === uri))).toBe(
-        true,
-      );
+      expect(
+        EffectArray.every(selected, uri =>
+          EffectArray.some(items, item => item.state === 'finalized' && item.memoryUri === uri),
+        ),
+      ).toBe(true);
       expect(finalizedDeferredCodeAnchorUris(items)).toEqual(selected);
       for (const [index, uri] of selected.entries()) {
         if (index === selected.length - 1) break;
-        expect(items.findIndex(item => item.state === 'finalized' && item.memoryUri === uri)).toBeLessThan(
-          items.findIndex(item => item.state === 'finalized' && item.memoryUri === selected[index + 1]),
+        expect(
+          Option.getOrElse(
+            EffectArray.findFirstIndex(items, item => item.state === 'finalized' && item.memoryUri === uri),
+            () => -1,
+          ),
+        ).toBeLessThan(
+          Option.getOrElse(
+            EffectArray.findFirstIndex(
+              items,
+              item => item.state === 'finalized' && item.memoryUri === selected[index + 1],
+            ),
+            () => -1,
+          ),
         );
       }
     },
@@ -583,7 +641,7 @@ describe('deferred code-anchor outbox', () => {
         );
         yield* discardOtherDeferredCodeAnchorIntents(fixture.config, MEMORY_URI, second.intentId);
         const deduplicated = yield* fixtureIntentPaths(fixture);
-        expect(deduplicated.map(candidate => fixture.path.basename(candidate))).toEqual([shardedName]);
+        expect(EffectArray.map(deduplicated, candidate => fixture.path.basename(candidate))).toEqual([shardedName]);
         expect(shardedName).toMatch(/-b[a-f0-9]{32}\.json$/u);
       }),
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
@@ -690,7 +748,7 @@ describe('deferred code-anchor outbox', () => {
         const racingFileSystem = FileSystem.FileSystem.of({
           ...fixture.fs,
           makeDirectory: (directory, options) => {
-            if (swapped || !fixture.path.basename(directory).startsWith('q-')) {
+            if (swapped || !Effect2.pipe(fixture.path.basename(directory), EffectString.startsWith('q-'))) {
               return fixture.fs.makeDirectory(directory, options);
             }
             swapped = true;
@@ -772,7 +830,7 @@ describe('deferred code-anchor outbox', () => {
           request: deferredRequest(fixture.repository, ['src/pending.ts']),
         });
         yield* fixture.fs.writeFileString(
-          fixture.path.join(fixture.outbox, `${'0'.repeat(64)}-tnca_corrupt.json`),
+          fixture.path.join(fixture.outbox, `${Effect2.pipe('0', EffectString.repeat(64))}-tnca_corrupt.json`),
           '{not-json}\n',
           {mode: 0o600},
         );
@@ -801,7 +859,7 @@ describe('deferred code-anchor outbox', () => {
         const observedFileSystem = FileSystem.FileSystem.of({
           ...fixture.fs,
           open: (target, options) => {
-            if (target.endsWith('.json')) intentOpens += 1;
+            if (Effect2.pipe(target, EffectString.endsWith('.json'))) intentOpens += 1;
             return fixture.fs.open(target, options);
           },
         });
@@ -810,8 +868,8 @@ describe('deferred code-anchor outbox', () => {
           {
             callerCwd: fixture.repository,
             kind: 'repository',
-            repositoryId: 'f'.repeat(64),
-            worktreeId: 'e'.repeat(64),
+            repositoryId: Effect2.pipe('f', EffectString.repeat(64)),
+            worktreeId: Effect2.pipe('e', EffectString.repeat(64)),
           },
           {limit: 1},
         ).pipe(
@@ -861,15 +919,14 @@ describe('deferred code-anchor outbox', () => {
         expect(new TextEncoder().encode(name).byteLength).toBeLessThanOrEqual(131);
         const representativeWindowsOutbox =
           'C:\\Users\\threadnote\\AppData\\Local\\threadnote\\data\\local\\user\\tester\\private\\deferred-code-anchors\\v1\\i\\u' +
-          'a'.repeat(32) +
+          Effect2.pipe('a', EffectString.repeat(32)) +
           '\\';
         expect(new TextEncoder().encode(`${representativeWindowsOutbox}${name}`).byteLength).toBeLessThanOrEqual(260);
         expect(name).not.toContain('platform');
         expect(name).not.toContain('src/workset.ts');
-        const intent = JSON.parse(yield* fixture.fs.readFileString(intentPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(intentPath)),
+        ).pipe(Effect.orDie);
         const repositoryRoute: DeferredCodeAnchorFinalizationRoute = {
           callerCwd: fixture.repository,
           kind: 'repository',
@@ -925,7 +982,7 @@ describe('deferred code-anchor outbox', () => {
           memoryContent: memoryContent(qualifiedMetadata, 'Pending qualified revision.'),
           memoryMetadata: qualifiedMetadata,
           memoryUri: qualifiedUri,
-          request: deferredRequest(fixture.repository, [`cgr_${'a'.repeat(40)}`]),
+          request: deferredRequest(fixture.repository, [`cgr_${Effect2.pipe('a', EffectString.repeat(40))}`]),
         });
         expect(
           yield* finalizeDeferredCodeAnchorsForRoute(
@@ -959,12 +1016,7 @@ describe('deferred code-anchor outbox', () => {
         const addressed = yield* Effect.forEach(yield* fixtureIntentPaths(fixture), intentPath =>
           fixture.fs.readFileString(intentPath).pipe(
             Effect.map(content => ({
-              intent: JSON.parse(content) as {
-                codeRefs: string[];
-                memoryUri: string;
-                repositoryId: string;
-                worktreeId: string;
-              },
+              intent: Schema.decodeUnknownSync(IntentAddressSchema)(JSON.parse(content)),
               name: fixture.path.basename(intentPath),
             })),
           ),
@@ -981,7 +1033,7 @@ describe('deferred code-anchor outbox', () => {
           ...store,
           read: (location, uri) =>
             Effect.sync(() => {
-              if (uri.includes('/deferred-')) observedReads.push(uri);
+              if (Effect2.pipe(uri, EffectString.includes('/deferred-'))) observedReads.push(uri);
             }).pipe(Effect.andThen(store.read(location, uri))),
         });
         const run = (preferredCodeRefs: readonly string[] = []) =>
@@ -1001,7 +1053,9 @@ describe('deferred code-anchor outbox', () => {
         for (let opportunity = 0; opportunity < 12; opportunity += 1) {
           expect(yield* run()).toMatchObject({pendingCount: 1, scannedCount: 1, state: 'contended'});
         }
-        expect(new Set(observedReads.slice(1))).toEqual(new Set(addressed.map(entry => entry.intent.memoryUri)));
+        expect(new Set(observedReads.slice(1))).toEqual(
+          new Set(EffectArray.map(addressed, entry => entry.intent.memoryUri)),
+        );
       }),
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
@@ -1027,17 +1081,9 @@ describe('deferred code-anchor outbox', () => {
         }
 
         const addressed = yield* Effect.forEach(yield* fixtureIntentPaths(fixture), intentPath =>
-          fixture.fs.readFileString(intentPath).pipe(
-            Effect.map(
-              content =>
-                JSON.parse(content) as {
-                  codeRefs: string[];
-                  memoryUri: string;
-                  repositoryId: string;
-                  worktreeId: string;
-                },
-            ),
-          ),
+          fixture.fs
+            .readFileString(intentPath)
+            .pipe(Effect.map(content => Schema.decodeUnknownSync(IntentAddressSchema)(JSON.parse(content)))),
         );
         const preferred = addressed[4];
         const route: DeferredCodeAnchorFinalizationRoute = {
@@ -1051,7 +1097,7 @@ describe('deferred code-anchor outbox', () => {
         const observedFileSystem = FileSystem.FileSystem.of({
           ...fixture.fs,
           open: (target, options) => {
-            if (target.endsWith('.json')) intentOpens += 1;
+            if (Effect2.pipe(target, EffectString.endsWith('.json'))) intentOpens += 1;
             return fixture.fs.open(target, options);
           },
         });
@@ -1059,7 +1105,7 @@ describe('deferred code-anchor outbox', () => {
           ...store,
           read: (location, uri) =>
             Effect.sync(() => {
-              if (uri.includes('/deferred-bounded-')) observedReads.push(uri);
+              if (Effect2.pipe(uri, EffectString.includes('/deferred-bounded-'))) observedReads.push(uri);
             }).pipe(Effect.andThen(store.read(location, uri))),
         });
 
@@ -1094,10 +1140,9 @@ describe('deferred code-anchor outbox', () => {
         });
         yield* store.write(resourceStoreLocation(fixture.config), MEMORY_URI, content, {mode: 'create'});
         const [intentPath] = yield* fixtureIntentPaths(fixture);
-        const intent = JSON.parse(yield* fixture.fs.readFileString(intentPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(intentPath)),
+        ).pipe(Effect.orDie);
         const route: DeferredCodeAnchorFinalizationRoute = {
           callerCwd: fixture.repository,
           kind: 'repository',
@@ -1144,10 +1189,9 @@ describe('deferred code-anchor outbox', () => {
         });
         yield* store.write(resourceStoreLocation(fixture.config), MEMORY_URI, content, {mode: 'create'});
         const [intentPath] = yield* fixtureIntentPaths(fixture);
-        const intent = JSON.parse(yield* fixture.fs.readFileString(intentPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(intentPath)),
+        ).pipe(Effect.orDie);
         const entered = yield* Deferred.make<void>();
         const blockedStore = ResourceStore.of({
           ...store,
@@ -1229,10 +1273,9 @@ describe('deferred code-anchor outbox', () => {
         });
         yield* store.write(resourceStoreLocation(fixture.config), MEMORY_URI, content, {mode: 'create'});
         const [intentPath] = yield* fixtureIntentPaths(fixture);
-        const intent = JSON.parse(yield* fixture.fs.readFileString(intentPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(intentPath)),
+        ).pipe(Effect.orDie);
         const committed = yield* Deferred.make<void>();
         const postCommitStore = ResourceStore.of({
           ...store,
@@ -1283,13 +1326,13 @@ describe('deferred code-anchor outbox', () => {
           request: deferredRequest(fixture.repository, ['src/orphan.ts']),
         });
         const [intentPath] = yield* fixtureIntentPaths(fixture);
-        const intent = JSON.parse(yield* fixture.fs.readFileString(intentPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(intentPath)),
+        ).pipe(Effect.orDie);
         yield* fixture.fs.remove(intentPath, {force: true});
-        const markersBefore = (yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true})).filter(name =>
-          name.endsWith('.ref'),
+        const markersBefore = EffectArray.filter(
+          yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true}),
+          __effectArrayValue2 => !!(name => Effect2.pipe(name, EffectString.endsWith('.ref')))(__effectArrayValue2),
         );
         expect(markersBefore.length).toBeGreaterThan(0);
 
@@ -1306,7 +1349,10 @@ describe('deferred code-anchor outbox', () => {
           ),
         ).toMatchObject({matchedCount: 0, scannedCount: 0, state: 'completed'});
         expect(
-          (yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true})).filter(name => name.endsWith('.ref')),
+          EffectArray.filter(
+            yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true}),
+            __effectArrayValue2 => !!(name => Effect2.pipe(name, EffectString.endsWith('.ref')))(__effectArrayValue2),
+          ),
         ).toEqual([]);
       }),
     ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
@@ -1324,15 +1370,21 @@ describe('deferred code-anchor outbox', () => {
         });
         const [pendingPath] = yield* fixtureIntentPaths(fixture);
         const pendingContent = yield* fixture.fs.readFileString(pendingPath);
-        const intent = JSON.parse(pendingContent) as {repositoryId: string; worktreeId: string};
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(JSON.parse(pendingContent)).pipe(
+          Effect.orDie,
+        );
         const markerPath = yield* fixtureRepositoryRouteMarkerPath(fixture);
         const laneRoot = fixture.path.dirname(markerPath);
         const stagedMarker = fixture.path.join(fixture.config.agentContextHome, 'staged-valid-route-marker.ref');
         yield* fixture.fs.rename(markerPath, stagedMarker);
         yield* fixture.fs.remove(laneRoot, {recursive: true});
         yield* fixture.fs.makeDirectory(laneRoot, {mode: 0o700});
-        const mismatchedName = `${'0'.repeat(32)}-tnca_${'0'.repeat(32)}-b${'0'.repeat(32)}`;
-        const mismatchedDirectory = fixture.path.join(fixture.outbox, 'i', `u${'0'.repeat(32)}`);
+        const mismatchedName = `${Effect2.pipe('0', EffectString.repeat(32))}-tnca_${Effect2.pipe('0', EffectString.repeat(32))}-b${Effect2.pipe('0', EffectString.repeat(32))}`;
+        const mismatchedDirectory = fixture.path.join(
+          fixture.outbox,
+          'i',
+          `u${Effect2.pipe('0', EffectString.repeat(32))}`,
+        );
         const mismatchedIntentPath = fixture.path.join(mismatchedDirectory, `${mismatchedName}.json`);
         const mismatchedMarkerPath = fixture.path.join(laneRoot, `${mismatchedName}.ref`);
         yield* fixture.fs.makeDirectory(mismatchedDirectory, {recursive: true, mode: 0o700});
@@ -1386,34 +1438,43 @@ describe('deferred code-anchor outbox', () => {
           if (
             !(yield* fixture.fs.exists(pendingPath)) &&
             !(yield* fixture.fs.exists(mismatchedMarkerPath)) &&
-            !(yield* Effect.forEach(poisonedMarkers, marker => fixture.fs.exists(marker), {concurrency: 4})).some(
+            !EffectArray.some(
+              yield* Effect.forEach(poisonedMarkers, marker => fixture.fs.exists(marker), {concurrency: 4}),
               Boolean,
             )
           ) {
             break;
           }
         }
-        expect(receipts.some(receipt => receipt.conflictCount === 1 && receipt.scannedCount === 1)).toBe(true);
-        expect(receipts.some(receipt => receipt.state === 'contended')).toBe(true);
-        expect(receipts.every(receipt => receipt.state !== 'failed')).toBe(true);
+        expect(EffectArray.some(receipts, receipt => receipt.conflictCount === 1 && receipt.scannedCount === 1)).toBe(
+          true,
+        );
+        expect(EffectArray.some(receipts, receipt => receipt.state === 'contended')).toBe(true);
+        expect(EffectArray.every(receipts, receipt => receipt.state !== 'failed')).toBe(true);
         expect(yield* fixture.fs.readFileString(mismatchedIntentPath)).toBe(pendingContent);
         expect(yield* fixture.fs.readFileString(outsideSentinel)).toBe('outside-route-entry-sentinel\n');
         expect(yield* fixture.fs.exists(mismatchedMarkerPath)).toBe(false);
         expect(
-          (yield* Effect.forEach(poisonedMarkers, marker => fixture.fs.exists(marker), {concurrency: 4})).some(Boolean),
+          EffectArray.some(
+            yield* Effect.forEach(poisonedMarkers, marker => fixture.fs.exists(marker), {concurrency: 4}),
+            Boolean,
+          ),
         ).toBe(false);
         expect(yield* fixture.fs.exists(pendingPath)).toBe(false);
         const quarantineRoot = fixture.path.join(fixture.path.dirname(laneRoot), '.quarantine-v1');
         const quarantined = yield* fixture.fs.readDirectory(quarantineRoot, {recursive: true});
-        expect(quarantined.filter(entry => fixture.path.basename(entry) === 'entry')).toHaveLength(
+        expect(EffectArray.filter(quarantined, entry => fixture.path.basename(entry) === 'entry')).toHaveLength(
           poisonedMarkers.length,
         );
-        expect(quarantined.some(entry => entry.includes('0bad-'))).toBe(false);
-        const addressSentinel = quarantined.find(
-          entry => fixture.path.basename(entry) === 'address-shaped-sentinel.txt',
+        expect(EffectArray.some(quarantined, entry => Effect2.pipe(entry, EffectString.includes('0bad-')))).toBe(false);
+        const addressSentinel = Option.getOrUndefined(
+          EffectArray.findFirst(quarantined, entry => fixture.path.basename(entry) === 'address-shaped-sentinel.txt'),
         );
-        const nonAddressSentinel = quarantined.find(
-          entry => fixture.path.basename(entry) === 'non-address-shaped-sentinel.txt',
+        const nonAddressSentinel = Option.getOrUndefined(
+          EffectArray.findFirst(
+            quarantined,
+            entry => fixture.path.basename(entry) === 'non-address-shaped-sentinel.txt',
+          ),
         );
         expect(yield* fixture.fs.readFileString(fixture.path.join(quarantineRoot, addressSentinel!))).toBe(
           'address-shaped-sentinel\n',
@@ -1436,10 +1497,9 @@ describe('deferred code-anchor outbox', () => {
           request: deferredRequest(fixture.repository, ['src/later-lane.ts']),
         });
         const [pendingPath] = yield* fixtureIntentPaths(fixture);
-        const intent = JSON.parse(yield* fixture.fs.readFileString(pendingPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(pendingPath)),
+        ).pipe(Effect.orDie);
         const markerPath = yield* fixtureRepositoryRouteMarkerPath(fixture);
         const laneRoot = fixture.path.dirname(markerPath);
         const laterLane = fixture.path.join(fixture.path.dirname(laneRoot), '7');
@@ -1468,7 +1528,7 @@ describe('deferred code-anchor outbox', () => {
         const fixture = yield* makeFixture();
         yield* fixture.fs.makeDirectory(fixture.outbox, {recursive: true, mode: 0o700});
         yield* fixture.fs.writeFileString(
-          fixture.path.join(fixture.outbox, `${'a'.repeat(64)}-tnca_corrupt.json`),
+          fixture.path.join(fixture.outbox, `${Effect2.pipe('a', EffectString.repeat(64))}-tnca_corrupt.json`),
           '{not-json}\n',
           {mode: 0o600},
         );
@@ -1601,10 +1661,9 @@ describe('deferred code-anchor outbox', () => {
         const store = yield* ResourceStore;
         yield* store.write(resourceStoreLocation(fixture.config), MEMORY_URI, content, {mode: 'create'});
         const [intentPath] = yield* fixtureIntentPaths(fixture);
-        const intent = JSON.parse(yield* fixture.fs.readFileString(intentPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(intentPath)),
+        ).pipe(Effect.orDie);
         yield* fixture.fs.remove(fixture.repository, {recursive: true});
 
         expect(
@@ -1612,7 +1671,7 @@ describe('deferred code-anchor outbox', () => {
             callerCwd: fixture.repository,
             kind: 'repository',
             repositoryId: intent.repositoryId,
-            worktreeId: 'c'.repeat(64),
+            worktreeId: Effect2.pipe('c', EffectString.repeat(64)),
           }),
         ).toMatchObject({matchedCount: 0, scannedCount: 0, state: 'completed'});
         expect(yield* hasDeferredCodeAnchorIntent(fixture.config, MEMORY_URI)).toBe(true);
@@ -1712,7 +1771,7 @@ describe('deferred code-anchor outbox', () => {
           status: () =>
             Effect.succeed({
               ...observed,
-              identity: {...observed.identity, worktreeId: 'f'.repeat(64)},
+              identity: {...observed.identity, worktreeId: Effect2.pipe('f', EffectString.repeat(64))},
             }),
         });
 
@@ -1899,9 +1958,13 @@ describe('deferred code-anchor outbox', () => {
           memoryUri: MEMORY_URI,
           request: deferredRequest(fixture.repository, ['src/later.ts']),
         });
-        yield* fixture.fs.writeFileString(fixture.path.join(fixture.outbox, `${'0'.repeat(64)}.json`), '{not-json}\n', {
-          mode: 0o600,
-        });
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.outbox, `${Effect2.pipe('0', EffectString.repeat(64))}.json`),
+          '{not-json}\n',
+          {
+            mode: 0o600,
+          },
+        );
 
         expect(yield* finalizeDeferredCodeAnchors(fixture.config, {limit: 1})).toMatchObject({
           failedCount: 1,
@@ -1924,7 +1987,10 @@ describe('deferred code-anchor outbox', () => {
         yield* fixture.fs.makeDirectory(fixture.outbox, {recursive: true, mode: 0o700});
         for (let index = 0; index < 48; index += 1) {
           yield* fixture.fs.writeFileString(
-            fixture.path.join(fixture.outbox, `${index.toString(16).padStart(64, '0')}-poison.json`),
+            fixture.path.join(
+              fixture.outbox,
+              `${Effect2.pipe(index.toString(16), EffectString.padStart(64, '0'))}-poison.json`,
+            ),
             '{not-json}\n',
             {mode: 0o600},
           );
@@ -1935,13 +2001,12 @@ describe('deferred code-anchor outbox', () => {
           memoryUri: MEMORY_URI,
           request: deferredRequest(fixture.repository, ['src/after-poison.ts']),
         });
-        const [intentPath] = (yield* fixtureIntentPaths(fixture)).filter(path =>
-          path.includes(`${fixture.path.sep}i${fixture.path.sep}`),
+        const [intentPath] = EffectArray.filter(yield* fixtureIntentPaths(fixture), path =>
+          Effect2.pipe(path, EffectString.includes(`${fixture.path.sep}i${fixture.path.sep}`)),
         );
-        const intent = JSON.parse(yield* fixture.fs.readFileString(intentPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(intentPath)),
+        ).pipe(Effect.orDie);
         yield* fixture.fs.rename(intentPath, fixture.path.join(fixture.outbox, `${yield* sha256Hex(MEMORY_URI)}.json`));
         const route: DeferredCodeAnchorFinalizationRoute = {
           callerCwd: fixture.repository,
@@ -1961,8 +2026,10 @@ describe('deferred code-anchor outbox', () => {
 
         expect(recovered).toBe(true);
         expect(yield* hasDeferredCodeAnchorIntent(fixture.config, MEMORY_URI)).toBe(false);
-        const quarantined = (yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true})).filter(name =>
-          name.endsWith(`${fixture.path.sep}entry`),
+        const quarantined = EffectArray.filter(
+          yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true}),
+          __effectArrayValue2 =>
+            !!(name => Effect2.pipe(name, EffectString.endsWith(`${fixture.path.sep}entry`)))(__effectArrayValue2),
         );
         expect(quarantined).toHaveLength(48);
         expect(yield* deferredCodeAnchorDoctorCheck(fixture.config)).toMatchObject({status: 'fail'});
@@ -2110,10 +2177,9 @@ describe('deferred code-anchor outbox', () => {
           request: deferredRequest(fixture.repository, ['src/route-ancestor-link.ts']),
         });
         const [pendingPath] = yield* fixtureIntentPaths(fixture);
-        const intent = JSON.parse(yield* fixture.fs.readFileString(pendingPath)) as {
-          repositoryId: string;
-          worktreeId: string;
-        };
+        const intent = yield* Schema.decodeUnknownEffect(IntentRouteSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(pendingPath)),
+        ).pipe(Effect.orDie);
         const markerPath = yield* fixtureRepositoryRouteMarkerPath(fixture);
         const laneRoot = fixture.path.dirname(markerPath);
         const outside = fixture.path.join(fixture.config.agentContextHome, 'outside-route-lane');
@@ -2147,9 +2213,14 @@ describe('deferred code-anchor outbox', () => {
           request: deferredRequest(fixture.repository, ['src/tampered.ts']),
         });
         const [pendingPath] = yield* fixtureIntentPaths(fixture);
-        const intent = JSON.parse(yield* fixture.fs.readFileString(pendingPath)) as Record<string, unknown>;
-        intent.memoryUri = 'threadnote://user/tester/memories/durable/projects/threadnote/other.md';
-        yield* fixture.fs.writeFileString(pendingPath, `${JSON.stringify(intent)}\n`, {mode: 0o600});
+        const intent = yield* Schema.decodeUnknownEffect(JsonRecordSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(pendingPath)),
+        ).pipe(Effect.orDie);
+        const changed = {
+          ...intent,
+          memoryUri: 'threadnote://user/tester/memories/durable/projects/threadnote/other.md',
+        };
+        yield* fixture.fs.writeFileString(pendingPath, `${JSON.stringify(changed)}\n`, {mode: 0o600});
 
         const receipt = yield* finalizeDeferredCodeAnchors(fixture.config);
         expect(receipt).toMatchObject({
@@ -2174,20 +2245,31 @@ describe('deferred code-anchor outbox', () => {
           });
         yield* stage();
         const [pendingPath] = yield* fixtureIntentPaths(fixture);
-        const callerTamper = JSON.parse(yield* fixture.fs.readFileString(pendingPath)) as Record<string, unknown>;
-        callerTamper.callerCwd = fixture.config.agentContextHome;
-        yield* fixture.fs.writeFileString(pendingPath, `${JSON.stringify(callerTamper)}\n`, {mode: 0o600});
+        const callerTamper = yield* Schema.decodeUnknownEffect(JsonRecordSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(pendingPath)),
+        ).pipe(Effect.orDie);
+        yield* fixture.fs.writeFileString(
+          pendingPath,
+          `${JSON.stringify({...callerTamper, callerCwd: fixture.config.agentContextHome})}\n`,
+          {mode: 0o600},
+        );
         expect(yield* finalizeDeferredCodeAnchors(fixture.config)).toMatchObject({
           failedCount: 1,
           items: [{code: 'invalid-intent', state: 'failed'}],
         });
 
         yield* stage();
-        const recoveryTamper = JSON.parse(yield* fixture.fs.readFileString(pendingPath)) as {
-          recovery: {observedGraph: {stale: boolean}};
+        const recoveryTamper = yield* Schema.decodeUnknownEffect(RecoveryMutationSchema)(
+          JSON.parse(yield* fixture.fs.readFileString(pendingPath)),
+        ).pipe(Effect.orDie);
+        const changed = {
+          ...recoveryTamper,
+          recovery: {
+            ...recoveryTamper.recovery,
+            observedGraph: {...recoveryTamper.recovery.observedGraph, stale: false},
+          },
         };
-        recoveryTamper.recovery.observedGraph.stale = false;
-        yield* fixture.fs.writeFileString(pendingPath, `${JSON.stringify(recoveryTamper)}\n`, {mode: 0o600});
+        yield* fixture.fs.writeFileString(pendingPath, `${JSON.stringify(changed)}\n`, {mode: 0o600});
         expect(yield* finalizeDeferredCodeAnchors(fixture.config)).toMatchObject({
           failedCount: 1,
           items: [{code: 'invalid-intent', state: 'failed'}],
@@ -2202,10 +2284,13 @@ const fixtureIntentPaths = Effect.fn('deferredCodeAnchorTest.intentPaths')(funct
   readonly outbox: string;
   readonly path: Path.Path;
 }) {
-  return (yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true}))
-    .filter(name => name.endsWith('.json'))
-    .map(name => fixture.path.join(fixture.outbox, name))
-    .sort();
+  return EffectArray.map(
+    EffectArray.filter(
+      yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true}),
+      __effectArrayValue2 => !!(name => Effect2.pipe(name, EffectString.endsWith('.json')))(__effectArrayValue2),
+    ),
+    name => fixture.path.join(fixture.outbox, name),
+  ).sort();
 });
 
 const fixtureRepositoryRouteMarkerPath = Effect.fn('deferredCodeAnchorTest.repositoryRouteMarker')(function* (fixture: {
@@ -2213,16 +2298,27 @@ const fixtureRepositoryRouteMarkerPath = Effect.fn('deferredCodeAnchorTest.repos
   readonly outbox: string;
   readonly path: Path.Path;
 }) {
-  const relative = (yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true})).find(entry => {
-    const segments = entry.split(fixture.path.sep);
-    return (
-      segments.length === 4 &&
-      segments[0] === 'r' &&
-      /^r[a-f0-9]{32}$/u.test(segments[1] ?? '') &&
-      segments[2] === '0' &&
-      segments[3]?.endsWith('.ref') === true
-    );
-  });
+  const relative = Option.getOrUndefined(
+    EffectArray.findFirst(
+      yield* fixture.fs.readDirectory(fixture.outbox, {recursive: true}),
+      __effectArrayValue =>
+        !!(entry => {
+          // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+          const segments = entry.split(fixture.path.sep);
+          return (
+            segments.length === 4 &&
+            segments[0] === 'r' &&
+            /^r[a-f0-9]{32}$/u.test(segments[1] ?? '') &&
+            segments[2] === '0' &&
+            Effect2.pipe(segments[3], effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect2.pipe(effectOptionalString, EffectString.endsWith('.ref')),
+            ) === true
+          );
+        })(__effectArrayValue),
+    ),
+  );
   if (relative === undefined) return yield* Effect.die(new Error('Repository route marker fixture is missing.'));
   return fixture.path.join(fixture.outbox, relative);
 });
@@ -2375,11 +2471,12 @@ const exactCurrentCitationGraph = Effect.fn('deferredCodeAnchorTest.exactCurrent
   files: readonly CodeGraphInventoryFile[],
 ) {
   const originalQuery = yield* CodeGraphQueryService;
+  const originalStore = yield* CodeGraphStore;
   const observed = yield* originalQuery.status(fixture.config.agentContextHome, fixture.repository, {
     observeWorktree: true,
     requestMaintenance: false,
   });
-  const filesByPath = new Map(files.map(file => [file.path, file]));
+  const filesByPath = new Map(EffectArray.map(files, file => [file.path, file]));
   const exactStatus: CodeGraphStatus = {
     ...observed,
     freshness: 'current',
@@ -2390,8 +2487,8 @@ const exactCurrentCitationGraph = Effect.fn('deferredCodeAnchorTest.exactCurrent
       edgeCount: 0,
       extractorSet: 'fixture-extractor-set',
       fileCount: files.length,
-      graphContentId: `cgc_${'a'.repeat(40)}`,
-      id: `cgsn_${'b'.repeat(40)}`,
+      graphContentId: `cgc_${Effect2.pipe('a', EffectString.repeat(40))}`,
+      id: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}`,
       repositoryId: observed.identity.repositoryId,
       state: 'ready',
       symbolCount: 0,
@@ -2406,6 +2503,7 @@ const exactCurrentCitationGraph = Effect.fn('deferredCodeAnchorTest.exactCurrent
     }),
     status: exactStatus,
     store: CodeGraphStore.of({
+      ...originalStore,
       acquireSnapshotLease: () => Effect.succeed('fixture-lease'),
       effectiveSnapshotCitationEvidence: (
         _databasePath: string,
@@ -2415,12 +2513,12 @@ const exactCurrentCitationGraph = Effect.fn('deferredCodeAnchorTest.exactCurrent
         Effect.succeed({
           fileInventoryCoverage: 'complete',
           filesByContentHashes: [],
-          filesByPaths: (request.paths ?? []).map(path => ({file: filesByPath.get(path), path})),
+          filesByPaths: EffectArray.map(request.paths ?? [], path => ({file: filesByPath.get(path), path})),
           symbolsByIds: [],
           symbolsBySemanticLocators: [],
         }),
       releaseSnapshotLease: () => Effect.void,
-    } as unknown as CodeGraphStoreShape),
+    }),
   };
 });
 
@@ -2450,10 +2548,10 @@ function selectedProjectStatus(status: CodeGraphStatus, project: string, scopeKe
         },
         scope: {
           admittedPrefixes: ['apps/a'],
-          closureDigest: 'b'.repeat(64),
+          closureDigest: Effect2.pipe('b', EffectString.repeat(64)),
           completeness: 'complete',
           controlPaths: [],
-          definitionDigest: 'a'.repeat(64),
+          definitionDigest: Effect2.pipe('a', EffectString.repeat(64)),
           diagnostics: [],
           includedProjectIds: ['app-a'],
           rootProjectIds: ['app-a'],

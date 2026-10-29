@@ -2,9 +2,12 @@ import {Effect, Predicate, Schema} from 'effect';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 
-export class ManagerRequestError extends Schema.TaggedError<ManagerRequestError>()('ManagerRequestError', {
-  message: Schema.String,
-}) {}
+export class ManagerRequestError extends Schema.TaggedError<ManagerRequestError, {readonly brand: unique symbol}>()(
+  'ManagerRequestError',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export interface ManagerHttpRequest {
   readonly body: Effect.Effect<Record<string, unknown>, unknown>;

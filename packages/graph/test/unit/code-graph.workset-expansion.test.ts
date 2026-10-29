@@ -1,13 +1,16 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {selectCodeGraphWorksetAdaptiveExpansionBatch} from '@threadnote/graph/workset/expansion';
 import type {CodeGraphWorksetRouterRepositoryCandidateV1} from '@threadnote/graph/workset/router';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 describe('code graph workset adaptive expansion', () => {
   it('uses the 4/4/16 schedule without changing global repository order', () => {
     const repositories = candidates(40);
     const selected = new Set<string>();
-    const batches = [0, 1, 2].map(phase => {
+    const batches = EffectArray.map([0, 1, 2], phase => {
       const batch = selectCodeGraphWorksetAdaptiveExpansionBatch({
         alreadySelectedRepositoryKeys: selected,
         phase,
@@ -18,10 +21,10 @@ describe('code graph workset adaptive expansion', () => {
       return batch;
     });
 
-    expect(batches.map(batch => batch.repositories.length)).toEqual([4, 4, 16]);
-    expect(batches.flatMap(batch => batch.repositories.map(repository => repository.rank))).toEqual(
-      Array.from({length: 24}, (_, index) => index + 1),
-    );
+    expect(EffectArray.map(batches, batch => batch.repositories.length)).toEqual([4, 4, 16]);
+    expect(
+      EffectArray.flatMap(batches, batch => EffectArray.map(batch.repositories, repository => repository.rank)),
+    ).toEqual(Array.from({length: 24}, (_, index) => index + 1));
   });
 
   it('returns truthful cancellation, deadline, and exhaustion receipts', () => {
@@ -39,7 +42,7 @@ describe('code graph workset adaptive expansion', () => {
     ).toMatchObject({repositories: [], stopReason: 'deadline'});
     expect(
       selectCodeGraphWorksetAdaptiveExpansionBatch({
-        alreadySelectedRepositoryKeys: new Set(repositories.map(repository => repository.repositoryKey)),
+        alreadySelectedRepositoryKeys: new Set(EffectArray.map(repositories, repository => repository.repositoryKey)),
         phase: 0,
         remainingMilliseconds: 1_000,
         repositories,
@@ -84,9 +87,9 @@ function candidates(count: number): readonly CodeGraphWorksetRouterRepositoryCan
     bestSymbolKey: `symbol-${index}`,
     exactSymbolCount: 0,
     matchingSymbolCount: 1,
-    projectionDigest: `${(index % 16).toString(16)}`.repeat(64),
+    projectionDigest: Effect.pipe(`${(index % 16).toString(16)}`, EffectString.repeat(64)),
     rank: index + 1,
-    repositoryId: `${((index + 1) % 16).toString(16)}`.repeat(64),
+    repositoryId: Effect.pipe(`${((index + 1) % 16).toString(16)}`, EffectString.repeat(64)),
     repositoryKey: `repository-${index}`,
     score: 1_000 - index,
     scoreReceipt: {

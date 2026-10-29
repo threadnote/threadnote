@@ -1,8 +1,11 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {planContextHealthCitationBatch} from '@threadnote/context/citation_validation';
 import type {ContextBriefMemoryCandidateV1} from '@threadnote/context/types';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function candidate(index: number, repository = index % 40): ContextBriefMemoryCandidateV1 {
   return {
@@ -10,13 +13,13 @@ function candidate(index: number, repository = index % 40): ContextBriefMemoryCa
     codeCitations: [
       createMemoryCodeCitation({
         extractorSet: 'test',
-        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        fileContentHash: {algorithm: 'sha256', value: Effect.pipe('a', EffectString.repeat(64))},
         path: `src/${index}.ts`,
-        repositoryId: repository.toString(16).padStart(64, '0'),
+        repositoryId: Effect.pipe(repository.toString(16), EffectString.padStart(64, '0')),
         repositoryIdentityKind: 'remote',
-        sourceCommit: 'b'.repeat(40),
+        sourceCommit: Effect.pipe('b', EffectString.repeat(40)),
         sourceDirty: false,
-        sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+        sourceSnapshotId: `cgsn_${Effect.pipe('c', EffectString.repeat(40))}`,
         target: {kind: 'file'},
         version: 1,
       }),
@@ -24,7 +27,7 @@ function candidate(index: number, repository = index % 40): ContextBriefMemoryCa
     excerpt: '',
     kind: 'durable',
     rank: index,
-    uri: `threadnote://memory/${index.toString().padStart(5, '0')}`,
+    uri: `threadnote://memory/${Effect.pipe(index.toString(), EffectString.padStart(5, '0'))}`,
   };
 }
 
@@ -35,26 +38,28 @@ describe('Context Health citation traversal', () => {
     const visited: string[] = [];
     for (let step = 0; step <= count; step += 1) {
       const batch = planContextHealthCitationBatch(candidates, {after});
-      const citations = batch.candidates.flatMap(value => value.codeCitations);
+      const citations = EffectArray.flatMap(batch.candidates, value => value.codeCitations);
       expect(citations.length).toBeLessThanOrEqual(96);
-      expect(new Set(citations.map(value => value.repositoryId)).size).toBeLessThanOrEqual(32);
-      visited.push(...batch.candidates.map(value => value.uri));
+      expect(new Set(EffectArray.map(citations, value => value.repositoryId)).size).toBeLessThanOrEqual(32);
+      visited.push(...EffectArray.map(batch.candidates, value => value.uri));
       after = batch.checkpoint.after;
       if (batch.checkpoint.complete) break;
     }
-    expect(visited).toEqual(candidates.map(value => value.uri));
+    expect(visited).toEqual(EffectArray.map(candidates, value => value.uri));
   });
 
   it('does not restart the prefix when a completed citation disappears', () => {
     const candidates = Array.from({length: 100}, (_, index) => candidate(index, 1));
     const first = planContextHealthCitationBatch(candidates);
     const next = planContextHealthCitationBatch(
-      candidates.filter(value => value.uri !== first.checkpoint.after?.uri),
+      EffectArray.filter(candidates, value => value.uri !== first.checkpoint.after?.uri),
       {
         after: first.checkpoint.after,
       },
     );
-    expect(next.candidates.map(value => value.uri)).toEqual(candidates.slice(96).map(value => value.uri));
+    expect(EffectArray.map(next.candidates, value => value.uri)).toEqual(
+      EffectArray.map(candidates.slice(96), value => value.uri),
+    );
   });
 
   it('is deterministic and visits each eligible identity exactly once regardless of input order and batch size', () => {
@@ -66,13 +71,17 @@ describe('Context Health citation traversal', () => {
         for (let step = 0; step <= count; step += 1) {
           const batch = planContextHealthCitationBatch([...candidates].reverse(), {after, batchSize});
           visited.push(
-            ...batch.candidates.flatMap(value => value.codeCitations.map(citation => `${value.uri}/${citation.id}`)),
+            ...EffectArray.flatMap(batch.candidates, value =>
+              EffectArray.map(value.codeCitations, citation => `${value.uri}/${citation.id}`),
+            ),
           );
           after = batch.checkpoint.after;
           if (batch.checkpoint.complete) break;
         }
         expect(visited).toEqual(
-          candidates.flatMap(value => value.codeCitations.map(citation => `${value.uri}/${citation.id}`)),
+          EffectArray.flatMap(candidates, value =>
+            EffectArray.map(value.codeCitations, citation => `${value.uri}/${citation.id}`),
+          ),
         );
         expect(new Set(visited).size).toBe(count);
       }),
@@ -85,15 +94,18 @@ describe('Context Health citation traversal', () => {
       fc.property(
         fc.array(fc.constantFrom('durable', 'handoff', 'incident', 'preference', 'smoke'), {maxLength: 120}),
         kinds => {
-          const expected = kinds.map((_, index) => candidate(index));
-          const varied = expected.map((subject, index) => ({...subject, kind: kinds[index]}));
+          const expected = EffectArray.map(kinds, (_, index) => candidate(index));
+          const varied = EffectArray.map(expected, (subject, index) => ({...subject, kind: kinds[index]}));
           let after: {uri: string; citationId: string} | undefined;
           for (let step = 0; step <= kinds.length; step += 1) {
             const baseline = planContextHealthCitationBatch(expected, {after, batchSize: 13});
             const actual = planContextHealthCitationBatch(varied, {after, batchSize: 13});
             const identities = (batch: typeof actual) =>
-              batch.candidates.flatMap(subject =>
-                subject.codeCitations.map(citation => `${subject.uri}\0${citation.id}\0${citation.repositoryId}`),
+              EffectArray.flatMap(batch.candidates, subject =>
+                EffectArray.map(
+                  subject.codeCitations,
+                  citation => `${subject.uri}\0${citation.id}\0${citation.repositoryId}`,
+                ),
               );
             expect(identities(actual)).toEqual(identities(baseline));
             expect(actual.checkpoint).toEqual(baseline.checkpoint);

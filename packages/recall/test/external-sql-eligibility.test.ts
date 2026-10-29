@@ -1,8 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {Database} from 'bun:sqlite';
 import * as FC from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import type {RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {recallEligibilityPredicate} from '@threadnote/recall/index/eligibility';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const providers = ['superhuman', 'pocket', 'github', 'linear'] as const;
 
@@ -22,14 +26,17 @@ describe('external SQL admission', () => {
         for (let index = 0; index < 12; index++)
           insert.run(
             `threadnote://resources/external/${provider}/denied-${index}/docs/doc_1/pages/page_1/line_1.md`,
-            JSON.stringify({contentHash: 'a'.repeat(64)}),
+            JSON.stringify({contentHash: Effect.pipe('a', EffectString.repeat(64))}),
           );
-        insert.run(wrongHashUri, JSON.stringify({contentHash: 'b'.repeat(64)}));
-        insert.run(activeUri, JSON.stringify({contentHash: 'a'.repeat(64)}));
+        insert.run(wrongHashUri, JSON.stringify({contentHash: Effect.pipe('b', EffectString.repeat(64))}));
+        insert.run(activeUri, JSON.stringify({contentHash: Effect.pipe('a', EffectString.repeat(64))}));
         insert.run(ordinaryUri, '{}');
         const active = recallEligibilityPredicate('d', {
           kind: 'pinned-hard-uri-bypass',
-          externalResources: {[activeUri]: 'a'.repeat(64), [wrongHashUri]: 'a'.repeat(64)},
+          externalResources: {
+            [activeUri]: Effect.pipe('a', EffectString.repeat(64)),
+            [wrongHashUri]: Effect.pipe('a', EffectString.repeat(64)),
+          },
         });
         expect(
           sql.query(`SELECT uri FROM documents AS d WHERE ${active.sql} ORDER BY uri LIMIT 1`).all(...active.params),
@@ -43,7 +50,7 @@ describe('external SQL admission', () => {
           kind: 'candidate-policy',
           authority: 'any',
           projects: {mode: 'projectless-only'},
-          externalResources: {[activeUri]: 'a'.repeat(64)},
+          externalResources: {[activeUri]: Effect.pipe('a', EffectString.repeat(64))},
         });
         expect(
           sql.query(`SELECT uri FROM documents AS d WHERE ${projectless.sql} ORDER BY uri`).all(...projectless.params),
@@ -79,8 +86,16 @@ describe('external SQL admission', () => {
       provider: FC.constantFrom(...providers),
       location: FC.constantFrom('root', 'child', 'neighbor', 'ordinary'),
       neighbor: FC.constantFrom('-other', '0', 'ish'),
-      contentHash: FC.constantFrom(null, 'a'.repeat(64), 'b'.repeat(64)),
-      accessHash: FC.constantFrom(null, 'a'.repeat(64), 'b'.repeat(64)),
+      contentHash: FC.constantFrom(
+        null,
+        Effect.pipe('a', EffectString.repeat(64)),
+        Effect.pipe('b', EffectString.repeat(64)),
+      ),
+      accessHash: FC.constantFrom(
+        null,
+        Effect.pipe('a', EffectString.repeat(64)),
+        Effect.pipe('b', EffectString.repeat(64)),
+      ),
       project: FC.constantFrom(null, 'demo', 'other'),
       approved: FC.boolean(),
     });
@@ -91,7 +106,7 @@ describe('external SQL admission', () => {
           sql.exec(
             'CREATE TABLE documents (id INTEGER, uri TEXT, project TEXT, approved_authoritative INTEGER, candidate_json TEXT)',
           );
-          const rows = inputs.map((input, id) => {
+          const rows = EffectArray.map(inputs, (input, id) => {
             const root = `threadnote://resources/external/${input.provider}`;
             const uri =
               input.location === 'root'
@@ -103,8 +118,8 @@ describe('external SQL admission', () => {
                     : `threadnote://resources/ordinary-${id}.md`;
             return {...input, id, uri};
           });
-          const access = Object.fromEntries(
-            rows.flatMap(row => (row.accessHash === null ? [] : [[row.uri, row.accessHash]])),
+          const access = EffectRecord.fromEntries(
+            EffectArray.flatMap(rows, row => (row.accessHash === null ? [] : [[row.uri, row.accessHash]])),
           );
           const insert = sql.query('INSERT INTO documents VALUES (?, ?, ?, ?, ?)');
           for (const row of rows) {
@@ -119,9 +134,10 @@ describe('external SQL admission', () => {
           const policies: readonly (RecallEligibilityPolicy | undefined)[] = [
             undefined,
             {kind: 'pinned-hard-uri-bypass', externalResources: access},
-            ...(['unrestricted', 'projectless-only', 'allow-projects-and-projectless', 'deny-all'] as const).flatMap(
+            ...EffectArray.flatMap(
+              ['unrestricted', 'projectless-only', 'allow-projects-and-projectless', 'deny-all'] as const,
               mode =>
-                (['any', 'approved-authoritative'] as const).map(authority => ({
+                EffectArray.map(['any', 'approved-authoritative'] as const, authority => ({
                   kind: 'candidate-policy' as const,
                   authority,
                   projects: mode === 'allow-projects-and-projectless' ? {mode, projects: ['demo']} : {mode},
@@ -132,31 +148,30 @@ describe('external SQL admission', () => {
           for (const policy of policies) {
             for (const checkHash of [true, false]) {
               const predicate = recallEligibilityPredicate('d', policy, checkHash ? undefined : false);
-              const expected = rows
-                .filter(row => {
-                  const external = providers.some(provider => {
-                    const root = `threadnote://resources/external/${provider}`;
-                    return row.uri === root || row.uri.startsWith(`${root}/`);
-                  });
-                  if (
-                    external &&
-                    (policy?.externalResources?.[row.uri] === undefined ||
-                      (checkHash && policy.externalResources[row.uri] !== row.contentHash))
-                  )
-                    return false;
-                  if (policy?.kind !== 'candidate-policy') return true;
-                  if (policy.projects.mode === 'deny-all') return false;
-                  if (policy.projects.mode === 'projectless-only' && row.project !== null) return false;
-                  if (
-                    policy.projects.mode === 'allow-projects-and-projectless' &&
-                    row.project !== null &&
-                    row.project !== 'demo'
-                  )
-                    return false;
-                  return policy.authority === 'any' || row.approved;
-                })
-                .slice(0, limit)
-                .map(row => ({id: row.id}));
+              const eligibleRows = EffectArray.filter(rows, (row, index) => {
+                if (!(index in rows)) return false;
+                const external = EffectArray.some(providers, provider => {
+                  const root = `threadnote://resources/external/${provider}`;
+                  return row.uri === root || Effect.pipe(row.uri, EffectString.startsWith(`${root}/`));
+                });
+                if (
+                  external &&
+                  (policy?.externalResources?.[row.uri] === undefined ||
+                    (checkHash && policy.externalResources[row.uri] !== row.contentHash))
+                )
+                  return false;
+                if (policy?.kind !== 'candidate-policy') return true;
+                if (policy.projects.mode === 'deny-all') return false;
+                if (policy.projects.mode === 'projectless-only' && row.project !== null) return false;
+                if (
+                  policy.projects.mode === 'allow-projects-and-projectless' &&
+                  row.project !== null &&
+                  row.project !== 'demo'
+                )
+                  return false;
+                return policy.authority === 'any' || row.approved;
+              });
+              const expected = EffectArray.map(eligibleRows.slice(0, limit), row => ({id: row.id}));
               expect(
                 sql
                   .query(`SELECT id FROM documents AS d WHERE ${predicate.sql} ORDER BY id LIMIT ?`)

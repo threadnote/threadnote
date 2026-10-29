@@ -1,3 +1,7 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const normalizedDefinitions = new Map<string, string>();
 const MAXIMUM_CACHED_DEFINITIONS = 128;
 const MAXIMUM_CACHED_DEFINITION_CODE_UNITS = 16 * 1_024;
@@ -45,16 +49,22 @@ function normalizeUncachedSchemaDefinition(value: string): string {
       }
       break;
     }
-    quoted.push(value.slice(start, Math.min(index + 1, value.length)));
+    quoted.push(Effect.pipe(value, EffectString.slice(start, Math.min(index + 1, value.length))));
     unquoted += `\u0000${quoted.length - 1}\u0000`;
   }
-  return unquoted
-    .toLowerCase()
-    .replace(/\bif not exists\b/gu, '')
-    .replace(/\s+/gu, ' ')
-    .replace(/\s*([(),])\s*/gu, '$1')
-    .trim()
-    .split('\u0000')
-    .map((segment, index) => (index % 2 === 1 ? (quoted[Number(segment)] ?? '') : segment))
-    .join('');
+  return EffectArray.join(
+    EffectArray.map(
+      Effect.pipe(
+        unquoted,
+        EffectString.toLowerCase,
+        EffectString.replace(/\bif not exists\b/gu, ''),
+        EffectString.replace(/\s+/gu, ' '),
+        EffectString.replace(/\s*([(),])\s*/gu, '$1'),
+        EffectString.trim,
+        EffectString.split('\u0000'),
+      ),
+      (segment, index) => (index % 2 === 1 ? (quoted[Number(segment)] ?? '') : segment),
+    ),
+    '',
+  );
 }

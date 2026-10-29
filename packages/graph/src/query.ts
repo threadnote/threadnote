@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Context, Crypto, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -105,6 +106,8 @@ import {
   type RepositoryIdentity,
   type RepositoryIdentityExpectation,
 } from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface CodeGraphInspectOptions extends CodeGraphQueryOptions {
   readonly baseCommit?: string;
@@ -947,8 +950,19 @@ export class CodeGraphQueryService extends Context.Service<
   );
 }
 
+export type CodeGraphTraversalQueryStore = Pick<
+  CodeGraphStoreShape,
+  | 'edgesForNodes'
+  | 'findSymbolsByPathAndName'
+  | 'searchSymbolsByPaths'
+  | 'searchSymbolsMany'
+  | 'symbolsByIds'
+  | 'traversalEdgesForNodes'
+>;
+export type CodeGraphTraversalQueryEmbedding = Pick<CodeGraphEmbeddingIndexShape, 'search'>;
+
 export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
-  store: CodeGraphStoreShape,
+  store: CodeGraphTraversalQueryStore,
   databasePath: string,
   snapshotId: string,
   query: string,
@@ -957,7 +971,7 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
   edgeLimit: number,
   depth: number,
   allowedProvenances: readonly CodeGraphProvenance[],
-  embedding: CodeGraphEmbeddingIndexShape,
+  embedding: CodeGraphTraversalQueryEmbedding,
   threadnoteHome: string,
   layout: CodeGraphLayout,
   impact: boolean,
@@ -989,13 +1003,21 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
   const perSeedLimit = impact
     ? Math.max(1, Math.min(20, Math.ceil(MAX_IMPACT_SEED_SYMBOLS / requestedSeedQueries.length)))
     : Math.max(1, seedLimit);
-  const normalizedPackageName = packageName?.trim().toLocaleLowerCase('en-US');
+  const normalizedPackageName = Effect2.pipe(
+    packageName,
+    effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(effectOptionalString, EffectString.toLocaleLowerCase('en-US')),
+  );
   const lexicalCandidateLimit = normalizedPackageName ? Math.min(500, Math.max(200, perSeedLimit * 20)) : perSeedLimit;
   const lexicalCandidateGroups = impactSelector?.path
     ? [yield* store.findSymbolsByPathAndName(databasePath, snapshotId, impactSelector.path, impactSelector.symbol)]
     : impactSelector && isStableCodeGraphNodeId(impactSelector.symbol)
       ? [
-          (yield* store.symbolsByIds(databasePath, snapshotId, [impactSelector.symbol])).map(node => ({
+          EffectArray.map(yield* store.symbolsByIds(databasePath, snapshotId, [impactSelector.symbol]), node => ({
             ...node,
             score: 1,
           })),
@@ -1009,20 +1031,32 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
   // the same complete traversal window regardless of snapshot representation.
   if (!impact) deadline = (yield* Clock.currentTimeMillis) + traversalTimeBudgetMilliseconds;
   const exactImpactSelectorGroups = impactSelector
-    ? lexicalCandidateGroups.map(group => exactCodeGraphImpactSelectorMatches(impactSelector, group))
+    ? EffectArray.map(lexicalCandidateGroups, group => exactCodeGraphImpactSelectorMatches(impactSelector, group))
     : [];
-  const impactSelectorResolvedExactly = exactImpactSelectorGroups.some(group => group.length > 0);
-  const lexicalGroups = lexicalCandidateGroups.map(group => {
+  const impactSelectorResolvedExactly = EffectArray.some(exactImpactSelectorGroups, group => group.length > 0);
+  const lexicalGroups = EffectArray.map(lexicalCandidateGroups, group => {
     const packageMatches = normalizedPackageName
-      ? group.filter(node => node.packageName?.toLocaleLowerCase('en-US') === normalizedPackageName)
+      ? EffectArray.filter(
+          group,
+          node =>
+            Effect2.pipe(node.packageName, effectOptionalString =>
+              effectOptionalString == null
+                ? undefined
+                : Effect2.pipe(effectOptionalString, EffectString.toLocaleLowerCase('en-US')),
+            ) === normalizedPackageName,
+        )
       : group;
     const exactMatches = impactSelector ? exactCodeGraphImpactSelectorMatches(impactSelector, packageMatches) : [];
     return (impactSelectorResolvedExactly ? exactMatches : packageMatches).slice(0, perSeedLimit);
   });
-  const lexicalCandidatesExamined = lexicalCandidateGroups.reduce((total, group) => total + group.length, 0);
-  const lexicalPackageMatches = lexicalGroups.reduce((total, group) => total + group.length, 0);
+  const lexicalCandidatesExamined = EffectArray.reduce(
+    lexicalCandidateGroups,
+    0,
+    (total, group) => total + group.length,
+  );
+  const lexicalPackageMatches = EffectArray.reduce(lexicalGroups, 0, (total, group) => total + group.length);
   let timedOut = yield* deadlineReached(deadline);
-  const unresolvedQueries = requestedSeedQueries.filter((_, index) => lexicalGroups[index]?.length === 0);
+  const unresolvedQueries = EffectArray.filter(requestedSeedQueries, (_, index) => lexicalGroups[index]?.length === 0);
   const recovered =
     impact && !timedOut && baseSnapshotId && unresolvedQueries.length > 0
       ? yield* recoverDeletedImpactSeeds(
@@ -1077,23 +1111,27 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
     deadline = (yield* Clock.currentTimeMillis) + traversalTimeBudgetMilliseconds;
   }
   const semantic = semanticResult.scores;
-  const semanticOnlyIds = [...semantic.keys()].filter(id => !lexicalById.has(id)).slice(0, 12);
+  const semanticOnlyIds = EffectArray.filter([...semantic.keys()], id => !lexicalById.has(id)).slice(0, 12);
   const semanticCandidates =
     semanticOnlyIds.length === 0 ? [] : yield* store.symbolsByIds(databasePath, snapshotId, semanticOnlyIds);
-  const semanticOnly = semanticCandidates
-    .filter(
-      node =>
-        normalizedPackageName === undefined || node.packageName?.toLocaleLowerCase('en-US') === normalizedPackageName,
-    )
-    .slice(0, Math.max(0, nodeLimit - lexicalSeeds.length));
+  const semanticOnly = EffectArray.filter(
+    semanticCandidates,
+    node =>
+      normalizedPackageName === undefined ||
+      Effect2.pipe(node.packageName, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect2.pipe(effectOptionalString, EffectString.toLocaleLowerCase('en-US')),
+      ) === normalizedPackageName,
+  ).slice(0, Math.max(0, nodeLimit - lexicalSeeds.length));
   timedOut ||= yield* deadlineReached(deadline);
   const queryTerms = queryTermsForRanking(query);
   const rankedSeeds = [
-    ...lexicalSeeds.map(node => ({
+    ...EffectArray.map(lexicalSeeds, node => ({
       ...node,
       score: Math.max(node.score, rankedSemanticScore(node, semantic.get(node.id) ?? 0, queryTerms)),
     })),
-    ...semanticOnly.map(node => ({
+    ...EffectArray.map(semanticOnly, node => ({
       ...node,
       score: rankedSemanticScore(node, semantic.get(node.id) ?? 0, queryTerms),
     })),
@@ -1103,26 +1141,28 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
     : rankedSeeds
         .sort((left, right) => right.score - left.score || compareCodeUnits(left.id, right.id))
         .slice(0, seedLimit);
-  const nodes = new Map(impact ? [] : seeds.map(node => [node.id, node] as const));
-  const seedNodes = new Map(seeds.map(node => [node.id, node]));
-  const seedIds = new Set(seeds.map(node => node.id));
-  const seedOrder = new Map(seeds.map((node, index) => [node.id, index]));
+  const nodes = new Map(impact ? [] : EffectArray.map(seeds, node => [node.id, node] as const));
+  const seedNodes = new Map(EffectArray.map(seeds, node => [node.id, node]));
+  const seedIds = new Set(EffectArray.map(seeds, node => node.id));
+  const seedOrder = new Map(EffectArray.map(seeds, (node, index) => [node.id, index]));
   const edges = new Map<string, CodeGraphEdge>();
-  let frontier = new Map(seeds.map(node => [node.id, recovered.remainingDepthById.get(node.id) ?? depth] as const));
+  let frontier = new Map(
+    EffectArray.map(seeds, node => [node.id, recovered.remainingDepthById.get(node.id) ?? depth] as const),
+  );
   let analysisTruncated = recovered.truncated;
   for (let currentDepth = 0; frontier.size > 0 && edges.size < edgeLimit && !timedOut; currentDepth += 1) {
     if (yield* deadlineReached(deadline)) {
       timedOut = true;
       break;
     }
-    const activeFrontier = [...frontier].filter(([, remainingDepth]) => remainingDepth > 0);
+    const activeFrontier = EffectArray.filter([...frontier], ([, remainingDepth]) => remainingDepth > 0);
     if (activeFrontier.length === 0) break;
     const remainingEdges = edgeLimit - edges.size;
     if (remainingEdges <= 0) break;
     const adjacent = yield* store.edgesForNodes(
       databasePath,
       snapshotId,
-      activeFrontier.map(([id]) => id),
+      EffectArray.map(activeFrontier, ([id]) => id),
       direction,
       Math.min(impact ? MAX_IMPACT_ANALYSIS_EDGES : remainingEdges, remainingEdges),
       allowedProvenances,
@@ -1165,17 +1205,18 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
     for (const symbol of hydrated) {
       nodes.set(symbol.id, {...symbol, score: impact ? (discoveredScores.get(symbol.id) ?? score) : score});
     }
-    frontier = new Map(hydrated.map(symbol => [symbol.id, discoveredDepths.get(symbol.id) ?? 0]));
+    frontier = new Map(EffectArray.map(hydrated, symbol => [symbol.id, discoveredDepths.get(symbol.id) ?? 0]));
   }
-  const orderedImpactNodes = [...nodes.values(), ...[...seedNodes.values()].filter(seed => !nodes.has(seed.id))].sort(
-    (left, right) => {
-      const leftSeed = seedIds.has(left.id);
-      const rightSeed = seedIds.has(right.id);
-      if (leftSeed !== rightSeed) return leftSeed ? 1 : -1;
-      if (leftSeed && rightSeed) return (seedOrder.get(left.id) ?? 0) - (seedOrder.get(right.id) ?? 0);
-      return right.score - left.score || compareCodeUnits(left.path, right.path) || compareCodeUnits(left.id, right.id);
-    },
-  );
+  const orderedImpactNodes = [
+    ...nodes.values(),
+    ...EffectArray.filter([...seedNodes.values()], seed => !nodes.has(seed.id)),
+  ].sort((left, right) => {
+    const leftSeed = seedIds.has(left.id);
+    const rightSeed = seedIds.has(right.id);
+    if (leftSeed !== rightSeed) return leftSeed ? 1 : -1;
+    if (leftSeed && rightSeed) return (seedOrder.get(left.id) ?? 0) - (seedOrder.get(right.id) ?? 0);
+    return right.score - left.score || compareCodeUnits(left.path, right.path) || compareCodeUnits(left.id, right.id);
+  });
   const unresolvedSeedQueries = Math.max(0, unresolvedQueries.length - recovered.recoveredPaths);
   const warnings: string[] = [];
   const suppliedSeedQueryCount = seedQueryCount ?? seedQueries?.length ?? 0;
@@ -1203,7 +1244,7 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
   }
   if (normalizedPackageName && lexicalPackageMatches === 0) {
     warnings.push(
-      `No lexical graph match was observed in package "${packageName!.trim()}" among ` +
+      `No lexical graph match was observed in package "${Effect2.pipe(packageName!, EffectString.trim)}" among ` +
         `${lexicalCandidatesExamined} bounded candidate${lexicalCandidatesExamined === 1 ? '' : 's'}. ` +
         'This is a package-local absence hint, not proof that the behavior is absent.',
     );
@@ -1222,7 +1263,7 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
             evidence: 'bounded-lexical-observation' as const,
             lexicalCandidatesExamined,
             lexicalMatches: lexicalPackageMatches,
-            packageName: packageName!.trim(),
+            packageName: Effect2.pipe(packageName!, EffectString.trim),
             type: 'package' as const,
           },
         }
@@ -1234,10 +1275,19 @@ export const traversalQuery = Effect.fn('codeGraph.traversalQuery')(function* (
 function queryTermsForRanking(query: string): readonly string[] {
   return [
     ...new Set(
-      query
-        .replace(/([a-z0-9])([A-Z])/gu, '$1 $2')
-        .toLocaleLowerCase('en-US')
-        .match(/[\p{L}\p{N}_$.-]{2,}/gu) ?? [],
+      Effect2.pipe(query, __effectPipeInput => {
+        const __effectPipeStage0 = Effect2.pipe(
+          __effectPipeInput,
+          EffectString.replace(/([a-z0-9])([A-Z])/gu, '$1 $2'),
+        );
+        const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.toLocaleLowerCase('en-US'));
+        const __effectPipeStage2 = Effect2.pipe(
+          __effectPipeStage1,
+          EffectString.match(/[\p{L}\p{N}_$.-]{2,}/gu),
+          Effect2.Option.getOrElse(() => null),
+        );
+        return __effectPipeStage2;
+      }) ?? [],
     ),
   ].slice(0, 32);
 }
@@ -1258,11 +1308,11 @@ function fairImpactSeeds(
   limit: number,
 ): readonly CodeGraphQueryNode[] {
   const selected = new Map<string, CodeGraphQueryNode>();
-  const orderedGroups = groups.map(group =>
+  const orderedGroups = EffectArray.map(groups, group =>
     [...group].sort((left, right) => right.score - left.score || compareCodeUnits(left.id, right.id)),
   );
   for (const group of orderedGroups) {
-    const representative = group.find(node => !selected.has(node.id));
+    const representative = Option.getOrUndefined(EffectArray.findFirst(group, node => !selected.has(node.id)));
     if (representative) selected.set(representative.id, representative);
     if (selected.size >= limit) return [...selected.values()];
   }
@@ -1277,7 +1327,7 @@ function fairImpactSeeds(
 }
 
 const recoverDeletedImpactSeeds = Effect.fn('codeGraph.recoverDeletedImpactSeeds')(function* (
-  store: CodeGraphStoreShape,
+  store: Pick<CodeGraphStoreShape, 'searchSymbolsByPaths' | 'symbolsByIds' | 'traversalEdgesForNodes'>,
   databasePath: string,
   currentSnapshotId: string,
   baseSnapshotId: string,
@@ -1302,7 +1352,7 @@ const recoverDeletedImpactSeeds = Effect.fn('codeGraph.recoverDeletedImpactSeeds
     };
   }
   const roots = fairImpactSeeds(baseGroups, MAX_IMPACT_RECOVERY_ROOTS);
-  const rootIds = new Set(roots.map(node => node.id));
+  const rootIds = new Set(EffectArray.map(roots, node => node.id));
   const pathIndexesByNode = new Map<string, Set<number>>();
   for (const [pathIndex, group] of baseGroups.entries()) {
     for (const node of group) {
@@ -1384,13 +1434,13 @@ const recoverDeletedImpactSeeds = Effect.fn('codeGraph.recoverDeletedImpactSeeds
         truncated,
       };
     }
-    const currentIds = new Set(current.map(node => node.id));
+    const currentIds = new Set(EffectArray.map(current, node => node.id));
     for (const node of current) {
       recoveredNodes.set(node.id, {...node, score: 0.9 / (currentDepth + 1)});
       remainingDepthById.set(node.id, depth - currentDepth - 1);
       for (const index of pathIndexesByNode.get(node.id) ?? []) recoveredPathIndexes.add(index);
     }
-    frontier = fairNext.filter(id => !currentIds.has(id));
+    frontier = EffectArray.filter(fairNext, id => !currentIds.has(id));
   }
   const orderedRecoveredIds = fairImpactNodeIds(
     [...recoveredNodes.keys()],
@@ -1399,7 +1449,7 @@ const recoverDeletedImpactSeeds = Effect.fn('codeGraph.recoverDeletedImpactSeeds
     MAX_IMPACT_SEED_SYMBOLS,
   );
   return {
-    nodes: orderedRecoveredIds.map(id => recoveredNodes.get(id)!),
+    nodes: EffectArray.map(orderedRecoveredIds, id => recoveredNodes.get(id)!),
     recoveredPaths: recoveredPathIndexes.size,
     remainingDepthById,
     timedOut: false,
@@ -1416,7 +1466,13 @@ function fairImpactNodeIds(
   const unique = [...new Set(ids)];
   const selected = new Set<string>();
   for (let pathIndex = 0; pathIndex < pathCount && selected.size < limit; pathIndex += 1) {
-    const representative = unique.find(id => pathIndexesByNode.get(id)?.has(pathIndex) && !selected.has(id));
+    const representative = Option.getOrUndefined(
+      EffectArray.findFirst(
+        unique,
+        __effectArrayValue =>
+          !!(id => pathIndexesByNode.get(id)?.has(pathIndex) && !selected.has(id))(__effectArrayValue),
+      ),
+    );
     if (representative) selected.add(representative);
   }
   for (const id of unique) {
@@ -1509,10 +1565,17 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
     const outsidePaths = input.options.deferProjectScopePresentation
       ? []
       : outsideCodeGraphProjectPaths(input.options, input.projectScope?.scope);
-    const scopedSeedQueries = input.options.seedQueries?.filter(
-      candidate =>
-        input.options.deferProjectScopePresentation || codeGraphScopeAdmitsPath(input.projectScope?.scope, candidate),
-    );
+    const seedQueries = input.options.seedQueries;
+    const scopedSeedQueries =
+      seedQueries === undefined
+        ? undefined
+        : EffectArray.filter(
+            seedQueries,
+            (candidate, __effectArrayIndex) =>
+              __effectArrayIndex in seedQueries &&
+              (input.options.deferProjectScopePresentation ||
+                codeGraphScopeAdmitsPath(input.projectScope?.scope, candidate)),
+          );
     const selected = yield* outsidePaths.length > 0 ||
     (scopedSeedQueries !== undefined && scopedSeedQueries.length === 0)
       ? Effect.succeed({nodes: [], edges: [], warnings: []})
@@ -1752,13 +1815,13 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
   return yield* withCodeGraphReadTransaction(input.store, input.layout.databasePath, read);
 });
 
-class WorktreeChangedDuringQuery extends Schema.TaggedError<WorktreeChangedDuringQuery>()(
-  'WorktreeChangedDuringQuery',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class WorktreeChangedDuringQuery extends Schema.TaggedError<
+  WorktreeChangedDuringQuery,
+  {readonly brand: unique symbol}
+>()('WorktreeChangedDuringQuery', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 function selectedProvenances(options: CodeGraphInspectOptions): readonly CodeGraphProvenance[] {
   return [
@@ -1820,7 +1883,9 @@ function isPreWriteSharedReadyAttachFailure(cause: unknown): boolean {
 }
 
 function required(value: string | undefined, name: string): string {
-  const trimmed = value?.trim();
+  const trimmed = Effect2.pipe(value, effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (!trimmed) throw new Error(`Code graph ${name} is required.`);
   return trimmed;
 }

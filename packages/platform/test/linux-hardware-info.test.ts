@@ -1,25 +1,31 @@
+import {Array as EffectArray} from 'effect';
 import {parseLinuxHardwareInfo} from '@threadnote/platform/system';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const maximumSafeKibibytes = Math.floor(Number.MAX_SAFE_INTEGER / 1024);
 // Linux ARM Docker observation: numeric CPU fields are present, but neither descriptive field exists.
-const armCpuInfo = [
-  'processor\t: 0',
-  'BogoMIPS\t: 48.00',
-  'Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics',
-  'CPU implementer\t: 0x61',
-  'CPU architecture: 8',
-  'CPU variant\t: 0x0',
-  'CPU part\t: 0x000',
-  'CPU revision\t: 0',
-  '',
-  'processor\t: 1',
-  'CPU implementer\t: 0x61',
-  'CPU architecture: 8',
-  'CPU part\t: 0x000',
-].join('\n');
+const armCpuInfo = EffectArray.join(
+  [
+    'processor\t: 0',
+    'BogoMIPS\t: 48.00',
+    'Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics',
+    'CPU implementer\t: 0x61',
+    'CPU architecture: 8',
+    'CPU variant\t: 0x0',
+    'CPU part\t: 0x000',
+    'CPU revision\t: 0',
+    '',
+    'processor\t: 1',
+    'CPU implementer\t: 0x61',
+    'CPU architecture: 8',
+    'CPU part\t: 0x000',
+  ],
+  '\n',
+);
 
 describe('Linux hardware metadata', () => {
   it('retains valid Docker ARM memory without inventing a descriptive CPU model', () => {
@@ -74,7 +80,7 @@ describe('Linux hardware metadata', () => {
     ({cpuInfo, kibibytes}) => {
       const parsed = parseLinuxHardwareInfo(cpuInfo, `MemTotal: ${kibibytes} kB\n`, 'arm64');
       expect(parsed.memoryBytes).toBe(Number(BigInt(kibibytes) * 1024n));
-      expect(parsed.cpuModel.trim()).not.toBe('');
+      expect(Effect.pipe(parsed.cpuModel, EffectString.trim)).not.toBe('');
     },
     {fastCheck: {numRuns: 64}},
   );

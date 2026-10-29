@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Layer, Option} from 'effect';
 import {createCachedCodeGraphContractHash} from '../cached_contract_hash.js';
 import {CODE_GRAPH_PARSER_FACTS_VERSION} from '../fact/budget.js';
@@ -22,6 +23,8 @@ import {
   CODE_GRAPH_RATIONALE_EXTRACTOR_VERSION,
   CODE_GRAPH_RATIONALE_INPUT_VERSION,
 } from '../rationale.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export {CODE_GRAPH_PARSER_FACTS_VERSION} from '../fact/budget.js';
 
@@ -68,27 +71,33 @@ export function createCodeGraphLanguagePackRegistry(
   packs: readonly CodeGraphLanguagePack[],
 ): CodeGraphLanguagePackRegistryShape {
   validatePacks(packs);
-  const entries = packs
-    .flatMap(pack =>
-      pack.files.map(matcher => ({
-        cacheIdentity: packCacheIdentity(pack),
-        matcher,
-        pack,
-        priority:
-          matcher.kind === 'extension'
-            ? 1
-            : matcher.kind === 'basename-pattern'
-              ? 2
-              : matcher.kind === 'basename'
-                ? 3
-                : 4,
-      })),
-    )
-    .sort((left, right) => right.priority - left.priority);
+  const entries = EffectArray.flatMap(packs, pack =>
+    EffectArray.map(pack.files, matcher => ({
+      cacheIdentity: packCacheIdentity(pack),
+      matcher,
+      pack,
+      priority:
+        matcher.kind === 'extension'
+          ? 1
+          : matcher.kind === 'basename-pattern'
+            ? 2
+            : matcher.kind === 'basename'
+              ? 3
+              : 4,
+    })),
+  ).sort((left, right) => right.priority - left.priority);
   const match = (path: string): Option.Option<CodeGraphLanguageMatch> => {
     const normalized = normalizeRepositoryPath(path);
-    const basename = normalized.split('/').at(-1)?.toLowerCase() ?? '';
-    const entry = entries.find(candidate => matches(candidate.matcher, normalized, basename));
+    const basename =
+      Effect2.pipe(Effect2.pipe(normalized, EffectString.split('/')).at(-1), effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.toLowerCase),
+      ) ?? '';
+    const entry = Option.getOrUndefined(
+      EffectArray.findFirst(
+        entries,
+        __effectArrayValue => !!(candidate => matches(candidate.matcher, normalized, basename))(__effectArrayValue),
+      ),
+    );
     return entry
       ? Option.some({
           cacheIdentity: entry.cacheIdentity,
@@ -98,25 +107,33 @@ export function createCodeGraphLanguagePackRegistry(
         })
       : Option.none();
   };
-  const workspaceDetectors = [...new Set(packs.flatMap(pack => Option.toArray(pack.workspaceDetector)))];
+  const workspaceDetectors = [...new Set(EffectArray.flatMap(packs, pack => Option.toArray(pack.workspaceDetector)))];
   return {
     activeCacheIdentities: paths =>
-      [...new Set(paths.flatMap(path => Option.toArray(Option.map(match(path), value => value.cacheIdentity))))].sort(),
+      [
+        ...new Set(
+          EffectArray.flatMap(paths, path => Option.toArray(Option.map(match(path), value => value.cacheIdentity))),
+        ),
+      ].sort(),
     activeDerivationIdentities: paths =>
       [
         ...new Set(
-          paths.flatMap(path => Option.toArray(Option.map(match(path), value => packDerivationIdentity(value.pack)))),
+          EffectArray.flatMap(paths, path =>
+            Option.toArray(Option.map(match(path), value => packDerivationIdentity(value.pack))),
+          ),
         ),
       ].sort(),
     activePackProvenance: paths => {
-      const activeIds = new Set(paths.flatMap(path => Option.toArray(Option.map(match(path), value => value.pack.id))));
-      return packs
-        .filter(pack => activeIds.has(pack.id))
-        .map(codeGraphLanguagePackProvenance)
-        .sort((left, right) => left.id.localeCompare(right.id));
+      const activeIds = new Set(
+        EffectArray.flatMap(paths, path => Option.toArray(Option.map(match(path), value => value.pack.id))),
+      );
+      return EffectArray.map(
+        EffectArray.filter(packs, (pack, __effectArrayIndex) => __effectArrayIndex in packs && activeIds.has(pack.id)),
+        codeGraphLanguagePackProvenance,
+      ).sort((left, right) => Effect2.pipe(left.id, EffectString.localeCompare(right.id)));
     },
     cacheIdentityForPath: path => Option.map(match(path), value => value.cacheIdentity),
-    cacheIdentities: [...new Set(entries.map(entry => entry.cacheIdentity))].sort(),
+    cacheIdentities: [...new Set(EffectArray.map(entries, entry => entry.cacheIdentity))].sort(),
     discoverWorkspace: files =>
       Effect.forEach(workspaceDetectors, detector => detector.detect(files), {
         concurrency: 1,
@@ -175,45 +192,58 @@ export function codeGraphLanguagePackProvenance(pack: CodeGraphLanguagePack): Co
 }
 
 export function packCacheIdentity(pack: CodeGraphLanguagePack): string {
-  const matchers = pack.files
-    .map(matcher => `${matcher.kind}:${matcher.value.toLowerCase()}:${matcher.language}`)
-    .sort()
-    .join('\n');
-  const assets = pack.assets
-    .map(asset => `${asset.relativePath}:${asset.sha256}:${asset.abi}:${asset.version}`)
-    .sort()
-    .join('\n');
+  const matchers = EffectArray.join(
+    EffectArray.map(
+      pack.files,
+      matcher => `${matcher.kind}:${Effect2.pipe(matcher.value, EffectString.toLowerCase)}:${matcher.language}`,
+    ).sort(),
+    '\n',
+  );
+  const assets = EffectArray.join(
+    EffectArray.map(pack.assets, asset => `${asset.relativePath}:${asset.sha256}:${asset.abi}:${asset.version}`).sort(),
+    '\n',
+  );
   return cacheIdentityHash(
     pack,
-    [
-      'code-graph-language-pack-v3',
-      CODE_GRAPH_PARSER_FACTS_VERSION,
-      `derivation-inputs:${CODE_GRAPH_RATIONALE_INPUT_VERSION}`,
-      `id:${pack.id}`,
-      `extractor:${pack.extractor.version}`,
-      `parser-runtime:${pack.assets.length > 0 ? TREE_SITTER_RUNTIME_CACHE_IDENTITY : 'pack-owned'}`,
-      `files:\n${matchers}`,
-      `assets:\n${assets}`,
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'code-graph-language-pack-v3',
+        CODE_GRAPH_PARSER_FACTS_VERSION,
+        `derivation-inputs:${CODE_GRAPH_RATIONALE_INPUT_VERSION}`,
+        `id:${pack.id}`,
+        `extractor:${pack.extractor.version}`,
+        `parser-runtime:${pack.assets.length > 0 ? TREE_SITTER_RUNTIME_CACHE_IDENTITY : 'pack-owned'}`,
+        `files:\n${matchers}`,
+        `assets:\n${assets}`,
+      ],
+      '\n',
+    ),
   );
 }
 
 export function packDerivationIdentity(pack: CodeGraphLanguagePack): string {
-  const matchers = pack.files
-    .map(matcher => `${matcher.kind}:${matcher.value.toLowerCase()}:${matcher.language}:${matcher.role}`)
-    .sort()
-    .join('\n');
+  const matchers = EffectArray.join(
+    EffectArray.map(
+      pack.files,
+      matcher =>
+        `${matcher.kind}:${Effect2.pipe(matcher.value, EffectString.toLowerCase)}:${matcher.language}:${matcher.role}`,
+    ).sort(),
+    '\n',
+  );
   return derivationIdentityHash(
     pack,
-    [
-      'code-graph-language-pack-derivation-v1',
-      `postprocessors:${CODE_GRAPH_RATIONALE_EXTRACTOR_VERSION}`,
-      `id:${pack.id}`,
-      `version:${pack.version}`,
-      `resolver:${pack.resolutionStrategy.domain}:${pack.resolutionStrategy.version}`,
-      `capabilities:${[...pack.capabilities].sort().join(',')}`,
-      `files:\n${matchers}`,
-    ].join('\n'),
+    EffectArray.join(
+      [
+        'code-graph-language-pack-derivation-v1',
+        `postprocessors:${CODE_GRAPH_RATIONALE_EXTRACTOR_VERSION}`,
+        `id:${pack.id}`,
+        `version:${pack.version}`,
+        `resolver:${pack.resolutionStrategy.domain}:${pack.resolutionStrategy.version}`,
+        `capabilities:${EffectArray.join([...pack.capabilities].sort(), ',')}`,
+        `files:\n${matchers}`,
+      ],
+      '\n',
+    ),
   );
 }
 
@@ -235,13 +265,15 @@ function validatePacks(packs: readonly CodeGraphLanguagePack[]): void {
     for (const matcher of pack.files) {
       if (
         matcher.kind === 'basename-pattern' &&
-        (!matcher.value.includes('*') || matcher.value.includes('**') || /[/\\]/u.test(matcher.value))
+        (!Effect2.pipe(matcher.value, EffectString.includes('*')) ||
+          Effect2.pipe(matcher.value, EffectString.includes('**')) ||
+          /[/\\]/u.test(matcher.value))
       ) {
         throw CodeGraphLanguagePackError.make({
           message: `Invalid code graph basename pattern: ${matcher.value}.`,
         });
       }
-      const key = `${matcher.kind}:${matcher.value.toLowerCase()}`;
+      const key = `${matcher.kind}:${Effect2.pipe(matcher.value, EffectString.toLowerCase)}`;
       if (matchers.has(key)) {
         throw CodeGraphLanguagePackError.make({message: `Duplicate code graph file matcher: ${key}.`});
       }
@@ -251,25 +283,27 @@ function validatePacks(packs: readonly CodeGraphLanguagePack[]): void {
 }
 
 function matches(matcher: CodeGraphFileMatcher, path: string, basename: string): boolean {
-  const value = matcher.value.toLowerCase();
+  const value = Effect2.pipe(matcher.value, EffectString.toLowerCase);
   if (matcher.kind === 'basename') return basename === value;
   if (matcher.kind === 'basename-pattern') return basenamePattern(value).test(basename);
-  if (matcher.kind === 'path-suffix') return path.toLowerCase().endsWith(value);
-  return basename.endsWith(value);
+  if (matcher.kind === 'path-suffix') return Effect2.pipe(path, EffectString.toLowerCase, EffectString.endsWith(value));
+  return Effect2.pipe(basename, EffectString.endsWith(value));
 }
 
 function basenamePattern(value: string): RegExp {
   const cached = basenamePatterns.get(value);
   if (cached !== undefined) return cached;
-  const source = value
-    .split('*')
-    .map(part => part.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'))
-    .join('[^/]+');
+  const source = EffectArray.join(
+    EffectArray.map(Effect2.pipe(value, EffectString.split('*')), part =>
+      Effect2.pipe(part, EffectString.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')),
+    ),
+    '[^/]+',
+  );
   const compiled = new RegExp(`^${source}$`, 'u');
   basenamePatterns.set(value, compiled);
   return compiled;
 }
 
 function normalizeRepositoryPath(value: string): string {
-  return value.replace(/^\.\/+/, '').replace(/\/+/g, '/');
+  return Effect2.pipe(value, EffectString.replace(/^\.\/+/, ''), EffectString.replace(/\/+/g, '/'));
 }

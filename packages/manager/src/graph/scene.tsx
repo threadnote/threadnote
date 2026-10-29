@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import * as THREE from 'three';
 import {compareCodeUnits} from '@threadnote/graph/ordering';
@@ -25,6 +26,8 @@ import {
   type PositionedNode,
   type ViewState,
 } from './model.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export function ThreeGraph(props: {
   readonly focusRequest?: {readonly nodeId: string; readonly sequence: number};
@@ -48,7 +51,7 @@ export function ThreeGraph(props: {
     () =>
       props.relationFilter === 'all'
         ? props.graph.edges
-        : props.graph.edges.filter(edge => edge.relation === props.relationFilter),
+        : EffectArray.filter(props.graph.edges, edge => edge.relation === props.relationFilter),
     [props.graph.edges, props.relationFilter],
   );
   const baseLayout = useMemo(
@@ -63,7 +66,10 @@ export function ThreeGraph(props: {
   const neighborhoodEdges = useMemo(
     () =>
       props.selectedNodeId
-        ? displayEdges.filter(edge => edge.sourceId === props.selectedNodeId || edge.targetId === props.selectedNodeId)
+        ? EffectArray.filter(
+            displayEdges,
+            edge => edge.sourceId === props.selectedNodeId || edge.targetId === props.selectedNodeId,
+          )
         : [],
     [displayEdges, props.selectedNodeId],
   );
@@ -74,13 +80,19 @@ export function ThreeGraph(props: {
   const highlightedNodeIds = useMemo(
     () =>
       props.selectedNodeId
-        ? new Set([props.selectedNodeId, ...animatedNeighborhoodEdges.flatMap(edge => [edge.sourceId, edge.targetId])])
+        ? new Set([
+            props.selectedNodeId,
+            ...EffectArray.flatMap(animatedNeighborhoodEdges, edge => [edge.sourceId, edge.targetId]),
+          ])
         : undefined,
     [animatedNeighborhoodEdges, props.selectedNodeId],
   );
   const activeNodeIds = useMemo(() => {
     if (!props.selectedNodeId || props.focusMode === 'all') return undefined;
-    return new Set([props.selectedNodeId, ...displayEdges.flatMap(edge => [edge.sourceId, edge.targetId])]);
+    return new Set([
+      props.selectedNodeId,
+      ...EffectArray.flatMap(displayEdges, edge => [edge.sourceId, edge.targetId]),
+    ]);
   }, [displayEdges, props.focusMode, props.selectedNodeId]);
   const [view, setView] = useState<ViewState>(() => fittedView(layout, size));
   const viewRef = useRef(view);
@@ -156,8 +168,12 @@ export function ThreeGraph(props: {
 
     const edgePositions: number[] = [];
     const edgeColors: number[] = [];
-    const renderedEdges = displayEdges.filter(
-      edge => layout.nodesById.has(edge.sourceId) && layout.nodesById.has(edge.targetId),
+    const renderedEdges = EffectArray.filter(
+      displayEdges,
+      (edge, __effectArrayIndex) =>
+        __effectArrayIndex in displayEdges &&
+        layout.nodesById.has(edge.sourceId) &&
+        layout.nodesById.has(edge.targetId),
     );
     for (const edge of renderedEdges) {
       const source = layout.nodesById.get(edge.sourceId);
@@ -200,8 +216,12 @@ export function ThreeGraph(props: {
     const points = new THREE.Points(nodeGeometry, nodeMaterial);
     scene.add(points);
 
-    const renderedHighlightedEdges = animatedNeighborhoodEdges.filter(
-      edge => layout.nodesById.has(edge.sourceId) && layout.nodesById.has(edge.targetId),
+    const renderedHighlightedEdges = EffectArray.filter(
+      animatedNeighborhoodEdges,
+      (edge, __effectArrayIndex) =>
+        __effectArrayIndex in animatedNeighborhoodEdges &&
+        layout.nodesById.has(edge.sourceId) &&
+        layout.nodesById.has(edge.targetId),
     );
     const highlightPositions = directionalEdgePositions(renderedHighlightedEdges, layout.nodesById, currentPositions);
     let highlightGeometry: THREE.BufferGeometry | undefined;
@@ -244,7 +264,7 @@ export function ThreeGraph(props: {
       edges: renderedEdges,
       highlightedEdges: renderedHighlightedEdges,
       highlightPosition,
-      nodeIds: layout.nodes.map(node => node.id),
+      nodeIds: EffectArray.map(layout.nodes, node => node.id),
       nodePosition,
       pointMaterials: selectedMaterial ? [nodeMaterial, selectedMaterial] : [nodeMaterial],
       renderer,
@@ -281,7 +301,7 @@ export function ThreeGraph(props: {
   }, [size, view]);
 
   useEffect(() => {
-    const currentNodes = baseLayout.nodes.map(node => {
+    const currentNodes = EffectArray.map(baseLayout.nodes, node => {
       const settledNode = layout.nodesById.get(node.id) ?? node;
       const position = graphPosition(settledNode, livePositionsRef.current);
       return {...node, x: position.x, y: position.y};
@@ -298,7 +318,7 @@ export function ThreeGraph(props: {
       Math.max(FOCUS_LAYOUT_ZOOM, viewRef.current.zoom),
     );
     const simulationIds = new Set([...livePositionsRef.current.keys(), ...settledPositions.keys(), ...targets.keys()]);
-    const particles = [...simulationIds].flatMap(nodeId => {
+    const particles = EffectArray.flatMap([...simulationIds], nodeId => {
       const baseNode = baseLayout.nodesById.get(nodeId);
       const currentNode = layout.nodesById.get(nodeId) ?? baseNode;
       if (!baseNode || !currentNode) return [];
@@ -342,7 +362,10 @@ export function ThreeGraph(props: {
 
     if (
       reducedMotion ||
-      particles.every(particle => Math.hypot(particle.targetX - particle.x, particle.targetY - particle.y) < 0.01)
+      EffectArray.every(
+        particles,
+        particle => Math.hypot(particle.targetX - particle.x, particle.targetY - particle.y) < 0.01,
+      )
     ) {
       settle();
       return;
@@ -454,7 +477,7 @@ export function ThreeGraph(props: {
         ref={canvasRef}
       />
       <div className="graph-labels" aria-hidden="true">
-        {labels.map(label => (
+        {EffectArray.map(labels, label => (
           <span
             className={
               label.node.id === props.selectedNodeId
@@ -514,21 +537,21 @@ function buildGraphLayout(
 ): GraphLayout {
   const sizeValues = graphNodeSizeValues(sizingEdges, sizeMetric);
   const nodes = graph.mode === 'overview' ? overviewLayout(graph.nodes) : detailLayout(graph.nodes, sizeValues);
-  const nodesById = new Map(nodes.map(node => [node.id, node]));
-  const extentX = Math.max(260, ...nodes.map(node => Math.abs(node.x) + node.radius));
-  const extentY = Math.max(200, ...nodes.map(node => Math.abs(node.y) + node.radius));
+  const nodesById = new Map(EffectArray.map(nodes, node => [node.id, node]));
+  const extentX = Math.max(260, ...EffectArray.map(nodes, node => Math.abs(node.x) + node.radius));
+  const extentY = Math.max(200, ...EffectArray.map(nodes, node => Math.abs(node.y) + node.radius));
   return {bounds: {height: extentY * 2.2, width: extentX * 2.2}, nodes, nodesById};
 }
 
 function graphLayoutWithPositions(layout: GraphLayout, positions: ReadonlyMap<string, GraphPosition>): GraphLayout {
   if (positions.size === 0) return layout;
-  const nodes = layout.nodes.map(node => {
+  const nodes = EffectArray.map(layout.nodes, node => {
     const position = positions.get(node.id);
     return position ? {...node, x: position.x, y: position.y} : node;
   });
-  const nodesById = new Map(nodes.map(node => [node.id, node]));
-  const extentX = Math.max(260, ...nodes.map(node => Math.abs(node.x) + node.radius));
-  const extentY = Math.max(200, ...nodes.map(node => Math.abs(node.y) + node.radius));
+  const nodesById = new Map(EffectArray.map(nodes, node => [node.id, node]));
+  const extentX = Math.max(260, ...EffectArray.map(nodes, node => Math.abs(node.x) + node.radius));
+  const extentY = Math.max(200, ...EffectArray.map(nodes, node => Math.abs(node.y) + node.radius));
   return {bounds: {height: extentY * 2.2, width: extentX * 2.2}, nodes, nodesById};
 }
 
@@ -546,7 +569,7 @@ export function graphFocusLayoutTargets(
   zoom = FOCUS_LAYOUT_ZOOM,
 ): ReadonlyMap<string, GraphPosition> {
   if (!selectedNodeId) return new Map();
-  const nodesById = new Map(nodes.map(node => [node.id, node]));
+  const nodesById = new Map(EffectArray.map(nodes, node => [node.id, node]));
   const selectedNode = nodesById.get(selectedNodeId);
   if (!selectedNode) return new Map();
   const neighborIds = new Set<string>();
@@ -555,13 +578,15 @@ export function graphFocusLayoutTargets(
     if (edge.targetId === selectedNodeId && nodesById.has(edge.sourceId)) neighborIds.add(edge.sourceId);
   }
   neighborIds.delete(selectedNodeId);
-  const orderedNeighbors = [...neighborIds]
-    .map(nodeId => nodesById.get(nodeId))
-    .filter(node => node !== undefined)
-    .sort((left, right) => compareCodeUnits(left.label, right.label) || compareCodeUnits(left.id, right.id));
+  const orderedNeighbors = EffectArray.filter(
+    EffectArray.map([...neighborIds], nodeId => nodesById.get(nodeId)),
+    node => node !== undefined,
+  ).sort((left, right) => compareCodeUnits(left.label, right.label) || compareCodeUnits(left.id, right.id));
   const highlightedIds = new Set([selectedNodeId, ...neighborIds]);
-  const visibleObstacles = nodes
-    .filter(node => !highlightedIds.has(node.id) && labelSizes.has(node.id))
+  const visibleObstacles = EffectArray.filter(
+    nodes,
+    __effectArrayValue => !!(node => !highlightedIds.has(node.id) && labelSizes.has(node.id))(__effectArrayValue),
+  )
     .sort((left, right) => compareCodeUnits(left.id, right.id))
     .slice(0, 180);
   const focusNodes = [
@@ -572,14 +597,14 @@ export function graphFocusLayoutTargets(
       highlighted: true,
       ...selectedNode,
     },
-    ...orderedNeighbors.map(node => ({
+    ...EffectArray.map(orderedNeighbors, node => ({
       anchorX: node.x,
       anchorY: node.y,
       fixed: false,
       highlighted: true,
       ...node,
     })),
-    ...visibleObstacles.map(node => ({
+    ...EffectArray.map(visibleObstacles, node => ({
       anchorX: node.x,
       anchorY: node.y,
       fixed: false,
@@ -588,12 +613,18 @@ export function graphFocusLayoutTargets(
     })),
   ];
   const safeZoom = Math.max(0.5, zoom);
-  const animatedNeighbors = focusNodes.filter(node => node.highlighted && !node.fixed);
+  const animatedNeighbors = EffectArray.filter(focusNodes, node => node.highlighted && !node.fixed);
   const maximumLabelWidth = Math.max(
     72,
-    ...animatedNeighbors.map(node => labelSizes.get(node.id)?.width ?? Math.min(150, node.label.length * 6.2)),
+    ...EffectArray.map(
+      animatedNeighbors,
+      node => labelSizes.get(node.id)?.width ?? Math.min(150, node.label.length * 6.2),
+    ),
   );
-  const maximumLabelHeight = Math.max(14, ...animatedNeighbors.map(node => labelSizes.get(node.id)?.height ?? 14));
+  const maximumLabelHeight = Math.max(
+    14,
+    ...EffectArray.map(animatedNeighbors, node => labelSizes.get(node.id)?.height ?? 14),
+  );
   const columns = Math.max(2, Math.ceil(Math.sqrt((animatedNeighbors.length + 1) * 0.35)));
   const rows = Math.ceil((animatedNeighbors.length + 1) / columns);
   const cellWidth = (Math.min(150, maximumLabelWidth) + 14) / safeZoom;
@@ -606,10 +637,11 @@ export function graphFocusLayoutTargets(
       y: ((rows - 1) / 2 - row) * cellHeight,
     };
   });
-  const centerSlot = slots.reduce(
+  const centerSlot = EffectArray.reduce(
+    slots,
+    {distance: Number.POSITIVE_INFINITY, index: 0},
     (closest, slot, index) =>
       Math.hypot(slot.x, slot.y) < closest.distance ? {distance: Math.hypot(slot.x, slot.y), index} : closest,
-    {distance: Number.POSITIVE_INFINITY, index: 0},
   );
   slots.splice(centerSlot.index, 1);
   slots.sort(
@@ -641,7 +673,7 @@ export function graphFocusLayoutTargets(
   // maximum-cardinality focus work. Dense graphs benefit more from responsive
   // interaction than from repeatedly refining already-overlapping offscreen labels.
   const collisionIterations = Math.max(10, Math.min(18, Math.floor(5_000 / focusNodes.length)));
-  const movableFocusNodes = focusNodes.filter(node => !node.fixed);
+  const movableFocusNodes = EffectArray.filter(focusNodes, node => !node.fixed);
   for (let iteration = 0; iteration < collisionIterations; iteration += 1) {
     for (const node of movableFocusNodes) {
       node.x += (node.anchorX - node.x) * 0.006;
@@ -661,7 +693,7 @@ export function graphFocusLayoutTargets(
       }
     }
   }
-  return new Map(focusNodes.map(node => [node.id, {x: node.x, y: node.y}]));
+  return new Map(EffectArray.map(focusNodes, node => [node.id, {x: node.x, y: node.y}]));
 }
 
 function focusCollisionPairs(
@@ -677,19 +709,17 @@ function focusCollisionPairs(
   labelSizes: ReadonlyMap<string, {readonly height: number; readonly width: number}>,
   zoom: number,
 ): readonly (readonly [number, number])[] {
-  const bounds = nodes
-    .map((node, index) => {
-      const boxes = focusNodeBoxes(node, labelSizes.get(node.id), zoom, node.fixed);
-      return {
-        bottom: Math.max(...boxes.map(box => box.bottom)),
-        highlighted: node.highlighted,
-        index,
-        left: Math.min(...boxes.map(box => box.left)),
-        right: Math.max(...boxes.map(box => box.right)),
-        top: Math.min(...boxes.map(box => box.top)),
-      };
-    })
-    .sort((left, right) => left.left - right.left || left.index - right.index);
+  const bounds = EffectArray.map(nodes, (node, index) => {
+    const boxes = focusNodeBoxes(node, labelSizes.get(node.id), zoom, node.fixed);
+    return {
+      bottom: Math.max(...EffectArray.map(boxes, box => box.bottom)),
+      highlighted: node.highlighted,
+      index,
+      left: Math.min(...EffectArray.map(boxes, box => box.left)),
+      right: Math.max(...EffectArray.map(boxes, box => box.right)),
+      top: Math.min(...EffectArray.map(boxes, box => box.top)),
+    };
+  }).sort((left, right) => left.left - right.left || left.index - right.index);
   const pairs: Array<readonly [number, number]> = [];
   for (const [leftPosition, left] of bounds.entries()) {
     for (let rightPosition = leftPosition + 1; rightPosition < bounds.length; rightPosition += 1) {
@@ -734,14 +764,21 @@ function separateFocusNodes(
       const leftCenterY = (leftBox.top + leftBox.bottom) / 2;
       const rightCenterX = (rightBox.left + rightBox.right) / 2;
       const rightCenterY = (rightBox.top + rightBox.bottom) / 2;
-      const fallback = hashString(`${left.id}:${right.id}`);
       if (overlapX < overlapY) {
         const direction =
-          leftCenterX === rightCenterX ? (fallback % 2 === 0 ? -1 : 1) : Math.sign(leftCenterX - rightCenterX);
+          leftCenterX === rightCenterX
+            ? hashString(`${left.id}:${right.id}`) % 2 === 0
+              ? -1
+              : 1
+            : Math.sign(leftCenterX - rightCenterX);
         moveFocusPair(left, right, direction * (overlapX + 2 / zoom), 0);
       } else {
         const direction =
-          leftCenterY === rightCenterY ? (fallback % 2 === 0 ? -1 : 1) : Math.sign(leftCenterY - rightCenterY);
+          leftCenterY === rightCenterY
+            ? hashString(`${left.id}:${right.id}`) % 2 === 0
+              ? -1
+              : 1
+            : Math.sign(leftCenterY - rightCenterY);
         moveFocusPair(left, right, 0, direction * (overlapY + 2 / zoom));
       }
     }
@@ -807,7 +844,7 @@ function overviewLayout(nodes: readonly GraphNode[]): readonly PositionedNode[] 
       (right.symbolCount ?? right.degree) - (left.symbolCount ?? left.degree) ||
       compareCodeUnits(left.label, right.label),
   );
-  return ordered.map((node, index) => {
+  return EffectArray.map(ordered, (node, index) => {
     const angle = index * 2.399963;
     const ring = index === 0 ? 0 : 78 + Math.sqrt(index) * 84;
     return positionNode(node, Math.cos(angle) * ring, Math.sin(angle) * ring, index);
@@ -879,8 +916,8 @@ function colorForNode(node: GraphNode, fallbackIndex: number): string {
 
 function graphGroup(node: GraphNode): string {
   if (!node.path) return node.projectId;
-  const parts = node.path.split('/');
-  return parts.slice(0, Math.min(2, Math.max(1, parts.length - 1))).join('/');
+  const parts = Effect.pipe(node.path, EffectString.split('/'));
+  return EffectArray.join(parts.slice(0, Math.min(2, Math.max(1, parts.length - 1))), '/');
 }
 
 function fittedView(layout: GraphLayout, size: {readonly height: number; readonly width: number}): ViewState {
@@ -1060,32 +1097,38 @@ function visibleLabels(
         : Math.min(MAX_FOCUSED_LABELS + 1, highlightedNodeIds?.size ?? 0);
   const maximum = Math.max(baseMaximum, highlightedMaximum);
   let focusedLabelCount = 0;
-  return [...layout.nodes]
-    .filter(node => !activeNodeIds || activeNodeIds.has(node.id))
-    .flatMap(node => {
+  const nodes: readonly PositionedNode[] = [...layout.nodes];
+  const activeNodes = EffectArray.filter(nodes, node => !activeNodeIds || activeNodeIds.has(node.id));
+  const positioned: {node: PositionedNode; x: number; y: number}[] = EffectArray.flatMap(
+    activeNodes,
+    (node): {node: PositionedNode; x: number; y: number}[] => {
       const position = graphPosition(node, positions);
       const x = size.width / 2 + (position.x - view.x) * view.zoom;
       const y = size.height / 2 - (position.y - view.y) * view.zoom;
       return x < -80 || x > size.width + 80 || y < -30 || y > size.height + 30 ? [] : [{node, x, y}];
-    })
-    .sort((left, right) => {
-      if (left.node.id === selectedNodeId) return -1;
-      if (right.node.id === selectedNodeId) return 1;
-      if (highlightedNodeIds?.has(left.node.id) && !highlightedNodeIds.has(right.node.id)) return -1;
-      if (highlightedNodeIds?.has(right.node.id) && !highlightedNodeIds.has(left.node.id)) return 1;
-      return (
-        right.node.degree - left.node.degree ||
-        right.node.radius - left.node.radius ||
-        compareCodeUnits(left.node.label, right.node.label)
-      );
-    })
-    .filter(({node}) => {
-      if (node.id === selectedNodeId || !highlightedNodeIds?.has(node.id)) return true;
-      focusedLabelCount += 1;
-      return focusedLabelCount <= MAX_FOCUSED_LABELS;
-    })
-    .map(({node, x, y}) => ({node, x: x + node.radius + 4, y}))
-    .slice(0, maximum);
+    },
+  );
+  return EffectArray.map(
+    EffectArray.filter(
+      positioned.sort((left, right) => {
+        if (left.node.id === selectedNodeId) return -1;
+        if (right.node.id === selectedNodeId) return 1;
+        if (highlightedNodeIds?.has(left.node.id) && !highlightedNodeIds.has(right.node.id)) return -1;
+        if (highlightedNodeIds?.has(right.node.id) && !highlightedNodeIds.has(left.node.id)) return 1;
+        return (
+          right.node.degree - left.node.degree ||
+          right.node.radius - left.node.radius ||
+          compareCodeUnits(left.node.label, right.node.label)
+        );
+      }),
+      ({node}) => {
+        if (node.id === selectedNodeId || !highlightedNodeIds?.has(node.id)) return true;
+        focusedLabelCount += 1;
+        return focusedLabelCount <= MAX_FOCUSED_LABELS;
+      },
+    ),
+    ({node, x, y}) => ({node, x: x + node.radius + 4, y}),
+  ).slice(0, maximum);
 }
 
 function directionalEdgePositions(
@@ -1182,7 +1225,11 @@ function graphPointViewScale(zoom: number): number {
 function hashString(value: string): number {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
+    hash ^= Effect.pipe(
+      value,
+      EffectString.charCodeAt(index),
+      Effect.Option.getOrElse(() => NaN),
+    );
     hash = Math.imul(hash, 16777619);
   }
   return hash | 0;

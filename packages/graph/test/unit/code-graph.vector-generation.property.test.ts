@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
@@ -19,6 +20,8 @@ import {
   CODE_GRAPH_VECTOR_RETIREMENT_STATE_TABLE_SQL,
   CODE_GRAPH_VECTOR_RETIREMENTS_TABLE_SQL,
 } from '../../src/vector/retirement.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 effectIt.layer(BunServices.layer)(it => {
   it.effect.prop(
@@ -53,7 +56,7 @@ effectIt.layer(BunServices.layer)(it => {
         yield* initializeCodeGraphGenerationSchema(sql);
         yield* sql.unsafe(
           "INSERT INTO vector_generations VALUES ('target', 'snapshot', 'model', ?, 1, 1, 0, 'building', 'now')",
-          ['a'.repeat(64)],
+          [Effect2.pipe('a', EffectString.repeat(64))],
         );
         let owner = 'owner-0';
         let offset = 0;
@@ -81,7 +84,7 @@ effectIt.layer(BunServices.layer)(it => {
             (_, n) =>
               [
                 'target',
-                String(offset + n).padStart(4, '0'),
+                Effect2.pipe(String(offset + n), EffectString.padStart(4, '0')),
                 `fingerprint-${offset + n}`,
                 new Uint8Array([offset + n]),
               ] as const,
@@ -115,16 +118,20 @@ effectIt.layer(BunServices.layer)(it => {
         yield* Scope.close(connection.scope, Exit.void);
         connection = yield* open;
         sql = connection.sql;
-        const expectedCount = pageSizes.reduce((sum, size) => sum + size, 0);
+        const expectedCount = EffectArray.reduce(pageSizes, 0, (sum, size) => sum + size);
         expect(yield* completeCodeGraphGeneration(sql, 'target', owner)).toBe(expectedCount);
         const rows = yield* sql.unsafe<{symbol_id: string; fingerprint: string; vector: Uint8Array}>(
           'SELECT symbol_id, fingerprint, vector FROM vectors ORDER BY symbol_id',
         );
         expect(
-          rows.map(row => ({id: row.symbol_id, fingerprint: row.fingerprint, payload: Array.from(row.vector)})),
+          EffectArray.map(rows, row => ({
+            id: row.symbol_id,
+            fingerprint: row.fingerprint,
+            payload: Array.from(row.vector),
+          })),
         ).toEqual(
           Array.from({length: expectedCount}, (_, n) => ({
-            id: String(n).padStart(4, '0'),
+            id: Effect2.pipe(String(n), EffectString.padStart(4, '0')),
             fingerprint: `fingerprint-${n}`,
             payload: [n],
           })),

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {parseBearerAccessToken} from '@threadnote/protocol/access-token';
@@ -6,8 +7,14 @@ import {
   makeGraphControlRateLimit,
   parseGraphControlPolicy,
 } from '@threadnote/graph/sharing/control/authorization';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const scope = {organization: 'acme', profileDigest: `sha256:${'b'.repeat(64)}`, repositoryId: 'a'.repeat(64)};
+const scope = {
+  organization: 'acme',
+  profileDigest: `sha256:${Effect.pipe('b', EffectString.repeat(64))}`,
+  repositoryId: Effect.pipe('a', EffectString.repeat(64)),
+};
 const principal = {issuer: 'https://identity.example.test/', scopes: new Set(['graph:read']), subject: 'reader'};
 const policy = {
   ...scope,
@@ -20,7 +27,7 @@ const policy = {
 
 describe('graph metadata authorization', () => {
   it('rejects an oversized bearer before verification', () => {
-    expect(() => parseBearerAccessToken(`Bearer ${'x'.repeat(16 * 1024 + 1)}`)).toThrow(
+    expect(() => parseBearerAccessToken(`Bearer ${Effect.pipe('x', EffectString.repeat(16 * 1024 + 1))}`)).toThrow(
       'The bearer access token is invalid.',
     );
   });
@@ -30,8 +37,8 @@ describe('graph metadata authorization', () => {
     expect(graphControlGrantAllowsRead(parsed, scope, principal, 1000)).toBe(true);
     for (const changed of [
       {...scope, organization: 'other'},
-      {...scope, repositoryId: 'c'.repeat(64)},
-      {...scope, profileDigest: `sha256:${'c'.repeat(64)}`},
+      {...scope, repositoryId: Effect.pipe('c', EffectString.repeat(64))},
+      {...scope, profileDigest: `sha256:${Effect.pipe('c', EffectString.repeat(64))}`},
     ])
       expect(graphControlGrantAllowsRead(parsed, changed, principal, 1000)).toBe(false);
     for (const changed of [
@@ -60,13 +67,13 @@ describe('graph metadata authorization', () => {
   it('grant removal cannot create access, and authorization never mutates input', () => {
     FC.assert(
       FC.property(FC.array(FC.boolean(), {maxLength: 32}), flags => {
-        const grants = flags.map((enabled, index) => ({
+        const grants = EffectArray.map(flags, (enabled, index) => ({
           expiresAt: 2000,
           scopes: enabled ? ['graph:read'] : [],
           subject: `reader-${index}`,
         }));
         const full = parseGraphControlPolicy({...policy, grants});
-        const reduced = {...full, grants: full.grants.filter((_grant, index) => index % 2 === 0)};
+        const reduced = {...full, grants: EffectArray.filter(full.grants, (_grant, index) => index % 2 === 0)};
         const before = JSON.stringify({full, reduced});
         for (let index = 0; index < flags.length; index += 1) {
           const candidate = {...principal, subject: `reader-${index}`};

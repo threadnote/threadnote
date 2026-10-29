@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, DateTime, Effect, FileSystem, Option, Path, Predicate, Result, Schema} from 'effect';
 
 import {SystemInfo} from '@threadnote/platform/system';
@@ -46,11 +47,17 @@ import {
   readFileIfExists,
   runCommand,
 } from '../utils.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class ShareOperationError extends Schema.TaggedError<ShareOperationError>()('ShareOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
+class ShareOperationError extends Schema.TaggedError<ShareOperationError, {readonly brand: unique symbol}>()(
+  'ShareOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
 
 function shareOperationError(cause: unknown): ShareOperationError {
   return Schema.is(ShareOperationError)(cause)
@@ -439,8 +446,10 @@ const ensureSharedGitignore = Effect.fn('share.ensureSharedGitignore')(function*
   // them can `git update-index --skip-worktree .gitignore` to suppress this.
   const gitignorePath = yield* pathJoin(worktree, '.gitignore');
   const existing = (yield* readFileIfExists(gitignorePath)) ?? '';
-  const lines = existing.split('\n').map(line => line.trim());
-  const missingPatterns = SHARED_GITIGNORE_PATTERNS.filter(pattern => !lines.includes(pattern));
+  const lines = EffectArray.map(Effect2.pipe(existing, EffectString.split('\n')), line =>
+    Effect2.pipe(line, EffectString.trim),
+  );
+  const missingPatterns = EffectArray.filter(SHARED_GITIGNORE_PATTERNS, pattern => !lines.includes(pattern));
   if (missingPatterns.length === 0) {
     return;
   }
@@ -449,7 +458,7 @@ const ensureSharedGitignore = Effect.fn('share.ensureSharedGitignore')(function*
   // comment lines.
   const hasHeader = lines.includes(SHARED_GITIGNORE_HEADER);
   const segments: string[] = [];
-  if (existing.length > 0 && !existing.endsWith('\n')) {
+  if (existing.length > 0 && !Effect2.pipe(existing, EffectString.endsWith('\n'))) {
     segments.push('\n');
   }
   if (existing.length > 0) {
@@ -458,9 +467,9 @@ const ensureSharedGitignore = Effect.fn('share.ensureSharedGitignore')(function*
   if (!hasHeader) {
     segments.push(SHARED_GITIGNORE_HEADER, '\n');
   }
-  segments.push(missingPatterns.join('\n'), '\n');
-  yield* writeFile(gitignorePath, `${existing}${segments.join('')}`, {encoding: 'utf8'});
-  yield* Console.log(`Added ${missingPatterns.join(', ')} to ${yield* portablePath(gitignorePath)}`);
+  segments.push(EffectArray.join(missingPatterns, '\n'), '\n');
+  yield* writeFile(gitignorePath, `${existing}${EffectArray.join(segments, '')}`, {encoding: 'utf8'});
+  yield* Console.log(`Added ${EffectArray.join(missingPatterns, ', ')} to ${yield* portablePath(gitignorePath)}`);
   yield* maybeRun(false, git, ['-C', worktree, 'add', '.gitignore']);
   const commitResult = yield* runCommand(
     git,
@@ -468,7 +477,8 @@ const ensureSharedGitignore = Effect.fn('share.ensureSharedGitignore')(function*
     {allowFailure: true},
   );
   if (commitResult.exitCode !== 0) {
-    const detail = commitResult.stderr.trim() || commitResult.stdout.trim();
+    const detail =
+      Effect2.pipe(commitResult.stderr, EffectString.trim) || Effect2.pipe(commitResult.stdout, EffectString.trim);
     if (!/nothing to commit|no changes added/i.test(detail)) {
       yield* Console.warn(
         `.gitignore housekeeping commit was rejected (${detail || 'unknown'}); it will be retried on the next share sync.`,
@@ -510,13 +520,14 @@ const loadPendingReindexes = Effect.fn('share.loadPendingReindexes')(function* (
     return;
   }
   const parsed = parseJsonConfigObject(raw);
-  if (!parsed || typeof parsed.teams !== 'object' || parsed.teams === null || Array.isArray(parsed.teams)) {
+  if (!parsed || typeof parsed.teams !== 'object' || parsed.teams === null || EffectArray.isArray(parsed.teams)) {
     state.pendingReindexes = new Map();
     return;
   }
   const pending = new Map<string, readonly ChangedFile[]>();
+  // oxlint-disable-next-line effecttsgo/prefer-effect-record -- JSON-decoded team maps are arbitrary heterogeneous objects.
   for (const [team, value] of Object.entries(parsed.teams)) {
-    if (!Array.isArray(value)) {
+    if (!EffectArray.isArray(value)) {
       continue;
     }
     const changes: ChangedFile[] = [];
@@ -556,7 +567,7 @@ const writePendingReindexes = Effect.fn('share.writePendingReindexes')(function*
     return;
   }
   const contents: PendingReindexFile = {
-    teams: Object.fromEntries(state.pendingReindexes),
+    teams: EffectRecord.fromEntries(state.pendingReindexes),
     version: 1,
   };
   yield* mkdir(yield* pathDirname(path), {recursive: true});
@@ -575,7 +586,7 @@ function assertSafeShareRelativePath(relativePath: string): string {
 }
 
 function normalizeTeamName(input: string | undefined): string {
-  const candidate = (input ?? 'default').trim();
+  const candidate = Effect2.pipe(input ?? 'default', EffectString.trim);
   if (!candidate) {
     return 'default';
   }
@@ -616,7 +627,8 @@ export const readTeamsFile = Effect.fn('share.readTeamsFile')(function* (config:
     });
   }
   const teams: Record<string, ShareTeamConfig> = {};
-  if (typeof parsed.teams === 'object' && parsed.teams !== null && !Array.isArray(parsed.teams)) {
+  if (typeof parsed.teams === 'object' && parsed.teams !== null && !EffectArray.isArray(parsed.teams)) {
+    // oxlint-disable-next-line effecttsgo/prefer-effect-record -- JSON-decoded team maps are arbitrary heterogeneous objects.
     for (const [name, value] of Object.entries(parsed.teams)) {
       if (!Predicate.isObject(value)) {
         yield* Console.warn(`Skipping non-object team entry "${name}" in ${path}.`);
@@ -666,14 +678,17 @@ export const resolveTeam = Effect.fn('share.resolveTeam')(function* (
   requested: string | undefined,
 ) {
   const teamsFile = yield* readTeamsFile(config);
-  const entries = Object.entries(teamsFile.teams);
+  const entries = EffectRecord.toEntries(teamsFile.teams);
   if (entries.length === 0) {
     throw ShareOperationError.make({message: 'No shared teams configured. Run: threadnote share init <remote-url>'});
   }
   const wantName = requested ? normalizeTeamName(requested) : (teamsFile.defaultTeam ?? entries[0][0]);
   const found = teamsFile.teams[wantName];
   if (!found) {
-    const known = entries.map(([name]) => name).join(', ');
+    const known = EffectArray.join(
+      EffectArray.map(entries, ([name]) => name),
+      ', ',
+    );
     throw ShareOperationError.make({message: `Team "${wantName}" is not configured. Known teams: ${known}`});
   }
   return {config: found, name: wantName};
@@ -703,7 +718,7 @@ const assertWorktreeUsable = Effect.fn('share.assertWorktreeUsable')(function* (
   }
   const entries = yield* readdir(worktree);
   if (entries.length > 0) {
-    const preview = entries.slice(0, 5).join(', ');
+    const preview = EffectArray.join(entries.slice(0, 5), ', ');
     const suffix = entries.length > 5 ? `, +${entries.length - 5} more` : '';
     throw ShareOperationError.make({
       message: `Worktree ${worktree} is not empty (contains: ${preview}${suffix}). Move or remove its contents, then retry threadnote share init.`,
@@ -742,7 +757,7 @@ const walkMemoryFiles = Effect.fn('share.walkMemoryFiles')(function* (root: stri
         if (depth === 0) {
           continue;
         }
-        if (!entry.name.endsWith('.md') || OV_SUMMARY_FILES.includes(entry.name)) {
+        if (!Effect2.pipe(entry.name, EffectString.endsWith('.md')) || OV_SUMMARY_FILES.includes(entry.name)) {
           continue;
         }
         out.push(full);
@@ -757,7 +772,8 @@ const workfileToResourceUri = Effect.fn('share.workfileToResourceUri')(function*
   team: ShareTeamConfig,
   filePath: string,
 ) {
-  const rel = (yield* pathRelative(team.worktree, filePath)).split(yield* pathSeparator).join('/');
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+  const rel = EffectArray.join((yield* pathRelative(team.worktree, filePath)).split(yield* pathSeparator), '/');
   return `threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/${team.name}/${rel}`;
 });
 
@@ -769,10 +785,10 @@ export function sharedTeamNameForUri(config: ShareRuntime, uri: string): string 
   const canonicalUri = canonicalResourceInput(uri);
   if (!canonicalUri) return undefined;
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/`;
-  if (!canonicalUri.startsWith(prefix)) {
+  if (!Effect2.pipe(canonicalUri, EffectString.startsWith(prefix))) {
     return undefined;
   }
-  const [team] = canonicalUri.slice(prefix.length).split('/');
+  const [team] = Effect2.pipe(canonicalUri, EffectString.slice(prefix.length), EffectString.split('/'));
   return team || undefined;
 }
 
@@ -780,29 +796,40 @@ export function sharedMemoryUriParts(config: ShareRuntime, uri: string): SharedM
   const canonicalUri = canonicalResourceInput(uri);
   if (!canonicalUri) return undefined;
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/`;
-  if (!canonicalUri.startsWith(prefix)) {
+  if (!Effect2.pipe(canonicalUri, EffectString.startsWith(prefix))) {
     return undefined;
   }
-  const [team, kind, scope, project, ...topicParts] = canonicalUri.slice(prefix.length).split('/');
+  const [team, kind, scope, project, ...topicParts] = Effect2.pipe(
+    canonicalUri,
+    EffectString.slice(prefix.length),
+    EffectString.split('/'),
+  );
   if (!team) {
     return undefined;
   }
   if (kind !== 'durable' || scope !== 'projects' || !project || topicParts.length === 0) {
     return {team};
   }
-  const topicPath = topicParts.join('/');
+  const topicPath = EffectArray.join(topicParts, '/');
   return {
     kind,
     project,
     team,
-    topic: topicPath.endsWith('.md') ? topicPath.slice(0, -'.md'.length) : topicPath,
+    topic: Effect2.pipe(topicPath, EffectString.endsWith('.md'))
+      ? Effect2.pipe(topicPath, EffectString.slice(0, -'.md'.length))
+      : topicPath,
   };
 }
 
 function isInTeamNamespace(config: ShareRuntime, uri: string, team: string): boolean {
   return (
-    canonicalResourceInput(uri)?.startsWith(
-      `threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/${team}/`,
+    Effect2.pipe(canonicalResourceInput(uri), effectOptionalString =>
+      effectOptionalString == null
+        ? undefined
+        : Effect2.pipe(
+            effectOptionalString,
+            EffectString.startsWith(`threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/${team}/`),
+          ),
     ) === true
   );
 }
@@ -814,13 +841,13 @@ export function sharedUriFor(config: ShareRuntime, personalUri: string, team: st
   }
   const canonicalUri = resource.canonicalUri;
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/`;
-  if (!canonicalUri.startsWith(prefix)) {
+  if (!Effect2.pipe(canonicalUri, EffectString.startsWith(prefix))) {
     throw ShareOperationError.make({
       message: `Refusing to publish memory outside the current user namespace: ${personalUri}`,
     });
   }
-  const rest = canonicalUri.slice(prefix.length);
-  if (!rest.startsWith('durable/projects/')) {
+  const rest = Effect2.pipe(canonicalUri, EffectString.slice(prefix.length));
+  if (!Effect2.pipe(rest, EffectString.startsWith('durable/projects/'))) {
     throw ShareOperationError.make({
       message: `Refusing to share ${personalUri}: only personal durable memories under durable/projects can enter a shared team.`,
     });
@@ -831,22 +858,22 @@ export function sharedUriFor(config: ShareRuntime, personalUri: string, team: st
 export function personalUriFor(config: ShareRuntime, sharedUri: string, team: string): string {
   const canonicalUri = parseResourceId(sharedUri).canonicalUri;
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/${team}/`;
-  if (!canonicalUri.startsWith(prefix)) {
+  if (!Effect2.pipe(canonicalUri, EffectString.startsWith(prefix))) {
     throw ShareOperationError.make({
       message: `Refusing to unpublish a URI outside team "${team}" shared namespace: ${sharedUri}`,
     });
   }
-  const rest = canonicalUri.slice(prefix.length);
+  const rest = Effect2.pipe(canonicalUri, EffectString.slice(prefix.length));
   return `threadnote://user/${uriSegment(config.user)}/memories/${rest}`;
 }
 
 export function resourceUriToWorktreeRelative(config: ShareRuntime, uri: string, team: string): string {
   const canonicalUri = parseResourceId(uri).canonicalUri;
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/${team}/`;
-  if (!canonicalUri.startsWith(prefix)) {
+  if (!Effect2.pipe(canonicalUri, EffectString.startsWith(prefix))) {
     throw ShareOperationError.make({message: `URI ${uri} is not inside team "${team}" shared subtree.`});
   }
-  return canonicalUri.slice(prefix.length);
+  return Effect2.pipe(canonicalUri, EffectString.slice(prefix.length));
 }
 
 const isRegularFileNoSymlink = Effect.fn('share.isRegularFileNoSymlink')(function* (path: string) {
@@ -872,10 +899,10 @@ export function stripPersonalProvenance(
   content: string,
   options: {readonly preserveStableMemoryRelations?: boolean} = {},
 ): string {
-  const lines = content.split('\n');
+  const lines = Effect2.pipe(content, EffectString.split('\n'));
   let headerEnd = lines.length;
   for (let index = 0; index < lines.length; index += 1) {
-    if (lines[index].trim() === '') {
+    if (Effect2.pipe(lines[index], EffectString.trim) === '') {
       headerEnd = index;
       break;
     }
@@ -897,7 +924,7 @@ export function stripPersonalProvenance(
   for (let index = headerEnd; index < lines.length; index += 1) {
     cleaned.push(lines[index]);
   }
-  return stripGeneratedMemoryHygieneSources(cleaned.join('\n'));
+  return stripGeneratedMemoryHygieneSources(EffectArray.join(cleaned, '\n'));
 }
 
 /** Shared publication, ingest, and replace: keep identity-alias relations, drop local projection URIs. */
@@ -911,24 +938,46 @@ export function stripPersonalProvenanceForSharedPublication(content: string): st
 }
 
 function isStableMemoryRelationHeader(line: string): boolean {
-  if (!line.startsWith('relation:')) return false;
-  const relation = parseMemoryRelationValue(line.slice('relation:'.length).trimStart());
+  if (!Effect2.pipe(line, EffectString.startsWith('relation:'))) return false;
+  const relation = parseMemoryRelationValue(
+    Effect2.pipe(line, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice('relation:'.length));
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.trimStart);
+      return __effectPipeStage1;
+    }),
+  );
   return relation !== undefined && memoryIdFromIdentityAlias(relation.uri) !== undefined;
 }
 
 export function setMemoryVisibility(content: string, visibility: 'personal' | 'shared'): string {
-  const lines = content.split('\n');
-  if (lines[0]?.trim() !== 'MEMORY' && lines[0]?.trim() !== 'HANDOFF') {
+  const lines = Effect2.pipe(content, EffectString.split('\n'));
+  if (
+    Effect2.pipe(lines[0], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) !== 'MEMORY' &&
+    Effect2.pipe(lines[0], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) !== 'HANDOFF'
+  ) {
     return content;
   }
-  const headerEnd = lines.findIndex(line => line.trim() === '');
+  const headerEnd = Option.getOrElse(
+    EffectArray.findFirstIndex(lines, line => Effect2.pipe(line, EffectString.trim) === ''),
+    () => -1,
+  );
   if (headerEnd === -1) {
     return content;
   }
-  const visibilityIndex = lines.slice(1, headerEnd).findIndex(line => line.startsWith('visibility:'));
+  const visibilityIndex = Option.getOrElse(
+    EffectArray.findFirstIndex(
+      lines.slice(1, headerEnd),
+      __effectArrayValue => !!(line => Effect2.pipe(line, EffectString.startsWith('visibility:')))(__effectArrayValue),
+    ),
+    () => -1,
+  );
   if (visibilityIndex >= 0) {
     lines[visibilityIndex + 1] = `visibility: ${visibility}`;
-    return lines.join('\n');
+    return EffectArray.join(lines, '\n');
   }
   let insertionIndex = headerEnd;
   for (let index = 1; index < headerEnd; index += 1) {
@@ -937,7 +986,7 @@ export function setMemoryVisibility(content: string, visibility: 'personal' | 's
     }
   }
   lines.splice(insertionIndex, 0, `visibility: ${visibility}`);
-  return lines.join('\n');
+  return EffectArray.join(lines, '\n');
 }
 
 const readMemoryContent = Effect.fn('share.readMemoryContent')(function* (
@@ -952,7 +1001,7 @@ const readMemoryContent = Effect.fn('share.readMemoryContent')(function* (
   }
   const store = yield* ResourceStore;
   const content = yield* store.read(resourceStoreLocation(config), uri);
-  if (!content.trim()) {
+  if (!Effect2.pipe(content, EffectString.trim)) {
     throw ShareOperationError.make({message: `Refusing to publish empty memory at ${uri}`});
   }
   return content;
@@ -979,20 +1028,27 @@ export const ensureSharedDirectoryChain = Effect.fn('share.ensureSharedDirectory
 });
 
 export function parentUri(uri: string): string {
-  const lastSlash = uri.lastIndexOf('/');
-  return lastSlash === -1 ? uri : uri.slice(0, lastSlash);
+  const lastSlash = Effect2.pipe(
+    uri,
+    EffectString.lastIndexOf('/'),
+    Effect2.Option.getOrElse(() => -1),
+  );
+  return lastSlash === -1 ? uri : Effect2.pipe(uri, EffectString.slice(0, lastSlash));
 }
 
 export function sharedDirectoryChain(config: ShareRuntime, directoryUri: string): readonly string[] {
   const canonicalUri = parseResourceId(directoryUri).canonicalUri;
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/`;
-  if (!canonicalUri.startsWith(prefix)) {
+  if (!Effect2.pipe(canonicalUri, EffectString.startsWith(prefix))) {
     return [canonicalUri];
   }
-  const parts = canonicalUri.slice(prefix.length).split('/').filter(Boolean);
+  const parts = EffectArray.filter(
+    Effect2.pipe(canonicalUri, EffectString.slice(prefix.length), EffectString.split('/')),
+    Boolean,
+  );
   const chain: string[] = [];
   for (let index = 1; index <= parts.length; index += 1) {
-    chain.push(`${prefix}${parts.slice(0, index).join('/')}`);
+    chain.push(`${prefix}${EffectArray.join(parts.slice(0, index), '/')}`);
   }
   return chain;
 }
@@ -1282,8 +1338,8 @@ export function reconcileMissingSharedMemoryIdentity(
   if (!separator || separator.index === undefined) {
     throw ShareOperationError.make({message: `Cannot preserve stable memory_id for unreadable shared memory ${uri}.`});
   }
-  const newline = separator[0].startsWith('\r') ? '\r\n' : '\n';
-  return `${sharedContent.slice(0, separator.index)}${newline}memory_id: ${establishedMemoryId}${sharedContent.slice(separator.index)}`;
+  const newline = Effect2.pipe(separator[0], EffectString.startsWith('\r')) ? '\r\n' : '\n';
+  return `${Effect2.pipe(sharedContent, EffectString.slice(0, separator.index))}${newline}memory_id: ${establishedMemoryId}${Effect2.pipe(sharedContent, EffectString.slice(separator.index))}`;
 }
 
 /** Re-read the live canonical bytes while ResourceStore holds its mutation lock. */
@@ -1318,11 +1374,17 @@ export const verifySharedMemoryContentUnchanged = Effect.fn('share.verifyMemoryC
 });
 
 function normalizeSharedMemoryComparisonContent(content: string): string {
-  return canonicalMemoryDocumentContent(content.replace(/\r\n?/g, '\n'));
+  return canonicalMemoryDocumentContent(Effect2.pipe(content, EffectString.replace(/\r\n?/g, '\n')));
 }
 
 function countManagedMemoryFieldsTrailers(content: string): number {
-  return content.match(/<!-- MEMORY_FIELDS\r?\n/g)?.length ?? 0;
+  return (
+    Effect2.pipe(
+      content,
+      EffectString.match(/<!-- MEMORY_FIELDS\r?\n/g),
+      Effect2.Option.getOrElse(() => null),
+    )?.length ?? 0
+  );
 }
 
 export type {

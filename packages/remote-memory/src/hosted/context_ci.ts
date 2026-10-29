@@ -1,8 +1,12 @@
+import {Array as EffectArray} from 'effect';
 import {constantTimeHexEqual} from '@threadnote/platform/hmac';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseContextCheckReportJson, projectContextCheckReportSarif} from '@threadnote/context/check';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export interface HostedContextCiPolicyV1 {
   readonly version: 1;
@@ -108,27 +112,8 @@ export function admitHostedContextCiWebhookV1(
     .digest('hex');
   if (!constantTimeHexEqual(expected, envelope.signature)) throw new Error('Context CI webhook rejected.');
   const value: unknown = JSON.parse(envelope.body);
-  if (
-    !isRecord(value) ||
-    Object.keys(value).length !== 10 ||
-    Object.keys(value).some(
-      key =>
-        ![
-          'version',
-          'installationId',
-          'repositoryId',
-          'headRepositoryId',
-          'ref',
-          'baseRef',
-          'headCommit',
-          'baseCommit',
-          'kind',
-          'trusted',
-        ].includes(key),
-    )
-  )
-    throw new Error('Context CI event rejected.');
-  const event = value as unknown as HostedContextCiEventV1;
+  if (!isHostedContextCiEvent(value)) throw new Error('Context CI event rejected.');
+  const event = value;
   validateEvent(policy, event);
   // Delivery IDs and event kind cannot create duplicate checks for the same immutable comparison.
   const binding = {
@@ -206,19 +191,19 @@ export function ciInteger(value: number, min: number, max: number): number {
 }
 
 function refs(values: readonly string[]): string[] {
-  if (!Array.isArray(values) || values.length < 1 || values.length > 100)
+  if (!EffectArray.isArray(values) || values.length < 1 || values.length > 100)
     throw new Error('Context CI refs are invalid.');
   return [
     ...new Set(
-      values.map(value => {
+      EffectArray.map(values, value => {
         if (
           typeof value !== 'string' ||
           value.length > 256 ||
           !/^refs\/heads\/[A-Za-z0-9_./-]+$/u.test(value) ||
-          value.includes('..') ||
-          value.includes('//') ||
-          value.endsWith('/') ||
-          value.endsWith('.lock')
+          Effect.pipe(value, EffectString.includes('..')) ||
+          Effect.pipe(value, EffectString.includes('//')) ||
+          Effect.pipe(value, EffectString.endsWith('/')) ||
+          Effect.pipe(value, EffectString.endsWith('.lock'))
         ) {
           throw new Error('Context CI ref is invalid.');
         }
@@ -226,6 +211,38 @@ function refs(values: readonly string[]): string[] {
       }),
     ),
   ].sort();
+}
+
+function isHostedContextCiEvent(value: unknown): value is HostedContextCiEventV1 {
+  if (!isRecord(value)) return false;
+  const keys = EffectRecord.keys(value);
+  return (
+    keys.length === 10 &&
+    EffectArray.every(keys, key =>
+      [
+        'version',
+        'installationId',
+        'repositoryId',
+        'headRepositoryId',
+        'ref',
+        'baseRef',
+        'headCommit',
+        'baseCommit',
+        'kind',
+        'trusted',
+      ].includes(key),
+    ) &&
+    value.version === 1 &&
+    typeof value.installationId === 'string' &&
+    typeof value.repositoryId === 'string' &&
+    typeof value.headRepositoryId === 'string' &&
+    typeof value.ref === 'string' &&
+    typeof value.baseRef === 'string' &&
+    typeof value.headCommit === 'string' &&
+    typeof value.baseCommit === 'string' &&
+    (value.kind === 'push' || value.kind === 'pull_request' || value.kind === 'rerun') &&
+    value.trusted === true
+  );
 }
 
 function validateEvent(policy: HostedContextCiPolicyV1, event: HostedContextCiEventV1): void {
@@ -246,5 +263,5 @@ function validateEvent(policy: HostedContextCiPolicyV1, event: HostedContextCiEv
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }

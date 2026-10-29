@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, PlatformError, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -17,14 +18,16 @@ import {
 } from './repository.js';
 import {codeGraphLocalProvenanceLockPath} from './layout.js';
 import type {RepositoryIdentity} from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-class CodeGraphLocalProvenanceError extends Schema.TaggedError<CodeGraphLocalProvenanceError>()(
-  'CodeGraphLocalProvenanceError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class CodeGraphLocalProvenanceError extends Schema.TaggedError<
+  CodeGraphLocalProvenanceError,
+  {readonly brand: unique symbol}
+>()('CodeGraphLocalProvenanceError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 const LOCAL_CONTEXT_DIRECTORY = 'local-context';
 const LOCAL_WORKTREES_DIRECTORY = 'worktrees';
@@ -207,10 +210,14 @@ export const inspectCodeGraphLocalProvenanceInventory = Effect.fn('codeGraph.ins
       if (page.overflow) {
         return {state: 'unavailable'} as const satisfies CodeGraphLocalProvenanceInventory;
       }
-      const worktreeIds = page.names
-        .filter(name => /^[0-9a-f]{64}\.json$/.test(name))
-        .map(name => name.slice(0, -5))
-        .sort();
+      const names = page.names;
+      const worktreeIds = EffectArray.map(
+        EffectArray.filter(
+          names,
+          (name, __effectArrayIndex) => __effectArrayIndex in names && /^[0-9a-f]{64}\.json$/.test(name),
+        ),
+        name => Effect2.pipe(name, EffectString.slice(0, -5)),
+      ).sort();
       return {state: 'ready', worktreeIds} as const satisfies CodeGraphLocalProvenanceInventory;
     }).pipe(Effect.orElseSucceed(() => ({state: 'unavailable'}) as const satisfies CodeGraphLocalProvenanceInventory));
   },
@@ -442,7 +449,7 @@ const recordResolvedCodeGraphLocalAssociationUnlocked = Effect.fn('codeGraph.rec
 
     const temporary = path.join(
       directory.value,
-      `.${identity.worktreeId}.${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}.tmp`,
+      `.${identity.worktreeId}.${Effect2.pipe(yield* crypto.randomUUIDv4(), EffectString.replaceAll('-', ''))}.tmp`,
     );
     const written = yield* Effect.gen(function* () {
       yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});
@@ -1158,7 +1165,7 @@ export function privacySafeCodeGraphLocalAssociation(
 }
 
 export function codeGraphLocalAssociationLabel(association: CodeGraphLocalAssociation): string {
-  return association.displayPath ?? association.state.replaceAll('-', ' ');
+  return association.displayPath ?? Effect2.pipe(association.state, EffectString.replaceAll('-', ' '));
 }
 
 function validTarget(target: CodeGraphLocalAssociationTarget): boolean {
@@ -1364,7 +1371,8 @@ function unavailableAssociation(state: Exclude<CodeGraphLocalAssociationState, '
 function homeAbbreviatedPath(path: Path.Path, homeDirectory: string, candidate: string): string {
   const relative = path.relative(homeDirectory, candidate);
   if (relative === '') return '~';
-  if (!relative.startsWith('..') && !path.isAbsolute(relative)) return `~${path.sep}${relative}`;
+  if (!Effect2.pipe(relative, EffectString.startsWith('..')) && !path.isAbsolute(relative))
+    return `~${path.sep}${relative}`;
   return candidate;
 }
 
@@ -1387,10 +1395,12 @@ function isLocalPath(value: unknown): value is string {
     typeof value === 'string' &&
     value.length > 0 &&
     value.length <= LOCAL_PATH_LENGTH_LIMIT &&
-    !value.includes('\0') &&
-    !value.includes('\r') &&
-    !value.includes('\n') &&
-    (value.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('\\\\'))
+    !Effect2.pipe(value, EffectString.includes('\0')) &&
+    !Effect2.pipe(value, EffectString.includes('\r')) &&
+    !Effect2.pipe(value, EffectString.includes('\n')) &&
+    (Effect2.pipe(value, EffectString.startsWith('/')) ||
+      /^[A-Za-z]:[\\/]/u.test(value) ||
+      Effect2.pipe(value, EffectString.startsWith('\\\\')))
   );
 }
 
@@ -1420,15 +1430,18 @@ function sameObservedRegularFile(before: FileSystem.File.Info, after: FileSystem
 
 function localProvenanceRecordIdentity(info: FileSystem.File.Info, recordDigest: string): string {
   return sha256HexSync(
-    [
-      'threadnote-code-graph-local-provenance-file-v1',
-      recordDigest,
-      String(info.dev),
-      String(Option.getOrUndefined(info.ino)),
-      String(info.size),
-      String(info.mode),
-      String(Option.getOrUndefined(info.mtime)?.getTime()),
-    ].join('\0'),
+    EffectArray.join(
+      [
+        'threadnote-code-graph-local-provenance-file-v1',
+        recordDigest,
+        String(info.dev),
+        String(Option.getOrUndefined(info.ino)),
+        String(info.size),
+        String(info.mode),
+        String(Option.getOrUndefined(info.mtime)?.getTime()),
+      ],
+      '\0',
+    ),
   );
 }
 

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -30,6 +31,8 @@ import {
 } from '@threadnote/graph/sharing/registry/publication_state';
 import {readGraphControlFrontier} from '@threadnote/graph/sharing/control/reader';
 import {collectGraphShareRegistryPublication} from '@threadnote/graph/sharing/registry/closure';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const layer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, FetchHttpClient.layer)),
@@ -47,7 +50,7 @@ const fixture = Effect.fn('test.registryPublication.fixture')(function* () {
       canonicalRemote: 'github.com/acme/example',
       organization: 'acme',
       publisherKeyFingerprint: key.fingerprint,
-      repositoryId: 'a'.repeat(64),
+      repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
     }),
     registry: {canonical: 'oci://registry.example.test/acme/canonical', worker: 'cas://local/worker'},
   };
@@ -95,18 +98,18 @@ const fixture = Effect.fn('test.registryPublication.fixture')(function* () {
         manifestDigest: checkpointDigest,
         metadataDigest,
         snapshotId: 'cgsn_fixture',
-        sourceCommit: 'b'.repeat(40),
+        sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
       },
       deltas: [],
       generation,
-      graphAbi: 'c'.repeat(64),
-      graphContentId: 'cgc_' + 'd'.repeat(40),
+      graphAbi: Effect2.pipe('c', EffectString.repeat(64)),
+      graphContentId: 'cgc_' + Effect2.pipe('d', EffectString.repeat(40)),
       logicalGraphDigest: sha256Digest('graph'),
       previousManifestDigest,
       publisherFence: 1,
       schemaVersion: 1,
       snapshotId: 'cgsn_fixture',
-      sourceCommit: 'b'.repeat(40),
+      sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
     };
     const signed = yield* signGraphShareFrontier(key, manifest);
     const documents = yield* putSignedGraphShareFrontierDocuments(casRoot, signed, metadataBytes);
@@ -166,9 +169,15 @@ effectIt.effect('serializes concurrent publishers with one promotion and idempot
       const f = yield* fixture();
       yield* f.candidate(1);
       const results = yield* Effect.forEach([1, 2, 3], () => f.publish(), {concurrency: 'unbounded'});
-      expect(results.every(result => result.status === 'acknowledged')).toBe(true);
+      expect(EffectArray.every(results, result => result.status === 'acknowledged')).toBe(true);
       expect(
-        f.registry.requests.filter(request => request.method === 'PUT' && request.pathname.endsWith(f.tag)),
+        EffectArray.filter(
+          f.registry.requests,
+          (request, index) =>
+            index in f.registry.requests &&
+            request.method === 'PUT' &&
+            Effect2.pipe(request.pathname, EffectString.endsWith(f.tag)),
+        ),
       ).toHaveLength(1);
     }).pipe(provideTestLayer(layer)),
   ),
@@ -183,14 +192,14 @@ effectIt.effect('retains complete checkpoint windows and counts the current body
     const input = {casRoot: f.casRoot, scope: f.scope, pointer: third.pointer, checkpointCount: 2};
     const bounded = yield* collectGraphShareRegistryPublication(input);
     expect(bounded.historyFloor.generation).toBe(2);
-    expect(bounded.retention.entries.some(entry => entry.digest === first.manifestDigest)).toBe(false);
-    expect(bounded.retention.entries.some(entry => entry.digest === second.manifestDigest)).toBe(true);
+    expect(EffectArray.some(bounded.retention.entries, entry => entry.digest === first.manifestDigest)).toBe(false);
+    expect(EffectArray.some(bounded.retention.entries, entry => entry.digest === second.manifestDigest)).toBe(true);
     let latest = third;
     for (let generation = 4; generation <= 67; generation += 1)
       latest = yield* f.candidate(generation, latest.manifestDigest, 3);
     const limited = yield* collectGraphShareRegistryPublication({...input, pointer: latest.pointer});
     expect(limited.historyFloor.generation).toBe(4);
-    expect(limited.retention.entries.some(entry => entry.digest === third.manifestDigest)).toBe(false);
+    expect(EffectArray.some(limited.retention.entries, entry => entry.digest === third.manifestDigest)).toBe(false);
   }).pipe(provideTestLayer(layer)),
 );
 
@@ -240,9 +249,9 @@ effectIt.effect('preserves the confirmed frontier during newer failures and repa
     expect(sha256Digest(f.registry.manifests.get(f.tag)!)).toBe(second.descriptorDigest);
     f.registry.manifests.set(f.tag, new TextEncoder().encode('unknown publication'));
     yield* TestClock.adjust(60_000);
-    const before = f.registry.requests.filter(r => r.method === 'PUT').length;
+    const before = EffectArray.filter(f.registry.requests, r => r.method === 'PUT').length;
     expect((yield* f.publish()).status).toBe('pending');
-    expect(f.registry.requests.filter(r => r.method === 'PUT')).toHaveLength(before);
+    expect(EffectArray.filter(f.registry.requests, r => r.method === 'PUT')).toHaveLength(before);
     yield* writePrivateJsonFile(f.pointerPath, first.pointer);
     yield* TestClock.adjust(17_000);
     expect((yield* f.publish()).status).toBe('pending');

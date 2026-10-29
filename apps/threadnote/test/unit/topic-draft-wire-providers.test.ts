@@ -1,9 +1,11 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, FileSystem, Layer, Path, Result, Schema, Stream} from 'effect';
 import {AiError, LanguageModel, Response} from 'effect/ai';
 import {OpenAiLanguageModel} from '@effect/ai-openai-compat';
 import {beforeEach, describe, expect, vi} from 'vitest';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {TestError} from '@threadnote/testing/test-error';
 import {BUILTIN_MODEL_MANIFESTS, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
@@ -42,6 +44,8 @@ import {
   makeTopicDraftWireEvidence,
 } from '../helpers/topic-draft-wire.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 vi.mock('@effect/ai-openai-compat', async importOriginal => {
   const actual = await importOriginal<typeof import('@effect/ai-openai-compat')>();
@@ -52,7 +56,9 @@ function decodeTopicDraftModelOutput(basis: TopicMaintenanceDraftBasisV1, input:
   return decodeModelOutput(basis, input, makeTopicDraftWireEvidence(basis));
 }
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, candidate => candidate.role === 'generation'),
+)!;
 const unexpected = () => Effect.die(TestError.make({message: 'Unexpected fixture service call'}));
 function nativeLayer(
   output: unknown,
@@ -108,8 +114,8 @@ function provideNativeOutput(
 
 function observationIdentity(basis: TopicMaintenanceDraftBasisV1) {
   return {
-    caseId: 'health-case-' + 'a'.repeat(40),
-    reviewId: 'review-' + 'b'.repeat(24),
+    caseId: 'health-case-' + Effect2.pipe('a', EffectString.repeat(40)),
+    reviewId: 'review-' + Effect2.pipe('b', EffectString.repeat(24)),
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
@@ -161,7 +167,8 @@ describe('compact topic provider boundary', () => {
           const basis = makeTopicDraftWireBasis(2);
           const fixture = makeTopicDraftWireFixture(basis);
           const wire = structuredClone(fixture);
-          if (invalidAssessment === 'comparison-over-byte-limit') wire.facts.entries[0].rationale = 'é'.repeat(513);
+          if (invalidAssessment === 'comparison-over-byte-limit')
+            wire.facts.entries[0].rationale = Effect2.pipe('é', EffectString.repeat(513));
           else wire.facts.entries[1].ordinal = 0;
           // This response passes the provider schema; only the application's byte/uniqueness guard rejects it.
           yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
@@ -239,7 +246,7 @@ describe('compact topic provider boundary', () => {
       Effect.gen(function* () {
         const basis = makeTopicDraftWireBasis(2);
         const wire = makeTopicDraftWireFixture(basis);
-        wire.facts.entries[0].rationale = 'x'.repeat(33 * 1024);
+        wire.facts.entries[0].rationale = Effect2.pipe('x', EffectString.repeat(33 * 1024));
         yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
         if (backend === 'effect') {
           vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(
@@ -289,9 +296,13 @@ describe('compact topic provider boundary', () => {
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(1);
       const model = {id: CORE_GENERATION_MODEL_ID, label: 'Gemma', isDefault: true};
-      const identity = yield* selectedTopicDraftIdentity({} as never, 'local-ai', model);
+      const identity = yield* selectedTopicDraftIdentity(
+        runtimeConfigForTest({agentContextHome: '/fixture'}),
+        'local-ai',
+        model,
+      );
       const result = yield* runSelectedDraft(
-        {agentContextHome: '/fixture'} as never,
+        runtimeConfigForTest({agentContextHome: '/fixture'}),
         'local-ai',
         model,
         'prompt',

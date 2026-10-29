@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -20,8 +21,10 @@ import {
   type CodeGraphRefreshFailure,
   type CodeGraphWatchOptions,
 } from '@threadnote/graph/watcher';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const recoveryKey = 'a'.repeat(64);
+const recoveryKey = Effect2.pipe('a', EffectString.repeat(64));
 const watchOptions: CodeGraphWatchOptions = {
   cwd: '/fixture/repository',
   key: recoveryKey,
@@ -115,12 +118,15 @@ describe('automatic code graph recovery', () => {
           coordinator,
           resolveIdentity: () =>
             Ref.update(resolverCalls, count => count + 1).pipe(
-              Effect.as({checkoutId: 'b'.repeat(64), worktreeId: recoveryKey}),
+              Effect.as({checkoutId: Effect2.pipe('b', EffectString.repeat(64)), worktreeId: recoveryKey}),
             ),
           routineMaintenance: (_options, identity) =>
             Ref.update(maintenanceCalls, count => count + 1).pipe(
               Effect.tap(() => {
-                expect(identity).toEqual({checkoutId: 'b'.repeat(64), worktreeId: recoveryKey});
+                expect(identity).toEqual({
+                  checkoutId: Effect2.pipe('b', EffectString.repeat(64)),
+                  worktreeId: recoveryKey,
+                });
                 return Effect.void;
               }),
               Effect.as(noWorkResult),
@@ -149,7 +155,7 @@ describe('automatic code graph recovery', () => {
         coordinator,
         resolveIdentity: () =>
           Ref.update(resolverCalls, count => count + 1).pipe(
-            Effect.as({checkoutId: 'b'.repeat(64), worktreeId: recoveryKey}),
+            Effect.as({checkoutId: Effect2.pipe('b', EffectString.repeat(64)), worktreeId: recoveryKey}),
           ),
         routineMaintenance: () =>
           Ref.update(maintenanceCalls, count => count + 1).pipe(
@@ -168,8 +174,8 @@ describe('automatic code graph recovery', () => {
       yield* Deferred.await(started);
       expect(yield* Ref.get(resolverCalls)).toBe(1);
       expect(yield* Ref.get(maintenanceCalls)).toBe(1);
-      expect(admissions.filter(admission => admission.state === 'scheduled')).toHaveLength(1);
-      expect(admissions.filter(admission => admission.state === 'coalesced')).toHaveLength(255);
+      expect(EffectArray.filter(admissions, admission => admission.state === 'scheduled')).toHaveLength(1);
+      expect(EffectArray.filter(admissions, admission => admission.state === 'coalesced')).toHaveLength(255);
       yield* Deferred.succeed(release, undefined);
     }).pipe(Effect.scoped),
   );
@@ -179,14 +185,14 @@ describe('automatic code graph recovery', () => {
       const resolverCalls = yield* Ref.make(0);
       const maintenanceCalls = yield* Ref.make(0);
       const coordinator = yield* makeCodeGraphAutomaticRecoveryCoordinator();
-      const nonActionable = failureCodes.filter(code => code !== 'schema-additive');
+      const nonActionable = EffectArray.filter(failureCodes, code => code !== 'schema-additive');
       const admissions = yield* Effect.forEach(nonActionable, code =>
         requestCodeGraphAutomaticRecovery(
           {
             coordinator,
             resolveIdentity: () =>
               Ref.update(resolverCalls, count => count + 1).pipe(
-                Effect.as({checkoutId: 'b'.repeat(64), worktreeId: recoveryKey}),
+                Effect.as({checkoutId: Effect2.pipe('b', EffectString.repeat(64)), worktreeId: recoveryKey}),
               ),
             routineMaintenance: () => Ref.update(maintenanceCalls, count => count + 1).pipe(Effect.as(noWorkResult)),
           },
@@ -195,7 +201,9 @@ describe('automatic code graph recovery', () => {
         ),
       );
 
-      expect(admissions).toEqual(nonActionable.map(code => ({action: 'none', code, state: 'not-actionable-here'})));
+      expect(admissions).toEqual(
+        EffectArray.map(nonActionable, code => ({action: 'none', code, state: 'not-actionable-here'})),
+      );
       expect(yield* Ref.get(resolverCalls)).toBe(0);
       expect(yield* Ref.get(maintenanceCalls)).toBe(0);
     }).pipe(Effect.scoped),
@@ -222,8 +230,8 @@ describe('automatic code graph recovery', () => {
       // Every caller returned while the admitted maintenance page was still held.
       yield* Deferred.await(started);
       expect(yield* Ref.get(calls)).toBe(1);
-      expect(admissions.filter(admission => admission.state === 'scheduled')).toHaveLength(1);
-      expect(admissions.filter(admission => admission.state === 'coalesced')).toHaveLength(255);
+      expect(EffectArray.filter(admissions, admission => admission.state === 'scheduled')).toHaveLength(1);
+      expect(EffectArray.filter(admissions, admission => admission.state === 'coalesced')).toHaveLength(255);
       yield* Deferred.succeed(release, undefined);
     }).pipe(Effect.scoped),
   );
@@ -305,7 +313,7 @@ describe('automatic code graph recovery', () => {
         expect(logs).toContain(
           'Code graph automatic recovery maintenance failed (permission; recovery: fix-permissions).',
         );
-        expect(`${JSON.stringify(settled)}\n${logs.join('\n')}`).not.toContain(privateMarker);
+        expect(`${JSON.stringify(settled)}\n${EffectArray.join(logs, '\n')}`).not.toContain(privateMarker);
       }).pipe(provideTestLayer(Logger.layer([logger])), Effect.scoped);
     }),
   );
@@ -352,7 +360,7 @@ describe('automatic code graph recovery', () => {
         }
 
         expect(logs).toContain('Code graph automatic recovery scheduling failed (unknown; recovery: diagnose).');
-        expect(logs.join('\n')).not.toContain(privateMarker);
+        expect(EffectArray.join(logs, '\n')).not.toContain(privateMarker);
       }).pipe(provideTestLayer(Logger.layer([logger])), Effect.scoped);
     }),
   );
@@ -383,7 +391,11 @@ describe('automatic code graph recovery', () => {
         );
 
         expect(yield* Ref.get(interrupted)).toBe(1);
-        expect(logs.some(message => message.includes('automatic recovery maintenance failed'))).toBe(false);
+        expect(
+          EffectArray.some(logs, message =>
+            Effect2.pipe(message, EffectString.includes('automatic recovery maintenance failed')),
+          ),
+        ).toBe(false);
       }).pipe(provideTestLayer(Logger.layer([logger])));
     }),
   );

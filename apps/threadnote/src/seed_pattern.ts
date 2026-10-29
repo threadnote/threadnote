@@ -1,4 +1,8 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 const UTF8 = new TextEncoder();
 const WINDOWS_DRIVE = /^[a-z]:/iu;
 
@@ -6,13 +10,13 @@ export const PROJECT_SEED_PATTERN_BYTES_MAXIMUM = 1_024;
 export const PROJECT_SEED_PATTERN_COUNT_MAXIMUM = 256;
 export const PROJECT_SEED_PATTERNS_BYTES_MAXIMUM = 64 * 1_024;
 
-export class InvalidProjectSeedPattern extends Schema.TaggedError<InvalidProjectSeedPattern>()(
-  'InvalidProjectSeedPattern',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class InvalidProjectSeedPattern extends Schema.TaggedError<
+  InvalidProjectSeedPattern,
+  {readonly brand: unique symbol}
+>()('InvalidProjectSeedPattern', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 /** Validate a repository-relative seed path/glob without rewriting its bytes. */
 export function validateProjectSeedPattern(pattern: string): string {
@@ -25,12 +29,12 @@ export function validateProjectSeedPattern(pattern: string): string {
       message: 'Seed patterns must be non-empty bounded text without control characters.',
     });
   }
-  const normalized = pattern.replaceAll('\\', '/');
+  const normalized = Effect.pipe(pattern, EffectString.replaceAll('\\', '/'));
   if (
-    normalized.startsWith('/') ||
-    normalized.startsWith('~/') ||
+    Effect.pipe(normalized, EffectString.startsWith('/')) ||
+    Effect.pipe(normalized, EffectString.startsWith('~/')) ||
     WINDOWS_DRIVE.test(pattern) ||
-    normalized.split('/').includes('..')
+    Effect.pipe(normalized, EffectString.split('/')).includes('..')
   ) {
     throw InvalidProjectSeedPattern.make({message: 'Seed patterns must stay within the configured project root.'});
   }
@@ -44,7 +48,7 @@ export function validateProjectSeedPatterns(patterns: readonly string[]): readon
     });
   }
   let bytes = 0;
-  return patterns.map(pattern => {
+  return EffectArray.map(patterns, pattern => {
     const validated = validateProjectSeedPattern(pattern);
     bytes += UTF8.encode(validated).byteLength;
     if (bytes > PROJECT_SEED_PATTERNS_BYTES_MAXIMUM) {
@@ -55,8 +59,13 @@ export function validateProjectSeedPatterns(patterns: readonly string[]): readon
 }
 
 function hasControlCharacter(value: string): boolean {
-  return [...value].some(character => {
-    const code = character.codePointAt(0) ?? 0;
+  return EffectArray.some([...value], character => {
+    const code =
+      Effect.pipe(
+        character,
+        EffectString.codePointAt(0),
+        Effect.Option.getOrElse(() => undefined),
+      ) ?? 0;
     return code <= 31 || code === 127;
   });
 }

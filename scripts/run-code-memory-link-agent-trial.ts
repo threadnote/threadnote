@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Console, Effect, Exit, FileSystem, Path} from 'effect';
@@ -66,6 +67,8 @@ import {
   parseCodeMemoryLinkCodexTerminalReceipt,
   type CodeMemoryLinkCodexTerminalKind,
 } from './code-memory-link-codex-terminal.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const options = parseArguments(yield* scriptArguments());
@@ -85,10 +88,11 @@ const program = Effect.gen(function* () {
   if (manifest.candidate.commit !== options.candidateCommit) {
     return yield* ScriptError.make({message: 'The trial manifest does not name --candidate-commit.'});
   }
-  if (manifest.harnessGovernanceCommit === undefined) {
+  const harnessGovernanceCommit = manifest.harnessGovernanceCommit;
+  if (harnessGovernanceCommit === undefined) {
     return yield* ScriptError.make({message: 'The trial manifest does not bind a protocol-v2 harness commit.'});
   }
-  const governance = yield* verifyApprovalCheckout(sourceRoot, manifest.harnessGovernanceCommit);
+  const governance = yield* verifyApprovalCheckout(sourceRoot, harnessGovernanceCommit);
   if (governance.commit !== options.approvalCommit) {
     return yield* ScriptError.make({
       message: 'The trial runner requires the exact clean reviewed --approval-commit checkout.',
@@ -97,7 +101,9 @@ const program = Effect.gen(function* () {
   if (!CODE_MEMORY_LINK_AGENT_AB_APPROVED_MANIFEST_HASHES.includes(manifest.manifestHash)) {
     return yield* ScriptError.make({message: 'The trial manifest is not approved in the reviewed harness checkout.'});
   }
-  const rosteredClient = manifest.clients.find(client => client.clientId === options.clientId);
+  const rosteredClient = EffectOption.getOrUndefined(
+    EffectArray.findFirst(manifest.clients, client => client.clientId === options.clientId),
+  );
   if (!rosteredClient) return yield* ScriptError.make({message: '--client-id is outside the manifest roster.'});
   const descriptor = parseCodeMemoryLinkClientImplementationDescriptorV1(descriptorInput);
   const descriptorHash = assertCodeMemoryLinkClientImplementationBinding({
@@ -127,7 +133,7 @@ const program = Effect.gen(function* () {
       const existing = parseCodeMemoryLinkAgentAbTrialsJsonl(existingSource);
       const attemptEvents = parseCodeMemoryLinkAgentAttemptsJsonl(attemptSource);
       const evidenceReceipts = parseCodeMemoryLinkAgentEvidenceJsonl(evidenceSource);
-      if (pendingSource.trim()) {
+      if (Effect2.pipe(pendingSource, EffectString.trim)) {
         const recovered = reconcileCodeMemoryLinkAgentPendingCommitV1({
           evidence: evidenceReceipts,
           pending: parseCodeMemoryLinkAgentPendingCommitJsonV1(pendingSource),
@@ -156,7 +162,12 @@ const program = Effect.gen(function* () {
             ? {evidenceSource: serializeCodeMemoryLinkAgentEvidenceJsonl(recovered.evidence)}
             : {}),
           ...(recovered.appendTrial
-            ? {trialsSource: `${recovered.trials.map(entry => JSON.stringify(entry)).join('\n')}\n`}
+            ? {
+                trialsSource: `${EffectArray.join(
+                  EffectArray.map(recovered.trials, entry => JSON.stringify(entry)),
+                  '\n',
+                )}\n`,
+              }
             : {}),
         });
         return recovered.pending.trial;
@@ -179,7 +190,9 @@ const program = Effect.gen(function* () {
         return yield* ScriptError.make({message: 'The preregistered trial ledger is already complete.'});
       }
       const scheduled = manifest.schedule[existing.length];
-      const task = manifest.tasks.find(candidate => candidate.taskId === scheduled.taskId)!;
+      const task = EffectOption.getOrUndefined(
+        EffectArray.findFirst(manifest.tasks, candidate => candidate.taskId === scheduled.taskId),
+      )!;
       const arm = assignment.labels[scheduled.blindLabel];
       if (scheduled.clientId !== options.clientId) {
         return yield* ScriptError.make({
@@ -330,7 +343,7 @@ const program = Effect.gen(function* () {
               catch: cause => ScriptError.make({message: 'The evaluated subject failed post-run verification.', cause}),
             }),
             collectCodeMemoryLinkClientImplementation(options),
-            verifyApprovalCheckout(sourceRoot, manifest.harnessGovernanceCommit),
+            verifyApprovalCheckout(sourceRoot, harnessGovernanceCommit),
           ],
           {concurrency: 3},
         );
@@ -386,7 +399,10 @@ const program = Effect.gen(function* () {
         yield* projectCodeMemoryLinkAgentPendingCommitDurably(layout, {
           evidenceSource: serializeCodeMemoryLinkAgentEvidenceJsonl(evidence),
           pendingSource: serializeCodeMemoryLinkAgentPendingCommitJsonV1(pendingCommit),
-          trialsSource: `${trials.map(entry => JSON.stringify(entry)).join('\n')}\n`,
+          trialsSource: `${EffectArray.join(
+            EffectArray.map(trials, entry => JSON.stringify(entry)),
+            '\n',
+          )}\n`,
         });
         return nextTrial;
       }).pipe(Effect.exit);
@@ -530,12 +546,9 @@ function parseArguments(args: readonly string[]): Options {
   if ((retryAttemptId === undefined) !== (retryReason === undefined)) {
     throw ScriptError.make({message: '--retry-of and --retry-reason must be supplied together.'});
   }
-  if (
-    retryReason !== undefined &&
-    !CODE_MEMORY_LINK_AGENT_RETRY_REASONS.includes(retryReason as CodeMemoryLinkAgentRetryReason)
-  ) {
+  if (retryReason !== undefined && !isCodeMemoryLinkAgentRetryReason(retryReason)) {
     throw ScriptError.make({
-      message: `--retry-reason must be one of: ${CODE_MEMORY_LINK_AGENT_RETRY_REASONS.join(', ')}.`,
+      message: `--retry-reason must be one of: ${EffectArray.join(CODE_MEMORY_LINK_AGENT_RETRY_REASONS, ', ')}.`,
     });
   }
   return {
@@ -557,10 +570,14 @@ function parseArguments(args: readonly string[]): Options {
     evidencePath,
     manifestPath,
     ...(retryAttemptId === undefined ? {} : {retryAttemptId}),
-    ...(retryReason === undefined ? {} : {retryReason: retryReason as CodeMemoryLinkAgentRetryReason}),
+    ...(retryReason === undefined ? {} : {retryReason}),
     timeoutMilliseconds,
     trialsPath,
   };
+}
+
+function isCodeMemoryLinkAgentRetryReason(value: string): value is CodeMemoryLinkAgentRetryReason {
+  return EffectArray.some(CODE_MEMORY_LINK_AGENT_RETRY_REASONS, reason => reason === value);
 }
 
 function assertRetryAcknowledgement(
@@ -605,11 +622,19 @@ function parsePositiveInteger(value: string, option: string): number {
 }
 
 function parseFileBinding(value: string, option: string): {readonly path: string; readonly role: string} {
-  const separator = value.indexOf('=');
+  const separator = Effect2.pipe(
+    value,
+    EffectString.indexOf('='),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (separator < 1) throw ScriptError.make({message: `${option} requires role=/absolute/path.`});
-  const role = value.slice(0, separator);
-  const path = value.slice(separator + 1);
-  if (!/^[a-z][a-z0-9-]{0,63}$/u.test(role) || !path.startsWith('/') || path.includes('\0')) {
+  const role = Effect2.pipe(value, EffectString.slice(0, separator));
+  const path = Effect2.pipe(value, EffectString.slice(separator + 1));
+  if (
+    !/^[a-z][a-z0-9-]{0,63}$/u.test(role) ||
+    !Effect2.pipe(path, EffectString.startsWith('/')) ||
+    Effect2.pipe(path, EffectString.includes('\0'))
+  ) {
     throw ScriptError.make({message: `${option} requires one portable role and absolute path.`});
   }
   return {path, role};
@@ -617,11 +642,15 @@ function parseFileBinding(value: string, option: string): {readonly path: string
 
 function randomOpaqueId(prefix: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return `${prefix}_${[...bytes].map(value => value.toString(16).padStart(2, '0')).join('')}`;
+  return `${prefix}_${EffectArray.join(
+    EffectArray.map([...bytes], value => Effect2.pipe(value.toString(16), EffectString.padStart(2, '0'))),
+    '',
+  )}`;
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
+  if (value === undefined) throw ScriptError.make({message: `${option} requires a value.`});
+  if (!Effect2.pipe(value, EffectString.trim)) throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
 

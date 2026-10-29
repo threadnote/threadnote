@@ -30,6 +30,8 @@ import {
   graphShareProfileDigest,
   parseGraphShareEnrollment,
 } from '@threadnote/graph/sharing/profile';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const sharingLayer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 
@@ -37,8 +39,8 @@ const profile = defaultGraphShareProfile({
   branch: 'refs/heads/main',
   canonicalRemote: 'github.com/acme/monorepo',
   organization: 'acme',
-  publisherKeyFingerprint: `sha256:${'a'.repeat(64)}`,
-  repositoryId: 'b'.repeat(64),
+  publisherKeyFingerprint: `sha256:${Effect2.pipe('a', EffectString.repeat(64))}`,
+  repositoryId: Effect2.pipe('b', EffectString.repeat(64)),
 });
 
 describe('graph share trust and CAS', () => {
@@ -117,9 +119,9 @@ describe('graph share trust and CAS', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-share-trust-lock-'});
-        const first = receiptFor('b'.repeat(64), 'read-only');
-        const second = receiptFor('c'.repeat(64), 'join');
-        const third = receiptFor('d'.repeat(64), 'join');
+        const first = receiptFor(Effect2.pipe('b', EffectString.repeat(64)), 'read-only');
+        const second = receiptFor(Effect2.pipe('c', EffectString.repeat(64)), 'join');
+        const third = receiptFor(Effect2.pipe('d', EffectString.repeat(64)), 'join');
         yield* writeGraphShareTrustReceipt(home, first);
         yield* writeGraphShareTrustReceipt(home, second);
         yield* Effect.all(
@@ -154,7 +156,7 @@ describe('graph share trust and CAS', () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-auto-revocation-'});
-          const ids = ['b'.repeat(64), 'c'.repeat(64)] as const;
+          const ids = [Effect2.pipe('b', EffectString.repeat(64)), Effect2.pipe('c', EffectString.repeat(64))] as const;
           const revoked = new Set<string>();
           for (const {repository, transition} of operations) {
             const id = ids[repository];

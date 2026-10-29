@@ -1,35 +1,46 @@
+import {Array as EffectArray} from 'effect';
 import {readdirSync, readFileSync} from '@threadnote/testing/node-fs';
 import {join, posix, relative, sep} from '@threadnote/testing/node-path';
 import {describe, expect, it} from 'vitest';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const GRAPH_SOURCE_DIRECTORY = join(import.meta.dirname, '../../src');
 const STORE_DIRECTORY = join(GRAPH_SOURCE_DIRECTORY, 'store');
 const STORE_IMPORT_PATTERN = /\b(?:from|import)\s+['"](\.[^'"]+)['"]/gu;
 
 function typeScriptFilesBelow(directory: string): readonly string[] {
-  return readdirSync(directory, {withFileTypes: true}).flatMap(entry => {
+  return EffectArray.flatMap(readdirSync(directory, {withFileTypes: true}), entry => {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) return typeScriptFilesBelow(path);
-    return entry.name.endsWith('.ts') ? [path] : [];
+    return Effect.pipe(entry.name, EffectString.endsWith('.ts')) ? [path] : [];
   });
 }
 
 function storeModules(): ReadonlyMap<string, string> {
   return new Map(
-    [join(GRAPH_SOURCE_DIRECTORY, 'store.ts'), ...typeScriptFilesBelow(STORE_DIRECTORY)]
-      .map(path => relative(GRAPH_SOURCE_DIRECTORY, path).split(sep).join('/'))
-      .sort()
-      .map(name => [name, readFileSync(join(GRAPH_SOURCE_DIRECTORY, name), 'utf8')]),
+    EffectArray.map(
+      EffectArray.map([join(GRAPH_SOURCE_DIRECTORY, 'store.ts'), ...typeScriptFilesBelow(STORE_DIRECTORY)], path =>
+        // oxlint-disable-next-line effecttsgo/prefer-effect-string -- This separator is not proven nonempty; native split returns [] for an empty receiver with an empty separator while Effect String split returns a nonempty array.
+        EffectArray.join(relative(GRAPH_SOURCE_DIRECTORY, path).split(sep), '/'),
+      ).sort(),
+      name => [name, readFileSync(join(GRAPH_SOURCE_DIRECTORY, name), 'utf8')],
+    ),
   );
 }
 
 function storeModuleDependencies(modules: ReadonlyMap<string, string>): ReadonlyMap<string, readonly string[]> {
   return new Map(
-    [...modules].map(([name, source]) => [
+    EffectArray.map([...modules], ([name, source]) => [
       name,
-      [...source.matchAll(STORE_IMPORT_PATTERN)]
-        .map(match => posix.normalize(posix.join(posix.dirname(name), match[1].replace(/\.js$/u, '.ts'))))
-        .filter(dependency => modules.has(dependency)),
+      EffectArray.filter(
+        EffectArray.map([...Effect.pipe(source, EffectString.matchAll(STORE_IMPORT_PATTERN))], match =>
+          posix.normalize(
+            posix.join(posix.dirname(name), Effect.pipe(match[1], EffectString.replace(/\.js$/u, '.ts'))),
+          ),
+        ),
+        dependency => modules.has(dependency),
+      ),
     ]),
   );
 }

@@ -1,9 +1,10 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Database} from 'bun:sqlite';
+import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -31,6 +32,14 @@ import {
   deleteCodeGraphVectorPointerWithRetirementSql,
   inspectCodeGraphVectorRetirementWork,
 } from '@threadnote/graph/vector/retirement';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function requiredRow<Row extends object>(row: Row | null): Row {
+  if (row === null) throw TestError.make({message: 'Expected a row for a required SQLite query result.'});
+  return row;
+}
 
 const VectorRetirementTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
 const identityCapacityProtector: CodeGraphVectorRetirementCapacityProtector = (_boundary, transaction) => transaction;
@@ -50,7 +59,7 @@ describe('code graph vector retirement schema', () => {
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [{generation: 'generation-live', snapshotId: 'snapshot-live', vectorCount: 3}],
-              pointers: [{generation: 'generation-live', worktreeId: 'a'.repeat(64)}],
+              pointers: [{generation: 'generation-live', worktreeId: Effect2.pipe('a', EffectString.repeat(64))}],
             }),
           );
           const before = yield* Effect.sync(() => readLegacyState(databasePath));
@@ -68,7 +77,7 @@ describe('code graph vector retirement schema', () => {
           const idempotent = yield* prepareCodeGraphVectorRetirement(databasePath, capacityOptions);
 
           expect(states.at(-1)).toBe('ready');
-          expect(states.every(state => state === 'prepared' || state === 'ready')).toBe(true);
+          expect(EffectArray.every(states, state => state === 'prepared' || state === 'ready')).toBe(true);
           expect(states.length).toBeLessThanOrEqual(16);
           expect(idempotent).toEqual({state: 'ready'});
           expect(boundaries).toEqual([
@@ -109,7 +118,7 @@ describe('code graph vector retirement schema', () => {
               generations: [{generation, snapshotId: 'snapshot-legacy', vectorCount: 3}],
               pointers: Array.from({length: pointerCount}, (_, index) => ({
                 generation,
-                worktreeId: index.toString(16).padStart(64, '0'),
+                worktreeId: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
               })),
             }),
           );
@@ -169,7 +178,7 @@ describe('code graph vector retirement schema', () => {
               generations: [{generation, snapshotId: 'snapshot-over-cap'}],
               pointers: Array.from({length: 8_193}, (_, index) => ({
                 generation,
-                worktreeId: index.toString(16).padStart(64, '0'),
+                worktreeId: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
               })),
             }),
           );
@@ -205,7 +214,7 @@ describe('code graph vector retirement schema', () => {
           const path = yield* Path.Path;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-r1-index-loss-'});
           const databasePath = path.join(root, 'vectors-v2.sqlite');
-          const retiredWorktree = 'a'.repeat(64);
+          const retiredWorktree = Effect2.pipe('a', EffectString.repeat(64));
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [
@@ -214,7 +223,7 @@ describe('code graph vector retirement schema', () => {
               ],
               pointers: [
                 {generation: 'generation-retired', worktreeId: retiredWorktree},
-                {generation: 'generation-live', worktreeId: 'b'.repeat(64)},
+                {generation: 'generation-live', worktreeId: Effect2.pipe('b', EffectString.repeat(64))},
               ],
             }),
           );
@@ -271,7 +280,7 @@ describe('code graph vector retirement schema', () => {
             scenario =>
               Effect.gen(function* () {
                 const databasePath = path.join(root, `${scenario.name}.sqlite`);
-                const worktreeId = 'a'.repeat(64);
+                const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
                 yield* Effect.sync(() =>
                   seedVectorDatabase(databasePath, {
                     generations: [{generation: 'generation-retired', snapshotId: 'snapshot-retired'}],
@@ -342,7 +351,7 @@ describe('code graph vector retirement schema', () => {
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [{generation: 'generation-live', snapshotId: 'snapshot-live'}],
-              pointers: [{generation: 'generation-live', worktreeId: 'a'.repeat(64)}],
+              pointers: [{generation: 'generation-live', worktreeId: Effect2.pipe('a', EffectString.repeat(64))}],
             }),
           );
           yield* Effect.sync(() =>
@@ -390,7 +399,7 @@ describe('code graph vector retirement schema', () => {
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [{generation: 'generation-live', snapshotId: 'snapshot-live'}],
-              pointers: [{generation: 'generation-live', worktreeId: 'a'.repeat(64)}],
+              pointers: [{generation: 'generation-live', worktreeId: Effect2.pipe('a', EffectString.repeat(64))}],
             }),
           );
           const plannedState = yield* Effect.sync(() => readVectorMigrationAuthorityState(databasePath));
@@ -474,7 +483,9 @@ describe('code graph vector retirement schema', () => {
                         {generation: 'generation-live', snapshotId: 'snapshot-live'},
                         {generation: 'generation-new', snapshotId: 'snapshot-new'},
                       ],
-                      pointers: [{generation: 'generation-live', worktreeId: 'a'.repeat(64)}],
+                      pointers: [
+                        {generation: 'generation-live', worktreeId: Effect2.pipe('a', EffectString.repeat(64))},
+                      ],
                     }),
                   );
                   yield* prepareUntilReady(databasePath);
@@ -483,7 +494,9 @@ describe('code graph vector retirement schema', () => {
 
                   yield* Effect.sync(() =>
                     withWritableDatabase(databasePath, database => {
-                      expect(() => upsertVectorPointer(database, 'a'.repeat(64), 'generation-new')).toThrow();
+                      expect(() =>
+                        upsertVectorPointer(database, Effect2.pipe('a', EffectString.repeat(64)), 'generation-new'),
+                      ).toThrow();
                     }),
                   );
                   expect(yield* Effect.sync(() => readAuthorityState(databasePath)), corruption.name).toEqual(before);
@@ -499,7 +512,7 @@ describe('code graph vector retirement schema', () => {
             );
 
             const exhaustedPath = path.join(root, 'exhausted.sqlite');
-            const worktreeId = 'b'.repeat(64);
+            const worktreeId = Effect2.pipe('b', EffectString.repeat(64));
             yield* Effect.sync(() =>
               seedVectorDatabase(exhaustedPath, {
                 generations: [
@@ -528,8 +541,8 @@ describe('code graph vector retirement schema', () => {
             expect(yield* Effect.sync(() => readAuthorityState(exhaustedPath))).toEqual(beforeExhausted);
 
             const behindPath = path.join(root, 'behind-maximum.sqlite');
-            const retiredWorktree = 'c'.repeat(64);
-            const liveWorktree = 'd'.repeat(64);
+            const retiredWorktree = Effect2.pipe('c', EffectString.repeat(64));
+            const liveWorktree = Effect2.pipe('d', EffectString.repeat(64));
             yield* Effect.sync(() =>
               seedVectorDatabase(behindPath, {
                 generations: [
@@ -576,7 +589,7 @@ describe('code graph vector retirement schema', () => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-pointer-'});
-          const worktreeId = 'a'.repeat(64);
+          const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
           const scenarios = [
             {
               mutate: (database: Database) =>
@@ -617,7 +630,7 @@ describe('code graph vector retirement schema', () => {
 
                 const markers = yield* Effect.sync(() => readRetirementRows(databasePath));
                 expect(markers, scenario.name).toHaveLength(1);
-                expect(Object.values(markers[0]), scenario.name).toEqual(
+                expect(EffectRecord.values(markers[0]), scenario.name).toEqual(
                   expect.arrayContaining(['generation-old', 'snapshot-old', worktreeId]),
                 );
               }),
@@ -634,8 +647,8 @@ describe('code graph vector retirement schema', () => {
           const path = yield* Path.Path;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-shared-'});
           const databasePath = path.join(root, 'vectors-v2.sqlite');
-          const firstWorktree = 'a'.repeat(64);
-          const lastWorktree = 'b'.repeat(64);
+          const firstWorktree = Effect2.pipe('a', EffectString.repeat(64));
+          const lastWorktree = Effect2.pipe('b', EffectString.repeat(64));
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [
@@ -671,7 +684,7 @@ describe('code graph vector retirement schema', () => {
           );
           const markers = yield* Effect.sync(() => readRetirementRows(databasePath));
           expect(markers).toHaveLength(1);
-          expect(Object.values(markers[0])).toEqual(
+          expect(EffectRecord.values(markers[0])).toEqual(
             expect.arrayContaining(['generation-shared', 'snapshot-shared', lastWorktree]),
           );
         }),
@@ -690,7 +703,7 @@ describe('code graph vector retirement schema', () => {
               generations: [{generation: 'generation-shared', snapshotId: 'snapshot-shared'}],
               pointers: Array.from({length: 128}, (_, index) => ({
                 generation: 'generation-shared',
-                worktreeId: index.toString(16).padStart(64, '0'),
+                worktreeId: Effect2.pipe(index.toString(16), EffectString.padStart(64, '0')),
               })),
             }),
           );
@@ -716,7 +729,7 @@ describe('code graph vector retirement schema', () => {
           const path = yield* Path.Path;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-exact-delete-'});
           const databasePath = path.join(root, 'vectors-v2.sqlite');
-          const worktreeId = 'a'.repeat(64);
+          const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [{generation: 'generation-exact', snapshotId: 'snapshot-exact'}],
@@ -741,7 +754,7 @@ describe('code graph vector retirement schema', () => {
           expect(after.pointers).toEqual([]);
           const markers = yield* Effect.sync(() => readRetirementRows(databasePath));
           expect(markers).toHaveLength(1);
-          expect(Object.values(markers[0])).toEqual(
+          expect(EffectRecord.values(markers[0])).toEqual(
             expect.arrayContaining(['generation-exact', 'snapshot-exact', worktreeId]),
           );
           expect(yield* Effect.sync(() => readPointerDeleteAuthority(databasePath))).toEqual({
@@ -762,13 +775,13 @@ describe('code graph vector retirement schema', () => {
           const databasePath = path.join(root, 'vectors-v2.sqlite');
           const generation = 'generation-corrupt-marker';
           const snapshotId = 'snapshot-corrupt-marker';
-          const worktreeId = 'a'.repeat(64);
+          const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [{generation, snapshotId}],
               pointers: [
                 {generation, worktreeId},
-                {generation, worktreeId: 'b'.repeat(64)},
+                {generation, worktreeId: Effect2.pipe('b', EffectString.repeat(64))},
               ],
             }),
           );
@@ -813,7 +826,7 @@ describe('code graph vector retirement schema', () => {
                 {generation: 'generation-delete', snapshotId: 'snapshot-delete'},
                 {generation: 'generation-update', snapshotId: 'snapshot-update'},
               ],
-              pointers: [{generation: 'generation-update', worktreeId: 'a'.repeat(64)}],
+              pointers: [{generation: 'generation-update', worktreeId: Effect2.pipe('a', EffectString.repeat(64))}],
             }),
           );
           yield* prepareUntilReady(databasePath);
@@ -915,8 +928,8 @@ describe('code graph vector retirement schema', () => {
                 {generation: 'generation-z', snapshotId: 'snapshot-z'},
               ],
               pointers: [
-                {generation: 'generation-a', worktreeId: 'a'.repeat(64)},
-                {generation: 'generation-z', worktreeId: 'b'.repeat(64)},
+                {generation: 'generation-a', worktreeId: Effect2.pipe('a', EffectString.repeat(64))},
+                {generation: 'generation-z', worktreeId: Effect2.pipe('b', EffectString.repeat(64))},
               ],
             }),
           );
@@ -965,8 +978,10 @@ describe('code graph vector retirement schema', () => {
                   ...(scenario === 'insert' ? [] : [{generation: 'generation-z', snapshotId: 'snapshot-z'}]),
                 ],
                 pointers: [
-                  {generation: 'generation-a', worktreeId: 'a'.repeat(64)},
-                  ...(scenario === 'update' ? [{generation: 'generation-z', worktreeId: 'b'.repeat(64)}] : []),
+                  {generation: 'generation-a', worktreeId: Effect2.pipe('a', EffectString.repeat(64))},
+                  ...(scenario === 'update'
+                    ? [{generation: 'generation-z', worktreeId: Effect2.pipe('b', EffectString.repeat(64))}]
+                    : []),
                 ],
               }),
             );
@@ -1053,7 +1068,7 @@ describe('code graph vector retirement schema', () => {
             yield* Effect.sync(() =>
               seedVectorDatabase(databasePath, {
                 generations: [{generation: 'generation-a', snapshotId: 'snapshot-a'}],
-                pointers: [{generation: 'generation-a', worktreeId: 'a'.repeat(64)}],
+                pointers: [{generation: 'generation-a', worktreeId: Effect2.pipe('a', EffectString.repeat(64))}],
               }),
             );
             yield* prepareUntilReady(databasePath);
@@ -1221,7 +1236,7 @@ describe('code graph vector retirement schema', () => {
           const path = yield* Path.Path;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-delete-drift-'});
           const databasePath = path.join(root, 'vectors-v2.sqlite');
-          const worktreeId = 'a'.repeat(64);
+          const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [{generation: 'generation-live', snapshotId: 'snapshot-live'}],
@@ -1283,7 +1298,9 @@ describe('code graph vector retirement schema', () => {
                       },
                       {generation: 'generation-ready', snapshotId: 'snapshot-ready', vectorCount: 2},
                     ],
-                    pointers: [{generation: 'generation-ready', worktreeId: 'a'.repeat(64)}],
+                    pointers: [
+                      {generation: 'generation-ready', worktreeId: Effect2.pipe('a', EffectString.repeat(64))},
+                    ],
                   }),
                 );
                 yield* prepareUntilReady(databasePath);
@@ -1311,8 +1328,8 @@ describe('code graph vector retirement schema', () => {
           const path = yield* Path.Path;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-reactivation-'});
           const databasePath = path.join(root, 'vectors-v2.sqlite');
-          const retiredWorktree = 'a'.repeat(64);
-          const liveWorktree = 'b'.repeat(64);
+          const retiredWorktree = Effect2.pipe('a', EffectString.repeat(64));
+          const liveWorktree = Effect2.pipe('b', EffectString.repeat(64));
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [
@@ -1338,7 +1355,7 @@ describe('code graph vector retirement schema', () => {
                 () =>
                   database
                     .query('INSERT INTO vector_pointers (worktree_id, generation) VALUES (?, ?)')
-                    .run('c'.repeat(64), 'generation-retiring'),
+                    .run(Effect2.pipe('c', EffectString.repeat(64)), 'generation-retiring'),
                 () =>
                   database
                     .query('UPDATE vector_pointers SET generation = ? WHERE worktree_id = ?')
@@ -1369,7 +1386,7 @@ describe('code graph vector retirement schema', () => {
                     .run(
                       'snapshot-rewritten',
                       'model-rewritten',
-                      'e'.repeat(64),
+                      Effect2.pipe('e', EffectString.repeat(64)),
                       768,
                       2,
                       99,
@@ -1410,14 +1427,14 @@ describe('code graph vector retirement schema', () => {
             const path = yield* Path.Path;
             const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-manifest-'});
             const blob = new Uint8Array(1024 * 1024);
-            const text = 'x'.repeat(1024 * 1024);
+            const text = Effect2.pipe('x', EffectString.repeat(1024 * 1024));
             const corruptions = [
               {column: 'generation', name: 'generation-text', value: text},
               {column: 'snapshot_id', name: 'snapshot-blob', value: blob},
               {column: 'model_id', name: 'model-id-blob', value: blob},
               {column: 'model_id', name: 'model-id-text', value: text},
               {column: 'model_sha256', name: 'model-sha-blob', value: blob},
-              {column: 'model_sha256', name: 'model-sha-uppercase', value: 'F'.repeat(64)},
+              {column: 'model_sha256', name: 'model-sha-uppercase', value: Effect2.pipe('F', EffectString.repeat(64))},
               {column: 'dimensions', name: 'dimensions-blob', value: blob},
               {column: 'template_version', name: 'template-version-blob', value: blob},
               {column: 'count', name: 'count-blob', value: blob},
@@ -1432,7 +1449,7 @@ describe('code graph vector retirement schema', () => {
                 Effect.gen(function* () {
                   const databasePath = path.join(root, `${corruption.name}.sqlite`);
                   const generation = 'generation-corrupt';
-                  const worktreeId = 'a'.repeat(64);
+                  const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
                   yield* Effect.sync(() =>
                     seedVectorDatabase(databasePath, {
                       generations: [{generation, snapshotId: 'snapshot-corrupt'}],
@@ -1511,7 +1528,7 @@ describe('code graph vector retirement schema', () => {
               Effect.gen(function* () {
                 const databasePath = path.join(root, `${scenario.name}.sqlite`);
                 const generation = 'generation-live';
-                const worktreeId = 'a'.repeat(64);
+                const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
                 yield* Effect.sync(() =>
                   seedVectorDatabase(databasePath, {
                     generations: [{generation, snapshotId: 'snapshot-live', vectorCount: 3}],
@@ -1574,7 +1591,7 @@ describe('code graph vector retirement schema', () => {
           const path = yield* Path.Path;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-page-'});
           const databasePath = path.join(root, 'vectors-v2.sqlite');
-          const worktreeId = 'a'.repeat(64);
+          const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [{generation: 'generation-reused', snapshotId: 'snapshot-reused', vectorCount: 2_005}],
@@ -1714,7 +1731,7 @@ describe('code graph vector retirement schema', () => {
           const path = yield* Path.Path;
           const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-retirement-bytes-'});
           const databasePath = path.join(root, 'vectors-v2.sqlite');
-          const worktreeId = 'a'.repeat(64);
+          const worktreeId = Effect2.pipe('a', EffectString.repeat(64));
           yield* Effect.sync(() =>
             seedVectorDatabase(databasePath, {
               generations: [
@@ -1781,12 +1798,18 @@ describe('code graph vector retirement schema', () => {
 
           expect(legacyProbe.parameters).toEqual([8_193]);
           expect(legacyPlan).toContainEqual(expect.stringContaining('USING INDEX sqlite_autoindex_vector_pointers_1'));
-          expect(legacyPlan.some(detail => detail.includes('USE TEMP B-TREE'))).toBe(false);
+          expect(
+            EffectArray.some(legacyPlan, detail => Effect2.pipe(detail, EffectString.includes('USE TEMP B-TREE'))),
+          ).toBe(false);
           expect(statement.parameters).toContain(1_000);
           expect(statement.parameters).not.toContain(10_000);
           expect(plan).toContainEqual(expect.stringContaining('SEARCH vectors USING PRIMARY KEY (generation='));
-          expect(plan.some(detail => detail.includes('SCAN vectors'))).toBe(false);
-          expect(plan.some(detail => detail.includes('USE TEMP B-TREE'))).toBe(false);
+          expect(EffectArray.some(plan, detail => Effect2.pipe(detail, EffectString.includes('SCAN vectors')))).toBe(
+            false,
+          );
+          expect(EffectArray.some(plan, detail => Effect2.pipe(detail, EffectString.includes('USE TEMP B-TREE')))).toBe(
+            false,
+          );
           expect(authorityPlans.pointer).toContainEqual(
             expect.stringContaining(
               'SEARCH vector_pointers USING COVERING INDEX vector_pointer_generation_lookup (generation=?)',
@@ -1794,20 +1817,23 @@ describe('code graph vector retirement schema', () => {
           );
           expect(authorityPlans.markerUsesAssociationIndex).toBe(true);
           expect(
-            authorityPlans.globalMarker.some(
+            EffectArray.some(
+              authorityPlans.globalMarker,
               detail =>
-                detail.includes('SEARCH vector_generation_retirements USING') &&
-                detail.includes('sqlite_autoindex_vector_generation_retirements_1'),
+                Effect2.pipe(detail, EffectString.includes('SEARCH vector_generation_retirements USING')) &&
+                Effect2.pipe(detail, EffectString.includes('sqlite_autoindex_vector_generation_retirements_1')),
             ),
           ).toBe(true);
           expect(
-            [...authorityPlans.pointer, ...authorityPlans.marker, ...authorityPlans.globalMarker].some(detail =>
-              detail.includes('SCAN '),
+            EffectArray.some(
+              [...authorityPlans.pointer, ...authorityPlans.marker, ...authorityPlans.globalMarker],
+              detail => Effect2.pipe(detail, EffectString.includes('SCAN ')),
             ),
           ).toBe(false);
           expect(
-            [...authorityPlans.pointer, ...authorityPlans.marker, ...authorityPlans.globalMarker].some(detail =>
-              detail.includes('USE TEMP B-TREE'),
+            EffectArray.some(
+              [...authorityPlans.pointer, ...authorityPlans.marker, ...authorityPlans.globalMarker],
+              detail => Effect2.pipe(detail, EffectString.includes('USE TEMP B-TREE')),
             ),
           ).toBe(false);
         }),
@@ -1890,14 +1916,14 @@ function seedVectorDatabase(databasePath: string, seed: VectorDatabaseSeed): voi
         insertGeneration.run(
           generation.generation,
           generation.snapshotId,
-          'f'.repeat(64),
+          Effect2.pipe('f', EffectString.repeat(64)),
           vectorCount,
           generation.state ?? 'ready',
           '1970-01-01T00:00:00.000Z',
         );
         const payload = new Uint8Array(generation.vectorBytes ?? 16);
         for (let index = 0; index < vectorCount; index += 1) {
-          const symbolId = `symbol-${index.toString().padStart(6, '0')}`;
+          const symbolId = `symbol-${Effect2.pipe(index.toString(), EffectString.padStart(6, '0'))}`;
           insertVector.run(generation.generation, symbolId, `fingerprint-${symbolId}`, payload);
         }
       }
@@ -1951,10 +1977,15 @@ function readVectorMigrationAuthorityState(databasePath: string) {
   try {
     const hasTable = (name: string) =>
       Number(
-        (
-          database.query("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as {
-            readonly count: number;
-          }
+        requiredRow(
+          database
+            .query<
+              {
+                readonly count: number;
+              },
+              SQLQueryBindings[]
+            >("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .get(name),
         ).count,
       ) === 1;
     const hasRetirementState = hasTable('vector_retirement_state');
@@ -1981,11 +2012,21 @@ function readVectorMigrationAuthorityState(databasePath: string) {
         : [],
       storage: {
         freelistCount: Number(
-          (database.query('PRAGMA freelist_count').get() as {readonly freelist_count: number}).freelist_count,
+          requiredRow(
+            database.query<{readonly freelist_count: number}, SQLQueryBindings[]>('PRAGMA freelist_count').get(),
+          ).freelist_count,
         ),
-        journalMode: (database.query('PRAGMA journal_mode').get() as {readonly journal_mode: string}).journal_mode,
-        pageCount: Number((database.query('PRAGMA page_count').get() as {readonly page_count: number}).page_count),
-        pageSize: Number((database.query('PRAGMA page_size').get() as {readonly page_size: number}).page_size),
+        journalMode: requiredRow(
+          database.query<{readonly journal_mode: string}, SQLQueryBindings[]>('PRAGMA journal_mode').get(),
+        ).journal_mode,
+        pageCount: Number(
+          requiredRow(database.query<{readonly page_count: number}, SQLQueryBindings[]>('PRAGMA page_count').get())
+            .page_count,
+        ),
+        pageSize: Number(
+          requiredRow(database.query<{readonly page_size: number}, SQLQueryBindings[]>('PRAGMA page_size').get())
+            .page_size,
+        ),
       },
       state: hasRetirementState ? database.query('SELECT * FROM vector_retirement_state ORDER BY singleton').all() : [],
       userVersion: database.query('PRAGMA user_version').get(),
@@ -1999,8 +2040,10 @@ function readIndexSql(databasePath: string): string | undefined {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     const row = database
-      .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'vector_pointer_generation_lookup'")
-      .get() as {readonly sql: string} | null;
+      .query<{readonly sql: string} | null, SQLQueryBindings[]>(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'vector_pointer_generation_lookup'",
+      )
+      .get();
     return row?.sql;
   } finally {
     database.close(false);
@@ -2011,12 +2054,12 @@ function readRetirementTableCount(databasePath: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     return Number(
-      (
+      requiredRow(
         database
-          .query(
+          .query<{readonly count: number}, SQLQueryBindings[]>(
             "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'vector_generation_retirements'",
           )
-          .get() as {readonly count: number}
+          .get(),
       ).count,
     );
   } finally {
@@ -2047,16 +2090,17 @@ function readRetirementSchemaState(databasePath: string) {
         )
         .all(),
       tableCount: Number(
-        (
+        requiredRow(
           database
-            .query(
+            .query<{readonly count: number}, SQLQueryBindings[]>(
               "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'vector_generation_retirements'",
             )
-            .get() as {readonly count: number}
+            .get(),
         ).count,
       ),
       userVersion: Number(
-        (database.query('PRAGMA user_version').get() as {readonly user_version: number}).user_version,
+        requiredRow(database.query<{readonly user_version: number}, SQLQueryBindings[]>('PRAGMA user_version').get())
+          .user_version,
       ),
     };
   } finally {
@@ -2096,19 +2140,39 @@ function readAuthorityState(databasePath: string) {
 function readRetirementRows(databasePath: string): readonly Record<string, unknown>[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database.query('SELECT * FROM vector_generation_retirements').all() as readonly Record<string, unknown>[];
+    return database
+      .query<Record<string, unknown>, SQLQueryBindings[]>('SELECT * FROM vector_generation_retirements')
+      .all();
   } finally {
     database.close(false);
   }
 }
 
 function retirementEpoch(marker: Readonly<Record<string, unknown>>): number {
-  const candidates = Object.entries(marker).filter(
-    ([key, value]) =>
-      /epoch|retirement.*id/i.test(key) && typeof value === 'number' && Number.isSafeInteger(value) && value > 0,
-  );
+  const candidates = EffectArray.filter(EffectRecord.toEntries(marker), isRetirementEpochEntry);
   expect(candidates).toHaveLength(1);
-  return candidates[0][1] as number;
+  const candidate = candidates[0];
+  if (!candidate) throw TestError.make({message: 'Expected one positive retirement epoch.'});
+  return candidate[1];
+}
+
+function isRetirementEpochEntry(entry: readonly [string, unknown]): entry is readonly [string, number] {
+  const [key, value] = entry;
+  return /epoch|retirement.*id/i.test(key) && typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function bindRetirementMarker(statement: {
+  readonly parameters: readonly (string | undefined)[];
+  readonly text: string;
+}) {
+  const parameters: string[] = [];
+  for (const parameter of statement.parameters) {
+    if (parameter === undefined) {
+      throw TestError.make({message: 'Production vector retirement marker statement retained an undefined binding.'});
+    }
+    parameters.push(parameter);
+  }
+  return {parameters, text: statement.text};
 }
 
 function withWritableDatabase<A>(databasePath: string, use: (database: Database) => A): A {
@@ -2179,9 +2243,16 @@ function readRetirementDataState(databasePath: string, extraTable?: string) {
 function readSchemaObjectCount(databasePath: string, name: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database.query('SELECT COUNT(*) AS count FROM sqlite_master WHERE name = ?').get(name) as {
-      readonly count: number;
-    };
+    const row = requiredRow(
+      database
+        .query<
+          {
+            readonly count: number;
+          },
+          SQLQueryBindings[]
+        >('SELECT COUNT(*) AS count FROM sqlite_master WHERE name = ?')
+        .get(name),
+    );
     return Number(row.count);
   } finally {
     database.close(false);
@@ -2194,8 +2265,11 @@ function corruptMarkedGeneration(
   value: string | Uint8Array,
   generation: string,
 ): void {
-  const trigger = CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.find(
-    candidate => candidate.name === 'vector_retirement_generation_update_guard',
+  const trigger = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS,
+      candidate => candidate.name === 'vector_retirement_generation_update_guard',
+    ),
   );
   if (trigger === undefined)
     throw TestError.make({message: 'Vector retirement generation-update guard is unavailable.'});
@@ -2219,8 +2293,11 @@ function insertCorruptRetirementMarker(
     readonly snapshotId: string;
   },
 ): void {
-  const trigger = CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.find(
-    candidate => candidate.name === 'vector_retirement_marker_insert_guard',
+  const trigger = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS,
+      candidate => candidate.name === 'vector_retirement_marker_insert_guard',
+    ),
   );
   if (trigger === undefined) throw TestError.make({message: 'Vector retirement marker-insert guard is unavailable.'});
   withWritableDatabase(databasePath, database => {
@@ -2251,18 +2328,24 @@ function upsertVectorPointer(database: Database, worktreeId: string, generation:
 function readPointerDeleteAuthority(databasePath: string) {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const columns = (
-      database.query("PRAGMA table_info('vector_retirement_state')").all() as readonly {readonly name: string}[]
-    ).map(column => column.name);
+    const columns = EffectArray.map(
+      database.query<{readonly name: string}, SQLQueryBindings[]>("PRAGMA table_info('vector_retirement_state')").all(),
+      column => column.name,
+    );
     const generation = requiredSemanticColumn(columns, /^pointer_delete_generation$/i);
     const snapshot = requiredSemanticColumn(columns, /^pointer_delete_snapshot_id$/i);
     const worktree = requiredSemanticColumn(columns, /^pointer_delete_worktree_id$/i);
-    return database
-      .query(
-        `SELECT ${generation} AS generation, ${snapshot} AS snapshot, ${worktree} AS worktree
+    return requiredRow(
+      database
+        .query<
+          {readonly generation: unknown; readonly snapshot: unknown; readonly worktree: unknown},
+          SQLQueryBindings[]
+        >(
+          `SELECT ${generation} AS generation, ${snapshot} AS snapshot, ${worktree} AS worktree
          FROM vector_retirement_state WHERE singleton = 1`,
-      )
-      .get() as {readonly generation: unknown; readonly snapshot: unknown; readonly worktree: unknown};
+        )
+        .get(),
+    );
   } finally {
     database.close(false);
   }
@@ -2281,7 +2364,14 @@ function insertGeneration(
        (generation, snapshot_id, model_id, model_sha256, dimensions, template_version, count, state, created_at)
        VALUES (?, ?, 'model-test', ?, 384, 1, ?, ?, ?)`,
     )
-    .run(generation, snapshotId, 'f'.repeat(64), vectorCount, state, '1970-01-01T00:00:00.000Z');
+    .run(
+      generation,
+      snapshotId,
+      Effect2.pipe('f', EffectString.repeat(64)),
+      vectorCount,
+      state,
+      '1970-01-01T00:00:00.000Z',
+    );
 }
 
 function readGenerationCounts(databasePath: string, generation: string) {
@@ -2289,10 +2379,15 @@ function readGenerationCounts(databasePath: string, generation: string) {
   try {
     const count = (table: string) =>
       Number(
-        (
-          database.query(`SELECT COUNT(*) AS count FROM ${table} WHERE generation = ?`).get(generation) as {
-            readonly count: number;
-          }
+        requiredRow(
+          database
+            .query<
+              {
+                readonly count: number;
+              },
+              SQLQueryBindings[]
+            >(`SELECT COUNT(*) AS count FROM ${table} WHERE generation = ?`)
+            .get(generation),
         ).count,
       );
     return {
@@ -2308,9 +2403,13 @@ function readGenerationCounts(databasePath: string, generation: string) {
 function readVectorPayload(databasePath: string, generation: string) {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database
-      .query('SELECT COUNT(*) AS rows, COALESCE(SUM(length(vector)), 0) AS bytes FROM vectors WHERE generation = ?')
-      .get(generation) as {readonly bytes: number; readonly rows: number};
+    const row = requiredRow(
+      database
+        .query<{readonly bytes: number; readonly rows: number}, SQLQueryBindings[]>(
+          'SELECT COUNT(*) AS rows, COALESCE(SUM(length(vector)), 0) AS bytes FROM vectors WHERE generation = ?',
+        )
+        .get(generation),
+    );
     return {bytes: Number(row.bytes), rows: Number(row.rows)};
   } finally {
     database.close(false);
@@ -2320,19 +2419,24 @@ function readVectorPayload(databasePath: string, generation: string) {
 function readVectorGenerationFactBytes(databasePath: string, generation: string): number {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    const row = database
-      .query(
-        `SELECT generation, snapshot_id, model_id, model_sha256, state, created_at
+    const row = requiredRow(
+      database
+        .query<Record<string, unknown>, SQLQueryBindings[]>(
+          `SELECT generation, snapshot_id, model_id, model_sha256, state, created_at
          FROM vector_generations WHERE generation = ?`,
-      )
-      .get(generation) as Record<string, unknown>;
-    const values = ['generation', 'snapshot_id', 'model_id', 'model_sha256', 'state', 'created_at'].map(column => {
-      const value = row[column];
-      if (typeof value !== 'string') throw TestError.make({message: `Vector generation ${column} is invalid.`});
-      return value;
-    });
+        )
+        .get(generation),
+    );
+    const values = EffectArray.map(
+      ['generation', 'snapshot_id', 'model_id', 'model_sha256', 'state', 'created_at'],
+      column => {
+        const value = row[column];
+        if (typeof value !== 'string') throw TestError.make({message: `Vector generation ${column} is invalid.`});
+        return value;
+      },
+    );
     const encoder = new TextEncoder();
-    return values.reduce((total, value) => total + encoder.encode(value).byteLength, 128);
+    return EffectArray.reduce(values, 128, (total, value) => total + encoder.encode(value).byteLength);
   } finally {
     database.close(false);
   }
@@ -2342,21 +2446,26 @@ function readVectorRetirementPageBytes(databasePath: string, generation: string,
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
     const rows = database
-      .query(
+      .query<
+        {
+          readonly fingerprint: string;
+          readonly symbol_id: string;
+          readonly vector_bytes: number;
+        },
+        SQLQueryBindings[]
+      >(
         `SELECT symbol_id, fingerprint, length(vector) AS vector_bytes
          FROM vectors
          WHERE generation = ?
          ORDER BY symbol_id
          LIMIT ?`,
       )
-      .all(generation, limit) as readonly {
-      readonly fingerprint: string;
-      readonly symbol_id: string;
-      readonly vector_bytes: number;
-    }[];
+      .all(generation, limit);
     const encoder = new TextEncoder();
     const generationBytes = encoder.encode(generation).byteLength;
-    return rows.reduce(
+    return EffectArray.reduce(
+      rows,
+      0,
       (sum, row) =>
         sum +
         encoder.encode(row.symbol_id).byteLength +
@@ -2364,7 +2473,6 @@ function readVectorRetirementPageBytes(databasePath: string, generation: string,
         Number(row.vector_bytes) +
         generationBytes +
         64,
-      0,
     );
   } finally {
     database.close(false);
@@ -2377,11 +2485,17 @@ function explain(
 ): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return (
-      database.query(`EXPLAIN QUERY PLAN ${statement.text}`).all(...statement.parameters) as readonly {
-        readonly detail: string;
-      }[]
-    ).map(row => row.detail);
+    return EffectArray.map(
+      database
+        .query<
+          {
+            readonly detail: string;
+          },
+          SQLQueryBindings[]
+        >(`EXPLAIN QUERY PLAN ${statement.text}`)
+        .all(...statement.parameters),
+      row => row.detail,
+    );
   } finally {
     database.close(false);
   }
@@ -2392,34 +2506,29 @@ function explainRetirementAuthority(databasePath: string) {
   try {
     const marker = codeGraphVectorRetirementMarkerPageStatement({
       afterGeneration: 'generation-plan',
-      retiredByWorktreeId: 'a'.repeat(64),
+      retiredByWorktreeId: Effect2.pipe('a', EffectString.repeat(64)),
       snapshotId: 'snapshot-plan',
     });
     const globalMarker = codeGraphVectorRetirementMarkerPageStatement({afterGeneration: 'generation-plan'});
-    if ([...marker.parameters, ...globalMarker.parameters].some(parameter => parameter === undefined)) {
-      throw TestError.make({message: 'Production vector retirement marker statement retained an undefined binding.'});
-    }
-    const boundMarker = marker as {readonly parameters: readonly (number | string)[]; readonly text: string};
-    const boundGlobalMarker = globalMarker as {
-      readonly parameters: readonly (number | string)[];
-      readonly text: string;
-    };
+    const boundMarker = bindRetirementMarker(marker);
+    const boundGlobalMarker = bindRetirementMarker(globalMarker);
     const pointer = database
-      .query(
+      .query<{readonly detail: string}, SQLQueryBindings[]>(
         `EXPLAIN QUERY PLAN
          SELECT 1 FROM vector_pointers WHERE generation = ? LIMIT 1`,
       )
-      .all('generation-plan') as readonly {readonly detail: string}[];
+      .all('generation-plan');
     const markerDetails = explain(databasePath, boundMarker);
     return {
       globalMarker: explain(databasePath, boundGlobalMarker),
       marker: markerDetails,
-      markerUsesAssociationIndex: markerDetails.some(
+      markerUsesAssociationIndex: EffectArray.some(
+        markerDetails,
         detail =>
-          detail.includes('SEARCH vector_generation_retirements USING') &&
-          detail.includes('(retired_by_worktree_id=? AND snapshot_id=? AND generation>?)'),
+          Effect2.pipe(detail, EffectString.includes('SEARCH vector_generation_retirements USING')) &&
+          Effect2.pipe(detail, EffectString.includes('(retired_by_worktree_id=? AND snapshot_id=? AND generation>?)')),
       ),
-      pointer: pointer.map(row => row.detail),
+      pointer: EffectArray.map(pointer, row => row.detail),
     };
   } finally {
     database.close(false);
@@ -2427,7 +2536,9 @@ function explainRetirementAuthority(databasePath: string) {
 }
 
 function requiredSemanticColumn(columns: readonly string[], pattern: RegExp): string {
-  const column = columns.find(candidate => pattern.test(candidate));
+  const column = EffectOption.getOrUndefined(
+    EffectArray.findFirst(columns, __effectArrayValue => !!(candidate => pattern.test(candidate))(__effectArrayValue)),
+  );
   if (column === undefined || !/^[a-z_]+$/.test(column))
     throw TestError.make({message: `Missing safe vector retirement column ${pattern}.`});
   return column;

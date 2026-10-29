@@ -1,5 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MEMORY_SCHEMA_VERSION = 10 as const;
 /** Schema 11 is emitted only by approved automatic maintenance. */
@@ -98,24 +102,24 @@ export interface ParsedMemoryCodeCitations {
   readonly errors?: readonly MemoryCodeCitationError[];
 }
 
-export class MemoryCodeCitationValidationError extends Schema.TaggedError<MemoryCodeCitationValidationError>()(
-  'MemoryCodeCitationValidationError',
-  {
-    message: Schema.String,
-    reason: Schema.Literals([
-      'aggregate-too-large',
-      'duplicate-id',
-      'entry-too-large',
-      'id-mismatch',
-      'invalid-json',
-      'invalid-shape',
-      'non-canonical',
-      'schema-version-mismatch',
-      'too-many-citations',
-      'unsupported-version',
-    ]),
-  },
-) {
+export class MemoryCodeCitationValidationError extends Schema.TaggedError<
+  MemoryCodeCitationValidationError,
+  {readonly brand: unique symbol}
+>()('MemoryCodeCitationValidationError', {
+  message: Schema.String,
+  reason: Schema.Literals([
+    'aggregate-too-large',
+    'duplicate-id',
+    'entry-too-large',
+    'id-mismatch',
+    'invalid-json',
+    'invalid-shape',
+    'non-canonical',
+    'schema-version-mismatch',
+    'too-many-citations',
+    'unsupported-version',
+  ]),
+}) {
   static of(reason: MemoryCodeCitationErrorReason): MemoryCodeCitationValidationError {
     return MemoryCodeCitationValidationError.make({
       message: CITATION_ERROR_MESSAGES[reason],
@@ -124,13 +128,13 @@ export class MemoryCodeCitationValidationError extends Schema.TaggedError<Memory
   }
 }
 
-export class UnsupportedMemorySchemaVersionError extends Schema.TaggedError<UnsupportedMemorySchemaVersionError>()(
-  'UnsupportedMemorySchemaVersionError',
-  {
-    message: Schema.String,
-    schemaVersion: Schema.Finite,
-  },
-) {
+export class UnsupportedMemorySchemaVersionError extends Schema.TaggedError<
+  UnsupportedMemorySchemaVersionError,
+  {readonly brand: unique symbol}
+>()('UnsupportedMemorySchemaVersionError', {
+  message: Schema.String,
+  schemaVersion: Schema.Finite,
+}) {
   static of(schemaVersion: number): UnsupportedMemorySchemaVersionError {
     return UnsupportedMemorySchemaVersionError.make({
       message: `Memory schema version ${schemaVersion} is newer than supported version ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION}.`,
@@ -295,7 +299,7 @@ export function formatMemoryCodeCitationLines(citations: readonly MemoryCodeCita
   }
   const seen = new Set<string>();
   const anchors = new Set<string>();
-  const lines = citations.map(citation => {
+  const lines = EffectArray.map(citations, citation => {
     const canonical = formatMemoryCodeCitation(citation);
     const id = assertMemoryCodeCitation(citation).id;
     const anchorId = memoryCodeCitationAnchorId(citation);
@@ -529,7 +533,7 @@ function targetWire(target: MemoryCodeCitationTargetV1): Record<string, unknown>
 
 function deriveCitationIdFromValidatedInput(input: MemoryCodeCitationInputV1): string {
   const identity = JSON.stringify(citationIdentityWire(input));
-  return `tncc_${sha256HexSync(`threadnote-memory-code-citation-v1\0${identity}`).slice(0, 40)}`;
+  return `tncc_${Effect.pipe(sha256HexSync(`threadnote-memory-code-citation-v1\0${identity}`), EffectString.slice(0, 40))}`;
 }
 
 function citationRootKeys(record: Record<string, unknown>): readonly string[] {
@@ -552,7 +556,7 @@ function citationRootKeys(record: Record<string, unknown>): readonly string[] {
 }
 
 function citationInputKeys(record: Record<string, unknown>): readonly string[] {
-  return citationRootKeys(record).filter(key => key !== 'id');
+  return EffectArray.filter(citationRootKeys(record), key => key !== 'id');
 }
 
 function symbolTargetKeys(record: Record<string, unknown>): readonly string[] {
@@ -574,8 +578,8 @@ function assertExactKeys(record: Record<string, unknown>, expected: readonly str
   const actual = Reflect.ownKeys(record);
   if (
     actual.length !== expected.length ||
-    actual.some(key => typeof key !== 'string') ||
-    expected.some(key => !hasOwn(record, key))
+    EffectArray.some(actual, key => typeof key !== 'string') ||
+    EffectArray.some(expected, key => !hasOwn(record, key))
   ) {
     throw citationError('invalid-shape');
   }
@@ -593,7 +597,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function hasOwn(record: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(record, key);
+  return EffectRecord.has(record, key);
 }
 
 function exactString(value: unknown, maximumBytes: number, pattern: RegExp): string {
@@ -615,21 +619,18 @@ function boundedText(value: unknown, maximumBytes: number): string {
 }
 
 function hasControlCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit <= 0x1f || codeUnit === 0x7f || codeUnit === 0x85 || codeUnit === 0x2028 || codeUnit === 0x2029) {
-      return true;
-    }
-  }
-  return false;
+  return /[^\u0020-\u007e\u0080-\u0084\u0086-\u2027\u202a-\u{10ffff}]/u.test(value);
 }
 
 function repositoryPath(value: unknown): string {
   const path = boundedText(value, 4_096);
   if (
-    path.startsWith('/') ||
-    path.includes('\\') ||
-    path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')
+    Effect.pipe(path, EffectString.startsWith('/')) ||
+    Effect.pipe(path, EffectString.includes('\\')) ||
+    EffectArray.some(
+      Effect.pipe(path, EffectString.split('/')),
+      segment => segment === '' || segment === '.' || segment === '..',
+    )
   ) {
     throw citationError('invalid-shape');
   }

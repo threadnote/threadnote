@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {existsSync} from '@threadnote/testing/node-fs';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
@@ -15,6 +16,8 @@ import type {CommandResult} from '@threadnote/platform/command';
 import type {ShareRuntime} from '@threadnote/threadnote/types';
 import * as utils from '@threadnote/threadnote/utils';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 vi.mock('@threadnote/threadnote/utils', async importOriginal => {
   const actual = await importOriginal<typeof import('@threadnote/threadnote/utils')>();
@@ -43,7 +46,16 @@ interface UnpublishFixture {
 const ok = (stdout = ''): CommandResult => ({exitCode: 0, stderr: '', stdout});
 
 function canonicalResourceFile(home: string, uri: string): string {
-  return join(home, 'data', 'local', ...uri.slice('threadnote://'.length).split('/'));
+  return join(
+    home,
+    'data',
+    'local',
+    ...Effect2.pipe(uri, __effectPipeInput => {
+      const __effectPipeStage0 = Effect2.pipe(__effectPipeInput, EffectString.slice('threadnote://'.length));
+      const __effectPipeStage1 = Effect2.pipe(__effectPipeStage0, EffectString.split('/'));
+      return __effectPipeStage1;
+    }),
+  );
 }
 
 async function writeCanonicalResource(home: string, uri: string, content: string): Promise<void> {
@@ -56,7 +68,7 @@ async function makeFixture(): Promise<UnpublishFixture> {
   const home = await mkdtemp(join(tmpdir(), 'threadnote-share-unpublish-'));
   const worktree = join(home, 'share', 'worktrees', 'default');
   const gitdir = join(home, 'share', 'teams', 'default.gitdir');
-  const worktreePath = join(worktree, ...RELATIVE_PATH.split('/'));
+  const worktreePath = join(worktree, ...Effect2.pipe(RELATIVE_PATH, EffectString.split('/')));
   await mkdir(dirname(worktreePath), {recursive: true});
   await writeFile(worktreePath, SHARED_CONTENT, 'utf8');
   await writeCanonicalResource(home, SOURCE_URI, SHARED_CONTENT);
@@ -122,7 +134,7 @@ describe('runShareUnpublish preflight and resume', () => {
 
   afterEach(async () => {
     vi.clearAllMocks();
-    await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
   });
 
   fcProp(
@@ -153,7 +165,7 @@ describe('runShareUnpublish preflight and resume', () => {
     expect(existsSync(fixture.sourcePath)).toBe(true);
     expect(existsSync(fixture.targetPath)).toBe(false);
     expect(existsSync(fixture.worktreePath)).toBe(true);
-    expect(vi.mocked(utils.runCommand).mock.calls.some(([, args]) => args.includes('rm'))).toBe(false);
+    expect(EffectArray.some(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args.includes('rm'))).toBe(false);
   });
 
   it('refuses the same non-byte-identical collision in preview and apply before Git or canonical writes', async () => {
@@ -162,7 +174,7 @@ describe('runShareUnpublish preflight and resume', () => {
     await writeCanonicalResource(
       fixture.config.agentContextHome,
       TARGET_URI,
-      PERSONAL_CONTENT.replaceAll('\n', '\r\n'),
+      Effect2.pipe(PERSONAL_CONTENT, EffectString.replaceAll('\n', '\r\n')),
     );
     mockGit(fixture);
 
@@ -176,7 +188,7 @@ describe('runShareUnpublish preflight and resume', () => {
     expect(await readFile(fixture.sourcePath, 'utf8')).toBe(SHARED_CONTENT);
     expect(await readFile(fixture.targetPath, 'utf8')).toContain('\r\n');
     expect(existsSync(fixture.worktreePath)).toBe(true);
-    expect(vi.mocked(utils.runCommand).mock.calls.some(([, args]) => args.includes('rm'))).toBe(false);
+    expect(EffectArray.some(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args.includes('rm'))).toBe(false);
   });
 
   it('resumes from a byte-identical personal target and completes Git and canonical cleanup', async () => {
@@ -230,7 +242,9 @@ describe('runShareUnpublish preflight and resume', () => {
     expect(result.output).toContain(`Shared Git path is already removed; continuing cleanup: ${RELATIVE_PATH}`);
     expect(existsSync(fixture.sourcePath)).toBe(false);
     expect(await readFile(fixture.targetPath, 'utf8')).toBe(PERSONAL_CONTENT);
-    expect(vi.mocked(utils.runCommand).mock.calls.some(([, args]) => args.includes('--ignore-unmatch'))).toBe(true);
+    expect(
+      EffectArray.some(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args.includes('--ignore-unmatch')),
+    ).toBe(true);
   });
 
   it('refuses a canonical/worktree mismatch before creating the personal destination', async () => {
@@ -246,7 +260,7 @@ describe('runShareUnpublish preflight and resume', () => {
     expect(existsSync(fixture.sourcePath)).toBe(true);
     expect(existsSync(fixture.targetPath)).toBe(false);
     expect(existsSync(fixture.worktreePath)).toBe(true);
-    expect(vi.mocked(utils.runCommand).mock.calls.some(([, args]) => args.includes('rm'))).toBe(false);
+    expect(EffectArray.some(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args.includes('rm'))).toBe(false);
   });
 
   it('refuses tracked Git content that differs from the shared canonical source', async () => {
@@ -261,6 +275,6 @@ describe('runShareUnpublish preflight and resume', () => {
     expect(existsSync(fixture.sourcePath)).toBe(true);
     expect(existsSync(fixture.targetPath)).toBe(false);
     expect(existsSync(fixture.worktreePath)).toBe(true);
-    expect(vi.mocked(utils.runCommand).mock.calls.some(([, args]) => args.includes('rm'))).toBe(false);
+    expect(EffectArray.some(vi.mocked(utils.runCommand).mock.calls, ([, args]) => args.includes('rm'))).toBe(false);
   });
 });

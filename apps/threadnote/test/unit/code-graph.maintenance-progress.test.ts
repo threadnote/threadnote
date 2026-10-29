@@ -9,6 +9,8 @@ import {
 } from '@threadnote/graph/maintenance/gate';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {mkdtemp, rm} from '../helpers/effect-filesystem.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('reported graph-maintenance progress', () => {
   effectIt.effect('publishes graph-maintenance status without a snapshot id', () =>
@@ -44,7 +46,7 @@ describe('reported graph-maintenance progress', () => {
         Effect.promise(() => mkdtemp('threadnote-graph-maintenance-checkout-status-')),
         directory => Effect.promise(() => rm(directory, {force: true, recursive: true})),
       );
-      const checkoutId = 'a'.repeat(64);
+      const checkoutId = Effect2.pipe('a', EffectString.repeat(64));
       const observed = yield* withCodeGraphReportedMaintenanceIntent(
         home,
         {checkoutId, operation: 'graph-maintenance'},

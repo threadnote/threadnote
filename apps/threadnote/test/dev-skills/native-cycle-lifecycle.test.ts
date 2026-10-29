@@ -1,4 +1,14 @@
-import {Array as EffectArray, String as EffectString, Context, Effect, FileSystem, Result} from 'effect';
+import {
+  Array as EffectArray,
+  String as EffectString,
+  Option as EffectOption,
+  Context,
+  Effect,
+  FileSystem,
+  PlatformError,
+  Predicate,
+  Result,
+} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -11,13 +21,15 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureNativeCycleSource as captureSource} from '../../src/workflow_automation/cycle_git.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {CycleDiagnostics, cycleDiagnostics} from './native-cycle-diagnostics.js';
+import * as EffectRecord from 'effect/Record';
+import * as Effect2 from 'effect';
 
 // P0 Windows allowance for three real Git/native cycle fixtures beyond 30s; revisit with performance data.
 const windowsCycleFixtureTimeout = process.platform === 'win32' ? {timeout: 120_000} : undefined;
 
 const object = (value: unknown): Record<string, unknown> => {
-  if (!value || typeof value !== 'object') throw new Error('Expected object response');
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) throw new Error('Expected object response');
+  return value;
 };
 const diagnosticOutputEnabled = process.env.THREADNOTE_NATIVE_CYCLE_DIAGNOSTICS === '1';
 type GraphStage = 'status-before' | 'index' | 'status-after';
@@ -154,7 +166,7 @@ const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
     ...original,
     init: (...args: Parameters<typeof original.init>) => diagnostics.action('init', original.init(...args)),
     call: (input: unknown) => {
-      const request = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+      const request = Predicate.isObject(input) ? input : {};
       const program = original.call(input);
       return diagnostics.action(
         request.command ?? request.action,
@@ -193,7 +205,7 @@ const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
       contracts: ['Retain proof.'],
       diagram: 'flowchart TD\n  Caller --> Delivery',
     },
-    phases: phaseIds.map(id => ({
+    phases: EffectArray.map(phaseIds, id => ({
       id,
       title: id,
       outcome: 'Phase works.',
@@ -240,8 +252,8 @@ const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
         delivery,
         bindings:
           initialBindings ??
-          Object.fromEntries(
-            phaseIds.map(id => [
+          EffectRecord.fromEntries(
+            EffectArray.map(phaseIds, id => [
               id,
               {branch: 'feature/' + id, baseBranch: id === 'two' && stacked ? 'feature/one' : 'main'},
             ]),
@@ -287,8 +299,8 @@ const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
             bindings:
               bindings ??
               initialBindings ??
-              Object.fromEntries(
-                phaseIds.map(id => [
+              EffectRecord.fromEntries(
+                EffectArray.map(phaseIds, id => [
                   id,
                   {branch: 'feature/' + id, baseBranch: id === 'two' && stacked ? 'feature/one' : 'main'},
                 ]),
@@ -335,7 +347,7 @@ const completeLocalPhase = Effect.fn('test.nativeCycle.completeLocalPhase')(func
     ...(previous
       ? {
           previous,
-          acceptedHead: (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim(),
+          acceptedHead: Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim),
           reason: 'The phase commit is an inspected descendant of the previous review head.',
         }
       : {}),
@@ -373,7 +385,7 @@ const completeLocalPhase = Effect.fn('test.nativeCycle.completeLocalPhase')(func
   });
   yield* f.git(['add', 'source.ts']);
   yield* f.git(['commit', '-m', id]);
-  const head = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+  const head = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
   yield* f.mutate('record-delivery', {
     phaseId: id,
     delivery: {
@@ -478,7 +490,7 @@ describe('native cycle lifecycle', () => {
       yield* f.git(['commit', '-m', 'Owned phase source']);
       yield* f.git(['merge', '--no-edit', 'main']);
       yield* f.fs.remove(f.path.join(f.repo, 'upstream.ts'));
-      const head = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      const head = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       const before = yield* f.fs.readFileString(f.statePath());
       expect(
         yield* f
@@ -502,14 +514,14 @@ describe('native cycle lifecycle', () => {
       yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.ts'), 'export const upstream = true;\n');
       yield* f.git(['add', 'upstream.ts']);
       yield* f.git(['commit', '-m', 'Shared upstream']);
-      const common = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      const common = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       yield* f.git(['checkout', 'feature/one']);
       yield* f.git(['merge', '--no-edit', 'main']);
       yield* f.git(['checkout', 'main']);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'later.ts'), 'export const later = true;\n');
       yield* f.git(['add', 'later.ts']);
       yield* f.git(['commit', '-m', 'Disjoint later upstream']);
-      const declared = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      const declared = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       yield* f.git(['checkout', 'feature/one']);
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "owned";\n');
       const result = object(
@@ -540,7 +552,7 @@ describe('native cycle lifecycle', () => {
         yield* f.git(['checkout', 'feature/one']);
         yield* f.git(['merge', '--no-edit', 'main']);
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), original);
-        const head = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const head = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
         const captured = object(
           object(
             (yield* f.mutate('snapshot', {
@@ -645,7 +657,7 @@ describe('native cycle lifecycle', () => {
       yield* f.fs.writeFileString(f.path.join(f.repo, 'config.ts'), 'export const unauthorized = true;\n');
       yield* f.git(['add', 'source.ts', 'config.ts']);
       yield* f.git(['commit', '-m', 'Before first review']);
-      const head = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      const head = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       const before = yield* f.fs.readFileString(f.statePath());
       expect(
         yield* f
@@ -660,7 +672,7 @@ describe('native cycle lifecycle', () => {
       expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
       yield* f.git(['rm', 'config.ts']);
       yield* f.git(['commit', '-m', 'Remove unowned source']);
-      const ownedHead = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      const ownedHead = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       const captured = object(
         object(
           (yield* f.mutate('snapshot', {
@@ -702,7 +714,7 @@ describe('native cycle lifecycle', () => {
         report: {...f.report, findings: [finding]},
       });
       const plan = yield* f.revise({
-        phases: f.document.phases.map(phase =>
+        phases: EffectArray.map(f.document.phases, phase =>
           phase.id === 'one' ? {...phase, outcome: 'Amended approved phase outcome.'} : phase,
         ),
       });
@@ -1025,13 +1037,13 @@ describe('native cycle lifecycle', () => {
         yield* f.mutate('begin-phase', {phaseId: 'one'});
         yield* completeLocalPhase(f, 'one');
         const before = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
-        const phases = f.document.phases.map(phase =>
+        const phases = EffectArray.map(f.document.phases, phase =>
           phase.id !== 'one'
             ? phase
             : field === 'verification'
               ? {
                   ...phase,
-                  acceptance: phase.acceptance.map(item => ({
+                  acceptance: EffectArray.map(phase.acceptance, item => ({
                     ...item,
                     verification: 'New approved observable verification.',
                   })),
@@ -1062,7 +1074,7 @@ describe('native cycle lifecycle', () => {
           id: 'minor-' + index,
           file: 'source.ts',
           line: 1,
-          body: 'Detailed finding. '.repeat(30),
+          body: Effect2.pipe('Detailed finding. ', EffectString.repeat(30)),
           trigger: 'Use the private flow.',
           impact: 'A minor usability gap.',
           evidence: 'Exact current source.',
@@ -1096,7 +1108,8 @@ describe('native cycle lifecycle', () => {
         content += page.text;
         sourceDigest = page.sourceDigest;
         if (page.nextOffsetBytes === null) break;
-        offsetBytes = page.nextOffsetBytes as number;
+        if (typeof page.nextOffsetBytes !== 'number') throw new Error('Expected the next offset to be numeric.');
+        offsetBytes = page.nextOffsetBytes;
       }
       expect(JSON.parse(content)).toEqual(report);
       const invalidFields = {...fields, attemptId: 'large-invalid-attempt', report: {...report, lanes: []}};
@@ -1292,10 +1305,10 @@ describe('native cycle lifecycle', () => {
         yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.ts'), 'export const upstream = true;\n');
         yield* f.git(['add', 'upstream.ts']);
         yield* f.git(['commit', '-m', 'Independent upstream']);
-        const upstream = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const upstream = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
         yield* f.git(['checkout', 'feature/one']);
         yield* f.git(['merge', '--no-edit', 'main']);
-        const acceptedHead = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const acceptedHead = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
         const result = yield* f.mutate('snapshot', {
           phaseId: 'one',
           snapshotId: 'after-incoming',
@@ -1311,8 +1324,8 @@ describe('native cycle lifecycle', () => {
             path: 'upstream.ts',
             mode: '100644',
             source: 'upstream',
-            tree: (yield* f.git(['rev-parse', upstream + '^{tree}'])).stdout.trim(),
-            blob: (yield* f.git(['rev-parse', upstream + ':upstream.ts'])).stdout.trim(),
+            tree: Effect2.pipe((yield* f.git(['rev-parse', upstream + '^{tree}'])).stdout, EffectString.trim),
+            blob: Effect2.pipe((yield* f.git(['rev-parse', upstream + ':upstream.ts'])).stdout, EffectString.trim),
             commit: upstream,
           },
         ]);
@@ -1325,7 +1338,7 @@ describe('native cycle lifecycle', () => {
         yield* f.git(['config', 'core.filemode', 'false']);
         yield* f.git(['update-index', '--chmod=+x', 'upstream.ts']);
         yield* f.git(['commit', '-m', 'Unowned mode edit']);
-        const modeHead = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const modeHead = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
         expect(
           yield* f
             .mutate('snapshot', {
@@ -1339,7 +1352,7 @@ describe('native cycle lifecycle', () => {
         ).toMatchObject({failure: {code: 'phase-scope'}});
         yield* f.git(['update-index', '--chmod=-x', 'upstream.ts']);
         yield* f.git(['commit', '-m', 'Restore upstream mode']);
-        const restoredHead = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const restoredHead = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
         yield* f.fs.writeFileString(f.path.join(f.repo, 'upstream.ts'), 'export const tampered = true;\n');
         expect(
           yield* f
@@ -1377,7 +1390,7 @@ describe('native cycle lifecycle', () => {
       ).toMatchObject({failure: {code: 'delivery-pending'}});
       yield* f.git(['add', 'source.ts']);
       yield* f.git(['commit', '-m', 'Phase one']);
-      const head = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+      const head = Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim);
       const delivered = yield* f.mutate('record-delivery', {
         phaseId: 'one',
         publication: {exemption: 'maintenance', reason: 'Private test, no feature publication.'},
@@ -1452,8 +1465,16 @@ describe('native cycle lifecycle', () => {
         const failRename = FileSystem.FileSystem.of({
           ...original,
           rename: (from, to) =>
-            to.endsWith('native-run.json')
-              ? Effect.fail(new Error('Synthetic state receipt interruption') as never)
+            Effect2.pipe(to, EffectString.endsWith('native-run.json'))
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: 'Unknown',
+                    module: 'FileSystem',
+                    method: 'rename',
+                    description: 'Synthetic state receipt interruption',
+                    pathOrDescriptor: to,
+                  }),
+                )
               : original.rename(from, to),
         });
         const interrupted = yield* f
@@ -1467,7 +1488,7 @@ describe('native cycle lifecycle', () => {
           report: f.report,
         });
         const state = JSON.parse(yield* f.fs.readFileString(f.statePath()));
-        expect(decodeNativeCycleRuntime(state.cycle).attempts.map(item => item.status)).toEqual([
+        expect(EffectArray.map(decodeNativeCycleRuntime(state.cycle).attempts, item => item.status)).toEqual([
           'invalid',
           'accepted',
         ]);
@@ -1490,7 +1511,10 @@ effectIt.effect(
       const acceptedRuntime = decodeNativeCycleRuntime(
         object(JSON.parse(yield* f.fs.readFileString(f.statePath()))).cycle,
       );
-      expect(acceptedRuntime.state.plan.phases.find(p => p.id === 'two')?.dependsOn).toEqual([]);
+      expect(
+        EffectOption.getOrUndefined(EffectArray.findFirst(acceptedRuntime.state.plan.phases, p => p.id === 'two'))
+          ?.dependsOn,
+      ).toEqual([]);
       yield* f.mutate('invalidate', {phaseId: 'one', reason: 'Real parent source failure.'});
       const before = yield* f.fs.readFileString(f.statePath());
       const refsBefore = (yield* f.git(['for-each-ref', '--format=%(refname) %(objectname)'])).stdout;
@@ -1519,7 +1543,7 @@ effectIt.effect(
         phaseId: 'two',
         snapshotId: 'two-continuation',
         previous: 'two-review',
-        acceptedHead: (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim(),
+        acceptedHead: Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim),
         reason: 'Continue from the exact normal phase commit.',
       });
       expect(object(object(continued.snapshot).snapshot).previous).toBe('two-review');
@@ -1607,7 +1631,10 @@ effectIt.effect(
       const before = yield* f.fs.readFileString(f.statePath());
       const oldRuntime = decodeNativeCycleRuntime(object(JSON.parse(before)).cycle);
       expect(oldRuntime.state.phases.two.status).toBe('published');
-      const indexFile = (yield* f.git(['rev-parse', '--path-format=absolute', '--git-path', 'index'])).stdout.trim();
+      const indexFile = Effect2.pipe(
+        (yield* f.git(['rev-parse', '--path-format=absolute', '--git-path', 'index'])).stdout,
+        EffectString.trim,
+      );
       const indexBefore = yield* f.fs.readFile(indexFile);
       const refsBefore = (yield* f.git(['for-each-ref', '--format=%(refname) %(objectname)'])).stdout;
       const sourceBefore = yield* captureNativeCycleSource(f.repo, 'HEAD');
@@ -1641,7 +1668,7 @@ effectIt.effect(
           phaseId: 'one',
           phaseHash: ancestor.phaseHash,
           delivery: 'local',
-          headSha: (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim(),
+          headSha: Effect2.pipe((yield* f.git(['rev-parse', 'HEAD'])).stdout, EffectString.trim),
           validatedTree: ancestor.tree,
         },
       });

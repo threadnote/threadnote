@@ -9,6 +9,8 @@ import {codeGraphPreparedSpoolBudgetRoot} from '@threadnote/graph/layout';
 import {withCodeGraphPreparedSpoolBudget} from '@threadnote/graph/prepared_spool_budget';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const testLayer = TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer));
 
@@ -25,8 +27,8 @@ describe('prepared spool budget process boundary', () => {
       yield* withCodeGraphPreparedSpoolBudget(
         {
           bytes: 1,
-          checkoutId: 'a'.repeat(64),
-          snapshotId: `cgsn_${'b'.repeat(40)}-direct`,
+          checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+          snapshotId: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}-direct`,
           threadnoteHome: home,
         },
         Effect.sync(() => {
@@ -52,8 +54,8 @@ describe('prepared spool budget process boundary', () => {
           const active = yield* withCodeGraphPreparedSpoolBudget(
             {
               bytes: 20 * 1_024 * 1_024 * 1_024,
-              checkoutId: 'a'.repeat(64),
-              snapshotId: `cgsn_${'b'.repeat(40)}-direct`,
+              checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+              snapshotId: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}-direct`,
               threadnoteHome: home,
             },
             Ref.update(events, values => [...values, 'active']).pipe(
@@ -65,8 +67,8 @@ describe('prepared spool budget process boundary', () => {
           const older = yield* withCodeGraphPreparedSpoolBudget(
             {
               bytes: 20 * 1_024 * 1_024 * 1_024,
-              checkoutId: 'c'.repeat(64),
-              snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+              checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
+              snapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`,
               threadnoteHome: home,
             },
             Ref.update(events, values => [...values, 'older']).pipe(Effect.andThen(Deferred.await(releaseOlder))),
@@ -75,8 +77,8 @@ describe('prepared spool budget process boundary', () => {
           const later = yield* withCodeGraphPreparedSpoolBudget(
             {
               bytes: 1,
-              checkoutId: 'e'.repeat(64),
-              snapshotId: `cgsn_${'f'.repeat(40)}-direct`,
+              checkoutId: Effect2.pipe('e', EffectString.repeat(64)),
+              snapshotId: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}-direct`,
               threadnoteHome: home,
             },
             Ref.update(events, values => [...values, 'later']),
@@ -103,13 +105,13 @@ describe('prepared spool budget process boundary', () => {
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-prepared-spool-budget-metadata-'});
       const root = codeGraphPreparedSpoolBudgetRoot(path, home);
       yield* fs.makeDirectory(root, {recursive: true});
-      const token = 'e'.repeat(64);
+      const token = Effect2.pipe('e', EffectString.repeat(64));
       const receiptPath = path.join(root, `v1-${token}.json`);
       const forged = JSON.stringify({
         bytes: 1,
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
         processId: process.pid,
-        snapshotId: `cgsn_${'b'.repeat(40)}-direct`,
+        snapshotId: `cgsn_${Effect2.pipe('b', EffectString.repeat(40))}-direct`,
         token,
         privatePath: '/private/source.ts',
         version: 1,
@@ -117,8 +119,8 @@ describe('prepared spool budget process boundary', () => {
       yield* fs.writeFileString(receiptPath, forged);
       const options = {
         bytes: 1,
-        checkoutId: 'c'.repeat(64),
-        snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+        checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
+        snapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`,
         threadnoteHome: home,
       } as const;
       expect((yield* Effect.exit(withCodeGraphPreparedSpoolBudget(options, Effect.void)))._tag).toBe('Failure');
@@ -153,8 +155,8 @@ describe('prepared spool budget process boundary', () => {
                 import {TestSystemInfoLayer} from ${JSON.stringify(systemLayerUrl)};
                 BunRuntime.runMain(withCodeGraphPreparedSpoolBudget({
                   bytes: ${CODE_GRAPH_PREPARED_SPOOL_BYTES_LIMIT + 1},
-                  checkoutId: ${JSON.stringify('a'.repeat(64))},
-                  snapshotId: ${JSON.stringify(`cgsn_${'b'.repeat(40)}-direct`)},
+                  checkoutId: ${JSON.stringify(Effect2.pipe('a', EffectString.repeat(64)))},
+                  snapshotId: ${JSON.stringify(`cgsn_${Effect2.pipe('b', EffectString.repeat(40))}-direct`)},
                   threadnoteHome: ${JSON.stringify(home)},
                 }, Effect.gen(function* () {
                   const fs = yield* FileSystem.FileSystem;
@@ -174,9 +176,9 @@ describe('prepared spool budget process boundary', () => {
           const successor = yield* withCodeGraphPreparedSpoolBudget(
             {
               bytes: CODE_GRAPH_PREPARED_SPOOL_BYTES_LIMIT + 1,
-              checkoutId: 'c'.repeat(64),
+              checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
               onWaiting: fs.writeFileString(queued, '').pipe(Effect.orDie),
-              snapshotId: `cgsn_${'d'.repeat(40)}-direct`,
+              snapshotId: `cgsn_${Effect2.pipe('d', EffectString.repeat(40))}-direct`,
               threadnoteHome: home,
             },
             fs.writeFileString(admitted, ''),

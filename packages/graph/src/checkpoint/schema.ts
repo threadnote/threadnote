@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {parseCodeGraphMonikerV1} from '../cross_repository/monikers.js';
 import type {CodeGraphExternalDependencyV1, CodeGraphMonikerV1} from '../cross_repository/types.js';
 import type {
@@ -16,6 +17,9 @@ import type {CodeGraphFileFacts} from '../types.js';
 import {canonicalJson} from './canonical_json.js';
 import {codeGraphCheckpointFileFactCacheIdentity} from './file_fact_identity.js';
 import {Predicate, Schema} from 'effect';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_GRAPH_CHECKPOINT_SCHEMA = 'threadnote.code-graph-checkpoint' as const;
 export const CODE_GRAPH_CHECKPOINT_MEDIA_TYPE = 'application/vnd.threadnote.code-graph-checkpoint.v1' as const;
@@ -49,7 +53,9 @@ export const CODE_GRAPH_CHECKPOINT_RECORD_KINDS = [
 export type CodeGraphCheckpointRecordKind = (typeof CODE_GRAPH_CHECKPOINT_RECORD_KINDS)[number];
 export type CodeGraphCheckpointSha256 = `sha256:${string}`;
 
-const RECORD_KIND_ORDER = new Map(CODE_GRAPH_CHECKPOINT_RECORD_KINDS.map((kind, ordinal) => [kind, ordinal]));
+const RECORD_KIND_ORDER = new Map(
+  EffectArray.map(CODE_GRAPH_CHECKPOINT_RECORD_KINDS, (kind, ordinal) => [kind, ordinal]),
+);
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const GRAPH_CONTENT_ID = /^cgc_[0-9a-f]{40}$/u;
@@ -59,13 +65,13 @@ const MAXIMUM_SHORT_TEXT_LENGTH = 16_384;
 const MAXIMUM_PATH_LENGTH = 4_096;
 const UTF8 = new TextEncoder();
 
-export class CodeGraphCheckpointSchemaError extends Schema.TaggedError<CodeGraphCheckpointSchemaError>()(
-  'CodeGraphCheckpointSchemaError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+export class CodeGraphCheckpointSchemaError extends Schema.TaggedError<
+  CodeGraphCheckpointSchemaError,
+  {readonly brand: unique symbol}
+>()('CodeGraphCheckpointSchemaError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export interface CodeGraphCheckpointDigestV1 {
   readonly algorithm: 'sha256';
@@ -482,13 +488,15 @@ export function parseCodeGraphCheckpointHeaderV1(value: unknown): CodeGraphCheck
     ...(input.reuse === undefined ? {} : {reuse: input.reuse}),
     source: input.source,
   });
-  const chunks = array(input.chunks, 'Checkpoint chunks').map((chunk, ordinal) => parseChunk(chunk, ordinal));
+  const chunks = EffectArray.map(array(input.chunks, 'Checkpoint chunks'), (chunk, ordinal) =>
+    parseChunk(chunk, ordinal),
+  );
   const counts = parseCounts(input.counts);
   const chunkRecords = checkedSum(
-    chunks.map(chunk => chunk.recordCount),
+    EffectArray.map(chunks, chunk => chunk.recordCount),
     'Checkpoint chunk record count',
   );
-  const countedRecords = checkedSum(Object.values(counts), 'Checkpoint record count');
+  const countedRecords = checkedSum(EffectRecord.values(counts), 'Checkpoint record count');
   if (chunkRecords !== countedRecords) {
     throw CodeGraphCheckpointSchemaError.make({message: 'Checkpoint chunk and kind counts do not match.'});
   }
@@ -799,23 +807,24 @@ export function isSafeCodeGraphCheckpointPath(value: string): boolean {
   if (
     value.length === 0 ||
     value.length > MAXIMUM_PATH_LENGTH ||
-    value.startsWith('/') ||
-    value.startsWith('\\') ||
+    Effect.pipe(value, EffectString.startsWith('/')) ||
+    Effect.pipe(value, EffectString.startsWith('\\')) ||
     /^[A-Za-z]:/u.test(value) ||
-    value.includes('\\') ||
+    Effect.pipe(value, EffectString.includes('\\')) ||
     containsControlCharacter(value)
   ) {
     return false;
   }
-  return !value.split('/').some(segment => segment === '' || segment === '.' || segment === '..');
+  return !EffectArray.some(
+    Effect.pipe(value, EffectString.split('/')),
+    segment => segment === '' || segment === '.' || segment === '..',
+  );
 }
 
+const CONTROL_CHARACTER = /[^\u0020-\u007e\u0080-\u{10ffff}]/u;
+
 function containsControlCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x1f || code === 0x7f) return true;
-  }
-  return false;
+  return CONTROL_CHARACTER.test(value);
 }
 
 function parseAbiInput(value: unknown): CodeGraphCheckpointAbiInputV1 {
@@ -844,7 +853,7 @@ function parseAbiInput(value: unknown): CodeGraphCheckpointAbiInputV1 {
   const checkpointSemanticVersion = input.checkpointSemanticVersion;
   const graphSchemaVersion = nonNegativeInteger(input.graphSchemaVersion, 'Graph schema version');
   const inventoryPolicyVersion = nonNegativeInteger(input.inventoryPolicyVersion, 'Inventory policy version');
-  const languagePacks = array(input.languagePacks, 'ABI language packs').map(parseLanguagePack);
+  const languagePacks = EffectArray.map(array(input.languagePacks, 'ABI language packs'), parseLanguagePack);
   ensureSortedUnique(languagePacks, pack => pack.id, 'ABI language packs');
   const lexicalLogicalFormatVersion = nonNegativeInteger(
     input.lexicalLogicalFormatVersion,
@@ -920,7 +929,7 @@ function parseCoverage(value: unknown): CodeGraphCheckpointCoverageV1 {
   exactKeys(input, ['eligibleFiles', 'excludedFiles', 'reasons', 'state'], [], 'Checkpoint coverage');
   const eligibleFiles = nonNegativeInteger(input.eligibleFiles, 'Coverage eligible files');
   const excludedFiles = nonNegativeInteger(input.excludedFiles, 'Coverage excluded files');
-  const reasons = array(input.reasons, 'Coverage reasons').map(reason => {
+  const reasons = EffectArray.map(array(input.reasons, 'Coverage reasons'), reason => {
     const candidate = object(reason, 'Coverage reason');
     exactKeys(candidate, ['bytes', 'code', 'files'], [], 'Coverage reason');
     return {
@@ -932,7 +941,7 @@ function parseCoverage(value: unknown): CodeGraphCheckpointCoverageV1 {
   ensureSortedUnique(reasons, reason => reason.code, 'Coverage reasons');
   const state = oneOf(input.state, ['complete', 'partial'], 'Coverage state');
   const explainedFiles = checkedSum(
-    reasons.map(reason => reason.files),
+    EffectArray.map(reasons, reason => reason.files),
     'Coverage reason file count',
   );
   if (explainedFiles !== excludedFiles) {
@@ -963,14 +972,14 @@ function parseRecordOrderKey(value: unknown, label: string): CodeGraphCheckpoint
   const input = object(value, label);
   exactKeys(input, ['identity', 'kind'], [], label);
   const kind = oneOf(input.kind, CODE_GRAPH_CHECKPOINT_RECORD_KINDS, `${label} kind`);
-  const identity = array(input.identity, `${label} identity`).map((entry, index) =>
+  const identity = EffectArray.map(array(input.identity, `${label} identity`), (entry, index) =>
     shortText(entry, `${label} identity ${index}`),
   );
   return {identity, kind};
 }
 
 function parseSortedDeletions(value: unknown): readonly CodeGraphCheckpointRecordOrderKeyV1[] {
-  const deletions = array(value, 'Checkpoint deletions').map((deletion, index) =>
+  const deletions = EffectArray.map(array(value, 'Checkpoint deletions'), (deletion, index) =>
     parseRecordOrderKey(deletion, `Checkpoint deletion ${index}`),
   );
   for (let index = 1; index < deletions.length; index += 1) {
@@ -1031,17 +1040,17 @@ function parsePortableInventory(value: unknown): CodeGraphCheckpointPortableInve
     ['diagnostics'],
     'Portable inventory',
   );
-  const attributionFiles = array(input.attributionFiles, 'Attribution files').map(parseAttributionFile);
+  const attributionFiles = EffectArray.map(array(input.attributionFiles, 'Attribution files'), parseAttributionFile);
   if (attributionFiles.length > CODE_GRAPH_CHECKPOINT_ATTRIBUTION_FILES_MAXIMUM) {
     throw CodeGraphCheckpointSchemaError.make({message: 'Attribution file count exceeds the portable boundary.'});
   }
   ensureSortedUnique(attributionFiles, file => file.path, 'Attribution files');
   const attributionContentBytes = checkedSum(
-    attributionFiles.map(file => file.size),
+    EffectArray.map(attributionFiles, file => file.size),
     'Attribution compact content bytes',
   );
   const attributionSourceBytes = checkedSum(
-    attributionFiles.map(file => file.blobSize),
+    EffectArray.map(attributionFiles, file => file.blobSize),
     'Attribution source bytes',
   );
   if (
@@ -1096,7 +1105,7 @@ function parsePolicyExclusions(value: unknown): CodeGraphCheckpointPolicyExclusi
   const bytes = nonNegativeInteger(input.bytes, 'Policy exclusion bytes');
   const files = nonNegativeInteger(input.files, 'Policy exclusion files');
   const policyVersion = positiveInteger(input.policyVersion, 'Policy exclusion version');
-  const reasons = array(input.reasons, 'Policy exclusion reasons').map(value => {
+  const reasons = EffectArray.map(array(input.reasons, 'Policy exclusion reasons'), value => {
     const reason = object(value, 'Policy exclusion reason');
     exactKeys(reason, ['bytes', 'files', 'reason'], [], 'Policy exclusion reason');
     return {
@@ -1114,8 +1123,8 @@ function parseWorkspace(value: unknown): CodeGraphWorkspace {
   exactKeys(input, ['diagnostics', 'fingerprint', 'projects', 'workspaces'], [], 'Portable workspace');
   const diagnostics = stringArray(input.diagnostics, 'Workspace diagnostics');
   const fingerprint = sha256(input.fingerprint, 'Workspace fingerprint');
-  const projects = array(input.projects, 'Workspace projects').map(parseWorkspaceProject);
-  const workspaces = array(input.workspaces, 'Build workspaces').map(parseBuildWorkspace);
+  const projects = EffectArray.map(array(input.projects, 'Workspace projects'), parseWorkspaceProject);
+  const workspaces = EffectArray.map(array(input.workspaces, 'Build workspaces'), parseBuildWorkspace);
   ensureSortedUnique(projects, project => project.id, 'Workspace projects');
   ensureSortedUnique(workspaces, workspace => workspace.id, 'Build workspaces');
   canonicalJson(input);
@@ -1147,20 +1156,20 @@ function parseWorkspaceProject(value: unknown): CodeGraphWorkspaceProject {
   );
   const buildSystem = workspaceBuildSystem(input.buildSystem, 'Project build system');
   const dependencies = stringArray(input.dependencies, 'Project dependencies');
-  const dependencyDetails: readonly CodeGraphWorkspaceDependency[] = array(
-    input.dependencyDetails,
-    'Project dependency details',
-  ).map(detail => {
-    const candidate = object(detail, 'Project dependency detail');
-    exactKeys(candidate, ['provenance', 'targetId'], ['evidence'], 'Project dependency detail');
-    const evidence =
-      candidate.evidence === undefined ? undefined : shortText(candidate.evidence, 'Project dependency evidence');
-    return {
-      ...(evidence === undefined ? {} : {evidence}),
-      provenance: workspaceProvenance(candidate.provenance, 'Project dependency provenance'),
-      targetId: shortText(candidate.targetId, 'Project dependency target'),
-    };
-  });
+  const dependencyDetails: readonly CodeGraphWorkspaceDependency[] = EffectArray.map(
+    array(input.dependencyDetails, 'Project dependency details'),
+    detail => {
+      const candidate = object(detail, 'Project dependency detail');
+      exactKeys(candidate, ['provenance', 'targetId'], ['evidence'], 'Project dependency detail');
+      const evidence =
+        candidate.evidence === undefined ? undefined : shortText(candidate.evidence, 'Project dependency evidence');
+      return {
+        ...(evidence === undefined ? {} : {evidence}),
+        provenance: workspaceProvenance(candidate.provenance, 'Project dependency provenance'),
+        targetId: shortText(candidate.targetId, 'Project dependency target'),
+      };
+    },
+  );
   const diagnostics = stringArray(input.diagnostics, 'Project diagnostics');
   const id = shortText(input.id, 'Project ID');
   const kind = oneOf(input.kind, ['module', 'package', 'project', 'target'], 'Project kind');
@@ -1175,9 +1184,11 @@ function parseWorkspaceProject(value: unknown): CodeGraphWorkspaceProject {
   const externalDependencies =
     input.externalDependencies === undefined
       ? undefined
-      : array(input.externalDependencies, 'Project external dependencies').map(parseExternalDependency);
+      : EffectArray.map(array(input.externalDependencies, 'Project external dependencies'), parseExternalDependency);
   const monikers: readonly CodeGraphMonikerV1[] | undefined =
-    input.monikers === undefined ? undefined : array(input.monikers, 'Project monikers').map(parseCodeGraphMonikerV1);
+    input.monikers === undefined
+      ? undefined
+      : EffectArray.map(array(input.monikers, 'Project monikers'), parseCodeGraphMonikerV1);
   return {
     buildSystem,
     dependencies,
@@ -1443,7 +1454,7 @@ function object(value: unknown, label: string): Record<string, unknown> {
 }
 
 function array(value: unknown, label: string): readonly unknown[] {
-  if (!Array.isArray(value) || value.length > MAXIMUM_ARRAY_LENGTH) {
+  if (!EffectArray.isArray(value) || value.length > MAXIMUM_ARRAY_LENGTH) {
     throw CodeGraphCheckpointSchemaError.make({message: `${label} must be a bounded array.`});
   }
   return value;
@@ -1457,9 +1468,10 @@ function exactKeys(
 ): void {
   const allowed = new Set([...required, ...optional]);
   for (const key of required) {
-    if (!Object.hasOwn(input, key)) throw CodeGraphCheckpointSchemaError.make({message: `${label} is missing ${key}.`});
+    if (!EffectRecord.has(input, key))
+      throw CodeGraphCheckpointSchemaError.make({message: `${label} is missing ${key}.`});
   }
-  for (const key of Object.keys(input)) {
+  for (const key of EffectRecord.keys(input)) {
     if (!allowed.has(key))
       throw CodeGraphCheckpointSchemaError.make({message: `${label} contains unknown field ${key}.`});
   }
@@ -1471,7 +1483,7 @@ function literal<T extends boolean | number | string>(value: unknown, expected: 
 }
 
 function oneOf<const T extends readonly string[]>(value: unknown, options: T, label: string): T[number] {
-  if (typeof value !== 'string' || !options.some(option => option === value)) {
+  if (typeof value !== 'string' || !EffectArray.some(options, option => option === value)) {
     throw CodeGraphCheckpointSchemaError.make({message: `${label} is invalid.`});
   }
   return value;
@@ -1566,11 +1578,11 @@ function workspaceName(value: unknown, root: string, label: string): string {
 }
 
 function stringArray(value: unknown, label: string): readonly string[] {
-  return array(value, label).map(entry => text(entry, `${label} entry`, MAXIMUM_SHORT_TEXT_LENGTH));
+  return EffectArray.map(array(value, label), entry => text(entry, `${label} entry`, MAXIMUM_SHORT_TEXT_LENGTH));
 }
 
 function pathArray(value: unknown, label: string, allowRoot: boolean): readonly string[] {
-  return array(value, label).map(entry =>
+  return EffectArray.map(array(value, label), entry =>
     allowRoot ? workspaceRoot(entry, `${label} entry`) : repositoryPath(entry, `${label} entry`),
   );
 }

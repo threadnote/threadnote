@@ -7,6 +7,7 @@ import {
   type CodeGraphFreshnessReceiptCandidate,
   type CodeGraphFreshnessReceiptRuntimePrerequisite,
 } from '@threadnote/graph/freshness_receipt';
+import {Array as EffectArray, Schema} from 'effect';
 
 const allPrerequisites = CODE_GRAPH_FRESHNESS_RECEIPT_RUNTIME_PREREQUISITES;
 
@@ -111,19 +112,11 @@ describe('code graph freshness receipt runtime gate', () => {
   it('does not retain caller aliases and freezes every returned wrapper', () => {
     const candidate = completeCandidate();
     const assessment = assessCodeGraphFreshnessReceiptCandidate(candidate);
-    const mutable = candidate as unknown as {
-      backend: string;
-      evidence: {
-        binding: {baseline: string};
-        coverage: {gitHead: string};
-        fences: {captureCheckpoints: string};
-      };
-    };
 
-    mutable.backend = 'mutated-backend';
-    mutable.evidence.binding.baseline = 'mutated';
-    mutable.evidence.coverage.gitHead = 'mutated';
-    mutable.evidence.fences.captureCheckpoints = 'mutated';
+    expect(Reflect.set(candidate, 'backend', 'mutated-backend')).toBe(true);
+    expect(Reflect.set(candidate.evidence.binding, 'baseline', 'mutated')).toBe(true);
+    expect(Reflect.set(candidate.evidence.coverage, 'gitHead', 'mutated')).toBe(true);
+    expect(Reflect.set(candidate.evidence.fences, 'captureCheckpoints', 'mutated')).toBe(true);
 
     expect(assessment).toEqual({
       authorizesCurrentness: false,
@@ -193,7 +186,7 @@ describe('code graph freshness receipt runtime gate', () => {
           for (const [index, prerequisite] of allPrerequisites.entries()) {
             if (proofs[index]) satisfied.add(prerequisite);
           }
-          const expectedMissing = allPrerequisites.filter(prerequisite => !satisfied.has(prerequisite));
+          const expectedMissing = EffectArray.filter(allPrerequisites, prerequisite => !satisfied.has(prerequisite));
           const assessment = assessCodeGraphFreshnessReceiptCandidate(candidateFromSatisfied(satisfied));
 
           expect(assessment).toEqual({
@@ -220,10 +213,55 @@ describe('code graph freshness receipt runtime gate', () => {
   });
 });
 
+const CompleteCandidateSchema = Schema.Struct({
+  backend: Schema.String,
+  evidence: Schema.Struct({
+    aliasIsolation: Schema.Literal('deep-clone-freeze-except-opaque-epoch'),
+    binding: Schema.Struct({
+      baseline: Schema.Literal('checkout-repository-worktree-head-dirty-overlay-fingerprint-ready-snapshot'),
+      selectedSnapshot: Schema.Literal('exact-baseline-snapshot'),
+    }),
+    coverage: Schema.Struct({
+      gitConfig: Schema.Literal('complete'),
+      gitControlPlane: Schema.Literal('complete'),
+      gitHead: Schema.Literal('complete'),
+      gitIndex: Schema.Literal('complete'),
+      gitRefs: Schema.Literal('complete'),
+      recursiveWorktree: Schema.Literal('complete'),
+      silentGitMutation: Schema.Literal('checkpoint-visible-before-notification'),
+    }),
+    epochs: Schema.Struct({
+      identity: Schema.Literal('opaque-owner-minted'),
+      invalidThenUnqualifiedReuse: Schema.Literal('rejected'),
+      replacementInvalidationReuse: Schema.Literal('rejected'),
+      retirement: Schema.Literal('monotonic-never-reusable'),
+    }),
+    fences: Schema.Struct({
+      captureCheckpoints: Schema.Literal('fresh-linearizable-before-and-after'),
+      captureObservation: Schema.Literal('exact-git-worktree-between-checkpoints'),
+      captureQueuedMutation: Schema.Literal('advance-rejected-before-notification'),
+      reuse: Schema.Literal('rejected'),
+      validateCheckpoints: Schema.Literal('fresh-linearizable-before-and-after'),
+      validateObservation: Schema.Literal('exact-git-worktree-between-checkpoints'),
+      validateQueuedMutation: Schema.Literal('advance-rejected-before-notification'),
+    }),
+    failClosed: Schema.Struct({
+      lifecycle: Schema.Literal('restart-close-end-error-invalidates-before-reuse'),
+      reconciliationMismatch: Schema.Literal('exact-observation-invalidates-before-reuse'),
+      sequenceOrCheckpointLoss: Schema.Literal('invalidates-before-reuse'),
+      unsupportedScope: Schema.Literal('filesystem-environment-falls-back'),
+    }),
+    gitConfigurationAccess: Schema.Literal('read-only'),
+    overflow: Schema.Literal('explicit'),
+    sequence: Schema.Literal('contiguous-monotonic'),
+    unknownInputHandling: Schema.Literal('total-fail-closed'),
+  }),
+});
+
 function completeCandidate(): CodeGraphFreshnessReceiptCandidate {
-  return candidateFromSatisfied(
-    new Set<CodeGraphFreshnessReceiptRuntimePrerequisite>(allPrerequisites),
-  ) as CodeGraphFreshnessReceiptCandidate;
+  const candidate = candidateFromSatisfied(new Set<CodeGraphFreshnessReceiptRuntimePrerequisite>(allPrerequisites));
+  if (!Schema.is(CompleteCandidateSchema)(candidate)) throw new Error('Invalid complete freshness candidate fixture.');
+  return candidate;
 }
 
 function candidateFromSatisfied(satisfied: ReadonlySet<CodeGraphFreshnessReceiptRuntimePrerequisite>): unknown {

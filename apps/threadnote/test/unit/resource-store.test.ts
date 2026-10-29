@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -30,6 +31,8 @@ import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-inval
 import {InvalidResourceId, parseResourceId} from '@threadnote/store/resource-id';
 import {mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('ResourceId', () => {
   it('keeps threadnote URIs canonical', () => {
@@ -69,13 +72,21 @@ describe('ResourceId', () => {
     {
       segment: FC.string({maxLength: 30, minLength: 1}).filter(
         value =>
-          value === value.trim() &&
-          value === value.normalize('NFC') &&
+          value === Effect2.pipe(value, EffectString.trim) &&
+          value === Effect2.pipe(value, EffectString.normalize('NFC')) &&
           !/[<>:"|?*\\/#%]/.test(value) &&
           !/[ .]$/.test(value) &&
           !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(value) &&
-          !['.', '..'].includes(value.toLowerCase()) &&
-          [...value].every(character => character.codePointAt(0)! > 0x1f),
+          !['.', '..'].includes(Effect2.pipe(value, EffectString.toLowerCase)) &&
+          EffectArray.every(
+            [...value],
+            character =>
+              Effect2.pipe(
+                character,
+                EffectString.codePointAt(0),
+                Effect2.Option.getOrElse(() => undefined),
+              )! > 0x1f,
+          ),
       ),
     },
     ({segment}) => {
@@ -127,7 +138,7 @@ describe('native ResourceStore', () => {
         const events = [...(yield* Ref.get(observed))].sort(
           (left, right) => Number(left.includeInactive) - Number(right.includeInactive),
         );
-        expect(events.map(({generation: _generation, ...event}) => event)).toEqual([
+        expect(EffectArray.map(events, ({generation: _generation, ...event}) => event)).toEqual([
           {home, includeInactive: false, invalidatedUris: [uri]},
           {home, includeInactive: true, invalidatedUris: [uri]},
         ]);
@@ -229,12 +240,14 @@ describe('native ResourceStore', () => {
           });
           expect((yield* store.stat(location(home), uri)).type).toBe('file');
           expect(
-            (yield* store.list(location(home), 'threadnote://user/test-user/memories', {recursive: true})).map(
+            EffectArray.map(
+              yield* store.list(location(home), 'threadnote://user/test-user/memories', {recursive: true}),
               entry => entry.uri,
             ),
           ).toContain(uri);
           expect(
-            (yield* store.glob(location(home), 'threadnote://user/test-user/memories', '**/*.md')).map(
+            EffectArray.map(
+              yield* store.glob(location(home), 'threadnote://user/test-user/memories', '**/*.md'),
               entry => entry.uri,
             ),
           ).toContain(uri);
@@ -266,7 +279,8 @@ describe('native ResourceStore', () => {
           yield* store.remove(location(home), uri);
           yield* store.remove(location(home), bomUri);
           expect(
-            (yield* store.list(location(home), 'threadnote://user/test-user/memories', {recursive: true})).some(
+            EffectArray.some(
+              yield* store.list(location(home), 'threadnote://user/test-user/memories', {recursive: true}),
               entry => entry.uri === uri,
             ),
           ).toBe(false);
@@ -391,7 +405,7 @@ describe('native ResourceStore', () => {
             includeInactive: false,
             query: 'mutation-invalidation-anchor',
           });
-          expect(refreshed.map(candidate => candidate.uri)).toContain(uri);
+          expect(EffectArray.map(refreshed, candidate => candidate.uri)).toContain(uri);
         }),
       );
     } finally {
@@ -409,7 +423,7 @@ describe('native ResourceStore', () => {
         const blockingFileSystem = FileSystem.FileSystem.of({
           ...fs,
           writeFileString: (target, content, options) =>
-            String(target).includes('.sqlite.stale.')
+            Effect2.pipe(String(target), EffectString.includes('.sqlite.stale.'))
               ? Deferred.succeed(invalidationStarted, undefined).pipe(
                   Effect.andThen(Deferred.await(releaseInvalidation)),
                   Effect.andThen(fs.writeFileString(target, content, options)),
@@ -467,7 +481,7 @@ describe('native ResourceStore', () => {
         const failedDerivedMarkerFileSystem = FileSystem.FileSystem.of({
           ...fs,
           writeFileString: (target, content, options) =>
-            String(target).includes('.sqlite.stale.')
+            Effect2.pipe(String(target), EffectString.includes('.sqlite.stale.'))
               ? Effect.die(new Error('injected derived recall marker failure'))
               : fs.writeFileString(target, content, options),
         });
@@ -514,7 +528,7 @@ describe('native ResourceStore', () => {
         const failedDerivedMarkerFileSystem = FileSystem.FileSystem.of({
           ...fs,
           writeFileString: (target, content, options) =>
-            String(target).includes('.sqlite.stale.')
+            Effect2.pipe(String(target), EffectString.includes('.sqlite.stale.'))
               ? Effect.die(new Error('injected first-mutation marker failure'))
               : fs.writeFileString(target, content, options),
         });

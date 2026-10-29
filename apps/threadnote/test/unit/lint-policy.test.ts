@@ -1,4 +1,5 @@
-import {String as EffectString} from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Record as EffectRecord, Schema} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import {antipattern, correctness, effectNative, style} from '@effect/tsgo/oxlint-presets';
@@ -8,14 +9,7 @@ import {
   isNodeBuiltinSpecifier,
   isNodeEffectPackageSpecifier,
 } from '../../../../config/lint/threadnote-plugin.js';
-import {
-  changedTypeScriptLines,
-  INCREMENTAL_LINT_RULES,
-  lintDiagnosticApplies,
-  LINT_TARGETS,
-  STRICT_LINT_ARGUMENTS,
-  lint,
-} from '../../../../scripts/lint.js';
+import {LINT_TARGETS, STRICT_LINT_ARGUMENTS, lint} from '../../../../scripts/lint.js';
 
 const EFFECT_PRESET_PATHS = [
   './node_modules/@effect/tsgo/oxlint-presets/correctness.json',
@@ -39,36 +33,51 @@ const EFFECT_APPLICATION_BOUNDARY_RULES = [
   'effecttsgo/unstable-api-usage',
 ] as const;
 
+function presetRuleNames(rules: unknown): readonly string[] {
+  return EffectRecord.keys(Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(rules));
+}
+
 function officialEffectRules(): readonly string[] {
   return [
     ...new Set([
-      ...Object.keys(correctness.rules ?? {}),
-      ...Object.keys(antipattern.rules ?? {}),
-      ...Object.keys(effectNative.rules ?? {}),
-      ...Object.keys(style.rules ?? {}),
+      ...presetRuleNames(correctness.rules ?? {}),
+      ...presetRuleNames(antipattern.rules ?? {}),
+      ...presetRuleNames(effectNative.rules ?? {}),
+      ...presetRuleNames(style.rules ?? {}),
     ]),
   ].sort();
 }
 
 describe('lint policy', () => {
   it('enforces every official Effect lint category at error except documented application boundaries', async () => {
-    const baseConfig = (await Bun.file(new URL('../../../../.oxlintrc.json', import.meta.url)).json()) as {
-      readonly extends?: readonly string[];
-      readonly rules?: Readonly<Record<string, string>>;
-    };
-    const strictConfig = (await Bun.file(new URL('../../../../.oxlintrc.strict.json', import.meta.url)).json()) as {
-      readonly rules?: Readonly<Record<string, string>>;
-    };
+    const configSchema = Schema.Struct({
+      extends: Schema.optionalKey(Schema.Array(Schema.String)),
+      rules: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+    });
+    const baseConfig = Schema.decodeUnknownSync(configSchema)(
+      await Bun.file(new URL('../../../../.oxlintrc.json', import.meta.url)).json(),
+    );
+    const strictConfig = Schema.decodeUnknownSync(configSchema)(
+      await Bun.file(new URL('../../../../.oxlintrc.strict.json', import.meta.url)).json(),
+    );
     const officialRules = officialEffectRules();
     const offRules = new Set<string>(EFFECT_APPLICATION_BOUNDARY_RULES);
 
     expect(baseConfig.extends).toEqual([...EFFECT_PRESET_PATHS]);
-    expect(officialRules.filter(rule => !offRules.has(rule) && strictConfig.rules?.[rule] !== 'error')).toEqual([]);
-    expect(EFFECT_APPLICATION_BOUNDARY_RULES.filter(rule => strictConfig.rules?.[rule] !== 'off')).toEqual([]);
-    expect(EFFECT_APPLICATION_BOUNDARY_RULES.filter(rule => baseConfig.rules?.[rule] !== 'off')).toEqual([]);
+    expect(
+      EffectArray.filter(officialRules, rule => !offRules.has(rule) && strictConfig.rules?.[rule] !== 'error'),
+    ).toEqual([]);
+    expect(EffectArray.filter(EFFECT_APPLICATION_BOUNDARY_RULES, rule => strictConfig.rules?.[rule] !== 'off')).toEqual(
+      [],
+    );
+    expect(EffectArray.filter(EFFECT_APPLICATION_BOUNDARY_RULES, rule => baseConfig.rules?.[rule] !== 'off')).toEqual(
+      [],
+    );
     expect(strictConfig.rules?.['effecttsgo/node-builtin-import']).toBe('error');
     expect(strictConfig.rules?.['effecttsgo/global-date-in-effect']).toBe('error');
     expect(strictConfig.rules?.['effecttsgo/process-env-in-effect']).toBe('error');
+    expect(baseConfig.rules?.['typescript/no-unsafe-type-assertion']).toBe('error');
+    expect(strictConfig.rules?.['typescript/no-unsafe-type-assertion']).toBe('error');
   });
 
   fcProp(
@@ -92,80 +101,18 @@ describe('lint policy', () => {
     expect(STRICT_LINT_ARGUMENTS).toContain('--threads=1');
     expect(STRICT_LINT_ARGUMENTS).toContain('--deny-warnings');
     expect(STRICT_LINT_ARGUMENTS).toContain('--report-unused-disable-directives-severity=error');
+    expect(STRICT_LINT_ARGUMENTS).toContain('typescript/no-unsafe-type-assertion');
   });
-
-  it('keeps existing debt separate while enforcing every new-file and unrelated-rule diagnostic', () => {
-    const diagnostic = {
-      code: 'effecttsgo(prefer-effect-array)',
-      filename: 'scripts/example.ts',
-      labels: [{span: {line: 3, column: 1}}],
-    };
-    expect(lintDiagnosticApplies(diagnostic, new Map())).toBe(false);
-    expect(lintDiagnosticApplies(diagnostic, new Map([[diagnostic.filename, new Set([2])]]))).toBe(false);
-    expect(lintDiagnosticApplies(diagnostic, new Map([[diagnostic.filename, new Set([3])]]))).toBe(true);
-    expect(lintDiagnosticApplies(diagnostic, new Map([[diagnostic.filename, new Set()]]))).toBe(true);
-    expect(lintDiagnosticApplies({...diagnostic, code: 'effecttsgo(floating-effect)'}, new Map())).toBe(true);
-    expect(lintDiagnosticApplies({...diagnostic, code: undefined}, new Map())).toBe(true);
-  });
-
-  fcProp(
-    it,
-    'enforces incremental diagnostics exactly on changed lines',
-    {
-      rule: FC.constantFrom(...INCREMENTAL_LINT_RULES),
-      line: FC.integer({min: 1, max: 200}),
-      lines: FC.uniqueArray(FC.integer({min: 1, max: 200}), {minLength: 1, maxLength: 30}),
-    },
-    ({rule, line, lines}) => {
-      const changed = new Set(lines);
-      expect(
-        lintDiagnosticApplies(
-          {code: rule, filename: 'example.ts', labels: [{span: {line, column: 1}}]},
-          new Map([['example.ts', changed]]),
-        ),
-      ).toBe(changed.has(line));
-    },
-  );
 
   it('runs lint first from the Bun pre-commit hook', async () => {
     const hook = await Bun.file(new URL('../../../../.husky/pre-commit', import.meta.url)).text();
-    const packageJson = (await Bun.file(new URL('../../../../package.json', import.meta.url)).json()) as {
-      readonly scripts?: Readonly<Record<string, string>>;
-    };
+    const packageJson = Schema.decodeUnknownSync(Schema.Struct({scripts: Schema.Record(Schema.String, Schema.String)}))(
+      await Bun.file(new URL('../../../../package.json', import.meta.url)).json(),
+    );
 
     expect(hook).toContain('bun run precommit');
     expect(packageJson.scripts?.precommit).toMatch(/^bun run lint(?:\s|&&)/);
   });
-
-  it('tracks only added TypeScript lines for the unsafe-assertion regression gate', () => {
-    const changed = changedTypeScriptLines(
-      [
-        'diff --git a/src/example.ts b/src/example.ts',
-        '+++ b/src/example.ts',
-        '@@ -4,2 +4,3 @@',
-        ' keep();',
-        '-old();',
-        '+next();',
-        '+added();',
-      ].join('\n'),
-    );
-    expect([...(changed.get('src/example.ts') ?? [])]).toEqual([5, 6]);
-  });
-
-  it.each(['packages/example/λ.ts', 'packages/example/a b.ts', 'packages/example/a\tb.ts'])(
-    'enforces diagnostics on Git paths with Unicode, spaces or quoted controls: %s',
-    path => {
-      const header = EffectString.includes('\t')(path) ? JSON.stringify(`b/${path}`) : `b/${path}`;
-      const changed = changedTypeScriptLines(`+++ ${header}\n@@ -0,0 +1 @@\n+added();`);
-      expect(changed.get(path)).toEqual(new Set([1]));
-      expect(
-        lintDiagnosticApplies(
-          {code: 'effecttsgo(prefer-effect-array)', filename: path, labels: [{span: {line: 1, column: 1}}]},
-          changed,
-        ),
-      ).toBe(true);
-    },
-  );
 
   fcProp(it, 'recognizes every explicit node: import as Node-specific', {specifier: FC.string()}, ({specifier}) => {
     expect(isNodeBuiltinSpecifier(`node:${specifier}`)).toBe(true);

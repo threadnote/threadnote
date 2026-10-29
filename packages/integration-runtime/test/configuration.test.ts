@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {makeSourceConfigurationRegistry} from '../src/config.js';
@@ -20,11 +21,11 @@ describe('source configuration registry', () => {
       fc.property(fc.uniqueArray(fc.stringMatching(/^[a-z][a-z0-9]{0,12}$/), {maxLength: 12}), ids => {
         const configuration = {
           version: 2 as const,
-          sources: ids.map(id => ({type: 'synthetic', id, enabled: true})),
+          sources: EffectArray.map(ids, id => ({type: 'synthetic', id, enabled: true})),
           projections: [],
         };
         expect(registry.parse(registry.render(configuration))).toEqual(configuration);
-        expect(configuration.sources.map(source => source.id)).toEqual(ids);
+        expect(EffectArray.map(configuration.sources, source => source.id)).toEqual(ids);
       }),
       {numRuns: 50},
     );

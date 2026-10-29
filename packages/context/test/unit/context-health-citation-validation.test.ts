@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
@@ -16,7 +17,7 @@ import {CodeGraphStore} from '@threadnote/graph/store';
 import {CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {CODE_GRAPH_SCHEMA_VERSION, type CodeGraphStatus, type CodeGraphSymbol} from '@threadnote/graph/types';
 import type {ContextBriefMemoryCandidateV1} from '@threadnote/context/types';
-import type {RuntimeConfig} from '@threadnote/workspace/config';
+
 import {createMemoryCodeCitation, type MemoryCodeCitationInputV1} from '@threadnote/memory/code/citation';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
@@ -25,6 +26,9 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {recordVerifiedCodeGraphLocalAssociation} from '@threadnote/graph/local_provenance';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {runtimeConfigForTest} from '@threadnote/workspace/test/helpers/runtime-config';
 
 const policy = Layer.mergeAll(
   Layer.succeed(ChildEnvironmentPolicy, {
@@ -75,7 +79,7 @@ describe('complete health evidence validation', () => {
             repositoryIdentityKind: 'remote',
             sourceCommit: originalIdentity.headCommit,
             sourceDirty: false,
-            sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+            sourceSnapshotId: `cgsn_${Effect2.pipe('c', EffectString.repeat(40))}`,
             target: {kind: 'file'},
             version: 1,
           };
@@ -108,15 +112,23 @@ describe('complete health evidence validation', () => {
             },
             stale: false,
           };
-          const query = CodeGraphQueryService.of({
+          const queryMock = Layer.mock(CodeGraphQueryService, {
             status: () => (available ? Effect.succeed(status) : Effect.fail('unavailable')),
             statusForPublishedIdentity: () => Effect.succeed(status),
-          } as unknown as CodeGraphQueryService['Service']);
-          const store = CodeGraphStore.of({
+          });
+          const queryLayer = Layer.effect(
+            CodeGraphQueryService,
+            Effect.gen(function* () {
+              const mockService = yield* CodeGraphQueryService;
+              const {withStatusSession: _unusedSessionHook, ...fallbackService} = mockService;
+              return fallbackService;
+            }),
+          ).pipe(Layer.provide(queryMock));
+          const storeLayer = Layer.mock(CodeGraphStore, {
             acquireSnapshotLease: () => Effect.succeed('lease'),
             releaseSnapshotLease: () => Effect.void,
-            readySnapshotById: () => Effect.void,
-            readySnapshotForCommit: () => Effect.void,
+            readySnapshotById: () => Effect.as(Effect.void, undefined),
+            readySnapshotForCommit: () => Effect.as(Effect.void, undefined),
             effectiveSnapshotCitationEvidence: () =>
               Effect.succeed({
                 fileInventoryCoverage: 'complete',
@@ -125,7 +137,7 @@ describe('complete health evidence validation', () => {
                   {
                     path: citation.path,
                     file: {
-                      blobId: 'f'.repeat(40),
+                      blobId: Effect2.pipe('f', EffectString.repeat(40)),
                       contentHash: observedContentHash,
                       language: 'typescript',
                       mode: '100644',
@@ -136,7 +148,7 @@ describe('complete health evidence validation', () => {
                   },
                 ],
                 symbolsByIds: [],
-                symbolsBySemanticLocators: observedSymbols.map(symbol => ({
+                symbolsBySemanticLocators: EffectArray.map(observedSymbols, symbol => ({
                   locator: {
                     kind: symbol.kind,
                     language: symbol.language,
@@ -148,50 +160,63 @@ describe('complete health evidence validation', () => {
                   truncated: false,
                 })),
               }),
-          } as unknown as CodeGraphStore['Service']);
-          const config = {agentContextHome: home, manifestPath: path.join(home, 'threadnote.toml')} as RuntimeConfig;
+          });
+          const serviceContext = yield* Layer.build(Layer.merge(queryLayer, storeLayer));
+          const config = runtimeConfigForTest({
+            agentContextHome: home,
+            manifestPath: path.join(home, 'threadnote.toml'),
+          });
           const candidates: ContextBriefMemoryCandidateV1[] = Array.from({length: 97}, (_, index) => ({
             citationErrorCount: 0,
             codeCitations: [citation],
             excerpt: '',
             kind: 'durable',
             rank: index,
-            uri: `threadnote://memory/${index.toString().padStart(3, '0')}`,
+            uri: `threadnote://memory/${Effect2.pipe(index.toString(), EffectString.padStart(3, '0'))}`,
           }));
           const scope = {callerCwd: repository, kind: 'repository' as const};
-          const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-            effect.pipe(
-              Effect.provideService(CodeGraphQueryService, query),
-              Effect.provideService(CodeGraphStore, store),
-            );
+          const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideContext(effect, serviceContext);
           const brief = yield* provide(validateContextBriefMemoryCitations(config, scope, candidates));
           expect(
-            brief.flatMap(value => value.receipts).filter(value => value.reason === 'citation-limit'),
+            EffectArray.filter(
+              EffectArray.flatMap(brief, value => value.receipts),
+              value => value.reason === 'citation-limit',
+            ),
           ).toHaveLength(1);
           const unavailable = {
             ...candidates[0],
             uri: 'threadnote://memory/zz-unavailable',
-            codeCitations: [createMemoryCodeCitation({...citationInput, repositoryId: 'f'.repeat(64)})],
+            codeCitations: [
+              createMemoryCodeCitation({...citationInput, repositoryId: Effect2.pipe('f', EffectString.repeat(64))}),
+            ],
           };
           const boundedHealth = yield* provide(
             validateContextHealthMemoryCitations(config, scope, [...candidates, unavailable]),
           );
-          expect(boundedHealth.flatMap(value => value.receipts)).toHaveLength(96);
-          expect(boundedHealth.find(value => value.uri === candidates[96]?.uri)).toBeUndefined();
+          expect(EffectArray.flatMap(boundedHealth, value => value.receipts)).toHaveLength(96);
+          expect(
+            EffectOption.getOrUndefined(
+              EffectArray.findFirst(boundedHealth, value => value.uri === candidates[96]?.uri),
+            ),
+          ).toBeUndefined();
           const complete = yield* provide(
             validateContextHealthMemoryCitations(config, scope, [...candidates, unavailable], {fullScan: true}),
           );
-          expect(complete.flatMap(value => value.receipts)).toHaveLength(98);
+          expect(EffectArray.flatMap(complete, value => value.receipts)).toHaveLength(98);
           expect(
-            complete
-              .filter(value => value.uri !== unavailable.uri)
-              .every(value =>
-                value.receipts.every(
+            EffectArray.every(
+              EffectArray.filter(complete, value => value.uri !== unavailable.uri),
+              value =>
+                EffectArray.every(
+                  value.receipts,
                   receipt => receipt.status === 'exact' && receipt.provenance === 'current-verified',
                 ),
-              ),
+            ),
           ).toBe(true);
-          expect(complete.find(value => value.uri === unavailable.uri)?.receipts[0]?.status).toBe('unknown');
+          expect(
+            EffectOption.getOrUndefined(EffectArray.findFirst(complete, value => value.uri === unavailable.uri))
+              ?.receipts[0]?.status,
+          ).toBe('unknown');
           expect(
             yield* readRetainedCodeGraphCitationEvidence(home, status.identity.checkoutId, {
               extractorSet: citation.extractorSet,
@@ -210,7 +235,7 @@ describe('complete health evidence validation', () => {
             identity: currentIdentity,
             readySnapshot: {
               ...status.readySnapshot!,
-              id: `cgsn_${'1'.repeat(40)}`,
+              id: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
               repositoryId: currentIdentity.repositoryId,
             },
           };
@@ -222,10 +247,16 @@ describe('complete health evidence validation', () => {
             }),
           );
           expect(
-            aliasBrief.flatMap(value => value.receipts).filter(receipt => receipt.provenance === 'current-verified'),
+            EffectArray.filter(
+              EffectArray.flatMap(aliasBrief, value => value.receipts),
+              receipt => receipt.provenance === 'current-verified',
+            ),
           ).toHaveLength(96);
           expect(
-            aliasBrief.flatMap(value => value.receipts).filter(receipt => receipt.reason === 'citation-limit'),
+            EffectArray.filter(
+              EffectArray.flatMap(aliasBrief, value => value.receipts),
+              receipt => receipt.reason === 'citation-limit',
+            ),
           ).toHaveLength(1);
           expect(aliasBrief[0]?.receipts[0]?.recovery?.aliasProof).toMatchObject({
             sourceRepositoryId: originalIdentity.repositoryId,
@@ -235,7 +266,7 @@ describe('complete health evidence validation', () => {
             validateContextBriefMemoryCitations(config, scope, candidates.slice(0, 1), {
               kind: 'repository',
               repositoryId: currentIdentity.repositoryId,
-              snapshotId: `cgsn_${'2'.repeat(40)}`,
+              snapshotId: `cgsn_${Effect2.pipe('2', EffectString.repeat(40))}`,
             }),
           );
           expect(fenced[0]?.receipts[0]?.status).toBe('unknown');
@@ -262,14 +293,14 @@ describe('complete health evidence validation', () => {
           yield* git(['add', '.']);
           yield* git(['commit', '--quiet', '-m', 'changed surrounding file']);
           const changedIdentity = yield* resolveRepositoryIdentity(repository);
-          const fragment = new TextDecoder().decode(bytes).trimEnd();
+          const fragment = Effect2.pipe(new TextDecoder().decode(bytes), EffectString.trimEnd);
           const target = {
             fragmentCanonicalization: 'utf8-source-span-v1' as const,
             fragmentHash: {algorithm: 'sha256' as const, value: sha256HexSync(fragment)},
             kind: 'symbol' as const,
             language: 'typescript',
             name: 'supported',
-            nodeId: `cgs_${'3'.repeat(32)}`,
+            nodeId: `cgs_${Effect2.pipe('3', EffectString.repeat(32))}`,
             qualifiedName: 'supported',
             span: {column: 1, endColumn: fragment.length + 1, endLine: 1, line: 1},
             symbolKind: 'variable',
@@ -279,7 +310,7 @@ describe('complete health evidence validation', () => {
             {
               contentHash: observedContentHash,
               exported: true,
-              id: `cgs_${'4'.repeat(32)}`,
+              id: `cgs_${Effect2.pipe('4', EffectString.repeat(32))}`,
               kind: target.symbolKind,
               language: target.language,
               name: target.name,
@@ -294,7 +325,7 @@ describe('complete health evidence validation', () => {
             readySnapshot: {
               ...status.readySnapshot!,
               commit: changedIdentity.headCommit,
-              id: `cgsn_${'5'.repeat(40)}`,
+              id: `cgsn_${Effect2.pipe('5', EffectString.repeat(40))}`,
             },
           };
           const preservedSymbol = yield* provide(

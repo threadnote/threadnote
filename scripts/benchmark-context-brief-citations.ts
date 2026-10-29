@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {Array as EffectArray} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 
@@ -10,6 +11,8 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {hasScriptHelpFlag, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const TARGET = new URL('./benchmark-context-brief-citations-target.ts', import.meta.url);
 
@@ -29,10 +32,16 @@ const program = Effect.scoped(
     }
     const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-context-brief-citation-benchmark-build-'});
     const target = yield* path.fromFileUrl(TARGET);
-    const packageManifest = JSON.parse(
+    const packageManifest: unknown = JSON.parse(
       yield* fs.readFileString(path.join(path.dirname(target), '..', 'package.json')),
-    ) as {readonly version?: unknown};
-    if (typeof packageManifest.version !== 'string' || packageManifest.version.length === 0) {
+    );
+    if (
+      typeof packageManifest !== 'object' ||
+      packageManifest === null ||
+      !('version' in packageManifest) ||
+      typeof packageManifest.version !== 'string' ||
+      packageManifest.version.length === 0
+    ) {
       return yield* ScriptError.make({message: 'package.json does not declare a benchmark source version.'});
     }
     const outfile = path.join(root, 'context-brief-citation-scale-benchmark.mjs');
@@ -48,7 +57,6 @@ const program = Effect.scoped(
           outdir: root,
           sourcemap: 'none',
           target: 'bun',
-          write: true,
         }),
       catch: cause =>
         ScriptError.make({message: 'Could not build the Context Brief citation scale benchmark target.', cause}),
@@ -56,10 +64,13 @@ const program = Effect.scoped(
     if (!result.success) {
       return yield* ScriptError.make({
         message:
-          result.logs
-            .map(log => log.message)
-            .filter(Boolean)
-            .join('\n') || 'Benchmark build failed.',
+          EffectArray.join(
+            EffectArray.filter(
+              EffectArray.map(result.logs, log => log.message),
+              Boolean,
+            ),
+            '\n',
+          ) || 'Benchmark build failed.',
       });
     }
     const digest = yield* sha256Hex(yield* fs.readFile(outfile));
@@ -68,7 +79,8 @@ const program = Effect.scoped(
       [outfile, ...args, '--built-artifact-sha256', digest],
       {maxOutputBytes: 0, timeoutMs: 3 * 60 * 60 * 1_000},
     );
-    if (child.stdout.trim()) yield* Console.log(child.stdout.trimEnd());
+    if (Effect2.pipe(child.stdout, EffectString.trim))
+      yield* Console.log(Effect2.pipe(child.stdout, EffectString.trimEnd));
   }),
 );
 
@@ -77,14 +89,17 @@ const commandLayer = ScriptCommandExecutorLayer.pipe(Layer.provide(systemLayer))
 const wrapperLayer = Layer.mergeAll(systemLayer, commandLayer).pipe(Layer.provideMerge(BunServices.layer));
 
 function usage(): string {
-  return [
-    'Usage: bun run bench:context-brief-citations -- [options]',
-    '',
-    'Builds and runs the Context Brief citation scale benchmark.',
-    'Options: --candidate-commit <40-hex> --output <json> --budget <json> --fail-on-budget',
-    '  --profiles <local-100k,workset-50,workset-128> --memory-candidates <count>',
-    '  --samples <count> --warmups <count>',
-  ].join('\n');
+  return EffectArray.join(
+    [
+      'Usage: bun run bench:context-brief-citations -- [options]',
+      '',
+      'Builds and runs the Context Brief citation scale benchmark.',
+      'Options: --candidate-commit <40-hex> --output <json> --budget <json> --fail-on-budget',
+      '  --profiles <local-100k,workset-50,workset-128> --memory-candidates <count>',
+      '  --samples <count> --warmups <count>',
+    ],
+    '\n',
+  );
 }
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(program, wrapperLayer));

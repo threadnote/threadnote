@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -8,14 +8,29 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
-import type {
-  WorkflowBinding,
-  WorkflowReadResult,
-  WorkflowRequest,
-  WorkflowProfile,
-} from '../../src/workflow_memory/protocol.js';
+import type {WorkflowBinding, WorkflowRequest, WorkflowProfile} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {workflowPropertyDiagnostics} from './workflow-property-diagnostics.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+
+const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const withRest = <const S extends Schema.StructWithRest.Objects>(schema: S) =>
+  Schema.StructWithRest(schema, [JsonRecordSchema]);
+const WorkflowReadSummarySchema = withRest(
+  Schema.Struct({
+    canonicalUri: Schema.String,
+    memoryId: Schema.optionalKey(Schema.String),
+    revision: Schema.String,
+    state: Schema.String,
+    storageKind: Schema.String,
+    verifiedReadback: Schema.Literal(true),
+  }),
+);
+const ProfileSchema = withRest(Schema.Struct({user: Schema.String}));
+const readResult = Schema.decodeUnknownSync(WorkflowReadSummarySchema);
+const decodeProfile = Schema.decodeUnknownSync(ProfileSchema);
 
 const fixture = Effect.fn('test.workflowMemory.fixture')(function* (profile: WorkflowProfile = 'desktop') {
   const fs = yield* FileSystem.FileSystem;
@@ -108,15 +123,17 @@ describe('private workflow artifact protocol', () => {
       Effect.gen(function* () {
         const f = yield* fixture(profile);
         const before = (yield* runCommandEffect('git', ['-C', f.worktree, 'rev-parse', 'HEAD'])).stdout;
-        const current = (yield* f.call({...f.write, role: 'current', storageKind: 'durable'})) as WorkflowReadResult;
+        const current = readResult(yield* f.call({...f.write, role: 'current', storageKind: 'durable'}));
         expect(current).toMatchObject({storageKind: 'handoff', state: 'active'});
         expect(current.canonicalUri).toContain('/handoffs/active/');
-        const plan = (yield* f.call({
-          ...f.write,
-          operationId: 'plan',
-          artifactKey: 'plan',
-          relations: [{type: 'depends_on', uri: `threadnote://memory/${current.memoryId}`}],
-        })) as WorkflowReadResult;
+        const plan = readResult(
+          yield* f.call({
+            ...f.write,
+            operationId: 'plan',
+            artifactKey: 'plan',
+            relations: [{type: 'depends_on', uri: `threadnote://memory/${current.memoryId}`}],
+          }),
+        );
         expect(plan.verifiedReadback).toBe(true);
         expect((yield* runCommandEffect('git', ['-C', f.worktree, 'status', '--porcelain'])).stdout).toBe('');
         expect((yield* runCommandEffect('git', ['-C', f.worktree, 'rev-parse', 'HEAD'])).stdout).toBe(before);
@@ -151,7 +168,8 @@ describe('private workflow artifact protocol', () => {
             })
             .pipe(Effect.result);
           expect(denied._tag).toBe('Failure');
-          if (!uri.startsWith('threadnote://memory/')) expect(denied).toMatchObject({failure: {code: 'out-of-scope'}});
+          if (!Effect2.pipe(uri, EffectString.startsWith('threadnote://memory/')))
+            expect(denied).toMatchObject({failure: {code: 'out-of-scope'}});
         }
         expect(yield* f.fs.readFileString(journalPath)).toBe(privateState);
         expect(
@@ -162,7 +180,7 @@ describe('private workflow artifact protocol', () => {
           profile === 'codex-cloud-personal' ? 'codex-cloud' : 'cursor-cloud',
           'profile.json',
         );
-        const saved = JSON.parse(yield* f.fs.readFileString(profilePath)) as Record<string, unknown>;
+        const saved = decodeProfile(JSON.parse(yield* f.fs.readFileString(profilePath)));
         yield* f.fs.writeFileString(profilePath, JSON.stringify({...saved, user: 'different-owner'}));
         expect(
           yield* f
@@ -184,7 +202,7 @@ describe('private workflow artifact protocol', () => {
           diagnostics.phase('fixture');
           const f = yield* fixture();
           diagnostics.phase('create');
-          const written = (yield* f.call(f.write)) as WorkflowReadResult;
+          const written = readResult(yield* f.call(f.write));
           for (let index = 0; index < retries; index++) {
             diagnostics.phase('write-replay', index);
             expect(yield* f.call(f.write)).toEqual(written);
@@ -238,7 +256,7 @@ describe('private workflow artifact protocol', () => {
       expect(
         yield* f.call({protocolVersion: 1, action: 'read', bindingId: f.binding.bindingId, uri: preview.canonicalUri}),
       ).toMatchObject({status: 'not-found'});
-      const written = (yield* f.call(f.write)) as WorkflowReadResult;
+      const written = readResult(yield* f.call(f.write));
       const journalPath = f.path.join(f.home, 'workflow-memory', `${f.binding.bindingId}.json`);
       const journalBeforeReplay = yield* f.fs.readFileString(journalPath);
       const artifactBeforeReplay = yield* store.read(
@@ -301,7 +319,7 @@ describe('private workflow artifact protocol', () => {
         const store = yield* ResourceStore;
         const target =
           conflict === 'pending relation target'
-            ? ((yield* f.call({...f.write, operationId: 'target', artifactKey: 'target'})) as WorkflowReadResult)
+            ? readResult(yield* f.call({...f.write, operationId: 'target', artifactKey: 'target'}))
             : undefined;
         const pending: WorkflowRequest = {
           ...f.write,
@@ -403,7 +421,7 @@ describe('private workflow artifact protocol', () => {
   effectIt.effect('enforces replace/archive revisions and recovers the exact archive destination', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const original = (yield* f.call(f.write)) as WorkflowReadResult;
+      const original = readResult(yield* f.call(f.write));
       const replace = {
         ...f.write,
         action: 'replace' as const,
@@ -413,7 +431,7 @@ describe('private workflow artifact protocol', () => {
         body: 'Updated\n',
         bodySha256: sha256HexSync('Updated\n'),
       };
-      const updated = (yield* f.call(replace)) as WorkflowReadResult;
+      const updated = readResult(yield* f.call(replace));
       expect(updated.memoryId).toBe(original.memoryId);
       expect(updated.canonicalUri).toBe(original.canonicalUri);
       const stale = yield* f.call({...replace, operationId: 'stale-replace'}).pipe(Effect.result);
@@ -429,7 +447,7 @@ describe('private workflow artifact protocol', () => {
         uri: updated.canonicalUri,
         expectedRevision: updated.revision,
       };
-      const archived = (yield* f.call(archive)) as WorkflowReadResult;
+      const archived = readResult(yield* f.call(archive));
       expect(archived).toMatchObject({state: 'archived', memoryId: original.memoryId, body: 'Updated\n'});
       expect(
         yield* f.call({
@@ -448,7 +466,7 @@ describe('private workflow artifact protocol', () => {
   effectIt.effect('rejects foreign workflow reads, relations and mutation without changing the source', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
-      const first = (yield* f.call(f.write)) as WorkflowReadResult;
+      const first = readResult(yield* f.call(f.write));
       const other = yield* f.call({
         protocolVersion: 1,
         action: 'bind',
@@ -492,7 +510,13 @@ describe('private workflow artifact protocol', () => {
       const store = yield* ResourceStore;
       const root = `threadnote://user/tester/memories/handoffs/active/fixture`;
       const entries = yield* store.list({account: f.config.account, home: f.home, user: f.config.user}, root);
-      const manifest = entries.find(entry => entry.uri.endsWith('-manifest.md'))!;
+      const manifest = EffectOption.getOrUndefined(
+        EffectArray.findFirst(
+          entries,
+          __effectArrayValue =>
+            !!(entry => Effect2.pipe(entry.uri, EffectString.endsWith('-manifest.md')))(__effectArrayValue),
+        ),
+      )!;
       yield* store.remove({account: f.config.account, home: f.home, user: f.config.user}, manifest.uri);
       const result = yield* f.call(f.write).pipe(Effect.result);
       expect(result).toMatchObject({_tag: 'Failure', failure: {code: 'task-state-lost'}});

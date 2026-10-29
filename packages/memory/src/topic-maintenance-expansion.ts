@@ -1,4 +1,5 @@
-import {Schema} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {Schema, pipe} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertMemoryCodeCitation,
@@ -18,6 +19,9 @@ import {
   validateTopicMaintenanceManifest,
   type TopicMaintenanceCodeManifestV3,
 } from './topic-maintenance.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const hash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const nodeId = Schema.String.check(Schema.isPattern(/^cgs_(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/u));
@@ -75,18 +79,18 @@ export function topicExpansionPath(path: string): boolean {
   return (
     path.length <= 2048 &&
     !/[\p{Cc}\\]/u.test(path) &&
-    !path.startsWith('/') &&
+    !Effect.pipe(path, EffectString.startsWith('/')) &&
     !/^[A-Za-z]:/u.test(path) &&
-    path.split('/').every(part => part !== '' && part !== '.' && part !== '..')
+    EffectArray.every(Effect.pipe(path, EffectString.split('/')), part => part !== '' && part !== '.' && part !== '..')
   );
 }
 export function validateTopicDependencyExpansionInput(input: unknown): TopicDependencyExpansionRequest {
   const value = Schema.decodeUnknownSync(requestSchema, strict)(input);
   if (
-    !value.root.startsWith('/') ||
+    !Effect.pipe(value.root, EffectString.startsWith('/')) ||
     /\p{Cc}/u.test(value.root) ||
-    value.root.split('/').includes('..') ||
-    value.configurationPaths.some(path => !topicExpansionPath(path))
+    Effect.pipe(value.root, EffectString.split('/')).includes('..') ||
+    EffectArray.some(value.configurationPaths, path => !topicExpansionPath(path))
   )
     throw new Error('Expansion requires an absolute root and exact repository-relative configuration paths.');
   if (!value.seeds.length && value.selectedNodeIds.length)
@@ -104,13 +108,14 @@ export function validateTopicDependencyExpansionInput(input: unknown): TopicDepe
 /** Sorted object keys and set-normalized selections make approval independent of transport order. */
 export function topicExpansionDigest(value: unknown): string {
   const canonical = (item: unknown): unknown =>
-    Array.isArray(item)
-      ? item.map(canonical)
+    EffectArray.isArray(item)
+      ? EffectArray.map(item, canonical)
       : item !== null && typeof item === 'object'
-        ? Object.fromEntries(
-            Object.entries(item)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([key, child]) => [key, canonical(child)]),
+        ? EffectRecord.fromEntries(
+            EffectArray.map(
+              EffectRecord.toEntries(item).sort(([a], [b]) => Effect.pipe(a, EffectString.localeCompare(b))),
+              ([key, child]) => [key, canonical(child)],
+            ),
           )
         : item;
   return sha256HexSync(JSON.stringify(canonical(value)));
@@ -206,7 +211,8 @@ export function validateTopicDependencyExpansionProof(
     proof.project !== request.project ||
     proof.root !== request.root ||
     proof.configDigest !== request.configDigest ||
-    topicExpansionDigest(proof.reads.map(read => read.seedId).sort()) !== topicExpansionDigest(request.seeds)
+    topicExpansionDigest(EffectArray.map(proof.reads, read => read.seedId).sort()) !==
+      topicExpansionDigest(request.seeds)
   )
     throw new Error('Expansion scope or exact seed proof differs from the explicit request.');
   const identities = new Map<string, string>();
@@ -221,10 +227,16 @@ export function validateTopicDependencyExpansionProof(
       c.visitedNodes > c.nodeLimit ||
       c.inspectedEdges > c.edgeLimit ||
       c.inspectedEdges < read.edges.length ||
-      !read.nodes.some(node => node.id === read.seedId) ||
-      new Set(read.nodes.map(node => node.id)).size !== read.nodes.length ||
-      new Set(read.edges.map(edge => edge.id)).size !== read.edges.length ||
-      read.nodes.some(node => !topicExpansionPath(node.path))
+      !pipe(
+        read.nodes,
+        EffectArray.some(node => node.id === read.seedId),
+      ) ||
+      new Set(EffectArray.map(read.nodes, node => node.id)).size !== read.nodes.length ||
+      new Set(EffectArray.map(read.edges, edge => edge.id)).size !== read.edges.length ||
+      pipe(
+        read.nodes,
+        EffectArray.some(node => !topicExpansionPath(node.path)),
+      )
     )
       throw new Error('Expansion neighborhood proof is incomplete or inconsistent.');
     for (const node of read.nodes) {
@@ -240,19 +252,22 @@ export function validateTopicDependencyExpansionProof(
       relationships.set(edge.id, digest);
     }
     if (
-      ![
-        'declared' as const,
-        'resolved' as const,
-        'syntactic' as const,
-        ...(request.provenances.includes('heuristic') ? ['heuristic' as const] : []),
-        ...(request.provenances.includes('model') ? ['model' as const] : []),
-      ].every(p => c.allowedProvenances.includes(p)) ||
+      !EffectArray.every(
+        [
+          'declared' as const,
+          'resolved' as const,
+          'syntactic' as const,
+          ...(request.provenances.includes('heuristic') ? ['heuristic' as const] : []),
+          ...(request.provenances.includes('model') ? ['model' as const] : []),
+        ],
+        p => c.allowedProvenances.includes(p),
+      ) ||
       c.allowedProvenances.length !==
         3 + Number(request.provenances.includes('heuristic')) + Number(request.provenances.includes('model'))
     )
       throw new Error('Expansion provenance coverage differs from the requested neighborhood.');
-    const nodes = new Set(read.nodes.map(node => node.id));
-    if (read.edges.some(edge => !nodes.has(edge.sourceId) || !nodes.has(edge.targetId)))
+    const nodes = new Set(EffectArray.map(read.nodes, node => node.id));
+    if (EffectArray.some(read.edges, edge => !nodes.has(edge.sourceId) || !nodes.has(edge.targetId)))
       throw new Error('Expansion edge has an unresolved endpoint.');
   }
   return proof;
@@ -298,7 +313,7 @@ export function topicDependencyExpansionChoices(
         ...(request.direction !== 'outgoing' && edge.targetId === read.seedId ? [edge.sourceId] : []),
       ];
       for (const id of ids) {
-        const node = read.nodes.find(node => node.id === id)!;
+        const node = EffectOption.getOrUndefined(EffectArray.findFirst(read.nodes, node => node.id === id))!;
         const old = eligible.get(id);
         if (old && (old.path !== node.path || old.contentHash !== node.contentHash))
           throw new Error('Expansion node identity collides.');
@@ -311,8 +326,10 @@ export function topicDependencyExpansionChoices(
       throw new Error('A selected endpoint lacks an admitted declared/resolved one-hop dependency.');
   for (const id of eligible.keys()) if (!request.selectedNodeIds.includes(id)) omissions.push({kind: 'unselected', id});
   return {
-    eligible: [...eligible.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    omissions: omissions.sort((a, b) => `${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`)),
+    eligible: [...eligible.values()].sort((a, b) => Effect.pipe(a.id, EffectString.localeCompare(b.id))),
+    omissions: omissions.sort((a, b) =>
+      Effect.pipe(`${a.kind}:${a.id}`, EffectString.localeCompare(`${b.kind}:${b.id}`)),
+    ),
   };
 }
 /** Pure monotone metadata extension. No body, support, role, scope, origin or prior mapping is rewritten. */
@@ -329,7 +346,7 @@ export function prepareTopicDependencyExpansion(
     record.headerTitle !== 'MEMORY' ||
     record.metadata.kind !== 'durable' ||
     record.metadata.status !== 'active' ||
-    !record.uri.startsWith('threadnote://user/') ||
+    !Effect.pipe(record.uri, EffectString.startsWith('threadnote://user/')) ||
     record.metadata.visibility === 'shared' ||
     record.metadata.obsidianEvidence ||
     record.metadata.sourceEvidence ||
@@ -346,19 +363,23 @@ export function prepareTopicDependencyExpansion(
   const choices = topicDependencyExpansionChoices(request, proof);
   if (proof.repositoryId !== old.repositoryId) throw new Error('Expansion cannot cross repositories.');
   const selected = [
-    ...request.selectedNodeIds.map(ref => ({kind: 'dependency' as const, ref})),
-    ...request.configurationPaths.map(ref => ({kind: 'configuration' as const, ref})),
-  ].sort((a, b) => `${a.kind}:${a.ref}`.localeCompare(`${b.kind}:${b.ref}`));
+    ...EffectArray.map(request.selectedNodeIds, ref => ({kind: 'dependency' as const, ref})),
+    ...EffectArray.map(request.configurationPaths, ref => ({kind: 'configuration' as const, ref})),
+  ].sort((a, b) => Effect.pipe(`${a.kind}:${a.ref}`, EffectString.localeCompare(`${b.kind}:${b.ref}`)));
   if (!selected.length)
     throw new Error('Choose at least one exact addition; empty selection never adds all suggestions.');
-  const additions = [...additionsInput].sort((a, b) => `${a.kind}:${a.ref}`.localeCompare(`${b.kind}:${b.ref}`));
-  if (topicExpansionDigest(selected) !== topicExpansionDigest(additions.map(({kind, ref}) => ({kind, ref}))))
+  const additions = [...additionsInput].sort((a, b) =>
+    Effect.pipe(`${a.kind}:${a.ref}`, EffectString.localeCompare(`${b.kind}:${b.ref}`)),
+  );
+  if (
+    topicExpansionDigest(selected) !== topicExpansionDigest(EffectArray.map(additions, ({kind, ref}) => ({kind, ref})))
+  )
     throw new Error('Captured selections differ from the explicit approval.');
-  const citations = new Map((record.metadata.codeCitations ?? []).map(citation => [citation.id, citation]));
+  const citations = new Map(EffectArray.map(record.metadata.codeCitations ?? [], citation => [citation.id, citation]));
   const newIds: string[] = [];
   for (const item of additions) {
     const citation = assertMemoryCodeCitation(item.citation);
-    const node = choices.eligible.find(node => node.id === item.ref);
+    const node = EffectOption.getOrUndefined(EffectArray.findFirst(choices.eligible, node => node.id === item.ref));
     if (
       citation.sourceDirty ||
       citation.evidenceRetention !== 'capsule-retained' ||
@@ -398,13 +419,13 @@ export function prepareTopicDependencyExpansion(
     additions,
   });
   const declared = new Set([
-    ...old.paragraphs.flatMap(paragraph => paragraph.citationIds),
-    ...old.additionalDependencies.map(item => item.citationId),
+    ...EffectArray.flatMap(old.paragraphs, paragraph => paragraph.citationIds),
+    ...EffectArray.map(old.additionalDependencies, item => item.citationId),
   ]);
   const additional = [...old.additionalDependencies];
   const mappings =
     old.version === 1
-      ? [...declared].sort().map(citationId => ({citationId, acceptedCitationId: citationId}))
+      ? EffectArray.map([...declared].sort(), citationId => ({citationId, acceptedCitationId: citationId}))
       : [...old.acceptedSources];
   for (const item of additions)
     if (!declared.has(item.citation.id)) {
@@ -421,22 +442,24 @@ export function prepareTopicDependencyExpansion(
     requestDigest,
     previousManifestHash,
     sourceCommit: proof.sourceCommit,
-    citationIds: sorted(additions.map(item => item.citation.id)),
+    citationIds: sorted(EffectArray.map(additions, item => item.citation.id)),
   };
   const manifest: TopicMaintenanceCodeManifestV3 = {
     ...old,
     version: 3,
     sourceKind: 'code',
     originCitationIds:
-      old.version === 1 ? (record.metadata.codeCitations ?? []).map(c => c.id).sort() : old.originCitationIds,
-    acceptedSources: mappings.sort((a, b) => a.citationId.localeCompare(b.citationId)),
+      old.version === 1
+        ? EffectArray.map(record.metadata.codeCitations ?? [], c => c.id).sort()
+        : old.originCitationIds,
+    acceptedSources: mappings.sort((a, b) => Effect.pipe(a.citationId, EffectString.localeCompare(b.citationId))),
     additionalDependencies: additional,
     dependencyExpansions: [...(old.version === 3 ? (old.dependencyExpansions ?? []) : []), receipt],
   };
   const consolidation =
     record.metadata.consolidation?.version === 1
       ? buildConsolidationProvenanceV2(record.metadata.consolidation, record.body, record.body, manifest, {
-          reviewId: `review-${revision.slice(0, 24)}`,
+          reviewId: `review-${Effect.pipe(revision, EffectString.slice(0, 24))}`,
           targetBeforeHash: beforeContentHash,
           packetDigest: proofDigest,
           observationRevision: requestDigest,
@@ -444,19 +467,17 @@ export function prepareTopicDependencyExpansion(
       : record.metadata.consolidation;
   const split = /\r?\n\r?\n/u.exec(before)!;
   if (!split) throw new Error('Expansion requires an intact canonical header.');
-  const header = before.slice(0, split.index);
-  const ending = header.includes('\r\n') ? '\r\n' : '\n';
-  const lines = header
-    .split(/\r?\n/u)
-    .map(line =>
-      /^topic_maintenance:/u.test(line)
-        ? `topic_maintenance: ${JSON.stringify(manifest)}`
-        : consolidation && /^consolidation:/u.test(line)
-          ? `consolidation: ${JSON.stringify(consolidation)}`
-          : line,
-    );
-  lines.push(...formatMemoryCodeCitationLines([...citations.values()].filter(c => newIds.includes(c.id))));
-  const content = lines.join(ending) + before.slice(split.index);
+  const header = Effect.pipe(before, EffectString.slice(0, split.index));
+  const ending = Effect.pipe(header, EffectString.includes('\r\n')) ? '\r\n' : '\n';
+  const lines = EffectArray.map(Effect.pipe(header, EffectString.split(/\r?\n/u)), line =>
+    /^topic_maintenance:/u.test(line)
+      ? `topic_maintenance: ${JSON.stringify(manifest)}`
+      : consolidation && /^consolidation:/u.test(line)
+        ? `consolidation: ${JSON.stringify(consolidation)}`
+        : line,
+  );
+  lines.push(...formatMemoryCodeCitationLines(EffectArray.filter([...citations.values()], c => newIds.includes(c.id))));
+  const content = EffectArray.join(lines, ending) + Effect.pipe(before, EffectString.slice(split.index));
   const parsed = parseMemoryDocument(record.uri, content);
   if (
     !parsed ||
@@ -468,7 +489,7 @@ export function prepareTopicDependencyExpansion(
     throw new Error('Expansion would produce invalid provenance.');
   const metadataDiff = [
     {field: 'topic_maintenance', beforeHash: previousManifestHash, afterHash: topicExpansionDigest(manifest)},
-    ...newIds.sort().map(id => ({
+    ...EffectArray.map(newIds.sort(), id => ({
       field: `code_citation:${id}`,
       beforeHash: sha256HexSync(''),
       afterHash: topicExpansionDigest(citations.get(id)),
@@ -535,7 +556,10 @@ export function validateTopicDependencyExpansionPreview(input: unknown): TopicDe
   )(input);
   const record = parseMemoryDocument(shape.targetUri, shape.beforeContent);
   if (!record) throw new Error('Expansion baseline is missing.');
-  const additions = shape.additions.map(item => ({...item, citation: assertMemoryCodeCitation(item.citation)}));
+  const additions = EffectArray.map(shape.additions, item => ({
+    ...item,
+    citation: assertMemoryCodeCitation(item.citation),
+  }));
   const rebuilt = prepareTopicDependencyExpansion(
     record,
     shape.callerCwd,

@@ -2,9 +2,12 @@ import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {parseGraphShareRegistryTarget} from '@threadnote/graph/sharing/registry/reference';
 import {parseGraphShareRegistryChallenge} from '@threadnote/graph/sharing/registry/auth';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const name = FC.array(FC.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'), {minLength: 1, maxLength: 20}).map(
-  chars => chars.join(''),
+  chars => EffectArray.join(chars, ''),
 );
 describe('trusted registry targets', () => {
   it('keeps generated repositories and token scopes confined to their exact authority', () => {
@@ -14,13 +17,13 @@ describe('trusted registry targets', () => {
         FC.array(name, {minLength: 1, maxLength: 5}),
         FC.integer({min: 1, max: 65535}),
         (host, parts, port) => {
-          const reference = `oci://registry-${host}.example.test:${port}/${parts.join('/')}`;
+          const reference = `oci://registry-${host}.example.test:${port}/${EffectArray.join(parts, '/')}`;
           const target = parseGraphShareRegistryTarget(reference);
-          expect(target.repository).toBe(parts.join('/'));
+          expect(target.repository).toBe(EffectArray.join(parts, '/'));
           expect(target.origin).toBe(new URL(`https://registry-${host}.example.test:${port}`).origin);
-          expect(target.pullScope).toBe(`repository:${parts.join('/')}:pull`);
+          expect(target.pullScope).toBe(`repository:${EffectArray.join(parts, '/')}:pull`);
           expect(new URL(`/v2/${target.repository}/blobs/sha256:abc`, target.origin).pathname).toBe(
-            `/v2/${parts.join('/')}/blobs/sha256:abc`,
+            `/v2/${EffectArray.join(parts, '/')}/blobs/sha256:abc`,
           );
           expect(
             parseGraphShareRegistryChallenge(
@@ -54,7 +57,7 @@ describe('trusted registry targets', () => {
       'oci://registry.example.test:0/repo',
       'oci://registry.example.test:65536/repo',
       'oci://registry.example.test:0443/repo',
-      'oci://registry.example.test/' + 'a'.repeat(256),
+      'oci://registry.example.test/' + Effect.pipe('a', EffectString.repeat(256)),
     ])
       expect(() => parseGraphShareRegistryTarget(value)).toThrow();
   });

@@ -7,6 +7,8 @@ import {codeMemoryLinkClientImplementationDescriptorHash} from '@threadnote/thre
 import {collectCodeMemoryLinkClientImplementation} from './code-memory-link-client-implementation.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {atomicWrite, scriptArguments} from './effect/script.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const program = Effect.gen(function* () {
   const input = parseArguments(yield* scriptArguments());
@@ -57,13 +59,25 @@ function parseArguments(args: readonly string[]) {
 }
 
 function parseBinding(value: string, option: string): {readonly path: string; readonly role: string} {
-  const separator = value.indexOf('=');
+  const separator = Effect2.pipe(
+    value,
+    EffectString.indexOf('='),
+    Effect2.Option.getOrElse(() => -1),
+  );
   if (separator < 1) throw ScriptError.make({message: `${option} requires role=/absolute/path.`});
-  return {path: value.slice(separator + 1), role: value.slice(0, separator)};
+  return {
+    path: Effect2.pipe(value, EffectString.slice(separator + 1)),
+    role: Effect2.pipe(value, EffectString.slice(0, separator)),
+  };
 }
 
 function required(value: string | undefined, option: string): string {
-  if (!value?.trim()) throw ScriptError.make({message: `${option} requires a value.`});
+  if (
+    !Effect2.pipe(value, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    )
+  )
+    throw ScriptError.make({message: `${option} requires a value.`});
   return value;
 }
 

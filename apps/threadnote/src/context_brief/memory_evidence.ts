@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {
   contextBriefCodeLinkRecallGaps,
   mapContextBriefCodeLinkMatches,
@@ -55,6 +56,9 @@ const CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_WAIT_MILLISECONDS = 1_000;
 const CONTEXT_BRIEF_CODE_ANCHOR_READ_RETRIES = 2;
 const CONTEXT_BRIEF_CODE_ANCHOR_RETRY_MILLISECONDS = 25;
 import {MEMORY_RECALL_EMPTY_GAP} from '@threadnote/context/memory-evidence';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
 const THREADNOTE_MEMORY_URI = /^threadnote:\/\/user\/[^/]+\/memories\//u;
 
 type ContextBriefMemoryScopeResolution =
@@ -94,7 +98,7 @@ export function contextBriefMemoryEligibilityPolicy(
   const members = normalizeRecallProjectNames(resolution.projects);
   const explicitProject = scope.project === undefined ? undefined : normalizeRecallProjectNames([scope.project])[0];
   const selectedMembers =
-    explicitProject === undefined ? members : members.filter(project => explicitProject === project);
+    explicitProject === undefined ? members : EffectArray.filter(members, project => explicitProject === project);
   return {
     policy: deriveRecallEligibilityPolicy({originalQuery: query, worksetProjectNames: selectedMembers}),
   };
@@ -117,7 +121,7 @@ const contextBriefMemoryEligibility = Effect.fn('contextBrief.resolveMemoryEligi
   const resolved = yield* resolveWorkset(config.manifestPath, scope.name).pipe(Effect.option);
   const projects =
     resolved._tag === 'Some' && resolved.value !== undefined
-      ? resolved.value.projects.map(project => project.name)
+      ? EffectArray.map(resolved.value.projects, project => project.name)
       : undefined;
   return contextBriefMemoryEligibilityPolicy(scope, query, {kind: 'workset', projects});
 });
@@ -140,14 +144,18 @@ export const retrieveContextBriefMemoryEvidence = Effect.fn('contextBrief.retrie
     limit: Math.max(plan.candidateLimit, plan.candidateLimit * MEMORY_RETRIEVAL_MULTIPLIER),
     query: plan.query,
   });
-  const rankedUris = index.candidates
-    .filter(
-      candidate =>
+  const rankedCandidates = index.candidates;
+  const rankedUris = EffectArray.map(
+    EffectArray.filter(
+      rankedCandidates,
+      (candidate, __effectArrayIndex) =>
+        __effectArrayIndex in rankedCandidates &&
         THREADNOTE_MEMORY_URI.test(candidate.uri) &&
         (candidate.kind === 'durable' || candidate.kind === 'handoff') &&
         candidate.status === 'active',
-    )
-    .map(candidate => candidate.uri);
+    ),
+    candidate => candidate.uri,
+  );
   const read = yield* readContextBriefMemoryCandidates(
     config,
     rankedUris,
@@ -195,7 +203,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     }
     const scopedEligibility = yield* contextBriefMemoryEligibility(config, plan.scope, plan.query);
     const callerCwd = plan.scope.callerCwd;
-    if (plan.codeRefs.some(ref => ref.startsWith('cgr_'))) {
+    if (EffectArray.some(plan.codeRefs, ref => Effect2.pipe(ref, EffectString.startsWith('cgr_')))) {
       return unavailableContextBriefCodeLinkedMemoryEvidence(requested, 'code-anchor-ref-unsupported');
     }
     const retryBudget = {remaining: CONTEXT_BRIEF_CODE_ANCHOR_READ_RETRIES};
@@ -240,25 +248,30 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
           : undefined;
     const resolvedAnchors =
       Result.isSuccess(capturedBatch) && capturedBatch.success.length === requested
-        ? capturedBatch.success.map((anchor, anchorOrdinal) => ({anchor, anchorOrdinal}))
-        : (fallbackAttempts ?? []).flatMap((attempt, anchorOrdinal) => {
+        ? EffectArray.map(capturedBatch.success, (anchor, anchorOrdinal) => ({anchor, anchorOrdinal}))
+        : EffectArray.flatMap(fallbackAttempts ?? [], (attempt, anchorOrdinal) => {
             const anchor = Result.isSuccess(attempt) ? attempt.success[0] : undefined;
             return anchor === undefined ? [] : [{anchor, anchorOrdinal}];
           });
-    const unresolvedCaptureFailures = (fallbackAttempts ?? []).flatMap(attempt =>
+    const unresolvedCaptureFailures = EffectArray.flatMap(fallbackAttempts ?? [], attempt =>
       Result.isFailure(attempt) ? [attempt.failure] : [],
     );
     const captureFailures = [
       ...(Result.isFailure(capturedBatch) ? [capturedBatch.failure] : []),
       ...unresolvedCaptureFailures,
     ];
-    const captureUnavailable = captureFailures.some(failure => !isUnresolvedContextBriefCodeAnchorFailure(failure));
+    const captureUnavailable = EffectArray.some(
+      captureFailures,
+      failure => !isUnresolvedContextBriefCodeAnchorFailure(failure),
+    );
     if (resolvedAnchors.length === 0) {
-      const unexpected = captureFailures.find(isUnexpectedContextBriefCodeAnchorFailure);
+      const unexpected = Option.getOrUndefined(
+        EffectArray.findFirst(captureFailures, isUnexpectedContextBriefCodeAnchorFailure),
+      );
       if (unexpected !== undefined) return yield* unexpected;
       return unavailableContextBriefCodeLinkedMemoryEvidence(requested, 'code-anchor-resolution-unavailable');
     }
-    const resolvedOrdinals = resolvedAnchors.map(anchor => anchor.anchorOrdinal);
+    const resolvedOrdinals = EffectArray.map(resolvedAnchors, anchor => anchor.anchorOrdinal);
     const identity = yield* resolveRepositoryIdentity(callerCwd).pipe(Effect.option);
     const attemptedUris: string[] = [];
     // Scoped cloud reads must not finalize pending memories outside their share boundary.
@@ -321,7 +334,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     let truncatedSelectorCount = 0;
     const linked = yield* loadRecallCodeLinks(config, {
       allowedUriScopes: options.allowedUriScopes ?? [contextBriefMemoryUriScope(config.user)],
-      anchors: resolvedAnchors.map(resolved => resolved.anchor),
+      anchors: EffectArray.map(resolvedAnchors, resolved => resolved.anchor),
       eligibility: scopedEligibility.policy,
       ...(forceRecallRefresh ? {forceRefresh: true} : {}),
       includeInactive: false,
@@ -340,7 +353,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     }
     const matchesByUri = mapContextBriefCodeLinkMatches(
       linked.value,
-      resolvedAnchors.map(resolved => ({
+      EffectArray.map(resolvedAnchors, resolved => ({
         ...(resolved.anchor.target.kind === 'symbol' ? {anchorNodeId: resolved.anchor.target.nodeId} : {}),
         anchorOrdinal: resolved.anchorOrdinal,
         anchorPath: resolved.anchor.path,
@@ -366,7 +379,10 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
       );
     }
     const readCandidates = readCandidatesResult.success;
-    const candidates = readCandidates.candidates.filter(candidate => (candidate.codeLinkMatches?.length ?? 0) > 0);
+    const candidates = EffectArray.filter(
+      readCandidates.candidates,
+      candidate => (candidate.codeLinkMatches?.length ?? 0) > 0,
+    );
     const complete = resolvedAnchors.length === requested;
     const unresolvedOrdinals = unresolvedContextBriefCodeAnchorOrdinals(requested, resolvedOrdinals);
     return {
@@ -380,7 +396,8 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
       candidates,
       consideredCandidates: linked.value.length,
       gaps: stableUnique([
-        ...contextBriefCodeLinkRecallGaps(complete, candidates.length, truncatedSelectorCount).filter(
+        ...EffectArray.filter(
+          contextBriefCodeLinkRecallGaps(complete, candidates.length, truncatedSelectorCount),
           gap => !finalizationUnavailable || gap !== 'code-anchor-recall-no-active-memory',
         ),
         ...(finalizationUnavailable ? ['code-anchor-recall-unavailable'] : []),
@@ -434,12 +451,16 @@ const readContextBriefMemoryCandidates = Effect.fn('contextBrief.readMemoryCandi
   requireResolvableMemoryIdentity = false,
   allowedUriScopes: readonly string[] = [contextBriefMemoryUriScope(config.user)],
 ) {
-  const scopedUris = rankedUris.filter(uri => allowedUriScopes.some(scope => resourceIdIsWithin(uri, scope)));
+  const scopedUris = EffectArray.filter(
+    rankedUris,
+    __effectArrayValue =>
+      !!(uri => EffectArray.some(allowedUriScopes, scope => resourceIdIsWithin(uri, scope)))(__effectArrayValue),
+  );
   const records = yield* readMemoryRecordsByUri(config, scopedUris);
-  const recordsByUri = new Map(records.map(record => [record.uri, record]));
+  const recordsByUri = new Map(EffectArray.map(records, record => [record.uri, record]));
   const memoryIds = [
     ...new Set(
-      records.flatMap(record =>
+      EffectArray.flatMap(records, record =>
         record.metadata.memoryId !== undefined && isMemoryId(record.metadata.memoryId)
           ? [record.metadata.memoryId]
           : [],
@@ -451,7 +472,8 @@ const readContextBriefMemoryCandidates = Effect.fn('contextBrief.readMemoryCandi
       ? yield* loadRecallMemoryIdentities(config, {allowedUriScopes, memoryIds})
       : [];
   const resolvableMemoryIds = new Set(
-    memoryIds.filter(
+    EffectArray.filter(
+      memoryIds,
       memoryId => classifyMemoryIdentityCandidates(identityCandidates, memoryId, allowedUriScopes).state === 'resolved',
     ),
   );
@@ -490,7 +512,7 @@ const readTopicReviewAttention = Effect.fn('contextBrief.readTopicReviewAttentio
   config: RuntimeConfig,
   record: MemoryRecord,
 ) {
-  const reviewId = `review-${sha256HexSync(`topic-maintenance\0${record.uri}`).slice(0, 24)}`;
+  const reviewId = `review-${Effect2.pipe(sha256HexSync(`topic-maintenance\0${record.uri}`), EffectString.slice(0, 24))}`;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = path.join(config.agentContextHome, 'threadnote', 'candidates', 'v1', 'reviews', `${reviewId}.json`);

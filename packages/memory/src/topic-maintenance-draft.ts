@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 export * from './topic-maintenance-generation.js';
 import {
   validateTopicGenerationSummary,
@@ -11,6 +12,7 @@ import type {
 } from './automatic-maintenance.js';
 import {assertAutomaticMaintenanceAssessment} from './automatic-maintenance.js';
 import {assertApprovedSourceDescriptor} from './reviewed-support.js';
+import {isOneOf, isSafeInteger} from './validation.js';
 import {consolidationRevision, consolidationSections} from './consolidation.js';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from './code/citation.js';
 import type {MemoryObsidianEvidenceV1} from './document.js';
@@ -24,6 +26,9 @@ import {
   type TopicMaintenanceDependencyV1,
   type TopicMaintenanceParagraphV1,
 } from './topic-maintenance.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const MAX_TOPIC_MAINTENANCE_DRAFT_BYTES = 32 * 1024;
 export const MAX_TOPIC_MAINTENANCE_BASIS_BYTES = 64 * 1024;
@@ -125,16 +130,22 @@ export function topicMaintenanceParagraphCoverage(
   basis: Pick<TopicMaintenanceDraftBasisV1, 'paragraphs'>,
   draft: TopicMaintenanceDraftV1,
 ): TopicMaintenanceParagraphCoverageV1 {
-  const eligible = basis.paragraphs.filter(topicMaintenanceParagraphEligible);
+  const eligible = EffectArray.filter(
+    basis.paragraphs,
+    (__effectFilterValue: (typeof basis.paragraphs)[number], __effectFilterIndex: number) =>
+      __effectFilterIndex in basis.paragraphs && topicMaintenanceParagraphEligible(__effectFilterValue),
+  );
   const entries = draft.paragraphDispositions?.entries ?? [];
-  const missingOrdinals = eligible
-    .filter(item => !entries.some(entry => entry.ordinal === item.ordinal))
-    .map(item => item.ordinal);
-  const unresolvedOrdinals = entries
-    .filter(item => item.disposition === 'unresolved')
-    .map(item => item.ordinal)
-    .sort((a, b) => a - b);
-  const resolvedCount = entries.filter(
+  const missingOrdinals = EffectArray.map(
+    EffectArray.filter(eligible, item => !EffectArray.some(entries, entry => entry.ordinal === item.ordinal)),
+    item => item.ordinal,
+  );
+  const unresolvedOrdinals = EffectArray.map(
+    EffectArray.filter(entries, item => item.disposition === 'unresolved'),
+    item => item.ordinal,
+  ).sort((a, b) => a - b);
+  const resolvedCount = EffectArray.filter(
+    entries,
     item => item.disposition !== 'unresolved' && item.supportHandles.length > 0,
   ).length;
   return {
@@ -313,14 +324,17 @@ function fail(message: string): never {
 }
 
 function object(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
 
 function keys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
-  const actual = Object.keys(value);
-  return required.every(key => key in value) && actual.every(key => required.includes(key) || optional.includes(key));
+  const actual = EffectRecord.keys(value);
+  return (
+    EffectArray.every(required, key => key in value) &&
+    EffectArray.every(actual, key => required.includes(key) || optional.includes(key))
+  );
 }
 
 function boundedText(value: unknown, maxBytes: number, allowEmpty = false): value is string {
@@ -328,29 +342,34 @@ function boundedText(value: unknown, maxBytes: number, allowEmpty = false): valu
 }
 
 function boundedStrings(value: unknown, maxCount: number, maxBytes: number): value is readonly string[] {
-  return Array.isArray(value) && value.length <= maxCount && value.every(item => boundedText(item, maxBytes));
+  return (
+    EffectArray.isArray(value) &&
+    value.length <= maxCount &&
+    EffectArray.every(value, item => boundedText(item, maxBytes))
+  );
 }
 
 function paragraphSpans(body: string): readonly ParagraphSpan[] {
-  const trimmed = body.trim();
-  const initial = body.length - body.trimStart().length;
+  const trimmed = Effect.pipe(body, EffectString.trim);
+  const initial = body.length - Effect.pipe(body, EffectString.trimStart).length;
   const result: ParagraphSpan[] = [];
   let cursor = 0;
   const add = (end: number) => {
-    const segment = trimmed.slice(cursor, end);
-    const text = segment.trim();
+    const segment = Effect.pipe(trimmed, EffectString.slice(cursor, end));
+    const text = Effect.pipe(segment, EffectString.trim);
     if (text) {
-      const start = initial + cursor + segment.length - segment.trimStart().length;
+      const start = initial + cursor + segment.length - Effect.pipe(segment, EffectString.trimStart).length;
       result.push({start, end: start + text.length, text});
     }
   };
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native matchAll preserves the standard RegExpMatchArray index type.
   for (const match of trimmed.matchAll(/\n[\t ]*\n/gu)) {
     add(match.index);
     cursor = match.index + match[0].length;
   }
   add(trimmed.length);
   const sections = consolidationSections(body);
-  if (result.length !== sections.length || result.some((span, index) => span.text !== sections[index]))
+  if (result.length !== sections.length || EffectArray.some(result, (span, index) => span.text !== sections[index]))
     fail('accepted paragraph spans are inconsistent.');
   return result;
 }
@@ -394,9 +413,9 @@ function assertTopicMaintenanceBasis(input: unknown): asserts input is TopicMain
     typeof input.packetDigest !== 'string' ||
     !HASH.test(input.packetDigest) ||
     !boundedText(input.body, MAX_TOPIC_MAINTENANCE_BYTES) ||
-    !Array.isArray(input.paragraphs) ||
-    !Array.isArray(input.additionalDependencies) ||
-    !Array.isArray(input.handles)
+    !EffectArray.isArray(input.paragraphs) ||
+    !EffectArray.isArray(input.additionalDependencies) ||
+    !EffectArray.isArray(input.handles)
   )
     fail('invalid basis shape or identity.');
   const idPattern = imported ? /^tnob_[a-f0-9]{40}$/u : CITATION_ID;
@@ -416,7 +435,7 @@ function assertTopicMaintenanceBasis(input: unknown): asserts input is TopicMain
     cited.add(topicMaintenanceObsidianCitationId(input.originEvidence));
   } else {
     for (const paragraph of input.paragraphs) {
-      if (object(paragraph) && Array.isArray(paragraph.citationIds))
+      if (object(paragraph) && EffectArray.isArray(paragraph.citationIds))
         for (const id of paragraph.citationIds) if (typeof id === 'string' && idPattern.test(id)) admitted.add(id);
     }
   }
@@ -429,7 +448,7 @@ function assertTopicMaintenanceBasis(input: unknown): asserts input is TopicMain
     if (
       !object(dependency) ||
       !keys(dependency, ['kind', 'citationId']) ||
-      !['configuration', 'dependency'].includes(dependency.kind as string) ||
+      !isOneOf(['configuration', 'dependency'], dependency.kind) ||
       typeof dependency.citationId !== 'string' ||
       !idPattern.test(dependency.citationId) ||
       dependencies.has(dependency.citationId)
@@ -448,7 +467,7 @@ function assertTopicMaintenanceBasis(input: unknown): asserts input is TopicMain
       typeof handle.id !== 'string' ||
       typeof handle.citationId !== 'string' ||
       !idPattern.test(handle.citationId) ||
-      !['historical', 'current'].includes(handle.variant as string) ||
+      !isOneOf(['historical', 'current'], handle.variant) ||
       handle.id !== `${handle.variant}:${handle.citationId}` ||
       !(imported ? /^(historical|current):tnob_[a-f0-9]{40}$/u : HANDLE_ID).test(handle.id) ||
       seen.has(handle.id)
@@ -456,11 +475,19 @@ function assertTopicMaintenanceBasis(input: unknown): asserts input is TopicMain
       fail('basis has unknown or duplicate evidence handles.');
     seen.add(handle.id);
   }
-  if ([...cited].some(id => !seen.has(`historical:${id}`) || !seen.has(`current:${id}`)))
+  if (EffectArray.some([...cited], id => !seen.has(`historical:${id}`) || !seen.has(`current:${id}`)))
     fail('basis omits a declared paragraph citation handle.');
 }
 
 function validateDraft(input: unknown, basis: LegacyTopicMaintenanceDraftBasis): TopicMaintenanceDraftV1 {
+  assertTopicMaintenanceDraft(input, basis);
+  return input;
+}
+
+function assertTopicMaintenanceDraft(
+  input: unknown,
+  basis: LegacyTopicMaintenanceDraftBasis,
+): asserts input is TopicMaintenanceDraftV1 {
   if (
     !object(input) ||
     !keys(
@@ -483,10 +510,8 @@ function validateDraft(input: unknown, basis: LegacyTopicMaintenanceDraftBasis):
     input.targetHash !== basis.targetHash ||
     input.observationRevision !== basis.observationRevision ||
     input.packetDigest !== basis.packetDigest ||
-    !['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence'].includes(
-      input.outcome as string,
-    ) ||
-    !Array.isArray(input.operations) ||
+    !isOneOf(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence'], input.outcome) ||
+    !EffectArray.isArray(input.operations) ||
     input.operations.length > MAX_TOPIC_MAINTENANCE_PARAGRAPHS ||
     !boundedStrings(input.reviewedHandles, 8, 64) ||
     !boundedText(input.rationale, 2048) ||
@@ -494,41 +519,51 @@ function validateDraft(input: unknown, basis: LegacyTopicMaintenanceDraftBasis):
     !boundedStrings(input.removedClaims, 64, 512)
   )
     fail('invalid draft shape or stale packet identity.');
-  const known = new Set(basis.handles.map(handle => handle.id));
+  const known = new Set(EffectArray.map(basis.handles, handle => handle.id));
   const spans = paragraphSpans(basis.body);
   if (
     new Set(input.reviewedHandles).size !== input.reviewedHandles.length ||
-    input.reviewedHandles.some(handle => !known.has(handle) || !handle.startsWith('current:'))
+    EffectArray.some(
+      input.reviewedHandles,
+      handle => !known.has(handle) || !Effect.pipe(handle, EffectString.startsWith('current:')),
+    )
   )
     fail('reviewed evidence handle is unknown or not current.');
   const seen = new Set<number>();
+  const operationSupport = new Map<number, readonly string[]>();
   for (const operation of input.operations) {
     if (
       !object(operation) ||
       !keys(operation, ['ordinal', 'beforeHash', 'text', 'supportHandles', 'rationale']) ||
-      !Number.isSafeInteger(operation.ordinal) ||
-      (operation.ordinal as number) < 0 ||
-      (operation.ordinal as number) >= basis.paragraphs.length ||
-      seen.has(operation.ordinal as number) ||
-      operation.beforeHash !== basis.paragraphs[operation.ordinal as number].hash ||
-      basis.paragraphs[operation.ordinal as number].role !== 'descriptive' ||
+      !isSafeInteger(operation.ordinal) ||
+      operation.ordinal < 0 ||
+      operation.ordinal >= basis.paragraphs.length ||
+      seen.has(operation.ordinal) ||
+      operation.beforeHash !== basis.paragraphs[operation.ordinal]?.hash ||
+      basis.paragraphs[operation.ordinal]?.role !== 'descriptive' ||
       !boundedText(operation.text, MAX_TOPIC_MAINTENANCE_BYTES) ||
-      operation.text !== operation.text.trim() ||
+      operation.text !== Effect.pipe(operation.text, EffectString.trim) ||
       !boundedText(operation.rationale, 1024) ||
       !boundedStrings(operation.supportHandles, 8, 64) ||
       operation.supportHandles.length === 0 ||
       new Set(operation.supportHandles).size !== operation.supportHandles.length ||
-      operation.supportHandles.some((handle: string) => !known.has(handle) || !handle.startsWith('current:'))
+      EffectArray.some(
+        operation.supportHandles,
+        (handle: string) => !known.has(handle) || !Effect.pipe(handle, EffectString.startsWith('current:')),
+      )
     )
       fail('invalid, overlapping, or unsupported paragraph replacement.');
-    if (operation.text === spans[operation.ordinal as number].text)
+    const span = spans[operation.ordinal];
+    if (!span) fail('replacement paragraph is outside the accepted body.');
+    if (operation.text === span.text)
       fail(`paragraph ${operation.ordinal} replacement repeats accepted text; a replacement must change the text.`);
     try {
       if (consolidationSections(operation.text).length !== 1) fail('replacement spans multiple paragraphs.');
     } catch {
       fail('replacement spans multiple paragraphs or exceeds body bounds.');
     }
-    seen.add(operation.ordinal as number);
+    seen.add(operation.ordinal);
+    operationSupport.set(operation.ordinal, operation.supportHandles);
   }
   if (
     (input.outcome === 'propose-update' && input.operations.length === 0) ||
@@ -543,56 +578,59 @@ function validateDraft(input: unknown, basis: LegacyTopicMaintenanceDraftBasis):
       !object(accounting) ||
       !keys(accounting, ['version', 'entries']) ||
       accounting.version !== 1 ||
-      !Array.isArray(accounting.entries) ||
+      !EffectArray.isArray(accounting.entries) ||
       accounting.entries.length > MAX_TOPIC_MAINTENANCE_PARAGRAPHS
     )
       fail('invalid paragraph dispositions.');
     const entries = accounting.entries;
     const accounted = new Set<number>();
+    const updated = new Set<number>();
     for (const entry of entries) {
       if (
         !object(entry) ||
         !keys(entry, ['ordinal', 'beforeHash', 'disposition', 'supportHandles', 'rationale']) ||
-        !Number.isSafeInteger(entry.ordinal) ||
-        !basis.paragraphs[entry.ordinal as number] ||
-        accounted.has(entry.ordinal as number)
+        !isSafeInteger(entry.ordinal) ||
+        !basis.paragraphs[entry.ordinal] ||
+        accounted.has(entry.ordinal)
       )
         fail('invalid or duplicate paragraph disposition.');
-      const paragraph = basis.paragraphs[entry.ordinal as number];
-      const operation = input.operations.find(item => item.ordinal === entry.ordinal);
+      const paragraph = basis.paragraphs[entry.ordinal];
+      const operation = operationSupport.get(entry.ordinal);
       const allowed = new Set(
-        [...paragraph.citationIds, ...basis.additionalDependencies.map(item => item.citationId)].map(
+        EffectArray.map(
+          [...paragraph.citationIds, ...EffectArray.map(basis.additionalDependencies, item => item.citationId)],
           id => `current:${id}`,
         ),
       );
       if (
         !topicMaintenanceParagraphEligible(paragraph) ||
         entry.beforeHash !== paragraph.hash ||
-        !['update', 'revalidate', 'unresolved'].includes(entry.disposition as string) ||
+        !isOneOf(['update', 'revalidate', 'unresolved'], entry.disposition) ||
         !boundedText(entry.rationale, 1024) ||
         !boundedStrings(entry.supportHandles, 8, 64) ||
         new Set(entry.supportHandles).size !== entry.supportHandles.length ||
-        entry.supportHandles.some(handle => !allowed.has(handle) || !known.has(handle)) ||
+        EffectArray.some(entry.supportHandles, handle => !allowed.has(handle) || !known.has(handle)) ||
         (entry.disposition === 'unresolved' ? entry.supportHandles.length !== 0 : entry.supportHandles.length === 0) ||
         (entry.disposition === 'update'
           ? !operation ||
-            entry.supportHandles.length !== operation.supportHandles.length ||
-            entry.supportHandles.some(handle => !operation.supportHandles.includes(handle))
+            entry.supportHandles.length !== operation.length ||
+            EffectArray.some(entry.supportHandles, handle => !operation.includes(handle))
           : operation !== undefined)
       )
         fail('contradictory or unsupported paragraph disposition.');
-      accounted.add(entry.ordinal as number);
+      accounted.add(entry.ordinal);
+      if (entry.disposition === 'update') updated.add(entry.ordinal);
     }
+    if (EffectArray.some([...seen], ordinal => !updated.has(ordinal)))
+      fail('paragraph disposition is missing for a replacement.');
     if (
-      input.operations.some(
-        operation => !entries.some(entry => entry.ordinal === operation.ordinal && entry.disposition === 'update'),
+      EffectArray.some(
+        basis.paragraphs,
+        item => topicMaintenanceParagraphEligible(item) && !accounted.has(item.ordinal),
       )
     )
-      fail('paragraph disposition is missing for a replacement.');
-    if (basis.paragraphs.some(item => topicMaintenanceParagraphEligible(item) && !accounted.has(item.ordinal)))
       fail('paragraph dispositions omit an eligible descriptive paragraph.');
   }
-  return input as unknown as TopicMaintenanceDraftV1;
 }
 
 function assemble(
@@ -600,15 +638,15 @@ function assemble(
   draft: TopicMaintenanceDraftV1,
 ): TopicMaintenanceDraftProposalV1 {
   const spans = paragraphSpans(basis.body);
-  const replacements = new Map(draft.operations.map(operation => [operation.ordinal, operation.text]));
+  const replacements = new Map(EffectArray.map(draft.operations, operation => [operation.ordinal, operation.text]));
   let cursor = 0;
   let body = '';
   for (const [ordinal, span] of spans.entries()) {
-    body += basis.body.slice(cursor, span.start);
-    body += replacements.get(ordinal) ?? basis.body.slice(span.start, span.end);
+    body += Effect.pipe(basis.body, EffectString.slice(cursor, span.start));
+    body += replacements.get(ordinal) ?? Effect.pipe(basis.body, EffectString.slice(span.start, span.end));
     cursor = span.end;
   }
-  body += basis.body.slice(cursor);
+  body += Effect.pipe(basis.body, EffectString.slice(cursor));
   if (textBytes(body) > MAX_TOPIC_MAINTENANCE_BYTES || consolidationSections(body).length !== spans.length)
     fail('assembled body exceeds bounds or changes paragraph count.');
   return {
@@ -656,15 +694,151 @@ export function parseTopicMaintenanceDraft(
   return assemble(basis, draft);
 }
 
+function isTopicMaintenanceReviewEvidenceShape(value: unknown): value is TopicMaintenanceReviewEvidenceV1 {
+  if (
+    !object(value) ||
+    !keys(value, [
+      'handleId',
+      'content',
+      'excerptHash',
+      'fileBytesHash',
+      'startLine',
+      'endLine',
+      'provenance',
+      'supportsCitation',
+      'truncated',
+      'source',
+      'citation',
+    ]) ||
+    typeof value.handleId !== 'string' ||
+    typeof value.content !== 'string' ||
+    typeof value.excerptHash !== 'string' ||
+    typeof value.fileBytesHash !== 'string' ||
+    typeof value.startLine !== 'number' ||
+    typeof value.endLine !== 'number' ||
+    (value.provenance !== 'historical-verified' && value.provenance !== 'current-verified') ||
+    value.supportsCitation !== true ||
+    value.truncated !== false ||
+    !object(value.source) ||
+    !keys(value.source, [
+      'extractorSet',
+      'fileContentHash',
+      'path',
+      'repositoryId',
+      'sourceCommit',
+      'sourceDirty',
+      'sourceSnapshotId',
+    ]) ||
+    typeof value.source.extractorSet !== 'string' ||
+    typeof value.source.fileContentHash !== 'string' ||
+    typeof value.source.path !== 'string' ||
+    typeof value.source.repositoryId !== 'string' ||
+    typeof value.source.sourceCommit !== 'string' ||
+    typeof value.source.sourceDirty !== 'boolean' ||
+    typeof value.source.sourceSnapshotId !== 'string'
+  )
+    return false;
+  try {
+    assertMemoryCodeCitation(value.citation);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isTopicMaintenanceObsidianReviewEvidenceShape(
+  value: unknown,
+): value is TopicMaintenanceObsidianReviewEvidenceV2 {
+  if (
+    !object(value) ||
+    !keys(value, [
+      'sourceKind',
+      'handleId',
+      'content',
+      'excerptHash',
+      'provenance',
+      'supportsCitation',
+      'truncated',
+      'citation',
+    ]) ||
+    value.sourceKind !== 'obsidian' ||
+    typeof value.handleId !== 'string' ||
+    typeof value.content !== 'string' ||
+    typeof value.excerptHash !== 'string' ||
+    (value.provenance !== 'historical-verified' && value.provenance !== 'current-verified') ||
+    value.supportsCitation !== true ||
+    value.truncated !== false
+  )
+    return false;
+  try {
+    assertTopicMaintenanceObsidianEvidence(value.citation);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isAutomaticMaintenanceDraftShape(value: unknown): value is AutomaticMaintenanceDraftV2 {
+  return (
+    object(value) &&
+    value.version === 2 &&
+    value.kind === 'automatic' &&
+    (value.purpose === 'automatic' || value.purpose === 'manual-edit') &&
+    typeof value.targetHash === 'string' &&
+    typeof value.observationRevision === 'string' &&
+    typeof value.packetDigest === 'string' &&
+    (value.outcome === 'propose-update' ||
+      value.outcome === 'propose-revalidation' ||
+      value.outcome === 'policy-conflict' ||
+      value.outcome === 'insufficient-evidence') &&
+    EffectArray.isArray(value.operations) &&
+    EffectArray.every(value.operations, isAutomaticOperationShape) &&
+    boundedStrings(value.reviewedHandles, 24, 80) &&
+    typeof value.rationale === 'string' &&
+    boundedStrings(value.unresolvedQuestions, 16, 512) &&
+    boundedStrings(value.removedClaims, 64, 512) &&
+    EffectArray.isArray(value.paragraphDecisions) &&
+    EffectArray.every(value.paragraphDecisions, isAutomaticParagraphDecisionShape) &&
+    (value.desiredBody === undefined || typeof value.desiredBody === 'string')
+  );
+}
+
+function isAutomaticOperationShape(value: unknown): value is TopicMaintenanceReplaceOperationV1 {
+  return (
+    object(value) &&
+    keys(value, ['ordinal', 'beforeHash', 'text', 'supportHandles', 'rationale']) &&
+    typeof value.ordinal === 'number' &&
+    typeof value.beforeHash === 'string' &&
+    typeof value.text === 'string' &&
+    boundedStrings(value.supportHandles, 8, 80) &&
+    typeof value.rationale === 'string'
+  );
+}
+
+function isAutomaticParagraphDecisionShape(value: unknown): value is AutomaticMaintenanceParagraphDecisionV2 {
+  return (
+    object(value) &&
+    keys(value, ['ordinal', 'beforeHash', 'role', 'support', 'evidenceIds']) &&
+    typeof value.ordinal === 'number' &&
+    typeof value.beforeHash === 'string' &&
+    (value.role === 'descriptive' ||
+      value.role === 'normative' ||
+      value.role === 'historical' ||
+      value.role === 'unknown') &&
+    (value.support === 'direct' || value.support === 'contextual' || value.support === 'unresolved') &&
+    boundedStrings(value.evidenceIds, 8, 68)
+  );
+}
+
 /** Rejects incompatible packet evidence before generation; payload loading uses the same checks. */
 export function validateTopicMaintenanceReviewEvidence(
   basisInput: TopicMaintenanceDraftBasisV1,
   input: unknown,
 ): readonly TopicMaintenanceReviewEvidenceV1[] {
   const basis = validateTopicMaintenanceDraftBasis(basisInput);
-  if (!Array.isArray(input) || input.length > 16 || jsonBytes(input) > MAX_TOPIC_MAINTENANCE_REVIEW_BYTES)
+  if (!EffectArray.isArray(input) || input.length > 16 || jsonBytes(input) > MAX_TOPIC_MAINTENANCE_REVIEW_BYTES)
     fail('invalid or oversized private review evidence.');
-  const known = new Set(basis.handles.map(handle => handle.id));
+  const known = new Set(EffectArray.map(basis.handles, handle => handle.id));
   const evidenceSeen = new Set<string>();
   const citations = new Map<string, MemoryCodeCitationV1>();
   for (const evidence of input) {
@@ -690,14 +864,16 @@ export function validateTopicMaintenanceReviewEvidence(
       evidence.excerptHash !== consolidationRevision(evidence.content) ||
       typeof evidence.fileBytesHash !== 'string' ||
       !HASH.test(evidence.fileBytesHash) ||
-      !Number.isSafeInteger(evidence.startLine) ||
-      (evidence.startLine as number) < 1 ||
-      !Number.isSafeInteger(evidence.endLine) ||
-      (evidence.endLine as number) < (evidence.startLine as number) ||
-      (evidence.endLine as number) - (evidence.startLine as number) >= 8 ||
-      evidence.content.split('\n').length !== (evidence.endLine as number) - (evidence.startLine as number) + 1 ||
+      !isSafeInteger(evidence.startLine) ||
+      evidence.startLine < 1 ||
+      !isSafeInteger(evidence.endLine) ||
+      evidence.endLine < evidence.startLine ||
+      evidence.endLine - evidence.startLine >= 8 ||
+      EffectString.split('\n')(evidence.content).length !== evidence.endLine - evidence.startLine + 1 ||
       evidence.provenance !==
-        (evidence.handleId.startsWith('historical:') ? 'historical-verified' : 'current-verified') ||
+        (Effect.pipe(evidence.handleId, EffectString.startsWith('historical:'))
+          ? 'historical-verified'
+          : 'current-verified') ||
       evidence.supportsCitation !== true ||
       evidence.truncated !== false ||
       !object(evidence.source) ||
@@ -731,11 +907,13 @@ export function validateTopicMaintenanceReviewEvidence(
       !COMMIT.test(source.sourceCommit) ||
       typeof source.sourceSnapshotId !== 'string' ||
       !SNAPSHOT.test(source.sourceSnapshotId) ||
-      (evidence.handleId.startsWith('historical:') &&
+      (Effect.pipe(evidence.handleId, EffectString.startsWith('historical:')) &&
         (source.sourceCommit !== citation.sourceCommit || source.sourceSnapshotId !== citation.sourceSnapshotId))
     )
       fail('private review excerpt source differs from its pinned citation.');
-    const handle = basis.handles.find(item => item.id === evidence.handleId)!;
+    const handle = EffectOption.getOrUndefined(
+      EffectArray.findFirst(basis.handles, item => item.id === evidence.handleId),
+    )!;
     if (handle.variant === 'historical' && citation.id !== handle.citationId)
       fail('historical review evidence changed the original citation.');
     citations.set(evidence.handleId, citation);
@@ -758,7 +936,9 @@ export function validateTopicMaintenanceReviewEvidence(
     )
       fail('current review evidence changed the declared symbol locator.');
   }
-  return input as readonly TopicMaintenanceReviewEvidenceV1[];
+  if (!EffectArray.every(input, isTopicMaintenanceReviewEvidenceShape))
+    fail('private review evidence is unknown, duplicate, or malformed.');
+  return input;
 }
 
 export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMaintenanceReviewPayloadV1 {
@@ -822,10 +1002,8 @@ function assertTopicMaintenanceReview(input: unknown): asserts input is TopicMai
     (usage.status === 'unavailable' && !keys(usage, ['status'])) ||
     (usage.status === 'measured' &&
       (!keys(usage, ['status', 'inputTokens', 'outputTokens']) ||
-        ![usage.inputTokens, usage.outputTokens].every(
-          value => Number.isSafeInteger(value) && (value as number) >= 0,
-        ))) ||
-    !['unavailable', 'measured'].includes(usage.status as string)
+        !EffectArray.every([usage.inputTokens, usage.outputTokens], value => isSafeInteger(value) && value >= 0))) ||
+    !isOneOf(['unavailable', 'measured'], usage.status)
   )
     fail('invalid provider usage receipt.');
   if (input.generation.origin === 'manual') {
@@ -840,14 +1018,14 @@ function assertTopicMaintenanceReview(input: unknown): asserts input is TopicMai
       fail('invalid manual review origin receipt.');
   } else if (
     (input.generation.origin !== undefined && input.generation.origin !== 'model') ||
-    ![1, 2].includes(input.generation.attempts as number)
+    !isOneOf([1, 2], input.generation.attempts)
   )
     fail('invalid model generation receipt.');
   const basis = validateTopicMaintenanceBasis(input.basis);
   if (basis.version === 3) fail('automatic basis requires its own review envelope.');
   if ((basis.version === 2) !== imported) fail('review and basis source kinds differ.');
   if (observation) {
-    const measured = topicGenerationUsage(observation.attempts.map(attempt => attempt.usage));
+    const measured = topicGenerationUsage(EffectArray.map(observation.attempts, attempt => attempt.usage));
     if (
       observation.targetHash !== basis.targetHash ||
       observation.observationRevision !== basis.observationRevision ||
@@ -864,9 +1042,9 @@ function assertTopicMaintenanceReview(input: unknown): asserts input is TopicMai
   if (
     input.proposal.body !== proposal.body ||
     input.proposal.finalBodyHash !== proposal.finalBodyHash ||
-    !Array.isArray(input.proposal.changedOrdinals) ||
+    !EffectArray.isArray(input.proposal.changedOrdinals) ||
     input.proposal.changedOrdinals.length !== proposal.changedOrdinals.length ||
-    input.proposal.changedOrdinals.some((ordinal, index) => ordinal !== proposal.changedOrdinals[index])
+    EffectArray.some(input.proposal.changedOrdinals, (ordinal, index) => ordinal !== proposal.changedOrdinals[index])
   )
     fail('private review proposal differs from deterministic assembly.');
 }
@@ -879,13 +1057,16 @@ export function validateTopicMaintenanceObsidianReviewEvidence(
   const basis = validateTopicMaintenanceBasis(basisInput);
   if (
     basis.version !== 2 ||
-    !Array.isArray(input) ||
+    !EffectArray.isArray(input) ||
     input.length !== basis.handles.length ||
     jsonBytes(input) > MAX_TOPIC_MAINTENANCE_REVIEW_BYTES
   )
     fail('invalid imported review evidence.');
   const historical = new Map(
-    [basis.originEvidence, basis.activeEvidence].map(pin => [topicMaintenanceObsidianCitationId(pin), pin]),
+    EffectArray.map([basis.originEvidence, basis.activeEvidence], pin => [
+      topicMaintenanceObsidianCitationId(pin),
+      pin,
+    ]),
   );
   const seen = new Set<string>();
   for (const evidence of input) {
@@ -910,7 +1091,9 @@ export function validateTopicMaintenanceObsidianReviewEvidence(
       evidence.truncated !== false
     )
       fail('unknown, malformed or duplicate imported fragment proof.');
-    const handle = basis.handles.find(item => item.id === evidence.handleId);
+    const handle = EffectOption.getOrUndefined(
+      EffectArray.findFirst(basis.handles, item => item.id === evidence.handleId),
+    );
     if (!handle) fail('imported evidence handle is undeclared.');
     const expected = handle.variant === 'historical' ? historical.get(handle.citationId) : basis.currentEvidence;
     if (
@@ -923,7 +1106,9 @@ export function validateTopicMaintenanceObsidianReviewEvidence(
       fail('imported review fragment differs from its exact retained pin.');
     seen.add(evidence.handleId);
   }
-  return input as readonly TopicMaintenanceObsidianReviewEvidenceV2[];
+  if (!EffectArray.every(input, isTopicMaintenanceObsidianReviewEvidenceShape))
+    fail('unknown, malformed or duplicate imported fragment proof.');
+  return input;
 }
 
 /** Fixed application intent persisted in the existing private candidate journal before provider allocation. */
@@ -976,7 +1161,8 @@ function assertObsidianCaptureIntent(value: unknown): asserts value is TopicMain
     (value.stage !== 'reserved' && value.stage !== 'captured') ||
     !boundedText(value.targetUri, 1024) ||
     !/^threadnote:\/\/user\/[^/]+\/memories\/durable\/projects\//u.test(value.targetUri) ||
-    ![value.targetHash, value.observationRevision, value.inspectionDigest].every(
+    !EffectArray.every(
+      [value.targetHash, value.observationRevision, value.inspectionDigest],
       hash => typeof hash === 'string' && HASH.test(hash),
     ) ||
     !object(value.input) ||
@@ -1061,14 +1247,21 @@ function assertObsidianCaptureIntent(value: unknown): asserts value is TopicMain
 /** Automatic and manual reviews have their own closed contracts; legacy parser limits stay frozen. */
 export const MAX_AUTOMATIC_REVIEW_BYTES = 16 * 1024 * 1024;
 export function automaticReviewSections(body: string): readonly string[] {
-  const canonical = body.replace(/\r\n?/gu, '\n').trim();
+  const canonical = Effect.pipe(body, EffectString.replace(/\r\n?/gu, '\n'), EffectString.trim);
   if (!canonical || canonical.length > 1_000_000) fail('manual body is empty or exceeds the canonical body limit.');
-  return canonical
-    .split(/\n[\t ]*\n/u)
-    .map(text => text.trim())
-    .filter(Boolean);
+  return EffectArray.filter(
+    EffectArray.map(Effect.pipe(canonical, EffectString.split(/\n[\t ]*\n/u)), text =>
+      Effect.pipe(text, EffectString.trim),
+    ),
+    Boolean,
+  );
 }
 export function validateAutomaticMaintenanceDraftBasis(input: unknown): AutomaticMaintenanceDraftBasisV3 {
+  assertAutomaticMaintenanceDraftBasis(input);
+  return input;
+}
+
+function assertAutomaticMaintenanceDraftBasis(input: unknown): asserts input is AutomaticMaintenanceDraftBasisV3 {
   if (
     !object(input) ||
     !keys(input, [
@@ -1091,11 +1284,11 @@ export function validateAutomaticMaintenanceDraftBasis(input: unknown): Automati
     typeof input.body !== 'string' ||
     input.body.length > 1_000_000 ||
     jsonBytes(input) > MAX_AUTOMATIC_REVIEW_BYTES ||
-    !Array.isArray(input.reads) ||
+    !EffectArray.isArray(input.reads) ||
     input.reads.length > (object(input.assessment) && input.assessment.version === 2 ? 32 : 16) ||
-    !Array.isArray(input.handles) ||
+    !EffectArray.isArray(input.handles) ||
     input.handles.length > (object(input.assessment) && input.assessment.version === 2 ? 24 : 16) ||
-    !Array.isArray(input.additionalDependencies) ||
+    !EffectArray.isArray(input.additionalDependencies) ||
     input.additionalDependencies.length
   )
     fail('invalid automatic basis.');
@@ -1106,7 +1299,8 @@ export function validateAutomaticMaintenanceDraftBasis(input: unknown): Automati
     input.targetHash !== assessment.target.canonicalHash ||
     consolidationRevision(input.body) !== assessment.target.bodyHash ||
     JSON.stringify(input.paragraphs) !== JSON.stringify(assessment.paragraphs) ||
-    ![input.observationRevision, input.packetDigest, input.scopeRevision].every(
+    !EffectArray.every(
+      [input.observationRevision, input.packetDigest, input.scopeRevision],
       value => typeof value === 'string' && HASH.test(value),
     )
   )
@@ -1129,7 +1323,7 @@ export function validateAutomaticMaintenanceDraftBasis(input: unknown): Automati
     if (
       !object(handle) ||
       !keys(handle, ['id', 'citationId', 'variant']) ||
-      !['accepted', 'current'].includes(handle.variant as string) ||
+      !isOneOf(['accepted', 'current'], handle.variant) ||
       typeof handle.citationId !== 'string' ||
       !/^ame_[a-f0-9]{64}$/u.test(handle.citationId) ||
       handle.id !== `${handle.variant}:${handle.citationId}` ||
@@ -1138,7 +1332,6 @@ export function validateAutomaticMaintenanceDraftBasis(input: unknown): Automati
       fail('unknown automatic evidence handle.');
     handles.add(handle.id);
   }
-  return input as unknown as AutomaticMaintenanceDraftBasisV3;
 }
 
 export function parseAutomaticMaintenanceDraft(
@@ -1155,7 +1348,10 @@ export function parseAutomaticMaintenanceProviderDraft(
 ): AutomaticMaintenanceDraftProposalV2 {
   const original = parseAutomaticMaintenanceDraftInternal(basisInput, raw, true);
   const sections = automaticReviewSections(basisInput.body);
-  const operations = original.draft.operations.filter(operation => operation.text !== sections[operation.ordinal]);
+  const operations = EffectArray.filter(
+    original.draft.operations,
+    operation => operation.text !== sections[operation.ordinal],
+  );
   return parseAutomaticMaintenanceDraft(basisInput, JSON.stringify({...original.draft, operations}));
 }
 
@@ -1195,12 +1391,12 @@ function parseAutomaticMaintenanceDraftInternal(
     ) ||
     input.version !== 2 ||
     input.kind !== 'automatic' ||
-    !['automatic', 'manual-edit'].includes(input.purpose as string) ||
+    !isOneOf(['automatic', 'manual-edit'], input.purpose) ||
     input.targetHash !== basis.targetHash ||
     input.observationRevision !== basis.observationRevision ||
     input.packetDigest !== basis.packetDigest ||
-    !Array.isArray(input.operations) ||
-    !Array.isArray(input.paragraphDecisions) ||
+    !EffectArray.isArray(input.operations) ||
+    !EffectArray.isArray(input.paragraphDecisions) ||
     !boundedText(input.rationale, 2048) ||
     !boundedStrings(input.reviewedHandles, basis.assessment.version === 2 ? 24 : 16, 80) ||
     !boundedStrings(input.unresolvedQuestions, 16, 512) ||
@@ -1210,58 +1406,68 @@ function parseAutomaticMaintenanceDraftInternal(
   const manual = input.purpose === 'manual-edit';
   if (allowExactUnchangedOperations && manual) fail('provider projection requires automatic purpose.');
   if (
-    !['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence'].includes(
-      input.outcome as string,
-    ) ||
+    !isOneOf(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence'], input.outcome) ||
     (manual
       ? typeof input.desiredBody !== 'string' || input.operations.length !== 0
       : input.desiredBody !== undefined || textBytes(raw) > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)
   )
     fail('automatic and user-authored purposes cannot be mixed.');
-  const known = new Set(basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id));
+  const known = new Set(
+    EffectArray.map(
+      EffectArray.filter(basis.handles, handle => handle.variant === 'current'),
+      handle => handle.id,
+    ),
+  );
   if (
     new Set(input.reviewedHandles).size !== input.reviewedHandles.length ||
-    input.reviewedHandles.some(
-      handle => !(manual ? basis.handles.some(entry => entry.id === handle) : known.has(handle)),
+    EffectArray.some(
+      input.reviewedHandles,
+      handle => !(manual ? EffectArray.some(basis.handles, entry => entry.id === handle) : known.has(handle)),
     )
   )
     fail('reviewed current handle is unknown.');
   const oldSections = automaticReviewSections(basis.body);
   const replacements = new Map<number, string>();
+  const operationSupport = new Map<number, readonly string[]>();
   if (input.operations.length > oldSections.length) fail('too many automatic operations.');
   for (const operation of input.operations) {
     if (
       !object(operation) ||
       !keys(operation, ['ordinal', 'beforeHash', 'text', 'supportHandles', 'rationale']) ||
-      !Number.isSafeInteger(operation.ordinal) ||
-      !basis.paragraphs[operation.ordinal as number] ||
-      replacements.has(operation.ordinal as number) ||
-      operation.beforeHash !== basis.paragraphs[operation.ordinal as number].hash ||
+      !isSafeInteger(operation.ordinal) ||
+      !basis.paragraphs[operation.ordinal] ||
+      replacements.has(operation.ordinal) ||
+      operation.beforeHash !== basis.paragraphs[operation.ordinal]?.hash ||
       !boundedText(operation.text, MAX_TOPIC_MAINTENANCE_BYTES) ||
-      operation.text !== operation.text.trim() ||
+      operation.text !== Effect.pipe(operation.text, EffectString.trim) ||
       automaticReviewSections(operation.text).length !== 1 ||
-      (!allowExactUnchangedOperations && operation.text === oldSections[operation.ordinal as number]) ||
+      (!allowExactUnchangedOperations && operation.text === oldSections[operation.ordinal]) ||
       !boundedText(operation.rationale, 1024) ||
       !boundedStrings(operation.supportHandles, 8, 80) ||
       !operation.supportHandles.length ||
       new Set(operation.supportHandles).size !== operation.supportHandles.length ||
-      operation.supportHandles.some(handle => !known.has(handle))
+      EffectArray.some(operation.supportHandles, handle => !known.has(handle))
     )
       fail('invalid automatic paragraph replacement.');
-    replacements.set(operation.ordinal as number, operation.text);
+    replacements.set(operation.ordinal, operation.text);
+    operationSupport.set(operation.ordinal, operation.supportHandles);
   }
   let body: string;
-  if (manual) body = (input.desiredBody as string).replace(/\r\n?/gu, '\n').trim();
-  else {
+  if (manual) {
+    const desiredBody = input.desiredBody;
+    if (typeof desiredBody !== 'string') fail('manual proposal requires its desired body.');
+    body = EffectString.trim(EffectString.replace(/\r\n?/gu, '\n')(desiredBody));
+  } else {
     const spans = paragraphSpans(basis.body);
     let cursor = 0;
     body = '';
     for (const [ordinal, span] of spans.entries()) {
       body +=
-        basis.body.slice(cursor, span.start) + (replacements.get(ordinal) ?? basis.body.slice(span.start, span.end));
+        Effect.pipe(basis.body, EffectString.slice(cursor, span.start)) +
+        (replacements.get(ordinal) ?? Effect.pipe(basis.body, EffectString.slice(span.start, span.end)));
       cursor = span.end;
     }
-    body += basis.body.slice(cursor);
+    body += Effect.pipe(basis.body, EffectString.slice(cursor));
     if (textBytes(body) > MAX_TOPIC_MAINTENANCE_BYTES) fail('automatic body exceeds the bounded model limit.');
   }
   const finalSections = automaticReviewSections(body);
@@ -1273,14 +1479,15 @@ function parseAutomaticMaintenanceDraftInternal(
       !keys(decision, ['ordinal', 'beforeHash', 'role', 'support', 'evidenceIds']) ||
       decision.ordinal !== ordinal ||
       decision.beforeHash !== consolidationRevision(oldSections[ordinal] ?? '') ||
-      !['descriptive', 'normative', 'historical', 'unknown'].includes(decision.role as string) ||
-      !['direct', 'contextual', 'unresolved'].includes(decision.support as string) ||
+      !isOneOf(['descriptive', 'normative', 'historical', 'unknown'], decision.role) ||
+      !isOneOf(['direct', 'contextual', 'unresolved'], decision.support) ||
       !boundedStrings(decision.evidenceIds, 8, 68) ||
       new Set(decision.evidenceIds).size !== decision.evidenceIds.length ||
-      decision.evidenceIds.some(
+      EffectArray.some(
+        decision.evidenceIds,
         id =>
-          !basis.assessment.evidence.some(entry => entry.id === id) &&
-          !basis.handles.some(handle => handle.citationId === id),
+          !EffectArray.some(basis.assessment.evidence, entry => entry.id === id) &&
+          !EffectArray.some(basis.handles, handle => handle.citationId === id),
       ) ||
       (decision.support === 'unresolved') !== (decision.evidenceIds.length === 0)
     )
@@ -1316,16 +1523,16 @@ function parseAutomaticMaintenanceDraftInternal(
         (established && prior.role !== 'descriptive'))
     )
       fail('only explicitly reviewed descriptive direct claims may be automatically replaced.');
-    const operation = input.operations.find(item => item.ordinal === ordinal);
+    const operation = operationSupport.get(ordinal);
     if (
       operation &&
-      JSON.stringify([...operation.supportHandles].sort()) !==
-        JSON.stringify(decision.evidenceIds.map(id => `current:${id}`).sort())
+      JSON.stringify([...operation].sort()) !==
+        JSON.stringify(EffectArray.map(decision.evidenceIds, id => `current:${id}`).sort())
     )
       fail('operation support differs from its visible decision.');
     if (
       decision.support !== 'unresolved' &&
-      decision.evidenceIds.some(id => !known.has(`current:${id}`)) &&
+      EffectArray.some(decision.evidenceIds, id => !known.has(`current:${id}`)) &&
       (!unchanged ||
         decision.role !== prior.role ||
         decision.support !== prior.support ||
@@ -1339,19 +1546,25 @@ function parseAutomaticMaintenanceDraftInternal(
       (input.outcome === 'propose-revalidation' && !input.reviewedHandles.length))
   )
     fail('automatic outcome differs from its operations.');
+  if (!isAutomaticMaintenanceDraftShape(input)) fail('invalid or stale automatic proposal.');
   return {
     version: 2,
     kind: 'automatic',
-    draft: input as unknown as AutomaticMaintenanceDraftV2,
+    draft: input,
     body,
     finalBodyHash: consolidationRevision(body),
     changedOrdinals: manual
-      ? finalSections.flatMap((text, ordinal) => (text === oldSections[ordinal] ? [] : [ordinal]))
+      ? EffectArray.flatMap(finalSections, (text, ordinal) => (text === oldSections[ordinal] ? [] : [ordinal]))
       : [...replacements.keys()].sort((a, b) => a - b),
   };
 }
 
 export function validateAutomaticMaintenanceReview(input: unknown): AutomaticMaintenanceReviewPayloadV3 {
+  assertAutomaticMaintenanceReview(input);
+  return input;
+}
+
+function assertAutomaticMaintenanceReview(input: unknown): asserts input is AutomaticMaintenanceReviewPayloadV3 {
   if (
     !object(input) ||
     !keys(input, ['version', 'kind', 'basis', 'proposal', 'reviewEvidence', 'generation']) ||
@@ -1360,35 +1573,34 @@ export function validateAutomaticMaintenanceReview(input: unknown): AutomaticMai
     jsonBytes(input) > MAX_AUTOMATIC_REVIEW_BYTES ||
     !object(input.proposal) ||
     !keys(input.proposal, ['version', 'kind', 'draft', 'body', 'finalBodyHash', 'changedOrdinals']) ||
-    !Array.isArray(input.reviewEvidence)
+    !EffectArray.isArray(input.reviewEvidence)
   )
     fail('invalid automatic review envelope.');
   const basis = validateAutomaticMaintenanceDraftBasis(input.basis);
   // The validated basis owns version-specific bounds; evidence must cover its handles bijectively.
   const seen = new Set<string>();
   for (const entry of input.reviewEvidence) {
+    const descriptor = object(entry) ? entry.descriptor : undefined;
     if (
       !object(entry) ||
       !keys(entry, ['handleId', 'descriptor', 'content', 'contentHash'], ['codeExcerpt']) ||
-      !object(entry.descriptor) ||
-      !keys(entry.descriptor, ['id', 'source', 'scope'], ['locator']) ||
+      !object(descriptor) ||
+      !keys(descriptor, ['id', 'source', 'scope'], ['locator']) ||
       typeof entry.handleId !== 'string' ||
       seen.has(entry.handleId) ||
-      !basis.handles.some(
-        handle =>
-          handle.id === entry.handleId && handle.citationId === (entry.descriptor as Record<string, unknown>).id,
-      ) ||
+      !EffectArray.some(basis.handles, handle => handle.id === entry.handleId && handle.citationId === descriptor.id) ||
       typeof entry.content !== 'string' ||
       entry.contentHash !== consolidationRevision(entry.content)
     )
       fail('invalid automatic reviewed source.');
-    const descriptor = entry.descriptor;
-    const evidence = basis.assessment.evidence.find(item => item.id === descriptor.id);
+    const evidence = EffectOption.getOrUndefined(
+      EffectArray.findFirst(basis.assessment.evidence, item => item.id === descriptor.id),
+    );
     assertApprovedSourceDescriptor(descriptor);
     if (
       evidence
         ? JSON.stringify(evidence.source) !== JSON.stringify(descriptor.source) || evidence.scope !== descriptor.scope
-        : descriptor.source.kind !== 'code' || !entry.handleId.startsWith('current:')
+        : descriptor.source.kind !== 'code' || !Effect.pipe(entry.handleId, EffectString.startsWith('current:'))
     )
       fail('reviewed source differs from exact preparation.');
     if (descriptor.source.kind === 'memory' && descriptor.source.fragment.hash !== entry.contentHash)
@@ -1397,10 +1609,10 @@ export function validateAutomaticMaintenanceReview(input: unknown): AutomaticMai
       descriptor.source.kind === 'code' &&
       (!object(entry.codeExcerpt) ||
         !keys(entry.codeExcerpt, ['startLine', 'endLine', 'fileBytesHash']) ||
-        !Number.isSafeInteger(entry.codeExcerpt.startLine) ||
-        (entry.codeExcerpt.startLine as number) < 1 ||
-        !Number.isSafeInteger(entry.codeExcerpt.endLine) ||
-        (entry.codeExcerpt.endLine as number) < (entry.codeExcerpt.startLine as number) ||
+        !isSafeInteger(entry.codeExcerpt.startLine) ||
+        entry.codeExcerpt.startLine < 1 ||
+        !isSafeInteger(entry.codeExcerpt.endLine) ||
+        entry.codeExcerpt.endLine < entry.codeExcerpt.startLine ||
         typeof entry.codeExcerpt.fileBytesHash !== 'string' ||
         !/^[0-9a-f]{64}$/u.test(entry.codeExcerpt.fileBytesHash))
     )
@@ -1440,7 +1652,7 @@ export function validateAutomaticMaintenanceReview(input: unknown): AutomaticMai
     !boundedText(generation.agent, 64) ||
     !boundedText(generation.model, 256) ||
     !boundedText(generation.promptVersion, 64) ||
-    ![1, 2].includes(generation.attempts as number) ||
+    !isOneOf([1, 2], generation.attempts) ||
     proposal.draft.purpose !== 'automatic'
   )
     fail('automatic model receipt is malformed.');
@@ -1450,14 +1662,14 @@ export function validateAutomaticMaintenanceReview(input: unknown): AutomaticMai
       ? !keys(usage, ['status'])
       : usage.status !== 'measured' ||
         !keys(usage, ['status', 'inputTokens', 'outputTokens']) ||
-        ![usage.inputTokens, usage.outputTokens].every(value => Number.isSafeInteger(value) && (value as number) >= 0)
+        !EffectArray.every([usage.inputTokens, usage.outputTokens], value => isSafeInteger(value) && value >= 0)
   )
     fail('automatic generation usage is malformed.');
   if (generation.modelVersion !== undefined && !boundedText(generation.modelVersion, 256))
     fail('automatic model revision is malformed.');
   if (generation.observation !== undefined) {
     const observation = validateTopicGenerationSummary(generation.observation);
-    const measured = topicGenerationUsage(observation.attempts.map(attempt => attempt.usage));
+    const measured = topicGenerationUsage(EffectArray.map(observation.attempts, attempt => attempt.usage));
     if (
       observation.state !== 'completed' ||
       observation.targetHash !== basis.targetHash ||
@@ -1471,5 +1683,4 @@ export function validateAutomaticMaintenanceReview(input: unknown): AutomaticMai
     )
       fail('automatic generation observation differs from the exact reviewed basis.');
   }
-  return input as unknown as AutomaticMaintenanceReviewPayloadV3;
 }

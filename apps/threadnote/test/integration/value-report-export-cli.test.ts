@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdtemp, readFile, rm, stat} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -5,12 +6,14 @@ import {join} from '@threadnote/testing/node-path';
 import {parseValueReportExportV1, VALUE_REPORT_EXPORT_SCHEMA} from '@threadnote/threadnote/value_report/export';
 import {afterEach, describe, expect, it} from 'vitest';
 import {promisify} from 'node:util';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const execFilePromise = promisify(execFile);
 const homes: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(homes.splice(0).map(home => rm(home, {force: true, recursive: true})));
+  await Promise.all(EffectArray.map(homes.splice(0), home => rm(home, {force: true, recursive: true})));
 });
 
 describe('value report export CLI', () => {
@@ -35,9 +38,23 @@ describe('value report export CLI', () => {
       ['value', 'report', 'export', '--project', 'private-project', '--period', '1', '--apply'],
       home,
     );
-    const outputPath = applied.stdout.trim().match(/^Exported redacted ValueReportExportV1 to (.+)\.$/u)?.[1];
+    const outputPath = Effect.pipe(applied.stdout, __effectPipeInput => {
+      const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.trim);
+      const __effectPipeStage1 = Effect.pipe(
+        __effectPipeStage0,
+        EffectString.match(/^Exported redacted ValueReportExportV1 to (.+)\.$/u),
+        Effect.Option.getOrElse(() => null),
+      );
+      return __effectPipeStage1;
+    })?.[1];
     expect(outputPath).toBeDefined();
-    expect(outputPath?.startsWith(join(home, 'exports', 'value-reports'))).toBe(true);
+    expect(
+      Effect.pipe(outputPath, effectOptionalString =>
+        effectOptionalString == null
+          ? undefined
+          : Effect.pipe(effectOptionalString, EffectString.startsWith(join(home, 'exports', 'value-reports'))),
+      ),
+    ).toBe(true);
     const exported = await readFile(outputPath!, 'utf8');
     expect(parseValueReportExportV1(JSON.parse(exported))).toMatchObject({
       schema: VALUE_REPORT_EXPORT_SCHEMA,

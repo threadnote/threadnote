@@ -1,7 +1,10 @@
+import {isLibrarySearchResponse} from './api/response_guards.js';
 import {useEffect, useState} from 'react';
 import {api, errorMessage} from './ui/support.js';
 import type {LibraryScope} from './library_model.js';
 import type {LibrarySearchResponse, TreeNode} from './ui/contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 interface SearchState {
   readonly key: string;
@@ -11,7 +14,7 @@ interface SearchState {
 }
 
 export function useLibrarySearch(query: string, scope: LibraryScope, enabled: boolean, tree?: TreeNode) {
-  const text = query.trim();
+  const text = Effect.pipe(query, EffectString.trim);
   const key = JSON.stringify([text, scope]);
   const [state, setState] = useState<SearchState>();
   useEffect(() => {
@@ -22,6 +25,7 @@ export function useLibrarySearch(query: string, scope: LibraryScope, enabled: bo
         `/api/library/search?query=${encodeURIComponent(text)}&scope=${encodeURIComponent(scope)}`,
         undefined,
         {signal: controller.signal, timeoutMilliseconds: 45_000},
+        isLibrarySearchResponse,
       ).then(
         result => {
           if (!controller.signal.aborted) setState({key, tree, result});

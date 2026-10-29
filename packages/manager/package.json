@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./api/response-guard": "./src/api/response_guard.ts",
+    "./api/response-guards": "./src/api/response_guards.ts",
     "./action-menu": "./src/action_menu.tsx",
     "./attention-view": "./src/attention_view.tsx",
     "./attention/contracts": "./src/attention/contracts.ts",
@@ -93,6 +95,7 @@
     "@effect/vitest": "4.0.7",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.2",
-    "vitest": "5.0.5"
+    "vitest": "5.0.5",
+    "happy-dom": "21.0.4"
   }
 }

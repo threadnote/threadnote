@@ -17,11 +17,13 @@ import {
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 
 import {SystemInfo} from '@threadnote/platform/system';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-const CHECKOUT_ID = 'a'.repeat(64);
-const WORKTREE_ID = '1'.repeat(64);
-const NEIGHBOR_WORKTREE_ID = '2'.repeat(64);
-const REPOSITORY_ID = 'b'.repeat(64);
+const CHECKOUT_ID = Effect2.pipe('a', EffectString.repeat(64));
+const WORKTREE_ID = Effect2.pipe('1', EffectString.repeat(64));
+const NEIGHBOR_WORKTREE_ID = Effect2.pipe('2', EffectString.repeat(64));
+const REPOSITORY_ID = Effect2.pipe('b', EffectString.repeat(64));
 const ProvenanceCleanupTestLayer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
   Layer.provideMerge(BunServices.layer),
@@ -117,7 +119,7 @@ describe('code graph local provenance cleanup', () => {
             fixture.sidecar,
             `${JSON.stringify({
               ...fixture.record,
-              registration: {adminNameKeys: ['4'.repeat(64)], kind: 'linked'},
+              registration: {adminNameKeys: [Effect2.pipe('4', EffectString.repeat(64))], kind: 'linked'},
             })}\n`,
             {flag: 'w', mode: 0o600},
           );
@@ -142,7 +144,7 @@ describe('code graph local provenance cleanup', () => {
             fixture.sidecar,
             `${JSON.stringify({
               ...fixture.record,
-              registration: {adminNameKeys: ['4'.repeat(64)], kind: 'linked'},
+              registration: {adminNameKeys: [Effect2.pipe('4', EffectString.repeat(64))], kind: 'linked'},
             })}\n`,
             {flag: 'w', mode: 0o600},
           );
@@ -364,7 +366,7 @@ function provenanceRecord(canonicalWorktreePath: string, worktreeId: string): Co
   return {
     canonicalWorktreePath,
     checkoutId: CHECKOUT_ID,
-    headCommit: 'f'.repeat(40),
+    headCommit: Effect2.pipe('f', EffectString.repeat(40)),
     observedAt: new Date().toISOString(),
     registration: {kind: 'main'},
     repositoryId: REPOSITORY_ID,

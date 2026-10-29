@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {declaresTopicMaintenanceHeader, declaresReviewedSupportHeader} from '@threadnote/memory/document';
@@ -7,11 +8,13 @@ import {
   verifyTopicMaintenanceGitProposal,
   type GitProposal,
 } from './topic_maintenance_proposal.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-export class KnowledgeDeltaGitMaterializerError extends Schema.TaggedError<KnowledgeDeltaGitMaterializerError>()(
-  'KnowledgeDeltaGitMaterializerError',
-  {message: Schema.String},
-) {}
+export class KnowledgeDeltaGitMaterializerError extends Schema.TaggedError<
+  KnowledgeDeltaGitMaterializerError,
+  {readonly brand: unique symbol}
+>()('KnowledgeDeltaGitMaterializerError', {message: Schema.String}) {}
 
 export interface KnowledgeDeltaGitMaterializerStateV1 {
   readonly baseCommit: string;
@@ -50,13 +53,11 @@ export function planKnowledgeDeltaGitMaterializationV1(
       fail(`Proposal target changed: ${file.path}.`);
     }
   }
-  const files = proposal.files.map(file => ({content: file.content, path: file.path}));
-  const targetState = proposal.files
-    .map(file => {
-      const content = state.files[file.path];
-      return {contentHash: content === undefined ? null : sha256HexSync(content), path: file.path};
-    })
-    .sort((left, right) => left.path.localeCompare(right.path));
+  const files = EffectArray.map(proposal.files, file => ({content: file.content, path: file.path}));
+  const targetState = EffectArray.map(proposal.files, file => {
+    const content = state.files[file.path];
+    return {contentHash: content === undefined ? null : sha256HexSync(content), path: file.path};
+  }).sort((left, right) => Effect.pipe(left.path, EffectString.localeCompare(right.path)));
   return {
     branch: proposal.branch.name,
     commitMessage: proposal.commit.message,

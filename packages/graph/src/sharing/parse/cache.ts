@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect, FileSystem, Path, Random, Schema} from 'effect';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {canonicalJson} from '../../checkpoint/canonical_json.js';
@@ -42,6 +43,9 @@ import {
   readContributionRetryState,
   writeContributionRetryState,
 } from '../contribution/retry_state.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export const enqueueLocalGraphShareParseResults = Effect.fn('codeGraph.sharing.enqueueLocalParseResults')(
   function* (input: {
@@ -61,8 +65,8 @@ export const enqueueLocalGraphShareParseResults = Effect.fn('codeGraph.sharing.e
     const mode = effectiveGraphShareContributionMode(trust?.accessMode, state.contributionMode ?? 'off');
     if (mode === 'off') return {queued: 0};
     const casRoot = state.casRoot;
-    const factsByPath = new Map(input.facts.map(fact => [fact.facts.path, fact]));
-    const batchId = input.identity.headCommit.slice(0, 40);
+    const factsByPath = new Map(EffectArray.map(input.facts, fact => [fact.facts.path, fact]));
+    const batchId = Effect2.pipe(input.identity.headCommit, EffectString.slice(0, 40));
     if (!/^[0-9a-f]{40}$/u.test(batchId)) return {queued: 0};
     const prepared: Array<{
       readonly artifact: GraphShareParseResultV1;
@@ -91,17 +95,16 @@ export const enqueueLocalGraphShareParseResults = Effect.fn('codeGraph.sharing.e
       });
       const resultBytes = new TextEncoder().encode(canonicalJson(artifact));
       const resultManifestDigest = yield* putCasBytes(casRoot, resultBytes);
+      const platform = parseSupportedPlatform(input.producer.platform);
       const candidate: GraphSharePendingSignedCandidate | undefined =
-        /^(?:darwin|linux|win32)$/u.test(input.producer.platform.os) &&
-        /^(?:arm64|x64)$/u.test(input.producer.platform.architecture) &&
-        input.producer.releaseIdentity !== 'unknown'
+        platform !== undefined && input.producer.releaseIdentity !== 'unknown'
           ? {
               actionKey: artifact.actionKey,
               batchId,
               casRoot,
               extractorSet: input.extractorSet,
               organization: trust.organization,
-              platform: input.producer.platform as GraphSharePendingSignedCandidate['platform'],
+              platform,
               profileDigest: trust.profileDigest,
               queuedAtMilliseconds: yield* Clock.currentTimeMillis,
               releaseIdentity: input.producer.releaseIdentity,
@@ -115,7 +118,7 @@ export const enqueueLocalGraphShareParseResults = Effect.fn('codeGraph.sharing.e
     }
     // The private producer journal must be durable before cacheFacts can make these results reusable.
     yield* persistGraphSharePendingSignedCandidates({
-      candidates: prepared.flatMap(item => (item.candidate === undefined ? [] : [item.candidate])),
+      candidates: EffectArray.flatMap(prepared, item => (item.candidate === undefined ? [] : [item.candidate])),
       repositoryId: input.identity.repositoryId,
       threadnoteHome: input.threadnoteHome,
     });
@@ -326,7 +329,7 @@ export const hydrateSharedParseCache = Effect.fn('codeGraph.sharing.hydrateShare
       continue;
     }
     yield* putCasBytes(casRoot, bytes);
-    const language = parsed.languageAndRole.split(':')[0] ?? 'unknown';
+    const language = Effect2.pipe(parsed.languageAndRole, EffectString.split(':'))[0] ?? 'unknown';
     yield* input.store.cacheFacts(
       input.databasePath,
       [
@@ -359,7 +362,10 @@ export function quarantinedGraphShareActionKeys(
     digests.set(receipt.actionKey, existing);
   }
   return new Set(
-    [...digests].filter(([, semanticDigests]) => semanticDigests.size > 1).map(([actionKey]) => actionKey),
+    EffectArray.map(
+      EffectArray.filter([...digests], ([, semanticDigests]) => semanticDigests.size > 1),
+      ([actionKey]) => actionKey,
+    ),
   );
 }
 
@@ -432,7 +438,7 @@ export const hydratePublisherParseCache = Effect.fn('codeGraph.sharing.hydratePu
   if (!(yield* fs.exists(input.databasePath)) || input.verified.length === 0) return {hydrated: 0};
   let hydrated = 0;
   for (const item of input.verified) {
-    const language = item.parsed.languageAndRole.split(':')[0] ?? 'unknown';
+    const language = Effect2.pipe(item.parsed.languageAndRole, EffectString.split(':'))[0] ?? 'unknown';
     yield* input.store.cacheFacts(
       input.databasePath,
       [
@@ -459,12 +465,28 @@ function isContributorSelfAttestation(value: unknown, payloadDigest: string): bo
   return (
     typeof value === 'object' &&
     value !== null &&
-    !Array.isArray(value) &&
-    JSON.stringify(Object.keys(value).sort()) === JSON.stringify(['kind', 'payloadDigest', 'schemaVersion']) &&
-    (value as {kind: unknown}).kind === 'contributor-self' &&
-    (value as {schemaVersion: unknown}).schemaVersion === 1 &&
-    (value as {payloadDigest: unknown}).payloadDigest === payloadDigest
+    !EffectArray.isArray(value) &&
+    JSON.stringify(EffectRecord.keys(value).sort()) === JSON.stringify(['kind', 'payloadDigest', 'schemaVersion']) &&
+    'kind' in value &&
+    value.kind === 'contributor-self' &&
+    'schemaVersion' in value &&
+    value.schemaVersion === 1 &&
+    'payloadDigest' in value &&
+    value.payloadDigest === payloadDigest
   );
+}
+
+function parseSupportedPlatform(platform: {
+  readonly os: string;
+  readonly architecture: string;
+}): GraphSharePendingSignedCandidate['platform'] | undefined {
+  if (
+    (platform.os !== 'darwin' && platform.os !== 'linux' && platform.os !== 'win32') ||
+    (platform.architecture !== 'arm64' && platform.architecture !== 'x64')
+  ) {
+    return undefined;
+  }
+  return {os: platform.os, architecture: platform.architecture};
 }
 
 export function admitsSharedParseCacheHydrate(input: {

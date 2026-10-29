@@ -1,12 +1,12 @@
-import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
+import {EffectMcpServerRegistry} from '@threadnote/threadnote/effect/ai/mcp';
 import {describe, expect} from 'vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {LocalModelRuntime, type LocalEmbeddingError} from '@threadnote/inference/engine/local-model-runtime';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
-import {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
 import {registerCompactTool} from '@threadnote/threadnote/mcp/server/memory';
 import {runCompact} from '@threadnote/threadnote/memory/commands';
 import {formatMemoryDocument} from '@threadnote/memory/document';
@@ -19,7 +19,9 @@ import {ensureVectorIndex, vectorIndexGenerationReadiness} from '@threadnote/rec
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
-const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
+const manifest = EffectOption.getOrUndefined(
+  EffectArray.findFirst(BUILTIN_MODEL_MANIFESTS, model => model.id === 'bge-small-en-v1.5-q8'),
+)!;
 
 describe('composite memory mutation recall refresh', () => {
   it.effect('restores lexical and already-built selected vector readiness after CLI and MCP compact mutations', () =>
@@ -27,7 +29,9 @@ describe('composite memory mutation recall refresh', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const runtime = fakeRuntime((inputs, dimensions) => Effect.succeed(inputs.map(() => unitVector(dimensions))));
+        const runtime = fakeRuntime((inputs, dimensions) =>
+          Effect.succeed(EffectArray.map(inputs, () => unitVector(dimensions))),
+        );
 
         yield* Effect.forEach(['cli', 'mcp'] as const, surface =>
           Effect.gen(function* () {
@@ -118,30 +122,10 @@ const writeCompositeFixture = Effect.fn('test.writeCompositeFixture')(function* 
   );
 });
 
-function invokeCompactContext(config: RuntimeConfig): Effect.Effect<CallToolResult> {
-  type CompactArguments = {
-    readonly apply?: boolean;
-    readonly dryRun?: boolean;
-    readonly kind?: 'durable' | 'handoff' | 'incident';
-    readonly project?: string;
-    readonly topic?: string;
-  };
-  let compactContext: ((arguments_: CompactArguments) => Effect.Effect<CallToolResult>) | undefined;
-  const server = {
-    registerTool: (
-      _name: string,
-      _definition: unknown,
-      handler: (arguments_: CompactArguments) => Effect.Effect<CallToolResult>,
-    ) => {
-      compactContext = handler;
-    },
-  } as unknown as EffectMcpServerAdapter;
+function invokeCompactContext(config: RuntimeConfig) {
+  const server = new EffectMcpServerRegistry();
   registerCompactTool(server, config);
-  return Effect.suspend(() =>
-    compactContext === undefined
-      ? Effect.die(TestError.make({message: 'compact_context was not registered.'}))
-      : compactContext({apply: true, dryRun: false, project: 'threadnote'}),
-  );
+  return server.invokeTool('compact_context', {apply: true, dryRun: false, project: 'threadnote'});
 }
 
 function fakeRuntime(

@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate, pipe as EffectPipe} from 'effect';
 import {ScriptCommandExecutorLayer} from './effect/system-layer.js';
 import {ScriptSystemInfoLayer} from './effect/system-layer.js';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
@@ -16,6 +17,9 @@ import {
   type EmbeddingContextPoolSize,
 } from '@threadnote/inference/engine/node-llama-cpp';
 import {atomicWrite, readJsonFile, scriptArguments} from './effect/script.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const DEFAULT_ROUNDS = 4;
 const SCALE_SYMBOLS = 10_000;
@@ -113,7 +117,9 @@ export function parseEmbeddingContextBenchmarkArguments(args: readonly string[])
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     const value = () => {
-      const candidate = args[++index]?.trim();
+      const candidate = Effect2.pipe(args[++index], effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
       if (!candidate) throw ScriptError.make({message: `${argument} requires a value.`});
       return candidate;
     };
@@ -138,7 +144,7 @@ export function summarizeEmbeddingContextArtifacts(
     throw ScriptError.make({message: 'Embedding benchmark artifact count is incomplete.'});
   const first = artifacts[0]?.artifact;
   if (!first) throw ScriptError.make({message: 'Embedding benchmark requires at least one artifact.'});
-  const observations = artifacts.map(({artifact, artifactPath}, index) => {
+  const observations = EffectArray.map(artifacts, ({artifact, artifactPath}, index) => {
     const round = Math.floor(index / 4);
     const position = index % 4;
     const contexts = schedule[round]?.[position];
@@ -153,7 +159,7 @@ export function summarizeEmbeddingContextArtifacts(
     validateComparableArtifact(first, artifact, artifactPath);
     validateSamplerIntegrity(artifact, artifactPath);
     return {
-      artifact: artifactPath.replaceAll('\\', '/').split('/').at(-1)!,
+      artifact: Effect2.pipe(artifactPath, EffectString.replaceAll('\\', '/'), EffectString.split('/')).at(-1)!,
       coldEmbeddingCpuMilliseconds: measurement(artifact, 'cold-embedding-progress-external-process-cpu-n1').mean,
       coldEmbeddingRssBytes: measurement(artifact, 'cold-embedding-progress-external-rss-peak-observed-n1').mean,
       coldIndexMilliseconds: measurement(artifact, 'cold-index').mean,
@@ -167,43 +173,57 @@ export function summarizeEmbeddingContextArtifacts(
       vectorRows: measurement(artifact, 'vector-rows').mean,
     } satisfies EmbeddingContextBenchmarkObservation;
   });
-  const baseline = observations.filter(observation => observation.contexts === 1);
-  const summaries = Object.fromEntries(
-    ([1, 2, 4, 8] as const).map(contexts => {
-      const selected = observations.filter(observation => observation.contexts === contexts);
-      const speedups = selected.map(observation => {
-        const paired = baseline.find(candidate => candidate.round === observation.round)!;
+  const baseline = EffectArray.filter(observations, observation => observation.contexts === 1);
+  const summaries = EffectRecord.fromEntries(
+    EffectArray.map([1, 2, 4, 8] as const, contexts => {
+      const selected = EffectArray.filter(observations, observation => observation.contexts === contexts);
+      const speedups = EffectArray.map(selected, observation => {
+        const paired = EffectOption.getOrUndefined(
+          EffectArray.findFirst(baseline, candidate => candidate.round === observation.round),
+        )!;
         return paired.coldIndexMilliseconds / observation.coldIndexMilliseconds;
       });
       return [
         String(contexts),
         {
-          coldEmbeddingCpuMilliseconds: distribution(selected.map(item => item.coldEmbeddingCpuMilliseconds)),
-          coldEmbeddingRssBytes: distribution(selected.map(item => item.coldEmbeddingRssBytes)),
-          coldIndexMilliseconds: distribution(selected.map(item => item.coldIndexMilliseconds)),
-          coldSamplerGapMilliseconds: distribution(selected.map(item => item.coldSamplerGapMilliseconds)),
-          coldVectorMilliseconds: distribution(selected.map(item => item.coldVectorMilliseconds)),
-          heartbeatGapMilliseconds: distribution(selected.map(item => item.heartbeatGapMilliseconds)),
+          coldEmbeddingCpuMilliseconds: distribution(
+            EffectArray.map(selected, item => item.coldEmbeddingCpuMilliseconds),
+          ),
+          coldEmbeddingRssBytes: distribution(EffectArray.map(selected, item => item.coldEmbeddingRssBytes)),
+          coldIndexMilliseconds: distribution(EffectArray.map(selected, item => item.coldIndexMilliseconds)),
+          coldSamplerGapMilliseconds: distribution(EffectArray.map(selected, item => item.coldSamplerGapMilliseconds)),
+          coldVectorMilliseconds: distribution(EffectArray.map(selected, item => item.coldVectorMilliseconds)),
+          heartbeatGapMilliseconds: distribution(EffectArray.map(selected, item => item.heartbeatGapMilliseconds)),
           medianSpeedupAgainstOne: distribution(speedups).median,
           observations: selected.length,
-          vectorIndexBytes: distribution(selected.map(item => item.vectorIndexBytes)),
+          vectorIndexBytes: distribution(EffectArray.map(selected, item => item.vectorIndexBytes)),
         } satisfies EmbeddingContextSummary,
       ];
     }),
   );
-  const candidate = ([1, 2, 4, 8] as const).reduce((winner, contexts) =>
-    summaries[String(contexts)].coldIndexMilliseconds.median < summaries[String(winner)].coldIndexMilliseconds.median
-      ? contexts
-      : winner,
+  const candidate = EffectPipe([1, 2, 4, 8] as const, __effectReduceValues =>
+    EffectArray.reduce(
+      EffectArray.drop(__effectReduceValues, 1),
+      EffectOption.getOrElse(EffectArray.head(__effectReduceValues), () => {
+        throw new TypeError('Reduce of empty array with no initial value');
+      }),
+      (winner, contexts) =>
+        summaries[String(contexts)].coldIndexMilliseconds.median <
+        summaries[String(winner)].coldIndexMilliseconds.median
+          ? contexts
+          : winner,
+    ),
   );
   const candidateSummary = summaries[String(candidate)];
   const baselineSummary = summaries['1'];
   const roundWinsAgainstOne =
     candidate === 1
       ? 0
-      : observations.filter(observation => {
+      : EffectArray.filter(observations, observation => {
           if (observation.contexts !== candidate) return false;
-          const paired = baseline.find(item => item.round === observation.round)!;
+          const paired = EffectOption.getOrUndefined(
+            EffectArray.findFirst(baseline, item => item.round === observation.round),
+          )!;
           return observation.coldIndexMilliseconds < paired.coldIndexMilliseconds;
         }).length;
   const requiredRoundWins = Math.max(3, Math.ceil(schedule.length * 0.75));
@@ -452,13 +472,17 @@ function validateThreadPlan(artifact: BenchmarkArtifactV1, path: string, context
       message: `Embedding benchmark artifact ${path} is not a CPU-thread-partitioned observation.`,
     });
   }
-  const threads = encoded.split(',').map(value => Number(value));
+  const threads: number[] = EffectArray.map(Effect2.pipe(encoded, EffectString.split(',')), (value: string): number =>
+    Number(value),
+  );
   if (
     threads.length !== contexts ||
-    threads.some(value => !Number.isSafeInteger(value) || value < 1) ||
-    threads.reduce((sum, value) => sum + value, 0) !== cpuMathCores ||
-    threads.some((value, index) => index > 0 && value > threads[index - 1]) ||
-    threads[0] - threads.at(-1)! > 1
+    EffectArray.some(threads, value => !Number.isSafeInteger(value) || value < 1) ||
+    EffectArray.reduce(threads, 0, (sum, value) => sum + value) !== cpuMathCores ||
+    EffectArray.some(threads, (value, index) => index > 0 && value > threads[index - 1]) ||
+    EffectOption.getOrElse(EffectArray.head(threads), () => 0) -
+      EffectOption.getOrElse(EffectArray.last(threads), () => 0) >
+      1
   ) {
     throw ScriptError.make({message: `Embedding benchmark artifact ${path} has an invalid CPU-thread partition.`});
   }
@@ -474,13 +498,15 @@ function normalizedEnvironmentOverrides(artifact: BenchmarkArtifactV1): string {
   } catch (cause) {
     throw ScriptError.make({message: 'Embedding benchmark artifact has invalid environment provenance.', cause});
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  if (!Predicate.isObject(parsed)) {
     throw ScriptError.make({message: 'Embedding benchmark artifact has invalid environment provenance.'});
   }
-  const values = {...(parsed as Record<string, unknown>)};
+  const values = {...parsed};
   delete values[THREADNOTE_EMBEDDING_CONTEXTS_ENV];
   return JSON.stringify(
-    Object.fromEntries(Object.entries(values).sort(([left], [right]) => left.localeCompare(right))),
+    EffectRecord.fromEntries(
+      EffectRecord.toEntries(values).sort(([left], [right]) => Effect2.pipe(left, EffectString.localeCompare(right))),
+    ),
   );
 }
 
@@ -510,13 +536,15 @@ function validateSamplerIntegrity(artifact: BenchmarkArtifactV1, path: string): 
 }
 
 function measurement(artifact: BenchmarkArtifactV1, name: string): BenchmarkMeasurementV1 {
-  const value = artifact.measurements.find(candidate => candidate.name === name);
+  const value = EffectOption.getOrUndefined(
+    EffectArray.findFirst(artifact.measurements, candidate => candidate.name === name),
+  );
   if (!value) throw ScriptError.make({message: `Embedding benchmark artifact is missing ${name}.`});
   return value;
 }
 
 function distribution(values: readonly number[]): DistributionSummary {
-  if (values.length === 0 || values.some(value => !Number.isFinite(value) || value < 0)) {
+  if (values.length === 0 || EffectArray.some(values, value => !Number.isFinite(value) || value < 0)) {
     throw ScriptError.make({message: 'Embedding benchmark distribution is empty or invalid.'});
   }
   const sorted = [...values].sort((left, right) => left - right);
@@ -553,11 +581,11 @@ const cleanSourceState = Effect.fn('embeddingContextBenchmark.cleanSourceState')
     ],
     {concurrency: 2},
   ).pipe(Effect.mapError(cause => ScriptError.make({message: 'Could not validate benchmark source state.', cause})));
-  const commit = commitResult.stdout.trim();
+  const commit = Effect2.pipe(commitResult.stdout, EffectString.trim);
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit)) {
     return yield* ScriptError.make({message: 'Embedding benchmark source commit is invalid.'});
   }
-  if (statusResult.stdout.trim()) {
+  if (Effect2.pipe(statusResult.stdout, EffectString.trim)) {
     return yield* ScriptError.make({message: 'Embedding context promotion evidence requires a clean checkout.'});
   }
   return {commit};

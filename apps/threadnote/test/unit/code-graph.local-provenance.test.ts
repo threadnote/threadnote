@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcProp} from '@threadnote/testing/fast-check-property';
@@ -43,6 +44,9 @@ import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {parseRepositoryIdentityMetadata, resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const temporaryRoots: string[] = [];
 
@@ -93,7 +97,11 @@ describe('code graph private local provenance', () => {
       registration: {kind: 'main'},
       schemaVersion: 2,
     });
-    expect(readdirSync(dirname(fixture.sidecar)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    expect(
+      EffectArray.filter(readdirSync(dirname(fixture.sidecar)), name =>
+        Effect2.pipe(name, EffectString.endsWith('.tmp')),
+      ),
+    ).toEqual([]);
 
     git(fixture.root, ['branch', '-m', 'feature/manager-labels']);
     const renamedBranchIdentity = await runEffect(resolveRepositoryIdentity(fixture.root));
@@ -158,7 +166,7 @@ describe('code graph private local provenance', () => {
         const fileSystem = yield* FileSystem.FileSystem;
         const probesRememberedWorktree = (target: unknown) => {
           const candidate = String(target);
-          if (candidate === fixture.root || candidate.startsWith(`${fixture.root}${sep}`)) {
+          if (candidate === fixture.root || Effect2.pipe(candidate, EffectString.startsWith(`${fixture.root}${sep}`))) {
             rememberedWorktreeProbeCount += 1;
           }
         };
@@ -251,7 +259,11 @@ describe('code graph private local provenance', () => {
     expect(interlockReached).toBe(true);
     expect(association).toEqual({available: false, state: 'invalid'});
     expect(existsSync(fixture.sidecar)).toBe(false);
-    expect(readdirSync(dirname(fixture.sidecar)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    expect(
+      EffectArray.filter(readdirSync(dirname(fixture.sidecar)), name =>
+        Effect2.pipe(name, EffectString.endsWith('.tmp')),
+      ),
+    ).toEqual([]);
   });
 
   it('revalidates the linked admin registration immediately before atomic publication', async () => {
@@ -278,11 +290,12 @@ describe('code graph private local provenance', () => {
       recordVerifiedCodeGraphLocalAssociation(home, identity, {
         beforePublishValidation: () =>
           Effect.sync(() => {
-            const originalAdmin = execFileSync(
-              'git',
-              ['-C', linked, 'rev-parse', '--path-format=absolute', '--git-dir'],
-              {encoding: 'utf8'},
-            ).replace(/\n$/, '');
+            const originalAdmin = Effect2.pipe(
+              execFileSync('git', ['-C', linked, 'rev-parse', '--path-format=absolute', '--git-dir'], {
+                encoding: 'utf8',
+              }),
+              EffectString.replace(/\n$/, ''),
+            );
             const renamedAdmin = `${originalAdmin}-changed`;
             renameSync(originalAdmin, renamedAdmin);
             writeFileSync(join(linked, '.git'), `gitdir: ${renamedAdmin}\n`);
@@ -319,10 +332,10 @@ describe('code graph private local provenance', () => {
 
     expect(associations).toHaveLength(32);
     expect(
-      Object.fromEntries(
-        [...new Set(associations.map(association => association.state))].map(state => [
+      EffectRecord.fromEntries(
+        EffectArray.map([...new Set(EffectArray.map(associations, association => association.state))], state => [
           state,
-          associations.filter(association => association.state === state).length,
+          EffectArray.filter(associations, association => association.state === state).length,
         ]),
       ),
     ).toEqual({verified: 32});
@@ -331,21 +344,21 @@ describe('code graph private local provenance', () => {
       repositoryId: fixture.identity.repositoryId,
       worktreeId: fixture.identity.worktreeId,
     });
-    expect(readdirSync(dirname(fixture.sidecar)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    expect(
+      EffectArray.filter(readdirSync(dirname(fixture.sidecar)), name =>
+        Effect2.pipe(name, EffectString.endsWith('.tmp')),
+      ),
+    ).toEqual([]);
   });
 
   effectIt.effect('uses one complete Git resolution per concurrent cadence-hit status observation', () =>
     Effect.gen(function* () {
       const fixture = yield* effectProvenanceFixture();
       yield* recordVerifiedCodeGraphLocalAssociation(fixture.home, fixture.identity);
-      const branch = (yield* runCommandEffect('git', [
-        '-C',
-        fixture.root,
-        'symbolic-ref',
-        '--quiet',
-        '--short',
-        'HEAD',
-      ])).stdout.trim();
+      const branch = Effect2.pipe(
+        (yield* runCommandEffect('git', ['-C', fixture.root, 'symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout,
+        EffectString.trim,
+      );
       let gitInvocationCount = 0;
       let branchObservationCount = 0;
       let interlockCount = 0;
@@ -355,52 +368,50 @@ describe('code graph private local provenance', () => {
       const query = yield* CodeGraphQueryService;
       const executeBytes = command.executeBytes;
       if (executeBytes === undefined) return yield* TestError.make({message: 'binary command adapter is unavailable'});
-      const mutableCommand = command as {
-        execute: typeof command.execute;
-        executeBytes: typeof executeBytes;
-      };
       const execute = command.execute;
+      const tracedCommand = {
+        ...command,
+        execute: (executable: string, args: readonly string[], options?: Parameters<typeof execute>[2]) => {
+          if (executable === 'git') {
+            gitInvocationCount += 1;
+            invocationCommands.push(args[2]);
+          }
+          return execute(executable, args, options);
+        },
+        executeBytes: (executable: string, args: readonly string[], options?: Parameters<typeof executeBytes>[2]) => {
+          if (executable === 'git') {
+            gitInvocationCount += 1;
+            invocationCommands.push(args[2]);
+          }
+          return executeBytes(executable, args, options).pipe(
+            Effect.tap(result =>
+              Effect.sync(() => {
+                if (executable !== 'git' || !args.includes('--abbrev-ref=loose')) return;
+                expect(args).toEqual([
+                  '-C',
+                  args[1],
+                  'rev-parse',
+                  '--path-format=absolute',
+                  '--show-toplevel',
+                  '--git-common-dir',
+                  '--git-dir',
+                  '--show-object-format',
+                  'HEAD',
+                  '--abbrev-ref=loose',
+                  'HEAD',
+                ]);
+                expect(result.exitCode).toBe(0);
+                const metadata = parseRepositoryIdentityMetadata(result.stdout);
+                expect(metadata?.repoRoot).toBe(fixture.identity.repoRoot);
+                expect(metadata?.branch).toEqual({state: 'current', branch});
+                branchObservationCount += 1;
+              }),
+            ),
+          );
+        },
+      };
       const statuses = yield* Effect.acquireUseRelease(
-        Effect.sync(() => {
-          mutableCommand.execute = (executable, args, options) => {
-            if (executable === 'git') {
-              gitInvocationCount += 1;
-              invocationCommands.push(args[2]);
-            }
-            return execute(executable, args, options);
-          };
-          mutableCommand.executeBytes = (executable, args, options) => {
-            if (executable === 'git') {
-              gitInvocationCount += 1;
-              invocationCommands.push(args[2]);
-            }
-            return executeBytes(executable, args, options).pipe(
-              Effect.tap(result =>
-                Effect.sync(() => {
-                  if (executable !== 'git' || !args.includes('--abbrev-ref=loose')) return;
-                  expect(args).toEqual([
-                    '-C',
-                    args[1],
-                    'rev-parse',
-                    '--path-format=absolute',
-                    '--show-toplevel',
-                    '--git-common-dir',
-                    '--git-dir',
-                    '--show-object-format',
-                    'HEAD',
-                    '--abbrev-ref=loose',
-                    'HEAD',
-                  ]);
-                  expect(result.exitCode).toBe(0);
-                  const metadata = parseRepositoryIdentityMetadata(result.stdout);
-                  expect(metadata?.repoRoot).toBe(fixture.identity.repoRoot);
-                  expect(metadata?.branch).toEqual({state: 'current', branch});
-                  branchObservationCount += 1;
-                }),
-              ),
-            );
-          };
-        }),
+        Effect.sync(() => Object.assign(command, tracedCommand)),
         () =>
           Effect.all(
             Array.from({length: 16}, () =>
@@ -414,24 +425,22 @@ describe('code graph private local provenance', () => {
             ),
             {concurrency: 'unbounded'},
           ),
-        () =>
-          Effect.sync(() => {
-            mutableCommand.execute = execute;
-            mutableCommand.executeBytes = executeBytes;
-          }),
+        () => Effect.sync(() => Object.assign(command, {execute, executeBytes})),
       );
 
       expect(statuses).toHaveLength(16);
-      expect(statuses.every(status => status.identity.repositoryId === fixture.identity.repositoryId)).toBe(true);
-      expect(statuses.every(status => status.identity.branch === branch)).toBe(true);
+      expect(
+        EffectArray.every(statuses, status => status.identity.repositoryId === fixture.identity.repositoryId),
+      ).toBe(true);
+      expect(EffectArray.every(statuses, status => status.identity.branch === branch)).toBe(true);
       expect(interlockCount).toBe(16);
       expect(branchObservationCount).toBe(16);
       expect(gitInvocationCount).toBe(16 * 3);
       expect(
-        Object.fromEntries(
-          ['rev-parse', 'config', 'remote'].map(name => [
+        EffectRecord.fromEntries(
+          EffectArray.map(['rev-parse', 'config', 'remote'], name => [
             name,
-            invocationCommands.filter(command => command === name).length,
+            EffectArray.filter(invocationCommands, command => command === name).length,
           ]),
         ),
       ).toEqual({'rev-parse': 16, config: 16, remote: 16});
@@ -535,20 +544,18 @@ describe('code graph private local provenance', () => {
       runEffect(
         Effect.gen(function* () {
           const command = yield* CommandExecutor;
-          const mutableCommand = command as {execute: typeof command.execute};
           const execute = command.execute;
           return yield* Effect.acquireUseRelease(
-            Effect.sync(() => {
-              mutableCommand.execute = (executable, args, options) => {
-                if (executable === 'git') gitInvocationCount += 1;
-                return execute(executable, args, options);
-              };
-            }),
-            () => readPersistedCodeGraphLocalAssociation(fixture.home, fixture.identity),
-            () =>
-              Effect.sync(() => {
-                mutableCommand.execute = execute;
+            Effect.sync(() =>
+              Object.assign(command, {
+                execute: (executable: string, args: readonly string[], options?: Parameters<typeof execute>[2]) => {
+                  if (executable === 'git') gitInvocationCount += 1;
+                  return execute(executable, args, options);
+                },
               }),
+            ),
+            () => readPersistedCodeGraphLocalAssociation(fixture.home, fixture.identity),
+            () => Effect.sync(() => Object.assign(command, {execute})),
           );
         }),
       );
@@ -576,7 +583,7 @@ describe('code graph private local provenance', () => {
       const fs = yield* FileSystem.FileSystem;
       yield* recordVerifiedCodeGraphLocalAssociation(fixture.home, fixture.identity);
       const expiredObservedAt = '2020-01-01T00:00:00.000Z';
-      const record = JSON.parse(yield* fs.readFileString(fixture.sidecar)) as CodeGraphLocalProvenanceRecord;
+      const record = parseValidRecord(yield* fs.readFileString(fixture.sidecar));
       yield* fs.writeFileString(fixture.sidecar, `${JSON.stringify({...record, observedAt: expiredObservedAt})}\n`, {
         mode: 0o600,
       });
@@ -585,22 +592,22 @@ describe('code graph private local provenance', () => {
       const command = yield* CommandExecutor;
       const executeBytes = command.executeBytes;
       if (executeBytes === undefined) return yield* TestError.make({message: 'binary command adapter is unavailable'});
-      const mutableCommand = command as {execute: typeof command.execute; executeBytes: typeof executeBytes};
       const execute = command.execute;
+      const tracedCommand = {
+        ...command,
+        execute: (executable: string, args: readonly string[], options?: Parameters<typeof execute>[2]) => {
+          if (executable === 'git' && args.includes('rev-parse') && args.includes('--show-toplevel'))
+            identityResolutionCount += 1;
+          return execute(executable, args, options);
+        },
+        executeBytes: (executable: string, args: readonly string[], options?: Parameters<typeof executeBytes>[2]) => {
+          if (executable === 'git' && args.includes('rev-parse') && args.includes('--show-toplevel'))
+            identityResolutionCount += 1;
+          return executeBytes(executable, args, options);
+        },
+      };
       const result = yield* Effect.acquireUseRelease(
-        Effect.sync(() => {
-          mutableCommand.execute = (executable, args, options) => {
-            if (executable === 'git' && args.includes('rev-parse') && args.includes('--show-toplevel')) {
-              identityResolutionCount += 1;
-            }
-            return execute(executable, args, options);
-          };
-          mutableCommand.executeBytes = (executable, args, options) => {
-            if (executable === 'git' && args.includes('rev-parse') && args.includes('--show-toplevel'))
-              identityResolutionCount += 1;
-            return executeBytes(executable, args, options);
-          };
-        }),
+        Effect.sync(() => Object.assign(command, tracedCommand)),
         () =>
           Effect.gen(function* () {
             const first = yield* readPersistedCodeGraphLocalAssociation(fixture.home, fixture.identity);
@@ -608,11 +615,7 @@ describe('code graph private local provenance', () => {
             const second = yield* readPersistedCodeGraphLocalAssociation(fixture.home, fixture.identity);
             return {afterFirstResolutionCount, first, second};
           }),
-        () =>
-          Effect.sync(() => {
-            mutableCommand.execute = execute;
-            mutableCommand.executeBytes = executeBytes;
-          }),
+        () => Effect.sync(() => Object.assign(command, {execute, executeBytes})),
       );
 
       expect(result.first).toMatchObject({available: true, path: fixture.root, state: 'verified'});
@@ -648,7 +651,11 @@ describe('code graph private local provenance', () => {
     expect(nonAbsolute).toEqual({available: false, state: 'invalid'});
     expect(JSON.stringify(nonAbsolute)).not.toContain('relative/private');
 
-    writeFileSync(fixture.sidecar, `${JSON.stringify({...valid, checkoutId: 'f'.repeat(64)})}\n`, {mode: 0o600});
+    writeFileSync(
+      fixture.sidecar,
+      `${JSON.stringify({...valid, checkoutId: Effect2.pipe('f', EffectString.repeat(64))})}\n`,
+      {mode: 0o600},
+    );
     expect(await runEffect(readPersistedCodeGraphLocalAssociation(fixture.home, fixture.identity))).toEqual({
       available: false,
       state: 'invalid',
@@ -725,7 +732,13 @@ describe('code graph private local provenance', () => {
                         Effect.flatMap(count => {
                           if (Number(count) > 0 || grew) return Effect.succeed(count);
                           grew = true;
-                          buffer.fill('x'.charCodeAt(0));
+                          buffer.fill(
+                            Effect2.pipe(
+                              'x',
+                              EffectString.charCodeAt(0),
+                              Effect2.Option.getOrElse(() => NaN),
+                            ),
+                          );
                           return Effect.succeed(buffer.byteLength);
                         }),
                       );
@@ -843,19 +856,19 @@ describe('code graph private local provenance', () => {
     'round-trips bounded records and strips every local path from privacy-safe projections',
     {
       segment: FC.array(FC.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'), {maxLength: 32, minLength: 1}).map(
-        characters => characters.join(''),
+        characters => EffectArray.join(characters, ''),
       ),
     },
     ({segment}) => {
       const record = {
         branch: `feature/${segment}`,
         canonicalWorktreePath: `/private/tmp/${segment}`,
-        checkoutId: 'a'.repeat(64),
-        headCommit: 'b'.repeat(40),
+        checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
+        headCommit: Effect2.pipe('b', EffectString.repeat(40)),
         observedAt: '2026-08-08T12:00:00.000Z',
-        repositoryId: 'c'.repeat(64),
+        repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
         schemaVersion: 1,
-        worktreeId: 'd'.repeat(64),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
       } satisfies CodeGraphLocalProvenanceRecord;
       expect(parseCodeGraphLocalProvenanceRecordJson(JSON.stringify(record))).toEqual(record);
 
@@ -980,7 +993,13 @@ function git(cwd: string, args: readonly string[]): void {
 }
 
 function readRecord(file: string): CodeGraphLocalProvenanceRecord {
-  return JSON.parse(readFileSync(file, 'utf8')) as CodeGraphLocalProvenanceRecord;
+  return parseValidRecord(readFileSync(file, 'utf8'));
+}
+
+function parseValidRecord(content: string): CodeGraphLocalProvenanceRecord {
+  const record = parseCodeGraphLocalProvenanceRecordJson(content);
+  if (record === undefined) throw new Error('Expected the fixture to contain a valid local provenance record.');
+  return record;
 }
 
 function readWithInjectedFileSystemFailure(
@@ -1058,5 +1077,5 @@ function mapOpenedFile(
 }
 
 function escapeRegularExpression(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return Effect2.pipe(value, EffectString.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 }

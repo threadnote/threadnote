@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphBuildWorkspace, CodeGraphWorkspace, CodeGraphWorkspaceProject} from '../languages/types.js';
 import {compareCodeUnits} from '../ordering.js';
 import {codeGraphPackageMoniker} from '../cross_repository/monikers.js';
@@ -5,6 +7,9 @@ import {
   PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
   PROJECT_INCREMENTAL_CLOSURE_MAX_SOURCE_BYTES,
 } from '../incremental/closure.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export type WorkspaceTransitionFallbackReason =
   | 'workspace-diagnostics'
@@ -87,26 +92,33 @@ export function classifyWorkspaceTransition(input: WorkspaceTransitionInput): Wo
     }
     if (
       !validRoot(project.root) ||
-      project.sourceRoots.some(root => !validRoot(root)) ||
-      project.workspaceRoots.some(root => !validRoot(root))
+      EffectArray.some(project.sourceRoots, root => !validRoot(root)) ||
+      EffectArray.some(project.workspaceRoots, root => !validRoot(root))
     ) {
       return fallback('invalid-path');
     }
   }
-  const added = [...newMap.keys()].filter(id => !oldMap.has(id)).sort(compareCodeUnits);
-  const removed = [...oldMap.keys()].filter(id => !newMap.has(id)).sort(compareCodeUnits);
+  const added = EffectArray.filter([...newMap.keys()], id => !oldMap.has(id)).sort(compareCodeUnits);
+  const removed = EffectArray.filter([...oldMap.keys()], id => !newMap.has(id)).sort(compareCodeUnits);
   if (
-    workspaceDelta.added.some(
-      id => ![...newMap.values()].some(project => project.workspaceId === id && added.includes(project.id)),
+    EffectArray.some(
+      workspaceDelta.added,
+      id =>
+        !EffectArray.some([...newMap.values()], project => project.workspaceId === id && added.includes(project.id)),
     ) ||
-    workspaceDelta.removed.some(
-      id => ![...oldMap.values()].some(project => project.workspaceId === id && removed.includes(project.id)),
+    EffectArray.some(
+      workspaceDelta.removed,
+      id =>
+        !EffectArray.some([...oldMap.values()], project => project.workspaceId === id && removed.includes(project.id)),
     ) ||
-    [...input.base.workspace.projects].some(
-      project => !input.base.workspace.workspaces.some(workspace => workspace.id === project.workspaceId),
+    EffectArray.some(
+      [...input.base.workspace.projects],
+      project => !EffectArray.some(input.base.workspace.workspaces, workspace => workspace.id === project.workspaceId),
     ) ||
-    [...input.current.workspace.projects].some(
-      project => !input.current.workspace.workspaces.some(workspace => workspace.id === project.workspaceId),
+    EffectArray.some(
+      [...input.current.workspace.projects],
+      project =>
+        !EffectArray.some(input.current.workspace.workspaces, workspace => workspace.id === project.workspaceId),
     )
   ) {
     return fallback('unrelated-workspace-change');
@@ -117,7 +129,9 @@ export function classifyWorkspaceTransition(input: WorkspaceTransitionInput): Wo
       return fallback('unsupported-roster-change');
     }
   }
-  const deltaPackageNames = new Set([...added, ...removed].map(id => (newMap.get(id) ?? oldMap.get(id)!).name));
+  const deltaPackageNames = new Set(
+    EffectArray.map([...added, ...removed], id => (newMap.get(id) ?? oldMap.get(id)!).name),
+  );
   const semanticChanged: string[] = [];
   for (const id of oldMap.keys()) {
     const before = oldMap.get(id)!;
@@ -164,7 +178,10 @@ export function classifyWorkspaceTransition(input: WorkspaceTransitionInput): Wo
       if (oldFile.repositoryPackageName !== newFile.repositoryPackageName) packageChangedPaths.add(path);
     }
     const domains = new Set([...oldByDomain.keys(), ...newByDomain.keys()]);
-    const ownerDiffers = [...domains].some(domain => oldByDomain.get(domain)?.id !== newByDomain.get(domain)?.id);
+    const ownerDiffers = EffectArray.some(
+      [...domains],
+      domain => oldByDomain.get(domain)?.id !== newByDomain.get(domain)?.id,
+    );
     if (ownerDiffers) {
       changedPaths.push(path);
       for (const domain of domains) {
@@ -190,15 +207,25 @@ export function classifyWorkspaceTransition(input: WorkspaceTransitionInput): Wo
     !packageChangedPaths.size
   )
     return {mode: 'unchanged'};
-  const baseAffected = allPaths.filter(
-    path =>
-      packageChangedPaths.has(path) ||
-      [...(oldOwners.get(path)?.values() ?? [])].some(owner => baseSeedsForPath(owner, baseClosure)),
+  const baseAffected = EffectArray.filter(
+    allPaths,
+    (path, __effectArrayIndex4) =>
+      __effectArrayIndex4 in allPaths &&
+      (packageChangedPaths.has(path) ||
+        EffectArray.some(
+          [...(oldOwners.get(path)?.values() ?? [])],
+          __effectArrayValue => !!(owner => baseSeedsForPath(owner, baseClosure))(__effectArrayValue),
+        )),
   );
-  const currentAffected = allPaths.filter(
-    path =>
-      packageChangedPaths.has(path) ||
-      [...(newOwners.get(path)?.values() ?? [])].some(owner => baseSeedsForPath(owner, currentClosure)),
+  const currentAffected = EffectArray.filter(
+    allPaths,
+    (path, __effectArrayIndex4) =>
+      __effectArrayIndex4 in allPaths &&
+      (packageChangedPaths.has(path) ||
+        EffectArray.some(
+          [...(newOwners.get(path)?.values() ?? [])],
+          __effectArrayValue => !!(owner => baseSeedsForPath(owner, currentClosure))(__effectArrayValue),
+        )),
   );
   const affected = [...new Set([...baseAffected, ...currentAffected, ...changedPaths])].sort(compareCodeUnits);
   const maxFiles = input.maxFiles ?? PROJECT_INCREMENTAL_CLOSURE_MAX_FILES;
@@ -255,12 +282,13 @@ function validInventory(files: readonly WorkspaceTransitionFile[]): Map<string, 
   for (const file of files) {
     if (
       !validPath(file.path) ||
-      file.resolutionDomains.some(domain => !domain || domain === 'workspace') ||
+      EffectArray.some(file.resolutionDomains, domain => !domain || domain === 'workspace') ||
       new Set(file.resolutionDomains).size !== file.resolutionDomains.length ||
       typeof file.hasWorkspacePackageSymbol !== 'boolean' ||
       (file.provenUnownedResolutionDomains !== undefined &&
         (new Set(file.provenUnownedResolutionDomains).size !== file.provenUnownedResolutionDomains.length ||
-          file.provenUnownedResolutionDomains.some(
+          EffectArray.some(
+            file.provenUnownedResolutionDomains,
             domain =>
               !['generic', 'documentation', 'global'].includes(domain) || !file.resolutionDomains.includes(domain),
           ))) ||
@@ -279,9 +307,12 @@ function validInventory(files: readonly WorkspaceTransitionFile[]): Map<string, 
 function validPath(path: string): boolean {
   return (
     path.length > 0 &&
-    !path.startsWith('/') &&
-    !path.includes('\\') &&
-    path.split('/').every(part => part.length > 0 && part !== '.' && part !== '..')
+    !Effect.pipe(path, EffectString.startsWith('/')) &&
+    !Effect.pipe(path, EffectString.includes('\\')) &&
+    EffectArray.every(
+      Effect.pipe(path, EffectString.split('/')),
+      part => part.length > 0 && part !== '.' && part !== '..',
+    )
   );
 }
 function validRoot(path: string): boolean {
@@ -322,8 +353,8 @@ function workspaceRosterDelta(
       return undefined;
   }
   return {
-    added: [...after.keys()].filter(id => !before.has(id)).sort(compareCodeUnits),
-    removed: [...before.keys()].filter(id => !after.has(id)).sort(compareCodeUnits),
+    added: EffectArray.filter([...after.keys()], id => !before.has(id)).sort(compareCodeUnits),
+    removed: EffectArray.filter([...before.keys()], id => !after.has(id)).sort(compareCodeUnits),
   };
 }
 function ownersFor(
@@ -335,11 +366,15 @@ function ownersFor(
     const owners = new Map<string, CodeGraphWorkspaceProject>();
     for (const domain of observedDomains(file)) {
       const packagesOnly = domain === 'workspace';
-      const eligible = projects.filter(project =>
-        packagesOnly
-          ? project.buildSystem === 'node' || project.buildSystem === 'pnpm'
-          : project.resolutionDomain === domain ||
-            (domain === 'bazel' && project.languages.some(language => language === 'bazel' || language === 'starlark')),
+      const eligible = EffectArray.filter(
+        projects,
+        (project, __effectArrayIndex3) =>
+          __effectArrayIndex3 in projects &&
+          (packagesOnly
+            ? project.buildSystem === 'node' || project.buildSystem === 'pnpm'
+            : project.resolutionDomain === domain ||
+              (domain === 'bazel' &&
+                EffectArray.some(project.languages, language => language === 'bazel' || language === 'starlark'))),
       );
       const sourceOwner = nearestOwner(eligible, path, 'sourceRoots');
       const owner = sourceOwner === 'ambiguous' ? sourceOwner : (sourceOwner ?? nearestOwner(eligible, path, 'root'));
@@ -356,13 +391,18 @@ function nearestOwner(
   path: string,
   rootsKind: 'root' | 'sourceRoots',
 ): CodeGraphWorkspaceProject | 'ambiguous' | undefined {
-  const candidates = projects.flatMap(project => {
+  const candidates = EffectArray.flatMap(projects, project => {
     const roots = rootsKind === 'root' ? [project.root] : project.sourceRoots;
-    const matches = roots.filter(root => root === '' || path === root || path.startsWith(`${root}/`));
-    return matches.length ? [{project, depth: Math.max(...matches.map(root => root.length))}] : [];
+    const matches = EffectArray.filter(
+      roots,
+      (root, __effectArrayIndex) =>
+        __effectArrayIndex in roots &&
+        (root === '' || path === root || Effect.pipe(path, EffectString.startsWith(`${root}/`))),
+    );
+    return matches.length ? [{project, depth: Math.max(...EffectArray.map(matches, root => root.length))}] : [];
   });
-  const depth = Math.max(-1, ...candidates.map(candidate => candidate.depth));
-  const nearest = candidates.filter(candidate => candidate.depth === depth);
+  const depth = Math.max(-1, ...EffectArray.map(candidates, candidate => candidate.depth));
+  const nearest = EffectArray.filter(candidates, candidate => candidate.depth === depth);
   if (!nearest.length || depth < 0) return undefined;
   if (nearest.length > 1) return 'ambiguous';
   return nearest[0].project;
@@ -376,11 +416,17 @@ function sameNonDependencySurface(
   deltaPackageNames: ReadonlySet<string>,
 ): boolean {
   const strip = (p: CodeGraphWorkspaceProject) => {
-    const explainedDependencies = (p.externalDependencies ?? []).filter(
-      dependency => deltaPackageNames.has(dependency.name) && dependency.importAlias === dependency.name,
+    const explainedDependencies = EffectArrayPipe(p.externalDependencies ?? [], __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (dependency, __effectArrayIndex2) =>
+          __effectArrayIndex2 in __effectArrayValues &&
+          deltaPackageNames.has(dependency.name) &&
+          dependency.importAlias === dependency.name,
+      ),
     );
     const explainedMonikers = new Set(
-      explainedDependencies.flatMap(dependency => {
+      EffectArray.flatMap(explainedDependencies, dependency => {
         try {
           return [
             stableJson(
@@ -406,8 +452,9 @@ function sameNonDependencySurface(
       ...p,
       dependencies: [],
       dependencyDetails: [],
-      monikers: (p.monikers ?? []).filter(moniker => !explainedMonikers.has(stableJson(moniker))),
-      externalDependencies: (p.externalDependencies ?? []).filter(
+      monikers: EffectArray.filter(p.monikers ?? [], moniker => !explainedMonikers.has(stableJson(moniker))),
+      externalDependencies: EffectArray.filter(
+        p.externalDependencies ?? [],
         dependency => !deltaPackageNames.has(dependency.name) || dependency.importAlias !== dependency.name,
       ),
     };
@@ -418,13 +465,14 @@ function stableJson(value: unknown): string {
   return JSON.stringify(canonical(value));
 }
 function canonical(value: unknown): unknown {
-  if (Array.isArray(value))
-    return value.map(canonical).sort((a, b) => compareCodeUnits(JSON.stringify(a), JSON.stringify(b)));
+  if (EffectArray.isArray(value))
+    return EffectArray.map(value, canonical).sort((a, b) => compareCodeUnits(JSON.stringify(a), JSON.stringify(b)));
   if (value && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([a], [b]) => compareCodeUnits(a, b))
-        .map(([key, item]) => [key, canonical(item)]),
+    return EffectRecord.fromEntries(
+      EffectArray.map(
+        EffectRecord.toEntries(value).sort(([a], [b]) => compareCodeUnits(a, b)),
+        ([key, item]) => [key, canonical(item)],
+      ),
     );
   return value;
 }
@@ -436,22 +484,24 @@ function reverseClosure(
   if (!byId) return undefined;
   for (const p of projects) {
     const deps = new Set(p.dependencies);
-    const details = new Set(p.dependencyDetails.map(d => d.targetId));
+    const details = new Set(EffectArray.map(p.dependencyDetails, d => d.targetId));
     if (
       deps.size !== p.dependencies.length ||
       deps.size !== details.size ||
-      [...deps].some(id => !details.has(id) || !byId.has(id)) ||
-      p.dependencyDetails.some(d => d.provenance !== 'declared')
+      EffectArray.some([...deps], id => !details.has(id) || !byId.has(id)) ||
+      EffectArray.some(p.dependencyDetails, d => d.provenance !== 'declared')
     )
       return undefined;
   }
-  const closure = new Set([...seeds].filter(id => byId.has(id)));
+  const closure = new Set(EffectArray.filter([...seeds], id => byId.has(id)));
   let changed = true;
   while (changed) {
     changed = false;
     for (const p of projects) {
       if (closure.has(p.id)) continue;
-      if (p.dependencies.some(id => closure.has(id) && byId.get(id)?.resolutionDomain === p.resolutionDomain)) {
+      if (
+        EffectArray.some(p.dependencies, id => closure.has(id) && byId.get(id)?.resolutionDomain === p.resolutionDomain)
+      ) {
         closure.add(p.id);
         changed = true;
       }

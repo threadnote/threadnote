@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {Schema} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -66,34 +67,36 @@ const budget: unknown = JSON.parse(
 
 describe('hosted macOS native median calibration', () => {
   it('rederives one ordinary breach and no guarded breach from independent hosted runners', () => {
-    const medians = calibration.observations.map(observation => observation.wallMilliseconds.p50);
+    const medians = EffectArray.map(calibration.observations, observation => observation.wallMilliseconds.p50);
     expect(medians).toHaveLength(calibration.expected.observations);
-    expect(new Set(calibration.observations.map(observation => observation.workflowRun)).size).toBe(
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.workflowRun)).size).toBe(
       calibration.expected.observations,
     );
-    expect(new Set(calibration.observations.map(observation => observation.jobId)).size).toBe(
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.jobId)).size).toBe(
       calibration.expected.observations,
     );
-    expect(new Set(calibration.observations.map(observation => observation.artifactId)).size).toBe(
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.artifactId)).size).toBe(
       calibration.expected.observations,
     );
-    expect(new Set(calibration.observations.map(observation => observation.archiveSha256)).size).toBe(
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.archiveSha256)).size).toBe(
       calibration.expected.observations,
     );
-    expect(new Set(calibration.observations.map(observation => observation.rawJsonSha256)).size).toBe(
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.rawJsonSha256)).size).toBe(
       calibration.expected.observations,
     );
-    expect(new Set(calibration.observations.map(observation => observation.runnerIdentity)).size).toBe(
+    expect(new Set(EffectArray.map(calibration.observations, observation => observation.runnerIdentity)).size).toBe(
       calibration.expected.observations,
     );
     expect(
-      calibration.observations.every(
+      EffectArray.every(
+        calibration.observations,
         observation => observation.codeGraphSourceTree === calibration.codeGraphSourceTree,
       ),
     ).toBe(true);
-    expect(new Set(calibration.observations.slice(-3).map(observation => observation.benchmarkHarnessBlob)).size).toBe(
-      1,
-    );
+    expect(
+      new Set(EffectArray.map(calibration.observations.slice(-3), observation => observation.benchmarkHarnessBlob))
+        .size,
+    ).toBe(1);
     expect(Math.max(...medians)).toBe(calibration.expected.maximumObservedWallP50Milliseconds);
     expect(
       calibration.expected.maximumObservedWallP50Milliseconds - calibration.policy.ordinaryWallP50MillisecondsMaximum,
@@ -101,17 +104,18 @@ describe('hosted macOS native median calibration', () => {
     expect(
       calibration.expected.maximumObservedWallP50Milliseconds / calibration.policy.ordinaryWallP50MillisecondsMaximum,
     ).toBeCloseTo(calibration.expected.ordinaryBoundaryRatio, 9);
-    expect(medians.filter(value => value > calibration.policy.ordinaryWallP50MillisecondsMaximum)).toHaveLength(
-      calibration.expected.ordinaryBreaches,
-    );
-    expect(medians.filter(value => value > calibration.policy.guardedWallP50MillisecondsMaximum)).toHaveLength(
-      calibration.expected.guardedBreaches,
-    );
+    expect(
+      EffectArray.filter(medians, value => value > calibration.policy.ordinaryWallP50MillisecondsMaximum),
+    ).toHaveLength(calibration.expected.ordinaryBreaches);
+    expect(
+      EffectArray.filter(medians, value => value > calibration.policy.guardedWallP50MillisecondsMaximum),
+    ).toHaveLength(calibration.expected.guardedBreaches);
     expect(
       calibration.policy.ordinaryWallP50MillisecondsMaximum * (1 + calibration.policy.guardedToleranceRatioMaximum),
     ).toBe(calibration.policy.guardedWallP50MillisecondsMaximum);
     expect(
-      calibration.observations.every(
+      EffectArray.every(
+        calibration.observations,
         observation =>
           observation.wallMilliseconds.p95 <= calibration.policy.hotWallP95MillisecondsMaximum &&
           observation.processCpuMilliseconds.p95 <= calibration.policy.processCpuP95MillisecondsMaximum,
@@ -239,10 +243,14 @@ function replaceMeasurement(
   name: string,
   update: (measurement: BenchmarkMeasurementV1) => BenchmarkMeasurementV1,
 ): BenchmarkArtifactV1 {
-  const current = artifact.measurements.find(measurement => measurement.name === name);
+  const current = EffectOption.getOrUndefined(
+    EffectArray.findFirst(artifact.measurements, measurement => measurement.name === name),
+  );
   if (current === undefined) throw new Error(`Missing measurement ${name}.`);
   return {
     ...artifact,
-    measurements: artifact.measurements.map(measurement => (measurement.name === name ? update(current) : measurement)),
+    measurements: EffectArray.map(artifact.measurements, measurement =>
+      measurement.name === name ? update(current) : measurement,
+    ),
   };
 }

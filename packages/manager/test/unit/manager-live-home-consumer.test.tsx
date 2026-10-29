@@ -5,6 +5,8 @@ import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {ManagerLiveProvider} from '../../src/live/provider.js';
 import {ManagerHomePanel} from '../../src/home_view.js';
 import {FakeManagerSocket} from './live-consumer-fixture.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 let root: Root | undefined;
 let homeReads: string[];
@@ -34,7 +36,7 @@ async function render(project: string) {
   );
 }
 beforeEach(() => {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   FakeManagerSocket.instances = [];
   homeReads = [];
@@ -47,7 +49,7 @@ beforeEach(() => {
         tickets++;
         return new Response(JSON.stringify({ticket: 'fixture'}));
       }
-      if (url.startsWith('/api/home?')) {
+      if (Effect.pipe(url, EffectString.startsWith('/api/home?'))) {
         const project = new URL(url, 'http://localhost').searchParams.get('project') ?? '';
         homeReads.push(project);
         return new Response(

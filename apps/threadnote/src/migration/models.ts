@@ -1,16 +1,17 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import type {LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {readModelSelection, writeModelSelection} from '@threadnote/inference/models/selection';
 
-class LegacyLocalModelMigrationError extends Schema.TaggedError<LegacyLocalModelMigrationError>()(
-  'LegacyLocalModelMigrationError',
-  {
-    cause: Schema.optionalKey(Schema.Defect()),
-    message: Schema.String,
-  },
-) {}
+class LegacyLocalModelMigrationError extends Schema.TaggedError<
+  LegacyLocalModelMigrationError,
+  {readonly brand: unique symbol}
+>()('LegacyLocalModelMigrationError', {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
 export const LEGACY_LOCAL_MODEL_MIGRATION_ID = 'legacy-local-model-v1' as const;
 const LEGACY_MODEL_DIRECTORY = 'threadnote/models';
@@ -51,7 +52,7 @@ export const isLegacyLocalModelMigrationPending = Effect.fn('legacyLocalModelMig
   if (receipt?.status === 'completed') return false;
   if (receipt?.status === 'pending') {
     for (const modelId of receipt.models) {
-      const manifest = manifests.find(candidate => candidate.id === modelId);
+      const manifest = Option.getOrUndefined(EffectArray.findFirst(manifests, candidate => candidate.id === modelId));
       if (!manifest) {
         return yield* LegacyLocalModelMigrationError.make({
           message: `Legacy model migration receipt references unknown model ${modelId}.`,
@@ -102,7 +103,7 @@ export const migrateLegacyLocalModels = Effect.fn('legacyLocalModelMigration.mig
 
   let resumed = false;
   for (const modelId of legacyModels) {
-    const manifest = manifests.find(candidate => candidate.id === modelId);
+    const manifest = Option.getOrUndefined(EffectArray.findFirst(manifests, candidate => candidate.id === modelId));
     if (!manifest) {
       return yield* LegacyLocalModelMigrationError.make({
         message: `Legacy model migration receipt references unknown model ${modelId}.`,
@@ -139,9 +140,14 @@ export const migrateLegacyLocalModels = Effect.fn('legacyLocalModelMigration.mig
     });
   }
 
-  const generationModel = legacyModels
-    .map(id => manifests.find(candidate => candidate.id === id))
-    .find((manifest): manifest is LocalModelManifest => manifest?.role === 'generation');
+  const generationModel = Option.getOrUndefined(
+    EffectArray.findFirst(
+      EffectArray.map(legacyModels, id =>
+        Option.getOrUndefined(EffectArray.findFirst(manifests, candidate => candidate.id === id)),
+      ),
+      (manifest): manifest is LocalModelManifest => manifest?.role === 'generation',
+    ),
+  );
   if (generationModel) {
     const selection = yield* readModelSelection(home);
     if (selection.roles.generation === undefined) {
@@ -260,8 +266,8 @@ function readReceipt(
         parsed.id !== LEGACY_LOCAL_MODEL_MIGRATION_ID ||
         parsed.version !== 1 ||
         (parsed.status !== 'pending' && parsed.status !== 'completed') ||
-        !Array.isArray(parsed.models) ||
-        !parsed.models.every(model => typeof model === 'string')
+        !EffectArray.isArray(parsed.models) ||
+        !EffectArray.every(parsed.models, model => typeof model === 'string')
       ) {
         throw LegacyLocalModelMigrationError.make({message: 'Invalid legacy local-model migration receipt.'});
       }

@@ -1,5 +1,7 @@
 import {Context, Option} from 'effect';
 import {CliOutput, Command, type HelpDoc} from 'effect/cli';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 class DefaultActionSubcommand extends Context.Service<DefaultActionSubcommand, true>()(
   '@threadnote/threadnote/effect/cli/help/DefaultActionSubcommand',
@@ -7,7 +9,7 @@ class DefaultActionSubcommand extends Context.Service<DefaultActionSubcommand, t
 
 export function optionalSubcommandHelpDoc(doc: HelpDoc.HelpDoc): HelpDoc.HelpDoc {
   return Option.isSome(Context.getOption(doc.annotations, DefaultActionSubcommand))
-    ? {...doc, usage: doc.usage.replace(' <subcommand>', ' [<subcommand>]')}
+    ? {...doc, usage: Effect.pipe(doc.usage, EffectString.replace(' <subcommand>', ' [<subcommand>]'))}
     : doc;
 }
 

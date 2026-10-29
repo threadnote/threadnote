@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Cause, Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, PlatformError} from 'effect';
@@ -55,7 +56,7 @@ describe('application indexer reclamation policy', () => {
         yield* fixture.git(['commit', '--allow-empty', '-qm', 'graph-equivalent commit']);
         const alias = yield* fixture.indexer.index(fixture.options);
         expect(alias.materialization?.mode).toBe('reused-snapshot');
-        expect(fixture.events.map(event => event.type)).toEqual(['cleanup', 'alias']);
+        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'alias']);
         expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
 
         fixture.events.length = 0;
@@ -63,20 +64,20 @@ describe('application indexer reclamation policy', () => {
         yield* fixture.git(['commit', '-am', 'change one source', '-q']);
         const incremental = yield* fixture.indexer.index(fixture.options);
         expect(incremental.materialization?.mode).toBe('incremental-clean');
-        expect(fixture.events.map(event => event.type)).toEqual(['cleanup', 'incremental']);
+        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'incremental']);
         expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
 
         fixture.events.length = 0;
         const forced = yield* fixture.indexer.index({...fixture.options, force: true});
         expect(forced.materialization?.mode).toBe('full');
-        expect(fixture.events.map(event => event.type)).toEqual(['cleanup', 'claim']);
+        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'claim']);
         expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required', retained: [forced.snapshot.id]}});
 
         fixture.events.length = 0;
         yield* fixture.changeSource('dirtyChange');
         const dirty = yield* fixture.indexer.index({...fixture.options, incrementalOverlay: false});
         expect(dirty.materialization?.mode).toBe('full');
-        expect(fixture.events.map(event => event.type)).toEqual(['cleanup', 'claim']);
+        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'claim']);
         expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required', retained: [dirty.snapshot.id]}});
 
         fixture.events.length = 0;
@@ -84,7 +85,7 @@ describe('application indexer reclamation policy', () => {
         const committedDirty = yield* fixture.indexer.index(fixture.options);
         expect(committedDirty.materialization?.mode).toBe('reused-snapshot');
         expect(committedDirty.snapshot.baseSnapshotId).toBe(dirty.snapshot.id);
-        expect(fixture.events.map(event => event.type)).toEqual(['cleanup', 'alias']);
+        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'alias']);
         expect(fixture.events[0]).toMatchObject({cleanup: {mode: 'required'}});
       }),
     ),
@@ -126,7 +127,7 @@ describe('application indexer reclamation policy', () => {
         const reused = yield* Fiber.join(waiter);
         expect(reused.snapshot.id).toBe(built.snapshot.id);
         expect(reused.materialization?.mode).toBe('reused-snapshot');
-        expect(fixture.events.map(event => event.type)).toEqual(['cleanup', 'claim', 'cleanup']);
+        expect(EffectArray.map(fixture.events, event => event.type)).toEqual(['cleanup', 'claim', 'cleanup']);
         expect(fixture.events.at(-1)).toEqual({
           type: 'cleanup',
           cleanup: {mode: 'deferred', retained: [], scopeId: undefined},

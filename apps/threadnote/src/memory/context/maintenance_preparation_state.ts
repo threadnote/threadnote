@@ -1,9 +1,11 @@
-import {Crypto, Data, Effect, FileSystem, Path} from 'effect';
+import {Array as EffectArray, Option as EffectOption, Schema} from 'effect';
+import {Crypto, Effect, FileSystem, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertAutomaticMaintenanceAssessment,
   type AutomaticMaintenanceAssessment,
 } from '@threadnote/memory/automatic-maintenance';
+import {isConsolidationReceiptShape} from '@threadnote/memory/consolidation';
 import type {ConsolidationReceipt} from '@threadnote/memory/consolidation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ContextHealthCitationSourceExcerptV1} from '@threadnote/context/citation_validation';
@@ -15,9 +17,12 @@ export const AUTOMATIC_PREPARATION_MAX_BYTES = 512 * 1024;
 export const AUTOMATIC_PREPARATION_V2_MAX_BYTES = 2 * 1024 * 1024;
 export const AUTOMATIC_PREPARATION_V2_MAX_READS = 32;
 export const AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES = 48;
-export class AutomaticPreparationError extends Data.TaggedError('AutomaticPreparationError')<{
-  readonly reason: 'cache-size-limit' | 'memory-fence-changed' | 'code-fence-changed';
-}> {}
+export class AutomaticPreparationError extends Schema.TaggedError<
+  AutomaticPreparationError,
+  {readonly brand: unique symbol}
+>()('AutomaticPreparationError', {
+  reason: Schema.Literals(['cache-size-limit', 'memory-fence-changed', 'code-fence-changed']),
+}) {}
 /** Disposable private scheduling data. Consumption must re-read target/source bytes and current access/scope,
  * assertAutomaticMaintenanceTarget, and revalidate the existing consolidation receipt against the live target.
  * Cached candidates and read vectors never confer review, apply, publication or historical-origin authority. */
@@ -42,6 +47,15 @@ export interface PreparedMemoryV1 {
 export interface AutomaticPreparationCursorV1 {
   readonly version: 1;
   readonly lastUri?: string;
+}
+function isAutomaticPreparationCursor(value: unknown): value is AutomaticPreparationCursorV1 {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'version' in value &&
+    value.version === 1 &&
+    (!('lastUri' in value) || value.lastUri === undefined || typeof value.lastUri === 'string')
+  );
 }
 
 const preparationPath = (path: Path.Path, config: RuntimeConfig, key: string) =>
@@ -70,33 +84,24 @@ export const readPreparedMemory = Effect.fn('automaticPreparation.readPrepared')
 ) {
   const value = yield* readCache(config, `target:${uri}`);
   return yield* Effect.try(() => {
-    const prepared = value as PreparedMemoryV1;
-    if (
-      prepared?.version !== 1 ||
-      prepared.mapper !== AUTOMATIC_PREPARATION_MAPPER ||
-      prepared.assessment?.target.uri !== uri ||
-      !Array.isArray(prepared.reads) ||
-      !Array.isArray(prepared.candidates) ||
-      !Array.isArray(prepared.omissions) ||
-      !/^[0-9a-f]{64}$/u.test(prepared.scopeRevision) ||
-      !/^[0-9a-f]{64}$/u.test(prepared.relevantRevision)
-    )
-      return undefined;
-    assertAutomaticMaintenanceAssessment(prepared.assessment);
+    if (!isPreparedMemoryShape(value) || value.assessment.target.uri !== uri) return undefined;
+    const prepared = value;
     const reviewed = prepared.assessment.version === 2;
     if (
       new TextEncoder().encode(JSON.stringify(prepared)).byteLength >
         (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_BYTES : AUTOMATIC_PREPARATION_MAX_BYTES) ||
       prepared.reads.length > (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_READS : 16) ||
-      new Set(prepared.reads.map(read => read.uri)).size !== prepared.reads.length ||
-      prepared.reads.some(read => typeof read.uri !== 'string' || !/^[0-9a-f]{64}$/u.test(read.hash)) ||
-      prepared.omissions.some(reason => typeof reason !== 'string' || reason.length > 128) ||
+      new Set(EffectArray.map(prepared.reads, read => read.uri)).size !== prepared.reads.length ||
+      EffectArray.some(prepared.reads, read => typeof read.uri !== 'string' || !/^[0-9a-f]{64}$/u.test(read.hash)) ||
+      EffectArray.some(prepared.omissions, reason => typeof reason !== 'string' || reason.length > 128) ||
       !['waiting-mapping', 'assessed'].includes(prepared.state) ||
       prepared.candidates.length > (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES : 16)
     )
       return undefined;
     for (const candidate of prepared.candidates) {
-      const evidence = prepared.assessment.evidence.find(item => item.id === candidate.evidenceId);
+      const evidence = EffectOption.getOrUndefined(
+        EffectArray.findFirst(prepared.assessment.evidence, item => item.id === candidate.evidenceId),
+      );
       if (!evidence || typeof candidate.text !== 'string') return undefined;
       if (evidence.source.kind === 'memory' && sha256HexSync(candidate.text) !== evidence.source.fragment.hash)
         return undefined;
@@ -111,14 +116,79 @@ export const readPreparedMemory = Effect.fn('automaticPreparation.readPrepared')
     return prepared;
   }).pipe(Effect.orElseSucceed(() => undefined));
 });
+
+function isPreparedMemoryShape(value: unknown): value is PreparedMemoryV1 {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    value.mapper !== AUTOMATIC_PREPARATION_MAPPER ||
+    !EffectArray.isArray(value.reads) ||
+    !EffectArray.every(
+      value.reads,
+      read => isRecord(read) && typeof read.uri === 'string' && typeof read.hash === 'string',
+    ) ||
+    typeof value.scopeRevision !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(value.scopeRevision) ||
+    typeof value.relevantRevision !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(value.relevantRevision) ||
+    !EffectArray.isArray(value.candidates) ||
+    !EffectArray.every(
+      value.candidates,
+      candidate =>
+        isRecord(candidate) &&
+        typeof candidate.evidenceId === 'string' &&
+        typeof candidate.text === 'string' &&
+        (candidate.excerpt === undefined || isCitationSourceExcerpt(candidate.excerpt)),
+    ) ||
+    !EffectArray.isArray(value.omissions) ||
+    !EffectArray.every(value.omissions, reason => typeof reason === 'string') ||
+    (value.state !== 'waiting-mapping' && value.state !== 'assessed') ||
+    (value.origin !== undefined &&
+      (!isRecord(value.origin) ||
+        typeof value.origin.receiptHash !== 'string' ||
+        !isConsolidationReceiptShape(value.origin.receipt)))
+  ) {
+    return false;
+  }
+  try {
+    assertAutomaticMaintenanceAssessment(value.assessment);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isCitationSourceExcerpt(value: unknown): value is ContextHealthCitationSourceExcerptV1 {
+  if (!isRecord(value) || !isRecord(value.source)) return false;
+  return (
+    typeof value.content === 'string' &&
+    typeof value.endLine === 'number' &&
+    typeof value.excerptHash === 'string' &&
+    typeof value.fileBytesHash === 'string' &&
+    (value.provenance === 'current-verified' || value.provenance === 'historical-verified') &&
+    typeof value.source.extractorSet === 'string' &&
+    typeof value.source.fileContentHash === 'string' &&
+    typeof value.source.path === 'string' &&
+    typeof value.source.repositoryId === 'string' &&
+    typeof value.source.sourceCommit === 'string' &&
+    typeof value.source.sourceDirty === 'boolean' &&
+    typeof value.source.sourceSnapshotId === 'string' &&
+    typeof value.startLine === 'number' &&
+    typeof value.supportsCitation === 'boolean' &&
+    typeof value.truncated === 'boolean'
+  );
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
 export const readAutomaticPreparationCursor = Effect.fn('automaticPreparation.readCursor')(function* (
   config: RuntimeConfig,
   scope?: string,
 ) {
-  const value = (yield* readCache(config, `cursor:${scope ?? '*'}`)) as AutomaticPreparationCursorV1 | undefined;
-  return value?.version === 1 && (value.lastUri === undefined || typeof value.lastUri === 'string')
-    ? value
-    : {version: 1 as const};
+  const value = yield* readCache(config, `cursor:${scope ?? '*'}`);
+  return isAutomaticPreparationCursor(value) ? value : {version: 1 as const};
 });
 const writeCache = Effect.fn('automaticPreparation.writeCache')(function* (
   config: RuntimeConfig,
@@ -136,9 +206,12 @@ const writeCache = Effect.fn('automaticPreparation.writeCache')(function* (
     typeof value === 'object' &&
     value !== null &&
     'assessment' in value &&
-    (value.assessment as AutomaticMaintenanceAssessment)?.version === 2;
+    typeof value.assessment === 'object' &&
+    value.assessment !== null &&
+    'version' in value.assessment &&
+    value.assessment.version === 2;
   if (encoded.byteLength > (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_BYTES : AUTOMATIC_PREPARATION_MAX_BYTES))
-    return yield* new AutomaticPreparationError({reason: 'cache-size-limit'});
+    return yield* AutomaticPreparationError.make({reason: 'cache-size-limit'});
   yield* fs.makeDirectory(path.dirname(file), {recursive: true, mode: 0o700});
   const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
   yield* Effect.scoped(
@@ -166,7 +239,13 @@ export function selectAutomaticPreparationUris(
   budget: number,
 ): readonly string[] {
   const ordered = [...new Set(uris)].sort();
-  const pivot = lastUri === undefined ? -1 : ordered.findIndex(uri => uri > lastUri);
+  const pivot =
+    lastUri === undefined
+      ? -1
+      : EffectOption.getOrElse(
+          EffectArray.findFirstIndex(ordered, uri => uri > lastUri),
+          () => -1,
+        );
   const start = pivot < 0 ? 0 : pivot;
   return [...ordered.slice(start), ...ordered.slice(0, start)].slice(0, Math.max(1, Math.min(4, budget)));
 }

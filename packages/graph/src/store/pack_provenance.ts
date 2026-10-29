@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import type {CodeGraphLanguagePackProvenance} from './models.js';
@@ -35,7 +36,7 @@ export const selectSnapshotPackProvenance = Effect.fn('codeGraph.selectSnapshotP
     WHERE snapshot_id = ${snapshotId}
     ORDER BY pack_id
   `;
-  return rows.map((pack): CodeGraphLanguagePackProvenance => ({
+  return EffectArray.map(rows, (pack): CodeGraphLanguagePackProvenance => ({
     cacheIdentity: pack.cache_identity,
     derivationIdentity: pack.derivation_identity,
     id: pack.pack_id,

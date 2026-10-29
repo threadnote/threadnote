@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RemoteMemoryFeatureFlag, RemoteMemoryScope} from './authorization.js';
@@ -8,6 +9,10 @@ import {
   validateRemoteMemoryProvisioningInput,
   type RemoteMemoryProvisioningInput,
 } from './postgres/control_plane.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const REMOTE_MEMORY_PROVISIONING_PLAN_VERSION = 1 as const;
 
@@ -85,16 +90,14 @@ export type RemoteMemoryProvisioningChangeV1 =
 export function normalizeRemoteMemoryProvisioningRequest(
   request: RemoteMemoryProvisioningRequestV1,
 ): RemoteMemoryProvisioningPlanInputV1 {
-  const {
-    expectedCurrentPolicyVersion: _expectedCurrentPolicyVersion,
-    expectedCurrentSharePolicyVersion: _expectedCurrentSharePolicyVersion,
-    ...requestInput
-  } = request as RemoteMemoryProvisioningInput;
+  const requestInput = {...request};
+  Reflect.deleteProperty(requestInput, 'expectedCurrentPolicyVersion');
+  Reflect.deleteProperty(requestInput, 'expectedCurrentSharePolicyVersion');
   const capabilities = sortedUnique(request.capabilities ?? ['memory:read']);
-  const writes = capabilities.some(capability => capability !== 'memory:read');
+  const writes = EffectArray.some(capabilities, capability => capability !== 'memory:read');
   const requiredFeatureFlags = pilotFeatureFlags(capabilities);
   const featureFlags = request.featureFlags === undefined ? undefined : sortedUnique(request.featureFlags);
-  if (featureFlags && requiredFeatureFlags.some(feature => !featureFlags.includes(feature))) {
+  if (featureFlags && EffectArray.some(requiredFeatureFlags, feature => !featureFlags.includes(feature))) {
     throw remoteMemoryError('invalid_request', 'Pilot share feature flags do not enable every requested capability.');
   }
   const input: RemoteMemoryProvisioningPlanInputV1 = {
@@ -147,7 +150,7 @@ export function planRemoteMemoryProvisioning(input: {
   return {
     ...unsigned,
     planDigest: sha256HexSync(canonicalJson(unsigned)),
-    planId: `tnpp_${sha256HexSync(canonicalJson(identity)).slice(0, 32)}`,
+    planId: `tnpp_${Effect.pipe(sha256HexSync(canonicalJson(identity)), EffectString.slice(0, 32))}`,
   };
 }
 
@@ -215,15 +218,16 @@ function assertPilotGrant(
   if (input.capabilities.includes('memory:admin')) {
     throw remoteMemoryError('invalid_request', 'External pilot identities cannot receive memory:admin.');
   }
-  const writes = input.capabilities.some(capability => capability !== 'memory:read');
+  const writes = EffectArray.some(input.capabilities, capability => capability !== 'memory:read');
   if (writes && (!input.allowedProjects || input.allowedProjects.length === 0)) {
     throw remoteMemoryError('invalid_request', 'Write-capable pilot grants must name at least one allowed project.');
   }
-  if (writes && input.grantExpiresAt === undefined) {
-    throw remoteMemoryError('invalid_request', 'Write-capable pilot grants require a bounded expiry.');
-  }
   if (writes) {
-    const expiry = Date.parse(exactIsoTimestamp(input.grantExpiresAt!, 'Provisioning grant expiry is invalid.'));
+    const grantExpiresAt = input.grantExpiresAt;
+    if (grantExpiresAt === undefined) {
+      throw remoteMemoryError('invalid_request', 'Write-capable pilot grants require a bounded expiry.');
+    }
+    const expiry = Date.parse(exactIsoTimestamp(grantExpiresAt, 'Provisioning grant expiry is invalid.'));
     const start = Date.parse(plannedAt);
     if (expiry <= start || expiry - start > 31 * 24 * 60 * 60 * 1000) {
       throw remoteMemoryError('invalid_request', 'Write-capable pilot grants must expire within 31 days.');
@@ -235,7 +239,7 @@ function assertPilotGrant(
     requireCompletePilotSharePolicy(input, 'Replacing a pilot share policy');
   } else {
     const enabled = new Set(state.share.featureFlags);
-    if (pilotFeatureFlags(input.capabilities).some(feature => !enabled.has(feature))) {
+    if (EffectArray.some(pilotFeatureFlags(input.capabilities), feature => !enabled.has(feature))) {
       throw remoteMemoryError(
         'conflict',
         'The existing share policy does not enable every requested pilot capability.',
@@ -325,7 +329,13 @@ function requireCompletePilotSharePolicy(input: RemoteMemoryProvisioningInput, o
     );
   }
   const projects = new Set(input.projects);
-  if (input.allowedProjects?.some(project => !projects.has(project))) {
+  if (
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(input.allowedProjects), __effectArrayReceiver =>
+        EffectArray.some(__effectArrayReceiver, project => !projects.has(project)),
+      ),
+    )
+  ) {
     throw remoteMemoryError('invalid_request', 'The pilot grant references a project outside the share catalog.');
   }
 }
@@ -333,7 +343,7 @@ function requireCompletePilotSharePolicy(input: RemoteMemoryProvisioningInput, o
 function pilotFeatureFlags(capabilities: readonly RemoteMemoryScope[]): RemoteMemoryFeatureFlag[] {
   const features: RemoteMemoryFeatureFlag[] = ['remote_memory_ga', 'remote_memory_read'];
   if (
-    capabilities.some(capability =>
+    EffectArray.some(capabilities, capability =>
       ['memory:propose:durable', 'memory:review:durable', 'memory:write:durable'].includes(capability),
     )
   ) {
@@ -354,10 +364,11 @@ function canonicalInput(input: RemoteMemoryProvisioningPlanInputV1): RemoteMemor
     ...(input.projects ? {projects: sortedUnique(input.projects)} : {}),
     ...(input.repositoryBindings
       ? {
-          repositoryBindings: Object.fromEntries(
-            Object.entries(input.repositoryBindings)
-              .sort(([left], [right]) => compareText(left, right))
-              .map(([project, repositories]) => [project, sortedUnique(repositories)]),
+          repositoryBindings: EffectRecord.fromEntries(
+            EffectArray.map(
+              EffectRecord.toEntries(input.repositoryBindings).sort(([left], [right]) => compareText(left, right)),
+              ([project, repositories]) => [project, sortedUnique(repositories)],
+            ),
           ),
         }
       : {}),
@@ -376,8 +387,15 @@ function sortedUnique<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)].sort(compareText);
 }
 
-function definedEntries<T extends object>(value: T): T {
-  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
+function definedEntries<Values extends RemoteMemoryProvisioningRequestV1 | RemoteMemoryProvisioningPlanInputV1>(
+  value: Values,
+): Values;
+function definedEntries<Values extends object>(value: Values): Values {
+  const result = {...value};
+  for (const [key, item] of EffectRecord.toEntries(result)) {
+    if (item === undefined) Reflect.deleteProperty(result, key);
+  }
+  return result;
 }
 
 function compareText(left: string, right: string): number {

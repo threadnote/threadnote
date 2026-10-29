@@ -1,3 +1,5 @@
+import * as EffectStruct from 'effect/Struct';
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -276,9 +278,7 @@ const scenario = (
           }).pipe(Effect.andThen(query.statusForPublishedIdentity(...args))),
       };
       const custom =
-        mutation === 'legacy-service'
-          ? Object.fromEntries(Object.entries(observed).filter(([name]) => name !== 'statusForPublishedIdentity'))
-          : observed;
+        mutation === 'legacy-service' ? EffectStruct.omit(observed, ['statusForPublishedIdentity']) : observed;
       return yield* validateContextBriefMemoryCitations(config, {callerCwd: caller, kind: 'repository'}, [
         {
           citationErrorCount: 0,
@@ -288,9 +288,15 @@ const scenario = (
           rank: 0,
           uri: `threadnote://user/test/memories/durable/projects/fixture/${mutation}-${suffix}.md`,
         },
-      ]).pipe(Effect.provideService(CodeGraphQueryService, CodeGraphQueryService.of(custom as typeof query)));
+      ]).pipe(
+        Effect.provideService(
+          CodeGraphQueryService,
+          // @ts-expect-error This fixture models a legacy service that predates statusForPublishedIdentity.
+          CodeGraphQueryService.of(custom),
+        ),
+      );
     }).pipe(provideTestLayer(CodeGraphQueryService.layer.pipe(Layer.provideMerge(dependencies))));
-    const receipts = validations.flatMap(value => value.receipts);
+    const receipts = EffectArray.flatMap(validations, value => value.receipts);
     expect(receipts).toHaveLength(1);
     const exact = mutation === 'none' || mutation === 'legacy-service';
     expect(receipts[0].status).toBe(exact ? 'exact' : 'unknown');

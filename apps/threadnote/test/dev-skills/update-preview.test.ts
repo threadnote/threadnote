@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {mkdtemp, readFile, readdir, realpath, rm} from '@threadnote/testing/node-fs-promises';
@@ -7,6 +8,7 @@ import {promisify} from '@threadnote/testing/node-util';
 import {inspectCliInvocation} from '@threadnote/threadnote/effect/cli';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import * as EffectRecord from 'effect/Record';
 
 const exec = promisify(execFile);
 const previewFlags = ['--check', '--dry-run'] as const;
@@ -55,7 +57,7 @@ describe('observational update admission', () => {
     const user = join(root, 'user');
     const home = join(root, 'data');
     const environment = {...process.env};
-    for (const key of Object.keys(environment))
+    for (const key of EffectRecord.keys(environment))
       if (/^(?:THREADNOTE_|CODEX_|CURSOR_|BUN_)/u.test(key) || /^(?:https?|all)_proxy$/iu.test(key))
         delete environment[key];
     Object.assign(environment, {
@@ -81,9 +83,9 @@ describe('observational update admission', () => {
       fetch: request => {
         requests += 1;
         const origin = new URL(request.url).origin;
-        const assets = ['darwin', 'linux', 'windows'].flatMap(platform =>
-          ['arm64', 'x64'].flatMap(arch =>
-            ['', '.sha256'].map(suffix => ({
+        const assets = EffectArray.flatMap(['darwin', 'linux', 'windows'], platform =>
+          EffectArray.flatMap(['arm64', 'x64'], arch =>
+            EffectArray.map(['', '.sha256'], suffix => ({
               name: `threadnote-${platform}-${arch}.tar.gz${suffix}`,
               browser_download_url: `${origin}/unfetched-${platform}-${arch}${suffix}`,
             })),

@@ -1,3 +1,5 @@
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 const GIT_INDEX_HEADER_BYTES = 12;
 const GIT_INDEX_SIGNATURE = Uint8Array.of(0x44, 0x49, 0x52, 0x43); // DIRC
 const GIT_INDEX_ENTRY_STAT_BYTES = 40;
@@ -125,7 +127,15 @@ function isGitIgnorePath(path: Uint8Array): boolean {
   const start = path.lastIndexOf(0x2f) + 1;
   if (path.byteLength - start !== name.length) return false;
   for (let index = 0; index < name.length; index += 1)
-    if ((path[start + index] | 0x20) !== name.charCodeAt(index)) return false;
+    if (
+      (path[start + index] | 0x20) !==
+      Effect.pipe(
+        name,
+        EffectString.charCodeAt(index),
+        Effect.Option.getOrElse(() => NaN),
+      )
+    )
+      return false;
   return true;
 }
 
@@ -154,6 +164,6 @@ function decodeGitIndexVariableWidthInteger(
 
 function bytesToHex(bytes: Uint8Array): string {
   let value = '';
-  for (const byte of bytes) value += byte.toString(16).padStart(2, '0');
+  for (const byte of bytes) value += Effect.pipe(byte.toString(16), EffectString.padStart(2, '0'));
   return value;
 }

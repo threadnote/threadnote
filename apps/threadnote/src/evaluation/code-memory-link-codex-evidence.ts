@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeMemoryLinkClientProjectionHash} from './code-memory-link-client-descriptor.js';
 import {Predicate} from 'effect';
@@ -17,6 +18,7 @@ import {
   type CodeMemoryLinkProxyToolV1,
   type CodeMemoryLinkRubricV1,
 } from './code-memory-link-agent-protocol.js';
+import * as EffectRecord from 'effect/Record';
 
 export const CODE_MEMORY_LINK_CODEX_RAW_EVIDENCE_VERSION = 1 as const;
 
@@ -328,11 +330,11 @@ function normalize(value: unknown, hasHash: boolean): Omit<CodeMemoryLinkCodexRa
     invalid('retained rubric differs from the bound rubric, fixture, or task');
   }
 
-  if (!Array.isArray(evidence.finalPublicArtifacts) || evidence.finalPublicArtifacts.length > 256) {
+  if (!EffectArray.isArray(evidence.finalPublicArtifacts) || evidence.finalPublicArtifacts.length > 256) {
     invalid('final public artifact roster is invalid');
   }
   let totalPublicBytes = 0;
-  const finalPublicArtifacts = evidence.finalPublicArtifacts.map((entry, index) => {
+  const finalPublicArtifacts = EffectArray.map(evidence.finalPublicArtifacts, (entry, index) => {
     const artifact = object(entry, `final public artifact ${index + 1}`);
     exactKeys(artifact, ['byteCount', 'contentSha256', 'pathDigest', 'type'], `final public artifact ${index + 1}`);
     if (artifact.type !== 'file') invalid('final public artifacts must be files');
@@ -347,7 +349,7 @@ function normalize(value: unknown, hasHash: boolean): Omit<CodeMemoryLinkCodexRa
     };
   });
   unique(
-    finalPublicArtifacts.map(artifact => artifact.pathDigest),
+    EffectArray.map(finalPublicArtifacts, artifact => artifact.pathDigest),
     'final public path digests',
   );
 
@@ -355,7 +357,8 @@ function normalize(value: unknown, hasHash: boolean): Omit<CodeMemoryLinkCodexRa
   if (graphPreflight.runBindingHash !== expectedRunBindingHash) {
     invalid('graph preflight differs from the independently reconstructed run binding');
   }
-  const contextCalls = appServer.checkpoints.filter(
+  const contextCalls = EffectArray.filter(
+    appServer.checkpoints,
     checkpoint => checkpoint.method === 'item/completed' && checkpoint.itemType === 'mcpToolCall',
   );
   const expectedResponseClass = {
@@ -468,13 +471,18 @@ function normalizeGraphPreflightWithoutHash(
     ],
     'graph preflight',
   );
-  if (!Array.isArray(preflight.observedCitationDigests) || preflight.observedCitationDigests.length > 64) {
+  if (!EffectArray.isArray(preflight.observedCitationDigests) || preflight.observedCitationDigests.length > 64) {
     invalid('observed citation digests are invalid');
   }
-  const observedCitationDigests = preflight.observedCitationDigests.map(value =>
+  const observedCitationDigests = EffectArray.map(preflight.observedCitationDigests, value =>
     matching(value, HASH, 'observed citation digest'),
   );
-  if (observedCitationDigests.some((entry, index) => index > 0 && observedCitationDigests[index - 1] >= entry)) {
+  if (
+    EffectArray.some(
+      observedCitationDigests,
+      (entry, index) => index > 0 && observedCitationDigests[index - 1] >= entry,
+    )
+  ) {
     invalid('observed citation digests must be unique and sorted');
   }
   const responses = object(preflight.observedResponses, 'graph preflight response projections');
@@ -491,10 +499,10 @@ function normalizeGraphPreflightWithoutHash(
   ) {
     invalid('graph preflight response projections do not represent the three assigned arms');
   }
-  if (!Array.isArray(preflight.observedSelectedMemories) || preflight.observedSelectedMemories.length > 24) {
+  if (!EffectArray.isArray(preflight.observedSelectedMemories) || preflight.observedSelectedMemories.length > 24) {
     invalid('observed selected-memory roster is invalid');
   }
-  const observedSelectedMemories = preflight.observedSelectedMemories.map((entry, index) => {
+  const observedSelectedMemories = EffectArray.map(preflight.observedSelectedMemories, (entry, index) => {
     const memory = object(entry, `observed selected memory ${index + 1}`);
     exactKeys(memory, ['contentSha256', 'memoryIdDigest'], `observed selected memory ${index + 1}`);
     return {
@@ -503,7 +511,7 @@ function normalizeGraphPreflightWithoutHash(
     };
   });
   if (
-    observedSelectedMemories.some((entry, index) => {
+    EffectArray.some(observedSelectedMemories, (entry, index) => {
       if (index === 0) return false;
       const previous = observedSelectedMemories[index - 1];
       return (
@@ -515,7 +523,7 @@ function normalizeGraphPreflightWithoutHash(
     invalid('observed selected-memory roster must be unique and canonically ordered');
   }
   unique(
-    observedSelectedMemories.map(memory => memory.memoryIdDigest),
+    EffectArray.map(observedSelectedMemories, memory => memory.memoryIdDigest),
     'observed selected-memory ids',
   );
   if (
@@ -543,9 +551,9 @@ function object(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
@@ -570,7 +578,7 @@ function matching(value: unknown, pattern: RegExp, label: string): string {
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
   if (typeof value !== 'string') invalid(`${label} is invalid`);
-  const match = allowed.find(candidate => candidate === value);
+  const match = EffectOption.getOrUndefined(EffectArray.findFirst(allowed, candidate => candidate === value));
   if (match === undefined) invalid(`${label} is invalid`);
   return match;
 }

@@ -7,6 +7,8 @@ import {parseProcedureManifest, type ProcedureManifest} from '@threadnote/contex
 import {ProcedureRuntimeError, procedureRuntimeStatus, verifyLocalProcedure} from './runtime.js';
 import {publishVerifiedProcedure, type ProcedurePublishOptions} from './publication.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface ProcedureVerifyOptions {
   readonly apply?: boolean;
@@ -108,7 +110,8 @@ export const runProcedureStatus = Effect.fn('procedure.status.command')(function
 });
 
 const localPath = Effect.fn('procedure.localPath')(function* (value: string) {
-  if (!value.trim() || value.includes('://')) return yield* failure('Select an explicit local file path.');
+  if (!Effect2.pipe(value, EffectString.trim) || Effect2.pipe(value, EffectString.includes('://')))
+    return yield* failure('Select an explicit local file path.');
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   return path.resolve(system.currentDirectory(), value);
@@ -149,12 +152,16 @@ const localVerificationEvidence = Effect.fn('procedure.localEvidence')(function*
   if (artifact === undefined) return yield* failure('Verification --apply requires --artifact for content binding.');
   const mappings = new Map<string, string>();
   for (const fixture of fixtures) {
-    const separator = fixture.indexOf('=');
-    const id = fixture.slice(0, separator);
-    if (separator <= 0 || mappings.has(id) || !fixture.slice(separator + 1)) {
+    const separator = Effect2.pipe(
+      fixture,
+      EffectString.indexOf('='),
+      Effect2.Option.getOrElse(() => -1),
+    );
+    const id = Effect2.pipe(fixture, EffectString.slice(0, separator));
+    if (separator <= 0 || mappings.has(id) || !Effect2.pipe(fixture, EffectString.slice(separator + 1))) {
       return yield* failure('Use each --fixture id=path exactly once.');
     }
-    mappings.set(id, fixture.slice(separator + 1));
+    mappings.set(id, Effect2.pipe(fixture, EffectString.slice(separator + 1)));
   }
   if (mappings.size !== manifest.verification.fixtures.length) {
     return yield* failure('Provide an exact local path mapping for every declared fixture.');

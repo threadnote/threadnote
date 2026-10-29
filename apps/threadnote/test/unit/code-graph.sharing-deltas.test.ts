@@ -35,9 +35,13 @@ import {defaultGraphShareProfile} from '@threadnote/graph/sharing/profile';
 
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunServices from '@effect/platform-bun/BunServices';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
+import {Option as EffectOption} from 'effect';
 
-const SHA256_ZERO = '0'.repeat(64);
-const SHA1_ZERO = '0'.repeat(40);
+const SHA256_ZERO = Effect2.pipe('0', EffectString.repeat(64));
+const SHA1_ZERO = Effect2.pipe('0', EffectString.repeat(40));
 const UTF8 = new TextEncoder();
 
 function metadataFor(eligibleFiles: number, commit = SHA1_ZERO): CodeGraphCheckpointMetadataV1 {
@@ -98,36 +102,36 @@ function factRecord(path: string): CodeGraphCheckpointFileFactRecordV1 {
 }
 
 function recordsFor(paths: readonly string[]): CodeGraphCheckpointRecordV1[] {
-  return paths.flatMap(path => [fileRecord(path), factRecord(path)]);
+  return EffectArray.flatMap(paths, path => [fileRecord(path), factRecord(path)]);
 }
 
 const MANIFEST: GraphShareFrontierManifestV1 = {
   branch: 'refs/heads/main',
   checkpoint: {
-    manifestDigest: `sha256:${'1'.repeat(64)}`,
+    manifestDigest: `sha256:${Effect2.pipe('1', EffectString.repeat(64))}`,
     snapshotId: 'cgsn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    sourceCommit: 'a'.repeat(40),
+    sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
   },
   deltas: [],
   generation: 1,
-  graphAbi: 'c'.repeat(64),
-  graphContentId: 'cgc_' + 'd'.repeat(40),
-  logicalGraphDigest: `sha256:${'2'.repeat(64)}`,
+  graphAbi: Effect2.pipe('c', EffectString.repeat(64)),
+  graphContentId: 'cgc_' + Effect2.pipe('d', EffectString.repeat(40)),
+  logicalGraphDigest: `sha256:${Effect2.pipe('2', EffectString.repeat(64))}`,
   previousManifestDigest: null,
-  profileDigest: `sha256:${'3'.repeat(64)}`,
+  profileDigest: `sha256:${Effect2.pipe('3', EffectString.repeat(64))}`,
   publisherFence: 1,
-  repositoryId: 'e'.repeat(64),
+  repositoryId: Effect2.pipe('e', EffectString.repeat(64)),
   schemaVersion: 1,
   snapshotId: 'cgsn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-  sourceCommit: 'a'.repeat(40),
+  sourceCommit: Effect2.pipe('a', EffectString.repeat(40)),
 };
 
 const profileFrontier = defaultGraphShareProfile({
   branch: 'refs/heads/main',
   canonicalRemote: 'github.com/acme/graph-share',
   organization: 'acme',
-  publisherKeyFingerprint: `sha256:${'f'.repeat(64)}`,
-  repositoryId: 'e'.repeat(64),
+  publisherKeyFingerprint: `sha256:${Effect2.pipe('f', EffectString.repeat(64))}`,
+  repositoryId: Effect2.pipe('e', EffectString.repeat(64)),
 }).frontier;
 
 const layer = Layer.mergeAll(BunServices.layer, BunHttpClient.layer, TestSystemInfoLayer);
@@ -142,16 +146,16 @@ describe('graph share TCG1 deltas', () => {
 
   it('encodes a delta pack with deletion order-keys and applies onto a checkpoint', () => {
     const base = encodeCodeGraphCheckpointPackV1(
-      metadataFor(2, '1'.repeat(40)),
+      metadataFor(2, Effect2.pipe('1', EffectString.repeat(40))),
       recordsFor(['src/a.ts', 'src/gone.ts']),
     );
     const target = encodeCodeGraphCheckpointPackV1(
-      metadataFor(2, '2'.repeat(40)),
+      metadataFor(2, Effect2.pipe('2', EffectString.repeat(40))),
       recordsFor(['src/a.ts', 'src/next.ts']),
     );
     const delta = encodeGraphShareDeltaPack({
       base: {
-        commit: '1'.repeat(40),
+        commit: Effect2.pipe('1', EffectString.repeat(40)),
         logicalDigest: base.header.logical,
         snapshotId: 'cgsn_base',
       },
@@ -159,23 +163,38 @@ describe('graph share TCG1 deltas', () => {
       target: {header: target.header, records: decodeCodeGraphCheckpointPackV1(target.bytes).records},
     });
     expect(delta.header.packKind).toBe('delta');
-    expect(delta.header.deletions?.some(key => key.identity.includes('src/gone.ts'))).toBe(true);
+    expect(
+      EffectOption.getOrUndefined(
+        EffectOption.map(EffectOption.fromNullishOr(delta.header.deletions), __effectArrayReceiver =>
+          EffectArray.some(
+            __effectArrayReceiver,
+            __effectArrayValue => !!(key => key.identity.includes('src/gone.ts'))(__effectArrayValue),
+          ),
+        ),
+      ),
+    ).toBe(true);
     const applied = applyCheckpointRecords(decodeCodeGraphCheckpointPackV1(base.bytes).records, {
       deletions: delta.header.deletions ?? [],
       upserts: decodeCodeGraphCheckpointPackV1(delta.bytes).records,
     });
-    const composed = encodeCodeGraphCheckpointPackV1(metadataFor(2, '2'.repeat(40)), applied);
+    const composed = encodeCodeGraphCheckpointPackV1(
+      metadataFor(2, Effect2.pipe('2', EffectString.repeat(40))),
+      applied,
+    );
     expect(composed.header.logical.digest).toBe(target.header.logical.digest);
   });
 
   it('plans compaction without closure proof and a delta when the overlay proof is complete', () => {
     const base = encodeCodeGraphCheckpointPackV1(metadataFor(1), recordsFor(['src/a.ts']));
-    const target = encodeCodeGraphCheckpointPackV1(metadataFor(1, '2'.repeat(40)), recordsFor(['src/a.ts']));
+    const target = encodeCodeGraphCheckpointPackV1(
+      metadataFor(1, Effect2.pipe('2', EffectString.repeat(40))),
+      recordsFor(['src/a.ts']),
+    );
     expect(graphShareDeltaClosureComplete(base.header, target.header)).toBe(true);
     expect(
       graphShareDeltaClosureComplete(base.header, {
         ...target.header,
-        reuse: {...target.header.reuse!, workspaceFingerprint: '1'.repeat(64)},
+        reuse: {...target.header.reuse!, workspaceFingerprint: Effect2.pipe('1', EffectString.repeat(64))},
       }),
     ).toBe(false);
     expect(
@@ -216,13 +235,13 @@ describe('graph share TCG1 deltas', () => {
       deltas: [
         {
           baseSnapshotId: MANIFEST.checkpoint.snapshotId,
-          manifestDigest: parseSha256Digest(`sha256:${'4'.repeat(64)}`),
-          targetCommit: 'b'.repeat(40),
+          manifestDigest: parseSha256Digest(`sha256:${Effect2.pipe('4', EffectString.repeat(64))}`),
+          targetCommit: Effect2.pipe('b', EffectString.repeat(40)),
           targetSnapshotId: 'cgsn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
         },
       ],
       snapshotId: 'cgsn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-      sourceCommit: 'b'.repeat(40),
+      sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
     };
     expect(parseGraphShareFrontierManifest(selected)).toEqual(selected);
     expect(
@@ -236,7 +255,10 @@ describe('graph share TCG1 deltas', () => {
       ),
     ).toBe(true);
     expect(
-      graphShareApplyBaseMatches({checkpointDigest: `sha256:${'9'.repeat(64)}`, snapshotId: 'cgsn_other'}, selected),
+      graphShareApplyBaseMatches(
+        {checkpointDigest: `sha256:${Effect2.pipe('9', EffectString.repeat(64))}`, snapshotId: 'cgsn_other'},
+        selected,
+      ),
     ).toBe(false);
     expect(
       graphShareApplyBaseMatches(
@@ -245,7 +267,10 @@ describe('graph share TCG1 deltas', () => {
       ),
     ).toBe(true);
     expect(
-      graphShareApplyBaseMatches({checkpointDigest: `sha256:${'9'.repeat(64)}`, snapshotId: 'cgsn_previous'}, MANIFEST),
+      graphShareApplyBaseMatches(
+        {checkpointDigest: `sha256:${Effect2.pipe('9', EffectString.repeat(64))}`, snapshotId: 'cgsn_previous'},
+        MANIFEST,
+      ),
     ).toBe(true);
   });
 
@@ -260,28 +285,36 @@ describe('graph share TCG1 deltas', () => {
       Effect.sync(() => {
         const targetPaths = [...new Set([...basePaths.slice(0, Math.max(1, basePaths.length - 1)), ...extraPaths])];
         const base = encodeCodeGraphCheckpointPackV1(
-          metadataFor(basePaths.length, '1'.repeat(40)),
+          metadataFor(basePaths.length, Effect2.pipe('1', EffectString.repeat(40))),
           recordsFor(basePaths),
         );
         const target = encodeCodeGraphCheckpointPackV1(
-          metadataFor(targetPaths.length, '2'.repeat(40)),
+          metadataFor(targetPaths.length, Effect2.pipe('2', EffectString.repeat(40))),
           recordsFor(targetPaths),
         );
         const baseRecords = decodeCodeGraphCheckpointPackV1(base.bytes).records;
         const targetRecords = decodeCodeGraphCheckpointPackV1(target.bytes).records;
         const delta = encodeGraphShareDeltaPack({
-          base: {commit: '1'.repeat(40), logicalDigest: base.header.logical, snapshotId: 'cgsn_base'},
+          base: {
+            commit: Effect2.pipe('1', EffectString.repeat(40)),
+            logicalDigest: base.header.logical,
+            snapshotId: 'cgsn_base',
+          },
           previousRecords: baseRecords,
           target: {header: target.header, records: targetRecords},
         });
         const applied = composeGraphShareTargetRecords(baseRecords, [
           {header: delta.header, records: decodeCodeGraphCheckpointPackV1(delta.bytes).records},
         ]);
-        const independently = encodeCodeGraphCheckpointPackV1(metadataFor(targetPaths.length, '2'.repeat(40)), [
-          ...targetRecords,
-        ]);
+        const independently = encodeCodeGraphCheckpointPackV1(
+          metadataFor(targetPaths.length, Effect2.pipe('2', EffectString.repeat(40))),
+          [...targetRecords],
+        );
         expect(
-          encodeCodeGraphCheckpointPackV1(metadataFor(targetPaths.length, '2'.repeat(40)), applied).header.logical,
+          encodeCodeGraphCheckpointPackV1(
+            metadataFor(targetPaths.length, Effect2.pipe('2', EffectString.repeat(40))),
+            applied,
+          ).header.logical,
         ).toEqual(independently.header.logical);
         expect(independently.header.logical.digest).toBe(target.header.logical.digest);
       }),
@@ -310,13 +343,13 @@ describe('graph share TCG1 deltas', () => {
             deltas: [
               {
                 baseSnapshotId: 'cgsn_not-the-checkpoint',
-                manifestDigest: `sha256:${'4'.repeat(64)}`,
-                targetCommit: 'b'.repeat(40),
+                manifestDigest: `sha256:${Effect2.pipe('4', EffectString.repeat(64))}`,
+                targetCommit: Effect2.pipe('b', EffectString.repeat(40)),
                 targetSnapshotId: 'cgsn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
               },
             ],
             snapshotId: 'cgsn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-            sourceCommit: 'b'.repeat(40),
+            sourceCommit: Effect2.pipe('b', EffectString.repeat(40)),
           }),
         ).toThrow(/chain|baseSnapshotId/i);
       }),
@@ -327,13 +360,20 @@ describe('graph share TCG1 deltas', () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const casRoot = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-share-delta-layer-'});
-      const base = encodeCodeGraphCheckpointPackV1(metadataFor(1, '1'.repeat(40)), recordsFor(['src/a.ts']));
+      const base = encodeCodeGraphCheckpointPackV1(
+        metadataFor(1, Effect2.pipe('1', EffectString.repeat(40))),
+        recordsFor(['src/a.ts']),
+      );
       const target = encodeCodeGraphCheckpointPackV1(
-        metadataFor(2, '2'.repeat(40)),
+        metadataFor(2, Effect2.pipe('2', EffectString.repeat(40))),
         recordsFor(['src/a.ts', 'src/next.ts']),
       );
       const delta = encodeGraphShareDeltaPack({
-        base: {commit: '1'.repeat(40), logicalDigest: base.header.logical, snapshotId: 'cgsn_base'},
+        base: {
+          commit: Effect2.pipe('1', EffectString.repeat(40)),
+          logicalDigest: base.header.logical,
+          snapshotId: 'cgsn_base',
+        },
         previousRecords: decodeCodeGraphCheckpointPackV1(base.bytes).records,
         target: {header: target.header, records: decodeCodeGraphCheckpointPackV1(target.bytes).records},
       });

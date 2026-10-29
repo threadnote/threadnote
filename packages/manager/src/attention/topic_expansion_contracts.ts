@@ -1,8 +1,10 @@
+import {Predicate} from 'effect';
 import type {
   TopicDependencyExpansionInput,
   TopicDependencyExpansionOperation,
   TopicDependencyExpansionOmission,
 } from '@threadnote/memory/topic-maintenance-expansion';
+import * as EffectRecord from 'effect/Record';
 
 /** Checkout paths and internal graph proof stay on the server. */
 export type ManagerTopicExpansionSelection = Omit<TopicDependencyExpansionInput, 'root' | 'project'>;
@@ -78,16 +80,15 @@ export interface ManagerTopicExpansionRecovery {
   readonly approvalDigest: string;
 }
 export function isManagerTopicExpansionRecovery(value: unknown): value is ManagerTopicExpansionRecovery {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const fields = value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) return false;
   return (
-    Object.keys(fields).length === 5 &&
-    fields.action === 'restart' &&
-    typeof fields.targetUri === 'string' &&
-    typeof fields.project === 'string' &&
-    typeof fields.revision === 'string' &&
-    /^[a-f0-9]{64}$/u.test(fields.revision) &&
-    typeof fields.approvalDigest === 'string' &&
-    /^[a-f0-9]{64}$/u.test(fields.approvalDigest)
+    EffectRecord.keys(value).length === 5 &&
+    value.action === 'restart' &&
+    typeof value.targetUri === 'string' &&
+    typeof value.project === 'string' &&
+    typeof value.revision === 'string' &&
+    /^[a-f0-9]{64}$/u.test(value.revision) &&
+    typeof value.approvalDigest === 'string' &&
+    /^[a-f0-9]{64}$/u.test(value.approvalDigest)
   );
 }

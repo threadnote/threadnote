@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Effect} from 'effect';
 import {resolveEffectAiConfiguration} from '../effect/ai/consolidator.js';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -27,7 +28,9 @@ export const detectConsolidationAgents = Effect.fn('manager.detectConsolidationA
     {available: copilot !== undefined, command: copilot, id: 'copilot', label: 'Copilot'},
     {
       available: nativeModels.length > 0,
-      command: nativeModels.find(model => model.isDefault)?.id ?? nativeModels[0]?.id,
+      command:
+        EffectOption.getOrUndefined(EffectArray.findFirst(nativeModels, model => model.isDefault))?.id ??
+        nativeModels[0]?.id,
       id: 'local-ai',
       label: 'Threadnote local AI',
     },

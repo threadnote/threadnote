@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {it} from '@effect/vitest';
 import {Cause, Context, Deferred, Effect, Fiber, Result, Schema} from 'effect';
 import {expect} from 'vitest';
@@ -201,12 +202,10 @@ it.effect('allocates fresh state for a reused Effect and concurrent requests', (
       {concurrency: 'unbounded'},
     );
     expect(f.calls.slice(0, 2)).toEqual([['reused'], ['reused']]);
-    expect(
-      f.calls
-        .slice(2)
-        .map(uris => uris.join(','))
-        .sort(),
-    ).toEqual(['first,first-tail', 'second']);
+    expect(EffectArray.map(f.calls.slice(2), uris => EffectArray.join(uris, ',')).sort()).toEqual([
+      'first,first-tail',
+      'second',
+    ]);
   }),
 );
 

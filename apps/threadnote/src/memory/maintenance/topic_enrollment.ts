@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Effect, FileSystem, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
@@ -29,10 +30,10 @@ import {readMemoryRecordsByUri, writeMemoryContentWithExpectedHash} from '../../
 import {inspectTopicObsidianOrigin} from '../context/maintenance_obsidian.js';
 import {resolveLocalMemoryReplacementTarget} from '../replacement_target.js';
 
-class TopicEnrollmentSourceError extends Schema.TaggedError<TopicEnrollmentSourceError>()(
-  'TopicEnrollmentSourceError',
-  {message: Schema.String},
-) {}
+class TopicEnrollmentSourceError extends Schema.TaggedError<
+  TopicEnrollmentSourceError,
+  {readonly brand: unique symbol}
+>()('TopicEnrollmentSourceError', {message: Schema.String}) {}
 type EnrollmentSourceCheck = Effect.Effect<
   void,
   unknown,
@@ -256,10 +257,11 @@ const prepareEnrollment = Effect.fn('topicMaintenance.prepareEnrollment')(functi
   const validations = yield* validateContextHealthMemoryCitations(config, scope, [
     {uri: record.uri, codeCitations: citations},
   ]);
-  const receipts = validations.flatMap(validation => validation.receipts);
+  const receipts = EffectArray.flatMap(validations, validation => validation.receipts);
   if (
     receipts.length !== citations.length ||
-    receipts.some(
+    EffectArray.some(
+      receipts,
       receipt =>
         receipt.status !== 'exact' ||
         receipt.coverage !== 'current-complete' ||
@@ -275,7 +277,12 @@ const prepareEnrollment = Effect.fn('topicMaintenance.prepareEnrollment')(functi
       maximumBytes: 1024,
       maximumLines: 8,
     });
-    if (!evidence.excerpts.some(excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation))
+    if (
+      !EffectArray.some(
+        evidence.excerpts,
+        excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation,
+      )
+    )
       return conflict('historical-evidence-unavailable', 'The captured supporting revision is not recoverable.');
   }
   if (!(yield* sourceStillCurrent(callerCwd, identity)))

@@ -1,28 +1,38 @@
-import {Data, Redacted} from 'effect';
+import {
+  isSafeInteger as checkedIsSafeInteger,
+  isFiniteNumber as checkedIsFiniteNumber,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray, Schema} from 'effect';
+import {Redacted} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {normalizeGitHubRepository} from './config.js';
 import {validGitHubApiToken} from './credentials.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const GITHUB_API_ORIGIN = 'https://api.github.com';
 export const GITHUB_API_VERSION = '2022-11-28';
 const PAGE_SIZE = 100;
 const RESPONSE_LIMIT = 2 * 1024 * 1024;
-export type GitHubClientErrorCode =
-  | 'authentication-rejected'
-  | 'access-rejected'
-  | 'not-found'
-  | 'quota-rejected'
-  | 'transport-rejected'
-  | 'response-too-large'
-  | 'contract-invalid'
-  | 'contract-incomplete'
-  | 'credential-reflected'
-  | 'deadline-exceeded'
-  | 'snapshot-changed';
-export class GitHubClientError extends Data.TaggedError('GitHubClientError')<{
-  readonly code: GitHubClientErrorCode;
-  readonly retryAfterMilliseconds?: number;
-}> {}
+export const GitHubClientErrorCodeSchema = Schema.Literals([
+  'authentication-rejected',
+  'access-rejected',
+  'not-found',
+  'quota-rejected',
+  'transport-rejected',
+  'response-too-large',
+  'contract-invalid',
+  'contract-incomplete',
+  'credential-reflected',
+  'deadline-exceeded',
+  'snapshot-changed',
+]);
+export type GitHubClientErrorCode = typeof GitHubClientErrorCodeSchema.Type;
+export class GitHubClientError extends Schema.TaggedError<GitHubClientError, {readonly brand: unique symbol}>()(
+  'GitHubClientError',
+  {code: GitHubClientErrorCodeSchema, retryAfterMilliseconds: Schema.optional(Schema.Finite)},
+) {}
 export interface GitHubClientBudget {
   requests: number;
   responseBytes: number;
@@ -98,10 +108,10 @@ export function githubSnapshotHash(value: GitHubConversation): string {
   return sha256HexSync(JSON.stringify(value));
 }
 function fail(code: GitHubClientErrorCode, retryAfterMilliseconds?: number): never {
-  throw new GitHubClientError({code, ...(retryAfterMilliseconds === undefined ? {} : {retryAfterMilliseconds})});
+  throw GitHubClientError.make({code, ...(retryAfterMilliseconds === undefined ? {} : {retryAfterMilliseconds})});
 }
 function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return value !== null && typeof value === 'object' && !EffectArray.isArray(value);
 }
 function obj(value: unknown): Record<string, unknown> {
   if (!record(value)) fail('contract-invalid');
@@ -112,12 +122,12 @@ function str(value: unknown, maximum = 1_000_000): string {
   return value;
 }
 function id(value: unknown): string {
-  if (!Number.isSafeInteger(value) || (value as number) <= 0) fail('contract-invalid');
+  if (!checkedIsSafeInteger(value) || value <= 0) fail('contract-invalid');
   return String(value);
 }
 function integer(value: unknown): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) fail('contract-invalid');
-  return value as number;
+  if (!checkedIsSafeInteger(value) || value < 0) fail('contract-invalid');
+  return value;
 }
 function bool(value: unknown): boolean {
   if (typeof value !== 'boolean') fail('contract-invalid');
@@ -125,7 +135,7 @@ function bool(value: unknown): boolean {
 }
 function date(value: unknown): string {
   const result = str(value, 128);
-  if (!/^\d{4}-\d\d-\d\dT/.test(result) || !Number.isFinite(Date.parse(result))) fail('contract-invalid');
+  if (!/^\d{4}-\d\d-\d\dT/.test(result) || !checkedIsFiniteNumber(Date.parse(result))) fail('contract-invalid');
   return result;
 }
 function author(value: unknown): string {
@@ -137,14 +147,14 @@ function body(value: unknown): string {
 function browserLink(value: unknown, repository: string, number: number): string {
   const link = str(value, 2048);
   const url = new URL(link);
-  const [owner, name] = repository.split('/');
+  const [owner, name] = Effect.pipe(repository, EffectString.split('/'));
   const prefix = `/${owner}/${name}/`;
   if (
     url.origin !== 'https://github.com' ||
     url.username ||
     url.password ||
     url.search ||
-    !url.pathname.toLowerCase().startsWith(prefix) ||
+    !Effect.pipe(url.pathname, EffectString.toLowerCase, EffectString.startsWith(prefix)) ||
     !new RegExp(`^/(?:[^/]+)/[^/]+/(?:issues|pull)/${number}(?:/files)?$`).test(url.pathname) ||
     (url.hash && !/^#[A-Za-z0-9_-]+$/.test(url.hash))
   )
@@ -155,13 +165,14 @@ function retryDelay(headers: Headers): number | undefined {
   const raw = headers.get('retry-after');
   const delay = raw === null ? NaN : /^\d+$/.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - Date.now();
   const reset = Number(headers.get('x-ratelimit-reset')) * 1000 - Date.now();
-  const candidates = [delay, headers.get('x-ratelimit-remaining') === '0' ? reset : NaN].filter(
-    value => Number.isFinite(value) && value >= 0,
+  const candidates = EffectArray.filter(
+    [delay, headers.get('x-ratelimit-remaining') === '0' ? reset : NaN],
+    value => checkedIsFiniteNumber(value) && value >= 0,
   );
   return candidates.length ? Math.min(Math.max(...candidates), 8_640_000_000_000_000 - Date.now() - 1) : undefined;
 }
 function pageNumber(value: number): number {
-  if (!Number.isSafeInteger(value) || value < 1) fail('contract-invalid');
+  if (!checkedIsSafeInteger(value) || value < 1) fail('contract-invalid');
   return value;
 }
 function candidate(value: unknown): GitHubCandidate {
@@ -182,7 +193,7 @@ function comments(value: unknown, repository: string, number: number, graphql = 
 function connection(value: unknown): {nodes: unknown[]; count: number; cursor: string | null; more: boolean} {
   const item = obj(value);
   const info = obj(item.pageInfo);
-  if (!Array.isArray(item.nodes) || item.nodes.length > 100) fail('contract-incomplete');
+  if (!EffectArray.isArray(item.nodes) || item.nodes.length > 100) fail('contract-incomplete');
   const more = bool(info.hasNextPage);
   const cursor = info.endCursor === null ? null : str(info.endCursor, 512);
   if (more && (!cursor || item.nodes.length === 0)) fail('contract-incomplete');
@@ -238,7 +249,7 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
     controller.signal.addEventListener('abort', cancel, {once: true});
     const timer = setTimeout(cancel, Math.min(Math.max(options.requestTimeoutMilliseconds ?? 10_000, 1), 30_000));
     const expired = Promise.withResolvers<never>();
-    local.signal.addEventListener('abort', () => expired.reject(new GitHubClientError({code: 'deadline-exceeded'})), {
+    local.signal.addEventListener('abort', () => expired.reject(GitHubClientError.make({code: 'deadline-exceeded'})), {
       once: true,
     });
     try {
@@ -275,7 +286,7 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
           target.username ||
           target.password ||
           target.hash ||
-          (url.pathname.startsWith('/repositories/') && target.pathname !== url.pathname) ||
+          (Effect.pipe(url.pathname, EffectString.startsWith('/repositories/')) && target.pathname !== url.pathname) ||
           !/^\/(?:repos\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+|repositories\/[1-9][0-9]*)(?:\/|$)/.test(target.pathname)
         )
           fail('transport-rejected');
@@ -305,7 +316,15 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
       if (response.status === 404) fail('not-found');
       if (
         response.status !== 200 ||
-        !response.headers.get('content-type')?.toLowerCase().startsWith('application/json')
+        !Effect.pipe(
+          response.headers.get('content-type'),
+          effectOptionalString =>
+            effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.toLowerCase),
+          effectOptionalString =>
+            effectOptionalString == null
+              ? undefined
+              : Effect.pipe(effectOptionalString, EffectString.startsWith('application/json')),
+        )
       )
         fail('transport-rejected');
       if (Number(response.headers.get('content-length')) > RESPONSE_LIMIT || !response.body) fail('response-too-large');
@@ -337,20 +356,20 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
         offset += chunk.byteLength;
       }
       const text = new TextDecoder('utf-8', {fatal: true}).decode(joined);
-      if (text.includes(secret)) fail('credential-reflected');
+      if (Effect.pipe(text, EffectString.includes(secret))) fail('credential-reflected');
       const value: unknown = JSON.parse(text);
       const containsSecret = (item: unknown): boolean =>
         typeof item === 'string'
-          ? item.includes(secret)
-          : Array.isArray(item)
-            ? item.some(containsSecret)
+          ? Effect.pipe(item, EffectString.includes(secret))
+          : EffectArray.isArray(item)
+            ? EffectArray.some(item, containsSecret)
             : record(item)
-              ? Object.values(item).some(containsSecret)
+              ? EffectArray.some(EffectRecord.values(item), containsSecret)
               : false;
       if (containsSecret(value)) fail('credential-reflected');
       return {value, headers: response.headers};
     } catch (error) {
-      if (error instanceof GitHubClientError) throw error;
+      if (Schema.is(GitHubClientError)(error)) throw error;
       fail(local.signal.aborted || controller.signal.aborted ? 'deadline-exceeded' : 'transport-rejected');
     } finally {
       clearTimeout(timer);
@@ -379,10 +398,14 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
   }
   function continuationPath(link: string, expected: URL, repository: string): string {
     const provided = new URL(link);
-    const alias = expected.pathname.replace(/^\/repositories\/[1-9][0-9]*/, repositoryPath(repository));
+    const alias = Effect.pipe(
+      expected.pathname,
+      EffectString.replace(/^\/repositories\/[1-9][0-9]*/, repositoryPath(repository)),
+    );
     if (
       provided.origin !== expected.origin ||
-      (provided.pathname !== expected.pathname && provided.pathname.toLowerCase() !== alias.toLowerCase()) ||
+      (provided.pathname !== expected.pathname &&
+        Effect.pipe(provided.pathname, EffectString.toLowerCase) !== Effect.pipe(alias, EffectString.toLowerCase)) ||
       provided.username ||
       provided.password ||
       provided.hash
@@ -390,7 +413,8 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
       fail('contract-incomplete');
     const allowed = new Set([...expected.searchParams.keys(), 'after']);
     if (
-      [...provided.searchParams].some(
+      EffectArray.some(
+        [...provided.searchParams],
         ([key, value]) =>
           !allowed.has(key) ||
           provided.searchParams.getAll(key).length !== 1 ||
@@ -398,7 +422,7 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
       )
     )
       fail('contract-incomplete');
-    if ([...expected.searchParams].some(([key, value]) => provided.searchParams.get(key) !== value))
+    if (EffectArray.some([...expected.searchParams], ([key, value]) => provided.searchParams.get(key) !== value))
       fail('contract-incomplete');
     return expected.pathname + provided.search;
   }
@@ -418,11 +442,14 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
         ? expected.pathname + expected.search
         : continuationPath(continuation, expected, repository),
     );
-    if (!Array.isArray(response.value) || response.value.length > PAGE_SIZE) fail('contract-invalid');
-    const next = response.headers
-      .get('link')
-      ?.split(',')
-      .find(part => /;\s*rel="next"/.test(part));
+    if (!EffectArray.isArray(response.value) || response.value.length > PAGE_SIZE) fail('contract-invalid');
+    const next = Effect.Option.getOrUndefined(
+      Effect.Option.map(Effect.Option.fromNullishOr(response.headers.get('link')), header =>
+        Effect.Option.getOrUndefined(
+          EffectArray.findFirst(Effect.pipe(header, EffectString.split(',')), part => /;\s*rel="next"/.test(part)),
+        ),
+      ),
+    );
     let nextLink: string | undefined;
     if (next) {
       const match = /^\s*<([^>]+)>;\s*rel="next"\s*$/.exec(next);
@@ -451,18 +478,20 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
   async function graphql(query: string, variables: Record<string, unknown>): Promise<Record<string, unknown>> {
     const response = await request('/graphql', {query, variables});
     const result = obj(response.value);
-    if (result.errors !== undefined && (!Array.isArray(result.errors) || result.errors.length !== 0)) {
-      const errors = Array.isArray(result.errors) ? result.errors : [];
-      if (errors.some(error => record(error) && error.type === 'RATE_LIMITED'))
+    if (result.errors !== undefined && (!EffectArray.isArray(result.errors) || result.errors.length !== 0)) {
+      const errors = EffectArray.isArray(result.errors) ? result.errors : [];
+      if (EffectArray.some(errors, error => record(error) && error.type === 'RATE_LIMITED'))
         fail('quota-rejected', retryDelay(response.headers) ?? 60_000);
-      if (errors.some(error => record(error) && (error.type === 'FORBIDDEN' || error.type === 'NOT_FOUND')))
+      if (
+        EffectArray.some(errors, error => record(error) && (error.type === 'FORBIDDEN' || error.type === 'NOT_FOUND'))
+      )
         fail('access-rejected');
       fail('contract-incomplete');
     }
     return obj(result.data);
   }
   async function threads(repository: GitHubRepository, number: number): Promise<GitHubThread[]> {
-    const [owner, name] = repository.name.split('/');
+    const [owner, name] = Effect.pipe(repository.name, EffectString.split('/'));
     const output: GitHubThread[] = [];
     const threadIds = new Set<string>();
     const threadCursors = new Set<string>();
@@ -531,7 +560,11 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
             path: str(node.path, 4096),
             line: node.line === null ? null : integer(node.line),
             diffHunk,
-            comments: discussion.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)),
+            comments: discussion.sort(
+              (a, b) =>
+                Effect.pipe(a.createdAt, EffectString.localeCompare(b.createdAt)) ||
+                Effect.pipe(a.id, EffectString.localeCompare(b.id)),
+            ),
           });
       }
       if (!listed.more) break;
@@ -540,7 +573,7 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
       cursor = listed.cursor;
     } while (cursor !== null);
     if (threadIds.size !== count) fail('contract-incomplete');
-    return output.sort((a, b) => a.id.localeCompare(b.id));
+    return output.sort((a, b) => Effect.pipe(a.id, EffectString.localeCompare(b.id)));
   }
   async function conversation(repository: GitHubRepository, item: GitHubCandidate): Promise<GitHubConversation> {
     const path = await pinnedRepositoryPath(repository.name, repository.id);
@@ -548,11 +581,11 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
     const identity = candidate(raw);
     if (identity.id !== item.id || identity.kind !== item.kind || identity.number !== item.number)
       fail('contract-invalid');
-    const discussion = (await all(repository.name, `/issues/${item.number}/comments`)).map(value =>
+    const discussion = EffectArray.map(await all(repository.name, `/issues/${item.number}/comments`), value =>
       comments(value, repository.name, item.number),
     );
     if (
-      new Set(discussion.map(value => value.id)).size !== discussion.length ||
+      new Set(EffectArray.map(discussion, value => value.id)).size !== discussion.length ||
       integer(raw.comments) !== discussion.length
     )
       fail('snapshot-changed');
@@ -571,7 +604,7 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
       merged = bool(pull.merged);
       draft = bool(pull.draft);
       const seen = new Set<string>();
-      reviews = (await all(repository.name, `/pulls/${item.number}/reviews`)).flatMap(value => {
+      reviews = EffectArray.flatMap(await all(repository.name, `/pulls/${item.number}/reviews`), value => {
         const review = obj(value);
         const reviewId = id(review.id);
         if (seen.has(reviewId)) fail('contract-incomplete');
@@ -604,8 +637,16 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
       state: str(raw.state, 64),
       url: browserLink(raw.html_url, repository.name, item.number),
       ...(merged === undefined ? {} : {merged, draft}),
-      comments: discussion.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)),
-      reviews: reviews.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)),
+      comments: discussion.sort(
+        (a, b) =>
+          Effect.pipe(a.createdAt, EffectString.localeCompare(b.createdAt)) ||
+          Effect.pipe(a.id, EffectString.localeCompare(b.id)),
+      ),
+      reviews: reviews.sort(
+        (a, b) =>
+          Effect.pipe(a.createdAt, EffectString.localeCompare(b.createdAt)) ||
+          Effect.pipe(a.id, EffectString.localeCompare(b.id)),
+      ),
       threads: reviewThreads,
     };
   }
@@ -617,8 +658,11 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
           ? '&state=all&sort=created&direction=asc'
           : `&state=all&sort=updated&direction=asc&since=${encodeURIComponent(date(since))}`;
       const result = await page(repository, '/issues', pageIndex, extra, continuation);
-      const items = result.items.map(candidate);
-      if (new Set(items.map(item => item.id)).size !== items.length || items.some(item => item.number < 1))
+      const items = EffectArray.map(result.items, candidate);
+      if (
+        new Set(EffectArray.map(items, item => item.id)).size !== items.length ||
+        EffectArray.some(items, item => item.number < 1)
+      )
         fail('contract-incomplete');
       return {items, hasMore: result.hasMore, continuation: result.continuation};
     },
@@ -637,7 +681,7 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
         continuation,
       );
       const expected = `${GITHUB_API_ORIGIN}${repositoryPath(repository)}/${kind === 'comments' ? 'issues' : 'pulls'}/`;
-      const numbers = result.items.map(value => {
+      const numbers = EffectArray.map(result.items, value => {
         const item = obj(value);
         id(item.id);
         const link = str(kind === 'comments' ? item.issue_url : item.pull_request_url, 2048);
@@ -648,9 +692,21 @@ export function createGitHubClient(token: Redacted.Redacted<string>, options: Gi
             ? []
             : [`${GITHUB_API_ORIGIN}/repositories/${alias}/${kind === 'comments' ? 'issues' : 'pulls'}/`]),
         ];
-        const prefix = prefixes.find(p => link.toLowerCase().startsWith(p.toLowerCase()));
-        if (prefix === undefined || !/^[1-9][0-9]*$/.test(link.slice(prefix.length))) fail('contract-invalid');
-        return integer(Number(link.slice(prefix.length)));
+        const prefix = Effect.Option.getOrUndefined(
+          EffectArray.findFirst(prefixes, p =>
+            Effect.pipe(link, __effectPipeInput => {
+              const __effectPipeStage0 = Effect.pipe(__effectPipeInput, EffectString.toLowerCase);
+              const __effectPipeStage1 = Effect.pipe(
+                __effectPipeStage0,
+                EffectString.startsWith(Effect.pipe(p, EffectString.toLowerCase)),
+              );
+              return __effectPipeStage1;
+            }),
+          ),
+        );
+        if (prefix === undefined || !/^[1-9][0-9]*$/.test(Effect.pipe(link, EffectString.slice(prefix.length))))
+          fail('contract-invalid');
+        return integer(Number(Effect.pipe(link, EffectString.slice(prefix.length))));
       });
       return {numbers: [...new Set(numbers)], hasMore: result.hasMore, continuation: result.continuation};
     },

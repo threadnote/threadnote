@@ -1,5 +1,7 @@
+import {isTicketResponse} from '../api/response_guards.js';
 import React, {createContext, useContext, useEffect, useMemo, useSyncExternalStore} from 'react';
 import {createManagerLiveClient} from './client.js';
+import {createManagerLiveSnapshotProjection} from './snapshot_projection.js';
 import type {ManagerLiveResource} from './contracts.js';
 import {MANAGER_LIVE_SNAPSHOT_HEADER, MANAGER_LIVE_SUPPORTED_TOPICS} from './contracts.js';
 import type {ManagerLiveSnapshot} from './store.js';
@@ -7,7 +9,7 @@ import {api} from '../ui/support.js';
 
 type Client = ReturnType<typeof createManagerLiveClient>;
 const LiveContext = createContext<Client | undefined>(undefined);
-const loading: ManagerLiveSnapshot = {status: 'loading'};
+const loading: {readonly status: 'loading'} = {status: 'loading'};
 
 /** A Manager tab owns one socket. Account changes dispose the old cache and socket. */
 export function ManagerLiveProvider(props: {
@@ -28,6 +30,7 @@ export function ManagerLiveProvider(props: {
                   signal,
                   headers: {[MANAGER_LIVE_SNAPSHOT_HEADER]: 'processes,graph-status'},
                 },
+                isTicketResponse,
               ),
           })
         : undefined,
@@ -57,6 +60,7 @@ export function useManagerLiveResource<T>(
   topic: 'context-health' | 'context-maintenance',
   project: string,
   reader: (signal: AbortSignal) => Promise<T>,
+  isData: (value: unknown) => value is T,
 ): {
   readonly snapshot: ManagerLiveSnapshot<T>;
   readonly active: boolean;
@@ -66,15 +70,17 @@ export function useManagerLiveResource<T>(
     () => (project ? {topic, project} : undefined),
     [topic, project],
   );
-  return useManagerLiveQuery(resource, '', reader);
+  return useManagerLiveQuery(resource, '', reader, isData);
 }
 
 export function useManagerLiveQuery<T>(
   resource: ManagerLiveResource | undefined,
   queryKey: string,
   reader: (signal: AbortSignal) => Promise<T>,
+  isData: (value: unknown) => value is T,
 ) {
   const client = useContext(LiveContext);
+  const projectSnapshot = useMemo(() => createManagerLiveSnapshotProjection<T>(), []);
   const readerRef = React.useRef(reader);
   readerRef.current = reader;
   const resourceKey = resource === undefined ? '' : JSON.stringify(resource);
@@ -88,10 +94,8 @@ export function useManagerLiveQuery<T>(
   );
   const getSnapshot = React.useCallback(
     () =>
-      client && stableResource
-        ? client.getQuerySnapshot<T>(stableResource, queryKey)
-        : (loading as ManagerLiveSnapshot<T>),
-    [client, stableResource, queryKey],
+      projectSnapshot(client && stableResource ? client.getQuerySnapshot(stableResource, queryKey) : loading, isData),
+    [client, stableResource, queryKey, projectSnapshot, isData],
   );
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const invalidate = React.useCallback(() => {

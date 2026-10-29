@@ -97,6 +97,8 @@ import {
   runShareSkillTool,
   runThreadnoteGuideTool,
 } from './share.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MCP_PROGRESS_TEST_SHARED_SYNC_DELAY_ENV = 'THREADNOTE_TEST_MCP_PROGRESS_SHARED_SYNC_DELAY_MILLISECONDS';
 const MCP_PROGRESS_TEST_SHARED_SYNC_DELAY_MAX_MILLISECONDS = 1_000;
@@ -226,13 +228,20 @@ function registerCursorCloudLocalTools(server: EffectMcpServerAdapter, config: R
       if (!checkedCwd.ok) return checkedCwd.error;
       const system = yield* SystemInfo;
       const environment = system.environment();
-      const endpoint = environment[CURSOR_CLOUD_MEMORY_ENDPOINT_ENV]?.trim();
+      const endpoint = Effect2.pipe(environment[CURSOR_CLOUD_MEMORY_ENDPOINT_ENV], effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
       if (!endpoint) {
         throw McpServerOperationError.make({
           message: `${CURSOR_CLOUD_MEMORY_ENDPOINT_ENV} is required when ${CURSOR_CLOUD_LOCAL_MCP_TOOLSET} is selected.`,
         });
       }
-      const mode = environment[CURSOR_CLOUD_MODE_ENV]?.trim() === 'org' ? 'org' : undefined;
+      const mode =
+        Effect2.pipe(environment[CURSOR_CLOUD_MODE_ENV], effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) === 'org'
+          ? 'org'
+          : undefined;
       const receipt = yield* cursorCloudRemoteHybridStatus(config, {
         cwd: checkedCwd.value,
         endpoint,
@@ -261,7 +270,9 @@ function registerCursorCloudLocalTools(server: EffectMcpServerAdapter, config: R
     },
     Effect.fn('mcp_server.completeCursorAttestation')(function* (challenge) {
       const system = yield* SystemInfo;
-      const endpoint = system.environment()[CURSOR_CLOUD_MEMORY_ENDPOINT_ENV]?.trim();
+      const endpoint = Effect2.pipe(system.environment()[CURSOR_CLOUD_MEMORY_ENDPOINT_ENV], effectOptionalString =>
+        effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+      );
       if (!endpoint) {
         throw McpServerOperationError.make({
           message: `${CURSOR_CLOUD_MEMORY_ENDPOINT_ENV} is required when ${CURSOR_CLOUD_LOCAL_MCP_TOOLSET} is selected.`,

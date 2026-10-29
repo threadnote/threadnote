@@ -1,9 +1,13 @@
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {formatRemoteMemoryUri, parseRemoteShareAddress} from '@threadnote/memory/remote/address';
 import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {inspectRemoteMemoryContent, parseRemoteCanonicalMemoryDocument} from '@threadnote/memory/remote/content';
 import {memoryCodeCitationSharingBlocker} from '@threadnote/memory/code/citation-policy';
 import {parseResourceId, validatePortableSegment} from '@threadnote/store/resource-id';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const REMOTE_MEMORY_PORTABILITY_VERSION = 1 as const;
 
@@ -126,10 +130,10 @@ export function planGitBetaImport(input: {
   const aliasCompatibilityEndsAt = compatibilityEnd(input.aliasCompatibilityEndsAt);
   const policy = importPolicy(input.policy);
   const existing = existingHashes(input.existing ?? [], shareId);
-  const candidates = input.records
-    .map(source => classifyGitBetaSource(source, shareId))
-    .map(candidate => applyImportPolicy(candidate, policy))
-    .sort(compareImportCandidates);
+  const candidates = EffectArray.map(
+    EffectArray.map(input.records, source => classifyGitBetaSource(source, shareId)),
+    candidate => applyImportPolicy(candidate, policy),
+  ).sort(compareImportCandidates);
   const validByTarget = new Map<string, ValidGitBetaSource[]>();
   for (const candidate of candidates) {
     if ('candidate' in candidate) {
@@ -141,7 +145,7 @@ export function planGitBetaImport(input: {
 
   const resolved = new Map<ValidGitBetaSource, GitBetaImportPlanEntryV1>();
   for (const [targetUri, values] of validByTarget) {
-    const hashes = new Set(values.map(value => value.contentHash));
+    const hashes = new Set(EffectArray.map(values, value => value.contentHash));
     if (hashes.size > 1) {
       for (const value of values) resolved.set(value, entry(value, 'conflict', 'source_content_conflict'));
       continue;
@@ -164,7 +168,7 @@ export function planGitBetaImport(input: {
     for (const duplicate of duplicates) resolved.set(duplicate, entry(duplicate, 'duplicate'));
   }
 
-  const entries = candidates.map(candidate =>
+  const entries = EffectArray.map(candidates, candidate =>
     'candidate' in candidate ? resolved.get(candidate.candidate)! : candidate.entry,
   );
   const counts = importCounts(entries);
@@ -185,7 +189,7 @@ export function planGitBetaImport(input: {
     dryRun: input.dryRun,
     entries,
     planDigest,
-    planId: `tnmi_${planDigest.slice(0, 32)}`,
+    planId: `tnmi_${Effect.pipe(planDigest, EffectString.slice(0, 32))}`,
     policy,
     shareId,
     sourceMutation: 'none',
@@ -239,7 +243,7 @@ export function materializeGitBetaImport(
     });
   }
   for (const classifications of classificationsByTarget.values()) {
-    if (classifications.every(classification => classification === 'duplicate')) {
+    if (EffectArray.every(classifications, classification => classification === 'duplicate')) {
       throw new Error('Git beta import plan marks every source for one target as a duplicate.');
     }
   }
@@ -285,7 +289,8 @@ export function finalizeGitBetaCutover(input: {
   readonly verified: boolean;
 }): RemoteMemoryCutoverReceiptV1 {
   verifyGitBetaImportPlan(input.plan);
-  const expected = input.plan.entries.filter(
+  const expected = EffectArray.filter(
+    input.plan.entries,
     entry => entry.classification === 'would_import' || entry.classification === 'unchanged',
   );
   const outcomeBySource = new Map<string, GitBetaImportApplyOutcomeV1>();
@@ -322,7 +327,9 @@ export function finalizeGitBetaCutover(input: {
 }
 
 export function planRemoteMemoryExport(records: readonly RemoteMemoryPortableRecordV1[]): RemoteMemoryExportPlanV1 {
-  const files = records.map(exportFile).sort((left, right) => compareCodeUnits(left.relativePath, right.relativePath));
+  const files = EffectArray.map(records, exportFile).sort((left, right) =>
+    compareCodeUnits(left.relativePath, right.relativePath),
+  );
   for (let index = 1; index < files.length; index += 1) {
     if (files[index - 1].relativePath === files[index].relativePath) {
       throw new Error(`Remote memory export path conflict: ${files[index].relativePath}.`);
@@ -363,7 +370,9 @@ export function verifyRemoteMemoryExportPlan(plan: RemoteMemoryExportPlanV1): vo
       address.topic,
     );
     if (file.relativePath !== expectedPath) throw new Error('Remote memory export path does not match its source URI.');
-    const aliases = [...new Set(file.aliases.map(value => canonicalSourceUri(value)))].sort(compareCodeUnits);
+    const aliases = [...new Set(EffectArray.map(file.aliases, value => canonicalSourceUri(value)))].sort(
+      compareCodeUnits,
+    );
     if (stableJson(aliases) !== stableJson(file.aliases)) {
       throw new Error('Remote memory export aliases are not canonical and deterministic.');
     }
@@ -393,7 +402,7 @@ function classifyGitBetaSource(
     return {candidate: validatedGitBetaSource({...source, sourceUri}, shareId), sourceUri};
   } catch (cause) {
     const reason = safeImportReason(cause instanceof Error ? cause.message : 'invalid_source');
-    const classification = reason.startsWith('blocked:') ? 'blocked' : 'invalid';
+    const classification = Effect.pipe(reason, EffectString.startsWith('blocked:')) ? 'blocked' : 'invalid';
     return {entry: invalidEntry(sourceUri, reason, classification), sourceUri};
   }
 }
@@ -412,13 +421,15 @@ function validatedGitBetaSource(source: GitBetaMemorySourceV1, shareId: string):
     kind !== 'durable' ||
     scope !== 'projects' ||
     !project ||
-    !file?.endsWith('.md') ||
+    !Effect.pipe(file, effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.endsWith('.md')),
+    ) ||
     file === '.md' ||
     resource.segments.length !== 8
   ) {
     throw new Error('unsupported_git_beta_layout');
   }
-  const topic = file.slice(0, -3);
+  const topic = Effect.pipe(file, EffectString.slice(0, -3));
   validatePortableSegment(project);
   validatePortableSegment(topic);
   const inspected = inspectRemoteMemoryContent(source.content);
@@ -533,7 +544,7 @@ function exportFile(record: RemoteMemoryPortableRecordV1): RemoteMemoryExportFil
   const contentHash = sha256HexSync(canonicalContent);
   if (contentHash !== record.contentHash) throw new Error(`Remote memory export hash mismatch: ${record.uri}.`);
   return {
-    aliases: [...new Set(record.aliases.map(value => canonicalSourceUri(value)))].sort(compareCodeUnits),
+    aliases: [...new Set(EffectArray.map(record.aliases, value => canonicalSourceUri(value)))].sort(compareCodeUnits),
     canonicalContent,
     contentHash,
     relativePath: exportRelativePath(record.kind, document.record.metadata.status, address.project, address.topic),
@@ -551,6 +562,73 @@ function exportRelativePath(
   const prefix =
     kind === 'durable' ? (status === 'active' ? 'durable/projects' : `durable/${status}`) : `handoffs/${status}`;
   return `${prefix}/${project}/${topic}.md`;
+}
+
+const GIT_BETA_IMPORT_CLASSIFICATIONS = [
+  'blocked',
+  'conflict',
+  'duplicate',
+  'invalid',
+  'unchanged',
+  'would_import',
+] as const;
+
+export function parseGitBetaImportPlan(value: unknown): GitBetaImportPlanV1 {
+  if (!isGitBetaImportPlanShape(value)) throw new Error('Git beta import plan has an invalid shape.');
+  verifyGitBetaImportPlan(value);
+  return value;
+}
+
+function isGitBetaImportPlanShape(value: unknown): value is GitBetaImportPlanV1 {
+  if (!isObjectRecord(value)) return false;
+  const counts = value.counts;
+  const policy = value.policy;
+  const entries = value.entries;
+  if (!isObjectRecord(counts) || !isObjectRecord(policy) || !EffectArray.isArray(entries)) return false;
+  if (
+    value.version !== REMOTE_MEMORY_PORTABILITY_VERSION ||
+    value.sourceMutation !== 'none' ||
+    typeof value.aliasCompatibilityEndsAt !== 'string' ||
+    typeof value.dryRun !== 'boolean' ||
+    typeof value.planDigest !== 'string' ||
+    typeof value.planId !== 'string' ||
+    typeof value.shareId !== 'string' ||
+    policy.version !== REMOTE_MEMORY_PORTABILITY_VERSION ||
+    !(policy.projects === 'all' || isStringArray(policy.projects)) ||
+    !(policy.sourceTeams === 'all' || isStringArray(policy.sourceTeams)) ||
+    !(policy.sourceUsers === 'all' || isStringArray(policy.sourceUsers)) ||
+    !EffectArray.every(GIT_BETA_IMPORT_CLASSIFICATIONS, classification => typeof counts[classification] === 'number') ||
+    !EffectArray.isArray(entries)
+  ) {
+    return false;
+  }
+  return EffectArray.every(
+    entries,
+    entry =>
+      isObjectRecord(entry) &&
+      typeof entry.sourceUri === 'string' &&
+      isGitBetaImportClassification(entry.classification) &&
+      entry.version === REMOTE_MEMORY_PORTABILITY_VERSION &&
+      (entry.aliasUri === undefined || typeof entry.aliasUri === 'string') &&
+      (entry.contentHash === undefined || typeof entry.contentHash === 'string') &&
+      (entry.reason === undefined || typeof entry.reason === 'string') &&
+      (entry.targetUri === undefined || typeof entry.targetUri === 'string'),
+  );
+}
+
+function isGitBetaImportClassification(value: unknown): value is GitBetaImportClassification {
+  return (
+    typeof value === 'string' &&
+    EffectArray.some(GIT_BETA_IMPORT_CLASSIFICATIONS, classification => classification === value)
+  );
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return EffectArray.isArray(value) && EffectArray.every(value, item => typeof item === 'string');
 }
 
 export function verifyGitBetaImportPlan(plan: GitBetaImportPlanV1): void {
@@ -584,7 +662,7 @@ export function verifyGitBetaImportPlan(plan: GitBetaImportPlanV1): void {
       version: plan.version,
     }),
   );
-  if (digest !== plan.planDigest || plan.planId !== `tnmi_${digest.slice(0, 32)}`) {
+  if (digest !== plan.planDigest || plan.planId !== `tnmi_${Effect.pipe(digest, EffectString.slice(0, 32))}`) {
     throw new Error('Git beta import plan digest does not match its contents.');
   }
 }
@@ -652,7 +730,7 @@ function importPolicy(input: Partial<Omit<GitBetaImportPolicyV1, 'version'>> | u
 
 function policySegments(values: 'all' | readonly string[] | undefined): 'all' | readonly string[] {
   if (values === undefined || values === 'all') return 'all';
-  return [...new Set(values.map(value => validatePortableSegment(value)))].sort(compareCodeUnits);
+  return [...new Set(EffectArray.map(values, value => validatePortableSegment(value)))].sort(compareCodeUnits);
 }
 
 function compatibilityEnd(input: string): string {
@@ -696,8 +774,10 @@ function uniqueSourcesByUri(sources: readonly GitBetaMemorySourceV1[]): Readonly
 
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, current) => {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
-    return Object.fromEntries(Object.entries(current).sort(([left], [right]) => compareCodeUnits(left, right)));
+    if (!current || typeof current !== 'object' || EffectArray.isArray(current)) return current;
+    return EffectRecord.fromEntries(
+      EffectRecord.toEntries(current).sort(([left], [right]) => compareCodeUnits(left, right)),
+    );
   });
 }
 

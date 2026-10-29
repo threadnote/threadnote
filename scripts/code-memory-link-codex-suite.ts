@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed sealed-suite loader verifies raw filesystem identity before exposing bytes to Effect-free protocol parsers. */
 import {createHash} from 'node:crypto';
 import {lstat, readFile, realpath, stat} from 'node:fs/promises';
@@ -13,6 +14,9 @@ import {
   type CodeMemoryLinkSealedSuiteV1,
   type CodeMemoryLinkTaskPacketV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CODE_MEMORY_LINK_CODEX_SUITE_LAYOUT_VERSION = 1 as const;
 export const CODE_MEMORY_LINK_CODEX_JUDGE_COMMAND_VERSION = 1 as const;
@@ -124,31 +128,33 @@ export async function loadCodeMemoryLinkCodexSuiteTask(input: {
   if (layout.layoutArtifactId !== expectedLayoutArtifactId) {
     throw new Error('The suite layout does not identify its reviewed content-addressed artifact.');
   }
-  const mappedLayout = layout.judge.files.find(file => file.artifactId === expectedLayoutArtifactId);
+  const mappedLayout = EffectOption.getOrUndefined(
+    EffectArray.findFirst(layout.judge.files, file => file.artifactId === expectedLayoutArtifactId),
+  );
   if (!mappedLayout || mappedLayout.source !== 'adapter.json') {
     throw new Error('The reviewed layout artifact must map the fixed adapter.json source.');
   }
 
   assertTaskRoster(layout, suite);
   assertArtifactCoverage(
-    layout.fixtureFiles.map(file => file.artifactId),
+    EffectArray.map(layout.fixtureFiles, file => file.artifactId),
     suite.fixture.artifacts,
     'fixture',
   );
   assertArtifactCoverage(
-    layout.judge.files.map(file => file.artifactId),
+    EffectArray.map(layout.judge.files, file => file.artifactId),
     suite.judge.artifacts,
     'judge',
   );
   const allSources = [
-    ...layout.fixtureFiles.map(file => file.source),
-    ...layout.judge.files.map(file => file.source),
-    ...layout.tasks.flatMap(task => [task.packetSource, task.rubricSource]),
+    ...EffectArray.map(layout.fixtureFiles, file => file.source),
+    ...EffectArray.map(layout.judge.files, file => file.source),
+    ...EffectArray.flatMap(layout.tasks, task => [task.packetSource, task.rubricSource]),
   ];
   unique(allSources, 'suite source paths');
 
   const fixtureFiles = await Promise.all(
-    layout.fixtureFiles.map(async file => {
+    EffectArray.map(layout.fixtureFiles, async file => {
       const descriptor = artifactById(suite.fixture.artifacts, file.artifactId, 'fixture');
       return {
         artifactId: file.artifactId,
@@ -159,7 +165,7 @@ export async function loadCodeMemoryLinkCodexSuiteTask(input: {
     }),
   );
   const judgeFiles = await Promise.all(
-    layout.judge.files.map(async file => {
+    EffectArray.map(layout.judge.files, async file => {
       const descriptor = artifactById(suite.judge.artifacts, file.artifactId, 'judge');
       return {
         artifactId: file.artifactId,
@@ -171,7 +177,7 @@ export async function loadCodeMemoryLinkCodexSuiteTask(input: {
   );
 
   const parsedTasks = await Promise.all(
-    layout.tasks.map(async mappedTask => {
+    EffectArray.map(layout.tasks, async mappedTask => {
       const [packetBytes, rubricBytes] = await Promise.all([
         verifiedLooseFile(root, mappedTask.packetSource, 'task packet'),
         verifiedLooseFile(root, mappedTask.rubricSource, 'task rubric'),
@@ -190,14 +196,22 @@ export async function loadCodeMemoryLinkCodexSuiteTask(input: {
       ) {
         throw new Error(`Task ${mappedTask.taskId} is not bound to its exact packet, rubric, kind, and fixture.`);
       }
-      if (rubric.goldCitationDigests.some(digest => !mappedTask.preflightExpectedCitationDigests.includes(digest))) {
+      if (
+        EffectArray.some(
+          rubric.goldCitationDigests,
+          digest => !mappedTask.preflightExpectedCitationDigests.includes(digest),
+        )
+      ) {
         throw new Error(`Task ${mappedTask.taskId} preflight does not cover every sealed gold citation digest.`);
       }
       return {rubric, taskPacket};
     }),
   );
   const requestedTaskId = matching(input.taskId, TASK_ID, 'requested task id');
-  const selectedIndex = layout.tasks.findIndex(task => task.taskId === requestedTaskId);
+  const selectedIndex = EffectOption.getOrElse(
+    EffectArray.findFirstIndex(layout.tasks, task => task.taskId === requestedTaskId),
+    () => -1,
+  );
   if (selectedIndex < 0) throw new Error('The requested task is outside the sealed suite roster.');
   const selected = parsedTasks[selectedIndex];
   const commandArtifact = artifactByLoadedId(judgeFiles, layout.judge.commandArtifactId, 'judge command');
@@ -209,17 +223,28 @@ export async function loadCodeMemoryLinkCodexSuiteTask(input: {
   ) {
     throw new Error('The static judge program must be a distinct reviewed artifact.');
   }
-  const selectedFixtureFiles = fixtureFiles.filter((_, index) => layout.fixtureFiles[index].taskId === requestedTaskId);
-  const selectedRepositoryFiles = selectedFixtureFiles.filter(
-    file => layout.fixtureFiles.find(mapped => mapped.artifactId === file.artifactId)!.scope === 'repository',
+  const selectedFixtureFiles = EffectArray.filter(
+    fixtureFiles,
+    (_, index) => layout.fixtureFiles[index].taskId === requestedTaskId,
+  );
+  const selectedRepositoryFiles = EffectArray.filter(
+    selectedFixtureFiles,
+    file =>
+      EffectOption.getOrUndefined(
+        EffectArray.findFirst(layout.fixtureFiles, mapped => mapped.artifactId === file.artifactId),
+      )!.scope === 'repository',
   );
   if (selectedRepositoryFiles.length === 0)
     throw new Error('Every sealed task requires a non-empty public repository.');
   return {
     fixture: {
       repository: selectedRepositoryFiles,
-      threadnoteHome: selectedFixtureFiles.filter(
-        file => layout.fixtureFiles.find(mapped => mapped.artifactId === file.artifactId)!.scope === 'threadnote-home',
+      threadnoteHome: EffectArray.filter(
+        selectedFixtureFiles,
+        file =>
+          EffectOption.getOrUndefined(
+            EffectArray.findFirst(layout.fixtureFiles, mapped => mapped.artifactId === file.artifactId),
+          )!.scope === 'threadnote-home',
       ),
     },
     judge: {command, commandArtifact, files: judgeFiles, programArtifact},
@@ -234,10 +259,10 @@ export function parseCodeMemoryLinkCodexSuiteLayoutV1(value: unknown): CodeMemor
   const layout = object(value, 'suite layout');
   exactKeys(layout, ['fixtureFiles', 'judge', 'layoutArtifactId', 'tasks', 'version'], 'suite layout');
   if (layout.version !== CODE_MEMORY_LINK_CODEX_SUITE_LAYOUT_VERSION) invalid('suite layout version must be 1');
-  if (!Array.isArray(layout.fixtureFiles) || !Array.isArray(layout.tasks)) {
+  if (!EffectArray.isArray(layout.fixtureFiles) || !EffectArray.isArray(layout.tasks)) {
     invalid('suite layout fixtureFiles and tasks must be arrays');
   }
-  const fixtureFiles = layout.fixtureFiles.map((entry, index) => {
+  const fixtureFiles = EffectArray.map(layout.fixtureFiles, (entry, index) => {
     const file = object(entry, `fixture file ${index + 1}`);
     exactKeys(file, ['artifactId', 'destination', 'scope', 'source', 'taskId'], `fixture file ${index + 1}`);
     const scope = oneOf(file.scope, ['repository', 'threadnote-home'] as const, 'fixture scope');
@@ -251,16 +276,16 @@ export function parseCodeMemoryLinkCodexSuiteLayoutV1(value: unknown): CodeMemor
   });
   const judgeInput = object(layout.judge, 'suite layout judge');
   exactKeys(judgeInput, ['commandArtifactId', 'files'], 'suite layout judge');
-  if (!Array.isArray(judgeInput.files)) invalid('suite layout judge files must be an array');
-  const judgeFiles = judgeInput.files.map((entry, index) => {
+  if (!EffectArray.isArray(judgeInput.files)) invalid('suite layout judge files must be an array');
+  const judgeFiles = EffectArray.map(judgeInput.files, (entry, index) => {
     const file = object(entry, `judge file ${index + 1}`);
     exactKeys(file, ['artifactId', 'destination', 'source'], `judge file ${index + 1}`);
     const destination = relativeFile(file.destination, 'judge destination');
     if (
       destination === '.runner-home' ||
-      destination.startsWith('.runner-home/') ||
+      Effect.pipe(destination, EffectString.startsWith('.runner-home/')) ||
       destination === '.runner-tmp' ||
-      destination.startsWith('.runner-tmp/')
+      Effect.pipe(destination, EffectString.startsWith('.runner-tmp/'))
     ) {
       invalid('judge destination uses an outer-runner reserved path');
     }
@@ -270,7 +295,7 @@ export function parseCodeMemoryLinkCodexSuiteLayoutV1(value: unknown): CodeMemor
       source: relativeFile(file.source, 'judge source'),
     };
   });
-  const tasks = layout.tasks.map((entry, index) => {
+  const tasks = EffectArray.map(layout.tasks, (entry, index) => {
     const task = object(entry, `suite layout task ${index + 1}`);
     exactKeys(
       task,
@@ -311,27 +336,28 @@ export function parseCodeMemoryLinkCodexSuiteLayoutV1(value: unknown): CodeMemor
     };
   });
   unique(
-    fixtureFiles.map(file => file.artifactId),
+    EffectArray.map(fixtureFiles, file => file.artifactId),
     'fixture artifact ids',
   );
   unique(
-    fixtureFiles.map(file => `${file.taskId}:${file.scope}:${file.destination}`),
+    EffectArray.map(fixtureFiles, file => `${file.taskId}:${file.scope}:${file.destination}`),
     'fixture destinations',
   );
   unique(
-    judgeFiles.map(file => file.artifactId),
+    EffectArray.map(judgeFiles, file => file.artifactId),
     'judge artifact ids',
   );
   unique(
-    judgeFiles.map(file => file.destination),
+    EffectArray.map(judgeFiles, file => file.destination),
     'judge destinations',
   );
   unique(
-    tasks.map(task => task.taskId),
+    EffectArray.map(tasks, task => task.taskId),
     'suite layout task ids',
   );
-  const taskIds = new Set(tasks.map(task => task.taskId));
-  if (fixtureFiles.some(file => !taskIds.has(file.taskId))) invalid('fixture file references an unknown task id');
+  const taskIds = new Set(EffectArray.map(tasks, task => task.taskId));
+  if (EffectArray.some(fixtureFiles, file => !taskIds.has(file.taskId)))
+    invalid('fixture file references an unknown task id');
   return {
     fixtureFiles,
     judge: {
@@ -385,7 +411,7 @@ function assertArtifactCoverage(
   descriptors: readonly CodeMemoryLinkArtifactV1[],
   label: string,
 ) {
-  if (ids.length !== descriptors.length || ids.some((id, index) => id !== descriptors[index].artifactId)) {
+  if (ids.length !== descriptors.length || EffectArray.some(ids, (id, index) => id !== descriptors[index].artifactId)) {
     throw new Error(`Suite layout must map the canonical ${label} artifact roster exactly once and in order.`);
   }
 }
@@ -415,14 +441,14 @@ async function verifiedArtifactFile(
 
 async function verifiedLooseFile(root: string, relativePath: string, label: string): Promise<Uint8Array> {
   const normalized = relativeFile(relativePath, `${label} path`);
-  const path = join(root, ...normalized.split('/'));
+  const path = join(root, ...Effect.pipe(normalized, EffectString.split('/')));
   const metadata = await lstat(path);
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
     throw new Error(`${label} must be a non-symlink, non-hardlinked regular file.`);
   }
   if (metadata.size > MAXIMUM_SEALED_FILE_BYTES) throw new Error(`${label} exceeds the sealed-file byte limit.`);
   const canonical = await realpath(path);
-  if (canonical !== path || (canonical !== root && !canonical.startsWith(`${root}${sep}`))) {
+  if (canonical !== path || (canonical !== root && !Effect.pipe(canonical, EffectString.startsWith(`${root}${sep}`)))) {
     throw new Error(`${label} escaped the canonical sealed suite root.`);
   }
   if (!(await stat(canonical)).isFile()) throw new Error(`${label} must remain a regular file.`);
@@ -448,7 +474,9 @@ function artifactById(
   artifactId: string,
   label: string,
 ): CodeMemoryLinkArtifactV1 {
-  const artifact = artifacts.find(entry => entry.artifactId === artifactId);
+  const artifact = EffectOption.getOrUndefined(
+    EffectArray.findFirst(artifacts, entry => entry.artifactId === artifactId),
+  );
   if (!artifact) throw new Error(`The ${label} artifact id is absent from the sealed manifest.`);
   return artifact;
 }
@@ -458,7 +486,9 @@ function artifactByLoadedId(
   artifactId: string,
   label: string,
 ): CodeMemoryLinkVerifiedArtifactV1 {
-  const artifact = artifacts.find(entry => entry.artifactId === artifactId);
+  const artifact = EffectOption.getOrUndefined(
+    EffectArray.findFirst(artifacts, entry => entry.artifactId === artifactId),
+  );
   if (!artifact) throw new Error(`The ${label} artifact id is absent from the loaded sealed artifacts.`);
   return artifact;
 }
@@ -476,30 +506,30 @@ function relativeFile(value: unknown, label: string, forbidControlFiles = false)
     typeof value !== 'string' ||
     value.length === 0 ||
     value.length > 4_096 ||
-    value.includes('\\') ||
-    value.includes('\0') ||
+    Effect.pipe(value, EffectString.includes('\\')) ||
+    Effect.pipe(value, EffectString.includes('\0')) ||
     isAbsolute(value) ||
     posix.normalize(value) !== value ||
     value === '.' ||
-    value.endsWith('/')
+    Effect.pipe(value, EffectString.endsWith('/'))
   ) {
     invalid(`${label} must be one normalized relative file path`);
   }
-  const segments = value.split('/');
-  if (segments.some(segment => segment === '' || segment === '.' || segment === '..')) {
+  const segments = Effect.pipe(value, EffectString.split('/'));
+  if (EffectArray.some(segments, (segment: string) => segment === '' || segment === '.' || segment === '..')) {
     invalid(`${label} contains a forbidden path segment`);
   }
-  if (forbidControlFiles && segments.some(segment => FORBIDDEN_PUBLIC_NAMES.has(segment))) {
+  if (forbidControlFiles && EffectArray.some(segments, (segment: string) => FORBIDDEN_PUBLIC_NAMES.has(segment))) {
     invalid(`${label} contains an agent-control filename`);
   }
   return value;
 }
 
 function codeRefs(value: unknown): readonly string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 8) {
+  if (!EffectArray.isArray(value) || value.length === 0 || value.length > 8) {
     invalid('task preflightCodeRefs must contain 1-8 values');
   }
-  const parsed = value.map((entry, index) => {
+  const parsed = EffectArray.map(value, (entry, index) => {
     if (typeof entry !== 'string' || /^cgs_/u.test(entry)) {
       invalid(`task preflightCodeRefs[${index}] must be a sealed repo-relative file path`);
     }
@@ -510,9 +540,9 @@ function codeRefs(value: unknown): readonly string[] {
 }
 
 function sortedHashes(value: unknown, label: string, maximum: number): readonly string[] {
-  if (!Array.isArray(value) || value.length > maximum) invalid(`${label} is invalid`);
-  const parsed = value.map((entry, index) => matching(entry, HASH, `${label}[${index}]`));
-  if (parsed.some((entry, index) => index > 0 && parsed[index - 1] >= entry)) {
+  if (!EffectArray.isArray(value) || value.length > maximum) invalid(`${label} is invalid`);
+  const parsed = EffectArray.map(value, (entry, index) => matching(entry, HASH, `${label}[${index}]`));
+  if (EffectArray.some(parsed, (entry, index) => index > 0 && parsed[index - 1] >= entry)) {
     invalid(`${label} must be unique and sorted`);
   }
   return parsed;
@@ -540,8 +570,8 @@ function selectedMemories(
   value: unknown,
   label: string,
 ): readonly {readonly contentSha256: string; readonly memoryIdDigest: string}[] {
-  if (!Array.isArray(value) || value.length > 24) invalid(`${label} is invalid`);
-  const parsed = value.map((entry, index) => {
+  if (!EffectArray.isArray(value) || value.length > 24) invalid(`${label} is invalid`);
+  const parsed = EffectArray.map(value, (entry, index) => {
     const memory = object(entry, `${label}[${index}]`);
     exactKeys(memory, ['contentSha256', 'memoryIdDigest'], `${label}[${index}]`);
     return {
@@ -550,7 +580,8 @@ function selectedMemories(
     };
   });
   if (
-    parsed.some(
+    EffectArray.some(
+      parsed,
       (entry, index) =>
         index > 0 &&
         (parsed[index - 1].memoryIdDigest > entry.memoryIdDigest ||
@@ -560,30 +591,30 @@ function selectedMemories(
   ) {
     invalid(`${label} must be unique and sorted`);
   }
-  if (new Set(parsed.map(memory => memory.memoryIdDigest)).size !== parsed.length) {
+  if (new Set(EffectArray.map(parsed, memory => memory.memoryIdDigest)).size !== parsed.length) {
     invalid(`${label} memory identity digests must be unique`);
   }
   return parsed;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) invalid(`${label} must be an object`);
-  return value as Record<string, unknown>;
+  if (!Predicate.isObject(value)) invalid(`${label} must be an object`);
+  return value;
 }
 
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
-  const actual = Object.keys(value).sort();
+  const actual = EffectRecord.keys(value).sort();
   const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (actual.length !== wanted.length || EffectArray.some(actual, (key, index) => key !== wanted[index])) {
     invalid(`${label} has unsupported or missing fields`);
   }
 }
 
 function integer(value: unknown, label: string, minimum: number, maximum: number): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
     invalid(`${label} is out of range`);
   }
-  return value as number;
+  return value;
 }
 
 function matching(value: unknown, pattern: RegExp, label: string): string {
@@ -591,9 +622,13 @@ function matching(value: unknown, pattern: RegExp, label: string): string {
   return value;
 }
 
+function isOneOf<T extends string>(value: string, allowed: readonly T[]): value is T {
+  return EffectArray.some(allowed, candidate => candidate === value);
+}
+
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
-  if (typeof value !== 'string' || !allowed.includes(value as T)) invalid(`${label} is invalid`);
-  return value as T;
+  if (typeof value !== 'string' || !isOneOf(value, allowed)) invalid(`${label} is invalid`);
+  return value;
 }
 
 function unique(values: readonly string[], label: string): void {

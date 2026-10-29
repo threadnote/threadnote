@@ -15,6 +15,9 @@ import {
   type CursorWorkloadAttestation,
   type CursorWorkloadClaims,
 } from '@threadnote/remote-memory/cursor_oidc';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Array as EffectArray} from 'effect';
 
 const ISSUER = 'https://api.cursor.com';
 const AUDIENCE = 'https://memory.example.test/attest/cursor';
@@ -258,10 +261,10 @@ describe('Cursor workload JWT verification', () => {
   it.each([
     ['cloud_agent_id', {cloud_agent_id: 'agent id with spaces'}],
     ['cloud_agent_id', {cloud_agent_id: 'agent\nignore-previous-instructions'}],
-    ['cloud_agent_id', {cloud_agent_id: `agent-${'x'.repeat(124)}`}],
+    ['cloud_agent_id', {cloud_agent_id: `agent-${Effect.pipe('x', EffectString.repeat(124))}`}],
     ['turn_id', {turn_id: 'turn/with/path'}],
     ['turn_id', {turn_id: 'turn token=secret-looking-value'}],
-    ['turn_id', {turn_id: `turn-${'x'.repeat(124)}`}],
+    ['turn_id', {turn_id: `turn-${Effect.pipe('x', EffectString.repeat(124))}`}],
   ])('rejects a non-opaque %s before it can enter a public receipt', async (_claim, overrides) => {
     await expectForbidden(await cursorToken(overrides));
   });
@@ -336,8 +339,8 @@ describe('Cursor challenge and persisted attestation lifecycle', () => {
       completeCursorAttestation(store, verifier, principal, {challengeId: challenge.challengeId, token}),
     ]);
 
-    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1);
-    expect(outcomes.filter(outcome => outcome.status === 'rejected')).toHaveLength(1);
+    expect(EffectArray.filter(outcomes, outcome => outcome.status === 'fulfilled')).toHaveLength(1);
+    expect(EffectArray.filter(outcomes, outcome => outcome.status === 'rejected')).toHaveLength(1);
     expect(store.consumed).toEqual(new Set([challenge.challengeId]));
     expect(store.attestations).toHaveLength(1);
   });
@@ -379,7 +382,7 @@ describe('Cursor challenge and persisted attestation lifecycle', () => {
     await expect(
       completeCursorAttestation(store, verifier, principal, {
         challengeId: challenge.challengeId,
-        token: 'x'.repeat(16 * 1024 + 1),
+        token: Effect.pipe('x', EffectString.repeat(16 * 1024 + 1)),
       }),
     ).rejects.toMatchObject({code: 'invalid_request', status: 400});
     expect(store.attempts.has(challenge.challengeId)).toBe(false);

@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {codeGraphEmbeddingDemandSchemaState, initializeCodeGraphEmbeddingDemandSchema} from '../../vector/demand.js';
 import {DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -236,7 +237,8 @@ const ensureCurrentCodeGraphQueryIndexes = Effect.fn('codeGraph.ensureCurrentQue
   yield* sql.unsafe('DROP INDEX IF EXISTS edges_target');
   yield* ensureCodeGraphQueryIndexes(
     sql,
-    CODE_GRAPH_QUERY_INDEX_DEFINITIONS.filter(
+    EffectArray.filter(
+      CODE_GRAPH_QUERY_INDEX_DEFINITIONS,
       definition => definition.name === 'edges_target_resolved' || definition.name === 'edges_evidence_path',
     ),
   );
@@ -292,8 +294,8 @@ const migratePersistentExtensionTables = Effect.fn('codeGraph.migratePersistentE
         yield* observe?.('migrated-query-indexes') ?? Effect.void;
       }
       if (revisionPlan.state === 'upgrade' && revisionPlan.route === 'bridge-build-owner-instance') {
-        const ownerInstances = PERSISTENT_EXTENSION_TABLES.find(
-          table => table.name === 'snapshot_build_owner_instances',
+        const ownerInstances = Option.getOrUndefined(
+          EffectArray.findFirst(PERSISTENT_EXTENSION_TABLES, table => table.name === 'snapshot_build_owner_instances'),
         );
         if (ownerInstances === undefined) {
           return yield* CodeGraphStoreError.of('Persistent build owner instance schema is unavailable.');
@@ -308,7 +310,7 @@ const migratePersistentExtensionTables = Effect.fn('codeGraph.migratePersistentE
         }
       }
       if (revisionPlan.state === 'upgrade' && revisionPlan.route === 'extend-checkpoint-import') {
-        const checkpointTables = PERSISTENT_EXTENSION_TABLES.filter(table => table.group === 'checkpoint');
+        const checkpointTables = EffectArray.filter(PERSISTENT_EXTENSION_TABLES, table => table.group === 'checkpoint');
         for (const table of checkpointTables) {
           const inspection = yield* persistentExtensionTableInspection(sql, table);
           if (inspection.exists && !inspection.compatible) {
@@ -365,7 +367,9 @@ const migratePersistentExtensionTables = Effect.fn('codeGraph.migratePersistentE
           // bounded maintenance collector instead of being dropped in this
           // schema transaction.
           yield* sql.unsafe(`ALTER TABLE building_references RENAME TO ${LEGACY_BUILDING_REFERENCES_V3_TABLE}`);
-          const currentReferences = PERSISTENT_EXTENSION_TABLES.find(table => table.name === 'building_references');
+          const currentReferences = Option.getOrUndefined(
+            EffectArray.findFirst(PERSISTENT_EXTENSION_TABLES, table => table.name === 'building_references'),
+          );
           if (currentReferences === undefined) {
             return yield* CodeGraphStoreError.of('Current persistent reference schema is unavailable.');
           }
@@ -373,7 +377,10 @@ const migratePersistentExtensionTables = Effect.fn('codeGraph.migratePersistentE
         }
       }
       const inspections = yield* inspectPersistentExtensionTables(sql);
-      const extensionSchemaCompatible = inspections.every(inspection => inspection.exists && inspection.compatible);
+      const extensionSchemaCompatible = EffectArray.every(
+        inspections,
+        inspection => inspection.exists && inspection.compatible,
+      );
       if (
         codeGraphPersistentSchemaSupports(recordedRevision, 'direct-current-contract-adoption') &&
         extensionSchemaCompatible
@@ -398,15 +405,22 @@ const migratePersistentExtensionTables = Effect.fn('codeGraph.migratePersistentE
         return;
       }
       const incompatibleGroups = new Set(
-        inspections
-          .filter(inspection => inspection.exists && !inspection.compatible)
-          .map(inspection => inspection.group),
+        EffectArray.map(
+          EffectArray.filter(
+            inspections,
+            (inspection, __effectArrayIndex) =>
+              __effectArrayIndex in inspections && inspection.exists && !inspection.compatible,
+          ),
+          inspection => inspection.group,
+        ),
       );
-      const missingTable = inspections.some(inspection => !inspection.exists);
-      const lexicalReadSurfaceMissing = inspections.some(
+      const missingTable = EffectArray.some(inspections, inspection => !inspection.exists);
+      const lexicalReadSurfaceMissing = EffectArray.some(
+        inspections,
         inspection => inspection.group === 'lexical' && !inspection.exists,
       );
-      const crossRepositoryAuthorityUnavailable = inspections.some(
+      const crossRepositoryAuthorityUnavailable = EffectArray.some(
+        inspections,
         inspection => inspection.group === 'cross-repository' && (!inspection.exists || !inspection.compatible),
       );
       const crossRepositorySnapshotAuthorityLost =

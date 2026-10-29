@@ -1,41 +1,42 @@
+import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Effect, FileSystem, Layer, Path, Ref} from 'effect';
+import {Context, Effect, FileSystem, Layer, Path, Ref, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
+import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
+import {SqlError} from 'effect/sql/SqlError';
 import * as FC from 'fast-check';
 import {describe, expect} from 'vitest';
 import {
   observeCodeGraphAdmissionEnvironment,
   recordCodeGraphSnapshotAdmission,
 } from '@threadnote/graph/admission_freshness';
-import {CodeGraphEmbeddingIndex, type CodeGraphEmbeddingIndexShape} from '@threadnote/graph/embedding';
-import {
-  CodeGraphIndexer,
-  extractorSetIdentityFromPackProvenance,
-  type CodeGraphIndexerShape,
-} from '@threadnote/graph/indexer';
+import {CodeGraphEmbeddingIndex} from '@threadnote/graph/embedding';
+import {CodeGraphIndexer, extractorSetIdentityFromPackProvenance} from '@threadnote/graph/indexer';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
 import {CodeGraphQueryService, type CodeGraphInspectOptions} from '@threadnote/graph/query';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
-import {CodeGraphStore, type CodeGraphStoreShape} from '@threadnote/graph/store';
-import type {CodeGraphQueryNode, CodeGraphSnapshot} from '@threadnote/graph/types';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {CodeGraphStoreTransientIoError, type CodeGraphQueryNode, type CodeGraphSnapshot} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const platform = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer, CodeGraphLanguagePackRegistry.layer);
 const dependencies = Layer.merge(platform, TestCommandExecutorLayer.pipe(Layer.provide(platform)));
 const node: CodeGraphQueryNode = {
   contentHash: 'fixture',
   exported: true,
-  id: `cgs_${'a'.repeat(32)}`,
+  id: `cgs_${Effect2.pipe('a', EffectString.repeat(32))}`,
   kind: 'function',
   language: 'typescript',
   name: 'value',
@@ -49,6 +50,8 @@ const operations = ['query', 'node', 'neighbors', 'explain', 'path', 'impact'] a
 // Real Git and admission receipts keep the currentness contract observable; only graph storage and indexing are modeled.
 const makeFixture = Effect.fn('test.makeQueryRuntimeFixture')(function* () {
   const fixtureContext = yield* Effect.context<Layer.Success<typeof dependencies>>();
+  const readSqlContext = yield* Layer.build(SqliteClient.layer({disableWAL: true, filename: ':memory:'}));
+  const readSql = Context.get(readSqlContext, SqlClient.SqlClient);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const packs = yield* CodeGraphLanguagePackRegistry;
@@ -81,7 +84,7 @@ const makeFixture = Effect.fn('test.makeQueryRuntimeFixture')(function* () {
     edgeCount: 0,
     extractorSet: extractorSetIdentityFromPackProvenance([]),
     fileCount: 1,
-    id: `cgsn_${'1'.repeat(40)}`,
+    id: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
     repositoryId: identity.repositoryId,
     state: 'ready',
     symbolCount: 1,
@@ -92,9 +95,6 @@ const makeFixture = Effect.fn('test.makeQueryRuntimeFixture')(function* () {
   const failProvenance = yield* Ref.make(false);
   const failRead = yield* Ref.make(false);
   const counters = yield* Ref.make({indexed: 0, provenance: 0, acquired: 0, released: 0, strict: 0});
-  const readSql = {
-    withTransaction: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
-  } as unknown as SqlClient.SqlClient;
   const record = (field: 'indexed' | 'provenance' | 'acquired' | 'released' | 'strict') =>
     Ref.update(counters, value => ({...value, [field]: value[field] + 1}));
   const admission = (environment?: string) =>
@@ -108,29 +108,36 @@ const makeFixture = Effect.fn('test.makeQueryRuntimeFixture')(function* () {
       );
     }).pipe(Effect.provide(fixtureContext));
   yield* admission();
-  const store = CodeGraphStore.of({
+  const store = {
     readySnapshot: () => Ref.get(ready),
     readySnapshotById: () => Ref.get(ready),
     snapshotPackProvenance: () =>
       Effect.gen(function* () {
         yield* record('provenance');
-        if (yield* Ref.get(failProvenance)) return yield* TestError.make({message: 'provenance read failed'});
+        if (yield* Ref.get(failProvenance))
+          return yield* CodeGraphStoreTransientIoError.of('provenance read failed', {operation: 'snapshot provenance'});
         return (yield* Ref.get(valid)) ? [] : undefined;
       }),
     acquireSnapshotLease: () => record('acquired').pipe(Effect.as('lease')),
     releaseSnapshotLease: () => record('released'),
     symbolsByIds: (_database: string, _snapshot: string, ids: readonly string[]) =>
       Effect.gen(function* () {
-        if (yield* Ref.get(failRead)) return yield* TestError.make({message: 'graph read failed'});
+        if (yield* Ref.get(failRead))
+          return yield* CodeGraphStoreTransientIoError.of('graph read failed', {operation: 'symbol read'});
         return ids.includes(node.id) ? [node] : [];
       }),
     searchSymbolsMany: () => Effect.succeed([[node]]),
     searchSymbolsByPaths: () => Effect.succeed([[node]]),
     edgesForNodes: () => Effect.succeed([]),
-    withSession: (_database: string, use: Effect.Effect<unknown, unknown, unknown>) =>
-      use.pipe(Effect.provideService(SqlClient.SqlClient, readSql)),
-  } as unknown as CodeGraphStoreShape);
-  const indexer = CodeGraphIndexer.of({
+    withSession: <A, E, R>(_database: string, use: Effect.Effect<A, E, R | SqlClient.SqlClient>) =>
+      use.pipe(
+        Effect.provideService(SqlClient.SqlClient, readSql),
+        Effect.catchIf(Schema.is(SqlError), error =>
+          Effect.fail(CodeGraphStoreTransientIoError.of(error.message ?? 'Graph query transaction failed.')),
+        ),
+      ),
+  };
+  const indexer = {
     index: () =>
       Effect.gen(function* () {
         yield* record('indexed');
@@ -138,25 +145,19 @@ const makeFixture = Effect.fn('test.makeQueryRuntimeFixture')(function* () {
         yield* Ref.set(valid, true);
         yield* Ref.set(failProvenance, false);
         yield* admission();
-      }),
+      }).pipe(Effect.as({diagnostics: [], durationMs: 0, identity, reusedFiles: 0, skippedFiles: 0, snapshot})),
     ensureCommit: () => Effect.die(TestError.make({message: 'unexpected historical build'})),
-  } as unknown as CodeGraphIndexerShape);
+  };
   const services = Layer.mergeAll(
     dependencies,
-    Layer.succeed(CodeGraphStore, store),
-    Layer.succeed(CodeGraphIndexer, indexer),
-    Layer.succeed(
-      CodeGraphMaintenanceCoordinator,
-      CodeGraphMaintenanceCoordinator.of({
-        request: () => Effect.die(TestError.make({message: 'unexpected maintenance'})),
-      } as unknown as Context.Service.Shape<typeof CodeGraphMaintenanceCoordinator>),
-    ),
-    Layer.succeed(
-      CodeGraphEmbeddingIndex,
-      CodeGraphEmbeddingIndex.of({
-        search: () => Effect.succeed(new Map()),
-      } as unknown as CodeGraphEmbeddingIndexShape),
-    ),
+    Layer.mock(CodeGraphStore, store),
+    Layer.mock(CodeGraphIndexer, indexer),
+    Layer.mock(CodeGraphMaintenanceCoordinator, {
+      request: () => Effect.die(TestError.make({message: 'unexpected maintenance'})),
+    }),
+    Layer.mock(CodeGraphEmbeddingIndex, {
+      search: () => Effect.succeed(new Map()),
+    }),
   );
   const context = yield* Layer.build(CodeGraphQueryService.layer.pipe(Layer.provide(services)));
   const query = Context.get(context, CodeGraphQueryService);
@@ -207,7 +208,7 @@ describe('query runtime probe policy', () => {
         strictFreshness: false,
         statusObservation: {identity: fixture.identity, projectScopeObserved: true},
       });
-      expect(result.nodes.map(candidate => candidate.id)).toContain(node.id);
+      expect(EffectArray.map(result.nodes, candidate => candidate.id)).toContain(node.id);
       const missingProof = yield* fixture
         .inspect({
           manifestPath,
@@ -229,7 +230,7 @@ describe('query runtime probe policy', () => {
             yield* Ref.set(fixture.counters, {indexed: 0, provenance: 0, acquired: 0, released: 0, strict: 0});
             const result = yield* fixture.inspect({operation, refresh, strictFreshness});
             expect(result.freshness).toBe(refresh === false && !strictFreshness ? 'deferred' : 'current');
-            expect(result.nodes.map(value => value.id)).toContain(node.id);
+            expect(EffectArray.map(result.nodes, value => value.id)).toContain(node.id);
             const rebuildMode = refresh === true || operation === 'path' || operation === 'impact';
             expect(yield* Ref.get(fixture.counters)).toEqual({
               indexed: 0,
@@ -275,7 +276,7 @@ describe('query runtime probe policy', () => {
           const builds = !available || (!valid && refreshesStale);
           const observed = refresh !== false || (strictFreshness ?? (operation === 'path' || operation === 'impact'));
           expect(result.freshness).toBe(!valid && !builds ? 'stale' : observed ? 'current' : 'deferred');
-          expect(result.nodes.map(value => value.id)).toContain(node.id);
+          expect(EffectArray.map(result.nodes, value => value.id)).toContain(node.id);
           expect(yield* Ref.get(fixture.counters)).toMatchObject({indexed: builds ? 1 : 0, acquired: 0, released: 0});
         }).pipe(provideTestLayer(dependencies), TestClock.withLive),
       // Four generated fixtures per operation: 24 total, separately bounded by the ordinary test timeout.
@@ -350,13 +351,14 @@ describe('query runtime probe policy', () => {
     () =>
       Effect.gen(function* () {
         const fixture = yield* makeFixture();
-        yield* fixture.admission('0'.repeat(64));
+        yield* fixture.admission(Effect2.pipe('0', EffectString.repeat(64)));
         expect((yield* fixture.inspect()).freshness).toBe('stale');
         yield* fixture.admission();
         const strict = yield* fixture.inspect({
           strictFreshness: true,
           interlock: {
-            afterSnapshotSelected: () => fixture.admission('0'.repeat(64)).pipe(Effect.orDie),
+            afterSnapshotSelected: () =>
+              fixture.admission(Effect2.pipe('0', EffectString.repeat(64))).pipe(Effect.orDie),
           },
         });
         expect(strict.freshness).toBe('stale');

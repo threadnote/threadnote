@@ -1,3 +1,6 @@
+import {Array as EffectArray} from 'effect';
+import {pipe as EffectArrayPipe} from 'effect';
+
 import {Effect, FileSystem, Option, Path, Result} from 'effect';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
@@ -25,6 +28,7 @@ import {
   automaticMaintenanceSections,
   MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE,
   type AutomaticMaintenanceEvidenceV1,
+  type AutomaticMaintenanceParagraph,
 } from '@threadnote/memory/automatic-maintenance';
 import {
   MAX_CONSOLIDATION_SOURCES,
@@ -60,6 +64,8 @@ import {
   AutomaticPreparationError,
   type PreparedMemoryV1,
 } from './maintenance_preparation_state.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 type InventorySnapshot = Effect.Success<ReturnType<typeof prepareContextMaintenanceInventory>>;
 type Candidate = PreparedMemoryV1['candidates'][number];
@@ -82,10 +88,19 @@ const hash = (value: unknown) => sha256HexSync(JSON.stringify(value));
 const RELATED_SOURCE_BUDGET = 8;
 const SOURCE_SELECTOR_BUDGET = RELATED_SOURCE_BUDGET + MAX_CONSOLIDATION_SOURCES + MAX_MEMORY_RELATIONS;
 
+function sharedMemoryScopeSegment(uri: string): string | undefined {
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Native split indexing preserves the optional URI segment boundary.
+  return uri.split('/shared/')[1]?.split('/')[0];
+}
+
 /** Match public memory reads, narrowed to the already eligible team for a shared target. */
 export function automaticMemorySourceUriScopes(config: RuntimeConfig, record: MemoryRecord): readonly string[] {
   const root = `threadnote://user/${uriSegment(config.user)}/memories`;
-  return [isSharedMemoryUri(record.uri) ? `${root}/shared/${record.uri.split('/shared/')[1].split('/')[0]}` : root];
+  return [
+    isSharedMemoryUri(record.uri)
+      ? `${root}/shared/${Effect2.pipe(Effect2.pipe(record.uri, EffectString.split('/shared/'))[1], EffectString.split('/'))[0]}`
+      : root,
+  ];
 }
 
 /** Meaning-bearing policy only: incidental timestamps and other assessments cannot recursively churn support. */
@@ -124,11 +139,13 @@ function preservedOrigin(record: MemoryRecord): PreparedMemoryV1['origin'] {
 
 function reviewedOriginSupports(origin: PreparedMemoryV1['origin']) {
   const receipt = origin?.receipt.version === 2 ? origin.receipt.origin : origin?.receipt;
-  return (
-    receipt?.reviews
-      .flatMap(review => review.supports)
-      .sort((a, b) => a.sourceUri.localeCompare(b.sourceUri) || a.fragment - b.fragment) ?? []
-  );
+  return receipt
+    ? EffectArrayPipe(receipt.reviews, __effectFlatMapValues =>
+        EffectArray.flatMap(__effectFlatMapValues, (review, __effectFlatMapIndex) =>
+          __effectFlatMapIndex in __effectFlatMapValues ? review.supports : [],
+        ),
+      ).sort((a, b) => Effect2.pipe(a.sourceUri, EffectString.localeCompare(b.sourceUri)) || a.fragment - b.fragment)
+    : [];
 }
 
 /** Select references only; each reader still authorizes and fences distinct canonical sources. */
@@ -137,12 +154,18 @@ export function selectAutomaticMemorySourceReferences(record: MemoryRecord) {
   const original = origin?.receipt.version === 2 ? origin.receipt.origin : origin?.receipt;
   const refs = [
     ...new Set([
-      ...(record.metadata.reviewedSupport?.active.sources ?? [])
-        .flatMap(entry => (entry.source.kind === 'memory' ? [entry.source.uri] : []))
-        .sort(),
-      ...reviewedOriginSupports(origin).map(support => support.sourceUri),
-      ...(original?.sources ?? []).map(source => source.uri).sort(),
-      ...(record.metadata.relations ?? []).map(relation => relation.uri).sort(),
+      ...EffectArrayPipe(record.metadata.reviewedSupport?.active.sources ?? [], __effectFlatMapValues =>
+        EffectArray.flatMap(__effectFlatMapValues, (entry, __effectFlatMapIndex2) =>
+          __effectFlatMapIndex2 in __effectFlatMapValues
+            ? entry.source.kind === 'memory'
+              ? [entry.source.uri]
+              : []
+            : [],
+        ),
+      ).sort(),
+      ...EffectArray.map(reviewedOriginSupports(origin), support => support.sourceUri),
+      ...EffectArray.map(original?.sources ?? [], source => source.uri).sort(),
+      ...EffectArray.map(record.metadata.relations ?? [], relation => relation.uri).sort(),
     ]),
   ];
   // Reviewed-origin references are a subset of the validated receipt's source vector.
@@ -153,24 +176,23 @@ export function selectAutomaticMemorySourceReferences(record: MemoryRecord) {
 }
 
 function codeRelevantRevision(candidates: readonly Candidate[], evidenceId: string, symbol: boolean) {
-  return candidates
-    .flatMap(candidate => {
-      const excerpt = candidate.excerpt;
-      if (candidate.evidenceId !== evidenceId || excerpt?.provenance !== 'current-verified') return [];
-      return [
-        {
-          repositoryId: excerpt.source.repositoryId,
-          path: excerpt.source.path,
-          sourceDirty: excerpt.source.sourceDirty,
-          // A bounded prefix cannot prove unchanged cited support; use the already verified full file hash.
-          contentHash:
-            symbol && !excerpt.truncated && excerpt.supportsCitation ? excerpt.excerptHash : excerpt.fileBytesHash,
-          truncated: excerpt.truncated,
-          supportsCitation: excerpt.supportsCitation,
-        },
-      ];
-    })
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return EffectArray.flatMap(candidates, (candidate, __effectFlatMapIndex) => {
+    if (!(__effectFlatMapIndex in candidates)) return [];
+    const excerpt = candidate.excerpt;
+    if (candidate.evidenceId !== evidenceId || excerpt?.provenance !== 'current-verified') return [];
+    return [
+      {
+        repositoryId: excerpt.source.repositoryId,
+        path: excerpt.source.path,
+        sourceDirty: excerpt.source.sourceDirty,
+        // A bounded prefix cannot prove unchanged cited support; use the already verified full file hash.
+        contentHash:
+          symbol && !excerpt.truncated && excerpt.supportsCitation ? excerpt.excerptHash : excerpt.fileBytesHash,
+        truncated: excerpt.truncated,
+        supportsCitation: excerpt.supportsCitation,
+      },
+    ];
+  }).sort((a, b) => Effect2.pipe(JSON.stringify(a), EffectString.localeCompare(JSON.stringify(b))));
 }
 
 /** Pure projection. Exact text reuse is a provisional mapping; relations and search ranks never imply entailment. */
@@ -198,10 +220,13 @@ export function prepareAutomaticMemory(
   let omittedSources = input.omittedSources ?? 0;
   const origin = preservedOrigin(record);
   const originSupports = reviewedOriginSupports(origin);
-  const originUris = new Set(originSupports.map(support => support.sourceUri));
+  const originUris = new Set(EffectArray.map(originSupports, support => support.sourceUri));
   const evidence = [...prepareMemoryMaintenanceBasis(record).assessment.evidence];
   for (const item of input.evidence ?? []) {
-    const index = evidence.findIndex(prior => prior.id === item.id);
+    const index = Option.getOrElse(
+      EffectArray.findFirstIndex(evidence, prior => prior.id === item.id),
+      () => -1,
+    );
     if (index < 0) evidence.push(item);
     else evidence[index] = item;
   }
@@ -214,7 +239,9 @@ export function prepareAutomaticMemory(
   const sections = automaticMaintenanceSections(record.body);
   if (!sections) omit('target-paragraph-bounds');
   for (const source of [...(input.sources ?? [])].sort(
-    (a, b) => Number(originUris.has(b.uri)) - Number(originUris.has(a.uri)) || a.uri.localeCompare(b.uri),
+    (a, b) =>
+      Number(originUris.has(b.uri)) - Number(originUris.has(a.uri)) ||
+      Effect2.pipe(a.uri, EffectString.localeCompare(b.uri)),
   )) {
     const sourceSections = automaticMaintenanceSections(source.body);
     if (!sourceSections) {
@@ -225,11 +252,22 @@ export function prepareAutomaticMemory(
     sourceContexts.push(automaticPreparationMemoryContext(source));
     const preferred: number[] = [];
     const receipt = origin?.receipt.version === 2 ? origin.receipt.origin : origin?.receipt;
-    for (const support of originSupports.filter(item => item.sourceUri === source.uri)) {
-      const captured = receipt?.sources.find(item => item.uri === support.sourceUri)?.fragments[support.fragment];
+    for (const support of EffectArray.filter(
+      originSupports,
+      (item, __effectArrayIndex) => __effectArrayIndex in originSupports && item.sourceUri === source.uri,
+    )) {
+      const captured = Effect2.Option.getOrUndefined(
+        Effect2.Option.map(Effect2.Option.fromNullishOr(receipt), __effectReceipt =>
+          Effect2.Option.getOrUndefined(
+            EffectArray.findFirst(__effectReceipt.sources, item => item.uri === support.sourceUri),
+          ),
+        ),
+      )?.fragments[support.fragment];
       if (captured !== undefined && sourceSections[support.fragment] === captured) preferred.push(support.fragment);
       else {
-        const matches = sourceSections.flatMap((text, ordinal) => (text === captured ? [ordinal] : []));
+        const matches = EffectArray.flatMap(sourceSections, (text, ordinal) =>
+          ordinal in sourceSections ? (text === captured ? [ordinal] : []) : [],
+        );
         if (matches.length === 1) preferred.push(matches[0]);
         else {
           omit(matches.length ? 'origin-current-fragment-ambiguous' : 'origin-current-fragment-unresolved');
@@ -242,7 +280,10 @@ export function prepareAutomaticMemory(
       const text = sourceSections[ordinal];
       const descriptor = memoryMaintenanceFragmentSource(source, ordinal);
       const id = automaticMaintenanceEvidenceId(descriptor);
-      const existing = evidence.findIndex(item => item.id === id);
+      const existing = Option.getOrElse(
+        EffectArray.findFirstIndex(evidence, item => item.id === id),
+        () => -1,
+      );
       if ((existing < 0 && evidence.length >= evidenceBudget) || candidates.length >= candidateBudget) {
         omit('evidence-budget');
         omittedSources++;
@@ -263,29 +304,35 @@ export function prepareAutomaticMemory(
       candidates.push({evidenceId: id, text});
     }
   }
-  const inferences = (sections ?? []).map((section, ordinal) => {
-    const ids = candidates
-      .filter(
-        candidate =>
+  const inferences = EffectArray.map(sections ?? [], (section, ordinal) => {
+    const ids = EffectArray.map(
+      EffectArray.filter(
+        candidates,
+        (candidate, __effectArrayIndex4) =>
+          __effectArrayIndex4 in candidates &&
           candidate.text === section &&
-          evidence.some(
+          EffectArray.some(
+            evidence,
             item =>
               item.id === candidate.evidenceId && item.source.kind === 'memory' && item.availability === 'available',
           ),
-      )
-      .map(candidate => candidate.evidenceId);
+      ),
+      candidate => candidate.evidenceId,
+    );
     const approved = record.metadata.reviewedSupport?.active.paragraphs[ordinal];
     const retained =
       approved &&
       approved.evidenceIds.length > 0 &&
-      approved.evidenceIds.every(id => {
-        const descriptor = record.metadata.reviewedSupport!.active.sources.find(source => source.id === id);
+      EffectArray.every(approved.evidenceIds, id => {
+        const descriptor = Option.getOrUndefined(
+          EffectArray.findFirst(record.metadata.reviewedSupport!.active.sources, source => source.id === id),
+        );
         if (!descriptor) return false;
-        return candidates.some(candidate => {
+        return EffectArray.some(candidates, candidate => {
           if (candidate.evidenceId !== id) return false;
           if (descriptor.source.kind === 'memory')
             return (
-              evidence.some(item => item.id === id && item.availability === 'available') &&
+              EffectArray.some(evidence, item => item.id === id && item.availability === 'available') &&
               sha256HexSync(candidate.text) === descriptor.source.fragment.hash
             );
           if (descriptor.source.kind === 'code')
@@ -317,14 +364,17 @@ export function prepareAutomaticMemory(
     const excerpt = candidate.excerpt;
     if (
       excerpt?.provenance !== 'current-verified' ||
-      !evidence.some(item => item.id === candidate.evidenceId && item.source.kind === 'code')
+      !EffectArray.some(evidence, item => item.id === candidate.evidenceId && item.source.kind === 'code')
     )
       continue;
     if (excerpt.truncated) omit('current-code-excerpt-truncated', candidate.evidenceId);
     if (!excerpt.supportsCitation) omit('current-code-citation-unsupported', candidate.evidenceId);
   }
   const uniqueOmissions = [...new Set(omissions)].sort();
-  omittedSources += evidence.filter(item => item.availability !== 'available').length;
+  omittedSources += EffectArray.filter(
+    evidence,
+    (item, __effectArrayIndex) => __effectArrayIndex in evidence && item.availability !== 'available',
+  ).length;
   const assessment = prepareMemoryMaintenanceBasis(record, {
     readOnly: isSharedMemoryUri(record.uri) || record.metadata.visibility === 'external',
     evidence,
@@ -337,10 +387,15 @@ export function prepareAutomaticMemory(
     },
   }).assessment;
   // Evidence IDs include whole canonical hashes. Generation suppression instead binds selected text and relevant policy.
-  const semanticEvidence = assessment.evidence
-    .filter(item => !ignoredEvidenceIds.has(item.id))
-    .map(item => {
-      const candidate = candidates.find(entry => entry.evidenceId === item.id);
+  const semanticEvidence = EffectArray.map(
+    EffectArrayPipe(assessment.evidence, __effectArrayValues =>
+      EffectArray.filter(
+        __effectArrayValues,
+        (item, __effectArrayIndex3) => __effectArrayIndex3 in __effectArrayValues && !ignoredEvidenceIds.has(item.id),
+      ),
+    ),
+    item => {
+      const candidate = Option.getOrUndefined(EffectArray.findFirst(candidates, entry => entry.evidenceId === item.id));
       const source = item.source;
       return {
         availability: item.availability,
@@ -365,14 +420,14 @@ export function prepareAutomaticMemory(
               : source,
         textHash: source.kind !== 'code' && candidate ? sha256HexSync(candidate.text) : null,
       };
-    })
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    },
+  ).sort((a, b) => Effect2.pipe(JSON.stringify(a), EffectString.localeCompare(JSON.stringify(b))));
   const relevantRevision = hash({
     mapper: AUTOMATIC_PREPARATION_MAPPER,
     target: automaticPreparationMemoryContext(record),
     body: assessment.target.bodyHash,
     relations: [...(record.metadata.relations ?? [])].sort((a, b) =>
-      JSON.stringify(a).localeCompare(JSON.stringify(b)),
+      Effect2.pipe(JSON.stringify(a), EffectString.localeCompare(JSON.stringify(b))),
     ),
     preparation: assessment.preparation,
     origin: origin?.receiptHash,
@@ -380,7 +435,7 @@ export function prepareAutomaticMemory(
     sources: sourceContexts,
     semanticEvidence,
     omissions: [...new Set(generationOmissions)].sort(),
-    paragraphs: assessment.paragraphs.map(p => ({
+    paragraphs: EffectArray.map(assessment.paragraphs, p => ({
       ordinal: p.ordinal,
       hash: p.hash,
       role: p.role,
@@ -390,19 +445,20 @@ export function prepareAutomaticMemory(
       validity: p.validity,
     })),
   });
+  const paragraphs: readonly AutomaticMaintenanceParagraph[] = assessment.paragraphs;
   return {
     version: 1,
     mapper: AUTOMATIC_PREPARATION_MAPPER,
     assessment,
     reads: [...(input.reads ?? [{uri: record.uri, hash: sha256HexSync(record.content)}])].sort((a, b) =>
-      a.uri.localeCompare(b.uri),
+      Effect2.pipe(a.uri, EffectString.localeCompare(b.uri)),
     ),
     scopeRevision: input.scopeRevision,
     relevantRevision,
     candidates,
     ...(origin ? {origin} : {}),
     omissions: uniqueOmissions,
-    state: assessment.paragraphs.some(p => p.role === 'unknown' || p.currentSupport === 'unresolved')
+    state: EffectArray.some(paragraphs, p => p.role === 'unknown' || p.currentSupport === 'unresolved')
       ? 'waiting-mapping'
       : 'assessed',
   };
@@ -433,15 +489,21 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
   const citations = [...(record.metadata.codeCitations ?? [])];
   for (const descriptor of record.metadata.reviewedSupport?.active.sources ?? []) {
     const source = descriptor.source;
-    if (source.kind === 'code' && !citations.some(citation => citation.id === source.citation.id))
+    if (source.kind === 'code' && !EffectArray.some(citations, citation => citation.id === source.citation.id))
       citations.push(source.citation);
   }
-  const recordedIds = new Set(citations.map(citation => citation.id));
+  const recordedIds = new Set(EffectArray.map(citations, citation => citation.id));
   const roots = record.metadata.codeCitations ?? [];
-  const active = (record.metadata.reviewedSupport?.active.sources ?? []).flatMap(descriptor =>
-    descriptor.source.kind === 'code' ? [descriptor.source.citation] : [],
+  const active = EffectArrayPipe(record.metadata.reviewedSupport?.active.sources ?? [], __effectFlatMapValues =>
+    EffectArray.flatMap(__effectFlatMapValues, (descriptor, __effectFlatMapIndex2) =>
+      __effectFlatMapIndex2 in __effectFlatMapValues
+        ? descriptor.source.kind === 'code'
+          ? [descriptor.source.citation]
+          : []
+        : [],
+    ),
   );
-  const activeIds = new Set(active.map(citation => citation.id));
+  const activeIds = new Set(EffectArray.map(active, citation => citation.id));
   const ignoredRootIds = new Set<string>();
   const readOmissions = new Map<string, string[]>();
   if (
@@ -468,11 +530,27 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
         omissions.push('code-graph-not-ready');
         return [];
       }
-      const selector = [...(record.metadata.topic ?? record.body)]
-        .map(character => (character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 ? ' ' : character))
-        .join('')
-        .trim()
-        .slice(0, 512);
+      const selector = Effect2.pipe(
+        EffectArray.join(
+          EffectArray.map([...(record.metadata.topic ?? record.body)], character =>
+            Effect2.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect2.Option.getOrElse(() => NaN),
+            ) < 32 ||
+            Effect2.pipe(
+              character,
+              EffectString.charCodeAt(0),
+              Effect2.Option.getOrElse(() => NaN),
+            ) === 127
+              ? ' '
+              : character,
+          ),
+          '',
+        ),
+        EffectString.trim,
+        EffectString.slice(0, 512),
+      );
       if (!selector) {
         omissions.push('code-query-empty');
         return [];
@@ -499,7 +577,7 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
         expectedCallerIdentity: status.identity,
         expectedProjectScope: memoryCodeCitationProjectScopeReceipt(status) ?? {kind: 'full'},
         planOnly: true,
-        refs: nodes.slice(0, 3).map(node => node.id),
+        refs: EffectArray.map(nodes.slice(0, 3), node => node.id),
       });
       return [...captured];
     }).pipe(
@@ -523,7 +601,9 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
     const id = automaticMaintenanceEvidenceId({kind: 'code', citation});
     const recorded = recordedIds.has(citation.id);
     const current = Result.isSuccess(result)
-      ? result.success.excerpts.find(item => item.provenance === 'current-verified')
+      ? Option.getOrUndefined(
+          EffectArray.findFirst(result.success.excerpts, item => item.provenance === 'current-verified'),
+        )
       : undefined;
     evidence.push({
       id,
@@ -540,7 +620,7 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
         uri: `code:${citation.repositoryId}:${citation.id}`,
         hash: hash({
           generation: result.success.generation,
-          excerpts: result.success.excerpts.map(excerpt => [
+          excerpts: EffectArray.map(result.success.excerpts, excerpt => [
             excerpt.provenance,
             excerpt.fileBytesHash,
             excerpt.excerptHash,
@@ -563,21 +643,23 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
     selectors.add(selector);
     // Proving a retained root irrelevant requires a fresh unique current capture even when its active pin reads.
     const needsFreshRootProof =
-      active.filter(pin => automaticSymbolSelectorKey(pin) === selector).length === 1 &&
-      roots.some(pin => !activeIds.has(pin.id) && automaticSymbolSelectorKey(pin) === selector);
+      EffectArray.filter(active, pin => automaticSymbolSelectorKey(pin) === selector).length === 1 &&
+      EffectArray.some(roots, pin => !activeIds.has(pin.id) && automaticSymbolSelectorKey(pin) === selector);
     // An unrelated commit/snapshot must not replace a still-supported canonical source identity.
     if (
       !needsFreshRootProof &&
-      candidates.some(
-        candidate =>
+      EffectArray.some(candidates, candidate =>
+        Boolean(
           candidate.excerpt &&
-          evidence.some(
+          EffectArray.some(
+            evidence,
             item =>
               item.id === candidate.evidenceId &&
               item.source.kind === 'code' &&
               automaticSymbolSelectorKey(item.source.citation) === selector &&
               automaticSupportedSymbolMatchesExcerpt(item.source.citation, candidate.excerpt!),
           ),
+        ),
       )
     )
       continue;
@@ -594,18 +676,26 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
     const captured = current.value;
     // Only a genuinely approved active pin can retain its identity across changed graph/extractor context.
     // The independently captured current source must prove every immutable file and typed-symbol field.
-    const retained = (record.metadata.reviewedSupport?.active.sources ?? []).flatMap(descriptor => {
-      if (descriptor.source.kind !== 'code') return [];
-      const approved = descriptor.source.citation;
-      const excerpt = retainAutomaticApprovedSymbolExcerpt(approved, captured.citation, captured.excerpt);
-      return excerpt ? [{approved, excerpt}] : [];
-    });
+    const activeSources = record.metadata.reviewedSupport?.active.sources ?? [];
+    const retained = EffectArrayPipe(activeSources, __effectFlatMapValues =>
+      EffectArray.flatMap(__effectFlatMapValues, (descriptor, __effectFlatMapIndex) => {
+        if (!(__effectFlatMapIndex in __effectFlatMapValues) || descriptor.source.kind !== 'code') return [];
+        const approved = descriptor.source.citation;
+        const excerpt = retainAutomaticApprovedSymbolExcerpt(approved, captured.citation, captured.excerpt);
+        return excerpt ? [{approved, excerpt}] : [];
+      }),
+    );
     if (retained.length === 1) {
       const {approved, excerpt} = retained[0];
       const approvedId = automaticMaintenanceEvidenceId({kind: 'code', citation: approved});
-      const item = evidence.find(entry => entry.id === approvedId);
-      const read = reads.find(entry => entry.uri === `code:${approved.repositoryId}:${approved.id}`);
-      const ownCandidates = candidates.filter(candidate => candidate.evidenceId === approvedId).length;
+      const item = Option.getOrUndefined(EffectArray.findFirst(evidence, entry => entry.id === approvedId));
+      const read = Option.getOrUndefined(
+        EffectArray.findFirst(reads, entry => entry.uri === `code:${approved.repositoryId}:${approved.id}`),
+      );
+      const ownCandidates = EffectArray.filter(
+        candidates,
+        (candidate, __effectArrayIndex) => __effectArrayIndex in candidates && candidate.evidenceId === approvedId,
+      ).length;
       if (
         item &&
         read &&
@@ -624,7 +714,7 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
       }
     }
     const id = automaticMaintenanceEvidenceId({kind: 'code', citation: captured.citation});
-    if (evidence.some(item => item.id === id)) continue;
+    if (EffectArray.some(evidence, item => item.id === id)) continue;
     if (
       evidence.length >=
         (record.metadata.reviewedSupport ? MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE : MAX_MEMORY_CODE_CITATIONS) ||
@@ -650,7 +740,10 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
   // Keep citation attribution until after scheduling projection: another active failure with the same reason remains.
   const generationOmissions = [
     ...omissions,
-    ...[...readOmissions].filter(([id]) => !ignoredRootIds.has(id)).flatMap(([, reasons]) => reasons),
+    ...EffectArray.flatMap(
+      EffectArray.filter([...readOmissions], ([id]) => !ignoredRootIds.has(id)),
+      ([, reasons]: [string, string[]]) => reasons,
+    ),
   ];
   omissions.push(...[...readOmissions.values()].flat());
   const result: AutomaticCodeEvidence = {
@@ -660,9 +753,16 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
     omissions,
     searchedScopes,
     generation: {
-      ignoredEvidenceIds: evidence
-        .filter(item => item.source.kind === 'code' && ignoredRootIds.has(item.source.citation.id))
-        .map(item => item.id),
+      ignoredEvidenceIds: EffectArray.map(
+        EffectArray.filter(
+          evidence,
+          (item, __effectArrayIndex2) =>
+            __effectArrayIndex2 in evidence &&
+            item.source.kind === 'code' &&
+            ignoredRootIds.has(item.source.citation.id),
+        ),
+        item => item.id,
+      ),
       omissions: generationOmissions,
     },
   };
@@ -682,14 +782,19 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
 ) {
   const cursor = yield* readAutomaticPreparationCursor(config, options.project);
   const uris = selectAutomaticPreparationUris(
-    snapshot.records
-      .filter(
-        record =>
-          record.metadata.status === 'active' &&
-          !isAgentArtifactUri(record.uri) &&
-          (options.project === undefined || (record.metadata.project ?? 'unscoped') === options.project),
-      )
-      .map(record => record.uri),
+    EffectArray.map(
+      EffectArrayPipe(snapshot.records, __effectArrayValues2 =>
+        EffectArray.filter(
+          __effectArrayValues2,
+          (record, __effectArrayIndex5) =>
+            __effectArrayIndex5 in __effectArrayValues2 &&
+            record.metadata.status === 'active' &&
+            !isAgentArtifactUri(record.uri) &&
+            (options.project === undefined || (record.metadata.project ?? 'unscoped') === options.project),
+        ),
+      ),
+      record => record.uri,
+    ),
     cursor.lastUri,
     options.maxRecords ?? 1,
   );
@@ -723,7 +828,11 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
           omittedSources++;
           continue;
         }
-        const relation = target.record.metadata.relations?.find(item => item.uri === ref);
+        const relation = Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(target.record.metadata.relations), findArray =>
+            Option.getOrUndefined(EffectArray.findFirst(findArray, item => item.uri === ref)),
+          ),
+        );
         const policy = relation
           ? resolveMaintenanceRelationPolicy(target.record, relation, snapshot.records, snapshot.complete)
           : undefined;
@@ -760,7 +869,7 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
           (target.record.metadata.project ?? '') !== (projected.metadata.project ?? '') ||
           (isSharedMemoryUri(uri) &&
             (!isSharedMemoryUri(projected.uri) ||
-              uri.split('/shared/')[1]?.split('/')[0] !== projected.uri.split('/shared/')[1]?.split('/')[0])) ||
+              sharedMemoryScopeSegment(uri) !== sharedMemoryScopeSegment(projected.uri))) ||
           projected.metadata.visibility === 'external' ||
           projected.metadata.trust === 'untrusted' ||
           projected.metadata.authority === 'external' ||
@@ -821,18 +930,18 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
       );
       for (const read of reads) {
         const closing = yield* readContextMaintenanceCanonicalRecord(config, read.uri);
-        if (closing.hash !== read.hash) return yield* new AutomaticPreparationError({reason: 'memory-fence-changed'});
+        if (closing.hash !== read.hash) return yield* AutomaticPreparationError.make({reason: 'memory-fence-changed'});
       }
       if (code.reads.length) {
         const closingCode = yield* readCode(target.record, root).pipe(Effect.timeoutOption(2_000));
         if (Option.isNone(closingCode) || hash(closingCode.value.reads) !== hash(code.reads))
-          return yield* new AutomaticPreparationError({reason: 'code-fence-changed'});
+          return yield* AutomaticPreparationError.make({reason: 'code-fence-changed'});
       }
       if (
         openingGeneration !==
         (yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account))
       )
-        return yield* new AutomaticPreparationError({reason: 'memory-fence-changed'});
+        return yield* AutomaticPreparationError.make({reason: 'memory-fence-changed'});
       yield* writePreparedMemory(config, result);
       prepared++;
     }).pipe(Effect.result);
@@ -860,7 +969,7 @@ export const prepareAutomaticMaintenance = Effect.fn('automaticPreparation.prepa
   }
   const automaticRoots = new Map(roots);
   if (Result.isSuccess(manifest)) {
-    const names = manifest.success.projects.map(project => project.name);
+    const names = EffectArray.map(manifest.success.projects, project => project.name);
     for (const name of names) if (names.indexOf(name) !== names.lastIndexOf(name)) automaticRoots.delete(name);
   }
   if (options.caseId === undefined)
@@ -892,22 +1001,28 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
   const target = yield* readContextMaintenanceCanonicalRecord(config, uri);
   const record = target.record;
   if (record.metadata.status !== 'active' || isAgentArtifactUri(uri))
-    return yield* new AutomaticPreparationError({reason: 'memory-fence-changed'});
+    return yield* AutomaticPreparationError.make({reason: 'memory-fence-changed'});
   const manifest = yield* readSeedManifest(config.manifestPath).pipe(Effect.result);
   let root: string | undefined;
   if (Result.isSuccess(manifest)) {
-    const matches = manifest.success.projects.filter(project => project.name === record.metadata.project);
+    const matches = EffectArrayPipe(manifest.success.projects, __effectFilterValues =>
+      EffectArray.filter(
+        __effectFilterValues,
+        (project, __effectFilterIndex) =>
+          __effectFilterIndex in __effectFilterValues && project.name === record.metadata.project,
+      ),
+    );
     if (matches.length === 1) root = yield* expandPath(matches[0].path);
   }
   if (sourceCwd !== undefined) {
     const path = yield* Path.Path;
-    if (!path.isAbsolute(sourceCwd)) return yield* new AutomaticPreparationError({reason: 'code-fence-changed'});
+    if (!path.isAbsolute(sourceCwd)) return yield* AutomaticPreparationError.make({reason: 'code-fence-changed'});
     if (
       root &&
       (yield* (yield* FileSystem.FileSystem).realPath(root)) !==
         (yield* (yield* FileSystem.FileSystem).realPath(sourceCwd))
     )
-      return yield* new AutomaticPreparationError({reason: 'code-fence-changed'});
+      return yield* AutomaticPreparationError.make({reason: 'code-fence-changed'});
     root = sourceCwd;
   }
   const {refs, omittedSources: omittedSelectors} = selectAutomaticMemorySourceReferences(record);
@@ -932,8 +1047,12 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
   let omittedSources = omittedSelectors;
   const omissions: string[] = omittedSources ? ['related-source-budget'] : [];
   for (const ref of refs) {
-    const stored = record.metadata.reviewedSupport?.active.sources.find(
-      entry => entry.source.kind === 'memory' && entry.source.uri === ref,
+    const stored = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(record.metadata.reviewedSupport?.active.sources), findArray2 =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(findArray2, entry => entry.source.kind === 'memory' && entry.source.uri === ref),
+        ),
+      ),
     );
     const portable =
       stored?.source.kind === 'memory' && stored.locator
@@ -951,7 +1070,11 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
     }
     const identity = route && Result.isSuccess(route) ? route.success[0] : undefined;
     const actualUri = portable ? portable.uri : identity!.canonicalUri;
-    if (!portable && isSharedMemoryUri(uri) && !allowedUriScopes.some(scope => resourceIdIsWithin(actualUri, scope))) {
+    if (
+      !portable &&
+      isSharedMemoryUri(uri) &&
+      !EffectArray.some(allowedUriScopes, scope => resourceIdIsWithin(actualUri, scope))
+    ) {
       omittedSources++;
       omissions.push('related-source-policy');
       continue;
@@ -1002,8 +1125,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       source.metadata.topicMaintenanceError ||
       source.metadata.reviewedSupportError ||
       (isSharedMemoryUri(uri) &&
-        (!isSharedMemoryUri(source.uri) ||
-          uri.split('/shared/')[1]?.split('/')[0] !== source.uri.split('/shared/')[1]?.split('/')[0]))
+        (!isSharedMemoryUri(source.uri) || sharedMemoryScopeSegment(uri) !== sharedMemoryScopeSegment(source.uri)))
     ) {
       omittedSources++;
       omissions.push('related-source-policy');
@@ -1052,11 +1174,11 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
           (yield* resolveAutomaticSharedMemorySource(config, portable.source, portable.locator)).record.content,
         )
       : (yield* readContextMaintenanceCanonicalRecord(config, read.uri)).hash;
-    if (actual !== read.hash) return yield* new AutomaticPreparationError({reason: 'memory-fence-changed'});
+    if (actual !== read.hash) return yield* AutomaticPreparationError.make({reason: 'memory-fence-changed'});
   }
   yield* verifyAuthoredMemoryRelationTargetIdentities(
     config,
-    [...liveSources].flatMap(([sourceUri, source]) =>
+    EffectArray.flatMap([...liveSources], ([sourceUri, source]) =>
       portableReads.has(sourceUri)
         ? []
         : [
@@ -1070,7 +1192,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
     ),
   );
   const identity =
-    root && code.candidates.some(candidate => candidate.excerpt?.provenance === 'current-verified')
+    root && EffectArray.some(code.candidates, candidate => candidate.excerpt?.provenance === 'current-verified')
       ? yield* resolveRepositoryIdentity(root)
       : undefined;
   const repositoryIdentity = identity

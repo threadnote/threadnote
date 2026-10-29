@@ -2,6 +2,9 @@ import {Context, Crypto, Effect, FileSystem, Option, Path, PlatformError, Queue,
 import {resourceAccountMutationGenerationPath} from '@threadnote/store/resource/lock';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {readSettledCanonicalMutationGeneration} from '@threadnote/store/resource/settled_revision';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Array as EffectArray} from 'effect';
 
 export type ManagerObservedTopic = 'context-health' | 'context-maintenance';
 
@@ -147,9 +150,12 @@ export const makeManagerLiveSources = Effect.fn('managerLive.makeSources')(funct
       stat !== undefined
         ? `${Number(stat.size)}:${Option.getOrUndefined(stat.mtime)?.getTime() ?? ''}:${Option.getOrUndefined(stat.ino) ?? ''}`
         : 'absent';
-    const revision = Array.from(yield* crypto.digest('SHA-256', new TextEncoder().encode(identity)), byte =>
-      byte.toString(16).padStart(2, '0'),
-    ).join('');
+    const revision = EffectArray.join(
+      Array.from(yield* crypto.digest('SHA-256', new TextEncoder().encode(identity)), byte =>
+        Effect2.pipe(byte.toString(16), EffectString.padStart(2, '0')),
+      ),
+      '',
+    );
     const old = yield* Ref.get(maintenanceRevision);
     if ((initialReconcileComplete || old !== undefined) && old !== revision) {
       yield* options.onInvalidate(['context-maintenance', 'context-health'], revision);
@@ -199,7 +205,7 @@ export const makeManagerLiveSources = Effect.fn('managerLive.makeSources')(funct
         Stream.filter(event => {
           const name = path.basename(event.path);
           const target = path.basename(file);
-          return name === target || name.startsWith(`${target}.`);
+          return name === target || Effect2.pipe(name, EffectString.startsWith(`${target}.`));
         }),
         Stream.runForEach(() => onEvent),
         Effect.catchCause(() => Ref.update(watchRestarts, count => count + 1)),

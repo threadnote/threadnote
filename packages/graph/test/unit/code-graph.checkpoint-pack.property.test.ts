@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
@@ -25,14 +26,16 @@ import {
   type CodeGraphCheckpointMetadataV1,
   type CodeGraphCheckpointRecordV1,
 } from '@threadnote/graph/checkpoint/schema';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const SHA256_ZERO = '0'.repeat(64);
-const SHA1_ZERO = '0'.repeat(40);
+const SHA256_ZERO = Effect.pipe('0', EffectString.repeat(64));
+const SHA1_ZERO = Effect.pipe('0', EffectString.repeat(40));
 const UTF8 = new TextEncoder();
 
 const pathArbitrary = FC.uniqueArray(
   FC.array(FC.constantFrom('a', 'b', 'Z', '0', '-', '_', '~', '"', 'é', '🙂'), {maxLength: 10, minLength: 1}).map(
-    characters => `src/${characters.join('')}.ts`,
+    characters => `src/${EffectArray.join(characters, '')}.ts`,
   ),
   {maxLength: 18, minLength: 1},
 );
@@ -52,6 +55,36 @@ describe('code graph checkpoint canonical JSON', () => {
       }),
     ).toBe('cgfd_5da64f881d3d24c06474d75175a038e01773ea5e');
   });
+
+  fcProp(
+    it,
+    'rejects exactly the arbitrary UTF-16 sequences containing unpaired surrogates',
+    {codeUnits: FC.array(FC.integer({min: 0, max: 0xffff}), {maxLength: 64})},
+    ({codeUnits}) => {
+      let expectedWellFormed = true;
+      for (let index = 0; index < codeUnits.length; index += 1) {
+        const code = codeUnits[index];
+        if (code >= 0xd800 && code <= 0xdbff) {
+          const next = codeUnits[index + 1];
+          if (next === undefined || next < 0xdc00 || next > 0xdfff) {
+            expectedWellFormed = false;
+            break;
+          }
+          index += 1;
+        } else if (code >= 0xdc00 && code <= 0xdfff) {
+          expectedWellFormed = false;
+          break;
+        }
+      }
+      const value = String.fromCharCode(...codeUnits);
+      if (expectedWellFormed) {
+        expect(canonicalJson(value)).toBe(JSON.stringify(value));
+      } else {
+        expect(() => canonicalJson(value)).toThrow(CanonicalJsonError);
+      }
+    },
+    {fastCheck: {numRuns: 400}},
+  );
 
   it('rejects lone surrogates, sparse arrays, accessors, symbols, and extra array properties', () => {
     expect(() => canonicalJson('\ud800')).toThrow(CanonicalJsonError);
@@ -145,7 +178,7 @@ describe('code graph checkpoint pack', () => {
 
       expect(decoder.finish().verification).toBe('full');
       expect(inspector.finish().verification).toBe('artifact-and-framing');
-      expect(verifiedChunks).toEqual(pack.header.chunks.map(chunk => chunk.ordinal));
+      expect(verifiedChunks).toEqual(EffectArray.map(pack.header.chunks, chunk => chunk.ordinal));
     },
     {fastCheck: {numRuns: 35}},
   );
@@ -163,9 +196,11 @@ describe('code graph checkpoint pack', () => {
     const plan = codeGraphCheckpointReadPlanV1(prepared.header);
 
     expect(plan.prefixBytes).toBe(prepared.prefix.byteLength);
-    expect(plan.chunks.map(chunk => chunk.frameBytes)).toEqual(chunks.map(chunk => chunk.bytes.byteLength));
+    expect(EffectArray.map(plan.chunks, chunk => chunk.frameBytes)).toEqual(
+      EffectArray.map(chunks, chunk => chunk.bytes.byteLength),
+    );
     const writer = new CodeGraphCheckpointArtifactWriterV1(prepared);
-    const pieces = [writer.prefix, ...chunks.map(chunk => writer.write(chunk))];
+    const pieces = [writer.prefix, ...EffectArray.map(chunks, chunk => writer.write(chunk))];
     const descriptor = writer.finish();
     const assembled = assembleCodeGraphCheckpointPackV1(prepared, chunks);
     expect(assembled.bytes).toEqual(join(pieces));
@@ -196,9 +231,11 @@ describe('code graph checkpoint pack', () => {
       CodeGraphCheckpointPackError,
     );
     expect(() => inspectCodeGraphCheckpointPackV1(join([pack.bytes, Uint8Array.of(0)]))).toThrow(/trailing/u);
-    expect(() => decodeCodeGraphCheckpointPackV1(pack.bytes, {expectedDigest: `sha256:${'f'.repeat(64)}`})).toThrow(
-      /expected digest/u,
-    );
+    expect(() =>
+      decodeCodeGraphCheckpointPackV1(pack.bytes, {
+        expectedDigest: `sha256:${Effect.pipe('f', EffectString.repeat(64))}`,
+      }),
+    ).toThrow(/expected digest/u);
 
     const badMagic = pack.bytes.slice();
     badMagic[0] ^= 1;
@@ -221,7 +258,7 @@ describe('code graph checkpoint pack', () => {
     expect(() =>
       parseCodeGraphCheckpointRecordV1({
         ...factRecord('src/a.ts'),
-        cacheIdentity: `cgfd_${'f'.repeat(40)}`,
+        cacheIdentity: `cgfd_${Effect.pipe('f', EffectString.repeat(40))}`,
       }),
     ).toThrow(/cache identity does not match/u);
     expect(() =>
@@ -356,7 +393,7 @@ function metadataWithAttribution(path: string): CodeGraphCheckpointMetadataV1 {
 }
 
 function recordsFor(paths: readonly string[]): CodeGraphCheckpointRecordV1[] {
-  return paths.flatMap(path => [fileRecord(path), factRecord(path)]);
+  return EffectArray.flatMap(paths, path => [fileRecord(path), factRecord(path)]);
 }
 
 function fileRecord(path: string): CodeGraphCheckpointFileRecordV1 {
@@ -410,7 +447,7 @@ function concatenateFirstGzipMember(pack: CodeGraphCheckpointEncodedPackV1): Uin
 }
 
 function join(parts: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  const output = new Uint8Array(EffectArray.reduce(parts, 0, (total, part) => total + part.byteLength));
   let offset = 0;
   for (const part of parts) {
     output.set(part, offset);

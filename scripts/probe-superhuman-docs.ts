@@ -1,3 +1,4 @@
+import * as MigrationSchema from 'effect/Schema';
 import {probeSuperhumanTools, ProbeError} from '@threadnote/integration-superhuman/probe';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {getRuntimeConfig} from '@threadnote/threadnote/runtime';
@@ -18,7 +19,7 @@ const outcome = await Effect.runPromise(
 if ('catalog' in outcome) {
   process.stdout.write(`${JSON.stringify(outcome.catalog, null, 2)}\n`);
 } else {
-  const code = outcome.error instanceof ProbeError ? outcome.error.code : 'transport-rejected';
+  const code = MigrationSchema.is(ProbeError)(outcome.error) ? outcome.error.code : 'transport-rejected';
   process.stderr.write(`Superhuman Docs MCP probe: ${code}\n`);
   process.exitCode = 1;
 }

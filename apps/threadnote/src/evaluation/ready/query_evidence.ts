@@ -1,3 +1,5 @@
+import {Array as EffectArray, Schema} from 'effect';
+import {isReadonlyArray} from '@threadnote/platform/readonly-array';
 import {
   CODE_GRAPH_EXTRACTOR_SET_VERSION,
   CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION,
@@ -8,6 +10,7 @@ import {
   QUERY_SEMANTIC_TIME_BUDGET_MILLISECONDS,
   QUERY_TRAVERSAL_TIME_BUDGET_MILLISECONDS,
 } from '@threadnote/graph/query';
+import * as EffectRecord from 'effect/Record';
 
 export const READY_QUERY_EVIDENCE_VERSION = 1 as const;
 export const READY_QUERY_EVIDENCE_SUITE = 'code-graph-ready-query-large' as const;
@@ -41,6 +44,8 @@ export const READY_QUERY_GITHUB_JOB = 'ready-query-evidence' as const;
 export const READY_QUERY_GITHUB_WORKFLOW_PATH = '.github/workflows/code-graph-ready-query-evidence.yml' as const;
 export const READY_QUERY_GITHUB_WORKFLOW_REF =
   `${READY_QUERY_GITHUB_REPOSITORY}/${READY_QUERY_GITHUB_WORKFLOW_PATH}@${READY_QUERY_GITHUB_REF}` as const;
+const READY_QUERY_LEGACY_GITHUB_WORKFLOW_REF =
+  `${READY_QUERY_LEGACY_GITHUB_REPOSITORY}/${READY_QUERY_GITHUB_WORKFLOW_PATH}@${READY_QUERY_GITHUB_REF}` as const;
 export const READY_QUERY_ENVIRONMENT_ATTESTATION =
   `intellij-ready-query-v1:${READY_QUERY_REPOSITORY_COMMIT}:${READY_QUERY_REPOSITORY_TREE}` as const;
 
@@ -49,7 +54,7 @@ export type ReadyQueryGitHubWorkflowRef =
   `${ReadyQueryGitHubRepository}/${typeof READY_QUERY_GITHUB_WORKFLOW_PATH}@${typeof READY_QUERY_GITHUB_REF}`;
 
 export function isReadyQueryGitHubRepository(value: string | undefined): value is ReadyQueryGitHubRepository {
-  return READY_QUERY_GITHUB_REPOSITORIES.some(repository => repository === value);
+  return EffectArray.some(READY_QUERY_GITHUB_REPOSITORIES, repository => repository === value);
 }
 
 export function readyQueryGitHubWorkflowRef(repository: ReadyQueryGitHubRepository): ReadyQueryGitHubWorkflowRef {
@@ -231,6 +236,168 @@ export interface ReadyQueryEvidenceV1 {
   readonly version: typeof READY_QUERY_EVIDENCE_VERSION;
 }
 
+const ReadyQueryTimingSeriesSchema = Schema.Struct({
+  endToEndMilliseconds: Schema.Array(Schema.Finite),
+  freshness: Schema.Literals(['current', 'deferred']),
+  intervalMilliseconds: Schema.optionalKey(Schema.Finite),
+  maxConcurrency: Schema.Literal(1),
+  mode: Schema.Literals(['fixed-rate', 'sequential']),
+  queueLatencyIncluded: Schema.Literal(true),
+  queueLatencyMilliseconds: Schema.Array(Schema.Finite),
+  resultDigests: Schema.Array(Schema.String),
+  serviceMilliseconds: Schema.Array(Schema.Finite),
+  snapshotDigests: Schema.Array(Schema.String),
+  stages: Schema.Array(
+    Schema.Struct({
+      disposition: Schema.Literals(['fallback', 'measured', 'skipped']),
+      durationMilliseconds: Schema.Array(Schema.Finite),
+      phase: Schema.Literals(['graph.query.execute', 'graph.query.snapshot', 'graph.query.status']),
+      stage: Schema.Literals([
+        'query-repository-identity',
+        'query-serialization',
+        'query-strict-reobservation',
+        'query-worktree-observation',
+      ]),
+    }),
+  ),
+  structuredResponseBytes: Schema.Array(Schema.Finite),
+  textResponseBytes: Schema.Array(Schema.Finite),
+  unattributedMilliseconds: Schema.Array(Schema.Finite),
+  warmups: Schema.Finite,
+});
+
+const ReadyQuerySemanticPreflightSchema = Schema.StructWithRest(
+  Schema.Struct({
+    isolation: Schema.Unknown,
+    host: Schema.StructWithRest(Schema.Struct({reasons: Schema.Unknown}), [
+      Schema.Record(Schema.String, Schema.Unknown),
+    ]),
+    source: Schema.StructWithRest(Schema.Struct({github: Schema.Unknown, validationMode: Schema.Unknown}), [
+      Schema.Record(Schema.String, Schema.Unknown),
+    ]),
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+
+const ReadyQueryEvidenceSchema = Schema.Struct({
+  latencyBoundary: Schema.Literal('composed-status-inspect-serialization'),
+  controls: Schema.Array(
+    Schema.Struct({
+      deferredDigest: Schema.String,
+      deferredFreshness: Schema.Literal('deferred'),
+      deferredStructuredResponseBytes: Schema.Finite,
+      deferredTextResponseBytes: Schema.Finite,
+      exactDigest: Schema.String,
+      exactFreshness: Schema.Literal('current'),
+      exactStructuredResponseBytes: Schema.Finite,
+      exactTextResponseBytes: Schema.Finite,
+      expectedMatch: Schema.Literal(true),
+      id: Schema.Literals([
+        'java-progress-manager',
+        'kotlin-gradle-warmup-configurator',
+        'bazel-kotlinc-options',
+        'typescript-webview-button',
+      ]),
+      language: Schema.String,
+    }),
+  ),
+  createdAt: Schema.String,
+  fixture: Schema.Struct({
+    clean: Schema.Literal(true),
+    commit: Schema.Literal(READY_QUERY_REPOSITORY_COMMIT),
+    publicCommitProof: Schema.Literal('anonymous-https-exact-commit-fetch'),
+    repository: Schema.Literal(READY_QUERY_REPOSITORY),
+    trackedFiles: Schema.Finite,
+    tree: Schema.Literal(READY_QUERY_REPOSITORY_TREE),
+  }),
+  host: Schema.Struct({
+    available: Schema.Literal(true),
+    contended: Schema.Literal(false),
+    cpuPressurePercentMaximum: Schema.Finite,
+    ioPressurePercentMaximum: Schema.Finite,
+    logicalCpuCount: Schema.Finite,
+    maxRunnableProcesses: Schema.Finite,
+    memoryPressurePercentMaximum: Schema.Finite,
+    observations: Schema.Finite,
+    policy: Schema.Literal('linux-proc-v1'),
+    reasons: Schema.Array(
+      Schema.Literals(['cpu-pressure', 'cpu-steal', 'io-pressure', 'memory-pressure', 'run-queue', 'swap-activity']),
+    ),
+    stealTicksDelta: Schema.Finite,
+    swapInputPagesDelta: Schema.Finite,
+    swapOutputPagesDelta: Schema.Finite,
+  }),
+  measurements: Schema.Struct({deferred: ReadyQueryTimingSeriesSchema, exact: ReadyQueryTimingSeriesSchema}),
+  isolation: Schema.Struct({
+    builderExclusion: Schema.Literal('maintenance-registration-intent-repository-lock-worktree-drain-v1'),
+    builderExclusionScope: Schema.Literal('inside-status-through-artifact-write'),
+    buildingSnapshotsAtEntry: Schema.Literal(0),
+    buildingSnapshotsAtExit: Schema.Literal(0),
+    databaseWriterLock: Schema.Literal('not-held'),
+    fullWriterIsolation: Schema.Literal('not-attested'),
+    storageCapacityIsolation: Schema.Literal('not-attested'),
+  }),
+  runner: Schema.Literal('dedicated-preprovisioned-linux-x64'),
+  requestProfile: Schema.Struct({
+    deferredTimeoutMilliseconds: Schema.Literal(READY_QUERY_DEFERRED_TIMEOUT_MILLISECONDS),
+    depth: Schema.Literal(1),
+    edgeLimit: Schema.Literal(40),
+    exactTimeoutMilliseconds: Schema.Literal(READY_QUERY_EXACT_TIMEOUT_MILLISECONDS),
+    includeHeuristic: Schema.Literal(false),
+    includeModelAssociations: Schema.Literal(false),
+    nodeLimit: Schema.Literal(20),
+    operation: Schema.Literal('query'),
+    semanticBudgetMilliseconds: Schema.Literal(QUERY_SEMANTIC_TIME_BUDGET_MILLISECONDS),
+    semanticPolicy: Schema.Literal('runtime-available-lexical-first'),
+    traversalBudgetMilliseconds: Schema.Literal(QUERY_TRAVERSAL_TIME_BUDGET_MILLISECONDS),
+  }),
+  runtime: Schema.Struct({
+    compatible: Schema.Literal(true),
+    extractorSet: Schema.Literal(CODE_GRAPH_EXTRACTOR_SET_VERSION),
+    persistentExtensionRevision: Schema.Literal(CODE_GRAPH_PERSISTENT_EXTENSION_SCHEMA_REVISION),
+    resultVersion: Schema.Literal(CODE_GRAPH_RESULT_VERSION),
+    schemaVersion: Schema.Literal(CODE_GRAPH_SCHEMA_VERSION),
+  }),
+  snapshot: Schema.Struct({
+    commit: Schema.Literal(READY_QUERY_REPOSITORY_COMMIT),
+    dirty: Schema.Literal(false),
+    edgeCount: Schema.Finite,
+    extractorSet: Schema.Literal(CODE_GRAPH_EXTRACTOR_SET_VERSION),
+    fileCount: Schema.Finite,
+    idSha256: Schema.String,
+    state: Schema.Literal('ready'),
+    symbolCount: Schema.Finite,
+  }),
+  source: Schema.Struct({
+    clean: Schema.Literal(true),
+    commit: Schema.String,
+    github: Schema.Struct({
+      environment: Schema.Literal(READY_QUERY_GITHUB_ENVIRONMENT),
+      environmentAttestation: Schema.Literal(READY_QUERY_ENVIRONMENT_ATTESTATION),
+      eventName: Schema.Literal(READY_QUERY_GITHUB_EVENT),
+      job: Schema.Literal(READY_QUERY_GITHUB_JOB),
+      ref: Schema.Literal(READY_QUERY_GITHUB_REF),
+      refProtected: Schema.Literal(true),
+      repository: Schema.Literals(READY_QUERY_GITHUB_REPOSITORIES),
+      repositoryId: Schema.Literal(READY_QUERY_GITHUB_REPOSITORY_ID),
+      repositoryEnablement: Schema.Literal('enabled'),
+      runnerArch: Schema.Literal('X64'),
+      runnerEnvironment: Schema.Literal('self-hosted'),
+      runnerOs: Schema.Literal('Linux'),
+      runAttempt: Schema.String,
+      runId: Schema.String,
+      sha: Schema.String,
+      workflowRef: Schema.Literals([READY_QUERY_GITHUB_WORKFLOW_REF, READY_QUERY_LEGACY_GITHUB_WORKFLOW_REF]),
+      workflowSha: Schema.String,
+    }),
+    lockfileSha256: Schema.String,
+    packageManifestSha256: Schema.String,
+    validationMode: Schema.Literal('github-actions-clean-source'),
+  }),
+  suite: Schema.Literal(READY_QUERY_EVIDENCE_SUITE),
+  version: Schema.Literal(READY_QUERY_EVIDENCE_VERSION),
+});
+
 const EXACT_COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const REQUIRED_STAGE_DISPOSITIONS = {
@@ -270,7 +437,63 @@ export function parseReadyQueryEvidenceV1(value: unknown): ReadyQueryEvidenceV1 
     ],
     'artifact',
   );
-  const artifact = value as unknown as ReadyQueryEvidenceV1;
+  if (Schema.is(ReadyQuerySemanticPreflightSchema)(value)) {
+    const source = value.source;
+    if (isUnknownRecord(source)) {
+      assert(source.validationMode === 'github-actions-clean-source', 'Ready-query source validation mode is invalid.');
+      const github = source.github;
+      if (isUnknownRecord(github)) {
+        const repository = github.repository;
+        assert(
+          typeof repository === 'string' &&
+            isReadyQueryGitHubRepository(repository) &&
+            github.repositoryId === READY_QUERY_GITHUB_REPOSITORY_ID &&
+            github.eventName === READY_QUERY_GITHUB_EVENT &&
+            github.job === READY_QUERY_GITHUB_JOB &&
+            github.ref === READY_QUERY_GITHUB_REF &&
+            github.refProtected === true &&
+            github.repositoryEnablement === 'enabled' &&
+            github.runnerEnvironment === 'self-hosted' &&
+            github.runnerOs === 'Linux' &&
+            github.runnerArch === 'X64' &&
+            github.workflowRef === readyQueryGitHubWorkflowRef(repository) &&
+            github.environment === READY_QUERY_GITHUB_ENVIRONMENT &&
+            github.environmentAttestation === READY_QUERY_ENVIRONMENT_ATTESTATION &&
+            github.sha === source.commit &&
+            github.workflowSha === source.commit &&
+            typeof github.sha === 'string' &&
+            EXACT_COMMIT.test(github.sha) &&
+            typeof github.runId === 'string' &&
+            /^[1-9]\d*$/.test(github.runId) &&
+            typeof github.runAttempt === 'string' &&
+            /^[1-9]\d*$/.test(github.runAttempt),
+          'Ready-query evidence is not bound to the canonical protected GitHub workflow run.',
+        );
+      }
+    }
+    const host = value.host;
+    if (isUnknownRecord(host)) {
+      assert(EffectArray.isArray(host.reasons), 'Ready-query host contention reasons are invalid.');
+      assert(host.reasons.length === 0, 'Host contention invalidates ready-query evidence.');
+    }
+    const isolation = value.isolation;
+    if (isUnknownRecord(isolation)) {
+      assert(
+        isolation.builderExclusion === 'maintenance-registration-intent-repository-lock-worktree-drain-v1' &&
+          isolation.builderExclusionScope === 'inside-status-through-artifact-write' &&
+          isolation.buildingSnapshotsAtEntry === 0 &&
+          isolation.buildingSnapshotsAtExit === 0 &&
+          isolation.databaseWriterLock === 'not-held' &&
+          isolation.fullWriterIsolation === 'not-attested' &&
+          isolation.storageCapacityIsolation === 'not-attested',
+        'Ready-query artifact does not prove the reviewed builder-exclusion boundary.',
+      );
+    }
+  }
+  if (!Schema.is(ReadyQueryEvidenceSchema)(value)) {
+    throw new Error('Ready-query evidence has invalid field types.');
+  }
+  const artifact: ReadyQueryEvidenceV1 = value;
   assert(artifact.version === READY_QUERY_EVIDENCE_VERSION, 'Ready-query evidence version is unsupported.');
   assert(artifact.suite === READY_QUERY_EVIDENCE_SUITE, 'Ready-query evidence suite is invalid.');
   assert(
@@ -443,9 +666,9 @@ function validateRuntimeAndSnapshot(
 }
 
 function validateControls(controls: readonly ReadyQueryControlEvidenceV1[] | undefined) {
-  assert(Array.isArray(controls), 'Ready-query controls are missing.');
+  assert(isReadonlyArray(controls), 'Ready-query controls are missing.');
   const byId = new Map<ReadyQueryControlId, ReadyQueryControlEvidenceV1>(
-    controls.map(control => [control.id, control] as const),
+    EffectArray.map(controls, (control: ReadyQueryControlEvidenceV1) => [control.id, control] as const),
   );
   assert(
     byId.size === READY_QUERY_CONTROLS.length && controls.length === byId.size,
@@ -524,7 +747,7 @@ function validateSeries(
     `${kind} measurements`,
   );
   const samples = series.endToEndMilliseconds;
-  assert(Array.isArray(samples), `Ready-query ${kind} samples are missing.`);
+  assert(EffectArray.isArray(samples), `Ready-query ${kind} samples are missing.`);
   assertIntegerAtLeast(samples.length, READY_QUERY_MINIMUM_SAMPLES, `${kind} samples`);
   assertIntegerAtLeast(series.warmups, READY_QUERY_MINIMUM_WARMUPS, `${kind} warmups`);
   assert(series.maxConcurrency === 1 && series.queueLatencyIncluded === true, `${kind} scheduling is not exact.`);
@@ -550,12 +773,15 @@ function validateSeries(
     series.unattributedMilliseconds,
   ];
   assert(
-    aligned.every(values => Array.isArray(values) && values.length === samples.length),
+    EffectArray.every(aligned, values => EffectArray.isArray(values) && values.length === samples.length),
     `${kind} samples are incomplete.`,
   );
-  assert(Array.isArray(series.stages), `${kind} stage coverage is missing.`);
+  assert(isReadonlyArray(series.stages), `${kind} stage coverage is missing.`);
   const stageMap = new Map<string, ReadyQueryStageSeriesV1>(
-    series.stages.map(stage => [`${stage.phase}/${stage.stage}`, stage] as const),
+    EffectArray.map(
+      series.stages,
+      (stage: ReadyQueryStageSeriesV1) => [`${stage.phase}/${stage.stage}`, stage] as const,
+    ),
   );
   const expectedStages = REQUIRED_STAGE_DISPOSITIONS[kind];
   assert(
@@ -571,7 +797,7 @@ function validateSeries(
     validateFiniteSeries(stage.durationMilliseconds, `${kind} stage ${key}`);
     if (disposition === 'skipped')
       assert(
-        stage.durationMilliseconds.every(value => value === 0),
+        EffectArray.every(stage.durationMilliseconds, value => value === 0),
         `${kind} skipped stage ${key} consumed time.`,
       );
   }
@@ -580,10 +806,14 @@ function validateSeries(
     const queue = series.queueLatencyMilliseconds[index];
     const service = series.serviceMilliseconds[index];
     const unattributed = series.unattributedMilliseconds[index];
-    validateFiniteSeries([samples[index]!, queue, service, unattributed], `${kind} timing`);
+    validateFiniteSeries([samples[index], queue, service, unattributed], `${kind} timing`);
     assert(closeEnough(samples[index], queue + service), `${kind} end-to-end timing does not include queue latency.`);
     assert(kind === 'deferred' || queue === 0, 'Sequential exact queries cannot report queue latency.');
-    const attributed = [...stageMap.values()].reduce((sum, stage) => sum + stage.durationMilliseconds[index], 0);
+    const attributed = EffectArray.reduce(
+      [...stageMap.values()],
+      0,
+      (sum, stage) => sum + stage.durationMilliseconds[index],
+    );
     assert(closeEnough(service, attributed + unattributed), `${kind} stage timing does not reconcile.`);
     assert(series.resultDigests[index] === expectedDigest, `${kind} result digest parity failed.`);
     assert(series.snapshotDigests[index] === artifact.snapshot.idSha256, `${kind} snapshot binding failed.`);
@@ -636,7 +866,7 @@ function validateHost(
     host.available === true && host.policy === 'linux-proc-v1',
     'Ready-query host contention evidence is unavailable.',
   );
-  assert(Array.isArray(host.reasons), 'Ready-query host contention reasons are invalid.');
+  assert(EffectArray.isArray(host.reasons), 'Ready-query host contention reasons are invalid.');
   assertIntegerAtLeast(host.logicalCpuCount, READY_QUERY_LOGICAL_CPU_MINIMUM, 'logical CPU count');
   assertIntegerAtLeast(
     host.observations,
@@ -717,15 +947,19 @@ function closeEnough(left: number, right: number): boolean {
   return Math.abs(left - right) <= 0.05;
 }
 
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
+}
+
 function assertRecord<T>(value: T, message: string): asserts value is T & object {
-  assert(typeof value === 'object' && value !== null && !Array.isArray(value), message);
+  assert(typeof value === 'object' && value !== null && !EffectArray.isArray(value), message);
 }
 
 function assertExactKeys(value: object, expected: readonly string[], label: string): void {
   const expectedKeys = new Set(expected);
-  const actual = Object.keys(value);
+  const actual = EffectRecord.keys(value);
   assert(
-    actual.length === expectedKeys.size && actual.every(key => expectedKeys.has(key)),
+    actual.length === expectedKeys.size && EffectArray.every(actual, key => expectedKeys.has(key)),
     `Ready-query ${label} contains unknown or missing fields.`,
   );
 }

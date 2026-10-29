@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Context, Effect, Layer, Schema} from 'effect';
 
 export interface VectorRecord {
@@ -10,9 +11,12 @@ export interface VectorSearchResult {
   readonly score: number;
 }
 
-export class VectorInvalid extends Schema.TaggedError<VectorInvalid>()('VectorInvalid', {
-  message: Schema.String,
-}) {}
+export class VectorInvalid extends Schema.TaggedError<VectorInvalid, {readonly brand: unique symbol}>()(
+  'VectorInvalid',
+  {
+    message: Schema.String,
+  },
+) {}
 
 export interface VectorSearchShape {
   readonly normalize: (vector: readonly number[]) => Effect.Effect<readonly number[], VectorInvalid>;
@@ -49,7 +53,7 @@ export function normalizeVector(vector: readonly number[]): readonly number[] {
     throw new Error('Vector magnitude must be finite and greater than zero.');
   }
   const inverseMagnitude = 1 / Math.sqrt(squaredMagnitude);
-  return vector.map(component => component * inverseMagnitude);
+  return EffectArray.map(vector, component => component * inverseMagnitude);
 }
 
 export function searchExactVectors(
@@ -95,7 +99,7 @@ export function searchExactVectors(
 }
 
 function assertFiniteVector(vector: readonly number[]): void {
-  if (vector.length === 0 || vector.some(component => !Number.isFinite(component))) {
+  if (vector.length === 0 || EffectArray.some(vector, component => !Number.isFinite(component))) {
     throw new Error('Vector must contain at least one finite component.');
   }
 }

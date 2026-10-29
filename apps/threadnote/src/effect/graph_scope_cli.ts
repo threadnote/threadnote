@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Console, Effect} from 'effect';
 import {Command} from 'effect/cli';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -12,6 +13,9 @@ import {
   validateManagerProjectGraph,
 } from '../manager/worksets.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import type {CliRuntimeRunner} from './cli.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface JsonOption {
   readonly json: boolean;
@@ -101,28 +105,31 @@ export function runCodeGraphScopePreview(config: RuntimeConfig, options: JsonOpt
       return;
     }
     yield* Console.log(
-      [
-        `Graph scope preview: ${preview.project.name}`,
-        `Source: ${preview.repository.displayName} @ ${preview.repository.commit.slice(0, 12)}${preview.repository.dirty ? ' + worktree changes' : ''}`,
-        `Roots: ${preview.scope.roots.length === 0 ? 'full repository' : preview.scope.roots.join(', ')}`,
-        `Root components: ${preview.scope.rootComponents.length === 0 ? 'all discovered components' : preview.scope.rootComponents.join(', ')}`,
-        `Dependency components: ${preview.scope.dependencyComponents.length || 'none'}`,
-        `Included: ${preview.inventory.included.files} file(s) · ${preview.inventory.included.bytes} bytes`,
-        `Excluded by scope: ${preview.inventory.excluded.files} file(s) · ${preview.inventory.excluded.bytes} bytes`,
-        `Completeness: ${preview.scope.completeness}`,
-        preview.scope.diagnostics.length === 0 ? undefined : `Diagnostics: ${preview.scope.diagnostics.join(' ')}`,
-        'Preview only: this command is read-only and does not index or mutate graph state.',
-      ]
-        .filter((line): line is string => line !== undefined)
-        .join('\n'),
+      EffectArray.join(
+        EffectArray.filter(
+          [
+            `Graph scope preview: ${preview.project.name}`,
+            `Source: ${preview.repository.displayName} @ ${Effect2.pipe(preview.repository.commit, EffectString.slice(0, 12))}${preview.repository.dirty ? ' + worktree changes' : ''}`,
+            `Roots: ${preview.scope.roots.length === 0 ? 'full repository' : EffectArray.join(preview.scope.roots, ', ')}`,
+            `Root components: ${preview.scope.rootComponents.length === 0 ? 'all discovered components' : EffectArray.join(preview.scope.rootComponents, ', ')}`,
+            `Dependency components: ${preview.scope.dependencyComponents.length || 'none'}`,
+            `Included: ${preview.inventory.included.files} file(s) · ${preview.inventory.included.bytes} bytes`,
+            `Excluded by scope: ${preview.inventory.excluded.files} file(s) · ${preview.inventory.excluded.bytes} bytes`,
+            `Completeness: ${preview.scope.completeness}`,
+            preview.scope.diagnostics.length === 0
+              ? undefined
+              : `Diagnostics: ${EffectArray.join(preview.scope.diagnostics, ' ')}`,
+            'Preview only: this command is read-only and does not index or mutate graph state.',
+          ],
+          (line): line is string => line !== undefined,
+        ),
+        '\n',
+      ),
     );
   });
 }
 
-export function makeCodeGraphScopeCommand(
-  withRuntime: <E, R>(body: (config: RuntimeConfig) => Effect.Effect<void, E, R>) => Effect.Effect<void, E, R>,
-  json: ReturnType<typeof boolean>,
-) {
+export function makeCodeGraphScopeCommand(withRuntime: CliRuntimeRunner, json: ReturnType<typeof boolean>) {
   const set = Command.make(
     'set',
     {

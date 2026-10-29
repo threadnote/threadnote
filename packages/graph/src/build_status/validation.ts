@@ -1,3 +1,5 @@
+import {Array as EffectArray} from 'effect';
+
 export const CODE_GRAPH_BUILD_STATUS_SCHEMA_VERSION = 1 as const;
 
 export const CODE_GRAPH_BUILD_HASH_ID = /^[0-9a-f]{64}$/;
@@ -39,7 +41,7 @@ export function codeGraphFailedBuildStatusRemovable(
 }
 
 export function isBuildStatusRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 }
 
 export function isBuildStatusHash(value: unknown): value is string {

@@ -1,6 +1,9 @@
+import {Array as EffectArray} from 'effect';
 import {ScriptError} from './effect/errors.js';
 import {Effect, FileSystem, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const MEBIBYTE = 1_048_576;
 
@@ -55,10 +58,10 @@ export const CODE_GRAPH_HEAVY_TAIL_SMOKE_PROFILE = {
 } as const satisfies CodeGraphHeavyTailProfile;
 
 export function parseCodeGraphHeavyTailProfile(value: unknown): CodeGraphHeavyTailProfile {
-  if (typeof value !== 'object' || value === null)
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) {
     throw ScriptError.make({message: 'Heavy-tail profile must be an object.'});
-  const profile = value as Partial<CodeGraphHeavyTailProfile>;
-  if (profile.id !== 'large-monorepo-heavy-tail' || profile.version !== 1) {
+  }
+  if (!('id' in value) || value.id !== 'large-monorepo-heavy-tail' || !('version' in value) || value.version !== 1) {
     throw ScriptError.make({message: 'Unsupported code graph heavy-tail profile.'});
   }
   for (const field of [
@@ -71,23 +74,57 @@ export function parseCodeGraphHeavyTailProfile(value: unknown): CodeGraphHeavyTa
     'regularTypeScriptFiles',
     'textlessSvgFiles',
   ] as const) {
-    const current = profile[field];
+    const current: unknown = Reflect.get(value, field);
     if (typeof current !== 'number' || !Number.isSafeInteger(current) || current < 1) {
       throw ScriptError.make({message: `Heavy-tail profile ${field} must be a positive safe integer.`});
     }
   }
-  if (profile.parallelWorkers! > 8)
+  if (!isCodeGraphHeavyTailProfile(value)) {
+    throw ScriptError.make({message: 'Heavy-tail profile has an invalid shape.'});
+  }
+  const profile = value;
+  if (profile.parallelWorkers > 8)
     throw ScriptError.make({message: 'Heavy-tail profile parallelWorkers must not exceed 8.'});
-  const eligibleFiles = codeGraphHeavyTailEligibleFiles(profile as CodeGraphHeavyTailProfile);
-  if (profile.interruptAfterPersistedFiles! >= eligibleFiles) {
+  const eligibleFiles = codeGraphHeavyTailEligibleFiles(profile);
+  if (profile.interruptAfterPersistedFiles >= eligibleFiles) {
     throw ScriptError.make({
       message: 'Heavy-tail interruption point must be smaller than the eligible fixture file count.',
     });
   }
-  if (profile.lowSignalJsonBytes! < 128 || profile.generatedTypeScriptBytes! < 128) {
+  if (profile.lowSignalJsonBytes < 128 || profile.generatedTypeScriptBytes < 128) {
     throw ScriptError.make({message: 'Heavy-tail large-file shapes must be at least 128 bytes.'});
   }
-  return profile as CodeGraphHeavyTailProfile;
+  return profile;
+}
+
+function isCodeGraphHeavyTailProfile(value: unknown): value is CodeGraphHeavyTailProfile {
+  if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
+  return (
+    'id' in value &&
+    value.id === 'large-monorepo-heavy-tail' &&
+    'version' in value &&
+    value.version === 1 &&
+    'callsPerPathologicalTypeScriptFile' in value &&
+    isPositiveSafeInteger(value.callsPerPathologicalTypeScriptFile) &&
+    'generatedTypeScriptBytes' in value &&
+    isPositiveSafeInteger(value.generatedTypeScriptBytes) &&
+    'interruptAfterPersistedFiles' in value &&
+    isPositiveSafeInteger(value.interruptAfterPersistedFiles) &&
+    'lowSignalJsonBytes' in value &&
+    isPositiveSafeInteger(value.lowSignalJsonBytes) &&
+    'parallelWorkers' in value &&
+    isPositiveSafeInteger(value.parallelWorkers) &&
+    'pathologicalTypeScriptFiles' in value &&
+    isPositiveSafeInteger(value.pathologicalTypeScriptFiles) &&
+    'regularTypeScriptFiles' in value &&
+    isPositiveSafeInteger(value.regularTypeScriptFiles) &&
+    'textlessSvgFiles' in value &&
+    isPositiveSafeInteger(value.textlessSvgFiles)
+  );
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
 }
 
 export function codeGraphHeavyTailEligibleFiles(profile: CodeGraphHeavyTailProfile): number {
@@ -107,7 +144,7 @@ export function codeGraphHeavyTailJsonFixtures(
           profile.lowSignalJsonBytes,
         ];
   const labels = ['small', 'medium', 'large', 'extreme'] as const;
-  return sizes.flatMap((bytes, sizeIndex) =>
+  return EffectArray.flatMap(sizes, (bytes, sizeIndex) =>
     Array.from({length: CODE_GRAPH_HEAVY_TAIL_JSON_DUPLICATES}, (_, duplicateIndex) => ({
       bytes,
       path:
@@ -125,34 +162,41 @@ export function codeGraphHeavyTailRepositoryFiles(profile: CodeGraphHeavyTailPro
 }
 
 export function codeGraphHeavyTailPathologicalTypeScript(index: number, calls: number): string {
-  const suffix = String(index).padStart(3, '0');
-  return [
-    'import {dependency} from "./dependency.js";',
-    `export function pathological${suffix}(): number {`,
-    '  let value = 0;',
-    ...Array.from({length: calls}, (_, call) => `  value += dependency(${call});`),
-    '  return value;',
-    '}',
-    `export {dependency as forwarded${suffix}} from "./dependency.js";`,
-    `export interface PreservedTail${suffix} { readonly value: string }`,
-    '',
-  ].join('\n');
+  const suffix = Effect2.pipe(String(index), EffectString.padStart(3, '0'));
+  return EffectArray.join(
+    [
+      'import {dependency} from "./dependency.js";',
+      `export function pathological${suffix}(): number {`,
+      '  let value = 0;',
+      ...Array.from({length: calls}, (_, call) => `  value += dependency(${call});`),
+      '  return value;',
+      '}',
+      `export {dependency as forwarded${suffix}} from "./dependency.js";`,
+      `export interface PreservedTail${suffix} { readonly value: string }`,
+      '',
+    ],
+    '\n',
+  );
 }
 
 export function codeGraphHeavyTailGeneratedTypeScript(targetBytes: number): string {
-  const prefix = ['import {dependency} from "./dependency.js";', '/* generated payload: '].join('\n');
-  const suffix = [
-    ' */',
-    'export function generatedSurface(): number { return dependency(1); }',
-    'export {dependency as generatedForward} from "./dependency.js";',
-    'export interface GeneratedSurfaceTail { readonly value: string }',
-    '',
-  ].join('\n');
+  const prefix = EffectArray.join(['import {dependency} from "./dependency.js";', '/* generated payload: '], '\n');
+  const suffix = EffectArray.join(
+    [
+      ' */',
+      'export function generatedSurface(): number { return dependency(1); }',
+      'export {dependency as generatedForward} from "./dependency.js";',
+      'export interface GeneratedSurfaceTail { readonly value: string }',
+      '',
+    ],
+    '\n',
+  );
   if (targetBytes < prefix.length + suffix.length) {
     throw ScriptError.make({
       message: `Generated TypeScript target must be at least ${prefix.length + suffix.length} bytes.`,
     });
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   return `${prefix}${'x'.repeat(targetBytes - prefix.length - suffix.length)}${suffix}`;
 }
 
@@ -164,6 +208,7 @@ export function codeGraphHeavyTailLowSignalJson(targetBytes: number): string {
       message: `Low-signal JSON target must be at least ${prefix.length + suffix.length} bytes.`,
     });
   }
+  // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The runtime count is not proven nonnegative; native repeat throws RangeError for negative counts while Effect String repeat returns an empty string.
   return `${prefix}${'x'.repeat(targetBytes - prefix.length - suffix.length)}${suffix}`;
 }
 
@@ -207,7 +252,7 @@ export const prepareCodeGraphHeavyTailFixture = Effect.fn('codeGraphHeavyTailFix
     Array.from({length: profile.pathologicalTypeScriptFiles}, (_, index) => index),
     index =>
       fs.writeFileString(
-        path.join(repository, 'src', `pathological-${String(index).padStart(3, '0')}.ts`),
+        path.join(repository, 'src', `pathological-${Effect2.pipe(String(index), EffectString.padStart(3, '0'))}.ts`),
         codeGraphHeavyTailPathologicalTypeScript(index, profile.callsPerPathologicalTypeScriptFile),
       ),
     {concurrency: 8, discard: true},
@@ -216,8 +261,8 @@ export const prepareCodeGraphHeavyTailFixture = Effect.fn('codeGraphHeavyTailFix
     Array.from({length: profile.regularTypeScriptFiles}, (_, index) => index),
     index =>
       fs.writeFileString(
-        path.join(repository, 'src', `regular-${String(index).padStart(5, '0')}.ts`),
-        `export function regular${String(index).padStart(5, '0')}(): number { return ${index}; }\n`,
+        path.join(repository, 'src', `regular-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}.ts`),
+        `export function regular${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}(): number { return ${index}; }\n`,
       ),
     {concurrency: 32, discard: true},
   );
@@ -225,7 +270,15 @@ export const prepareCodeGraphHeavyTailFixture = Effect.fn('codeGraphHeavyTailFix
   yield* Effect.forEach(
     Array.from({length: profile.textlessSvgFiles}, (_, index) => index),
     index =>
-      fs.writeFileString(path.join(repository, 'assets', 'icons', `icon-${String(index).padStart(5, '0')}.svg`), svg),
+      fs.writeFileString(
+        path.join(
+          repository,
+          'assets',
+          'icons',
+          `icon-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}.svg`,
+        ),
+        svg,
+      ),
     {concurrency: 32, discard: true},
   );
   yield* git(repository, ['init', '-q']);

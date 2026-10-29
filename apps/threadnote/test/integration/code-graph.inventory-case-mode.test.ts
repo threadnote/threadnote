@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
@@ -8,12 +9,14 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {StandaloneBrokerLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 describe('portable Git ignore matching', () => {
   fcEffectProp(
     it,
     'keeps committed inventory and preview invariant under the local Git case setting',
-    {suffix: fc.array(fc.constantFrom(...'abcdef'), {maxLength: 6}).map(chars => chars.join(''))},
+    {suffix: fc.array(fc.constantFrom(...'abcdef'), {maxLength: 6}).map(chars => EffectArray.join(chars, ''))},
     ({suffix}) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -25,7 +28,10 @@ describe('portable Git ignore matching', () => {
         yield* fs.writeFileString(path.join(root, 'src/always.ts'), 'export const always = true;\n');
         yield* fs.writeFileString(path.join(root, admitted), 'export const value = 1;\n');
         yield* fs.writeFileString(path.join(root, excluded), 'export const ignored = 2;\n');
-        yield* fs.writeFileString(path.join(root, '.gitignore'), `${admitted.toLowerCase()}\n${excluded}\n`);
+        yield* fs.writeFileString(
+          path.join(root, '.gitignore'),
+          `${Effect2.pipe(admitted, EffectString.toLowerCase)}\n${excluded}\n`,
+        );
         yield* git(root, ['init', '-q']);
         yield* git(root, ['add', '-f', admitted, excluded, 'src/always.ts', '.gitignore']);
         yield* git(root, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture']);
@@ -36,8 +42,10 @@ describe('portable Git ignore matching', () => {
           const inventory = yield* inventoryRepository(identity);
           const preview = yield* previewCodeGraphInventory(identity, {includeOverlay: false});
           expect(inventory.dirty).toBe(false);
-          expect(inventory.files.map(file => file.path)).toEqual([admitted, 'src/always.ts']);
-          expect((yield* git(root, ['config', '--get', 'core.ignorecase'])).stdout.trim()).toBe(mode);
+          expect(EffectArray.map(inventory.files, file => file.path)).toEqual([admitted, 'src/always.ts']);
+          expect(
+            Effect2.pipe((yield* git(root, ['config', '--get', 'core.ignorecase'])).stdout, EffectString.trim),
+          ).toBe(mode);
           expect((yield* git(root, ['status', '--porcelain'])).stdout).toBe('');
           observations.push({
             files: inventory.files,

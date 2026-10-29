@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
 import {
@@ -9,8 +10,16 @@ import {
   type ModelSetupState,
 } from '@threadnote/inference/models/setup';
 import {parseModelSelection} from '@threadnote/inference/models/selection';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
-const job = {home: '/canonical/home', modelId: 'fixture-generation', revision: 'a'.repeat(40), sha256: 'b'.repeat(64)};
+const job = {
+  home: '/canonical/home',
+  modelId: 'fixture-generation',
+  revision: Effect.pipe('a', EffectString.repeat(40)),
+  sha256: Effect.pipe('b', EffectString.repeat(64)),
+};
 const owner = {token: 'one', processId: 1, processStartIdentity: 'process-start-one'};
 const identity = {size: '4', device: '1', inode: '2', modifiedAtNs: '3', changedAtNs: '4'};
 const receipt = {sha256: job.sha256, fileIdentity: identity};
@@ -78,7 +87,10 @@ describe('model setup domain properties', () => {
   it('round-trips valid role maps without inventing roles or losing explicit identities', () => {
     FC.assert(
       FC.property(FC.subarray(['embedding', 'generation', 'reranker'] as const), FC.nat(), (roles, id) => {
-        const selection = {version: 1, roles: Object.fromEntries(roles.map(role => [role, `model-${id}`]))};
+        const selection = {
+          version: 1,
+          roles: EffectRecord.fromEntries(EffectArray.map(roles, role => [role, `model-${id}`])),
+        };
         expect(parseModelSelection(JSON.stringify(selection))).toEqual({status: 'valid', selection});
       }),
       {numRuns: 100},
@@ -140,7 +152,9 @@ describe('model setup domain properties', () => {
               if (phase === 'downloading' || phase === 'verifying') phase = 'retry-wait';
               state = transitionModelSetup(state, {type: 'retry-wait', fence, reason: 'offline', nextAttemptAt: 42});
             } else {
-              const stale = historical.find(candidate => candidate.intentEpoch !== epoch) ?? {
+              const stale = EffectOption.getOrUndefined(
+                EffectArray.findFirst(historical, candidate => candidate.intentEpoch !== epoch),
+              ) ?? {
                 ...fence,
                 owner: {...owner, token: 'impostor'},
               };
@@ -180,7 +194,7 @@ describe('model setup domain properties', () => {
             expiresAt = now + 30_000;
           }
           expect(state.reservation?.nonce).toBe(expectedNonce);
-          for (const old of oldReservations.filter(old => old.nonce !== expectedNonce)) {
+          for (const old of EffectArray.filter(oldReservations, old => old.nonce !== expectedNonce)) {
             expect(
               transitionModelSetup(state, {type: 'claim', job, intentEpoch: old.epoch, nonce: old.nonce, owner, now}),
             ).toBe(state);
@@ -196,15 +210,23 @@ describe('model setup domain properties', () => {
   it('rejects cross-home/model/revision/digest and process identity fences without mutating state', () => {
     FC.assert(
       FC.property(
-        FC.constantFrom('home', 'modelId', 'revision', 'sha256', 'token', 'processId', 'processStartIdentity'),
-        key => {
+        FC.constantFrom(
+          {kind: 'job', key: 'home'},
+          {kind: 'job', key: 'modelId'},
+          {kind: 'job', key: 'revision'},
+          {kind: 'job', key: 'sha256'},
+          {kind: 'owner', key: 'token'},
+          {kind: 'owner', key: 'processId'},
+          {kind: 'owner', key: 'processStartIdentity'},
+        ),
+        mutation => {
           const state = stateAt('verifying', 2, 1, 4);
           const copy = structuredClone(state);
           const fence: ModelSetupFence = {intentEpoch: 2, job, owner};
           const changed =
-            key in job
-              ? {...fence, job: {...job, [key]: `${job[key as keyof typeof job]}different`}}
-              : {...fence, owner: {...owner, [key]: key === 'processId' ? 2 : 'different'}};
+            mutation.kind === 'job'
+              ? {...fence, job: changeJobField(mutation.key)}
+              : {...fence, owner: changeOwnerField(mutation.key)};
           expect(transitionModelSetup(state, {type: 'ready', fence: changed, receipt})).toBe(state);
           expect(state).toEqual(copy);
         },
@@ -213,3 +235,27 @@ describe('model setup domain properties', () => {
     );
   });
 });
+
+function changeJobField(key: 'home' | 'modelId' | 'revision' | 'sha256') {
+  switch (key) {
+    case 'home':
+      return {...job, home: `${job.home}different`};
+    case 'modelId':
+      return {...job, modelId: `${job.modelId}different`};
+    case 'revision':
+      return {...job, revision: `${job.revision}different`};
+    case 'sha256':
+      return {...job, sha256: `${job.sha256}different`};
+  }
+}
+
+function changeOwnerField(key: 'token' | 'processId' | 'processStartIdentity') {
+  switch (key) {
+    case 'token':
+      return {...owner, token: 'different'};
+    case 'processId':
+      return {...owner, processId: 2};
+    case 'processStartIdentity':
+      return {...owner, processStartIdentity: 'different'};
+  }
+}

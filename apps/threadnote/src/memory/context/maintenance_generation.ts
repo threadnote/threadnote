@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {InvalidModelOutput, InferenceInterrupted} from '@threadnote/inference/engine/errors';
 import {Cause, Clock, Crypto, Effect, Exit, Option, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -12,15 +13,17 @@ import {
 } from '@threadnote/memory/topic-maintenance-draft';
 import {isTransientDraftProviderFailure, SelectedDraftError} from '../../effect/ai/selected_generation.js';
 import {DraftProviderUnavailableBeforeDispatch, TopicDraftProviderOutputError} from '../../effect/ai/consolidator.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
-export class TopicGenerationRequestError extends Schema.TaggedError<TopicGenerationRequestError>()(
-  'TopicGenerationRequestError',
-  {
-    message: Schema.String,
-    diagnostics: Schema.optionalKey(TopicGenerationSummary),
-    failureKind: Schema.optionalKey(Schema.Literals(['transient', 'terminal'])),
-  },
-) {}
+export class TopicGenerationRequestError extends Schema.TaggedError<
+  TopicGenerationRequestError,
+  {readonly brand: unique symbol}
+>()('TopicGenerationRequestError', {
+  message: Schema.String,
+  diagnostics: Schema.optionalKey(TopicGenerationSummary),
+  failureKind: Schema.optionalKey(Schema.Literals(['transient', 'terminal'])),
+}) {}
 const failed = (diagnostics?: TopicGenerationSummaryV1, failureKind: 'transient' | 'terminal' = 'terminal') =>
   TopicGenerationRequestError.make({
     message: 'Topic generation failed. Inspect the saved local diagnostics when available.',
@@ -55,7 +58,7 @@ export function withTopicGenerationObservation<A, E, R>(
 ) {
   return Effect.uninterruptibleMask(restore =>
     Effect.gen(function* () {
-      const id = (yield* (yield* Crypto.Crypto).randomUUIDv4()).replaceAll('-', '');
+      const id = Effect2.pipe(yield* (yield* Crypto.Crypto).randomUUIDv4(), EffectString.replaceAll('-', ''));
       const observation = new TopicGenerationObservation(
         home,
         {
@@ -122,9 +125,9 @@ export class TopicGenerationObservation {
     private readonly persist: typeof saveTopicGenerationReceipt,
   ) {}
   private elapsedMilliseconds() {
-    return this.receipt.attempts.some(attempt => attempt.elapsedMilliseconds === null)
+    return EffectArray.some(this.receipt.attempts, attempt => attempt.elapsedMilliseconds === null)
       ? null
-      : this.receipt.attempts.reduce((total, attempt) => total + (attempt.elapsedMilliseconds ?? 0), 0);
+      : EffectArray.reduce(this.receipt.attempts, 0, (total, attempt) => total + (attempt.elapsedMilliseconds ?? 0));
   }
   save() {
     this.receipt = {...this.receipt, elapsedMilliseconds: this.elapsedMilliseconds()};
@@ -142,8 +145,10 @@ export class TopicGenerationObservation {
   private updateAttempt(changes: Partial<TopicGenerationReceiptV1['attempts'][number]>) {
     this.receipt = {
       ...this.receipt,
-      attempts: this.receipt.attempts.map((attempt, index, all) =>
-        index === all.length - 1 ? {...attempt, ...changes} : attempt,
+      attempts: Effect2.pipe(this.receipt.attempts, attempts =>
+        EffectArray.map(attempts, (attempt, index) =>
+          index === attempts.length - 1 ? {...attempt, ...changes} : attempt,
+        ),
       ),
     };
   }

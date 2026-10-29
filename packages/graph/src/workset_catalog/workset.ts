@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Cause, Clock, Crypto, Effect, Exit, FileSystem, Path, Ref, Result, Semaphore, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -56,6 +57,9 @@ import type {
   CodeGraphWorksetCatalogPublishedMemberV1,
   CodeGraphWorksetScopeReceiptV1,
 } from './types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+import {Option as EffectOption} from 'effect';
 
 export const CODE_GRAPH_WORKSET_PREPARE_CONCURRENCY_DEFAULT = 2;
 export const CODE_GRAPH_WORKSET_PREPARE_CONCURRENCY_MAXIMUM = 8;
@@ -257,25 +261,24 @@ interface CodeGraphWorksetPrepareProgressInputV1 {
 }
 
 export function codeGraphWorksetManifestDigest(workset: ResolvedWorkset): string {
-  const projects = workset.projects
-    .map(
-      project =>
-        [
-          project.name,
-          project.path,
-          project.uri,
-          ...(project.graph === undefined
-            ? []
-            : [
-                JSON.stringify({
-                  closure: project.graph.closure,
-                  roots: [...new Set(project.graph.roots)].sort(compareText),
-                  include: [...new Set(project.graph.include ?? [])].sort(compareText),
-                }),
-              ]),
-        ] as const,
-    )
-    .sort(compareProjectDigestEntry);
+  const projects = EffectArray.map(
+    workset.projects,
+    project =>
+      [
+        project.name,
+        project.path,
+        project.uri,
+        ...(project.graph === undefined
+          ? []
+          : [
+              JSON.stringify({
+                closure: project.graph.closure,
+                roots: [...new Set(project.graph.roots)].sort(compareText),
+                include: [...new Set(project.graph.include ?? [])].sort(compareText),
+              }),
+            ]),
+      ] as const,
+  ).sort(compareProjectDigestEntry);
   const unresolved = [...workset.unresolvedProjects].sort(compareText);
   return sha256HexSync(
     JSON.stringify(['threadnote-code-graph-workset-manifest-v1', workset.name, projects, unresolved]),
@@ -333,7 +336,8 @@ const prepareCodeGraphWorksetScoped = Effect.fn('codeGraphWorkset.prepareScoped'
       Effect.flatMap(count => reportAt({completed: count, member, phase, project: member.project})),
     );
   yield* reportAt({phase: 'starting'});
-  const unresolved: readonly PreparedMemberWithProjection[] = workset.unresolvedProjects.map(
+  const unresolved: readonly PreparedMemberWithProjection[] = EffectArray.map(
+    workset.unresolvedProjects,
     project =>
       ({
         project: safeLabel(project),
@@ -369,7 +373,7 @@ const prepareCodeGraphWorksetScoped = Effect.fn('codeGraphWorkset.prepareScoped'
       {concurrency: 1},
     );
     const members: readonly PreparedMemberWithProjection[] = [...configured, ...unresolved];
-    const generationMembers = members.flatMap(member =>
+    const generationMembers = EffectArray.flatMap(members, member =>
       member.state === 'ready' ? [preparedGenerationMember(member)] : [],
     );
     if (generationMembers.length === 0) {
@@ -382,7 +386,10 @@ const prepareCodeGraphWorksetScoped = Effect.fn('codeGraphWorkset.prepareScoped'
       worksetName: workset.name,
     });
     stagedGenerationId = staged.state === 'staging' ? staged.id : undefined;
-    const bridgeMembers = members.filter((member): member is PreparedReadyMember => member.state === 'ready');
+    const bridgeMembers = EffectArray.filter(
+      members,
+      (member): member is PreparedReadyMember => member.state === 'ready',
+    );
     yield* reportAt({completed: yield* Ref.get(completed), phase: 'bridging'});
     const bridges = yield* prepareCodeGraphWorksetBridgesForGeneration(config, staged.id, bridgeMembers);
     yield* assertPreparedMemberLeases(members);
@@ -520,13 +527,20 @@ export const inspectCodeGraphWorksetStatus = Effect.fn('codeGraphWorkset.status'
       : yield* readPublishedCodeGraphWorksetCatalogBridgeSetSummary(config.agentContextHome, published.id).pipe(
           Effect.orElseSucceed(() => undefined),
         );
-  const publishedByProject = new Map(published?.members.map(member => [member.repositoryKey, member]) ?? []);
+  const publishedByProject = new Map(
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(published?.members), __effectArrayReceiver =>
+        EffectArray.map(__effectArrayReceiver, member => [member.repositoryKey, member]),
+      ),
+    ) ?? [],
+  );
   const configured = yield* Effect.forEach(
     workset.projects,
     project => inspectConfiguredMember(config, project, publishedByProject.get(safeLabel(project.name)), fs, query),
     {concurrency: CODE_GRAPH_WORKSET_PREPARE_CONCURRENCY_DEFAULT},
   );
-  const unresolved = workset.unresolvedProjects.map(
+  const unresolved = EffectArray.map(
+    workset.unresolvedProjects,
     project =>
       ({
         project: safeLabel(project),
@@ -538,7 +552,7 @@ export const inspectCodeGraphWorksetStatus = Effect.fn('codeGraphWorkset.status'
   const generationDrift =
     published !== undefined && !codeGraphWorksetCatalogGenerationMatches(workset, manifestDigest, published);
   if (generationDrift) {
-    members = members.map(member =>
+    members = EffectArray.map(members, member =>
       member.state === 'current' ? {...member, reason: 'catalog-generation-drift', state: 'stale'} : member,
     );
   }
@@ -823,12 +837,14 @@ export function codeGraphWorksetCatalogGenerationMatches(
   published: CodeGraphWorksetCatalogPublishedGenerationV1,
 ): boolean {
   if (published.manifestDigest !== manifestDigest) return false;
-  const expected = new Set(workset.projects.map(project => safeLabel(project.name)));
-  const actual = published.members.map(member => member.repositoryKey);
+  const expected = new Set(EffectArray.map(workset.projects, project => safeLabel(project.name)));
+  const actual = EffectArray.map(published.members, member => member.repositoryKey);
   if (actual.length === 0 || new Set(actual).size !== actual.length) return false;
-  return published.members.every(member => {
+  return EffectArray.every(published.members, member => {
     if (!expected.has(member.repositoryKey)) return false;
-    const project = workset.projects.find(candidate => safeLabel(candidate.name) === member.repositoryKey)!;
+    const project = EffectOption.getOrUndefined(
+      EffectArray.findFirst(workset.projects, candidate => safeLabel(candidate.name) === member.repositoryKey),
+    )!;
     const scopeId = project.graph === undefined ? 'full-repository' : `code-graph-scope:${sha256HexSync(project.uri)}`;
     try {
       return normalizeWorksetScopeReceipt(member).scopeId === scopeId;
@@ -975,7 +991,7 @@ function prepareResult(
   published: CodeGraphWorksetCatalogGenerationReceiptV1 | undefined,
   bridges?: CodeGraphWorksetPrepareBridgeReceiptV1,
 ): CodeGraphWorksetPrepareResultV1 {
-  const publicMembers = members.map(publicPrepareMember);
+  const publicMembers = EffectArray.map(members, publicPrepareMember);
   return {
     ...(bridges === undefined ? {} : {bridges}),
     coverage: codeGraphWorksetPrepareCoverage(publicMembers),
@@ -1010,10 +1026,10 @@ export const prepareCodeGraphWorksetBridgesForGeneration = Effect.fn('codeGraphW
         ),
       {concurrency: CODE_GRAPH_WORKSET_PREPARE_CONCURRENCY_DEFAULT},
     );
-    const unavailableRepositories = loaded
-      .filter(value => value.state === 'unavailable')
-      .map(value => value.member.project)
-      .sort(compareText);
+    const unavailableRepositories = EffectArray.map(
+      EffectArray.filter(loaded, value => value.state === 'unavailable'),
+      value => value.member.project,
+    ).sort(compareText);
     if (unavailableRepositories.length > 0) {
       const stored = yield* replaceCodeGraphWorksetCatalogBridgeSet(config.agentContextHome, {
         bridges: [],
@@ -1039,7 +1055,7 @@ export const prepareCodeGraphWorksetBridgesForGeneration = Effect.fn('codeGraphW
         ],
       } satisfies CodeGraphWorksetPrepareBridgeReceiptV1;
     }
-    const repositories = loaded.map(value => {
+    const repositories = EffectArray.map(loaded, value => {
       if (value.state !== 'ready') throw new Error('Unreachable bridge preparation state.');
       return {
         monikers: value.monikers,
@@ -1072,11 +1088,11 @@ export const prepareCodeGraphWorksetBridgesForGeneration = Effect.fn('codeGraphW
       return {
         bridgeCount: 0,
         digest: stored.digest,
-        monikerCount: repositories.reduce((total, value) => total + value.monikers.length, 0),
+        monikerCount: EffectArray.reduce(repositories, 0, (total, value) => total + value.monikers.length),
         rejectionCount: 0,
         resolverVersion: stored.resolverVersion,
         state: 'unavailable' as const,
-        unavailableRepositories: ready.map(value => value.project).sort(compareText),
+        unavailableRepositories: EffectArray.map(ready, value => value.project).sort(compareText),
         warnings: ['Cross-repository bridges were withheld because deterministic resolution failed.'],
       } satisfies CodeGraphWorksetPrepareBridgeReceiptV1;
     }
@@ -1096,7 +1112,7 @@ export const prepareCodeGraphWorksetBridgesForGeneration = Effect.fn('codeGraphW
     return {
       bridgeCount: stored.bridgeCount,
       digest: stored.digest,
-      monikerCount: repositories.reduce((total, value) => total + value.monikers.length, 0),
+      monikerCount: EffectArray.reduce(repositories, 0, (total, value) => total + value.monikers.length),
       rejectionCount: resolution.success.rejections.length,
       resolverVersion: stored.resolverVersion,
       state: 'ready' as const,
@@ -1190,8 +1206,8 @@ function prepareConcurrency(value: number | undefined): number {
 }
 
 function safeLabel(value: string): string {
-  const normalized = value.replace(/[\r\n\t\0]/gu, ' ').trim();
-  return normalized.slice(0, 256) || 'unknown';
+  const normalized = Effect2.pipe(value, EffectString.replace(/[\r\n\t\0]/gu, ' '), EffectString.trim);
+  return Effect2.pipe(normalized, EffectString.slice(0, 256)) || 'unknown';
 }
 
 function compareProjectDigestEntry(

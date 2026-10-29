@@ -5,19 +5,25 @@ import * as HttpClientRequest from 'effect/http/HttpClientRequest';
 import type {HttpClientResponse} from 'effect/http/HttpClientResponse';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 
-export class HttpRequestFailed extends Schema.TaggedError<HttpRequestFailed>()('HttpRequestFailed', {
-  cause: Schema.Defect(),
-  message: Schema.String,
-  method: Schema.String,
-  url: Schema.String,
-}) {}
+export class HttpRequestFailed extends Schema.TaggedError<HttpRequestFailed, {readonly brand: unique symbol}>()(
+  'HttpRequestFailed',
+  {
+    cause: Schema.Defect(),
+    message: Schema.String,
+    method: Schema.String,
+    url: Schema.String,
+  },
+) {}
 
-export class HttpStatusError extends Schema.TaggedError<HttpStatusError>()('HttpStatusError', {
-  message: Schema.String,
-  method: Schema.String,
-  status: Schema.Finite,
-  url: Schema.String,
-}) {}
+export class HttpStatusError extends Schema.TaggedError<HttpStatusError, {readonly brand: unique symbol}>()(
+  'HttpStatusError',
+  {
+    message: Schema.String,
+    method: Schema.String,
+    status: Schema.Finite,
+    url: Schema.String,
+  },
+) {}
 
 export type HttpError = HttpRequestFailed | HttpStatusError;
 
@@ -202,15 +208,16 @@ const executeStatus = (
   return client.execute(request).pipe(
     Effect.provideService(FetchHttpClient.Fetch, dynamicFetch),
     Effect.timeout(options?.timeoutMs ?? 3000),
-    Effect.map(response => response.status),
-    Effect.mapError(cause =>
-      HttpRequestFailed.make({
-        cause,
-        message: `GET ${urlText} failed`,
-        method: 'GET',
-        url: urlText,
-      }),
-    ),
+    Effect.mapBoth({
+      onSuccess: response => response.status,
+      onFailure: cause =>
+        HttpRequestFailed.make({
+          cause,
+          message: `GET ${urlText} failed`,
+          method: 'GET',
+          url: urlText,
+        }),
+    }),
   );
 };
 

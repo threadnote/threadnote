@@ -1,30 +1,70 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Effect, FileSystem, Layer, Option, Path} from 'effect';
+import * as Crypto from 'effect/Crypto';
 import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {SystemInfo} from '@threadnote/platform/system';
 import {CommandExecutor} from '@threadnote/platform/command';
+import type {CodeGraphEmbeddingIndexShape} from '@threadnote/graph/embedding';
+import type {DirectPersistentCapacityProtection} from '@threadnote/graph/indexer/types';
+import type {CodeGraphMaintenanceCoordinatorShape} from '@threadnote/graph/maintenance/coordinator';
 import {buildOwnedCleanSnapshot} from '@threadnote/graph/indexer/build';
 import {extractorSetIdentity, graphContentIdentity} from '@threadnote/graph/indexer/materialization';
 import type {CodeGraphLanguagePackRegistryShape} from '@threadnote/graph/languages/registry';
 import {codeGraphLayout} from '@threadnote/graph/layout';
-import type {CodeGraphStoreShape} from '@threadnote/graph/store';
 import {retireIncompleteWorktreeSnapshots} from '@threadnote/graph/store/persistent_build';
 import {initializeSchema} from '@threadnote/graph/store/schema/initialization';
 import {useDatabaseDirect} from '@threadnote/graph/store/session';
-import type {CodeGraphSnapshot, RepositoryIdentity} from '@threadnote/graph/types';
+import {CodeGraphStoreError, type CodeGraphSnapshot, type RepositoryIdentity} from '@threadnote/graph/types';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const RETIRED_ID = 'retired-fixture';
-const STOPPED = new Error('stop at new snapshot boundary');
+const STOPPED = CodeGraphStoreError.of('stop at new snapshot boundary');
+const unusedEmbedding: CodeGraphEmbeddingIndexShape = {
+  check: () => Effect.succeed({modelId: 'fixture', reused: 0, state: 'ready'}),
+  ensure: () => Effect.die('unexpected embedding ensure'),
+  search: () => Effect.die('unexpected embedding search'),
+};
+const testSystem = SystemInfo.of({
+  architecture: 'x64',
+  availableDiskBytes: () => Effect.die('unexpected disk capacity query'),
+  currentDirectory: () => process.cwd(),
+  environment: () => process.env,
+  developmentEntrypoint: '/test/threadnote.ts',
+  intendedChildEnvironment: environment => environment,
+  executablePath: process.execPath,
+  homeDirectory: process.env.HOME ?? '/tmp',
+  hardwareInfo: Effect.succeed({cpuModel: 'test', memoryBytes: 1, effectiveMemoryBytes: 1, operatingSystem: 'test'}),
+  isProcessRunning: processId => processId === process.pid,
+  memoryUsage: () => ({external: 0, heapUsed: 0, rss: 0}),
+  processStartIdentity: () => Effect.as(Effect.void, undefined),
+  runtimeVersion: Bun.version,
+  pathDelimiter: process.platform === 'win32' ? ';' : ':',
+  platform: process.platform,
+  processId: process.pid,
+  processArguments: process.argv,
+  readLine: () => () => undefined,
+  signalProcess: () => undefined,
+  setExitCode: () => undefined,
+  setEnvironmentVariable: () => undefined,
+  stdinIsTTY: false,
+  stdoutIsTTY: false,
+  tempDirectory: '/tmp',
+  userName: 'fixture',
+});
 const TestLayer = Layer.mergeAll(
   BunServices.layer,
-  Layer.succeed(CommandExecutor, {execute: () => Effect.die('unexpected command execution')} as never),
-  Layer.succeed(SystemInfo, {
-    processId: process.pid,
-    processStartIdentity: () => Effect.void,
-  } as never),
+  Layer.succeed(
+    CommandExecutor,
+    CommandExecutor.of({
+      execute: () => Effect.die('unexpected command execution'),
+      executeStreaming: () => Effect.die('unexpected command execution'),
+    }),
+  ),
+  Layer.succeed(SystemInfo, testSystem),
 );
 
 describe('ready snapshot reuse reclamation', () => {
@@ -75,10 +115,11 @@ describe('ready snapshot reuse reclamation', () => {
               activateCleanSnapshotAlias: () => Effect.die('alias publication must follow the candidate guard'),
               reusableOverlayBase: () =>
                 fixture.remainingRows.pipe(
+                  Effect.mapError(() => CodeGraphStoreError.of('Unable to observe fixture cleanup rows.')),
                   Effect.tap(rows => Effect.sync(() => expect(rows).toBe(0))),
                   Effect.andThen(Effect.fail(STOPPED)),
                 ),
-            } as unknown as CodeGraphStoreShape,
+            },
           }).pipe(Effect.flip);
           expect(failure).toBe(STOPPED);
           expect(fixture.cleanupModes).toEqual(['required']);
@@ -122,26 +163,36 @@ function withFixture<A, E, R>(rows: number, use: (fixture: Fixture) => Effect.Ef
     ':memory:',
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
+      const crypto = yield* Crypto.Crypto;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-ready-reclaim-'});
       const identity: RepositoryIdentity = {
         caseMode: 'sensitive',
-        checkoutId: 'a'.repeat(64),
+        checkoutId: Effect2.pipe('a', EffectString.repeat(64)),
         displayName: 'fixture',
         gitCommonDirectory: path.join(home, '.git'),
-        headCommit: 'b'.repeat(40),
+        headCommit: Effect2.pipe('b', EffectString.repeat(40)),
         objectFormat: 'sha1',
         repoRoot: home,
-        repositoryId: 'c'.repeat(64),
-        worktreeId: 'd'.repeat(64),
+        repositoryId: Effect2.pipe('c', EffectString.repeat(64)),
+        worktreeId: Effect2.pipe('d', EffectString.repeat(64)),
       };
-      const languagePacks = {
+      const languagePacks: CodeGraphLanguagePackRegistryShape = {
         activeCacheIdentities: () => [],
         activeDerivationIdentities: () => [],
+        activePackProvenance: () => [],
+        cacheIdentities: [],
+        cacheIdentityForPath: () => Option.none(),
         discoverWorkspace: () =>
           Effect.succeed({diagnostics: [], fingerprint: 'workspace', projects: [], workspaces: []}),
-      } as unknown as CodeGraphLanguagePackRegistryShape;
+        extractFile: () => Effect.die('unexpected language extraction'),
+        extractRawFile: () => Effect.die('unexpected raw language extraction'),
+        isResolutionContext: () => false,
+        match: () => Option.none(),
+        postprocessFile: (_file, facts) => facts,
+        packs: [],
+      };
       const extractorSet = extractorSetIdentity([], languagePacks);
       const ready: CodeGraphSnapshot = {
         commit: identity.headCommit,
@@ -150,7 +201,7 @@ function withFixture<A, E, R>(rows: number, use: (fixture: Fixture) => Effect.Ef
         extractorSet,
         fileCount: 1,
         graphContentId: graphContentIdentity(extractorSet, []),
-        id: `cgsn_${'e'.repeat(40)}`,
+        id: `cgsn_${Effect2.pipe('e', EffectString.repeat(40))}`,
         repositoryId: identity.repositoryId,
         state: 'ready',
         symbolCount: 2,
@@ -179,18 +230,33 @@ function withFixture<A, E, R>(rows: number, use: (fixture: Fixture) => Effect.Ef
         .pipe(Effect.map(result => result[0].count));
       const cleanupModes: string[] = [];
       const writes: string[] = [];
+      const capacityProtection: DirectPersistentCapacityProtection = {
+        availableDiskBytes: () => Effect.die('unexpected disk capacity query'),
+        crypto,
+        maintenance: {
+          kickOrdinary: () => Effect.die('unexpected ordinary maintenance'),
+          kickReconciliation: () => Effect.die('unexpected reconciliation maintenance'),
+          kickResidual: () => Effect.die('unexpected residual maintenance'),
+          request: () => Effect.die('unexpected maintenance request'),
+          tick: () => Effect.die('unexpected maintenance tick'),
+        } satisfies CodeGraphMaintenanceCoordinatorShape,
+        path,
+        system: testSystem,
+        temporaryDirectory: '/tmp',
+        walAutoCheckpointPages: 1,
+      };
       const fixture = {
         ready,
         remainingRows,
         cleanupModes,
         writes,
         input: (route: 'exact-ready' | 'commit-ready' | 'materialize') => ({
-          buildOwner: {processId: process.pid} as never,
-          capacityProtection: {} as never,
-          embedding: {check: () => Effect.succeed({state: 'ready'})} as never,
+          buildOwner: {buildId: 'fixture-build', processId: process.pid},
+          capacityProtection,
+          embedding: unusedEmbedding,
           ensureVectors: false,
           existing: ready,
-          fallbackSnapshotId: `cgsn_${'f'.repeat(40)}`,
+          fallbackSnapshotId: `cgsn_${Effect2.pipe('f', EffectString.repeat(40))}`,
           force: false,
           fs,
           identity,
@@ -230,10 +296,11 @@ function withFixture<A, E, R>(rows: number, use: (fixture: Fixture) => Effect.Ef
                 ),
                 Effect.andThen(Effect.fail(STOPPED)),
               ),
-          } as unknown as CodeGraphStoreShape,
+          },
           threadnoteHome: home,
         }),
       };
+      // @ts-expect-error -- This fixture intentionally implements only the store calls consumed by these test paths.
       return yield* use(fixture);
     }),
   );

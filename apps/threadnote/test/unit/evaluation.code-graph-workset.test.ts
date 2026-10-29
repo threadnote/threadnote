@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -13,6 +15,8 @@ import {
   type CodeGraphWorksetExpectedEdgeV1,
   type CodeGraphWorksetMemberState,
 } from '@threadnote/threadnote/evaluation/code-graph-workset';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const importEdge: CodeGraphWorksetExpectedEdgeV1 = {
   provenance: 'declared',
@@ -32,9 +36,9 @@ const fixtureInput: CodeGraphWorksetEvaluationFixtureV1 = {
   allowedAuthoritativeEdges: [callerEdge, importEdge],
   generator: {
     archetypes: [
-      {id: 'producer-archetype', sha256: 'a'.repeat(64)},
-      {id: 'consumer-archetype', sha256: 'b'.repeat(64)},
-      {id: 'empty-archetype', sha256: 'c'.repeat(64)},
+      {id: 'producer-archetype', sha256: Effect.pipe('a', EffectString.repeat(64))},
+      {id: 'consumer-archetype', sha256: Effect.pipe('b', EffectString.repeat(64))},
+      {id: 'empty-archetype', sha256: Effect.pipe('c', EffectString.repeat(64))},
     ],
     name: 'threadnote-workset-fixture',
     version: '1.0.0',
@@ -171,14 +175,21 @@ describe('code graph workset evaluation contract', () => {
   const fixture = parseCodeGraphWorksetEvaluationFixtureV1(fixtureInput);
 
   it('models every Phase 0 query, availability, worktree, and isolation state without changing code-graph V1', () => {
-    expect(new Set(fixture.queries.map(entry => entry.category))).toEqual(
+    expect(new Set(EffectArray.map(fixture.queries, entry => entry.category))).toEqual(
       new Set(CODE_GRAPH_WORKSET_EVALUATION_CATEGORIES),
     );
-    expect(new Set(fixture.members.map(member => member.expectedState))).toEqual(
+    expect(new Set(EffectArray.map(fixture.members, member => member.expectedState))).toEqual(
       new Set(CODE_GRAPH_WORKSET_MEMBER_STATES),
     );
-    expect(new Set(fixture.members.map(member => member.worktree.state))).toEqual(new Set(['clean', 'dirty']));
-    expect(fixture.members.filter(member => member.worktree.isolation)).toHaveLength(2);
+    expect(new Set(EffectArray.map(fixture.members, member => member.worktree.state))).toEqual(
+      new Set(['clean', 'dirty']),
+    );
+    expect(
+      EffectArray.filter(
+        fixture.members,
+        (member, index) => index in fixture.members && Boolean(member.worktree.isolation),
+      ),
+    ).toHaveLength(2);
     expect(codeGraphWorksetEvaluationFixtureHash(fixture)).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -237,8 +248,8 @@ describe('code graph workset evaluation contract', () => {
       structuredResponseUtf8Bytes: 470,
       textResponseUtf8Bytes: 280,
     });
-    expect(metrics.metricsBySize.map(entry => entry.worksetSize)).toEqual([2, 5]);
-    expect(metrics.metricsBySize.map(entry => entry.metrics.queryCount)).toEqual([9, 9]);
+    expect(EffectArray.map(metrics.metricsBySize, entry => entry.worksetSize)).toEqual([2, 5]);
+    expect(EffectArray.map(metrics.metricsBySize, entry => entry.metrics.queryCount)).toEqual([9, 9]);
 
     const baseline = parseCodeGraphWorksetEvaluationBaselineV1({
       createdAt: '2026-08-11T00:00:00.000Z',
@@ -263,9 +274,12 @@ describe('code graph workset evaluation contract', () => {
 
   it('detects a delivered cross-repository authoritative edge outside the reviewed allowlist', () => {
     const observations = perfectObservations(fixture);
-    const observationIndex = observations.findIndex(observation => observation.execution === 'executed');
+    const observationIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(observations, observation => observation.execution === 'executed'),
+      () => -1,
+    );
     const observation = observations[observationIndex];
-    const contaminated = observations.map((candidate, index) =>
+    const contaminated = EffectArray.map(observations, (candidate, index) =>
       index === observationIndex
         ? {...observation, authoritativeEdges: [...observation.authoritativeEdges, unexpectedEdge]}
         : candidate,
@@ -286,7 +300,7 @@ describe('code graph workset evaluation contract', () => {
     expect(() =>
       parseCodeGraphWorksetEvaluationFixtureV1({
         ...fixtureInput,
-        queries: fixtureInput.queries.map(entry =>
+        queries: EffectArray.map(fixtureInput.queries, entry =>
           entry.id === 'symbol-api' ? {...entry, expectedRepositories: ['unknown']} : entry,
         ),
       }),
@@ -294,7 +308,7 @@ describe('code graph workset evaluation contract', () => {
     expect(() =>
       parseCodeGraphWorksetEvaluationFixtureV1({
         ...fixtureInput,
-        queries: fixtureInput.queries.map(entry =>
+        queries: EffectArray.map(fixtureInput.queries, entry =>
           entry.id === 'no-answer-payments'
             ? {...entry, expectedRepositories: ['producer'], expectedSymbols: [{repositoryId: 'producer', symbol: 'x'}]}
             : entry,
@@ -304,7 +318,7 @@ describe('code graph workset evaluation contract', () => {
     expect(() =>
       parseCodeGraphWorksetEvaluationFixtureV1({
         ...fixtureInput,
-        queries: fixtureInput.queries.map(entry =>
+        queries: EffectArray.map(fixtureInput.queries, entry =>
           entry.id === 'imports-api'
             ? {
                 ...entry,
@@ -318,9 +332,16 @@ describe('code graph workset evaluation contract', () => {
 
   it('keeps unsupported traversal and buffered delivery evidence explicit', () => {
     const observations = perfectObservations(fixture);
-    const unsupportedIndex = observations.findIndex(observation => observation.execution === 'unsupported-operation');
-    const executedIndex = observations.findIndex(
-      observation => observation.execution === 'executed' && observation.measurement?.evidenceCardCount,
+    const unsupportedIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(observations, observation => observation.execution === 'unsupported-operation'),
+      () => -1,
+    );
+    const executedIndex = EffectOption.getOrElse(
+      EffectArray.findFirstIndex(
+        observations,
+        observation => observation.execution === 'executed' && Boolean(observation.measurement?.evidenceCardCount),
+      ),
+      () => -1,
     );
     expect(unsupportedIndex).toBeGreaterThanOrEqual(0);
     expect(executedIndex).toBeGreaterThanOrEqual(0);
@@ -384,7 +405,7 @@ describe('code graph workset evaluation contract', () => {
             ...fixture,
             allowedAuthoritativeEdges,
             generator: {...fixture.generator, archetypes},
-            members: members.map(member => ({
+            members: EffectArray.map(members, member => ({
               ...member,
               worktree: member.worktree.isolation
                 ? {
@@ -398,7 +419,7 @@ describe('code graph workset evaluation contract', () => {
                   }
                 : member.worktree,
             })),
-            queries: queries.map(entry => ({
+            queries: EffectArray.map(queries, entry => ({
               ...entry,
               expectedEdges: reverseNested ? [...entry.expectedEdges].reverse() : entry.expectedEdges,
               expectedRepositories: reverseNested
@@ -430,16 +451,23 @@ describe('code graph workset evaluation contract', () => {
           minLength: fixture.queries.length,
         }),
         (repositoryHit, symbolHit, edgeHit, accurateCoverage, completionTimes) => {
-          const observations = fixture.sizes.flatMap(worksetSize =>
-            fixture.queries
-              .filter(entry => entry.sizes.includes(worksetSize))
-              .map((entry, index) => {
-                const coverage = fixture.members
-                  .filter(member => member.ordinal <= worksetSize)
-                  .map(member => ({
+          const observations = EffectArray.flatMap(fixture.sizes, worksetSize =>
+            EffectArray.map(
+              EffectArrayPipe(fixture.queries, __effectArrayValues =>
+                EffectArray.filter(
+                  __effectArrayValues,
+                  (entry, __effectArrayIndex) =>
+                    __effectArrayIndex in __effectArrayValues && entry.sizes.includes(worksetSize),
+                ),
+              ),
+              (entry, index) => {
+                const coverage = EffectArray.map(
+                  EffectArray.filter(fixture.members, member => member.ordinal <= worksetSize),
+                  member => ({
                     repositoryId: member.id,
                     state: accurateCoverage[index] ? member.expectedState : differentState(member.expectedState),
-                  }));
+                  }),
+                );
                 if (entry.operation !== 'query') {
                   return {
                     authoritativeEdges: [],
@@ -499,10 +527,14 @@ describe('code graph workset evaluation contract', () => {
                   worktreeLeakageCount: edgeHit[index] ? 1 : 0,
                   worktreeObservationCount: 1,
                 } satisfies CodeGraphWorksetEvaluationObservationV1;
-              }),
+              },
+            ),
           );
           const metrics = evaluateCodeGraphWorksetObservations(fixture, observations);
-          for (const metricSet of [metrics.aggregate, ...metrics.metricsBySize.map(entry => entry.metrics)]) {
+          for (const metricSet of [
+            metrics.aggregate,
+            ...EffectArray.map(metrics.metricsBySize, entry => entry.metrics),
+          ]) {
             for (const rate of [
               metricSet.authoritativeFalseEdgeRate,
               metricSet.coverageAccuracy,
@@ -558,13 +590,19 @@ function query(
 function perfectObservations(
   fixture: CodeGraphWorksetEvaluationFixtureV1,
 ): readonly CodeGraphWorksetEvaluationObservationV1[] {
-  return fixture.sizes.flatMap(worksetSize =>
-    fixture.queries
-      .filter(entry => entry.sizes.includes(worksetSize))
-      .map((entry, index) => {
-        const coverage = fixture.members
-          .filter(member => member.ordinal <= worksetSize)
-          .map(member => ({repositoryId: member.id, state: member.expectedState}));
+  return EffectArray.flatMap(fixture.sizes, worksetSize =>
+    EffectArray.map(
+      EffectArrayPipe(fixture.queries, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (entry, __effectArrayIndex) => __effectArrayIndex in __effectArrayValues && entry.sizes.includes(worksetSize),
+        ),
+      ),
+      (entry, index) => {
+        const coverage = EffectArray.map(
+          EffectArray.filter(fixture.members, member => member.ordinal <= worksetSize),
+          member => ({repositoryId: member.id, state: member.expectedState}),
+        );
         if (entry.operation !== 'query') {
           return {
             authoritativeEdges: [],
@@ -616,7 +654,8 @@ function perfectObservations(
           worktreeLeakageCount: 0,
           worktreeObservationCount: 2,
         } satisfies CodeGraphWorksetEvaluationObservationV1;
-      }),
+      },
+    ),
   );
 }
 

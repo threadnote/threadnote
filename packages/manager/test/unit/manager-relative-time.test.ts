@@ -4,6 +4,8 @@ import {createRoot} from 'react-dom/client';
 import {expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {formatRelativeAge, useRelativeTimeNow} from '../../src/relative_time.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 const now = Date.parse('2026-10-09T12:00:00Z');
 
@@ -29,7 +31,8 @@ it('always reports a nonnegative age in a unit containing the elapsed time', () 
     fc.property(fc.integer({min: 0, max: 365 * 86400}), seconds => {
       const label = formatRelativeAge(new Date(now - seconds * 1000).toISOString(), now)!;
       const [, count, unit] = /^(\d+) (sec|min|hours?|days?) ago$/u.exec(label)!;
-      const scale = unit === 'sec' ? 1 : unit === 'min' ? 60 : unit.startsWith('hour') ? 3600 : 86400;
+      const scale =
+        unit === 'sec' ? 1 : unit === 'min' ? 60 : Effect.pipe(unit, EffectString.startsWith('hour')) ? 3600 : 86400;
       expect(Number(count) * scale).toBeLessThanOrEqual(seconds);
       expect((Number(count) + 1) * scale).toBeGreaterThan(seconds);
     }),

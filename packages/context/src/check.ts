@@ -1,3 +1,9 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {
+  isFiniteNumber as checkedIsFiniteNumber,
+  isSafeInteger as checkedIsSafeInteger,
+} from '@threadnote/platform/validation';
+import {Array as EffectArray} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {
   ContextHealthConfidenceV1,
@@ -6,6 +12,9 @@ import type {
   ContextHealthReportV1,
   ContextHealthSeverityV1,
 } from './health.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const CONTEXT_CHECK_REPORT_VERSION = 2 as const;
 export const DEFAULT_CONTEXT_CHECK_FINDING_LIMIT = 100 as const;
@@ -126,9 +135,12 @@ export function buildContextCheckReport(input: ContextCheckReportInputV1): Conte
   const citedDocumentCitationUris = new Set(input.selection.citedDocumentCitationUris ?? []);
   const findings = uniqueFindings(
     [
-      ...input.healthReport.findings
-        .map(finding => projectFinding(finding, selectedUris, citedDocumentCitationUris))
-        .filter((finding): finding is ContextCheckFindingV1 => finding !== undefined),
+      ...EffectArray.filter(
+        EffectArray.map(input.healthReport.findings, finding =>
+          projectFinding(finding, selectedUris, citedDocumentCitationUris),
+        ),
+        (finding): finding is ContextCheckFindingV1 => finding !== undefined,
+      ),
       ...graphImpactFindings(input.selection.graphImpactedMemoryUris ?? []),
       ...captureAdvisoryFindings(input.selection.captureAdvisoryIds ?? []),
     ].sort(compareFindings),
@@ -170,13 +182,14 @@ export function parseContextCheckReportJson(value: string): ContextCheckReport {
 
 export function projectContextCheckReportSarif(report: ContextCheckReport): ContextCheckSarifV1 {
   const results = [
-    ...report.findings.map(sarifFinding),
+    ...EffectArray.map(report.findings, sarifFinding),
     ...(report.evidenceStatus !== 'complete' ||
-    (report.exitCode === 2 && !report.findings.some(finding => finding.repairability === 'requires-evidence'))
+    (report.exitCode === 2 &&
+      !EffectArray.some(report.findings, finding => finding.repairability === 'requires-evidence'))
       ? [sarifEvidence(report)]
       : []),
   ];
-  const rules = [...new Map(results.map(result => [result.ruleId, sarifRule(result.ruleId)])).values()];
+  const rules = [...new Map(EffectArray.map(results, result => [result.ruleId, sarifRule(result.ruleId)])).values()];
   return {
     $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
     runs: [{results, tool: {driver: {name: 'Threadnote Context Check', rules, version: '1.0.0'}}}],
@@ -190,9 +203,17 @@ function projectFinding(
   citedDocumentCitationUris: ReadonlySet<string>,
 ): ContextCheckFindingV1 | undefined {
   const activeConflict = isActiveConflict(finding.category);
-  const affectedUris = [...new Set(finding.uris.filter(uri => activeConflict || selectedUris.has(uri)))].sort(
-    compareText,
-  );
+  const affectedUris = [
+    ...new Set(
+      EffectArrayPipe(finding.uris, __effectArrayValues =>
+        EffectArray.filter(
+          __effectArrayValues,
+          (uri, __effectArrayIndex) =>
+            __effectArrayIndex in __effectArrayValues && (activeConflict || selectedUris.has(uri)),
+        ),
+      ),
+    ),
+  ].sort(compareText);
   if (!activeConflict && affectedUris.length === 0) return undefined;
   const category = citedDocumentCategory(finding, citedDocumentCitationUris) ?? finding.category;
   return {
@@ -213,7 +234,7 @@ function projectFinding(
 }
 
 function graphImpactFindings(uris: readonly string[]): readonly ContextCheckFindingV1[] {
-  return [...new Set(uris)].sort(compareText).map(uri => ({
+  return EffectArray.map([...new Set(uris)].sort(compareText), uri => ({
     affectedMemoryCount: 1,
     category: 'graph-impact',
     confidence: 'high',
@@ -224,7 +245,7 @@ function graphImpactFindings(uris: readonly string[]): readonly ContextCheckFind
 }
 
 function captureAdvisoryFindings(ids: readonly string[]): readonly ContextCheckFindingV1[] {
-  return [...new Set(ids)].sort(compareText).map(id => ({
+  return EffectArray.map([...new Set(ids)].sort(compareText), id => ({
     affectedMemoryCount: 0,
     category: 'capture-advisory',
     confidence: 'high',
@@ -243,7 +264,10 @@ function report(
   omittedFindings: number,
   classificationFindings: readonly ContextCheckFindingV1[] = findings,
 ): ContextCheckReportV2 {
-  const requiresEvidence = classificationFindings.some(finding => finding.repairability === 'requires-evidence');
+  const requiresEvidence = EffectArray.some(
+    classificationFindings,
+    finding => finding.repairability === 'requires-evidence',
+  );
   const nonFatalGraphEvidenceGap =
     classificationFindings.length === 0 &&
     (evidenceReason === 'graph-impact-evidence-incomplete' || evidenceReason === 'graph-impact-evidence-unavailable');
@@ -281,15 +305,10 @@ function fingerprint(
   affectedUris: readonly string[],
 ): string {
   return sha256HexSync(
-    [
-      'threadnote-context-check-finding-v1',
-      category,
-      identity,
-      confidence,
-      repairability,
-      severity,
-      ...affectedUris,
-    ].join('\u0000'),
+    EffectArray.join(
+      ['threadnote-context-check-finding-v1', category, identity, confidence, repairability, severity, ...affectedUris],
+      '\u0000',
+    ),
   );
 }
 
@@ -318,22 +337,26 @@ function inputProblems(input: ContextCheckReportInputV1): boolean {
   if (input.healthReport.version !== 1 || input.healthReport.project.length === 0) return true;
   if (input.selection.status === 'unavailable') return false;
   return (
-    input.selection.affectedMemoryUris.some(uri => uri.length === 0) ||
-    input.selection.changedPaths.some(path => !safeRepositoryPath(path))
+    EffectArray.some(input.selection.affectedMemoryUris, uri => uri.length === 0) ||
+    EffectArray.some(input.selection.changedPaths, path => !safeRepositoryPath(path))
   );
 }
 
 function safeRepositoryPath(path: string): boolean {
-  return path.length > 0 && !path.startsWith('/') && !path.split('/').includes('..');
+  return (
+    path.length > 0 &&
+    !Effect.pipe(path, EffectString.startsWith('/')) &&
+    !Effect.pipe(path, EffectString.split('/')).includes('..')
+  );
 }
 
 function findingLimit(input: number | undefined): number {
-  if (input === undefined || !Number.isFinite(input)) return DEFAULT_CONTEXT_CHECK_FINDING_LIMIT;
+  if (input === undefined || !checkedIsFiniteNumber(input)) return DEFAULT_CONTEXT_CHECK_FINDING_LIMIT;
   return Math.max(0, Math.min(MAXIMUM_CONTEXT_CHECK_FINDING_LIMIT, Math.floor(input)));
 }
 
 function uniqueFindings(findings: readonly ContextCheckFindingV1[]): readonly ContextCheckFindingV1[] {
-  return [...new Map(findings.map(finding => [finding.fingerprint, finding])).values()];
+  return [...new Map(EffectArray.map(findings, finding => [finding.fingerprint, finding])).values()];
 }
 
 function compareFindings(left: ContextCheckFindingV1, right: ContextCheckFindingV1): number {
@@ -381,7 +404,7 @@ function sarifRule(id: string): {
 } {
   return {
     id,
-    name: id.slice('threadnote/context-check/'.length),
+    name: Effect.pipe(id, EffectString.slice('threadnote/context-check/'.length)),
     shortDescription: {text: 'Threadnote context-check result.'},
   };
 }
@@ -423,13 +446,13 @@ function isContextCheckReport(value: unknown): value is ContextCheckReport {
   if (
     !boundedInteger(value.limit, MAXIMUM_CONTEXT_CHECK_FINDING_LIMIT) ||
     !boundedInteger(value.omittedFindings, Number.MAX_SAFE_INTEGER) ||
-    !Array.isArray(value.findings) ||
+    !EffectArray.isArray(value.findings) ||
     value.findings.length > value.limit ||
     !validEvidenceReason(value.evidenceReason)
   )
     return false;
-  if (!value.findings.every(isFinding)) return false;
-  const requiresEvidence = value.findings.some(finding => finding.repairability === 'requires-evidence');
+  if (!EffectArray.every(value.findings, isFinding)) return false;
+  const requiresEvidence = EffectArray.some(value.findings, finding => finding.repairability === 'requires-evidence');
   const nonFatalGraphEvidenceGap =
     value.version === CONTEXT_CHECK_REPORT_VERSION &&
     value.evidenceStatus === 'unavailable' &&
@@ -526,12 +549,12 @@ function validEvidenceReason(value: unknown): boolean {
 }
 
 function boundedInteger(value: unknown, maximum: number): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum;
+  return checkedIsSafeInteger(value) && value >= 0 && value <= maximum;
 }
 
 function hasExactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   const allowedKeys = new Set(allowed);
-  return Object.keys(value).every(key => allowedKeys.has(key));
+  return EffectArray.every(EffectRecord.keys(value), key => allowedKeys.has(key));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

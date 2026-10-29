@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {Schema} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {createHash} from '@threadnote/testing/node-crypto';
@@ -64,12 +65,43 @@ import {
   reconcileCodeMemoryLinkAgentPendingCommitV1,
   serializeCodeMemoryLinkAgentPendingCommitJsonV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-pending';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return Predicate.isObject(value) ? value : undefined;
+}
+
+function toolItem(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  return objectRecord(objectRecord(event.params)?.item);
+}
+
+type TextContentProjection = {readonly text?: unknown; readonly type?: unknown};
+function isTextContentProjection(value: unknown): value is TextContentProjection {
+  return (
+    Predicate.isObject(value) &&
+    (!('text' in value) || typeof value.text === 'string') &&
+    (!('type' in value) || typeof value.type === 'string')
+  );
+}
+
+function toolResultProjection(event: Record<string, unknown>) {
+  const item = toolItem(event);
+  const result = objectRecord(item?.result);
+  const content = result?.content;
+  return result === undefined
+    ? undefined
+    : {
+        content: EffectArray.isArray(content) ? EffectArray.filter(content, isTextContentProjection) : [],
+      };
+}
 
 describe('Code Memory Link Codex app-server transport', () => {
   const temporaryRoots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(temporaryRoots.splice(0).map(root => rm(root, {force: true, recursive: true})));
+    await Promise.all(EffectArray.map(temporaryRoots.splice(0), root => rm(root, {force: true, recursive: true})));
   });
 
   it('names the pinned code-mode edit surface without implying a direct apply_patch tool', () => {
@@ -104,7 +136,7 @@ describe('Code Memory Link Codex app-server transport', () => {
       timeoutMilliseconds: 10_000,
     });
 
-    const ordered = trace.events.map(event => event.method);
+    const ordered = EffectArray.map(trace.events, event => event.method);
     const firstCompleted = ordered.indexOf('item/completed');
     const firstUsage = ordered.indexOf('thread/tokenUsage/updated');
     const turnCompleted = ordered.indexOf('turn/completed');
@@ -141,22 +173,24 @@ describe('Code Memory Link Codex app-server transport', () => {
       timeoutMilliseconds: 10_000,
     });
     expect(autoReviewedTrace.approvals).toEqual([]);
-    expect(autoReviewedTrace.events.map(event => event.method)).toContain('item/autoApprovalReview/completed');
+    expect(EffectArray.map(autoReviewedTrace.events, event => event.method)).toContain(
+      'item/autoApprovalReview/completed',
+    );
 
-    const artifactId = `art_${'1'.repeat(16)}`;
+    const artifactId = `art_${Effect.pipe('1', EffectString.repeat(16))}`;
     const rubricInput = {
-      fixtureHash: '1'.repeat(64),
+      fixtureHash: Effect.pipe('1', EffectString.repeat(64)),
       goldCitationDigests: [],
       predicates: [
         {
           assertion: {artifactId, expected: 'pass=true', kind: 'utf8-contains' as const},
           expected: true,
-          predicateId: `prd_${'1'.repeat(16)}`,
+          predicateId: `prd_${Effect.pipe('1', EffectString.repeat(16))}`,
           roles: ['task-pass'] as const,
         },
       ],
       qualifyingActionItemTypes: [],
-      taskId: `tsk_${'1'.repeat(16)}`,
+      taskId: `tsk_${Effect.pipe('1', EffectString.repeat(16))}`,
       taskKind: 'negative-control' as const,
       version: 1 as const,
     };
@@ -170,24 +204,26 @@ describe('Code Memory Link Codex app-server transport', () => {
     };
     const proxyTool = {server: 'context_brief_gate', tool: 'context_brief'};
     const bindingSeed = {
-      approvalCommit: '1'.repeat(40),
+      approvalCommit: Effect.pipe('1', EffectString.repeat(40)),
       arm: 'no-memory' as const,
       armPosition: 3 as const,
-      assignmentHash: '2'.repeat(64),
+      assignmentHash: Effect.pipe('2', EffectString.repeat(64)),
       blindLabel: 'Z' as const,
       budget: {steps: 2, tokens: 150},
-      candidateCommit: '3'.repeat(40),
-      candidateExecutableSha256: '4'.repeat(64),
-      clientDescriptorHash: '5'.repeat(64),
-      clientId: `cli_${'6'.repeat(16)}`,
+      candidateCommit: Effect.pipe('3', EffectString.repeat(40)),
+      candidateExecutableSha256: Effect.pipe('4', EffectString.repeat(64)),
+      clientDescriptorHash: Effect.pipe('5', EffectString.repeat(64)),
+      clientId: `cli_${Effect.pipe('6', EffectString.repeat(16))}`,
       fixtureHash: rubric.fixtureHash,
-      invocationNonceDigest: codeMemoryLinkCodexInvocationNonceDigestV1(`inv_${'7'.repeat(16)}`),
-      manifestHash: '8'.repeat(64),
-      packetHash: '9'.repeat(64),
+      invocationNonceDigest: codeMemoryLinkCodexInvocationNonceDigestV1(
+        `inv_${Effect.pipe('7', EffectString.repeat(16))}`,
+      ),
+      manifestHash: Effect.pipe('8', EffectString.repeat(64)),
+      packetHash: Effect.pipe('9', EffectString.repeat(64)),
       rubricHash: rubric.rubricHash,
-      runNonce: `run_${'a'.repeat(16)}`,
+      runNonce: `run_${Effect.pipe('a', EffectString.repeat(16))}`,
       runOrder: 0,
-      suiteHash: 'b'.repeat(64),
+      suiteHash: Effect.pipe('b', EffectString.repeat(64)),
       taskId: rubric.taskId,
       taskKind: rubric.taskKind,
     };
@@ -221,12 +257,13 @@ describe('Code Memory Link Codex app-server transport', () => {
       response: CODE_MEMORY_LINK_CANONICAL_EMPTY_CONTEXT_BRIEF_V1.structuredContent,
       runBindingHash,
     });
-    const sealedToolResult = (
-      releaseEvents.find(candidate => {
-        const params = candidate.params as {item?: {type?: unknown}} | undefined;
-        return candidate.method === 'item/completed' && params?.item?.type === 'mcpToolCall';
-      })?.params as {item?: {result?: {content?: readonly {text?: unknown; type?: unknown}[]}}} | undefined
-    )?.item?.result;
+    const sealedEvent = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        releaseEvents,
+        candidate => candidate.method === 'item/completed' && toolItem(candidate)?.type === 'mcpToolCall',
+      ),
+    );
+    const sealedToolResult = sealedEvent === undefined ? undefined : toolResultProjection(sealedEvent);
     expect(sealedToolResult?.content).toHaveLength(1);
     expect(JSON.parse(String(sealedToolResult?.content?.[0]?.text))).toEqual(
       CODE_MEMORY_LINK_CANONICAL_EMPTY_CONTEXT_BRIEF_V1.structuredContent,
@@ -244,8 +281,8 @@ describe('Code Memory Link Codex app-server transport', () => {
       ],
       threadStartResponse: trace.threadStartResponse,
     });
-    expect(evidence.checkpoints.map(checkpoint => checkpoint.method)).toEqual(
-      ordered.filter(method =>
+    expect(EffectArray.map(evidence.checkpoints, checkpoint => checkpoint.method)).toEqual(
+      EffectArray.filter(ordered, method =>
         ['turn/started', 'item/started', 'item/completed', 'thread/tokenUsage/updated', 'turn/completed'].includes(
           String(method),
         ),
@@ -264,9 +301,9 @@ describe('Code Memory Link Codex app-server transport', () => {
         runBindingHash,
       },
       clientProtocol: {
-        configurationProjectionHash: 'c'.repeat(64),
-        environmentPolicyHash: 'd'.repeat(64),
-        executionBundleHash: 'e'.repeat(64),
+        configurationProjectionHash: Effect.pipe('c', EffectString.repeat(64)),
+        environmentPolicyHash: Effect.pipe('d', EffectString.repeat(64)),
+        executionBundleHash: Effect.pipe('e', EffectString.repeat(64)),
         expectedClient,
         expectedClientProjectionHash: codeMemoryLinkClientProjectionHash('expected-client', {
           appServerVersion: expectedClient.appServerVersion,
@@ -277,28 +314,35 @@ describe('Code Memory Link Codex app-server transport', () => {
         }),
         proxyTool,
       },
-      finalPublicArtifacts: [{byteCount: 10, contentSha256: 'c'.repeat(64), pathDigest: 'd'.repeat(64), type: 'file'}],
+      finalPublicArtifacts: [
+        {
+          byteCount: 10,
+          contentSha256: Effect.pipe('c', EffectString.repeat(64)),
+          pathDigest: Effect.pipe('d', EffectString.repeat(64)),
+          type: 'file',
+        },
+      ],
       graphPreflight: withPreflightReceipt({
-        commit: 'e'.repeat(40),
-        graphContentDigest: 'f'.repeat(64),
-        graphSnapshotDigest: '1'.repeat(64),
+        commit: Effect.pipe('e', EffectString.repeat(40)),
+        graphContentDigest: Effect.pipe('f', EffectString.repeat(64)),
+        graphSnapshotDigest: Effect.pipe('1', EffectString.repeat(64)),
         observedCitationDigests: [],
         observedResponses: responseReceipts,
         observedSelectedMemories: [],
-        originDigest: '2'.repeat(64),
+        originDigest: Effect.pipe('2', EffectString.repeat(64)),
         runBindingHash,
       }),
       judge: {
         adjudicationHash: projection.adjudicationHash,
-        commandArtifactId: `art_${'3'.repeat(16)}`,
-        commandSha256: '3'.repeat(64),
-        programArtifactId: `art_${'4'.repeat(16)}`,
-        programSha256: '4'.repeat(64),
-        repositorySnapshotHash: '7'.repeat(64),
+        commandArtifactId: `art_${Effect.pipe('3', EffectString.repeat(16))}`,
+        commandSha256: Effect.pipe('3', EffectString.repeat(64)),
+        programArtifactId: `art_${Effect.pipe('4', EffectString.repeat(16))}`,
+        programSha256: Effect.pipe('4', EffectString.repeat(64)),
+        repositorySnapshotHash: Effect.pipe('7', EffectString.repeat(64)),
         runBindingHash,
         staticObservationHash: evidence.staticObservationHash,
-        stderrSha256: '5'.repeat(64),
-        stdoutSha256: '6'.repeat(64),
+        stderrSha256: Effect.pipe('5', EffectString.repeat(64)),
+        stdoutSha256: Effect.pipe('6', EffectString.repeat(64)),
       },
       rubric,
       version: 1,
@@ -307,7 +351,10 @@ describe('Code Memory Link Codex app-server transport', () => {
     const {evidenceHash: _rawEvidenceHash, ...rawEvidenceWithoutHash} = rawEvidence;
     const missingCallEvidence = rehashAppServerEvidence(
       evidence,
-      evidence.checkpoints.filter(checkpoint => !('itemType' in checkpoint) || checkpoint.itemType !== 'mcpToolCall'),
+      EffectArray.filter(
+        evidence.checkpoints,
+        checkpoint => !('itemType' in checkpoint) || checkpoint.itemType !== 'mcpToolCall',
+      ),
     );
     const missingCallRawEvidence = createCodeMemoryLinkCodexRawEvidenceV1({
       ...rawEvidenceWithoutHash,
@@ -322,7 +369,7 @@ describe('Code Memory Link Codex app-server transport', () => {
 
     const failedCallEvidence = rehashAppServerEvidence(
       evidence,
-      evidence.checkpoints.map(checkpoint =>
+      EffectArray.map(evidence.checkpoints, checkpoint =>
         checkpoint.method === 'item/completed' && checkpoint.itemType === 'mcpToolCall'
           ? {...checkpoint, proxyReceipt: null, response: null, status: 'failed' as const, succeeded: false}
           : checkpoint,
@@ -338,7 +385,7 @@ describe('Code Memory Link Codex app-server transport', () => {
       contextBriefProtocolAdhered: false,
       taskPassed: false,
     });
-    const directCitationId = `tncc_${'1'.repeat(40)}`;
+    const directCitationId = `tncc_${Effect.pipe('1', EffectString.repeat(40))}`;
     const anchoredReceipt = canonicalizeCodeMemoryLinkContextBriefResultV1({
       activeHandoffs: [],
       durableDecisions: [
@@ -385,7 +432,7 @@ describe('Code Memory Link Codex app-server transport', () => {
         proxyTool,
         qualifyingActionItemId: null,
         rubric,
-        runBindingHash: '0'.repeat(64),
+        runBindingHash: Effect.pipe('0', EffectString.repeat(64)),
         staticArtifacts: [
           {artifactId, content, mediaType: 'text/plain', sha256: codeMemoryLinkStaticArtifactSha256(content)},
         ],
@@ -395,7 +442,7 @@ describe('Code Memory Link Codex app-server transport', () => {
     expect(() =>
       parseCodeMemoryLinkCodexRawEvidenceV1({
         ...rawEvidence,
-        bindings: {...rawEvidence.bindings, packetHash: '0'.repeat(64)},
+        bindings: {...rawEvidence.bindings, packetHash: Effect.pipe('0', EffectString.repeat(64))},
       }),
     ).toThrow(/arm packet hash/u);
 
@@ -436,7 +483,7 @@ describe('Code Memory Link Codex app-server transport', () => {
       'unsupported or missing fields',
     );
 
-    const invocationNonce = `inv_${'7'.repeat(16)}`;
+    const invocationNonce = `inv_${Effect.pipe('7', EffectString.repeat(16))}`;
     const candidate = {
       buildIdentityHash: rawEvidence.bindings.candidateExecutableSha256,
       commit: rawEvidence.bindings.candidateCommit,
@@ -453,7 +500,7 @@ describe('Code Memory Link Codex app-server transport', () => {
       preRuntime: runtime,
       previousReceiptDigest: null,
       trial: clientOutput.trial,
-      trialId: `trl_${'8'.repeat(16)}`,
+      trialId: `trl_${Effect.pipe('8', EffectString.repeat(16))}`,
     });
     const receipt = createCodeMemoryLinkAgentEvidenceReceiptV1({
       previousEvidenceDigest: null,
@@ -468,7 +515,7 @@ describe('Code Memory Link Codex app-server transport', () => {
     const chainedReceipt = createCodeMemoryLinkAgentEvidenceReceiptV1({
       previousEvidenceDigest: firstReceiptDigest,
       rawEvidence: chainedRawEvidence,
-      trialId: `trl_${'9'.repeat(16)}`,
+      trialId: `trl_${Effect.pipe('9', EffectString.repeat(16))}`,
     });
     const evidenceJsonl = serializeCodeMemoryLinkAgentEvidenceJsonl([receipt, chainedReceipt]);
     expect(parseCodeMemoryLinkAgentEvidenceJsonl(evidenceJsonl)).toEqual([receipt, chainedReceipt]);
@@ -482,7 +529,7 @@ describe('Code Memory Link Codex app-server transport', () => {
       version: 1,
     };
     const manifest: CodeMemoryLinkAgentAbManifestV1 = {
-      adjudicationArtifactHash: '9'.repeat(64),
+      adjudicationArtifactHash: Effect.pipe('9', EffectString.repeat(64)),
       assignmentHash: rawEvidence.bindings.assignmentHash,
       candidate,
       clients: [
@@ -496,7 +543,7 @@ describe('Code Memory Link Codex app-server transport', () => {
         },
       ],
       evaluatorVersion: 'test-v1',
-      experimentId: `exp_${'1'.repeat(16)}`,
+      experimentId: `exp_${Effect.pipe('1', EffectString.repeat(16))}`,
       fixtureHash: rawEvidence.bindings.fixtureHash,
       judgeVersion: 'test-v1',
       manifestHash: rawEvidence.bindings.manifestHash,
@@ -511,7 +558,7 @@ describe('Code Memory Link Codex app-server transport', () => {
         },
       ],
       scheduleAlgorithmVersion: 'sha256-counterbalanced-v1',
-      scheduleSeed: 'a'.repeat(64),
+      scheduleSeed: Effect.pipe('a', EffectString.repeat(64)),
       suiteHash: rawEvidence.bindings.suiteHash,
       tasks: [
         {
@@ -555,9 +602,9 @@ describe('Code Memory Link Codex app-server transport', () => {
       expect(reconciled.evidence).toEqual([receipt]);
       expect(reconciled.trials).toEqual([trial]);
     }
-    expect(() => parseCodeMemoryLinkAgentPendingCommitV1({...pending, commitDigest: '0'.repeat(64)})).toThrow(
-      'digest does not match',
-    );
+    expect(() =>
+      parseCodeMemoryLinkAgentPendingCommitV1({...pending, commitDigest: Effect.pipe('0', EffectString.repeat(64))}),
+    ).toThrow('digest does not match');
     const conflictingReceipt = createCodeMemoryLinkAgentEvidenceReceiptV1({
       previousEvidenceDigest: null,
       rawEvidence: chainedRawEvidence,
@@ -668,10 +715,12 @@ describe('Code Memory Link Codex app-server transport', () => {
       timeoutMilliseconds: 10_000,
     });
 
-    const declined = trace.events.find(event => {
-      const params = event.params as {item?: {id?: unknown; status?: unknown}} | undefined;
-      return event.method === 'item/completed' && params?.item?.id === 'item_denied_command';
-    });
+    const declined = EffectOption.getOrUndefined(
+      EffectArray.findFirst(
+        trace.events,
+        event => event.method === 'item/completed' && toolItem(event)?.id === 'item_denied_command',
+      ),
+    );
     expect(declined).toMatchObject({params: {item: {status: 'declined'}}});
     expect(trace.approvals).toHaveLength(1);
     expect(trace.approvals[0]).toMatchObject({itemType: 'commandExecution'});
@@ -933,7 +982,11 @@ describe('Code Memory Link Codex app-server transport', () => {
     );
     const bunExecutable = await realpath(process.execPath);
     const fakeExecutable = join(root, 'fake-codex');
-    await writeFile(fakeExecutable, fakeSource.replace('#!/usr/bin/env bun', `#!${bunExecutable}`), {mode: 0o700});
+    await writeFile(
+      fakeExecutable,
+      Effect.pipe(fakeSource, EffectString.replace('#!/usr/bin/env bun', `#!${bunExecutable}`)),
+      {mode: 0o700},
+    );
     const auth = join(root, 'auth.json');
     await writeFile(auth, '{}\n', {mode: 0o600});
     const proxyBundle = join(root, 'context-proxy.bundle.js');
@@ -941,7 +994,7 @@ describe('Code Memory Link Codex app-server transport', () => {
     const safeExecutablePath = join(root, 'safe-bin');
     await mkdir(safeExecutablePath);
     const safeBinaries = await Promise.all(
-      CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES.map(async name => {
+      EffectArray.map(CODE_MEMORY_LINK_SAFE_EXECUTABLE_NAMES, async name => {
         const path = join(safeExecutablePath, name);
         await writeFile(path, '#!/bin/sh\nexit 0\n', {mode: 0o700});
         return {name, path, sha256: await sha256File(path)};
@@ -966,7 +1019,7 @@ describe('Code Memory Link Codex app-server transport', () => {
       },
       safeBinaries,
       safeExecutablePath,
-      sealedSuite: {layoutArtifactId: `art_${'1'.repeat(16)}`, root: suiteRoot},
+      sealedSuite: {layoutArtifactId: `art_${Effect.pipe('1', EffectString.repeat(16))}`, root: suiteRoot},
       temporaryRoot: root,
       version: 1,
     };
@@ -978,9 +1031,19 @@ describe('Code Memory Link Codex app-server transport', () => {
     });
     try {
       const generated = await readFile(join(isolation.codexHome, 'config.toml'), 'utf8');
-      expect(generated.match(/^\[mcp_servers\./gmu)).toHaveLength(1);
+      expect(
+        Effect.pipe(
+          generated,
+          EffectString.match(/^\[mcp_servers\./gmu),
+          Effect.Option.getOrElse(() => null),
+        ),
+      ).toHaveLength(1);
       expect(generated).toContain('[mcp_servers.context_brief_gate]');
-      expect(Object.keys(isolation.environment).some(key => key.startsWith('THREADNOTE_'))).toBe(false);
+      expect(
+        EffectArray.some(EffectRecord.keys(isolation.environment), key =>
+          Effect.pipe(key, EffectString.startsWith('THREADNOTE_')),
+        ),
+      ).toBe(false);
       const trace = await runCodeMemoryLinkAppServerTurn({
         appServer: isolation.appServer,
         cwd: isolation.repositoryRoot,
@@ -992,7 +1055,7 @@ describe('Code Memory Link Codex app-server transport', () => {
         taskBudget: {steps: 2, tokens: 150},
         timeoutMilliseconds: 10_000,
       });
-      expect(trace.events.map(event => event.method).slice(0, 3)).toEqual([
+      expect(EffectArray.map(trace.events, event => event.method).slice(0, 3)).toEqual([
         'remoteControl/status/changed',
         'thread/started',
         'mcpServer/startupStatus/updated',
@@ -1033,13 +1096,15 @@ function sealTransportContextBriefResult(input: {
   readonly response: unknown;
   readonly runBindingHash: string;
 }): void {
-  const event = input.events.find(candidate => {
-    if (candidate.method !== 'item/completed') return false;
-    const params = candidate.params as {item?: {type?: unknown}} | undefined;
-    return params?.item?.type === 'mcpToolCall';
-  });
+  const event = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      input.events,
+      candidate => candidate.method === 'item/completed' && toolItem(candidate)?.type === 'mcpToolCall',
+    ),
+  );
   if (!event) throw new Error('Missing Context Brief completion in transport fixture.');
-  const item = (event.params as {item: Record<string, unknown>}).item;
+  const item = toolItem(event);
+  if (!item) throw new Error('Context Brief completion has no MCP item.');
   const rawRequest = item.arguments;
   const canonical = canonicalizeCodeMemoryLinkContextBriefResultV1(input.response);
   item.result = {
@@ -1072,10 +1137,13 @@ function rehashAppServerEvidence(
   checkpoints: CodeMemoryLinkCodexAppServerEvidenceV1['checkpoints'],
 ): CodeMemoryLinkCodexAppServerEvidenceV1 {
   const {evidenceHash: _evidenceHash, ...withoutHash} = evidence;
-  const ordered: CodeMemoryLinkCodexAppServerEvidenceV1['checkpoints'] = checkpoints.map((checkpoint, index) => ({
-    ...checkpoint,
-    ordinal: index + 1,
-  }));
+  const ordered: CodeMemoryLinkCodexAppServerEvidenceV1['checkpoints'] = EffectArray.map(
+    checkpoints,
+    (checkpoint, index) => ({
+      ...checkpoint,
+      ordinal: index + 1,
+    }),
+  );
   const candidate = {...withoutHash, checkpoints: ordered};
   return {...candidate, evidenceHash: codeMemoryLinkCodexAppServerEvidenceHashV1(candidate)};
 }

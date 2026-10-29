@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
@@ -31,6 +32,9 @@ import {discoverManifestWorkspace} from '@threadnote/graph/workspace';
 import {join, mkdtemp, rm} from '../helpers/effect-filesystem.js';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {claimPersistentBuildForTest} from '@threadnote/graph/test/helpers/code-graph-build';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const span = {column: 1, endColumn: 8, endLine: 2, line: 2} as const;
 const unprotectedCacheWrite: CodeGraphDirectPersistentCapacityProtector = (_boundary, transaction) => transaction;
@@ -61,8 +65,12 @@ describe('cross-repository declarations and monikers', () => {
         ),
       ),
     ]);
-    const app = workspace.projects.find(project => project.name === '@acme/app')!;
-    const core = workspace.projects.find(project => project.name === '@acme/core')!;
+    const app = Option.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, project => project.name === '@acme/app'),
+    )!;
+    const core = Option.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, project => project.name === '@acme/core'),
+    )!;
 
     expect(app.dependencies).toContain(core.id);
     expect(app.externalDependencies).toEqual([
@@ -87,16 +95,50 @@ describe('cross-repository declarations and monikers', () => {
         versionConstraint: '~4.1.0',
       }),
     ]);
-    expect(app.externalDependencies?.some(dependency => dependency.name === '@acme/core')).toBe(false);
     expect(
-      app.externalDependencies?.every(dependency => dependency.evidence.path === 'packages/app/package.json'),
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(app.externalDependencies), __effectArrayReceiver =>
+          EffectArray.some(__effectArrayReceiver, dependency => dependency.name === '@acme/core'),
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(app.externalDependencies), __effectArrayReceiver =>
+          EffectArray.every(
+            __effectArrayReceiver,
+            dependency => dependency.evidence.path === 'packages/app/package.json',
+          ),
+        ),
+      ),
     ).toBe(true);
-    expect(app.externalDependencies?.every(dependency => dependency.evidence.span !== undefined)).toBe(true);
-    expect(app.monikers?.filter(moniker => moniker.scheme === 'package' && moniker.role === 'import')).toHaveLength(5);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(app.externalDependencies), __effectArrayReceiver =>
+          EffectArray.every(__effectArrayReceiver, dependency => dependency.evidence.span !== undefined),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(app.monikers), monikers =>
+          EffectArray.filter(
+            monikers,
+            (moniker, index) => index in monikers && moniker.scheme === 'package' && moniker.role === 'import',
+          ),
+        ),
+      ),
+    ).toHaveLength(5);
     expect(app.monikers).toContainEqual(
       expect.objectContaining({identity: 'package:npm:@scope/tools', packageVersion: '^2.0.0', role: 'import'}),
     );
-    expect(app.monikers?.some(moniker => moniker.identity === 'package:npm:legacytools')).toBe(false);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(app.monikers), __effectArrayReceiver =>
+          EffectArray.some(__effectArrayReceiver, moniker => moniker.identity === 'package:npm:legacytools'),
+        ),
+      ),
+    ).toBe(false);
     expect(app.monikers).toContainEqual(
       expect.objectContaining({
         identity: 'package:npm:@acme/app',
@@ -117,7 +159,9 @@ describe('cross-repository declarations and monikers', () => {
         JSON.stringify({dependencies: {'@acme/duplicate': '^1.0.0'}, name: '@acme/app'}),
       ),
     ]);
-    const app = workspace.projects.find(project => project.name === '@acme/app')!;
+    const app = Option.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, project => project.name === '@acme/app'),
+    )!;
     expect(app.dependencies).toEqual([]);
     expect(app.externalDependencies).toContainEqual(
       expect.objectContaining({
@@ -132,17 +176,30 @@ describe('cross-repository declarations and monikers', () => {
   });
 
   it('extracts a large npm declaration surface with one indexed evidence pass', () => {
-    const dependencies = Object.fromEntries(
-      Array.from({length: 10_000}, (_, index) => [`dependency-${String(index).padStart(5, '0')}`, `^${index}.0.0`]),
+    const dependencies = EffectRecord.fromEntries(
+      Array.from({length: 10_000}, (_, index) => [
+        `dependency-${Effect2.pipe(String(index), EffectString.padStart(5, '0'))}`,
+        `^${index}.0.0`,
+      ]),
     );
     const startedAt = performance.now();
     const workspace = discoverManifestWorkspace([
       file('package.json', 'npm-manifest', JSON.stringify({dependencies, name: '@acme/large-manifest'}, null, 2)),
     ]);
     const elapsedMilliseconds = performance.now() - startedAt;
-    const project = workspace.projects.find(candidate => candidate.name === '@acme/large-manifest')!;
+    const project = Option.getOrUndefined(
+      EffectArray.findFirst(workspace.projects, candidate => candidate.name === '@acme/large-manifest'),
+    )!;
     expect(project.externalDependencies).toHaveLength(10_000);
-    expect(new Set(project.externalDependencies?.map(dependency => dependency.evidence.span?.line)).size).toBe(10_000);
+    expect(
+      new Set(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(project.externalDependencies), __effectArrayReceiver =>
+            EffectArray.map(__effectArrayReceiver, dependency => dependency.evidence.span?.line),
+          ),
+        ),
+      ).size,
+    ).toBe(10_000);
     expect(elapsedMilliseconds).toBeLessThan(4_000);
   }, 10_000);
 
@@ -158,7 +215,13 @@ describe('cross-repository declarations and monikers', () => {
          service Orders { rpc GetOrder (Order) returns (Order); }`,
       ),
     );
-    expect(facts.monikers?.map(moniker => [moniker.role, moniker.kind, moniker.identity])).toEqual([
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(facts.monikers), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, moniker => [moniker.role, moniker.kind, moniker.identity]),
+        ),
+      ),
+    ).toEqual([
       ['import', 'file', 'protobuf:file:acme/common/v1/money.proto'],
       ['export', 'file', 'protobuf:file:proto/orders/v1/orders.proto'],
       ['export', 'message', 'protobuf:message:acme.orders.v1.Order'],
@@ -166,14 +229,38 @@ describe('cross-repository declarations and monikers', () => {
       ['export', 'rpc', 'protobuf:rpc:acme.orders.v1.Orders.GetOrder'],
       ['export', 'service', 'protobuf:service:acme.orders.v1.Orders'],
     ]);
-    expect(facts.monikers?.every(moniker => moniker.evidence.path === facts.path)).toBe(true);
-    expect(facts.monikers?.every(moniker => moniker.evidence.span.line >= 1)).toBe(true);
-    const message = facts.monikers?.find(moniker => moniker.kind === 'message' && moniker.scheme === 'protobuf');
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(facts.monikers), __effectArrayReceiver =>
+          EffectArray.every(__effectArrayReceiver, moniker => moniker.evidence.path === facts.path),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(facts.monikers), __effectArrayReceiver =>
+          EffectArray.every(__effectArrayReceiver, moniker => moniker.evidence.span.line >= 1),
+        ),
+      ),
+    ).toBe(true);
+    const message = Option.getOrUndefined(
+      Option.map(Option.fromNullishOr(facts.monikers), __effectArrayReceiver =>
+        Option.getOrUndefined(
+          EffectArray.findFirst(
+            __effectArrayReceiver,
+            moniker => moniker.kind === 'message' && moniker.scheme === 'protobuf',
+          ),
+        ),
+      ),
+    );
     expect(message && 'symbolId' in message ? message.symbolId : undefined).toMatch(/^cgs_/u);
   });
 
   it('retains bounded protobuf import edges after declaration monikers fill their independent budget', () => {
-    const declarations = Array.from({length: 3_999}, (_, index) => `message Message${index} {}`).join('\n');
+    const declarations = EffectArray.join(
+      Array.from({length: 3_999}, (_, index) => `message Message${index} {}`),
+      '\n',
+    );
     const facts = protobufFacts(
       file('proto/bounded.proto', 'protobuf', `syntax = "proto3";\n${declarations}\nimport "acme/common.proto";`),
     );
@@ -193,14 +280,19 @@ describe('cross-repository declarations and monikers', () => {
         'syntax = "proto3"; import "../outside.proto"; import "acme/valid.proto";',
       ),
     );
-    expect(facts.edges.filter(edge => edge.relation === 'imports').map(edge => edge.targetName)).toEqual([
-      '../outside.proto',
-      'acme/valid.proto',
-    ]);
-    expect(facts.monikers?.map(moniker => moniker.identity)).toEqual([
-      'protobuf:file:acme/valid.proto',
-      'protobuf:file:proto/imports.proto',
-    ]);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(facts.edges, edge => edge.relation === 'imports'),
+        edge => edge.targetName,
+      ),
+    ).toEqual(['../outside.proto', 'acme/valid.proto']);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(facts.monikers), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, moniker => moniker.identity),
+        ),
+      ),
+    ).toEqual(['protobuf:file:acme/valid.proto', 'protobuf:file:proto/imports.proto']);
     expect(facts.diagnostics).toContain(
       'proto/imports.proto: one or more protobuf declarations or imports could not form scoped cross-repository monikers',
     );
@@ -214,8 +306,18 @@ describe('cross-repository declarations and monikers', () => {
         'syntax = "proto3"; package foo..bar; message Kept {} service KeptService {}',
       ),
     );
-    expect(facts.symbols.map(symbol => symbol.name)).toEqual(['proto/malformed-package.proto', 'Kept', 'KeptService']);
-    expect(facts.monikers?.map(moniker => moniker.identity)).toEqual(['protobuf:file:proto/malformed-package.proto']);
+    expect(EffectArray.map(facts.symbols, symbol => symbol.name)).toEqual([
+      'proto/malformed-package.proto',
+      'Kept',
+      'KeptService',
+    ]);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(facts.monikers), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, moniker => moniker.identity),
+        ),
+      ),
+    ).toEqual(['protobuf:file:proto/malformed-package.proto']);
     expect(facts.diagnostics).toContain(
       'proto/malformed-package.proto: one or more protobuf declarations or imports could not form scoped cross-repository monikers',
     );
@@ -231,19 +333,35 @@ describe('cross-repository declarations and monikers', () => {
          import "acme/valid.proto";`,
       ),
     );
-    expect(facts.edges.filter(edge => edge.relation === 'imports').map(edge => edge.targetName)).toEqual([
-      'acme/valid.proto',
-    ]);
-    expect(facts.monikers?.map(moniker => moniker.identity)).toEqual([
-      'protobuf:file:acme/valid.proto',
-      'protobuf:file:proto/options.proto',
-    ]);
-    expect(facts.monikers?.some(moniker => moniker.identity.includes('evil.proto'))).toBe(false);
+    expect(
+      EffectArray.map(
+        EffectArray.filter(facts.edges, edge => edge.relation === 'imports'),
+        edge => edge.targetName,
+      ),
+    ).toEqual(['acme/valid.proto']);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(facts.monikers), __effectArrayReceiver =>
+          EffectArray.map(__effectArrayReceiver, moniker => moniker.identity),
+        ),
+      ),
+    ).toEqual(['protobuf:file:acme/valid.proto', 'protobuf:file:proto/options.proto']);
+    expect(
+      Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(facts.monikers), __effectArrayReceiver =>
+          EffectArray.some(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(moniker => Effect2.pipe(moniker.identity, EffectString.includes('evil.proto')))(__effectArrayValue),
+          ),
+        ),
+      ),
+    ).toBe(false);
   });
 
   it('strictly round-trips monikers and rejects unnormalized or excess-field input', () => {
     const moniker = codeGraphPackageMoniker({
-      componentId: `cgp_${'1'.repeat(32)}`,
+      componentId: `cgp_${Effect2.pipe('1', EffectString.repeat(32))}`,
       dependencyKind: 'runtime',
       evidence: {path: 'packages/app/package.json', span},
       packageName: '@ＡＣＭＥ/ＴＯＯＬＳ',
@@ -340,8 +458,12 @@ describe('cross-repository declarations and monikers', () => {
       const cleanRows = declarationRows(cleanDatabase, rebuilt.id);
       expect(incrementalRows).toEqual(cleanRows);
       expect(declarationRows(directDatabase, direct.id)).toEqual(cleanRows);
-      expect(incrementalRows.monikers.some(row => row.identity === 'protobuf:file:acme/common.proto')).toBe(false);
-      expect(incrementalRows.monikers.some(row => row.identity === 'protobuf:file:acme/shared.proto')).toBe(true);
+      expect(
+        EffectArray.some(incrementalRows.monikers, row => row.identity === 'protobuf:file:acme/common.proto'),
+      ).toBe(false);
+      expect(
+        EffectArray.some(incrementalRows.monikers, row => row.identity === 'protobuf:file:acme/shared.proto'),
+      ).toBe(true);
       expect(incrementalRows.externalDependencies).toEqual([
         expect.objectContaining({
           dependency_kind: 'runtime',
@@ -386,7 +508,7 @@ describe('cross-repository declarations and monikers', () => {
         null,
         2,
       );
-      const finalContent = baseContent.replace('vitest run', 'vitest run --coverage');
+      const finalContent = Effect2.pipe(baseContent, EffectString.replace('vitest run', 'vitest run --coverage'));
       const baseFile = file('package.json', 'json', baseContent);
       const finalFile = file('package.json', 'json', finalContent);
       const baseFacts = extractStructuredSchemaFacts(baseFile, {packageName: Option.none(), project: Option.none()});
@@ -439,7 +561,7 @@ describe('cross-repository declarations and monikers', () => {
       const cleanRows = declarationRows(cleanDatabase, rebuilt.id);
       expect(declarationRows(persistedDatabase, persistedOverlay.id)).toEqual(cleanRows);
       expect(declarationRows(stagedDatabase, stagedOverlay.id)).toEqual(cleanRows);
-      expect(cleanRows.monikers.map(row => [row.role, row.identity])).toEqual([
+      expect(EffectArray.map(cleanRows.monikers, row => [row.role, row.identity])).toEqual([
         ['export', 'package:npm:@acme/orders'],
         ['import', 'package:npm:zod'],
       ]);
@@ -581,10 +703,10 @@ describe('cross-repository declarations and monikers', () => {
       ),
     },
     ({values}) => {
-      const monikers = values.map(({name, role, seed}) =>
+      const monikers = EffectArray.map(values, ({name, role, seed}) =>
         role === 'import'
           ? codeGraphPackageMoniker({
-              componentId: `cgp_${seed.toString(16).padStart(32, '0')}`,
+              componentId: `cgp_${Effect2.pipe(seed.toString(16), EffectString.padStart(32, '0'))}`,
               dependencyKind: 'runtime',
               evidence: {path: `packages/p${seed}/package.json`, span},
               packageName: name,
@@ -592,7 +714,7 @@ describe('cross-repository declarations and monikers', () => {
               role,
             })
           : codeGraphPackageMoniker({
-              componentId: `cgp_${seed.toString(16).padStart(32, '0')}`,
+              componentId: `cgp_${Effect2.pipe(seed.toString(16), EffectString.padStart(32, '0'))}`,
               evidence: {path: `packages/p${seed}/package.json`, span},
               packageName: name,
               packageVersion: `${seed}.0.0`,
@@ -602,12 +724,14 @@ describe('cross-repository declarations and monikers', () => {
       const canonical = canonicalCodeGraphMonikers(monikers);
       expect(canonicalCodeGraphMonikers([...monikers].reverse())).toEqual(canonical);
       expect(canonicalCodeGraphMonikers([...canonical, ...canonical])).toEqual(canonical);
-      expect(canonical.map(moniker => moniker.id)).toEqual(
-        [...canonical.map(moniker => moniker.id)].sort((a, b) => {
-          const left = canonical.find(moniker => moniker.id === a)!;
-          const right = canonical.find(moniker => moniker.id === b)!;
+      expect(EffectArray.map(canonical, moniker => moniker.id)).toEqual(
+        [...EffectArray.map(canonical, moniker => moniker.id)].sort((a, b) => {
+          const left = Option.getOrUndefined(EffectArray.findFirst(canonical, moniker => moniker.id === a))!;
+          const right = Option.getOrUndefined(EffectArray.findFirst(canonical, moniker => moniker.id === b))!;
           return (
-            left.identity.localeCompare(right.identity) || left.role.localeCompare(right.role) || a.localeCompare(b)
+            Effect2.pipe(left.identity, EffectString.localeCompare(right.identity)) ||
+            Effect2.pipe(left.role, EffectString.localeCompare(right.role)) ||
+            Effect2.pipe(a, EffectString.localeCompare(b))
           );
         }),
       );
@@ -623,9 +747,9 @@ describe('cross-repository declarations and monikers', () => {
       versions: FC.uniqueArray(FC.integer({max: 100, min: 1}), {maxLength: 20, minLength: 2}),
     },
     ({versions}) => {
-      const monikers = versions.map(version =>
+      const monikers = EffectArray.map(versions, version =>
         codeGraphPackageMoniker({
-          componentId: `cgp_${'1'.repeat(32)}`,
+          componentId: `cgp_${Effect2.pipe('1', EffectString.repeat(32))}`,
           dependencyKind: 'runtime',
           evidence: {path: 'package.json', span},
           packageName: '@acme/tools',
@@ -635,7 +759,7 @@ describe('cross-repository declarations and monikers', () => {
       );
       const canonical = canonicalCodeGraphMonikers(monikers);
       expect(canonicalCodeGraphMonikers([...monikers].reverse())).toEqual(canonical);
-      expect(new Set(canonical.map(moniker => moniker.id)).size).toBe(versions.length);
+      expect(new Set(EffectArray.map(canonical, moniker => moniker.id)).size).toBe(versions.length);
       expect(canonical).toHaveLength(versions.length);
     },
     {fastCheck: {numRuns: 50}},
@@ -643,7 +767,7 @@ describe('cross-repository declarations and monikers', () => {
 
   it('never aliases equal bare protobuf names across packages or declaration kinds', () => {
     const evidence = {path: 'api.proto', span};
-    const symbolId = `cgs_${'1'.repeat(32)}`;
+    const symbolId = `cgs_${Effect2.pipe('1', EffectString.repeat(32))}`;
     const identities = [
       codeGraphProtobufMoniker({evidence, kind: 'message', qualifiedName: 'one.api.Item', role: 'export', symbolId})
         .identity,
@@ -663,9 +787,13 @@ function protobufFacts(source: CodeGraphInventoryFile): CodeGraphFileFacts {
 
 function file(path: string, language: string, content: string): CodeGraphInventoryFile {
   return {
-    blobId: Bun.hash(content).toString(16).padStart(40, '0').slice(0, 40),
+    blobId: Effect2.pipe(Bun.hash(content).toString(16), EffectString.padStart(40, '0'), EffectString.slice(0, 40)),
     content,
-    contentHash: Bun.hash(`${path}\0${content}`).toString(16).padStart(64, '0').slice(0, 64),
+    contentHash: Effect2.pipe(
+      Bun.hash(`${path}\0${content}`).toString(16),
+      EffectString.padStart(64, '0'),
+      EffectString.slice(0, 64),
+    ),
     language,
     mode: '100644',
     path,
@@ -677,14 +805,14 @@ function file(path: string, language: string, content: string): CodeGraphInvento
 function repositoryIdentity(root: string): RepositoryIdentity {
   return {
     caseMode: 'sensitive',
-    checkoutId: 'c'.repeat(64),
+    checkoutId: Effect2.pipe('c', EffectString.repeat(64)),
     displayName: 'cross-repository-monikers',
     gitCommonDirectory: root,
-    headCommit: '1'.repeat(40),
+    headCommit: Effect2.pipe('1', EffectString.repeat(40)),
     objectFormat: 'sha1',
     repoRoot: root,
-    repositoryId: 'a'.repeat(64),
-    worktreeId: 'b'.repeat(64),
+    repositoryId: Effect2.pipe('a', EffectString.repeat(64)),
+    worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
   };
 }
 
@@ -813,12 +941,13 @@ function declarationRows(databasePath: string, snapshotId: string) {
 function tablePrimaryKey(databasePath: string, table: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query<{readonly name: string; readonly pk: number}, []>(`PRAGMA table_info(${table})`)
-      .all()
-      .filter(column => column.pk > 0)
-      .sort((left, right) => left.pk - right.pk)
-      .map(column => column.name);
+    return EffectArray.map(
+      EffectArray.filter(
+        database.query<{readonly name: string; readonly pk: number}, []>(`PRAGMA table_info(${table})`).all(),
+        column => column.pk > 0,
+      ).sort((left, right) => left.pk - right.pk),
+      column => column.name,
+    );
   } finally {
     database.close(false);
   }
@@ -827,10 +956,10 @@ function tablePrimaryKey(databasePath: string, table: string): readonly string[]
 function tableColumns(databasePath: string, table: string): readonly string[] {
   const database = new Database(databasePath, {readonly: true, strict: true});
   try {
-    return database
-      .query<{readonly name: string}, []>(`PRAGMA table_info(${table})`)
-      .all()
-      .map(row => row.name);
+    return EffectArray.map(
+      database.query<{readonly name: string}, []>(`PRAGMA table_info(${table})`).all(),
+      row => row.name,
+    );
   } finally {
     database.close(false);
   }

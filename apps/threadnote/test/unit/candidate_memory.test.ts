@@ -1,8 +1,10 @@
+import {Array as EffectArray} from 'effect';
+import * as EffectRecord from 'effect/Record';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
-import {ByteSize, DateTime, Effect, FileSystem, Layer, Option, Path} from 'effect';
+import {ByteSize, DateTime, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
@@ -29,6 +31,15 @@ import type {MemoryRecord} from '@threadnote/memory/document';
 
 import {join, mkdir, mkdtemp, readFile, rm, symlink, writeFile} from '../helpers/effect-filesystem.js';
 import {runEffect as run} from '../helpers/effect-runtime.js';
+
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+function withoutRecordKey(value: unknown, key: string): Record<string, unknown> {
+  if (!Schema.is(Schema.Record(Schema.String, Schema.Unknown))(value)) {
+    throw new Error('Expected a candidate record fixture.');
+  }
+  return EffectRecord.fromEntries(EffectArray.filter(EffectRecord.toEntries(value), ([entryKey]) => entryKey !== key));
+}
 
 const input: SessionCloseoutInput = {
   decisions: ['Keep application workflows Effect-native.'],
@@ -112,14 +123,13 @@ function projectedCandidate(
 
 describe('candidate-memory formation', () => {
   it('retains legacy generic reviews without candidate kinds', () => {
-    const candidate = Object.fromEntries(
-      Object.entries(projectedCandidate('legacy')).filter(([key]) => key !== 'kind'),
-    );
+    const candidate = withoutRecordKey(projectedCandidate('legacy'), 'kind');
     for (const version of [1, 2]) {
       const raw = {...projectedReview([]), version, candidates: [candidate]};
       const before = structuredClone(raw);
       const parsed = parseCandidateReview(raw);
       expect(parsed.candidates).toEqual([candidate]);
+      // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
       expect(Object.hasOwn(parsed.candidates[0], 'kind')).toBe(false);
       expect(raw).toEqual(before);
     }
@@ -134,10 +144,8 @@ describe('candidate-memory formation', () => {
           minLength: 1,
         }),
         (version, kind, states) => {
-          const candidates = states.map((state, index) => {
-            const candidate = Object.fromEntries(
-              Object.entries(projectedCandidate(`legacy-${index}`)).filter(([key]) => key !== 'kind'),
-            );
+          const candidates = EffectArray.map(states, (state, index) => {
+            const candidate = withoutRecordKey(projectedCandidate(`legacy-${index}`), 'kind');
             return {...candidate, state, ...(kind === undefined ? {} : {kind})};
           });
           const raw = {...projectedReview([]), version, candidates};
@@ -205,7 +213,7 @@ describe('candidate-memory formation', () => {
           projectedCandidate('review-0123456789abcdef-4', {
             comparison: 'replacement',
             recommendation: 'replace',
-            targetContentHash: 'a'.repeat(64),
+            targetContentHash: Effect2.pipe('a', EffectString.repeat(64)),
             targetUri: 'threadnote://user/me/memories/durable/projects/threadnote/knowledge-delta.md',
           }),
         ]),
@@ -296,8 +304,12 @@ describe('candidate-memory formation', () => {
     const review = await run(buildCandidateReview(input, [], new Date('2026-07-23T10:00:00.000Z')));
 
     expect(review.candidates).toHaveLength(3);
-    expect(review.candidates.map(candidate => candidate.kind)).toEqual(['durable', 'preference', 'handoff']);
-    expect(review.candidates.every(candidate => candidate.recommendation === 'create')).toBe(true);
+    expect(EffectArray.map(review.candidates, candidate => candidate.kind)).toEqual([
+      'durable',
+      'preference',
+      'handoff',
+    ]);
+    expect(EffectArray.every(review.candidates, candidate => candidate.recommendation === 'create')).toBe(true);
     expect(review.candidates[0]?.proposedText).toContain('## Decisions');
     expect(review.candidates[0]?.proposedText).toContain('## Invariants');
   });
@@ -396,21 +408,24 @@ describe('candidate-memory formation', () => {
 
   effectIt.effect('warns when a handoff replacement would erase most multi-section continuity state', () =>
     Effect.gen(function* () {
-      const targetBody = [
-        '## Current state',
-        '- Release branch and exact head are recorded for the next agent.',
-        '- Runtime ownership and active branch coordination are recorded here.',
-        '- Pull request status still needs a fresh remote check.',
-        '',
-        '## Verification evidence',
-        '- Focused tests, typecheck, lint, and exact-head smoke passed.',
-        '- The retained safety artifact and recovery path are documented.',
-        '',
-        '## Ordered next steps',
-        '- Refresh remote checks before merging.',
-        '- Transfer runtime ownership before the next install.',
-        '- Run final admission only after every slice is complete.',
-      ].join('\n');
+      const targetBody = EffectArray.join(
+        [
+          '## Current state',
+          '- Release branch and exact head are recorded for the next agent.',
+          '- Runtime ownership and active branch coordination are recorded here.',
+          '- Pull request status still needs a fresh remote check.',
+          '',
+          '## Verification evidence',
+          '- Focused tests, typecheck, lint, and exact-head smoke passed.',
+          '- The retained safety artifact and recovery path are documented.',
+          '',
+          '## Ordered next steps',
+          '- Refresh remote checks before merging.',
+          '- Transfer runtime ownership before the next install.',
+          '- Run final admission only after every slice is complete.',
+        ],
+        '\n',
+      );
       const review = yield* buildCandidateReview(
         {
           ...input,
@@ -454,23 +469,34 @@ describe('candidate-memory formation', () => {
   );
 
   it('flags material character and line loss at compact boundaries monotonically', () => {
-    const compactLines = Array.from({length: 8}, (_unused, index) => `line-${index}`).join('\n');
+    const compactLines = EffectArray.join(
+      Array.from({length: 8}, (_unused, index) => `line-${index}`),
+      '\n',
+    );
     expect(assessReplacementSafety('handoff', replacementSafetyBaseline(compactLines), 'line-0')).toMatchObject({
       destructiveLossRisk: true,
       targetBodyCharacters: compactLines.length,
       targetNonEmptyLines: 8,
     });
 
-    const characterTarget = 'x'.repeat(256);
+    const characterTarget = Effect2.pipe('x', EffectString.repeat(256));
     expect(
-      assessReplacementSafety('handoff', replacementSafetyBaseline(characterTarget), 'x'.repeat(179)),
+      assessReplacementSafety(
+        'handoff',
+        replacementSafetyBaseline(characterTarget),
+        Effect2.pipe('x', EffectString.repeat(179)),
+      ),
     ).toMatchObject({
       destructiveLossRisk: true,
       retainedCharacterRatio: 179 / 256,
     });
-    expect(assessReplacementSafety('handoff', replacementSafetyBaseline('x'.repeat(255)), 'x'.repeat(1))).toMatchObject(
-      {destructiveLossRisk: false},
-    );
+    expect(
+      assessReplacementSafety(
+        'handoff',
+        replacementSafetyBaseline(Effect2.pipe('x', EffectString.repeat(255))),
+        Effect2.pipe('x', EffectString.repeat(1)),
+      ),
+    ).toMatchObject({destructiveLossRisk: false});
 
     fc.assert(
       fc.property(fc.integer({min: 0, max: 8}), fc.integer({min: 0, max: 8}), (left, right) => {
@@ -479,12 +505,18 @@ describe('candidate-memory formation', () => {
         const moreResult = assessReplacementSafety(
           'handoff',
           replacementSafetyBaseline(compactLines),
-          Array.from({length: moreRetained}, (_unused, index) => `line-${index}`).join('\n'),
+          EffectArray.join(
+            Array.from({length: moreRetained}, (_unused, index) => `line-${index}`),
+            '\n',
+          ),
         );
         const lessResult = assessReplacementSafety(
           'handoff',
           replacementSafetyBaseline(compactLines),
-          Array.from({length: lessRetained}, (_unused, index) => `line-${index}`).join('\n'),
+          EffectArray.join(
+            Array.from({length: lessRetained}, (_unused, index) => `line-${index}`),
+            '\n',
+          ),
         );
         if (moreResult.destructiveLossRisk) {
           expect(lessResult.destructiveLossRisk).toBe(true);
@@ -499,7 +531,7 @@ describe('candidate-memory formation', () => {
       projectedCandidate('review-0123456789abcdef-1', {
         comparison: 'replacement',
         recommendation: 'replace',
-        targetContentHash: 'a'.repeat(64),
+        targetContentHash: Effect2.pipe('a', EffectString.repeat(64)),
         targetUri: 'threadnote://user/me/memories/handoffs/active/threadnote/legacy.md',
       }),
     ]);
@@ -567,17 +599,20 @@ describe('candidate-memory formation', () => {
       );
       const outsidePath = join(scanDirectory, 'outside.md');
       const memory = (body: string) =>
-        [
-          'MEMORY',
-          'kind: durable',
-          'status: active',
-          'project: threadnote',
-          'topic: safe-scan',
-          'source_agent_client: test',
-          'timestamp: 2026-07-23T00:00:00.000Z',
-          '',
-          body,
-        ].join('\n');
+        EffectArray.join(
+          [
+            'MEMORY',
+            'kind: durable',
+            'status: active',
+            'project: threadnote',
+            'topic: safe-scan',
+            'source_agent_client: test',
+            'timestamp: 2026-07-23T00:00:00.000Z',
+            '',
+            body,
+          ],
+          '\n',
+        );
       await mkdir(projectDirectory, {recursive: true});
       await writeFile(join(projectDirectory, 'safe.md'), memory('safe candidate comparison'), 'utf8');
       await writeFile(outsidePath, memory('escaped candidate comparison'), 'utf8');
@@ -588,7 +623,9 @@ describe('candidate-memory formation', () => {
         readActiveProjectMemories({account: 'local', agentContextHome: scanDirectory, user: 'me'}, 'threadnote'),
       );
 
-      expect(records.map(record => record.body.trim())).toEqual(['safe candidate comparison']);
+      expect(EffectArray.map(records, record => Effect2.pipe(record.body, EffectString.trim))).toEqual([
+        'safe candidate comparison',
+      ]);
     } finally {
       await rm(scanDirectory, {force: true, recursive: true});
     }
@@ -599,18 +636,21 @@ describe('candidate-memory formation', () => {
       const agentContextHome = 'C:\\context';
       const projectDirectory = 'C:\\context\\data\\local\\user\\me\\memories\\durable\\projects\\threadnote';
       const memoryPath = `${projectDirectory}\\recall.md`;
-      const memoryContent = [
-        'MEMORY',
-        'kind: durable',
-        'status: active',
-        'project: threadnote',
-        'topic: recall-memory-formation',
-        'source_agent_client: test',
-        'timestamp: 2026-07-23T00:00:00.000Z',
-        '',
-        '## Decisions',
-        '- Keep application workflows Effect-native.',
-      ].join('\n');
+      const memoryContent = EffectArray.join(
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'project: threadnote',
+          'topic: recall-memory-formation',
+          'source_agent_client: test',
+          'timestamp: 2026-07-23T00:00:00.000Z',
+          '',
+          '## Decisions',
+          '- Keep application workflows Effect-native.',
+        ],
+        '\n',
+      );
       const WindowsFileSystemLayer = FileSystem.layerNoop({
         readDirectory: path => Effect.succeed(path === projectDirectory ? ['recall.md'] : []),
         readFileString: () => Effect.succeed(memoryContent),
@@ -657,14 +697,14 @@ describe('candidate-memory formation', () => {
     expect(validateSessionCloseoutInput({...input, evidence: Array.from({length: 33}, () => 'file.md')})).toContain(
       'evidence exceeds',
     );
-    expect(validateSessionCloseoutInput({...input, decisions: ['x'.repeat(2_001)]})).toContain(
-      'decisions contains an item',
-    );
+    expect(
+      validateSessionCloseoutInput({...input, decisions: [Effect2.pipe('x', EffectString.repeat(2_001))]}),
+    ).toContain('decisions contains an item');
     expect(
       validateSessionCloseoutInput({
         ...input,
-        decisions: Array.from({length: 32}, () => 'é'.repeat(1_100)),
-        handoff: Array.from({length: 32}, () => 'é'.repeat(1_100)),
+        decisions: Array.from({length: 32}, () => Effect2.pipe('é', EffectString.repeat(1_100))),
+        handoff: Array.from({length: 32}, () => Effect2.pipe('é', EffectString.repeat(1_100))),
       }),
     ).toContain('UTF-8 bytes');
   });
@@ -758,7 +798,7 @@ describe('candidate review persistence', () => {
         review,
         candidateId,
         '## Decisions\n- Keep application workflows Effect-native.\n\n## Constraints\n- Preserve callers.',
-        'a'.repeat(64),
+        Effect2.pipe('a', EffectString.repeat(64)),
         '2026-07-23T10:01:00.000Z',
       );
       if (!refreshed) throw new Error('expected a replacement candidate');
@@ -772,7 +812,7 @@ describe('candidate review persistence', () => {
           sectionHeadings: ['Decisions', 'Constraints'],
           version: 1,
         },
-        targetContentHash: 'a'.repeat(64),
+        targetContentHash: Effect2.pipe('a', EffectString.repeat(64)),
       });
       expect(loaded.auditEvents.at(-1)).toMatchObject({
         action: 'refresh_safety',
@@ -802,7 +842,7 @@ describe('candidate review persistence', () => {
         {
           allowDestructiveReplacement: true,
           bodyText: '## Decisions\n- Keep the explicitly approved replacement.',
-          contentHash: 'a'.repeat(64),
+          contentHash: Effect2.pipe('a', EffectString.repeat(64)),
           operation: 'replace',
           replaceUri: 'threadnote://user/me/memories/durable/projects/threadnote/old.md',
           targetUri: 'threadnote://user/me/memories/durable/projects/threadnote/new.md',
@@ -818,16 +858,25 @@ describe('candidate review persistence', () => {
       yield* saveCandidateReview(temporaryDirectory, applied);
 
       const loaded = yield* loadCandidateReview(temporaryDirectory, review.reviewId);
-      expect(loaded.auditEvents.filter(event => event.action === 'begin_apply' || event.action === 'apply')).toEqual([
+      expect(
+        EffectArray.filter(loaded.auditEvents, event => event.action === 'begin_apply' || event.action === 'apply'),
+      ).toEqual([
         expect.objectContaining({action: 'begin_apply', allowDestructiveReplacement: true}),
         expect.objectContaining({action: 'apply', allowDestructiveReplacement: true}),
       ]);
       const auditPath = path.join(temporaryDirectory, 'threadnote', 'candidates', 'v1', 'audit.jsonl');
-      const auditEvents = (yield* fs.readFileString(auditPath))
-        .trim()
-        .split('\n')
-        .map(line => JSON.parse(line) as {readonly allowDestructiveReplacement?: boolean});
-      expect(auditEvents.filter(event => event.allowDestructiveReplacement === true)).toHaveLength(2);
+      const auditEvents = EffectArray.map(
+        Effect2.pipe(yield* fs.readFileString(auditPath), EffectString.trim, EffectString.split('\n')),
+        line => {
+          const event: unknown = JSON.parse(line);
+          return Schema.decodeUnknownSync(
+            Schema.Struct({
+              allowDestructiveReplacement: Schema.optionalKey(Schema.Boolean),
+            }),
+          )(event);
+        },
+      );
+      expect(EffectArray.filter(auditEvents, event => event.allowDestructiveReplacement === true)).toHaveLength(2);
     }).pipe(provideTestLayer(Layer.mergeAll(BunCrypto.layer, BunFileSystem.layer, BunPath.layer, TestSystemInfoLayer))),
   );
 
@@ -845,8 +894,11 @@ describe('candidate review persistence', () => {
       );
 
     await run(Effect.all([locked('first'), locked('second')], {concurrency: 2}));
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional array indexing and native trace segment parsing.
     expect(trace[0]?.split(':')[0]).toBe(trace[1]?.split(':')[0]);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional array indexing and native trace segment parsing.
     expect(trace[2]?.split(':')[0]).toBe(trace[3]?.split(':')[0]);
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- Preserve optional array indexing and native trace segment parsing.
     expect(trace[0]?.split(':')[0]).not.toBe(trace[2]?.split(':')[0]);
 
     const event = {
@@ -858,7 +910,9 @@ describe('candidate review persistence', () => {
     };
     const auditPath = await run(appendCandidateAudit(directory, event));
     await run(appendCandidateAudit(directory, event));
-    expect((await readFile(auditPath, 'utf8')).trim().split('\n')).toHaveLength(1);
+    expect(Effect2.pipe(await readFile(auditPath, 'utf8'), EffectString.trim, EffectString.split('\n'))).toHaveLength(
+      1,
+    );
   });
 
   it('keeps no-op decisions and per-review audit history bounded', async () => {
@@ -879,7 +933,7 @@ describe('candidate review persistence', () => {
     for (let revision = 3; revision <= 180; revision += 1) {
       bounded = candidateReviewWithAuditEvent(bounded, {
         action: 'begin_apply',
-        at: `2026-07-23T10:${String(revision).padStart(2, '0')}:00.000Z`,
+        at: `2026-07-23T10:${Effect2.pipe(String(revision), EffectString.padStart(2, '0'))}:00.000Z`,
         candidateId,
         reviewId: review.reviewId,
         revision,
@@ -903,7 +957,7 @@ describe('candidate review persistence', () => {
     await expect(run(loadCandidateReview(directory, review.reviewId))).resolves.toMatchObject({
       reviewId: review.reviewId,
     });
-    expect((await readFile(auditPath, 'utf8')).trim()).toContain('"action":"create_review"');
+    expect(Effect2.pipe(await readFile(auditPath, 'utf8'), EffectString.trim)).toContain('"action":"create_review"');
   });
 
   it('does not let an old review replay evict newer bounded audit events', async () => {
@@ -917,7 +971,10 @@ describe('candidate review persistence', () => {
       reviewId: `review-${index}`,
       revision: 2,
     }));
-    const boundedAudit = `${newerEvents.map(event => JSON.stringify(event)).join('\n')}\n`;
+    const boundedAudit = `${EffectArray.join(
+      EffectArray.map(newerEvents, event => JSON.stringify(event)),
+      '\n',
+    )}\n`;
     await writeFile(auditPath, boundedAudit, 'utf8');
 
     await run(loadCandidateReview(directory, review.reviewId));
@@ -928,10 +985,11 @@ describe('candidate review persistence', () => {
   it('preserves workflow order when audit transitions share a timestamp', async () => {
     const at = '2026-07-23T10:00:00.000Z';
     const reviewId = 'same-timestamp-review';
-    for (const [index, action] of ['create_review', 'begin_apply', 'apply', 'defer', 'reject'].entries()) {
+    const workflowActions = ['create_review', 'begin_apply', 'apply', 'defer', 'reject'] as const;
+    for (const [index, action] of workflowActions.entries()) {
       await run(
         appendCandidateAudit(directory, {
-          action: action as 'apply' | 'begin_apply' | 'create_review' | 'defer' | 'reject',
+          action,
           at,
           candidateId: index === 0 ? undefined : `candidate-${index}`,
           reviewId,
@@ -940,10 +998,13 @@ describe('candidate review persistence', () => {
       );
     }
     const auditPath = join(directory, 'threadnote', 'candidates', 'v1', 'audit.jsonl');
-    const actions = (await readFile(auditPath, 'utf8'))
-      .trim()
-      .split('\n')
-      .map(line => (JSON.parse(line) as {readonly action: string}).action);
+    const actions = EffectArray.map(
+      Effect2.pipe(await readFile(auditPath, 'utf8'), EffectString.trim, EffectString.split('\n')),
+      line => {
+        const event: unknown = JSON.parse(line);
+        return Schema.decodeUnknownSync(Schema.Struct({action: Schema.String}))(event).action;
+      },
+    );
 
     expect(actions).toEqual(['create_review', 'begin_apply', 'apply', 'defer', 'reject']);
   });

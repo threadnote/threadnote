@@ -1,10 +1,14 @@
+import {Array as EffectArray} from 'effect';
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
-import {afterEach, describe, expect, it, vi} from 'vitest';
+import {assert, afterEach, describe, expect, it, vi} from 'vitest';
 import {ManagerDialogProvider} from '@threadnote/manager/dialog';
 import {SuperhumanConnectionForm} from '../src/manager-ui/connection-form.js';
 import type {SuperhumanSource} from '../src/manager-contracts.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+import {Option as EffectOption} from 'effect';
 
 let root: Root | undefined;
 afterEach(async () => {
@@ -13,7 +17,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 async function render(source?: SuperhumanSource): Promise<void> {
-  (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
@@ -26,8 +30,14 @@ async function render(source?: SuperhumanSource): Promise<void> {
   );
 }
 function button(label: string): HTMLButtonElement {
-  const value = [...document.querySelectorAll('button')].find(
-    item => item.textContent?.trim() === label || item.getAttribute('aria-label') === label,
+  const value = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      [...document.querySelectorAll('button')],
+      item =>
+        Effect.pipe(item.textContent, effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect.pipe(effectOptionalString, EffectString.trim),
+        ) === label || item.getAttribute('aria-label') === label,
+    ),
   );
   if (!value) throw new Error(`Missing button: ${label}`);
   return value;
@@ -99,12 +109,16 @@ describe('Superhuman link chips', () => {
     expect(document.querySelector('.integration-link-chip a')?.getAttribute('href')).toBe(pageA.browserLink);
     expect(document.body.textContent).toContain('Team handbook');
     expect(
-      [...document.querySelectorAll('.integration-link-chip-icon img')].map(item => item.getAttribute('src')),
+      EffectArray.map([...document.querySelectorAll('.integration-link-chip-icon img')], item =>
+        item.getAttribute('src'),
+      ),
     ).toEqual([pageA.iconUrl, whole.iconUrl]);
     expect(document.querySelector('.integration-link-chip-icon img')?.getAttribute('referrerpolicy')).toBe(
       'no-referrer',
     );
-    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
+    const passwordInput = document.querySelector('input[type="password"]');
+    if (!(passwordInput instanceof HTMLInputElement)) throw new Error('Expected the password input to remain mounted.');
+    expect(passwordInput.value).toBe('');
     await act(async () => button('Save settings').click());
     expect(calls[0]).toEqual({action: 'describe-selection', id: 'docs'});
     expect(calls[1]).toMatchObject({action: 'save-source', documents: source.documents});
@@ -195,7 +209,7 @@ describe('Superhuman link chips', () => {
       await act(async () =>
         document.querySelector('textarea')!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})),
       );
-      expect((document.querySelector('textarea') as HTMLTextAreaElement).value).toBe('');
+      expect(requiredTextarea('textarea').value).toBe('');
       if (url === pageA.browserLink)
         expect(document.querySelector('.integration-link-chip-icon img')?.getAttribute('src')).toBe(pageA.iconUrl);
     }
@@ -226,8 +240,14 @@ describe('Superhuman link chips', () => {
     expect(document.querySelectorAll('.integration-link-chip')).toHaveLength(3);
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('Link unavailable');
     expect(button('Save settings').disabled).toBe(true);
-    expect((document.querySelector('textarea') as HTMLTextAreaElement).value).toContain('/missing');
+    expect(requiredTextarea('textarea').value).toContain('/missing');
     await fill('#superhuman-links', '');
     expect(button('Save settings').disabled).toBe(false);
   });
 });
+
+function requiredTextarea(selector: string): HTMLTextAreaElement {
+  const element = document.querySelector(selector);
+  assert(element instanceof HTMLTextAreaElement, `Missing textarea: ${selector}`);
+  return element;
+}

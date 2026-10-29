@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {
   ContextHealthCaseDispositionV2,
@@ -11,10 +12,13 @@ import type {
   MaintenanceState,
 } from './maintenance.js';
 import {maintenanceSnapshotFailure} from './maintenance_snapshot.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 function maintenanceCaseSubjectKeys(item: ContextMaintenanceCaseV2): readonly string[] {
   return (item.subjectContentHashes?.length ?? 0) > 0
-    ? item.subjectContentHashes!.map(subject => subject.uri)
+    ? EffectArray.map(item.subjectContentHashes!, subject => subject.uri)
     : [item.memoryId];
 }
 
@@ -28,9 +32,9 @@ export function publicStatus(
       ? originalState
       : {
           ...originalState,
-          projects: originalState.projects.filter(item => item.project === project),
-          cases: originalState.cases.filter(item => item.project === project),
-          receipts: originalState.receipts.filter(item => item.project === project),
+          projects: EffectArray.filter(originalState.projects, item => item.project === project),
+          cases: EffectArray.filter(originalState.cases, item => item.project === project),
+          receipts: EffectArray.filter(originalState.receipts, item => item.project === project),
         };
   const {
     checkpoints: _checkpoints,
@@ -46,7 +50,10 @@ export function publicStatus(
   } = state;
   const counts: Record<string, number> = {
     decisionMemories: new Set(
-      state.cases.filter(item => item.disposition === 'needs-decision').flatMap(maintenanceCaseSubjectKeys),
+      EffectArray.flatMap(
+        EffectArray.filter(state.cases, item => item.disposition === 'needs-decision'),
+        maintenanceCaseSubjectKeys,
+      ),
     ).size,
   };
   const groups = new Map<
@@ -73,7 +80,7 @@ export function publicStatus(
   const orderedCases = [...state.cases].sort(
     (a, b) =>
       Number(b.disposition === 'needs-decision') - Number(a.disposition === 'needs-decision') ||
-      a.caseId.localeCompare(b.caseId),
+      Effect.pipe(a.caseId, EffectString.localeCompare(b.caseId)),
   );
   const orderedReceipts = [...state.receipts].reverse();
   const select = <T>(
@@ -86,7 +93,7 @@ export function publicStatus(
   ) => {
     if (cursor !== undefined && exact !== undefined) throw new Error('Choose a page cursor or an exact selector.');
     if (exact !== undefined) {
-      const item = items.find(item => id(item) === exact);
+      const item = EffectOption.getOrUndefined(EffectArray.findFirst(items, item => id(item) === exact));
       if (item === undefined) throw new Error('The exact maintenance selector is unavailable in this project.');
       return {items: [item]};
     }
@@ -116,7 +123,7 @@ export function publicStatus(
     item => item.receiptId,
     limit ?? 10,
   );
-  const cases = casePage.items.map(item => ({
+  const cases = EffectArray.map(casePage.items, item => ({
     ...item,
     events: options.caseId === undefined ? item.events.slice(-2) : item.events,
     ...(options.caseId === undefined
@@ -130,9 +137,12 @@ export function publicStatus(
   }));
   return {
     ...status,
-    semanticCoverage: Object.entries(state.semanticProgress ?? {})
-      .filter(([name]) => project === undefined || name === project)
-      .map(([name, progress]) => {
+    semanticCoverage: EffectArray.map(
+      EffectArray.filter(
+        EffectRecord.toEntries(state.semanticProgress ?? {}),
+        ([name]) => project === undefined || name === project,
+      ),
+      ([name, progress]) => {
         if (progress.version !== 2 || progress.analyzerVersion !== CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION)
           return {
             project: name,
@@ -152,20 +162,26 @@ export function publicStatus(
             churnCount: 0,
             dirtyRecordPairsRemaining: 0,
           };
-        const records = progress.records?.filter(record => !record.removed) ?? [];
-        const extracted = records.filter(record => record.claims !== undefined);
-        const unsupported = extracted.filter(record => (record.reasons?.length ?? 0) > 0);
-        const allClaims = extracted.reduce((sum, record) => sum + (record.claims ?? 0), 0);
-        const sameRecordPairs = extracted.reduce((sum, record) => sum + (record.claims ?? 0) ** 2, 0);
+        const progressRecords = progress.records;
+        const records = progressRecords
+          ? EffectArray.filter(progressRecords, (record, index) => index in progressRecords && !record.removed)
+          : [];
+        const extracted = EffectArray.filter(records, record => record.claims !== undefined);
+        const unsupported = EffectArray.filter(extracted, record => (record.reasons?.length ?? 0) > 0);
+        const allClaims = EffectArray.reduce(extracted, 0, (sum, record) => sum + (record.claims ?? 0));
+        const sameRecordPairs = EffectArray.reduce(extracted, 0, (sum, record) => sum + (record.claims ?? 0) ** 2);
         const totalClaimPairs =
           extracted.length === records.length ? (allClaims ** 2 - sameRecordPairs) / 2 : undefined;
         const dirtyRecordPairsRemaining =
-          progress.dirty?.reduce((sum, entry) => {
-            const ownIndex = progress.records.findIndex(record => record.uri === entry.uri);
+          EffectArray.reduce(progress.dirty, 0, (sum, entry) => {
+            const ownIndex = EffectOption.getOrElse(
+              EffectArray.findFirstIndex(progress.records, record => record.uri === entry.uri),
+              () => -1,
+            );
             return (
               sum + Math.max(0, progress.records.length - entry.otherCursor - Number(ownIndex >= entry.otherCursor))
             );
-          }, 0) ?? 0;
+          }) ?? 0;
         const comparisonFinished =
           progress.comparison?.pairCursor >=
             Math.max(0, (progress.records.length * (progress.records.length - 1)) / 2) &&
@@ -187,19 +203,24 @@ export function publicStatus(
           comparedClaimPairs: progress.comparedClaimPairs ?? 0,
           ...(totalClaimPairs === undefined ? {} : {totalClaimPairs}),
           unsupportedRecords: unsupported.length,
-          unsupportedClaims: extracted.reduce((sum, record) => sum + (record.unsupportedClaims ?? 0), 0),
-          bodyLimitedRecords: extracted.filter(record => record.reasons?.includes('body-limit')).length,
+          unsupportedClaims: EffectArray.reduce(extracted, 0, (sum, record) => sum + (record.unsupportedClaims ?? 0)),
+          bodyLimitedRecords: EffectArray.filter(extracted, record => Boolean(record.reasons?.includes('body-limit')))
+            .length,
           outputOmittedFindings: progress.outputOmittedFindings ?? 0,
           churnCount: progress.churnCount ?? 0,
           dirtyRecordPairsRemaining,
         };
-      }),
+      },
+    ),
     cases,
     receipts: receiptPage.items,
     omittedReceipts: state.receipts.length - receiptPage.items.length,
     page: {generation, caseNextCursor: casePage.next, receiptNextCursor: receiptPage.next},
     counts,
-    groups: [...groups.values()].slice(0, 100).map(({ids, ...group}) => ({...group, affectedMemories: ids.size})),
+    groups: EffectArray.map([...groups.values()].slice(0, 100), ({ids, ...group}) => ({
+      ...group,
+      affectedMemories: ids.size,
+    })),
     omittedCases: state.cases.length - cases.length,
   };
 }
@@ -218,7 +239,8 @@ export function renderContextMaintenanceStatus(status: ContextMaintenanceStatusV
   const counts = status.counts ?? {};
   const diagnostics = [
     ...new Map(
-      [...(status.error?.diagnostic ? [status.error.diagnostic] : []), ...(status.preparation?.diagnostics ?? [])].map(
+      EffectArray.map(
+        [...(status.error?.diagnostic ? [status.error.diagnostic] : []), ...(status.preparation?.diagnostics ?? [])],
         diagnostic => {
           const safe = maintenanceSnapshotFailure(
             diagnostic.category,
@@ -230,23 +252,28 @@ export function renderContextMaintenanceStatus(status: ContextMaintenanceStatusV
       ),
     ).values(),
   ];
-  return [
-    `Context maintenance: ${status.paused ? 'paused' : status.state}`,
-    ...(status.preparation?.complete === false
-      ? [
-          `Preparation: partial; ${status.preparation.admittedRecords} records indexed so far; ${status.preparation.omittedRecords ?? 0} records omitted.`,
-        ]
-      : []),
-    `Decisions: ${counts.decisionMemories ?? 0}; waiting evidence: ${counts['waiting-evidence'] ?? 0}; completed: ${(counts.resolved ?? 0) + (counts.retired ?? 0)}.`,
-    ...status.projects.map(
-      item =>
-        `${item.project}: ${item.checked}/${item.eligible} tasks checked; ${item.checkedCitations}/${item.eligibleCitations} citations verified.`,
-    ),
-    ...(status.groups ?? [])
-      .slice(0, 12)
-      .map(group => `${group.project}: ${group.reason} (${group.affectedMemories} memories)`),
-    ...(status.error === undefined ? [] : [`Maintenance error: ${status.error.reason}`]),
-    ...diagnostics.slice(0, 8).flatMap(renderSnapshotDiagnostic),
-    ...(diagnostics.length > 8 ? [`Diagnostics: ${diagnostics.length - 8} additional diagnostics omitted.`] : []),
-  ].join('\n');
+  return EffectArray.join(
+    [
+      `Context maintenance: ${status.paused ? 'paused' : status.state}`,
+      ...(status.preparation?.complete === false
+        ? [
+            `Preparation: partial; ${status.preparation.admittedRecords} records indexed so far; ${status.preparation.omittedRecords ?? 0} records omitted.`,
+          ]
+        : []),
+      `Decisions: ${counts.decisionMemories ?? 0}; waiting evidence: ${counts['waiting-evidence'] ?? 0}; completed: ${(counts.resolved ?? 0) + (counts.retired ?? 0)}.`,
+      ...EffectArray.map(
+        status.projects,
+        item =>
+          `${item.project}: ${item.checked}/${item.eligible} tasks checked; ${item.checkedCitations}/${item.eligibleCitations} citations verified.`,
+      ),
+      ...EffectArray.map(
+        (status.groups ?? []).slice(0, 12),
+        group => `${group.project}: ${group.reason} (${group.affectedMemories} memories)`,
+      ),
+      ...(status.error === undefined ? [] : [`Maintenance error: ${status.error.reason}`]),
+      ...EffectArray.flatMap(diagnostics.slice(0, 8), renderSnapshotDiagnostic),
+      ...(diagnostics.length > 8 ? [`Diagnostics: ${diagnostics.length - 8} additional diagnostics omitted.`] : []),
+    ],
+    '\n',
+  );
 }

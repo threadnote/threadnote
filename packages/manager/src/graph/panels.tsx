@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import React, {useEffect, useState} from 'react';
 import {formatRelativeAge, useRelativeTimeNow} from '../relative_time.js';
 import type {CodeGraphAutomaticCompactionStatus} from '@threadnote/graph/automatic/compaction';
@@ -50,6 +51,9 @@ import {
 import {type ManagerDialogOptions, useOptionalManagerDialogs} from '@threadnote/manager/dialog';
 import {GraphReconciliationProgress} from './reconciliation.js';
 import type {ManagerGraphReconciliationStatus} from '@threadnote/graph/manager/status';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
+
 export {GraphReconciliationProgress};
 
 export function GraphSummary(props: {
@@ -70,7 +74,7 @@ export function GraphSummary(props: {
           ? props.graph.repository.metrics === 'complete'
             ? 'Node size reflects indexed symbol volume. Double-click a component to explore its symbol graph.'
             : 'Node size reflects visible relationship degree. Double-click a component to explore its symbol graph.'
-          : `Node size reflects ${sizeMetricLabel(props.sizeMetric).toLowerCase()} among the filtered relationships.`}
+          : `Node size reflects ${Effect.pipe(sizeMetricLabel(props.sizeMetric), EffectString.toLowerCase)} among the filtered relationships.`}
       </p>
       <dl className="metric-list">
         <div>
@@ -88,7 +92,7 @@ export function GraphSummary(props: {
         <div>
           <dt>Snapshot</dt>
           <dd>
-            {props.graph.repository.snapshot.commit.slice(0, 8)}
+            {Effect.pipe(props.graph.repository.snapshot.commit, EffectString.slice(0, 8))}
             {props.graph.repository.snapshot.dirty ? ' + dirty' : ''}
           </dd>
         </div>
@@ -166,7 +170,7 @@ export function GraphSummary(props: {
             {props.analysis.hubs.length > 0 ? (
               <div className="graph-analysis-list">
                 <h5>{partialTopology ? 'Highest observed-connectivity nodes' : 'Highest-connectivity nodes'}</h5>
-                {props.analysis.hubs.slice(0, 4).map(hub => (
+                {EffectArray.map(props.analysis.hubs.slice(0, 4), hub => (
                   <div key={`${hub.node.path}:${hub.node.label}`}>
                     <span>
                       <strong>{hub.node.label}</strong>
@@ -211,20 +215,25 @@ export function NodeInspector(props: {
 }): React.ReactElement {
   const [tab, setTab] = useState<'evidence' | 'overview' | 'relationships'>('overview');
   useEffect(() => setTab('overview'), [props.node.id]);
-  const connected = props.graph.edges.filter(
+  const connected = EffectArray.filter(
+    props.graph.edges,
     edge => edge.sourceId === props.node.id || edge.targetId === props.node.id,
   );
-  const nodesById = new Map(props.graph.nodes.map(node => [node.id, node]));
-  const localRelated = connected
-    .slice()
-    .sort((left, right) => right.count - left.count || right.confidence - left.confidence)
-    .slice(0, 7)
-    .map(edge => {
-      const id = edge.sourceId === props.node.id ? edge.targetId : edge.sourceId;
-      return {edge, node: nodesById.get(id)};
-    })
-    .filter((item): item is {readonly edge: GraphEdge; readonly node: GraphNode} => item.node !== undefined);
-  const visibleNodeIds = new Set(props.graph.nodes.map(node => node.id));
+  const nodesById = new Map(EffectArray.map(props.graph.nodes, node => [node.id, node]));
+  const localRelated = EffectArray.filter(
+    EffectArray.map(
+      connected
+        .slice()
+        .sort((left, right) => right.count - left.count || right.confidence - left.confidence)
+        .slice(0, 7),
+      edge => {
+        const id = edge.sourceId === props.node.id ? edge.targetId : edge.sourceId;
+        return {edge, node: nodesById.get(id)};
+      },
+    ),
+    (item): item is {readonly edge: GraphEdge; readonly node: GraphNode} => item.node !== undefined,
+  );
+  const visibleNodeIds = new Set(EffectArray.map(props.graph.nodes, node => node.id));
   const detail = props.detail?.node.id === props.node.id ? props.detail : undefined;
   const sourceLocation = detail
     ? `${detail.node.path}:${detail.node.span.line}:${detail.node.span.column}`
@@ -243,10 +252,12 @@ export function NodeInspector(props: {
           ) : null}
         </div>
         <h3>{props.node.label}</h3>
-        <p className="node-qualified">{props.node.qualifiedName ?? props.node.projectId.replace(/^[^:]+:/, '')}</p>
+        <p className="node-qualified">
+          {props.node.qualifiedName ?? Effect.pipe(props.node.projectId, EffectString.replace(/^[^:]+:/, ''))}
+        </p>
         {breadcrumb.length > 0 ? (
           <div className="source-breadcrumb" aria-label="Source breadcrumb">
-            {breadcrumb.map((part, index) => (
+            {EffectArray.map(breadcrumb, (part, index) => (
               <React.Fragment key={`${part}-${index}`}>
                 {index > 0 ? <span aria-hidden="true">/</span> : null}
                 <strong>{part}</strong>
@@ -261,17 +272,18 @@ export function NodeInspector(props: {
         </button>
       ) : (
         <div className="inspector-tabs" role="tablist" aria-label="Node details">
-          {(
+          {EffectArray.map(
             [
               ['overview', 'Overview'],
               ['relationships', 'Relations'],
               ['evidence', 'Evidence'],
-            ] as const
-          ).map(([value, label]) => (
-            <button aria-selected={tab === value} key={value} onClick={() => setTab(value)} role="tab" type="button">
-              {label}
-            </button>
-          ))}
+            ] as const,
+            ([value, label]) => (
+              <button aria-selected={tab === value} key={value} onClick={() => setTab(value)} role="tab" type="button">
+                {label}
+              </button>
+            ),
+          )}
         </div>
       )}
 
@@ -332,7 +344,7 @@ export function NodeInspector(props: {
           </dl>
           {detail?.stats.provenances.length ? (
             <div className="provenance-strip" aria-label="Relationship provenance">
-              {detail.stats.provenances.map(item => (
+              {EffectArray.map(detail.stats.provenances, item => (
                 <span key={item.provenance}>
                   {item.provenance}{' '}
                   <strong>{graphRelationshipCountLabel(item.count, relationshipCountsSampled)}</strong>
@@ -347,7 +359,7 @@ export function NodeInspector(props: {
           {props.node.type === 'project' && localRelated.length ? (
             <div className="related-list">
               <h4>Strongest visible links</h4>
-              {localRelated.map(({edge, node}) => (
+              {EffectArray.map(localRelated, ({edge, node}) => (
                 <button key={edge.id} onClick={() => props.onSelectNode(node.id)} type="button">
                   <span>{node.label}</span>
                   <small>
@@ -375,7 +387,7 @@ export function NodeInspector(props: {
               </span>
             </div>
             <div className="relation-breakdown">
-              {detail.stats.relations.map(item => {
+              {EffectArray.map(detail.stats.relations, item => {
                 const maximum = detail.stats.relations[0]?.count ?? 1;
                 return (
                   <div key={item.relation}>
@@ -394,7 +406,7 @@ export function NodeInspector(props: {
             {relationshipSampleLabel ? <p className="detail-truncation">{relationshipSampleLabel}</p> : null}
             <div className="related-list relationship-list">
               <h4>Direct neighborhood</h4>
-              {detail.relationships.slice(0, 32).map(relationship => {
+              {EffectArray.map(detail.relationships.slice(0, 32), relationship => {
                 const canSelect = Boolean(relationship.related.id && visibleNodeIds.has(relationship.related.id));
                 return (
                   <button
@@ -430,7 +442,7 @@ export function NodeInspector(props: {
       {props.node.type === 'symbol' && tab === 'evidence' ? (
         detail?.relationships.length ? (
           <div className="evidence-list">
-            {detail.relationships.slice(0, 32).map(relationship => (
+            {EffectArray.map(detail.relationships.slice(0, 32), relationship => (
               <article key={relationship.id}>
                 <header>
                   <span>{relationLabel(relationship.relation)}</span>
@@ -483,7 +495,13 @@ export function GraphAdministration(props: {
   const [selectedProjectName, setSelectedProjectName] = useState('');
   const blocked = props.busy !== undefined;
   const selectedProject =
-    props.configuredProjects?.find(project => project.name === selectedProjectName) ?? props.configuredProjects?.[0];
+    EffectOption.getOrUndefined(
+      EffectOption.map(EffectOption.fromNullishOr(props.configuredProjects), __effectArrayReceiver =>
+        EffectOption.getOrUndefined(
+          EffectArray.findFirst(__effectArrayReceiver, project => project.name === selectedProjectName),
+        ),
+      ),
+    ) ?? props.configuredProjects?.[0];
   const confirmAction = async (options: ManagerDialogOptions, action: GraphAdministrationAction): Promise<void> => {
     if (await dialogs.confirm(options)) props.onAction(action);
   };
@@ -556,7 +574,7 @@ export function GraphAdministration(props: {
                   {props.configuredProjects.length === 0 ? (
                     <option value="">No configured projects</option>
                   ) : (
-                    props.configuredProjects.map(project => (
+                    EffectArray.map(props.configuredProjects, project => (
                       <option key={project.name} value={project.name}>
                         {project.name}
                       </option>
@@ -671,16 +689,28 @@ export function GraphAdministration(props: {
         </label>
         {props.report ? (
           <div className="graph-database-grid">
-            {props.report.databases.map(database => {
-              const view = database.views.find(candidate => candidate.managementAvailable) ?? database.views[0];
+            {EffectArray.map(props.report.databases, database => {
+              const view =
+                EffectOption.getOrUndefined(
+                  EffectArray.findFirst(database.views, candidate => candidate.managementAvailable),
+                ) ?? database.views[0];
               const managementAvailable = view?.managementAvailable === true;
               const unassociatedWithoutSnapshot = view === undefined && database.health?.readySnapshots === 0;
               const repository = unassociatedWithoutSnapshot
                 ? 'Unassociated graph storage'
                 : (view?.repository.displayName ?? 'Indexed repository');
               const jobs = graphAdministrationJobSelection(database.builds, database.waiters);
-              const obsolete = props.report?.obsoleteStores.checkouts.find(
-                checkout => checkout.checkoutId === database.checkoutId,
+              const obsolete = EffectOption.getOrUndefined(
+                EffectOption.map(
+                  EffectOption.fromNullishOr(props.report?.obsoleteStores.checkouts),
+                  __effectArrayReceiver =>
+                    EffectOption.getOrUndefined(
+                      EffectArray.findFirst(
+                        __effectArrayReceiver,
+                        checkout => checkout.checkoutId === database.checkoutId,
+                      ),
+                    ),
+                ),
               );
               const target = view
                 ? graphAdministrationTarget(database.checkoutId, {
@@ -793,7 +823,7 @@ export function GraphAdministration(props: {
                     )
                   ) : null}
                   <div className="graph-database-views">
-                    {database.views.map(candidate => {
+                    {EffectArray.map(database.views, candidate => {
                       const removalTarget = graphViewRemovalTarget(database.checkoutId, {
                         scopeId: candidate.viewScopeId,
                         snapshot: candidate.snapshot,
@@ -880,7 +910,7 @@ export function GraphAdministration(props: {
                             </small>
                           ) : null}
                           <button
-                            aria-label={`Remove active worktree view ${candidate.viewWorktreeId.slice(-8)}`}
+                            aria-label={`Remove active worktree view ${Effect.pipe(candidate.viewWorktreeId, EffectString.slice(-8))}`}
                             className="danger graph-view-remove"
                             disabled={blocked}
                             onClick={() => props.onAction({action: 'remove-view', ...removalTarget})}
@@ -895,7 +925,7 @@ export function GraphAdministration(props: {
                       );
                     })}
                   </div>
-                  {jobs.jobs.map(job => {
+                  {EffectArray.map(jobs.jobs, job => {
                     const jobView = graphAdministrationJobView(database.views, job);
                     return (
                       <p className="graph-database-job" key={`${job.buildId}:${job.coordination?.role ?? 'build'}`}>
@@ -914,7 +944,7 @@ export function GraphAdministration(props: {
                   {jobs.hiddenCount > 0 ? (
                     <p className="graph-database-job">+{jobs.hiddenCount} more active or failed jobs</p>
                   ) : null}
-                  {database.issues.map(issue => (
+                  {EffectArray.map(database.issues, issue => (
                     <p className="graph-database-issue" key={`${database.checkoutId}:${issue.code}`}>
                       {issue.code}: {issue.message}
                     </p>
@@ -1076,9 +1106,12 @@ export function GraphMaintenanceProgress(props: {
   readonly status: CodeGraphMaintenanceStatus;
 }): React.ReactElement {
   const {status} = props;
-  const repository = props.repositories
-    .flatMap(group => group.views)
-    .find(view => view.checkoutId === status.checkoutId);
+  const repository = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      EffectArray.flatMap(props.repositories, group => group.views),
+      view => view.checkoutId === status.checkoutId,
+    ),
+  );
   const elapsed = status.startedAt === undefined ? undefined : Math.max(0, Date.now() - Date.parse(status.startedAt));
   const lastUpdate =
     status.updatedAt === undefined ? undefined : Math.max(0, Date.now() - Date.parse(status.updatedAt));
@@ -1131,7 +1164,12 @@ export function GraphAutomaticCompactionProgress(props: {
   const {status} = props;
   if (status.state === 'idle') return null;
   const checkoutId = 'checkoutId' in status ? status.checkoutId : undefined;
-  const repository = props.repositories.flatMap(group => group.views).find(view => view.checkoutId === checkoutId);
+  const repository = EffectOption.getOrUndefined(
+    EffectArray.findFirst(
+      EffectArray.flatMap(props.repositories, group => group.views),
+      view => view.checkoutId === checkoutId,
+    ),
+  );
   const target = repository
     ? `${repository.displayName} · folder ${graphLocalAssociationText(repository.localAssociation)}`
     : checkoutId
@@ -1327,7 +1365,7 @@ export function GraphBuildProgress(props: {
           Full materialization selected
           {build.materialization.metrics.fallbackReason === undefined
             ? ''
-            : ` · incremental fallback: ${build.materialization.metrics.fallbackReason.replaceAll('-', ' ')}`}
+            : ` · incremental fallback: ${Effect.pipe(build.materialization.metrics.fallbackReason, EffectString.replaceAll('-', ' '))}`}
         </p>
       ) : null}
       {build.materialization?.activity ? (
@@ -1355,7 +1393,8 @@ export function GraphBuildProgress(props: {
       ) : null}
       {build.activation?.activity ? (
         <p>
-          Current reported step: activating · {build.activation.activity.stage.replaceAll('-', ' ')} ·{' '}
+          Current reported step: activating ·{' '}
+          {Effect.pipe(build.activation.activity.stage, EffectString.replaceAll('-', ' '))} ·{' '}
           {build.activation.activity.state}
           {build.activation.activity.rows === undefined
             ? ''
@@ -1501,10 +1540,10 @@ export function GraphBuildProgress(props: {
                 {build.materialization.metrics.storage.filesystemsShared === true ? ' · shared filesystem' : ''}
                 {build.materialization.metrics.storage.materializationMode === undefined
                   ? ''
-                  : ` · ${build.materialization.metrics.storage.materializationMode.replaceAll('-', ' ')}`}
+                  : ` · ${Effect.pipe(build.materialization.metrics.storage.materializationMode, EffectString.replaceAll('-', ' '))}`}
                 {build.materialization.metrics.storage.estimateBasis === undefined
                   ? ''
-                  : ` · estimate from ${build.materialization.metrics.storage.estimateBasis.replaceAll('-', ' ')}`}
+                  : ` · estimate from ${Effect.pipe(build.materialization.metrics.storage.estimateBasis, EffectString.replaceAll('-', ' '))}`}
                 {' · '}rollback journals excluded from TEMP totals
               </p>
               {graphMaterializationDiskWarning(build.materialization.metrics.storage) ? (
@@ -1549,7 +1588,7 @@ export function GraphBuildProgress(props: {
 }
 
 function graphCommitLabel(commit: string): string {
-  return commit.slice(0, 12) || 'unknown';
+  return Effect.pipe(commit, EffectString.slice(0, 12)) || 'unknown';
 }
 
 function graphActiveBatchNumber(completed: number, total: number): number {
@@ -1591,22 +1630,25 @@ function graphMaterializationStageLabel(stage: GraphMaterializationStage): strin
 
 function graphMaterializationRows(rows: GraphMaterializationRows | undefined): string {
   if (!rows) return '';
-  const values = [
-    rows.symbols === undefined ? undefined : `${rows.symbols.toLocaleString()} symbols`,
-    rows.lookupKeys === undefined ? undefined : `${rows.lookupKeys.toLocaleString()} lookup keys`,
-    rows.terms === undefined ? undefined : `${rows.terms.toLocaleString()} terms`,
-    rows.edges === undefined ? undefined : `${rows.edges.toLocaleString()} relationships`,
-    rows.references === undefined ? undefined : `${rows.references.toLocaleString()} references`,
-    rows.referenceCandidates === undefined ? undefined : `${rows.referenceCandidates.toLocaleString()} candidates`,
-    rows.reexports === undefined ? undefined : `${rows.reexports.toLocaleString()} re-exports`,
-    rows.deduplicatedEdges === undefined || rows.deduplicatedEdges === 0
-      ? undefined
-      : `${rows.deduplicatedEdges.toLocaleString()} repeated relationships collapsed`,
-    rows.deduplicatedReferences === undefined || rows.deduplicatedReferences === 0
-      ? undefined
-      : `${rows.deduplicatedReferences.toLocaleString()} repeated resolution records collapsed`,
-  ].filter((value): value is string => value !== undefined);
-  return values.length > 0 ? ` · ${values.join(', ')}` : '';
+  const values = EffectArray.filter(
+    [
+      rows.symbols === undefined ? undefined : `${rows.symbols.toLocaleString()} symbols`,
+      rows.lookupKeys === undefined ? undefined : `${rows.lookupKeys.toLocaleString()} lookup keys`,
+      rows.terms === undefined ? undefined : `${rows.terms.toLocaleString()} terms`,
+      rows.edges === undefined ? undefined : `${rows.edges.toLocaleString()} relationships`,
+      rows.references === undefined ? undefined : `${rows.references.toLocaleString()} references`,
+      rows.referenceCandidates === undefined ? undefined : `${rows.referenceCandidates.toLocaleString()} candidates`,
+      rows.reexports === undefined ? undefined : `${rows.reexports.toLocaleString()} re-exports`,
+      rows.deduplicatedEdges === undefined || rows.deduplicatedEdges === 0
+        ? undefined
+        : `${rows.deduplicatedEdges.toLocaleString()} repeated relationships collapsed`,
+      rows.deduplicatedReferences === undefined || rows.deduplicatedReferences === 0
+        ? undefined
+        : `${rows.deduplicatedReferences.toLocaleString()} repeated resolution records collapsed`,
+    ],
+    (value): value is string => value !== undefined,
+  );
+  return values.length > 0 ? ` · ${EffectArray.join(values, ', ')}` : '';
 }
 
 function graphMaterializationDiskWarning(storage: GraphMaterializationStorage): string | undefined {
@@ -1633,7 +1675,9 @@ function graphMaterializationDiskWarning(storage: GraphMaterializationStorage): 
   ) {
     scopes.push('graph database');
   }
-  return scopes.length === 0 ? undefined : `Low disk: ${scopes.join(' and ')} storage is below its estimate.`;
+  return scopes.length === 0
+    ? undefined
+    : `Low disk: ${EffectArray.join(scopes, ' and ')} storage is below its estimate.`;
 }
 
 function graphEtaBasisLabel(

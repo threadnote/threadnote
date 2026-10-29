@@ -1,4 +1,6 @@
 /* oxlint-disable effecttsgo/node-builtin-import -- This container preflight verifies raw volume files and native Ed25519 key identity before starting Effect services. */
+import * as Effect from 'effect';
+import * as EffectString from 'effect/String';
 import {canonicalOAuthUrl, sameOriginOAuthEndpoint} from '@threadnote/graph/sharing/oauth/m2m_config';
 import {parseOAuthM2MPublisherRegistryCredentialConfig} from '@threadnote/graph/sharing/oauth/m2m_registry_credential';
 import {createPrivateKey, createPublicKey} from 'node:crypto';
@@ -22,7 +24,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 
 function required(env: Environment, name: string): string {
   const value = env[name];
-  if (value === undefined || value.length === 0 || value.trim() !== value)
+  if (value === undefined || value.length === 0 || EffectString.trim(value) !== value)
     throw new Error(`${name} is missing or invalid`);
   return value;
 }
@@ -78,7 +80,11 @@ function deploymentBinding(env: Environment) {
   if (!SHA256_HEX.test(repositoryId) || !SHA256_DIGEST.test(profileDigest))
     throw new Error('Repository or profile identity is invalid');
   const branch = required(env, 'THREADNOTE_GRAPH_GIT_BRANCH');
-  if (!/^[A-Za-z0-9._/-]{1,255}$/u.test(branch) || branch.startsWith('-') || branch.includes('..'))
+  if (
+    !/^[A-Za-z0-9._/-]{1,255}$/u.test(branch) ||
+    Effect.pipe(branch, EffectString.startsWith('-')) ||
+    Effect.pipe(branch, EffectString.includes('..'))
+  )
     throw new Error('Git branch is invalid');
   const gitRemoteUrl = required(env, 'THREADNOTE_GRAPH_GIT_REMOTE_URL');
   const remoteMatch = /^git@github\.com:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\.git$/u.exec(gitRemoteUrl);
@@ -160,12 +166,13 @@ function readStateFile(root: string, relative: string, limit: number, privateFil
   const base = resolve(root);
   let current = base;
   if (!lstatSync(base).isDirectory()) throw new Error('Publisher volume is unavailable');
-  for (const component of relative.split('/')) {
+  for (const component of Effect.pipe(relative, EffectString.split('/'))) {
     current = join(current, component);
     const metadata = lstatSync(current);
     if (metadata.isSymbolicLink()) throw new Error('Publisher state must not use symbolic links');
   }
-  if (!current.startsWith(`${base}${sep}`)) throw new Error('Publisher state escaped its volume');
+  if (!Effect.pipe(current, EffectString.startsWith(`${base}${sep}`)))
+    throw new Error('Publisher state escaped its volume');
   const handle = openSync(current, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const metadata = fstatSync(handle);
@@ -185,13 +192,21 @@ export function validateGraphPublisherDeployment(root: string, env: Environment)
   const enrollment = parseGraphShareEnrollment(readJson(root, 'repository/.threadnote/graph-share.json', 4096));
   const pointer = parseGraphShareProfilePointer(enrollment.profile);
   const bodyDigest = enrolledProfileBodyDigest(enrollment);
-  const bytes = readStateFile(root, `threadnote/graph-sharing/cas/sha256/${bodyDigest.slice(7)}`, 128 * 1024);
+  const bytes = readStateFile(
+    root,
+    `threadnote/graph-sharing/cas/sha256/${Effect.pipe(bodyDigest, EffectString.slice(7))}`,
+    128 * 1024,
+  );
   if (sha256Digest(bytes) !== bodyDigest) throw new Error('Persisted profile digest differs from enrollment');
   const profile =
     pointer.kind === 'cas'
       ? parseGraphShareProfile(JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes)))
       : parseGraphShareProfileOciArtifact(
-          readStateFile(root, `threadnote/graph-sharing/cas/sha256/${pointer.manifestDigest.slice(7)}`, 8192),
+          readStateFile(
+            root,
+            `threadnote/graph-sharing/cas/sha256/${Effect.pipe(pointer.manifestDigest, EffectString.slice(7))}`,
+            8192,
+          ),
           pointer.manifestDigest,
           bytes,
         );

@@ -9,7 +9,7 @@ import {
 } from './artifacts.js';
 import {decodeJsonBytes, readBoundedPrivateBytes, writePrivateJsonFile} from './atomic.js';
 import {casBlobPath} from './cas.js';
-import {sha256Digest, sha256HexFromDigest, SHA256_DIGEST, type Sha256Digest} from './digest.js';
+import {parseSha256Digest, sha256Digest, sha256HexFromDigest, SHA256_DIGEST, type Sha256Digest} from './digest.js';
 import {graphSharingFailure, graphSharingUnavailable} from './errors.js';
 import {graphSharingLayout} from './layout.js';
 import {lookupGraphShareTrustReceipt} from './trust.js';
@@ -69,7 +69,15 @@ export const readAcceptedGraphShareFrontier = Effect.fn('codeGraph.sharing.readA
   ).pipe(Effect.mapError(() => graphSharingFailure('Accepted frontier state is invalid.')));
   if (state.authority !== authorityDigest(scope))
     return yield* graphSharingFailure('Accepted frontier authority is invalid.');
-  return state as GraphShareAcceptedFrontier;
+  const frontier: GraphShareAcceptedFrontier = {
+    authority: state.authority,
+    envelopeDigest: parseSha256Digest(state.envelopeDigest),
+    generation: state.generation,
+    manifestDigest: parseSha256Digest(state.manifestDigest),
+    publisherFence: state.publisherFence,
+    schemaVersion: state.schemaVersion,
+  };
+  return frontier;
 });
 
 export const readAuthenticatedGraphShareFrontier = Effect.fn('codeGraph.sharing.readAuthenticatedFrontier')(function* (

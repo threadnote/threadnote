@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -6,7 +7,32 @@ import {parseMemoryDocument} from '@threadnote/memory/document';
 import {SystemInfo} from '@threadnote/platform/system';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
-import type {WorkflowBinding} from '../../src/workflow_memory/protocol.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+type NameReservation = {readonly title: string; readonly family: {readonly slug: string; readonly ordinal: number}};
+
+function requireNameReservations(text: string): NameReservation[] {
+  const value: unknown = JSON.parse(text);
+  if (!isRecord(value) || !EffectArray.isArray(value.reservations)) throw new Error('Expected naming reservations.');
+  return EffectArray.map(value.reservations, reservation => {
+    if (
+      !isRecord(reservation) ||
+      typeof reservation.title !== 'string' ||
+      !isRecord(reservation.family) ||
+      typeof reservation.family.slug !== 'string' ||
+      typeof reservation.family.ordinal !== 'number'
+    )
+      throw new Error('Expected a valid naming reservation.');
+    return {title: reservation.title, family: {slug: reservation.family.slug, ordinal: reservation.family.ordinal}};
+  });
+}
+
+function requireArtifactIdentity(value: unknown): {readonly artifactKey: string; readonly role: string} {
+  if (!isRecord(value) || typeof value.artifactKey !== 'string' || typeof value.role !== 'string')
+    throw new Error('Expected a workflow artifact identity.');
+  return {artifactKey: value.artifactKey, role: value.role};
+}
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 const failure = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.result);
@@ -32,7 +58,7 @@ type ArtifactResult = {
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
+  typeof value === 'object' && value !== null && !EffectArray.isArray(value);
 
 const requireInitResult = (value: unknown): InitResult => {
   if (
@@ -171,7 +197,7 @@ describe('native workflow naming integration', () => {
           expect(artifact.memoryId).toMatch(/^tn_[a-f0-9]{20}$/u);
           const content = yield* f.store.read(f.location, artifact.uri);
           const document = parseMemoryDocument(artifact.uri, content);
-          expect(document?.metadata.topic).toBe(item.leaf.slice(0, -'.md'.length));
+          expect(document?.metadata.topic).toBe(Effect2.pipe(item.leaf, EffectString.slice(0, -'.md'.length)));
           expect(document?.metadata.sourceSessionId).toBe('native-v1-named-run');
         }
 
@@ -202,11 +228,9 @@ describe('native workflow naming integration', () => {
         expect(yield* f.fs.readFileString(f.statePath(runId))).toBe(stateAfterReplacement);
         expect(yield* f.fs.readFileString(journalPath)).toBe(journalAfterReplacement);
 
-        const journal = JSON.parse(journalAfterReplacement) as {
-          binding: WorkflowBinding;
-          artifacts: Record<string, {artifactKey: string; sourceRunId: string; role: string}>;
-        };
-        const secondPlan = journal.artifacts[artifacts.get('plan-summary-key')!.artifact.uri];
+        const journal: unknown = JSON.parse(journalAfterReplacement);
+        if (!isRecord(journal) || !isRecord(journal.artifacts)) throw new Error('Expected workflow journal artifacts.');
+        const secondPlan = requireArtifactIdentity(journal.artifacts[artifacts.get('plan-summary-key')!.artifact.uri]);
         const system = yield* SystemInfo;
         const scopedSystem = {...system, currentDirectory: () => f.repo, environment: () => ({})};
         const archived = yield* runWorkflowMemory(f.config, {
@@ -249,20 +273,20 @@ describe('native workflow naming integration', () => {
         ([runId, title]) => f.call(initInput(f, runId, title)),
         {concurrency: 2},
       );
-      const initialized = simultaneousResults.map(requireInitResult);
+      const initialized = EffectArray.map(simultaneousResults, requireInitResult);
       const remainingResults = yield* Effect.forEach(
         requests.slice(2),
         ([runId, title]) => f.call(initInput(f, runId, title)),
         {concurrency: 2},
       );
-      initialized.push(...remainingResults.map(requireInitResult));
-      expect(new Set(initialized.map(item => item.bindingId)).size).toBe(requests.length);
-      expect(initialized.slice(0, 3).map(item => item.naming.slug)).toEqual([
+      initialized.push(...EffectArray.map(remainingResults, requireInitResult));
+      expect(new Set(EffectArray.map(initialized, item => item.bindingId)).size).toBe(requests.length);
+      expect(EffectArray.map(initialized.slice(0, 3), item => item.naming.slug)).toEqual([
         'shared-roadmap',
         'shared-roadmap',
         'shared-roadmap',
       ]);
-      expect(new Set(initialized.slice(0, 3).map(item => item.naming.ordinal)).size).toBe(3);
+      expect(new Set(EffectArray.map(initialized.slice(0, 3), item => item.naming.ordinal)).size).toBe(3);
       expect(initialized[3].naming).toEqual({policyVersion: 1, slug: 'shared-roadmap-2', ordinal: 2});
     }).pipe(run),
   );
@@ -270,7 +294,7 @@ describe('native workflow naming integration', () => {
   effectIt.effect('allocates distinct families for titles that collide after truncation', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
-      const longPrefix = 'x'.repeat(100);
+      const longPrefix = Effect2.pipe('x', EffectString.repeat(100));
       const requests = [
         ['name-long-a', `${longPrefix} left`],
         ['name-long-b', `${longPrefix} right`],
@@ -278,10 +302,10 @@ describe('native workflow naming integration', () => {
       const results = yield* Effect.forEach(requests, ([runId, title]) => f.call(initInput(f, runId, title)), {
         concurrency: 2,
       });
-      const initialized = results.map(requireInitResult);
-      expect(new Set(initialized.map(item => item.bindingId)).size).toBe(2);
-      expect(initialized[0].naming.slug).toBe('x'.repeat(80));
-      expect(initialized[1].naming.slug).toBe('x'.repeat(80));
+      const initialized = EffectArray.map(results, requireInitResult);
+      expect(new Set(EffectArray.map(initialized, item => item.bindingId)).size).toBe(2);
+      expect(initialized[0].naming.slug).toBe(Effect2.pipe('x', EffectString.repeat(80)));
+      expect(initialized[1].naming.slug).toBe(Effect2.pipe('x', EffectString.repeat(80)));
       expect(initialized[0].naming.ordinal).not.toBe(initialized[1].naming.ordinal);
     }).pipe(run),
   );
@@ -296,8 +320,8 @@ describe('native workflow naming integration', () => {
       const results = yield* Effect.forEach(requests, ([runId, title]) => f.call(initInput(f, runId, title)), {
         concurrency: 2,
       });
-      const initialized = results.map(requireInitResult);
-      expect(new Set(initialized.map(item => item.bindingId)).size).toBe(2);
+      const initialized = EffectArray.map(results, requireInitResult);
+      expect(new Set(EffectArray.map(initialized, item => item.bindingId)).size).toBe(2);
       expect(initialized[0].naming.slug).toBe('untitled');
       expect(initialized[1].naming.slug).toBe('untitled');
       expect(initialized[0].naming.ordinal).not.toBe(initialized[1].naming.ordinal);
@@ -334,11 +358,10 @@ describe('native workflow naming integration', () => {
       expect(interrupted).toBe(true);
       expect(yield* f.fs.exists(statePath)).toBe(false);
       const registryBeforeRetry = yield* f.fs.readFileString(nameRegistryPath(f));
-      const reservationsBeforeRetry = JSON.parse(registryBeforeRetry).reservations as {
-        title: string;
-        family: {slug: string; ordinal: number};
-      }[];
-      const previous = reservationsBeforeRetry.find(item => item.title === retryTitle)!.family;
+      const reservationsBeforeRetry = requireNameReservations(registryBeforeRetry);
+      const previous = EffectOption.getOrUndefined(
+        EffectArray.findFirst(reservationsBeforeRetry, item => item.title === retryTitle),
+      )!.family;
       const recovered = requireInitResult(yield* f.call(initInput(f, 'retry-run', retryTitle)));
       expect(recovered.naming).toEqual({...previous, policyVersion: 1});
       expect(JSON.parse(yield* f.fs.readFileString(nameRegistryPath(f))).reservations).toHaveLength(
@@ -357,13 +380,17 @@ describe('native workflow naming integration', () => {
         const durableRoot = 'threadnote://user/tester/memories/durable/projects/fixture';
         const handoffRoot = 'threadnote://user/tester/memories/handoffs/active/fixture';
         const seeded = [
-          [`${durableRoot}/workflow-${'a'.repeat(64)}-root.md`, 'legacy document bytes'],
+          [`${durableRoot}/workflow-${Effect2.pipe('a', EffectString.repeat(64))}-root.md`, 'legacy document bytes'],
           [`${durableRoot}/workflow-reserved-plan-plan.md`, 'foreign artifact bytes'],
           [`${durableRoot}/workflow-reserved-plan-state.md`, 'foreign state bytes'],
           [`${handoffRoot}/workflow-reserved-plan-foreign.md`, 'foreign handoff bytes'],
         ] as const;
         for (const [uri, bytes] of seeded) yield* f.store.write(f.location, uri, bytes, {mode: 'create'});
-        const legacyJournal = f.path.join(f.home, 'workflow-memory', `${'a'.repeat(64)}.json`);
+        const legacyJournal = f.path.join(
+          f.home,
+          'workflow-memory',
+          `${Effect2.pipe('a', EffectString.repeat(64))}.json`,
+        );
         yield* f.fs.makeDirectory(f.path.dirname(legacyJournal), {recursive: true});
         yield* f.fs.writeFileString(legacyJournal, 'Original beta journal bytes.\n');
 

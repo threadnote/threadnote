@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphWorkspaceProject} from '../languages/types.js';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '../fact/budget.js';
 import {CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES} from './work.js';
@@ -15,6 +16,8 @@ import type {
   CodeGraphReference,
   CodeGraphSymbol,
 } from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect from 'effect';
 
 export const PROJECT_INCREMENTAL_CLOSURE_MAX_FILES = 128;
 export const PROJECT_INCREMENTAL_CLOSURE_MAX_SOURCE_BYTES = 16 * 1_048_576;
@@ -116,7 +119,7 @@ export function partitionProjectResolutionSurfaceChanges(
     committedByPath === undefined ||
     effectiveByPath === undefined ||
     committedByPath.size !== effectiveByPath.size ||
-    [...committedByPath.keys()].some(path => !effectiveByPath.has(path))
+    EffectArray.some([...committedByPath.keys()], path => !effectiveByPath.has(path))
   ) {
     return undefined;
   }
@@ -230,11 +233,13 @@ export function assessProjectFileSetClosureSeeds(input: {
   );
   if (deletedFailure !== undefined) return incompleteSeeds(deletedFailure);
   if (seeds.size === 0 && unownedResolutionDomains.size === 0) return incompleteSeeds('no-project-seeds');
-  if ([...seeds].some(id => !baseProjectsById.has(id) || !currentProjectsById.has(id))) {
+  if (EffectArray.some([...seeds], id => !baseProjectsById.has(id) || !currentProjectsById.has(id))) {
     return incompleteSeeds('project-not-stable');
   }
-  const baseResolutionDomains = new Set([...seeds].map(id => baseProjectsById.get(id)!.resolutionDomain));
-  const currentResolutionDomains = new Set([...seeds].map(id => currentProjectsById.get(id)!.resolutionDomain));
+  const baseResolutionDomains = new Set(EffectArray.map([...seeds], id => baseProjectsById.get(id)!.resolutionDomain));
+  const currentResolutionDomains = new Set(
+    EffectArray.map([...seeds], id => currentProjectsById.get(id)!.resolutionDomain),
+  );
   if (
     !hasCompleteDeclaredDependencyModel(input.baseProjects, baseProjectsById, baseResolutionDomains) ||
     !hasCompleteDeclaredDependencyModel(input.currentProjects, currentProjectsById, currentResolutionDomains)
@@ -303,7 +308,7 @@ export function selectProjectIncrementalClosure(
   // Reverse dependencies never cross resolver domains. Checking ownership in
   // an unrelated workspace domain would only let overlapping metadata scopes
   // veto an otherwise complete declared closure.
-  const closureResolutionDomains = new Set(projectIds.map(id => projectsById.get(id)!.resolutionDomain));
+  const closureResolutionDomains = new Set(EffectArray.map(projectIds, id => projectsById.get(id)!.resolutionDomain));
 
   const indexesByDomain = projectPathIndexesByDomain(input.projects);
   const affected = new Set(input.modifiedPaths);
@@ -330,9 +335,9 @@ export function selectProjectIncrementalClosure(
     }
   }
 
-  const filesByPath = new Map(input.files.map(file => [file.path, file]));
+  const filesByPath = new Map(EffectArray.map(input.files, file => [file.path, file]));
   const affectedPaths = [...affected].sort(compareCodeUnits);
-  if (affectedPaths.some(path => !filesByPath.has(path))) return incompletePlan();
+  if (EffectArray.some(affectedPaths, path => !filesByPath.has(path))) return incompletePlan();
   const maxFiles = input.maxFiles ?? PROJECT_INCREMENTAL_CLOSURE_MAX_FILES;
   const maxSourceBytes = input.maxSourceBytes ?? PROJECT_INCREMENTAL_CLOSURE_MAX_SOURCE_BYTES;
   if (affectedPaths.length > maxFiles) {
@@ -402,7 +407,7 @@ export function assessProjectClosureSeeds(input: {
     committedByPath === undefined ||
     effectiveByPath === undefined ||
     committedByPath.size !== effectiveByPath.size ||
-    [...committedByPath.keys()].some(path => !effectiveByPath.has(path))
+    EffectArray.some([...committedByPath.keys()], path => !effectiveByPath.has(path))
   ) {
     return {mode: 'fallback', reason: 'resolution-surface-changed'};
   }
@@ -421,7 +426,7 @@ export function assessProjectClosureSeeds(input: {
       if (
         reference.relation !== 'reexports' ||
         project.mode !== 'unique' ||
-        !reference.aliasLookupKeys!.every(key => isOwnedLookupKey(key, project.project))
+        !EffectArray.every(reference.aliasLookupKeys!, key => isOwnedLookupKey(key, project.project))
       ) {
         return {
           mode: 'fallback',
@@ -434,11 +439,14 @@ export function assessProjectClosureSeeds(input: {
   const changedReexports = changedReexportReferences(input.committedFacts, input.effectiveFacts);
   const candidateReexports: ProjectResolutionReexportCandidate[] = [];
   for (const reference of changedReexports) {
-    const aliases = (reference.aliasLookupKeys ?? []).map(key => ({
+    const aliases = EffectArray.map(reference.aliasLookupKeys ?? [], key => ({
       key,
       resolutionDomain: lookupKeyDomain(key, reference.resolutionDomain),
     }));
-    const candidates = reference.lookupTiers.flat().map(key => ({key, resolutionDomain: reference.resolutionDomain}));
+    const candidates = EffectArray.map(reference.lookupTiers.flat(), key => ({
+      key,
+      resolutionDomain: reference.resolutionDomain,
+    }));
     for (const key of reference.aliasLookupKeys ?? []) {
       addResolutionLookupKey(candidateLookupKeys, lookupKeyDomain(key, reference.resolutionDomain), key);
     }
@@ -448,8 +456,8 @@ export function assessProjectClosureSeeds(input: {
     candidateReexports.push({aliases, candidates, sourcePath: reference.evidencePath});
   }
 
-  const committedSymbols = uniqueSymbols(input.committedFacts.flatMap(file => file.symbols));
-  const effectiveSymbols = uniqueSymbols(input.effectiveFacts.flatMap(file => file.symbols));
+  const committedSymbols = uniqueSymbols(EffectArray.flatMap(input.committedFacts, file => file.symbols));
+  const effectiveSymbols = uniqueSymbols(EffectArray.flatMap(input.effectiveFacts, file => file.symbols));
   if (committedSymbols === undefined || effectiveSymbols === undefined) {
     return {mode: 'fallback', reason: 'resolution-surface-changed'};
   }
@@ -470,7 +478,7 @@ export function assessProjectClosureSeeds(input: {
       if (left.resolutionScopeId !== project.project.id) {
         return {mode: 'fallback', reason: 'project-closure-incomplete'};
       }
-      if ((left.lookupKeys ?? []).some(key => !isOwnedLookupKey(key, project.project))) {
+      if (EffectArray.some(left.lookupKeys ?? [], key => !isOwnedLookupKey(key, project.project))) {
         return {mode: 'fallback', reason: 'resolution-surface-changed'};
       }
       for (const key of left.lookupKeys ?? []) {
@@ -517,8 +525,8 @@ export function assessProjectClosureSeeds(input: {
       return {mode: 'fallback', reason: 'project-closure-incomplete'};
     }
     if (lookupChanged) {
-      const leftGlobal = (left.lookupKeys ?? []).filter(key => !isOwnedLookupKey(key, project.project));
-      const rightGlobal = (right.lookupKeys ?? []).filter(key => !isOwnedLookupKey(key, project.project));
+      const leftGlobal = EffectArray.filter(left.lookupKeys ?? [], key => !isOwnedLookupKey(key, project.project));
+      const rightGlobal = EffectArray.filter(right.lookupKeys ?? [], key => !isOwnedLookupKey(key, project.project));
       if (!sameStrings(leftGlobal, rightGlobal)) {
         return {mode: 'fallback', reason: 'resolution-surface-changed'};
       }
@@ -549,12 +557,12 @@ export function assessProjectClosureSeeds(input: {
     if (right.resolutionScopeId !== project.project.id) {
       return {mode: 'fallback', reason: 'project-closure-incomplete'};
     }
-    if ((right.lookupKeys ?? []).some(key => !isOwnedLookupKey(key, project.project))) {
+    if (EffectArray.some(right.lookupKeys ?? [], key => !isOwnedLookupKey(key, project.project))) {
       return {mode: 'fallback', reason: 'resolution-surface-changed'};
     }
     seeds.add(project.project.id);
   }
-  const seedResolutionDomains = new Set([...seeds].map(id => projectsById.get(id)!.resolutionDomain));
+  const seedResolutionDomains = new Set(EffectArray.map([...seeds], id => projectsById.get(id)!.resolutionDomain));
   if (!hasCompleteDeclaredDependencyModel(input.projects, projectsById, seedResolutionDomains)) {
     return incompleteSeeds();
   }
@@ -617,8 +625,12 @@ function addResolutionLookupKey(
 }
 
 function lookupKeyDomain(key: string, fallback: string | undefined): string {
-  const separator = key.indexOf(':');
-  return separator > 0 ? key.slice(0, separator) : (fallback ?? 'generic');
+  const separator = Effect.pipe(
+    key,
+    EffectString.indexOf(':'),
+    Effect.Option.getOrElse(() => -1),
+  );
+  return separator > 0 ? Effect.pipe(key, EffectString.slice(0, separator)) : (fallback ?? 'generic');
 }
 
 function compareResolutionLookupKeys(left: ProjectResolutionLookupKey, right: ProjectResolutionLookupKey): number {
@@ -645,7 +657,7 @@ function reexportReferenceMultiset(
   facts: readonly CodeGraphFileFacts[],
 ): ReadonlyMap<string, readonly CodeGraphReference[]> {
   const output = new Map<string, CodeGraphReference[]>();
-  for (const reference of facts.flatMap(file => file.references ?? [])) {
+  for (const reference of EffectArray.flatMap(facts, file => file.references ?? [])) {
     if (reference.relation !== 'reexports' || (reference.aliasLookupKeys?.length ?? 0) === 0) continue;
     const signature = JSON.stringify([
       reference.evidencePath,
@@ -654,7 +666,7 @@ function reexportReferenceMultiset(
       reference.exportedOnly ?? false,
       reference.arity ?? null,
       [...(reference.aliasLookupKeys ?? [])].sort(compareCodeUnits),
-      reference.lookupTiers.map(tier => [...tier].sort(compareCodeUnits)),
+      EffectArray.map(reference.lookupTiers, tier => [...tier].sort(compareCodeUnits)),
     ]);
     const values = output.get(signature) ?? [];
     values.push(reference);
@@ -712,9 +724,13 @@ function nearestPrefix(index: ReadonlyMap<string, readonly string[]>, path: stri
   for (;;) {
     const values = index.get(prefix);
     if (values !== undefined) return values;
-    const separator = prefix.lastIndexOf('/');
+    const separator = Effect.pipe(
+      prefix,
+      EffectString.lastIndexOf('/'),
+      Effect.Option.getOrElse(() => -1),
+    );
     if (separator < 0) return index.get('');
-    prefix = prefix.slice(0, separator);
+    prefix = Effect.pipe(prefix, EffectString.slice(0, separator));
   }
 }
 
@@ -749,12 +765,12 @@ function hasCompleteDeclaredDependencyModel(
   for (const project of projects) {
     if (resolutionDomains !== undefined && !resolutionDomains.has(project.resolutionDomain)) continue;
     const dependencies = new Set(project.dependencies);
-    const detailedTargets = new Set(project.dependencyDetails.map(dependency => dependency.targetId));
+    const detailedTargets = new Set(EffectArray.map(project.dependencyDetails, dependency => dependency.targetId));
     if (
       dependencies.size !== project.dependencies.length ||
       !sameStrings([...dependencies], [...detailedTargets]) ||
-      project.dependencyDetails.some(dependency => dependency.provenance !== 'declared') ||
-      [...dependencies].some(id => !projectsById.has(id))
+      EffectArray.some(project.dependencyDetails, dependency => dependency.provenance !== 'declared') ||
+      EffectArray.some([...dependencies], id => !projectsById.has(id))
     ) {
       return false;
     }
@@ -788,8 +804,8 @@ function declaredProjectResolutionClosure(
   const projectsById = uniqueProjectsById(projects);
   if (projectsById === undefined) return undefined;
   const seeds = uniqueSorted(seedProjectIds);
-  if (seeds.length === 0 || seeds.some(id => !projectsById.has(id))) return undefined;
-  const resolutionDomains = new Set(seeds.map(id => projectsById.get(id)!.resolutionDomain));
+  if (seeds.length === 0 || EffectArray.some(seeds, id => !projectsById.has(id))) return undefined;
+  const resolutionDomains = new Set(EffectArray.map(seeds, id => projectsById.get(id)!.resolutionDomain));
   if (!hasCompleteDeclaredDependencyModel(projects, projectsById, resolutionDomains)) return undefined;
 
   const reverseDependencies = new Map<string, string[]>();
@@ -818,7 +834,7 @@ function declaredProjectResolutionClosure(
   }
   const projectIds = [...closure].sort(compareCodeUnits);
   if (
-    projectIds.some(id => {
+    EffectArray.some(projectIds, id => {
       const project = projectsById.get(id)!;
       return project.provenance !== 'declared' || project.buildSystem === 'inferred' || project.diagnostics.length > 0;
     })
@@ -855,7 +871,7 @@ function hasSameGlobalSymbolSurface(left: CodeGraphSymbol, right: CodeGraphSymbo
 }
 
 function isOwnedLookupKey(key: string, project: CodeGraphWorkspaceProject): boolean {
-  return key.startsWith(`${project.resolutionDomain}:${project.id}:`);
+  return Effect.pipe(key, EffectString.startsWith(`${project.resolutionDomain}:${project.id}:`));
 }
 
 function uniqueFactsByPath(facts: readonly CodeGraphFileFacts[]): ReadonlyMap<string, CodeGraphFileFacts> | undefined {
@@ -877,7 +893,7 @@ function uniqueSymbols(symbols: readonly CodeGraphSymbol[]): ReadonlyMap<string,
 }
 
 function publishedSymbols(symbols: ReadonlyMap<string, CodeGraphSymbol>): ReadonlyMap<string, CodeGraphSymbol> {
-  return new Map([...symbols].filter(([, symbol]) => isPublishedCodeGraphResolutionSymbol(symbol)));
+  return new Map(EffectArray.filter([...symbols], ([, symbol]) => isPublishedCodeGraphResolutionSymbol(symbol)));
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
@@ -885,7 +901,7 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
   const normalizedRight = uniqueSorted(right);
   return (
     normalizedLeft.length === normalizedRight.length &&
-    normalizedLeft.every((value, index) => value === normalizedRight[index])
+    EffectArray.every(normalizedLeft, (value, index) => value === normalizedRight[index])
   );
 }
 

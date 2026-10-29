@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Crypto, DateTime, Effect} from 'effect';
 import {getAgentAdapter} from '../../agent_integration/adapters.js';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
@@ -24,6 +25,8 @@ import {
   readSecondSurfaceProofChallengeV1,
   verifySecondSurfaceProofAttestationV1,
 } from './surface_store.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 export interface SecondSurfaceProofProducerInputV1 {
   readonly callerCwd: string;
@@ -45,12 +48,19 @@ export const produceSecondSurfaceProofV1 = Effect.fn('activation.proof.produce')
   const context = challenge.context;
   const system = yield* SystemInfo;
   const environment = system.environment();
-  const surfaceId = environment[THREADNOTE_MCP_SURFACE_ENV]?.trim();
+  const surfaceId = Effect2.pipe(environment[THREADNOTE_MCP_SURFACE_ENV], effectOptionalString =>
+    effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+  );
   if (surfaceId !== context.secondary.surfaceId) {
     throw new Error('Activation retrieval proof was invoked from the wrong catalog surface.');
   }
   const adapter = getAgentAdapter(surfaceId);
-  if (adapter === undefined || environment[THREADNOTE_MCP_CLIENT_ENV]?.trim() !== adapter.catalog.agentId) {
+  if (
+    adapter === undefined ||
+    Effect2.pipe(environment[THREADNOTE_MCP_CLIENT_ENV], effectOptionalString =>
+      effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+    ) !== adapter.catalog.agentId
+  ) {
     throw new Error('Activation retrieval proof client identity does not match the catalog surface.');
   }
   const observed = yield* observeCurrentActivationSurfaceV1(config, adapter);
@@ -61,7 +71,10 @@ export const produceSecondSurfaceProofV1 = Effect.fn('activation.proof.produce')
     canonicalJson({
       installedVersion: yield* getThreadnoteVersion(),
       protocol: 'threadnote-mcp-stdio-v1',
-      toolset: environment[MCP_TOOLSET_ENV]?.trim() || DEFAULT_MCP_TOOLSET,
+      toolset:
+        Effect2.pipe(environment[MCP_TOOLSET_ENV], effectOptionalString =>
+          effectOptionalString == null ? undefined : Effect2.pipe(effectOptionalString, EffectString.trim),
+        ) || DEFAULT_MCP_TOOLSET,
     }),
   );
   if (runtimeFingerprint !== context.secondary.mcpServerFingerprint) {
@@ -92,7 +105,7 @@ export const produceSecondSurfaceProofV1 = Effect.fn('activation.proof.produce')
   )).value;
   const recallAt = DateTime.formatIso(yield* DateTime.now);
   const recallInvocationId = sha256HexSync(yield* crypto.randomBytes(32));
-  const recallResults = recalled.ranked.map(candidate => {
+  const recallResults = EffectArray.map(recalled.ranked, candidate => {
     if (candidate.memoryId === undefined) {
       throw new Error('Activation retrieval proof recall returned an unresolved memory identity.');
     }
@@ -111,7 +124,7 @@ export const produceSecondSurfaceProofV1 = Effect.fn('activation.proof.produce')
       project: input.project,
       queryFingerprint: context.queryFingerprint,
       queryExpansions: recalled.queryExpansions,
-      results: recalled.ranked.map(candidate => ({
+      results: EffectArray.map(recalled.ranked, candidate => ({
         category: candidate.category,
         contextType: candidate.contextType,
         equivalentUris: candidate.equivalentUris ?? [],
@@ -126,7 +139,7 @@ export const produceSecondSurfaceProofV1 = Effect.fn('activation.proof.produce')
         uri: candidate.uri,
       })),
       totalRanked: recalled.totalRanked,
-      warnings: recalled.warnings.map(warning => sha256HexSync(JSON.stringify(warning))),
+      warnings: EffectArray.map(recalled.warnings, warning => sha256HexSync(JSON.stringify(warning))),
     }),
   );
   const common = {

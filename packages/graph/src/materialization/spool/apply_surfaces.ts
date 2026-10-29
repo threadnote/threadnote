@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import type {CodeGraphMaterializationSpoolReadyPlan} from '../spool.js';
 import {CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES} from './surfaces.js';
 
@@ -31,7 +32,8 @@ export function codeGraphMaterializationSpoolApplyPlan(
 ): readonly {readonly name: string; readonly rowCount: number}[] {
   if (
     ready.surfaces.length !== CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES.length ||
-    ready.surfaces.some(
+    EffectArray.some(
+      ready.surfaces,
       (surface, index) =>
         surface.name !== CODE_GRAPH_MATERIALIZATION_SPOOL_SURFACES[index].name ||
         !Number.isSafeInteger(surface.rowCount) ||
@@ -42,8 +44,8 @@ export function codeGraphMaterializationSpoolApplyPlan(
   ) {
     throw new Error('Code graph materialization spool ready plan is invalid.');
   }
-  const physicalCounts = new Map(ready.surfaces.map(surface => [surface.name, surface.rowCount]));
-  return CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES.map(surface => ({
+  const physicalCounts = new Map(EffectArray.map(ready.surfaces, surface => [surface.name, surface.rowCount]));
+  return EffectArray.map(CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES, surface => ({
     name: surface.name,
     rowCount:
       surface.name === 'lexical_snapshot'

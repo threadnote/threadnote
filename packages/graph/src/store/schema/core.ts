@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {Clock, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
@@ -19,6 +20,8 @@ import {
 import {tableExists} from '../session.js';
 import {codeGraphPersistentSchemaIsCurrent} from './revision.js';
 import {CODE_GRAPH_SCOPE_CURSOR_MAXIMUM_BYTES, CODE_GRAPH_SCOPE_CURSOR_PATTERN} from '../scope/cursor.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 const removedViewCleanupSchemaCurrent = Effect.fn('codeGraph.removedViewCleanupSchemaCurrent')(function* (
   sql: SqlClient.SqlClient,
@@ -175,14 +178,17 @@ const CODE_GRAPH_ACTIVE_SNAPSHOT_EXTRACTOR_TRIGGER_SQL = `CREATE TRIGGER active_
     SELECT RAISE(ABORT, 'Code graph snapshot was built by an older extractor generation.');
   END`;
 
-const CODE_GRAPH_SCOPED_ACTIVE_SNAPSHOT_EXTRACTOR_TRIGGER_SQL =
-  CODE_GRAPH_ACTIVE_SNAPSHOT_EXTRACTOR_TRIGGER_SQL.replace(
+const CODE_GRAPH_SCOPED_ACTIVE_SNAPSHOT_EXTRACTOR_TRIGGER_SQL = Effect2.pipe(
+  CODE_GRAPH_ACTIVE_SNAPSHOT_EXTRACTOR_TRIGGER_SQL,
+  EffectString.replace(
     'FROM snapshot_extractor_generations AS generation',
     'FROM snapshot_extractor_generations AS generation JOIN snapshots AS snapshot ON snapshot.id = generation.snapshot_id',
-  ).replace(
+  ),
+  EffectString.replace(
     'WHERE generation.snapshot_id = NEW.snapshot_id',
     'WHERE generation.snapshot_id = NEW.snapshot_id AND snapshot.scope_id = NEW.scope_id',
-  );
+  ),
+);
 
 const ensureColumn = Effect.fn('codeGraph.ensureColumn')(function* (
   sql: SqlClient.SqlClient,
@@ -191,7 +197,7 @@ const ensureColumn = Effect.fn('codeGraph.ensureColumn')(function* (
   declaration: string,
 ) {
   const columns = yield* sql.unsafe<{readonly name: string}>(`PRAGMA table_info(${table})`);
-  if (columns.some(candidate => candidate.name === column)) return false;
+  if (EffectArray.some(columns, candidate => candidate.name === column)) return false;
   yield* sql.unsafe(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`);
   return true;
 });

@@ -1,3 +1,5 @@
+import {pipe as EffectArrayPipe} from 'effect';
+import {Array as EffectArray} from 'effect';
 import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -126,10 +128,13 @@ export const writeSemanticReviewState = Effect.fn('semanticReview.writeState')(f
     Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)),
   );
 });
-export class SemanticReviewError extends Schema.TaggedError<SemanticReviewError>()('SemanticReviewError', {
-  message: Schema.String,
-  reason: Schema.Literals(['stale', 'blocked']),
-}) {}
+export class SemanticReviewError extends Schema.TaggedError<SemanticReviewError, {readonly brand: unique symbol}>()(
+  'SemanticReviewError',
+  {
+    message: Schema.String,
+    reason: Schema.Literals(['stale', 'blocked']),
+  },
+) {}
 export function semanticReviewError(message: string, reason: 'stale' | 'blocked' = 'blocked') {
   return SemanticReviewError.make({message, reason});
 }
@@ -140,8 +145,14 @@ export const semanticReviewRawSourcesCurrent = Effect.fn('semanticReview.rawSour
 ) {
   if (
     entry.rawSources?.length !== 2 ||
-    ![entry.input.left, entry.input.right].every(source =>
-      entry.rawSources?.some(raw => raw.recordUri === source.recordUri),
+    !EffectArray.every([entry.input.left, entry.input.right], source =>
+      Boolean(
+        Option.getOrUndefined(
+          Option.map(Option.fromNullishOr(entry.rawSources), __effectArrayReceiver =>
+            EffectArray.some(__effectArrayReceiver, raw => raw.recordUri === source.recordUri),
+          ),
+        ),
+      ),
     )
   )
     return false;
@@ -153,7 +164,7 @@ export const semanticReviewRawSourcesCurrent = Effect.fn('semanticReview.rawSour
       Effect.orElseSucceed(() => false),
     ),
   );
-  return results.every(Boolean);
+  return EffectArray.every(results, Boolean);
 });
 export const reviewedSemanticContradictionIds = Effect.fn('semanticReview.reviewedIds')(function* (
   config: RuntimeConfig,
@@ -161,13 +172,17 @@ export const reviewedSemanticContradictionIds = Effect.fn('semanticReview.review
   records: readonly MemoryRecord[],
 ) {
   const state = yield* readSemanticReviewState(config);
-  const candidates = state.entries.filter(
-    entry =>
+  const entries = state.entries;
+  const candidates = EffectArray.filter(
+    entries,
+    (entry, __effectArrayIndex) =>
+      __effectArrayIndex in entries &&
       entry.applied &&
       entry.input.choice === 'both' &&
       entry.input.project === project &&
-      [entry.input.left, entry.input.right].every(source =>
-        records.some(
+      EffectArray.every([entry.input.left, entry.input.right], source =>
+        EffectArray.some(
+          records,
           record =>
             record.uri === source.recordUri &&
             record.metadata.status === 'active' &&
@@ -176,7 +191,7 @@ export const reviewedSemanticContradictionIds = Effect.fn('semanticReview.review
       ),
   );
   const verified = yield* Effect.filter(candidates, entry => semanticReviewRawSourcesCurrent(config, entry));
-  return verified.map(entry => entry.input.contradictionId);
+  return EffectArray.map(verified, entry => entry.input.contradictionId);
 });
 
 export function projectReviewedSemanticCases(
@@ -184,43 +199,67 @@ export function projectReviewedSemanticCases(
   entries: readonly SemanticReviewEntry[],
   records: readonly MemoryRecord[],
 ) {
-  return cases.map(item => {
+  return EffectArray.map(cases, item => {
     if (item.family !== 'semantic-contradiction') return item;
-    const reviewed = entries.find(
-      entry =>
-        entry.applied &&
-        entry.rawSources?.length === 2 &&
-        entry.input.project === item.project &&
-        entry.slot === item.slot &&
-        item.subjectContentHashes?.length === 2 &&
-        item.subjectContentHashes.every(source =>
-          [entry.input.left, entry.input.right].some(
-            expected => expected.recordUri === source.uri && expected.recordContentFingerprint === source.hash,
-          ),
-        ) &&
-        (entry.input.choice === 'both'
-          ? [entry.input.left, entry.input.right].every(source =>
-              records.some(
-                record =>
-                  record.uri === source.recordUri &&
-                  record.metadata.status === 'active' &&
-                  sha256HexSync(record.content) === source.recordContentFingerprint,
+    const reviewed = Option.getOrUndefined(
+      EffectArray.findFirst(
+        entries,
+        __effectArrayValue =>
+          !!(entry =>
+            entry.applied &&
+            entry.rawSources?.length === 2 &&
+            entry.input.project === item.project &&
+            entry.slot === item.slot &&
+            item.subjectContentHashes?.length === 2 &&
+            EffectArray.every(item.subjectContentHashes, source =>
+              EffectArray.some(
+                [entry.input.left, entry.input.right],
+                expected => expected.recordUri === source.uri && expected.recordContentFingerprint === source.hash,
               ),
-            )
-          : records.some(
-              record =>
-                record.uri === entry.preview.keptUri &&
-                sha256HexSync(record.content) ===
-                  [entry.input.left, entry.input.right].find(source => source.recordUri === record.uri)
-                    ?.recordContentFingerprint,
             ) &&
-            records.some(record => record.uri === entry.archiveUri && record.content === entry.archiveContent) &&
-            !records.some(record => record.uri === entry.preview.archivedUri)),
+            (entry.input.choice === 'both'
+              ? EffectArray.every([entry.input.left, entry.input.right], source =>
+                  EffectArray.some(
+                    records,
+                    record =>
+                      record.uri === source.recordUri &&
+                      record.metadata.status === 'active' &&
+                      sha256HexSync(record.content) === source.recordContentFingerprint,
+                  ),
+                )
+              : EffectArray.some(
+                  records,
+                  record =>
+                    record.uri === entry.preview.keptUri &&
+                    sha256HexSync(record.content) ===
+                      Option.getOrUndefined(
+                        EffectArray.findFirst(
+                          [entry.input.left, entry.input.right],
+                          source => source.recordUri === record.uri,
+                        ),
+                      )?.recordContentFingerprint,
+                ) &&
+                EffectArray.some(
+                  records,
+                  record => record.uri === entry.archiveUri && record.content === entry.archiveContent,
+                ) &&
+                !EffectArray.some(records, record => record.uri === entry.preview.archivedUri)))(__effectArrayValue),
+      ),
     );
     if (!reviewed) {
       if (item.reason !== 'human-reviewed-keep-both' || item.disposition !== 'resolved') return item;
-      const sameClaims = item.subjectContentHashes?.every(source =>
-        records.some(record => record.uri === source.uri && sha256HexSync(record.content) === source.hash),
+      const sameClaims = Option.getOrUndefined(
+        Option.map(Option.fromNullishOr(item.subjectContentHashes), __effectArrayReceiver =>
+          EffectArray.every(
+            __effectArrayReceiver,
+            __effectArrayValue =>
+              !!(source =>
+                EffectArray.some(
+                  records,
+                  record => record.uri === source.uri && sha256HexSync(record.content) === source.hash,
+                ))(__effectArrayValue),
+          ),
+        ),
       );
       return {
         ...item,
@@ -233,7 +272,7 @@ export function projectReviewedSemanticCases(
       ...item,
       disposition: 'resolved' as const,
       reason,
-      events: item.events.some(event => event.reason === reason && event.at === reviewed.timestamp)
+      events: EffectArray.some(item.events, event => event.reason === reason && event.at === reviewed.timestamp)
         ? item.events
         : [...item.events, {at: reviewed.timestamp, reason}].slice(-16),
     };
@@ -245,8 +284,14 @@ export const reviewedSemanticMaintenanceCases = Effect.fn('semanticReview.review
   cases: readonly ContextMaintenanceCaseV2[],
   project?: string,
 ) {
-  const candidates = (yield* readSemanticReviewState(config)).entries.filter(
-    entry => entry.applied && (project === undefined || entry.input.project === project),
+  const candidates = EffectArrayPipe((yield* readSemanticReviewState(config)).entries, __effectArrayValues =>
+    EffectArray.filter(
+      __effectArrayValues,
+      (entry, __effectArrayIndex) =>
+        __effectArrayIndex in __effectArrayValues &&
+        entry.applied &&
+        (project === undefined || entry.input.project === project),
+    ),
   );
   const entries = yield* Effect.filter(candidates, entry =>
     entry.input.choice === 'both'
@@ -256,7 +301,7 @@ export const reviewedSemanticMaintenanceCases = Effect.fn('semanticReview.review
   if (candidates.length === 0) return cases;
   const records = yield* readMemoryRecordsByUri(config, [
     ...new Set(
-      candidates.flatMap(entry => [
+      EffectArray.flatMap(candidates, entry => [
         entry.input.left.recordUri,
         entry.input.right.recordUri,
         ...(entry.archiveUri === undefined ? [] : [entry.archiveUri]),
@@ -273,6 +318,6 @@ export function saveReviewedSemanticMaintenanceCases<
 >(config: RuntimeConfig, state: S, save: (state: S) => Effect.Effect<void, E, R>) {
   return Effect.gen(function* () {
     const cases = yield* reviewedSemanticMaintenanceCases(config, state.cases);
-    if (cases.some((item, index) => item !== state.cases[index])) yield* save({...state, cases});
+    if (EffectArray.some(cases, (item, index) => item !== state.cases[index])) yield* save({...state, cases});
   });
 }

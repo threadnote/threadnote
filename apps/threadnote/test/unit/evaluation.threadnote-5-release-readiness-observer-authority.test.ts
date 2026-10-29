@@ -1,7 +1,10 @@
+import {Array as EffectArray, Option as EffectOption, Predicate} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
+import {createHash} from '@threadnote/testing/node-crypto';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {promisify} from '@threadnote/testing/node-util';
@@ -10,6 +13,7 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {
   previewThreadnote5ReviewedAuthorityManifestV1,
   reviewedAuthorityBundleArtifact,
+  parseThreadnote5ReviewedAuthorityBundleV1,
   THREADNOTE_5_OBSERVER_AUTHORITY_COVERAGE,
   threadnote5PrivateObserverArtifactDigest,
   verifyThreadnote5ReviewedAuthorityManifestV1,
@@ -18,11 +22,18 @@ import {
   parseThreadnote5LocalAuthorityManifestV1,
   threadnote5LocalAuthorityManifestHash,
 } from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-authority';
-import {threadnote5LocalSubsystemReceiptDigest} from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-receipts';
 import {
   PRODUCTION_CAPTURE_CANDIDATE,
   productionCaptureFixture,
 } from '../helpers/threadnote-5-production-capture-fixture.js';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
+
+function execOutput(error: unknown): string {
+  if (!Predicate.isObject(error)) return '';
+  return String(error.stderr || error.stdout || '');
+}
 
 describe('Threadnote 5 independent observer authority', () => {
   effectIt.effect('replays native sources and seals content-free proof binding', () =>
@@ -99,7 +110,7 @@ describe('Threadnote 5 independent observer authority', () => {
           retainedRecords: [
             {
               ...fixture.records[0],
-              artifact: {padding: 'x'.repeat(8 * 1024 * 1024)},
+              artifact: {padding: Effect2.pipe('x', EffectString.repeat(8 * 1024 * 1024))},
               digest: 'not-a-hash',
             },
           ],
@@ -147,20 +158,24 @@ describe('Threadnote 5 independent observer authority', () => {
         expect(() =>
           previewThreadnote5ReviewedAuthorityManifestV1({
             candidate: PRODUCTION_CAPTURE_CANDIDATE,
-            retainedRecords: fixture.records.map((record, index) =>
-              index === 0 ? {...record, digest: 'f'.repeat(64)} : record,
+            retainedRecords: EffectArray.map(fixture.records, (record, index) =>
+              index === 0 ? {...record, digest: Effect2.pipe('f', EffectString.repeat(64))} : record,
             ),
             reviews,
           }),
         ).toThrow(/digest/u);
-        const unsupportedRecord = {...fixture.records[0], version: 2};
+        const unsupportedRecordInput = {...fixture.records[0], version: 2};
+        const {digest: _validDigest, ...unsupportedRecordWithoutDigest} = unsupportedRecordInput;
+        const unsupportedRecord = {
+          ...unsupportedRecordWithoutDigest,
+          digest: createHash('sha256')
+            .update(`threadnote-5-local-subsystem-receipt-v1\0${canonicalJson(unsupportedRecordWithoutDigest)}`)
+            .digest('hex'),
+        };
         expect(() =>
           previewThreadnote5ReviewedAuthorityManifestV1({
             candidate: PRODUCTION_CAPTURE_CANDIDATE,
-            retainedRecords: [
-              {...unsupportedRecord, digest: threadnote5LocalSubsystemReceiptDigest(unsupportedRecord as never)},
-              ...fixture.records.slice(1),
-            ],
+            retainedRecords: [unsupportedRecord, ...fixture.records.slice(1)],
             reviews,
           }),
         ).toThrow(/unsupported/u);
@@ -195,7 +210,7 @@ describe('Threadnote 5 independent observer authority', () => {
             retainedRecords: fixture.records,
             reviews: {
               ...reviews,
-              artifacts: reviews.artifacts.map((row, index) =>
+              artifacts: EffectArray.map(reviews.artifacts, (row, index) =>
                 index === 0
                   ? {
                       ...row,
@@ -203,7 +218,10 @@ describe('Threadnote 5 independent observer authority', () => {
                         ...row.artifact,
                         runtime: {
                           ...row.artifact.runtime,
-                          post: {...PRODUCTION_CAPTURE_CANDIDATE, executableSha256: 'f'.repeat(64)},
+                          post: {
+                            ...PRODUCTION_CAPTURE_CANDIDATE,
+                            executableSha256: Effect2.pipe('f', EffectString.repeat(64)),
+                          },
                         },
                       },
                       artifactDigest: row.artifactDigest,
@@ -217,7 +235,7 @@ describe('Threadnote 5 independent observer authority', () => {
           verifyThreadnote5ReviewedAuthorityManifestV1({
             bundle: reviewedAuthorityBundleArtifact(preview),
             candidate: PRODUCTION_CAPTURE_CANDIDATE,
-            expectedBindingSha256: 'f'.repeat(64),
+            expectedBindingSha256: Effect2.pipe('f', EffectString.repeat(64)),
             expectedManifestSha256: preview.manifestHash,
             expectedReviewArtifactSetSha256: preview.reviewArtifactSetHash,
             retainedRecords: fixture.records,
@@ -252,13 +270,12 @@ describe('observer authority command boundary', () => {
       const recordsPath = join(directory, 'records.json');
       const reviewsPath = join(directory, 'reviews.json');
       const bundlePath = join(directory, 'reviewed-bundle.json');
-      await Promise.all(
-        [
-          [candidatePath, PRODUCTION_CAPTURE_CANDIDATE],
-          [recordsPath, fixture.records],
-          [reviewsPath, reviews],
-        ].map(([path, value]) => writeFile(path as string, JSON.stringify(value))),
-      );
+      const inputFiles: readonly [string, unknown][] = [
+        [candidatePath, PRODUCTION_CAPTURE_CANDIDATE],
+        [recordsPath, fixture.records],
+        [reviewsPath, reviews],
+      ];
+      await Promise.all(EffectArray.map(inputFiles, ([path, value]) => writeFile(path, JSON.stringify(value))));
       const assembled = await execFilePromise(
         process.execPath,
         [
@@ -273,15 +290,19 @@ describe('observer authority command boundary', () => {
         ],
         {cwd: process.cwd()},
       );
-      const bundle = JSON.parse(assembled.stdout) as ReturnType<typeof reviewedAuthorityBundleArtifact>;
+      const bundle: unknown = JSON.parse(assembled.stdout);
+      const parsedBundle = parseThreadnote5ReviewedAuthorityBundleV1(bundle);
       expect(assembled.stderr).toBe('');
-      expect(parseThreadnote5LocalAuthorityManifestV1(bundle.manifest)).toEqual(
+      expect(parseThreadnote5LocalAuthorityManifestV1(parsedBundle.manifest)).toEqual(
         parseThreadnote5LocalAuthorityManifestV1(fixture.authorityManifest),
       );
-      expect(bundle.binding).toEqual(
-        expect.objectContaining({manifestHash: threadnote5LocalAuthorityManifestHash(bundle.manifest), version: 1}),
+      expect(parsedBundle.binding).toEqual(
+        expect.objectContaining({
+          manifestHash: threadnote5LocalAuthorityManifestHash(parsedBundle.manifest),
+          version: 1,
+        }),
       );
-      expect(Object.keys(bundle).sort()).toEqual(['binding', 'manifest', 'version']);
+      expect(EffectRecord.keys(parsedBundle).sort()).toEqual(['binding', 'manifest', 'version']);
       await writeFile(bundlePath, assembled.stdout, {flag: 'wx'});
       const verified = await execFilePromise(
         process.execPath,
@@ -297,11 +318,11 @@ describe('observer authority command boundary', () => {
           '--bundle',
           bundlePath,
           '--manifest-sha256',
-          bundle.binding.manifestHash,
+          parsedBundle.binding.manifestHash,
           '--review-artifact-set-sha256',
-          bundle.binding.reviewArtifactSetHash,
+          parsedBundle.binding.reviewArtifactSetHash,
           '--binding-sha256',
-          bundle.binding.bindingHash,
+          parsedBundle.binding.bindingHash,
         ],
         {cwd: process.cwd()},
       );
@@ -328,8 +349,11 @@ describe('observer authority command boundary', () => {
         writeFile(recordsPath, '[]'),
         writeFile(reviewsPath, '{}'),
         writeFile(bundlePath, '{}'),
-        writeFile(oversizedCandidatePath, JSON.stringify({padding: 'x'.repeat(64 * 1024)})),
-        writeFile(oversizedPrivatePath, JSON.stringify({padding: 'x'.repeat(8 * 1024 * 1024)})),
+        writeFile(oversizedCandidatePath, JSON.stringify({padding: Effect2.pipe('x', EffectString.repeat(64 * 1024))})),
+        writeFile(
+          oversizedPrivatePath,
+          JSON.stringify({padding: Effect2.pipe('x', EffectString.repeat(8 * 1024 * 1024))}),
+        ),
       ]);
       const cases = [
         {
@@ -372,21 +396,19 @@ describe('observer authority command boundary', () => {
                 '--bundle',
                 oversizedPrivatePath,
                 '--manifest-sha256',
-                'a'.repeat(64),
+                Effect2.pipe('a', EffectString.repeat(64)),
                 '--review-artifact-set-sha256',
-                'b'.repeat(64),
+                Effect2.pipe('b', EffectString.repeat(64)),
                 '--binding-sha256',
-                'c'.repeat(64),
+                Effect2.pipe('c', EffectString.repeat(64)),
               ]
             : []),
         ];
         const failure = await execFilePromise(process.execPath, arguments_, {cwd: process.cwd()}).then(
           () => undefined,
-          error => error as {stderr?: string; stdout?: string},
+          error => execOutput(error),
         );
-        expect(failure?.stderr || failure?.stdout || '').toContain(
-          `Observer authority ${row.label} exceeds its raw-byte limit.`,
-        );
+        expect(failure).toContain(`Observer authority ${row.label} exceeds its raw-byte limit.`);
       }
     } finally {
       await rm(directory, {force: true, recursive: true});
@@ -417,10 +439,9 @@ describe('observer authority command boundary', () => {
       const runLegacyPublication = (flag: '--binding-output' | '--output', value: string) =>
         execFilePromise(process.execPath, legacyArguments(flag, value), {cwd: process.cwd()}).then(
           () => undefined,
-          error => error as {stderr?: string; stdout?: string},
+          error => execOutput(error),
         );
-      const failureText = (failure: Awaited<ReturnType<typeof runLegacyPublication>>) =>
-        failure?.stderr || failure?.stdout || '';
+      const failureText = (failure: Awaited<ReturnType<typeof runLegacyPublication>>) => failure ?? '';
       expect(failureText(await runLegacyPublication('--output', join(alias, 'publication', 'authority.json')))).toMatch(
         /Unknown observer authority option: --output/u,
       );
@@ -441,18 +462,24 @@ describe('observer authority command boundary', () => {
 
 function reviewEnvelope() {
   const fixture = productionCaptureFixture();
-  const records = new Map(fixture.records.map(record => [`${record.scenario}\0${record.kind}`, record]));
+  const records = new Map(EffectArray.map(fixture.records, record => [`${record.scenario}\0${record.kind}`, record]));
   return {
     candidate: PRODUCTION_CAPTURE_CANDIDATE,
     version: 1 as const,
-    artifacts: THREADNOTE_5_OBSERVER_AUTHORITY_COVERAGE.map(coverage => {
+    artifacts: EffectArray.map(THREADNOTE_5_OBSERVER_AUTHORITY_COVERAGE, coverage => {
       const record = records.get(`${coverage.scenario}\0${coverage.kind}`)!;
-      const observedAuthority = fixture.authorityManifest.entries.find(entry => entry.recordDigest === record.digest)!;
+      const observedAuthority = EffectOption.getOrUndefined(
+        EffectArray.findFirst(fixture.authorityManifest.entries, entry => entry.recordDigest === record.digest),
+      )!;
       const artifact = {
         candidate: PRODUCTION_CAPTURE_CANDIDATE,
         observedAt: '2026-01-01T00:00:00.000Z',
         observedAuthority,
-        provenance: {approvalDigest: 'a'.repeat(64), observerIdHash: 'b'.repeat(64), reviewerIdHash: 'c'.repeat(64)},
+        provenance: {
+          approvalDigest: Effect2.pipe('a', EffectString.repeat(64)),
+          observerIdHash: Effect2.pipe('b', EffectString.repeat(64)),
+          reviewerIdHash: Effect2.pipe('c', EffectString.repeat(64)),
+        },
         runtime: {pre: PRODUCTION_CAPTURE_CANDIDATE, post: PRODUCTION_CAPTURE_CANDIDATE},
         version: 1 as const,
       };

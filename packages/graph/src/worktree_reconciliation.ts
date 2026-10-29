@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {Crypto, Effect, FileSystem, Path, Schema} from 'effect';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -33,10 +34,10 @@ export {type CodeGraphWorktreeReconciliationCandidate} from './store.js';
 
 export const CODE_GRAPH_WORKTREE_RECONCILIATION_CANDIDATE_LIMIT = 32;
 
-class CodeGraphWorktreeAuthorityChanged extends Schema.TaggedError<CodeGraphWorktreeAuthorityChanged>()(
-  'CodeGraphWorktreeAuthorityChanged',
-  {message: Schema.String},
-) {}
+class CodeGraphWorktreeAuthorityChanged extends Schema.TaggedError<
+  CodeGraphWorktreeAuthorityChanged,
+  {readonly brand: unique symbol}
+>()('CodeGraphWorktreeAuthorityChanged', {message: Schema.String}) {}
 
 export interface CodeGraphWorktreeReconciliationAuthorityInput {
   readonly anchorMatches: boolean;
@@ -205,7 +206,9 @@ export const makeCodeGraphWorktreeReconciler = Effect.fn('codeGraph.makeWorktree
                   Effect.orElseSucceed(() => undefined),
                 ),
             {concurrency: 1},
-          ).pipe(Effect.map(values => values.filter((value): value is MissingCandidate => value !== undefined)));
+          ).pipe(
+            Effect.map(values => EffectArray.filter(values, (value): value is MissingCandidate => value !== undefined)),
+          );
           if (observedEvidence.length === 0) {
             return {nextCursor, reason: 'no-missing-candidates', state: 'preserved'} as const;
           }
@@ -218,7 +221,8 @@ export const makeCodeGraphWorktreeReconciler = Effect.fn('codeGraph.makeWorktree
             }
             expectedAnchor = resolved.value;
           }
-          const evidenceCandidates = observedEvidence.filter(
+          const evidenceCandidates = EffectArray.filter(
+            observedEvidence,
             entry =>
               entry.candidate.worktreeId !== expectedAnchor.worktreeId &&
               entry.candidate.repositoryId === expectedAnchor.repositoryId,
@@ -235,7 +239,7 @@ export const makeCodeGraphWorktreeReconciler = Effect.fn('codeGraph.makeWorktree
           const initialAuthority = yield* dependencies
             .observeAuthority(
               initialAnchor.value,
-              evidenceCandidates.map(entry => authorityTarget(entry.evidence)),
+              EffectArray.map(evidenceCandidates, entry => authorityTarget(entry.evidence)),
             )
             .pipe(Effect.option);
           if (initialAuthority._tag === 'None' || initialAuthority.value.state === 'unknown') {
@@ -248,10 +252,14 @@ export const makeCodeGraphWorktreeReconciler = Effect.fn('codeGraph.makeWorktree
           ) {
             return {nextCursor, reason: 'registry-unavailable', state: 'deferred'} as const;
           }
-          const targetIndex = evidenceCandidates.findIndex(
-            (_entry, index) =>
-              completeInitialAuthority.pathStates[index] === 'missing' &&
-              completeInitialAuthority.registryStates[index] === 'absent',
+          const targetIndex = EffectOption.getOrElse(
+            EffectArray.findFirstIndex(
+              evidenceCandidates,
+              (_entry, index) =>
+                completeInitialAuthority.pathStates[index] === 'missing' &&
+                completeInitialAuthority.registryStates[index] === 'absent',
+            ),
+            () => -1,
           );
           if (targetIndex < 0) {
             return {

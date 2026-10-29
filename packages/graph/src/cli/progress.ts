@@ -3,6 +3,8 @@ import {materializationStorageShortfalls} from '../indexer/materialization.js';
 import {codeGraphEtaMeasurement, makeCodeGraphEtaTracker, observeCodeGraphEta} from '../progress/eta.js';
 import {formatCodeGraphStatusDuration} from '../status/render.js';
 import type {CodeGraphProgress} from '../types.js';
+import * as EffectString from 'effect/String';
+import * as Effect2 from 'effect';
 
 interface CodeGraphRepairProgressLine {
   readonly current: number;
@@ -49,7 +51,9 @@ export function formatCodeGraphIndexProgressLine(progress: CodeGraphProgress, re
         'downloading-checkpoint': 'Downloading shared checkpoint',
       }[progress.subphase];
     case 'activating':
-      return progress.activity ? `Activating · ${progress.activity.stage.replaceAll('-', ' ')}` : 'Activating snapshot';
+      return progress.activity
+        ? `Activating · ${Effect2.pipe(progress.activity.stage, EffectString.replaceAll('-', ' '))}`
+        : 'Activating snapshot';
   }
 }
 
@@ -61,7 +65,7 @@ export function formatCodeGraphDoctorProgressLine(progress: CodeGraphRepairProgr
     case 'deferred':
       return `Checking · deferred ${database}`;
     default:
-      return `Checking · ${progress.phase.replaceAll('-', ' ')} · ${database}`;
+      return `Checking · ${Effect2.pipe(progress.phase, EffectString.replaceAll('-', ' '))} · ${database}`;
   }
 }
 

@@ -1,3 +1,4 @@
+import {isGraphCatalog, isStatus, isStatusResponse} from '../api/response_guards.js';
 import {useEffect, useRef, type Dispatch, type RefObject, type SetStateAction} from 'react';
 import {
   graphBuildIsActive,
@@ -11,6 +12,7 @@ import {
 } from '../graph.js';
 import {useManagerLiveConnection, useManagerLiveQuery} from '../live/provider.js';
 import {GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS, api, errorMessage} from './support.js';
+import {Array as EffectArray} from 'effect';
 
 type Status = Pick<
   GraphCatalog,
@@ -27,7 +29,7 @@ export function useManagerRuntimeConnection(options: {
   useEffect(() => {
     if (connection !== 'unsupported' && connection !== 'stopped') return;
     const timer = window.setInterval(() => {
-      void api<{readonly status: 'ok'}>('/api/health').then(
+      void api<{readonly status: 'ok'}>('/api/health', undefined, undefined, isStatusResponse).then(
         () => {
           if (options.runtime === 'disconnected') options.onRecovery();
         },
@@ -55,10 +57,16 @@ export function useGraphLiveStatus(options: {
     options.enabled ? {topic: 'graph-status', scope: 'account'} : undefined,
     'status',
     signal =>
-      api<Status>('/api/graphs/status', undefined, {
-        signal,
-        timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-      }),
+      api<Status>(
+        '/api/graphs/status',
+        undefined,
+        {
+          signal,
+          timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
+        },
+        isStatus,
+      ),
+    isStatus,
   );
   const fallback = !live.active || live.snapshot.status === 'unsupported';
   const observed = useRef({activeBuild: false, activeMaintenance: false, acknowledged: new Set<string>()});
@@ -67,7 +75,7 @@ export function useGraphLiveStatus(options: {
     running: false,
   });
   async function apply(status: Status, cancelled: () => boolean, signal: AbortSignal): Promise<void> {
-    const activeBuild = status.builds.some(graphBuildIsActive);
+    const activeBuild = EffectArray.some(status.builds, graphBuildIsActive);
     const activeMaintenance = status.maintenance !== undefined;
     const previous = observed.current;
     const refreshCatalog =
@@ -82,10 +90,15 @@ export function useGraphLiveStatus(options: {
             status.catalogRevision,
           )));
     if (refreshCatalog) {
-      const refreshed = await api<GraphCatalog>('/api/graphs', undefined, {
-        signal,
-        timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-      });
+      const refreshed = await api<GraphCatalog>(
+        '/api/graphs',
+        undefined,
+        {
+          signal,
+          timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
+        },
+        isGraphCatalog,
+      );
       if (cancelled()) return;
       const merged = mergeGraphCatalogStatus(refreshed, status);
       options.authoritative.current = true;
@@ -165,10 +178,15 @@ export function useGraphLiveStatus(options: {
     let timer: number | undefined;
     const poll = async () => {
       try {
-        const status = await api<Status>('/api/graphs/status', undefined, {
-          signal: controller.signal,
-          timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-        });
+        const status = await api<Status>(
+          '/api/graphs/status',
+          undefined,
+          {
+            signal: controller.signal,
+            timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
+          },
+          isStatus,
+        );
         if (cancelled) return;
         await apply(status, () => cancelled, controller.signal);
         if (!cancelled)
