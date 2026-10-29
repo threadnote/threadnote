@@ -8,9 +8,105 @@ import {obsidianSourceWork} from '@threadnote/integration-obsidian/source';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {captureConsole} from '../../src/effect/console.js';
 import * as maintenance from '../../src/memory/context/maintenance.js';
+import * as refresh from '../../src/memory/context/maintenance_refresh.js';
+import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
 import {runContextMaintainCommand} from '../../src/memory/context/maintenance_commands.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {managerImportedTopicFixture} from '../helpers/manager-imported-topic.js';
+
+const refreshConfig = {
+  account: 'local',
+  user: 'tester',
+  agentId: 'test',
+  agentContextHome: '/unused',
+  manifestPath: '/unused',
+};
+
+effectIt.effect('explicit refresh CLI preserves the selected scope and never falls through to a repair tick', () =>
+  Effect.gen(function* () {
+    const observed = {
+      outcome: 'incomplete' as const,
+      reason: 'Target evidence is unavailable; no absence is inferred.',
+    };
+    const refreshSpy = vi.spyOn(refresh, 'refreshContextMaintenanceCase').mockReturnValue(Effect.succeed(observed));
+    const runSpy = vi.spyOn(maintenance, 'runContextMaintenance');
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        refreshSpy.mockRestore();
+        runSpy.mockRestore();
+      }),
+    );
+    const selection = {
+      memoryUri: 'threadnote://user/tester/memories/durable/selected.md',
+      startLine: 2,
+      maximumLines: 4,
+    };
+    const result = yield* captureConsole(
+      runContextMaintainCommand(refreshConfig, {
+        action: 'refresh',
+        project: 'fixture',
+        caseId: 'selected-case',
+        sourceCwd: '/selected',
+        json: true,
+        ...selection,
+      }),
+    );
+    expect(JSON.parse(result.output)).toEqual(observed);
+    expect(refreshSpy).toHaveBeenCalledExactlyOnceWith(
+      refreshConfig,
+      {project: 'fixture', caseId: 'selected-case', cwd: '/selected'},
+      {...selection, citationId: undefined},
+    );
+    expect(runSpy).not.toHaveBeenCalled();
+    for (const missing of [{project: undefined}, {caseId: undefined}, {sourceCwd: 'relative'}]) {
+      const refused = yield* runContextMaintainCommand(refreshConfig, {
+        action: 'refresh',
+        project: 'fixture',
+        caseId: 'selected-case',
+        sourceCwd: '/selected',
+        ...missing,
+      }).pipe(Effect.result);
+      expect(Result.isFailure(refused)).toBe(true);
+    }
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(runSpy).not.toHaveBeenCalled();
+  }).pipe(provideTestLayer(ApplicationLayer)),
+);
+
+effectIt.effect('registered MCP refresh validates its exact scope and preserves an incomplete observation', () =>
+  Effect.gen(function* () {
+    const observed = {outcome: 'incomplete' as const, reason: 'Selected target remains unknown.'};
+    const refreshSpy = vi.spyOn(refresh, 'refreshContextMaintenanceCase').mockReturnValue(Effect.succeed(observed));
+    const runSpy = vi.spyOn(maintenance, 'runContextMaintenance');
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        refreshSpy.mockRestore();
+        runSpy.mockRestore();
+      }),
+    );
+    const server = new EffectMcpServerAdapter('refresh-test', '0', 'Synthetic refresh adapter test.');
+    registerContextMaintenanceTools(server, refreshConfig);
+    const input = {action: 'refresh', project: 'fixture', caseId: 'selected-case', callerCwd: '/selected'};
+    const result = yield* server.invokeTool('context_maintain', input);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual(observed);
+    expect(refreshSpy).toHaveBeenCalledExactlyOnceWith(refreshConfig, {
+      project: 'fixture',
+      caseId: 'selected-case',
+      cwd: '/selected',
+    });
+    for (const invalid of [{project: undefined}, {caseId: undefined}, {callerCwd: 'relative'}]) {
+      const refused = yield* server.invokeTool(
+        'context_maintain',
+        Object.fromEntries(Object.entries({...input, ...invalid}).filter(([, value]) => value !== undefined)),
+      );
+      expect(refused.isError).toBe(true);
+    }
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(runSpy).not.toHaveBeenCalled();
+  }).pipe(provideTestLayer(ApplicationLayer)),
+);
 
 effectIt.effect('source CLI reads an unchanged imported packet as JSON with either output format', () =>
   Effect.gen(function* () {

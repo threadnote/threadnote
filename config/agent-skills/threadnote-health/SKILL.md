@@ -24,6 +24,13 @@ Read the selected case and its memory pointers. Confirm project, absolute `calle
 available on this surface before editing. Refresh a stale packet. Shared or remote authority does not imply access to local
 personal storage.
 
+Refresh one selected stale decision with `context_maintain` action `refresh`, its exact `project` and `caseId`, and
+absolute `callerCwd`. CLI fallback: `threadnote context maintain --action refresh --project <project> --case-id <case-id>
+--source-cwd <absolute-checkout> --json`. Refresh only updates local observations; it never repairs canonical memories,
+publishes shared changes, or starts automatic draft work. Exact `run --case-id` remains citation-only. If the bounded
+refresh reports incomplete or unavailable evidence, follow its specific prerequisite instead of widening to a corpus run
+or treating unreadable targets as absent.
+
 Packets identify the stable family/slot and exact citation or relation target, original citation provenance, content hash,
 source revision, attempted recovery ladder, policy and budget. Read their bounded evidence excerpts with their hashes,
 coverage and provenance. `supportsCitation=false` means current bytes need claim review; historical bytes never become

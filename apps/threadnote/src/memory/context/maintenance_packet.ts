@@ -3,6 +3,7 @@ import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {canonicalMemoryDocumentContent, isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
 import {memoryCodeCitationAnchorId} from '@threadnote/memory/code/citation';
+import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {findContextHealthSemanticContradiction} from '@threadnote/context/health_semantic';
 import {resolveContextHealthRelationTargetV2} from '@threadnote/context/health_maintenance';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
@@ -10,6 +11,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {readTeamsFile} from '../../share/core.js';
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
+import type {ContextMaintenanceRelationEvidence} from './maintenance_contracts.js';
 
 class ContextMaintenancePacketError extends Schema.TaggedError<ContextMaintenancePacketError>()(
   'ContextMaintenancePacketError',
@@ -32,8 +34,9 @@ export function sharedMaintenanceOwnerProposal(
   record: MemoryRecord,
   corpus: readonly MemoryRecord[],
   sharedBase?: {readonly repositoryId: string; readonly commit: string},
+  selectedEvidence?: ContextMaintenanceRelationEvidence,
 ) {
-  const edits = (record.metadata.relations ?? [])
+  const edits = (selectedEvidence === undefined ? (record.metadata.relations ?? []) : [])
     .filter(relation => resolveContextHealthRelationTargetV2(corpus, relation.uri).state === 'missing')
     .map(relation => ({
       operation: 'remove-relation' as const,
@@ -47,10 +50,27 @@ export function sharedMaintenanceOwnerProposal(
     expectedContentHash,
     sharedBase:
       sharedBase === undefined ? {state: 'unavailable' as const} : {state: 'available' as const, ...sharedBase},
-    proposalRevision: sha256HexSync(JSON.stringify([record.uri, expectedContentHash, sharedBase, edits])),
+    proposalRevision: sha256HexSync(
+      JSON.stringify([
+        record.uri,
+        expectedContentHash,
+        sharedBase,
+        edits,
+        ...(selectedEvidence ? [selectedEvidence] : []),
+      ]),
+    ),
     selectedEdits: edits.slice(0, 32),
     omittedEdits: Math.max(0, edits.length - 32),
     authority: 'shared-owner' as const,
+    ...(selectedEvidence
+      ? {
+          evidence: {
+            completeness: selectedEvidence.completeness,
+            provenance: selectedEvidence.provenance,
+            supportsAbsence: false as const,
+          },
+        }
+      : {}),
     publication: {
       operations: ['review_session_context', 'list_memory_candidates', 'apply_memory_candidates', 'share_propose'],
       instructions:
@@ -175,7 +195,9 @@ export function buildContextMaintenancePacket<E, R>(
             });
         }
         const ownerProposal =
-          shared && !approvedSupport ? sharedMaintenanceOwnerProposal(record, corpus, sharedBase) : undefined;
+          shared && !approvedSupport
+            ? sharedMaintenanceOwnerProposal(record, corpus, sharedBase, item.relationEvidence)
+            : undefined;
         return {
           version: 2 as const,
           caseId: item.caseId,
@@ -206,6 +228,7 @@ export function buildContextMaintenancePacket<E, R>(
             .map(subject => ({uri: subject.uri, expectedContentHash: subject.hash})),
           omittedRelatedMemories: Math.max(0, (item.subjectContentHashes?.length ?? 0) - 32),
           sourceRevision: item.sourceSnapshot,
+          ...(item.relationEvidence ? {relationEvidence: item.relationEvidence} : {}),
           subject: {kind: 'memory' as const, uri: record.uri, memoryId: item.memoryId},
           caseTarget: {family: item.family, slot: item.slot, citationId: item.citationId},
           target:
@@ -216,7 +239,9 @@ export function buildContextMaintenancePacket<E, R>(
                   relations: (record.metadata.relations ?? [])
                     .filter(
                       relation =>
+                        item.family === 'shared-owner-proposal' ||
                         relation.uri === item.slot ||
+                        memoryIdFromIdentityAlias(relation.uri) === item.slot ||
                         resolveContextHealthRelationTargetV2(corpus, relation.uri).record?.metadata.memoryId ===
                           item.slot,
                     )
@@ -312,32 +337,36 @@ export function buildContextMaintenancePacket<E, R>(
                         'Preserve verified historical provenance',
                         'Review retirement of an unsupported anchor or claim',
                       ],
-          allowedOperations: approvedSupport
-            ? [
-                'read_context',
-                'context_maintenance_packet',
-                'context_maintenance_review',
-                ...(shared ? ['share_propose'] : []),
-              ]
-            : shared
+          allowedOperations: item.relationEvidence
+            ? ['read_context', 'context_maintenance_packet']
+            : approvedSupport
               ? [
                   'read_context',
-                  'review_session_context',
-                  'list_memory_candidates',
-                  'apply_memory_candidates',
-                  'share_propose',
+                  'context_maintenance_packet',
+                  'context_maintenance_review',
+                  ...(shared ? ['share_propose'] : []),
                 ]
-              : [
-                  'read_context',
-                  'context_health_repair_preview',
-                  'context_health_repair_apply',
-                  ...(canRetire ? ['context_maintain'] : []),
-                ],
-          instructions: approvedSupport
-            ? 'Compare the approved paragraph mapping with exact current evidence. Request context_maintenance_review action=automatic-preview with this exact URI and baseline hash; use manual-preview with the full user-authored desiredBody for a manual edit. Review the full document, role/support changes and source bindings before explicit approval. Shared owners separately review and approve share_propose. Immutable root citations remain history.'
-            : shared
-              ? ownerProposal!.publication.instructions
-              : 'Read the exact memory and target. Current excerpts support the citation only when supportsCitation is true; historical excerpts preserve original provenance only. A new hash cannot validate old prose. Preview and apply only a supported exact revision within the authorized personal scope.',
+              : shared
+                ? [
+                    'read_context',
+                    'review_session_context',
+                    'list_memory_candidates',
+                    'apply_memory_candidates',
+                    'share_propose',
+                  ]
+                : [
+                    'read_context',
+                    'context_health_repair_preview',
+                    'context_health_repair_apply',
+                    ...(canRetire ? ['context_maintain'] : []),
+                  ],
+          instructions: item.relationEvidence
+            ? 'This packet inspects only the selected readable evidence. Unreadable or unresolved targets remain unknown; no absence or repair authority is established. Review the exact memory and target identities, restore supported source access, then refresh this selection. Shared owners must separately verify team authority and approve any repair and publication.'
+            : approvedSupport
+              ? 'Compare the approved paragraph mapping with exact current evidence. Request context_maintenance_review action=automatic-preview with this exact URI and baseline hash; use manual-preview with the full user-authored desiredBody for a manual edit. Review the full document, role/support changes and source bindings before explicit approval. Shared owners separately review and approve share_propose. Immutable root citations remain history.'
+              : shared
+                ? ownerProposal!.publication.instructions
+                : 'Read the exact memory and target. Current excerpts support the citation only when supportsCitation is true; historical excerpts preserve original provenance only. A new hash cannot validate old prose. Preview and apply only a supported exact revision within the authorized personal scope.',
         };
       }),
     );

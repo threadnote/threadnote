@@ -413,6 +413,7 @@ export function makeContextMaintainCommand<E, R>(
           'resume',
           'undo',
           'packet',
+          'refresh',
           'retire-anchor',
           'draft',
           'draft-view',
@@ -443,7 +444,7 @@ export function makeContextMaintainCommand<E, R>(
         'receipt-id',
         'Exact local repair receipt for undo or private generation receipt for draft-receipt',
       ),
-      caseId: optionalString('case-id', 'Exact citation case refresh, bounded agent packet, or status selector'),
+      caseId: optionalString('case-id', 'Exact case for refresh/packet/status; run supports citation cases only'),
       backend: optionalString('backend', 'Selected text-only topic draft backend: local-ai or effect-ai'),
       unitsPerHour: optional(
         integerFlag('background-units').pipe(

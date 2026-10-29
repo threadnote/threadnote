@@ -1,11 +1,16 @@
 import {Schema} from 'effect';
 import {errorMessage, ManagerApiError} from '../ui/support.js';
 
+export function maintenanceEvidenceBusy(cause: unknown): boolean {
+  return Schema.is(ManagerApiError)(cause) && cause.status === 503 && cause.code === 'context-maintenance-busy';
+}
+
 export function retryableEvidenceRead(cause: unknown): boolean {
   return !Schema.is(ManagerApiError)(cause) || cause.status >= 500 || [408, 429].includes(cause.status);
 }
 
 export function evidenceReadError(cause: unknown): string {
+  if (maintenanceEvidenceBusy(cause)) return 'Maintenance is busy. Check current evidence to try again.';
   return retryableEvidenceRead(cause)
     ? 'Current evidence could not be checked. Check current evidence to try again.'
     : errorMessage(cause);

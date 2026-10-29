@@ -1,4 +1,5 @@
 import {refreshContextMaintenanceCase} from '../memory/context/maintenance_refresh.js';
+import {ContextMaintenanceBusy, contextMaintenanceBusyResult} from '../memory/context/maintenance_contracts.js';
 import {isManagerProjectName} from './project/name.js';
 import {Cause, Clock, Crypto, DateTime, Effect, Exit, Fiber, Result, Schema, Scope} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -144,35 +145,42 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
       )
         return invalid('Select an exact reference from this decision.');
       const root = yield* managerAttentionProjectRoot(request.config, body.project);
-      const result = yield* refreshContextMaintenanceCase(
-        request.config,
-        {
-          project: body.project,
-          caseId: body.caseId,
-          cwd: root.state === 'available' ? root.cwd : (yield* SystemInfo).currentDirectory(),
-        },
-        {memoryUri: body.memoryUri, citationId: body.citationId},
+      const project = body.project;
+      const caseId = body.caseId;
+      const selection = {memoryUri: body.memoryUri, citationId: body.citationId};
+      return yield* maintenanceActionResponse(
+        Effect.gen(function* () {
+          const result = yield* refreshContextMaintenanceCase(
+            request.config,
+            {
+              project,
+              caseId,
+              cwd: root.state === 'available' ? root.cwd : (yield* SystemInfo).currentDirectory(),
+            },
+            selection,
+          );
+          if ('packet' in result && result.packet && 'topicEvidence' in result.packet) {
+            const reviewId = yield* managerTopicPacketReviewId(request.config, result.packet);
+            return {...result, packet: {...result.packet, ...(reviewId ? {reviewId} : {})}};
+          }
+          return result;
+        }),
       );
-      if ('packet' in result && result.packet && 'topicEvidence' in result.packet) {
-        const reviewId = yield* managerTopicPacketReviewId(request.config, result.packet);
-        return {status: 200, body: {...result, packet: {...result.packet, ...(reviewId ? {reviewId} : {})}}};
-      }
-      return {status: 200, body: result};
     }
     if (body.action === 'pause' || body.action === 'resume')
-      return {status: 200, body: yield* setContextMaintenancePaused(request.config, body.action === 'pause')};
+      return yield* maintenanceActionResponse(setContextMaintenancePaused(request.config, body.action === 'pause'));
     if (body.action === 'undo' && typeof body.receiptId === 'string') {
-      const result = yield* undoContextMaintenance(request.config, body.receiptId);
-      return {status: result.status === 'conflict' ? 409 : 200, body: result};
+      return yield* maintenanceActionResponse(undoContextMaintenance(request.config, body.receiptId), result =>
+        result.status === 'conflict' ? 409 : 200,
+      );
     }
     if (body.action === 'run-now')
-      return {
-        status: 200,
-        body: yield* runContextMaintenance(request.config, {
+      return yield* maintenanceActionResponse(
+        runContextMaintenance(request.config, {
           cwd: (yield* SystemInfo).currentDirectory(),
           project: typeof body.project === 'string' ? body.project : undefined,
         }),
-      };
+      );
     return invalid('Choose run-now, pause, resume, or undo with an exact receipt.');
   }
   if (route === '/api/context-health/citations/jobs' && request.method === 'GET') {
@@ -528,6 +536,18 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
     body: result.status === 'conflict' ? {error: result.conflict.message} : result,
   };
 });
+
+function maintenanceActionResponse<A, E, R>(
+  operation: Effect.Effect<A, E, R>,
+  status: (body: A) => number = () => 200,
+) {
+  return operation.pipe(
+    Effect.map(body => ({status: status(body), body})),
+    Effect.catchIf(Schema.is(ContextMaintenanceBusy), () =>
+      Effect.succeed({status: 503, body: contextMaintenanceBusyResult()}),
+    ),
+  );
+}
 
 function startBackgroundCitationRepair(
   request: {

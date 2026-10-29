@@ -15,6 +15,21 @@ export class MaintenancePauseFenceBusy extends Schema.TaggedError<MaintenancePau
   {},
 ) {}
 
+export class ContextMaintenanceBusy extends Schema.TaggedError<ContextMaintenanceBusy>()('ContextMaintenanceBusy', {}) {
+  override readonly message =
+    'Context maintenance is busy. No protected operation started. Retry shortly; if busy persists, let current Threadnote work finish before retrying.';
+}
+
+export function contextMaintenanceBusyResult() {
+  return {
+    outcome: 'busy' as const,
+    code: 'context-maintenance-busy' as const,
+    retryable: true as const,
+    progress: 'not-started' as const,
+    error: ContextMaintenanceBusy.make({}).message,
+  };
+}
+
 export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly checkpoints: Readonly<Record<string, WorkCheckpoint>>;
   readonly lastProject?: string;
@@ -43,6 +58,22 @@ export interface ContextMaintenanceReadOptions {
   readonly receiptCursor?: string;
   readonly caseId?: string;
   readonly receiptId?: string;
+}
+
+/** A bounded readable-resource observation is never proof that an unobserved target is absent. */
+export interface ContextMaintenanceRelationResourceObservation {
+  readonly uri: string;
+  readonly sourceHash?: string;
+  readonly memoryId?: string;
+  readonly status?: string;
+}
+
+export interface ContextMaintenanceRelationEvidence {
+  readonly completeness: 'selected-only';
+  readonly provenance: 'bounded-selected-resource-read';
+  readonly subject: ContextMaintenanceRelationResourceObservation;
+  /** Target observations exclude the subject, which the packet's existing subject fences re-read. */
+  readonly observations: readonly ContextMaintenanceRelationResourceObservation[];
 }
 
 export interface ContextMaintenanceCaseV2 {
@@ -80,6 +111,7 @@ export interface ContextMaintenanceCaseV2 {
   readonly causeKey?: string;
   readonly repositoryId?: string;
   readonly subjectContentHashes?: readonly {readonly uri: string; readonly hash: string}[];
+  readonly relationEvidence?: ContextMaintenanceRelationEvidence;
   readonly candidateReview?: {readonly reviewId: string; readonly revision: number; readonly candidateRevision: string};
   readonly sourceSnapshot?: {readonly cwd: string; readonly generation: string; readonly revision: string};
   readonly sourceSnapshots?: readonly {
