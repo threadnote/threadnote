@@ -43,21 +43,15 @@ export function withMaintenancePacketRevision<A, E, R, E2, R2>(
 
 export function sharedMaintenanceOwnerProposal(
   record: MemoryRecord,
-  corpus: readonly MemoryRecord[],
   sharedBase?: {readonly repositoryId: string; readonly commit: string},
   selectedEvidence?: ContextMaintenanceRelationEvidence,
 ) {
-  const edits = EffectArray.map(
-    EffectArray.filter(
-      selectedEvidence === undefined ? (record.metadata.relations ?? []) : [],
-      relation => resolveContextHealthRelationTargetV2(corpus, relation.uri).state === 'missing',
-    ),
-    relation => ({
-      operation: 'remove-relation' as const,
-      relation,
-      reason: 'target-unresolved-in-readable-corpus',
-    }),
-  );
+  // Neither a bounded lookup nor an arbitrary readable corpus proves target absence.
+  const evidence = {
+    completeness: selectedEvidence?.completeness ?? ('unknown' as const),
+    provenance: selectedEvidence?.provenance ?? ('unobserved-relation-targets' as const),
+    supportsAbsence: false as const,
+  };
   const expectedContentHash = sha256HexSync(canonicalMemoryDocumentContent(record.content));
   return {
     readOnly: true as const,
@@ -70,22 +64,14 @@ export function sharedMaintenanceOwnerProposal(
         record.uri,
         expectedContentHash,
         sharedBase,
-        edits,
+        evidence,
         ...(selectedEvidence ? [selectedEvidence] : []),
       ]),
     ),
-    selectedEdits: edits.slice(0, 32),
-    omittedEdits: Math.max(0, edits.length - 32),
+    selectedEdits: [],
+    omittedEdits: 0,
     authority: 'shared-owner' as const,
-    ...(selectedEvidence
-      ? {
-          evidence: {
-            completeness: selectedEvidence.completeness,
-            provenance: selectedEvidence.provenance,
-            supportsAbsence: false as const,
-          },
-        }
-      : {}),
+    evidence,
     publication: {
       operations: ['review_session_context', 'list_memory_candidates', 'apply_memory_candidates', 'share_propose'],
       instructions:
@@ -232,7 +218,7 @@ export function buildContextMaintenancePacket<E, R>(
         }
         const ownerProposal =
           shared && !approvedSupport
-            ? sharedMaintenanceOwnerProposal(record, corpus, sharedBase, item.relationEvidence)
+            ? sharedMaintenanceOwnerProposal(record, sharedBase, item.relationEvidence)
             : undefined;
         return {
           version: 2 as const,
