@@ -12,7 +12,7 @@ import type {
 } from './contract.js';
 import {decode, hash, isRecord, readOptional, requireValue, stableJson} from './files.js';
 import {consumerId, enrollmentContext, parseRuntimeIndex, parseTarget, type Enrollment} from './registry.js';
-import {parseDevSkillsManifest, parseNativeRequirements} from './manifest.js';
+import {parseHistoricalDevSkillsManifest, parseNativeRequirements} from './manifest.js';
 
 export interface RefreshMember {
   readonly consumerId: string;
@@ -183,7 +183,7 @@ function parseRequest(value: unknown, root: string, path: Path.Path): RefreshReq
   );
   const release = value.release as unknown as DevSkillsReleaseIdentity;
   const capabilities = parseCapabilities(value.capabilities);
-  const desired = parseDevSkillsManifest(value.desired);
+  const desired = parseHistoricalDevSkillsManifest(value.desired);
   requireValue(
     capabilities.runtimeVersion === release.releaseVersion &&
       desired.releaseVersion === release.releaseVersion &&

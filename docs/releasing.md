@@ -75,7 +75,27 @@ threadnote update --beta
 The bootstrap installer verifies the downloaded release and invokes its installer directly. The second command uses
 the new updater to refresh enrolled workflows, preserving ownership and personal-edit checks. Stable 5.2.1 has no
 development-workflow refresh handshake and can use `threadnote update --beta`; beta.8 can also use that command.
-For a custom data home, pass the same `--home` to both recovery commands. Qualify those paths with actual released binaries in
+Beta.9's candidate reader rejects retained schema-1 refresh journals with `Unsupported development workflow manifest
+contract.` Beta.10 reads those historical journals while keeping new candidate admission strict. Preserve the journal;
+bootstrap to beta.10 or later before retrying the update. A fresh-journal upgrade test does not cover this retained-history
+case.
+
+If enrollment remains but the physical workflow store and all managed entry files are missing, use an explicit Install
+preview after upgrading:
+
+```sh
+threadnote dev-skills install --agent codex --dry-run
+threadnote dev-skills install --agent codex
+threadnote dev-skills status --agent codex
+threadnote update --beta
+```
+
+Install creates a new current generation and ownership receipt only when matching sole enrollment and complete absence
+are verified. Present or unknown files, pending transactions and changed enrollment block it. Status and automatic
+maintenance do not perform this reinstall. Do not delete journals or enrollment records to bypass a conflict; an empty
+directory alone does not explain how ownership was lost.
+
+For a custom data home, pass the same `--home` to every recovery command. Qualify those paths with actual released binaries in
 isolated installation and data homes. Synthetic version labels in current-code tests do not establish compatibility
 with a released updater.
 

@@ -4,8 +4,8 @@ import type {DevSkillsAction, DevSkillsBundle, DevSkillsResult, DevSkillsSelecto
 import {planMutation, selectDevSkillsTarget} from './plan.js';
 import {disableEnrollment} from './enablement.js';
 import {enrollmentContext, readReceipt} from './registry.js';
-import {fail} from './files.js';
-import {commitMutation, recoverTransaction} from './transaction.js';
+import {fail, stableJson} from './files.js';
+import {commitMutation, readTransactionConsumer, recoverTransaction} from './transaction.js';
 import {validateLease, withDevSkillsMutationLease, withPhysicalLock, type DevSkillsMutationLease} from './lease.js';
 import {devSkillsReadiness} from './readiness.js';
 export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(function* (
@@ -18,13 +18,28 @@ export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(funct
     readonly lease?: DevSkillsMutationLease;
     readonly readiness?: boolean;
     readonly createdBy?: string;
+    readonly reinstallMissingStore?: boolean;
   } = {},
 ) {
   const initial = yield* planMutation(config, bundle, action, selector, options);
   if (options.expectedDigest && initial.plan.previewDigest !== options.expectedDigest)
     return yield* fail('stale-preview', 'Development skills changed since preview. Preview the operation again.');
-  if (!initial.plan.canApply && initial.plan.installationState !== 'recovery-needed')
+  if (!initial.plan.canApply && (initial.missingStoreAttempt || initial.plan.installationState !== 'recovery-needed'))
     return yield* fail('installation-conflict', initial.plan.issues.map(issue => issue.message).join(' '));
+  if (initial.missingStoreReinstall && options.lease)
+    return yield* fail('invalid-lease', 'A missing-store install requires its own no-replay mutation lease.');
+  if (
+    options.reinstallMissingStore &&
+    initial.plan.installationState === 'recovery-needed' &&
+    !(yield* readReceipt(initial.plan.target)).receipt
+  ) {
+    const original = yield* readTransactionConsumer(initial.plan.target.skillRoot);
+    if (stableJson(original) !== stableJson(initial.consumer))
+      return yield* fail(
+        'recovery-needed',
+        'Resume the original physical transaction from its exact owning home and target.',
+      );
+  }
   const apply = (lease: DevSkillsMutationLease) =>
     Effect.gen(function* () {
       const held = yield* validateLease(config, lease);
@@ -51,16 +66,26 @@ export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(funct
       return yield* withPhysicalLock(
         target.skillRoot,
         Effect.gen(function* () {
-          const locked = yield* planMutation(config, bundle, action, selector, options);
+          const locked = yield* planMutation(config, bundle, action, selector, {...options, physicalLockHeld: true});
           if (locked.consumer.installationRoot !== held.root)
             return yield* fail('invalid-lease', 'Enrollment coordinator changed.');
-          if (options.expectedDigest && locked.plan.previewDigest !== options.expectedDigest)
+          if (
+            locked.missingStoreReinstall !== initial.missingStoreReinstall ||
+            (initial.missingStoreReinstall && locked.plan.previewDigest !== initial.plan.previewDigest) ||
+            (options.expectedDigest && locked.plan.previewDigest !== options.expectedDigest)
+          )
             return yield* fail(
               'stale-preview',
               'Development skills changed while acquiring the mutation lease. Preview again.',
             );
-          const recovered = yield* recoverTransaction(locked.consumer);
-          const mutation = recovered ? yield* planMutation(config, bundle, action, selector, options) : locked;
+          const recovered = initial.missingStoreReinstall ? false : yield* recoverTransaction(locked.consumer);
+          const mutation = recovered
+            ? yield* planMutation(config, bundle, action, selector, {
+                ...options,
+                reinstallMissingStore: false,
+                physicalLockHeld: true,
+              })
+            : locked;
           if (!mutation.plan.canApply)
             return yield* fail('installation-conflict', mutation.plan.issues.map(issue => issue.message).join(' '));
           const applied = yield* commitMutation(mutation);
@@ -81,7 +106,9 @@ export const applyCapturedDevSkills = Effect.fn('devSkills.applyCaptured')(funct
         }),
       );
     });
-  return yield* (options.lease ? apply(options.lease) : withDevSkillsMutationLease(config, apply)).pipe(
-    Effect.map((result): DevSkillsResult => result),
-  );
+  return yield* (
+    options.lease
+      ? apply(options.lease)
+      : withDevSkillsMutationLease(config, apply, {replayEnablement: !initial.missingStoreReinstall})
+  ).pipe(Effect.map((result): DevSkillsResult => result));
 });

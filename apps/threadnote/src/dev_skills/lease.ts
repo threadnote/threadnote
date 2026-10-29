@@ -2,8 +2,8 @@ import {Effect, FileSystem, Option, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withSetupMutationLock} from '../setup/lock.js';
-import {assertSafePath, fail} from './files.js';
-import {recoverEnablement} from './enablement.js';
+import {assertSafePath, fail, readOptional} from './files.js';
+import {enablementJournalPath, recoverEnablement} from './enablement.js';
 import {enrollmentContext, hasDevSkillsHomeState, physicalDirectory} from './registry.js';
 
 const identity: unique symbol = Symbol('DevSkillsMutationLease');
@@ -51,6 +51,7 @@ export function withHomeLease<A, E, R>(
   config: RuntimeConfig,
   coordinator: DevSkillsRuntimeCoordinator,
   body: (lease: DevSkillsMutationLease) => Effect.Effect<A, E, R>,
+  policy: {readonly replayEnablement?: boolean} = {},
 ) {
   return Effect.gen(function* () {
     const path = yield* Path.Path;
@@ -64,7 +65,10 @@ export function withHomeLease<A, E, R>(
         const context = yield* enrollmentContext(config);
         if (context.root !== root)
           return yield* fail('enrollment-conflict', 'The home belongs to another runtime enrollment coordinator.');
-        yield* recoverEnablement(home, root);
+        if (policy.replayEnablement === false) {
+          if ((yield* readOptional(enablementJournalPath(path, home))) !== null)
+            return yield* fail('recovery-needed', 'A pending enablement transaction must be recovered separately.');
+        } else yield* recoverEnablement(home, root);
         const lease: DevSkillsMutationLease = {[identity]: true};
         live.set(lease, {home, root, coordinator});
         return yield* Effect.suspend(() => body(lease)).pipe(
@@ -81,10 +85,11 @@ export function withHomeLease<A, E, R>(
 export function withDevSkillsMutationLease<A, E, R>(
   config: RuntimeConfig,
   body: (lease: DevSkillsMutationLease) => Effect.Effect<A, E, R>,
+  policy: {readonly replayEnablement?: boolean} = {},
 ) {
   return Effect.gen(function* () {
     const context = yield* enrollmentContext(config);
-    return yield* withRuntimeCoordinator(context.root, coordinator => withHomeLease(config, coordinator, body));
+    return yield* withRuntimeCoordinator(context.root, coordinator => withHomeLease(config, coordinator, body, policy));
   });
 }
 export function withDevSkillsRemovalLease<A, E, R>(

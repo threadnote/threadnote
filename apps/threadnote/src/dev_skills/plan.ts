@@ -29,6 +29,7 @@ import {enablementJournalPath} from './enablement.js';
 import {hash, json, readOptional, statOptional, stableJson} from './files.js';
 import {generationRoot, inspectDuplicates, inspectOwned, renderEntrypoints} from './inspection.js';
 import {devSkillsCompatibility, devSkillsRuntimeVersion} from './manifest.js';
+import {knownStoreEnrollments, missingStoreIsEmpty} from './missing_store.js';
 
 export const selectDevSkillsTarget = Effect.fn('devSkills.selectTarget')(function* (
   config: RuntimeConfig,
@@ -64,13 +65,19 @@ export interface PlannedMutation {
   readonly retainedPaths: readonly string[];
   readonly enabled?: boolean;
   readonly createdBy?: string;
+  readonly missingStoreAttempt: boolean;
+  readonly missingStoreReinstall: boolean;
 }
 export const planMutation = Effect.fn('devSkills.planMutation')(function* (
   config: RuntimeConfig,
   bundle: DevSkillsBundle,
   action: DevSkillsAction,
   selector: DevSkillsSelector,
-  options: {readonly createdBy?: string} = {},
+  options: {
+    readonly createdBy?: string;
+    readonly reinstallMissingStore?: boolean;
+    readonly physicalLockHeld?: boolean;
+  } = {},
 ) {
   const path = yield* Path.Path;
   const target = yield* selectDevSkillsTarget(config, selector);
@@ -85,10 +92,24 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
       : action === 'update'
         ? context.homeIndex.targets[id]?.createdBy
         : undefined;
-  const pending =
-    (yield* readOptional(journalPath(path, target.skillRoot))) ??
-    (yield* readOptional(enablementJournalPath(path, context.home))) ??
-    (yield* readOptional(restoreJournalPath(path, target.skillRoot)));
+  const physicalJournal = yield* readOptional(journalPath(path, target.skillRoot));
+  const enablementJournal = yield* readOptional(enablementJournalPath(path, context.home));
+  const restoreJournal = yield* readOptional(restoreJournalPath(path, target.skillRoot));
+  const pending = physicalJournal ?? enablementJournal ?? restoreJournal;
+  const sharing =
+    action === 'install' && !receipt && physicalJournal === null ? yield* knownStoreEnrollments(context, target) : [];
+  const missingStoreAttempt =
+    action === 'install' &&
+    !receipt &&
+    (context.homeIndex.targets[id] !== undefined ||
+      context.runtimeIndex.enrollments[id] !== undefined ||
+      sharing.length > 0) &&
+    physicalJournal === null;
+  const missingStoreReinstall =
+    missingStoreAttempt &&
+    options.reinstallMissingStore === true &&
+    pending === null &&
+    (yield* missingStoreIsEmpty(context, consumer, options.physicalLockHeld === true, sharing));
   const inspected = yield* inspectOwned(target, receipt);
   const obsolete = new Set(
     Object.keys(receipt?.entrypoints ?? {}).filter(
@@ -129,8 +150,14 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
     ...compatibility.filter(issue => action !== 'update' || issue.code !== 'legacy-workflow-update-required'),
   );
   const enrolled = context.homeIndex.targets[id]?.state === 'enrolled';
+  if (missingStoreAttempt && !missingStoreReinstall)
+    issues.push({
+      code: 'incomplete',
+      message:
+        'A new missing-store install requires matching sole enrollment, no pending transactions and completely absent managed content.',
+    });
   if (
-    enrolled !== Boolean(receipt?.consumers[id]) ||
+    (!missingStoreReinstall && enrolled !== Boolean(receipt?.consumers[id])) ||
     stableJson(context.homeIndex.targets[id]) !== stableJson(context.runtimeIndex.enrollments[id])
   )
     issues.push({
@@ -286,6 +313,8 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
       runtime: context.runtimeContent,
       observed: inspected.contents,
       journal: pending,
+      manualMissingStore: options.reinstallMissingStore === true,
+      missingStoreReinstall,
     }),
   );
   return {
@@ -296,5 +325,7 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
     retainedPaths: [...new Set(retainedPaths)],
     enabled: action === 'install' || (action === 'update' && context.homeIndex.targets[id]?.enabled === true),
     createdBy,
+    missingStoreAttempt,
+    missingStoreReinstall,
   } satisfies PlannedMutation;
 });

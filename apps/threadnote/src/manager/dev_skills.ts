@@ -234,9 +234,16 @@ export const handleManagerDevSkillsRequest = Effect.fn('managerDevSkills.handleR
     const body = yield* request.body.pipe(Effect.mapError(() => invalid('Provide a JSON object request body.')));
     const input = yield* validate(() => mutationInput(body, url.pathname === routes.apply));
     const selector = yield* admitSelector(config, input.selector);
+    const manual = {reinstallMissingStore: input.action === 'install'};
     if (url.pathname === routes.preview)
-      return response(200, (yield* previewDevSkills(config, input.action, selector)) satisfies ManagerDevSkillsPlan);
-    const result = yield* applyDevSkills(config, input.action, selector, {expectedDigest: input.previewDigest!});
+      return response(
+        200,
+        (yield* previewDevSkills(config, input.action, selector, manual)) satisfies ManagerDevSkillsPlan,
+      );
+    const result = yield* applyDevSkills(config, input.action, selector, {
+      ...manual,
+      expectedDigest: input.previewDigest!,
+    });
     const status = yield* statusDevSkills(config, selector);
     return response(200, {result, status} satisfies ManagerDevSkillsApplyResponse);
   }).pipe(Effect.catchCause(cause => Effect.succeed(errorResponse(Cause.squash(cause)))));

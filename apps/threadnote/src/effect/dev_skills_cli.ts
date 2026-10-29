@@ -116,9 +116,14 @@ export function makeDevSkillsCommand(withRuntime: CliRuntimeRunner) {
       ({agent, scope, cwd, profile, dryRun, json}) =>
         withRuntime(config => {
           const selector = {agent, scope, cwd, profile};
+          const manual = {reinstallMissingStore: action === 'install'};
           if (dryRun)
-            return previewDevSkills(config, action, selector).pipe(Effect.flatMap(result => printPlan(result, json)));
-          return applyDevSkills(config, action, selector).pipe(Effect.flatMap(result => printPlan(result, json)));
+            return previewDevSkills(config, action, selector, manual).pipe(
+              Effect.flatMap(result => printPlan(result, json)),
+            );
+          return applyDevSkills(config, action, selector, manual).pipe(
+            Effect.flatMap(result => printPlan(result, json)),
+          );
         }),
     ),
   );
