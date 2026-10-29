@@ -1,4 +1,4 @@
-import {Context, Effect, FileSystem, Result} from 'effect';
+import {Array as EffectArray, String as EffectString, Context, Effect, FileSystem, Result} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -808,7 +808,7 @@ describe('native cycle lifecycle', () => {
         ).toMatchObject({failure: {code: 'review-history'}});
         const before = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
         const plan = yield* f.revise({
-          phases: f.document.phases.map(phase =>
+          phases: EffectArray.map(f.document.phases, phase =>
             phase.id === 'one'
               ? {...phase, outcome: 'The approved material amendment requires a full current review.'}
               : phase,
@@ -874,7 +874,7 @@ describe('native cycle lifecycle', () => {
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "current amended";\n');
         yield* f.git(['add', 'source.ts']);
         yield* f.git(['commit', '-m', 'Current amended source']);
-        const head = (yield* f.git(['rev-parse', 'HEAD'])).stdout.trim();
+        const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
         const recovery = {
           phaseId: 'one',
           snapshotId: 'current-full-recovery',
@@ -894,7 +894,7 @@ describe('native cycle lifecycle', () => {
         expect(after.snapshots.slice(0, before.snapshots.length)).toEqual(before.snapshots);
         expect(after.reviews).toEqual(before.reviews);
         expect(after.attempts).toEqual(before.attempts);
-        expect(after.reviews.some(item => item.snapshotId === unreviewed.snapshotId)).toBe(false);
+        expect(EffectArray.some(after.reviews, item => item.snapshotId === unreviewed.snapshotId)).toBe(false);
         const report = {
           ...f.report,
           snapshotId: current.snapshotId,
@@ -955,7 +955,7 @@ describe('native cycle lifecycle', () => {
         report: f.report,
       });
       const amended = yield* f.revise({
-        phases: f.document.phases.map(phase =>
+        phases: EffectArray.map(f.document.phases, phase =>
           phase.id === 'one' ? {...phase, outcome: 'Temporary approved material amendment.'} : phase,
         ),
       });

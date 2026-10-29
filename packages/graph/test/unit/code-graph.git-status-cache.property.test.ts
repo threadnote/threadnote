@@ -18,11 +18,31 @@ describe('code graph private Git status cache receipt', () => {
         (indexBytes, sourceIndexDevice, sourceIndexInode, sourceIndexModifiedAtMilliseconds, semanticSha256) => {
           const receipt = {
             indexBytes,
-            sourceIndexDevice,
-            sourceIndexInode,
+            sourceIndexDevice: sourceIndexDevice.toString(),
+            sourceIndexInode: sourceIndexInode.toString(),
             sourceIndexModifiedAtMilliseconds,
             ...(semanticSha256 === undefined ? {} : {sourceIndexSemanticSha256: semanticSha256}),
             version: CODE_GRAPH_GIT_STATUS_CACHE_RECEIPT_VERSION,
+          };
+          expect(parseCodeGraphGitStatusCacheReceipt(JSON.stringify(receipt))).toEqual(receipt);
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
+  it('round-trips exact filesystem identities beyond JavaScript safe integers', () => {
+    fc.assert(
+      fc.property(
+        fc.bigInt({min: 2n ** 53n, max: 2n ** 64n - 1n}),
+        fc.bigInt({min: 2n ** 53n, max: 2n ** 64n - 1n}),
+        (device, inode) => {
+          const receipt = {
+            version: CODE_GRAPH_GIT_STATUS_CACHE_RECEIPT_VERSION,
+            indexBytes: 100,
+            sourceIndexDevice: device.toString(),
+            sourceIndexInode: inode.toString(),
+            sourceIndexModifiedAtMilliseconds: 1,
           };
           expect(parseCodeGraphGitStatusCacheReceipt(JSON.stringify(receipt))).toEqual(receipt);
         },

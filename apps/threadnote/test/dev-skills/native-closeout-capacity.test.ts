@@ -1,5 +1,5 @@
 import {it} from '@effect/vitest';
-import {Effect, Result, Schema} from 'effect';
+import {Array as EffectArray, String as EffectString, Effect, Result, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -60,7 +60,7 @@ describe('whole closeout capacity reservation', () => {
         fc.uniqueArray(fc.integer({min: 0, max: 4000}), {maxLength: 32}),
         fc.integer({min: 0, max: 32}),
         (unrelated, childCount) => {
-          const prefix = unrelated.map(value => ({intent: {operationId: `unrelated-${value}`}}));
+          const prefix = EffectArray.map(unrelated, value => ({intent: {operationId: `unrelated-${value}`}}));
           const reservation = {operationStart: prefix.length, operationIds: ['closeout-a', 'closeout-b']};
           expect(pristineCloseoutOperationPrefix(prefix, reservation)).toBe(true);
           const consumed = [
@@ -68,7 +68,9 @@ describe('whole closeout capacity reservation', () => {
             ...Array.from({length: childCount + 1}, (_, index) => ({intent: {operationId: `closeout-${index}`}})),
           ];
           expect(pristineCloseoutOperationPrefix(consumed, reservation)).toBe(false);
-          expect(prefix.map(item => item.intent.operationId)).toEqual(unrelated.map(value => `unrelated-${value}`));
+          expect(EffectArray.map(prefix, item => item.intent.operationId)).toEqual(
+            EffectArray.map(unrelated, value => `unrelated-${value}`),
+          );
         },
       ),
       {numRuns: 64},
@@ -102,7 +104,7 @@ describe('whole closeout capacity reservation', () => {
       const bytes = yield* f.fs.readFileString(f.statePath());
       const wrongRelease = yield* releasePristineNativeCloseoutCapacity(f.config, 'native-run', {
         ...admitted,
-        transactionId: 'd'.repeat(64),
+        transactionId: EffectString.repeat(64)('d'),
       }).pipe(Effect.result);
       expect(Result.isFailure(wrongRelease)).toBe(true);
       expect(yield* f.fs.readFileString(f.statePath())).toBe(bytes);

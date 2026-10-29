@@ -1,3 +1,4 @@
+import {Array as EffectArray, Option} from 'effect';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {JSON_SCHEMA, load} from 'js-yaml';
 import {describe, expect, it} from 'vitest';
@@ -324,7 +325,7 @@ describe('platform benchmark workflow', () => {
     expect(job['runs-on']).toBe('ubuntu-24.04');
     expect(job['timeout-minutes']).toBe(40);
     expect(job.needs).toBe('classify');
-    expect(job.if).toBe('always()');
+    expect(job.if).toBe("always() && github.event_name == 'pull_request'");
     expect(classifier.outputs?.run_benchmark).toBe('${{ steps.scope.outputs.run_benchmark }}');
     expect(classifier.steps?.find(step => step.id === 'scope')).toMatchObject({
       name: 'Classify the production-ratchet diff',
@@ -391,6 +392,27 @@ describe('platform benchmark workflow', () => {
       ),
     ).toHaveLength(2);
     expect(command).not.toContain('bench:code-graph:production:ratchet');
+    const captureJob = ratchetWorkflow.jobs['capture-baseline'];
+    expect(captureJob.if).toBe("github.event_name == 'workflow_dispatch'");
+    expect(captureJob['runs-on']).toBe('ubuntu-24.04');
+    const capture = Option.getOrUndefined(
+      EffectArray.findFirst(
+        captureJob.steps ?? [],
+        step => step.name === 'Capture three exact-source observations and generate a candidate',
+      ),
+    );
+    expect(capture?.run).toContain('for sample in 1 2 3; do');
+    expect(capture?.run).toContain('--profile-files 3000 --profile-symbols 110000');
+    expect(capture?.run).toContain('scripts/generate-code-graph-production-ratchet.ts');
+    expect(capture?.run).toContain('artifacts/production-ratchet-observation-{1,2,3}.json');
+    expect(
+      Option.getOrUndefined(
+        EffectArray.findFirst(captureJob.steps ?? [], step => step.uses === 'actions/upload-artifact@v7'),
+      )?.with,
+    ).toMatchObject({
+      name: 'production-ratchet-candidate-${{ github.sha }}',
+      path: 'artifacts/',
+    });
   });
 
   it('prepares one verified model artifact before every vector benchmark lane', () => {

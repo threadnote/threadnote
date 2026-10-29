@@ -1,4 +1,4 @@
-import {Effect, Schema} from 'effect';
+import {Array as EffectArray, String as EffectString, Effect, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -122,6 +122,11 @@ const planDocument = () =>
 const loadedRootSchema = Schema.Struct({
   authoring: Schema.Struct({root: AuthoringReferenceSchema, readiness: Schema.Literal('ready')}),
 });
+
+const decodeExportedCyclePlan = (value: unknown) => {
+  if (!value || typeof value !== 'object' || !('authoring' in value)) throw new Error('Expected exported cycle plan.');
+  return decodeNativeCyclePlan(value.authoring);
+};
 
 const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
   withSpec = false,
@@ -259,16 +264,14 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
   if (!controller) throw new Error('Expected controller state.');
   const cyclePlan =
     cycleDelivery === 'pr'
-      ? decodeNativeCyclePlan(
-          (
-            (yield* call({
-              ...f.base('authoring', 'plan-run'),
-              command: 'export-dev-cycle',
-              uri: planRoot.uri,
-              delivery: 'pr',
-              bindings: {one: {branch: 'fixture/reader', baseBranch: 'main'}},
-            })) as {authoring: unknown}
-          ).authoring,
+      ? decodeExportedCyclePlan(
+          yield* call({
+            ...f.base('authoring', 'plan-run'),
+            command: 'export-dev-cycle',
+            uri: planRoot.uri,
+            delivery: 'pr',
+            bindings: {one: {branch: 'fixture/reader', baseBranch: 'main'}},
+          }),
         )
       : decodeNativeCyclePlan({
           format: 'threadnote-native-cycle-plan',
@@ -292,16 +295,16 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
           phases: [
             {
               id: 'one',
-              definitionHash: '1'.repeat(64),
+              definitionHash: EffectString.repeat(64)('1'),
               title: 'Reader behavior',
               dependsOn: [],
               allowedPaths: ['source.ts'],
-              acceptanceCriteria: plan.phases[0].acceptance.map(item => item.criterion),
+              acceptanceCriteria: EffectArray.map(plan.phases[0].acceptance, item => item.criterion),
               safeToMergeReason: 'The fixture is independently verifiable.',
               branch: 'fixture/reader',
               baseBranch: 'main',
               status: 'pending',
-              acceptanceRefs: plan.phases[0].acceptance.map(item => ({
+              acceptanceRefs: EffectArray.map(plan.phases[0].acceptance, item => ({
                 id: item.id,
                 criterion: item.criterion,
                 requirements: item.requirementIds,
@@ -311,9 +314,13 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
           ],
         });
   const initialHead =
-    cycleDelivery === 'pr' ? (yield* git(f.repo, ['rev-parse', 'HEAD'])).stdout.trim() : 'a'.repeat(40);
+    cycleDelivery === 'pr'
+      ? EffectString.trim((yield* git(f.repo, ['rev-parse', 'HEAD'])).stdout)
+      : EffectString.repeat(40)('a');
   const initialTree =
-    cycleDelivery === 'pr' ? (yield* git(f.repo, ['rev-parse', 'HEAD^{tree}'])).stdout.trim() : 'b'.repeat(40);
+    cycleDelivery === 'pr'
+      ? EffectString.trim((yield* git(f.repo, ['rev-parse', 'HEAD^{tree}'])).stdout)
+      : EffectString.repeat(40)('b');
   const validatedCycle = validateNativeCyclePhase(
     initializeNativeCycle(cyclePlan),
     'one',

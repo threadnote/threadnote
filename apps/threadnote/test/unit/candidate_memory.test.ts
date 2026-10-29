@@ -621,7 +621,7 @@ describe('candidate-memory formation', () => {
             birthtime: Option.none(),
             blksize: Option.none(),
             blocks: Option.none(),
-            dev: 0,
+            dev: 0n,
             gid: Option.none(),
             ino: Option.none(),
             mode: 0,

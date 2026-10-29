@@ -136,9 +136,9 @@ export function nativeRequestSchema(input: unknown) {
         : request.topic === 'cycle-review'
           ? {
               semanticPrerequisites: {
-                requiredSelectedLane: nativeCycleOrchestratorLane,
-                requiredCompletedLane: nativeCycleOrchestratorLane,
-                specialistLanes: 'Optional; every selected lane must have a complete report.',
+                requiredSelectedLanes: [nativeCycleOrchestratorLane, 'simplicity'],
+                requiredCompletedLanes: [nativeCycleOrchestratorLane, 'simplicity'],
+                specialistLanes: 'Additional specialist lanes are optional; every selected lane must be complete.',
               },
             }
           : {}),

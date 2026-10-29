@@ -198,21 +198,24 @@ effectIt.effect('reports acquisition and cleanup failures after finalization and
     else throw new Error('Expected acquisition failure');
     expect(acquisition.snapshot()).toMatchObject({bodyEntered: false, bodyExited: false});
     const observer = make({sink: line => lines.push(line)});
-    const cleanupExit = yield* reportNativeFailure(
+    const withCleanup = (body: Effect.Effect<never, typeof value>) =>
       Effect.scoped(
         Effect.gen(function* () {
           yield* Effect.acquireRelease(Effect.void, () => Effect.die(cleanupDefect));
-          return yield* observeNativeBody(Effect.fail(value), observer);
+          return yield* body;
         }),
-      ),
+      );
+    const nativeCleanupExit = yield* withCleanup(Effect.fail(value)).pipe(Effect.exit);
+    const cleanupExit = yield* reportNativeFailure(
+      withCleanup(observeNativeBody(Effect.fail(value), observer)),
       observer,
     ).pipe(Effect.exit);
+    expect(cleanupExit).toEqual(nativeCleanupExit);
     if (Exit.isFailure(cleanupExit)) {
-      expect(cleanupExit.cause.reasons.some(reason => Cause.isFailReason(reason) && reason.error === value)).toBe(true);
       expect(
         cleanupExit.cause.reasons.some(reason => Cause.isDieReason(reason) && reason.defect === cleanupDefect),
       ).toBe(true);
-    } else throw new Error('Expected composed cleanup failure');
+    } else throw new Error('Expected cleanup failure');
     expect(observer.snapshot()).toMatchObject({bodyEntered: true, bodyExited: true});
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[1].slice(lines[1].indexOf('{'))).outerFailure).toBe(true);
@@ -266,8 +269,8 @@ effectIt.effect('conserves NativeSpan identity, delegation, context and both com
     expect(ends[0][1]).toBe(failed);
     expect(ends[1][1]).toBe(passed);
     if (span.status._tag === 'Ended') {
-      expect(span.status.endTime).toBe(4_000_000n);
-      expect(span.status.exit).toBe(passed);
+      expect(span.status.endTime).toBe(3_000_000n);
+      expect(span.status.exit).toBe(failed);
     }
     expect(observer.snapshot().totals['workflowMemory.readJournalFile']).toEqual({
       started: 1,

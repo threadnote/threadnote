@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Clock, Context, Deferred, Effect, Exit, Fiber, Option, Tracer} from 'effect';
+import {Cause, Clock, Context, Deferred, Effect, Exit, Fiber, Option, String as EffectString, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -467,9 +467,11 @@ it('registration diagnostic metadata preserves artifact fields and the original 
     )
       return 0;
     if (key.endsWith('sampler-version-n1')) return 4;
-    if (key.startsWith('production-shape-')) return 100;
-    if (key.endsWith('activation-observed-stages-n1')) return 32;
-    return ratchet.measurements[key]?.minimum ?? 1;
+    if (EffectString.startsWith('production-shape-')(key))
+      return Math.max(100, ratchet.measurements[key]?.minimum ?? 0);
+    if (EffectString.endsWith('activation-observed-stages-n1')(key))
+      return Math.min(32, ratchet.measurements[key]?.maximum ?? 32);
+    return ratchet.measurements[key]?.minimum ?? Math.min(1, ratchet.measurements[key]?.maximum ?? 1);
   };
   const artifact = (commit: string, registration: number, minute: number): BenchmarkArtifactV1 => ({
     version: 1,
@@ -483,9 +485,9 @@ it('registration diagnostic metadata preserves artifact fields and the original 
       dirty: false,
       fixtureHash: String(ratchet.environment.fixtureHash),
       memoryBytes: 16_000_000_000,
-      node: 'bun/1.4.2',
+      node: String(ratchet.environment.node),
       operatingSystem: 'Linux',
-      packageManager: 'bun/1.4.2',
+      packageManager: String(ratchet.environment.packageManager),
       runner: 'threadnote-code-graph-e2e',
       runnerVersion: '1',
     },
@@ -510,6 +512,7 @@ it('registration diagnostic metadata preserves artifact fields and the original 
   const initial = artifact(candidateCommit, 6243.82131, 0);
   const control = artifact(controlCommit, 446.739343, 1);
   const candidate = artifact(candidateCommit, 426.954365, 2);
+  expect(() => enforceCodeGraphBenchmarkRatchet(candidate, ratchet)).not.toThrow();
   const tracing = createBenchmarkRegistrationTracing();
   tracing.begin(0n);
   span(tracing).end(1n, Exit.void);

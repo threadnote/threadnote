@@ -65,7 +65,7 @@ describe('governed large ready-query workflow', () => {
     expect(job['timeout-minutes']).toBe(30);
     expect(checkout?.uses).toBe('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1');
     expect(checkout?.with).toMatchObject({'persist-credentials': false});
-    expect(setupBun?.with).toEqual({'bun-version': '1.4.2'});
+    expect(setupBun?.with).toEqual({'bun-version': '1.4.4'});
     expect(setupBun?.uses).toBe('oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6');
     expect(job.env).toBeUndefined();
     expect(guard?.env).toEqual({

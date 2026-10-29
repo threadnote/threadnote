@@ -1,3 +1,4 @@
+import {Array as EffectArray} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {validateNativeCycleReview, validateNativeCycleReviewHistory} from '../src/cycle_review.js';
@@ -177,14 +178,16 @@ describe('native cycle review validation', () => {
       for (const input of [
         {
           ...valid,
-          selected: valid.selected.filter(name => name !== 'simplicity'),
-          lanes: valid.lanes.filter(lane => lane.name !== 'simplicity'),
+          selected: EffectArray.filter(valid.selected, name => name !== 'simplicity'),
+          lanes: EffectArray.filter(valid.lanes, lane => lane.name !== 'simplicity'),
         },
-        {...valid, lanes: valid.lanes.filter(lane => lane.name !== 'simplicity')},
-        {...valid, selected: valid.selected.filter(name => name !== 'simplicity')},
+        {...valid, lanes: EffectArray.filter(valid.lanes, lane => lane.name !== 'simplicity')},
+        {...valid, selected: EffectArray.filter(valid.selected, name => name !== 'simplicity')},
         {
           ...valid,
-          lanes: valid.lanes.map(lane => (lane.name === 'simplicity' ? {...lane, status: 'running'} : lane)),
+          lanes: EffectArray.map(valid.lanes, lane =>
+            lane.name === 'simplicity' ? {...lane, status: 'running'} : lane,
+          ),
         },
         {...valid, selected: [...valid.selected, 'simplicity']},
         {...valid, lanes: [...valid.lanes, {name: 'simplicity', status: 'complete'}]},
@@ -225,13 +228,13 @@ describe('native cycle review validation', () => {
             ...(orchestratorSelected ? ['orchestrator'] : []),
             ...(simplicitySelected ? ['simplicity'] : []),
           ];
-          const completed = selected.filter(name => name !== 'simplicity');
+          const completed = EffectArray.filter(selected, name => name !== 'simplicity');
           if (simplicityComplete) completed.push('simplicity');
           const input = review(
             {
               mode: incremental ? 'incremental' : 'full',
               selected,
-              lanes: completed.map(name => ({name, status: 'complete'})),
+              lanes: EffectArray.map(completed, name => ({name, status: 'complete'})),
               findings: [],
             },
             current,

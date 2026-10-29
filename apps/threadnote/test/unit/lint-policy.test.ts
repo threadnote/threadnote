@@ -1,3 +1,4 @@
+import {String as EffectString} from 'effect';
 import {fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import {antipattern, correctness, effectNative, style} from '@effect/tsgo/oxlint-presets';
@@ -7,7 +8,14 @@ import {
   isNodeBuiltinSpecifier,
   isNodeEffectPackageSpecifier,
 } from '../../../../config/lint/threadnote-plugin.js';
-import {changedTypeScriptLines, LINT_TARGETS, STRICT_LINT_ARGUMENTS, lint} from '../../../../scripts/lint.js';
+import {
+  changedTypeScriptLines,
+  INCREMENTAL_LINT_RULES,
+  lintDiagnosticApplies,
+  LINT_TARGETS,
+  STRICT_LINT_ARGUMENTS,
+  lint,
+} from '../../../../scripts/lint.js';
 
 const EFFECT_PRESET_PATHS = [
   './node_modules/@effect/tsgo/oxlint-presets/correctness.json',
@@ -16,7 +24,7 @@ const EFFECT_PRESET_PATHS = [
   './node_modules/@effect/tsgo/oxlint-presets/style.json',
 ] as const;
 
-/** Official Effect rules that stay off because they rewrite non-Effect surfaces or default-off mega-channels. */
+/** Explicit application boundaries that cannot use the corresponding Effect API. */
 const EFFECT_APPLICATION_BOUNDARY_RULES = [
   'effecttsgo/any-unknown-in-error-context',
   'effecttsgo/async-function',
@@ -72,10 +80,10 @@ describe('lint policy', () => {
     },
   );
 
-  it('runs one deterministic full-repository pass that rejects every warning', () => {
+  it('runs one deterministic full-repository pass that rejects every warning', async () => {
     const calls: Array<readonly string[]> = [];
     expect(
-      lint(arguments_ => {
+      await lint(arguments_ => {
         calls.push(arguments_);
         return 0;
       }),
@@ -85,6 +93,39 @@ describe('lint policy', () => {
     expect(STRICT_LINT_ARGUMENTS).toContain('--deny-warnings');
     expect(STRICT_LINT_ARGUMENTS).toContain('--report-unused-disable-directives-severity=error');
   });
+
+  it('keeps existing debt separate while enforcing every new-file and unrelated-rule diagnostic', () => {
+    const diagnostic = {
+      code: 'effecttsgo(prefer-effect-array)',
+      filename: 'scripts/example.ts',
+      labels: [{span: {line: 3, column: 1}}],
+    };
+    expect(lintDiagnosticApplies(diagnostic, new Map())).toBe(false);
+    expect(lintDiagnosticApplies(diagnostic, new Map([[diagnostic.filename, new Set([2])]]))).toBe(false);
+    expect(lintDiagnosticApplies(diagnostic, new Map([[diagnostic.filename, new Set([3])]]))).toBe(true);
+    expect(lintDiagnosticApplies(diagnostic, new Map([[diagnostic.filename, new Set()]]))).toBe(true);
+    expect(lintDiagnosticApplies({...diagnostic, code: 'effecttsgo(floating-effect)'}, new Map())).toBe(true);
+    expect(lintDiagnosticApplies({...diagnostic, code: undefined}, new Map())).toBe(true);
+  });
+
+  fcProp(
+    it,
+    'enforces incremental diagnostics exactly on changed lines',
+    {
+      rule: FC.constantFrom(...INCREMENTAL_LINT_RULES),
+      line: FC.integer({min: 1, max: 200}),
+      lines: FC.uniqueArray(FC.integer({min: 1, max: 200}), {minLength: 1, maxLength: 30}),
+    },
+    ({rule, line, lines}) => {
+      const changed = new Set(lines);
+      expect(
+        lintDiagnosticApplies(
+          {code: rule, filename: 'example.ts', labels: [{span: {line, column: 1}}]},
+          new Map([['example.ts', changed]]),
+        ),
+      ).toBe(changed.has(line));
+    },
+  );
 
   it('runs lint first from the Bun pre-commit hook', async () => {
     const hook = await Bun.file(new URL('../../../../.husky/pre-commit', import.meta.url)).text();
@@ -110,6 +151,21 @@ describe('lint policy', () => {
     );
     expect([...(changed.get('src/example.ts') ?? [])]).toEqual([5, 6]);
   });
+
+  it.each(['packages/example/λ.ts', 'packages/example/a b.ts', 'packages/example/a\tb.ts'])(
+    'enforces diagnostics on Git paths with Unicode, spaces or quoted controls: %s',
+    path => {
+      const header = EffectString.includes('\t')(path) ? JSON.stringify(`b/${path}`) : `b/${path}`;
+      const changed = changedTypeScriptLines(`+++ ${header}\n@@ -0,0 +1 @@\n+added();`);
+      expect(changed.get(path)).toEqual(new Set([1]));
+      expect(
+        lintDiagnosticApplies(
+          {code: 'effecttsgo(prefer-effect-array)', filename: path, labels: [{span: {line: 1, column: 1}}]},
+          changed,
+        ),
+      ).toBe(true);
+    },
+  );
 
   fcProp(it, 'recognizes every explicit node: import as Node-specific', {specifier: FC.string()}, ({specifier}) => {
     expect(isNodeBuiltinSpecifier(`node:${specifier}`)).toBe(true);

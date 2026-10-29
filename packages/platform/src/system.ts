@@ -338,12 +338,14 @@ export function runtimeStat(path: string): Promise<RuntimeBigIntStats> {
 }
 
 export function resolveFileSystemIdentity(
-  dev: number,
-  ino: Option.Option<number>,
+  dev: number | bigint,
+  ino: Option.Option<number | bigint>,
   exact?: FileSystemIdentity,
 ): Option.Option<FileSystemIdentity> {
   const observedIno = Option.getOrUndefined(ino);
-  return Number.isSafeInteger(dev) && observedIno !== undefined && Number.isSafeInteger(observedIno)
+  return (typeof dev === 'bigint' || Number.isSafeInteger(dev)) &&
+    observedIno !== undefined &&
+    (typeof observedIno === 'bigint' || Number.isSafeInteger(observedIno))
     ? Option.some({dev: BigInt(dev), ino: BigInt(observedIno)})
     : Option.fromNullishOr(exact);
 }
@@ -407,10 +409,7 @@ export function readOpenedFileSystemIdentity(
 
 function exactIdentityCoheres(info: FileSystem.File.Info, exact: FileSystemIdentity): boolean {
   const observedIno = Option.getOrUndefined(info.ino);
-  return (
-    (!Number.isSafeInteger(info.dev) || exact.dev === BigInt(info.dev)) &&
-    (observedIno === undefined || !Number.isSafeInteger(observedIno) || exact.ino === BigInt(observedIno))
-  );
+  return exact.dev === info.dev && (observedIno === undefined || exact.ino === observedIno);
 }
 
 function readRuntimePathIdentity(

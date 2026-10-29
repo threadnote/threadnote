@@ -1,3 +1,4 @@
+import {Array, Schema, String} from 'effect';
 import {ScriptError} from './effect/errors.js';
 
 export const LINT_TARGETS = ['config/lint', 'scripts', 'packages', 'apps', 'tools', 'infra'] as const;
@@ -20,8 +21,12 @@ export function changedTypeScriptLines(diff: string): ReadonlyMap<string, Readon
   let path: string | undefined;
   let line = 0;
   for (const diffLine of diff.split('\n')) {
-    if (diffLine.startsWith('+++ b/')) {
-      path = diffLine.slice('+++ b/'.length);
+    if (String.startsWith('+++ ')(diffLine)) {
+      const header = String.slice(4)(diffLine);
+      const filename = String.startsWith('"')(header)
+        ? Schema.decodeSync(Schema.fromJsonString(Schema.String))(header)
+        : header;
+      path = String.startsWith('b/')(filename) ? String.slice(2)(filename) : undefined;
       continue;
     }
     const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/u.exec(diffLine);
@@ -42,66 +47,125 @@ export function changedTypeScriptLines(diff: string): ReadonlyMap<string, Readon
   return changed;
 }
 
-function gitOutput(arguments_: readonly string[]): string | undefined {
-  const child = Bun.spawnSync({cmd: ['git', ...arguments_], stderr: 'ignore', stdout: 'pipe'});
-  return child.exitCode === 0 ? new TextDecoder().decode(child.stdout) : undefined;
+async function gitOutput(arguments_: readonly string[]): Promise<string | undefined> {
+  const child = Bun.spawn({cmd: ['git', ...arguments_], stderr: 'ignore', stdout: 'pipe'});
+  const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+  return exitCode === 0 ? stdout : undefined;
 }
 
-function unsafeTypeAssertionDiagnostics(changed: ReadonlyMap<string, ReadonlySet<number>>): readonly string[] {
-  if (changed.size === 0) return [];
-  const child = Bun.spawnSync({
-    cmd: [
-      'bun',
-      '--bun',
-      'oxlint',
-      ...STRICT_LINT_ARGUMENTS,
-      '-D',
-      UNSAFE_TYPE_ASSERTION_RULE,
-      '--format',
-      'unix',
-      ...changed.keys(),
-    ],
-    stderr: 'pipe',
-    stdout: 'pipe',
-  });
-  const output = `${new TextDecoder().decode(child.stdout)}${new TextDecoder().decode(child.stderr)}`;
-  return output.split('\n').filter(diagnostic => {
-    const match = /^(.*):(\d+):(\d+): error typescript\(no-unsafe-type-assertion\):/u.exec(diagnostic);
-    if (!match) return false;
-    return changed.get(match[1])?.has(Number(match[2])) === true;
-  });
+export const INCREMENTAL_LINT_RULES = new Set([
+  'effecttsgo(map-map-error-to-map-both)',
+  'effecttsgo(prefer-effect-array)',
+  'effecttsgo(prefer-effect-record)',
+  'effecttsgo(prefer-effect-string)',
+  'effecttsgo(prefer-schema-tagged-error)',
+  'effecttsgo(schema-class-missing-brand)',
+  'typescript(no-unsafe-type-assertion)',
+]);
+
+const LintDiagnostic = Schema.Struct({
+  code: Schema.optionalKey(Schema.String),
+  filename: Schema.String,
+  message: Schema.String,
+  severity: Schema.String,
+  labels: Schema.Array(Schema.Struct({span: Schema.Struct({line: Schema.Int, column: Schema.Int})})),
+});
+type LintDiagnostic = typeof LintDiagnostic.Type;
+
+/** Existing violations of the incremental rules remain visible to editors; added lines must pass. */
+export function lintDiagnosticApplies(
+  diagnostic: Pick<LintDiagnostic, 'code' | 'filename' | 'labels'>,
+  changed: ReadonlyMap<string, ReadonlySet<number>>,
+): boolean {
+  return (
+    diagnostic.code === undefined ||
+    !INCREMENTAL_LINT_RULES.has(diagnostic.code) ||
+    changed.get(diagnostic.filename)?.size === 0 ||
+    Array.some(diagnostic.labels, label => changed.get(diagnostic.filename)?.has(label.span.line) === true)
+  );
 }
 
-/** Reject unsafe type assertions on every new or modified TypeScript source line. */
-export function lintUnsafeTypeAssertions(): number {
-  const base = gitOutput(['merge-base', 'HEAD', 'origin/main']) ?? gitOutput(['rev-parse', 'HEAD']);
-  if (!base) return 0;
-  const diff = gitOutput(['diff', '--no-ext-diff', '--unified=0', base, '--', ...LINT_TARGETS]);
-  if (diff === undefined) return 0;
-  const diagnostics = unsafeTypeAssertionDiagnostics(changedTypeScriptLines(diff));
-  if (diagnostics.length === 0) return 0;
-  process.stderr.write(`${diagnostics.join('\n')}\n`);
-  return 1;
+async function changedSourceLines(): Promise<ReadonlyMap<string, ReadonlySet<number>>> {
+  const base = await gitOutput(['merge-base', 'HEAD', `origin/${process.env.GITHUB_BASE_REF ?? 'main'}`]);
+  if (!base) throw ScriptError.make({message: 'Cannot resolve the lint base; fetch the target branch before linting.'});
+  const [diff, untracked] = await Promise.all([
+    gitOutput([
+      '-c',
+      'core.quotepath=false',
+      'diff',
+      '--no-ext-diff',
+      '--unified=0',
+      String.trim(base),
+      '--',
+      ...LINT_TARGETS,
+    ]),
+    gitOutput(['ls-files', '-z', '--others', '--exclude-standard', '--', ...LINT_TARGETS]),
+  ]);
+  if (diff === undefined || untracked === undefined) throw ScriptError.make({message: 'Cannot read the lint diff.'});
+  const changed = new Map(changedTypeScriptLines(diff));
+  for (const path of String.split(untracked, '\0')) {
+    if (!TYPE_SCRIPT_SOURCE.test(path)) continue;
+    // A missing map entry denotes an unchanged file; the empty set marks a wholly new file.
+    changed.set(path, new Set());
+  }
+  return changed;
 }
 
-function runOxlint(arguments_: readonly string[]): number {
-  const child = Bun.spawnSync({
-    cmd: ['bun', '--bun', 'oxlint', ...arguments_],
-    stderr: 'inherit',
-    stdout: 'inherit',
-  });
-  return child.exitCode;
+async function runOxlint(arguments_: readonly string[]): Promise<number> {
+  const changed = await changedSourceLines();
+  // Oxlint's native reporter truncates large writes to Bun pipes; a regular file retains the complete report.
+  const reportFile = Bun.file(new URL(`../.context/lint-${Bun.randomUUIDv7()}.json`, import.meta.url));
+  let exitCode: number;
+  let stdout: string;
+  let stderr: string;
+  try {
+    await Bun.write(reportFile, '');
+    const child = Bun.spawn({
+      cmd: [
+        process.execPath,
+        'node_modules/oxlint/bin/oxlint',
+        ...arguments_,
+        '-D',
+        UNSAFE_TYPE_ASSERTION_RULE,
+        '--format',
+        'json',
+        ...(Array.contains(process.argv, '--fix') ? ['--fix'] : []),
+      ],
+      stderr: 'pipe',
+      stdout: reportFile,
+    });
+    [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    stdout = await reportFile.text();
+  } finally {
+    await reportFile.delete();
+  }
+  if (stderr.length > 0) {
+    process.stderr.write(stderr);
+    return exitCode || 1;
+  }
+  const report = Schema.decodeSync(Schema.fromJsonString(Schema.Struct({diagnostics: Schema.Array(LintDiagnostic)})))(
+    stdout,
+  );
+  const diagnostics = Array.filter(report.diagnostics, diagnostic => lintDiagnosticApplies(diagnostic, changed));
+  for (const diagnostic of diagnostics) {
+    const position = diagnostic.labels[0]?.span;
+    process.stderr.write(
+      `${diagnostic.filename}:${position?.line ?? 1}:${position?.column ?? 1}: ${diagnostic.message} [${diagnostic.severity}/${diagnostic.code ?? 'unknown'}]\n`,
+    );
+  }
+  return diagnostics.length > 0 ? 1 : exitCode !== 0 && report.diagnostics.length === 0 ? exitCode : 0;
 }
 
-/** Run one deterministic, full-repository lint policy with no warning-only grandfathering. */
-export function lint(execute: (arguments_: readonly string[]) => number = runOxlint): number {
-  const lintExitCode = execute([...STRICT_LINT_ARGUMENTS, ...LINT_TARGETS]);
-  return lintExitCode === 0 ? lintUnsafeTypeAssertions() : lintExitCode;
+/** One full pass; only the six newly adopted rules and unsafe assertions are limited to added lines. */
+export async function lint(
+  execute: (arguments_: readonly string[]) => number | Promise<number> = runOxlint,
+): Promise<number> {
+  return execute([...STRICT_LINT_ARGUMENTS, ...LINT_TARGETS]);
 }
 
 if (import.meta.main) {
   try {
-    process.exitCode = lint();
+    process.exitCode = await lint();
   } catch (cause) {
     throw ScriptError.make({message: 'Could not run the repository lint policy.', cause});
   }

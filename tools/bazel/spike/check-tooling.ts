@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 
 const execute = (args: string[]) => Bun.spawnSync([process.execPath, ...args], {stdout: 'pipe', stderr: 'pipe'});
-const typescript = execute(['node_modules/typescript/bin/tsc', '--noEmit', '-p', 'tools/bazel/spike/tsconfig.json']);
+const typescript = execute(['check', '-p', 'tools/bazel/spike/tsconfig.json']);
 assert.equal(typescript.exitCode, 0, typescript.stderr.toString() + typescript.stdout.toString());
 
 const diagnostics = execute([
@@ -33,4 +33,4 @@ assert.deepEqual(
   readFileSync(`node_modules/@oxlint-tsgolint/${platform}/tsgolint`),
   readFileSync(`${artifact}/oxlint-tsgolint/${tsgolintPackage.version}/tsgolint`),
 );
-process.stdout.write('TypeScript, Effect diagnostics, and patched Oxlint execute under Bazel.\n');
+process.stdout.write('Bun check, Effect diagnostics, and patched Oxlint execute under Bazel.\n');

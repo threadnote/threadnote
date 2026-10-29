@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  BUN_VERSION: 1.4.2
+  BUN_VERSION: 1.4.4
 
 jobs:
   # Registered CI can dispatch a branch's same-commit manual tier before the new workflow reaches default.

@@ -209,10 +209,10 @@ const writeAutomaticCompactionReceipt = Effect.fn('codeGraph.writeAutomaticCompa
 });
 
 interface AutomaticCompactionReceiptRoot {
-  readonly dev: number;
-  readonly ino?: number;
-  readonly parentDev: number;
-  readonly parentIno?: number;
+  readonly dev: bigint;
+  readonly ino?: bigint;
+  readonly parentDev: bigint;
+  readonly parentIno?: bigint;
   readonly root: string;
 }
 

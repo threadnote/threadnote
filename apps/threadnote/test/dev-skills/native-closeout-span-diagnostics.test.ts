@@ -87,18 +87,20 @@ effectIt.effect('preserves native parent objects through unknown spans and retur
   }),
 );
 
-effectIt.effect('delegates exact native timestamps and Exit identities on every end call, counting once', () =>
+effectIt.effect('preserves native timestamps, Exit identities and repeated end semantics, counting once', () =>
   Effect.sync(() => {
     const observer = closeoutSpanDiagnostics(() => 0);
     const parent = observer.tracer.span(options('private.parent'));
     const spanOptions = options('workflowMemory.persistState', Option.some(parent));
     const span = observer.tracer.span(spanOptions);
+    const native = new Tracer.NativeSpan(spanOptions);
     expect(span).toBeInstanceOf(Tracer.NativeSpan);
     expect(span.parent).toBe(spanOptions.parent);
     expect(span.annotations).toBe(spanOptions.annotations);
     expect(span.links).toBe(spanOptions.links);
     const failure = Exit.fail({private: 'must not appear'});
     span.end(3_000_000n, failure);
+    native.end(3_000_000n, failure);
     expect(span.status).toEqual({
       _tag: 'Ended',
       startTime: spanOptions.startTime,
@@ -108,10 +110,9 @@ effectIt.effect('delegates exact native timestamps and Exit identities on every 
     if (span.status._tag === 'Ended') expect(span.status.exit).toBe(failure);
     const repeated = Exit.succeed({private: 'must not appear'});
     span.end(4_000_000n, repeated);
-    if (span.status._tag === 'Ended') {
-      expect(span.status.endTime).toBe(4_000_000n);
-      expect(span.status.exit).toBe(repeated);
-    }
+    native.end(4_000_000n, repeated);
+    expect(span.status).toEqual(native.status);
+    if (span.status._tag === 'Ended') expect(span.status.exit).toBe(failure);
     expect(observer.snapshot().totals['workflowMemory.persistState']).toEqual({
       started: 1,
       ended: 1,

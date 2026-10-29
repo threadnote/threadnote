@@ -20,7 +20,7 @@ jobs:
     name: Publish complete immutable release
     runs-on: ubuntu-latest
     env:
-      BUN_VERSION: 1.4.2
+      BUN_VERSION: 1.4.4
     permissions:
       contents: write
 

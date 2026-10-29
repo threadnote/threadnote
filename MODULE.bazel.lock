@@ -216,7 +216,7 @@
   "moduleExtensions": {
     "//tools/bazel:repositories.bzl%bun": {
       "os:osx,arch:aarch64": {
-        "bzlTransitiveDigest": "tZ8aX22NhvYtjfnUIoK17Bld1ZOWWaxkND5VoWIl5S4=",
+        "bzlTransitiveDigest": "mxC+KSulpuk/VKXwdtUtBJvOpKR8j2pDSNw2Bj5uncw=",
         "usagesDigest": "QFBoaLRhAkMAjwWKsjz/s6SlwG0OlTD1fKW9faHId8E=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
