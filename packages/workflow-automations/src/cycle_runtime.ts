@@ -6,7 +6,7 @@ import {
   decodeNativeCycleState,
   nativeCyclePhaseHash,
 } from './cycle.js';
-import {NativeCycleSnapshotSchema, NativeCycleReviewSchema, validateNativeCycleReview} from './cycle_review.js';
+import {NativeCycleSnapshotSchema, NativeCycleReviewSchema, validateNativeCycleReviewHistory} from './cycle_review.js';
 import {WorkflowAutomationError} from './contracts.js';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
@@ -155,7 +155,7 @@ export function decodeNativeCycleRuntime(input: unknown): NativeCycleRuntime {
     const previous = predecessor ? snapshots.get(predecessor)?.snapshot : undefined;
     const priorReport = previous ? reviews.get(previous.snapshotId) : undefined;
     if (previous && !priorReport) fail('Review history lost its prior finding ledger.');
-    validateNativeCycleReview(
+    validateNativeCycleReviewHistory(
       snapshot,
       report,
       previous && priorReport ? {snapshot: previous, review: priorReport} : undefined,

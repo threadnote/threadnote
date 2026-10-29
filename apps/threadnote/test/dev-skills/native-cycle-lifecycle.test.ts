@@ -1,4 +1,4 @@
-import {Context, Effect, FileSystem, Result} from 'effect';
+import {Array as EffectArray, String as EffectString, Context, Effect, FileSystem, Result} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -311,8 +311,11 @@ const reviewed = Effect.fn('test.nativeCycle.reviewed')(function* () {
     snapshotTree: snapshot.tree,
     status: 'complete',
     mode: 'full',
-    selected: ['orchestrator'],
-    lanes: [{name: 'orchestrator', status: 'complete'}],
+    selected: ['orchestrator', 'simplicity'],
+    lanes: [
+      {name: 'orchestrator', status: 'complete'},
+      {name: 'simplicity', status: 'complete'},
+    ],
     findings: [],
   };
   return {...f, snapshot, report};
@@ -347,8 +350,11 @@ const completeLocalPhase = Effect.fn('test.nativeCycle.completeLocalPhase')(func
       snapshotTree: snapshot.tree,
       status: 'complete',
       mode: snapshot.previous ? 'incremental' : 'full',
-      selected: ['orchestrator'],
-      lanes: [{name: 'orchestrator', status: 'complete'}],
+      selected: ['orchestrator', 'simplicity'],
+      lanes: [
+        {name: 'orchestrator', status: 'complete'},
+        {name: 'simplicity', status: 'complete'},
+      ],
       findings: [],
     },
   });
@@ -381,6 +387,37 @@ const completeLocalPhase = Effect.fn('test.nativeCycle.completeLocalPhase')(func
 });
 
 describe('native cycle lifecycle', () => {
+  effectIt.effect('decodes an immutable legacy review while refusing its current submission', () =>
+    Effect.gen(function* () {
+      const f = yield* reviewed();
+      const legacy = {
+        ...f.report,
+        selected: ['orchestrator'],
+        lanes: [{name: 'orchestrator', status: 'complete'}],
+      };
+      const bytes = JSON.stringify(legacy);
+      const runtime = JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle;
+      const stored = {...runtime, reviews: [{snapshotId: f.snapshot.snapshotId, report: legacy}]};
+      expect(decodeNativeCycleRuntime(stored).reviews[0].report).toEqual(legacy);
+      expect(JSON.stringify(legacy)).toBe(bytes);
+      expect(() =>
+        decodeNativeCycleRuntime({
+          ...stored,
+          reviews: [{snapshotId: f.snapshot.snapshotId, report: {...legacy, lanes: []}}],
+        }),
+      ).toThrow();
+      expect(
+        yield* f.mutate('validate-review', {
+          snapshotId: f.snapshot.snapshotId,
+          attemptId: 'legacy-current-rejected',
+          report: legacy,
+        }),
+      ).toMatchObject({status: 'error', code: 'invalid-cycle-review'});
+      expect(
+        yield* f.mutate('ready', {phaseId: 'one', snapshotId: f.snapshot.snapshotId}).pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'review-pending'}});
+    }).pipe(run),
+  );
   effectIt.effect('keeps stable-base incremental patch detail limited to the new source delta', () =>
     Effect.gen(function* () {
       const f = yield* reviewed();
@@ -429,8 +466,11 @@ describe('native cycle lifecycle', () => {
           snapshotTree: first.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator'],
-          lanes: [{name: 'orchestrator', status: 'complete'}],
+          selected: ['orchestrator', 'simplicity'],
+          lanes: [
+            {name: 'orchestrator', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
           findings: [],
         },
       });
@@ -549,8 +589,11 @@ describe('native cycle lifecycle', () => {
           snapshotTree: snapshot.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator'],
-          lanes: [{name: 'orchestrator', status: 'complete'}],
+          selected: ['orchestrator', 'simplicity'],
+          lanes: [
+            {name: 'orchestrator', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
           findings: [],
         },
       });
@@ -697,6 +740,279 @@ describe('native cycle lifecycle', () => {
       expect(
         yield* f.mutate('ready', {phaseId: 'one', snapshotId: restarted.snapshotId}).pipe(Effect.result),
       ).toMatchObject({failure: {code: 'review-blocked'}});
+    }).pipe(run),
+  );
+
+  effectIt.effect(
+    'recovers an amended phase from its last accepted ledger while retaining an unreviewed snapshot',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* reviewed();
+        const finding = {
+          id: 'amendment-blocker',
+          file: 'source.ts',
+          line: 1,
+          body: 'The accepted review still has an important defect.',
+          trigger: 'Use the fixture source.',
+          impact: 'The incomplete behavior remains reachable.',
+          evidence: 'The fixture has not repaired the accepted finding.',
+          severity: 'important',
+          category: 'correctness',
+          confidence: 99,
+          state: 'new',
+        };
+        yield* f.mutate('validate-review', {
+          snapshotId: f.snapshot.snapshotId,
+          attemptId: 'amendment-first',
+          report: {...f.report, findings: [finding]},
+        });
+        const ledger = object(
+          object(
+            (yield* f.mutate('snapshot', {
+              phaseId: 'one',
+              snapshotId: 'accepted-ledger',
+              previous: f.snapshot.snapshotId,
+            })).snapshot,
+          ).snapshot,
+        );
+        yield* f.mutate('validate-review', {
+          snapshotId: ledger.snapshotId,
+          attemptId: 'amendment-ledger',
+          report: {
+            ...f.report,
+            snapshotId: ledger.snapshotId,
+            snapshotTree: ledger.tree,
+            mode: 'incremental',
+            findings: [{...finding, state: 'carried'}],
+          },
+        });
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "unreviewed";\n');
+        const unreviewed = object(
+          object(
+            (yield* f.mutate('snapshot', {
+              phaseId: 'one',
+              snapshotId: 'unreviewed-before-amendment',
+              previous: ledger.snapshotId,
+            })).snapshot,
+          ).snapshot,
+        );
+        expect(
+          yield* f
+            .mutate('snapshot', {
+              phaseId: 'one',
+              snapshotId: 'same-contract-skip',
+              previous: ledger.snapshotId,
+              reason: 'An explanation cannot waive the same-contract review.',
+            })
+            .pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'review-history'}});
+        const before = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+        const plan = yield* f.revise({
+          phases: EffectArray.map(f.document.phases, phase =>
+            phase.id === 'one'
+              ? {...phase, outcome: 'The approved material amendment requires a full current review.'}
+              : phase,
+          ),
+        });
+        const oldReport = {
+          ...f.report,
+          snapshotId: unreviewed.snapshotId,
+          snapshotTree: unreviewed.tree,
+          mode: 'incremental',
+          findings: [{...finding, state: 'carried'}],
+        };
+        expect(
+          yield* f
+            .mutate('validate-review', {
+              snapshotId: unreviewed.snapshotId,
+              attemptId: 'historical-must-not-be-admitted',
+              report: oldReport,
+            })
+            .pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'plan-drift'}});
+        yield* f.mutate('reconcile', {plan, reason: 'Approved material amendment after the external source review.'});
+        yield* f.mutate('resume-phase', {
+          phaseId: 'one',
+          reason: 'Capture current amended work without inventing old review evidence.',
+        });
+        expect(
+          yield* f
+            .mutate('validate-review', {
+              snapshotId: unreviewed.snapshotId,
+              attemptId: 'historical-still-stale',
+              report: oldReport,
+            })
+            .pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'review-stale'}});
+        expect(
+          yield* f
+            .mutate('snapshot', {
+              phaseId: 'one',
+              snapshotId: 'still-needs-report',
+              previous: unreviewed.snapshotId,
+            })
+            .pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'review-pending'}});
+        const untouched = yield* f.fs.readFileString(f.statePath());
+        for (const fields of [
+          {previous: f.snapshot.snapshotId, reason: 'Do not skip the later accepted ledger.'},
+          {previous: ledger.snapshotId},
+          {previous: ledger.snapshotId, reason: '  '},
+          {previous: 'missing-predecessor', reason: 'A missing predecessor is not accepted evidence.'},
+        ]) {
+          expect(
+            yield* f
+              .mutate('snapshot', {
+                phaseId: 'one',
+                snapshotId: 'invalid-amendment-recovery',
+                ...fields,
+              })
+              .pipe(Effect.result),
+          ).toMatchObject({failure: {code: 'review-history'}});
+          expect(yield* f.fs.readFileString(f.statePath())).toBe(untouched);
+        }
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "current amended";\n');
+        yield* f.git(['add', 'source.ts']);
+        yield* f.git(['commit', '-m', 'Current amended source']);
+        const head = EffectString.trim((yield* f.git(['rev-parse', 'HEAD'])).stdout);
+        const recovery = {
+          phaseId: 'one',
+          snapshotId: 'current-full-recovery',
+          previous: ledger.snapshotId,
+          reason: 'Supersede only unreviewed snapshots invalidated by the approved material amendment.',
+        };
+        expect(yield* f.mutate('snapshot', recovery).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'head-drift'},
+        });
+        const current = object(
+          object((yield* f.mutate('snapshot', {...recovery, acceptedHead: head})).snapshot).snapshot,
+        );
+        expect(current).toMatchObject({supersedes: ledger.snapshotId, head, baseTree: ledger.baseTree});
+        expect(current.previous).toBeUndefined();
+        const after = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
+        expect(after.baselines).toEqual(before.baselines);
+        expect(after.snapshots.slice(0, before.snapshots.length)).toEqual(before.snapshots);
+        expect(after.reviews).toEqual(before.reviews);
+        expect(after.attempts).toEqual(before.attempts);
+        expect(EffectArray.some(after.reviews, item => item.snapshotId === unreviewed.snapshotId)).toBe(false);
+        const report = {
+          ...f.report,
+          snapshotId: current.snapshotId,
+          phaseHash: current.phaseHash,
+          snapshotTree: current.tree,
+          mode: 'full',
+        };
+        expect(
+          yield* f.mutate('validate-review', {
+            snapshotId: current.snapshotId,
+            attemptId: 'recovery-missing-blocker',
+            report,
+          }),
+        ).toMatchObject({status: 'error', code: 'invalid-cycle-review'});
+        expect(
+          yield* f.mutate('validate-review', {
+            snapshotId: current.snapshotId,
+            attemptId: 'recovery-missing-simplicity',
+            report: {
+              ...report,
+              selected: ['orchestrator'],
+              lanes: [{name: 'orchestrator', status: 'complete'}],
+              findings: [{...finding, state: 'carried'}],
+            },
+          }),
+        ).toMatchObject({status: 'error', code: 'invalid-cycle-review'});
+        const carried = {
+          snapshotId: current.snapshotId,
+          attemptId: 'recovery-full-report',
+          report: {...report, findings: [{...finding, state: 'carried'}]},
+        };
+        expect(yield* f.mutate('validate-review', carried).pipe(Effect.result)).toMatchObject({
+          failure: {code: 'review-failed'},
+        });
+        expect(
+          yield* f.mutate('validate-review', {
+            ...carried,
+            userAuthority:
+              'The private fixture authorizes this corrected full report after two retained invalid attempts.',
+          }),
+        ).toMatchObject({status: 'ok'});
+        expect(
+          yield* f.mutate('ready', {phaseId: 'one', snapshotId: current.snapshotId}).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'review-blocked'}});
+        yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const fixture = "later drift";\n');
+        expect(
+          yield* f.mutate('ready', {phaseId: 'one', snapshotId: current.snapshotId}).pipe(Effect.result),
+        ).toMatchObject({failure: {code: 'source-drift'}});
+      }).pipe(run),
+  );
+
+  effectIt.effect('does not bypass an unreviewed snapshot when the accepted ledger matches the current contract', () =>
+    Effect.gen(function* () {
+      const f = yield* reviewed();
+      yield* f.mutate('validate-review', {
+        snapshotId: f.snapshot.snapshotId,
+        attemptId: 'original-contract',
+        report: f.report,
+      });
+      const amended = yield* f.revise({
+        phases: EffectArray.map(f.document.phases, phase =>
+          phase.id === 'one' ? {...phase, outcome: 'Temporary approved material amendment.'} : phase,
+        ),
+      });
+      yield* f.mutate('reconcile', {plan: amended, reason: 'Inspect the temporary approved contract.'});
+      yield* f.mutate('resume-phase', {phaseId: 'one', reason: 'Capture the temporary contract.'});
+      yield* f.mutate('snapshot', {
+        phaseId: 'one',
+        snapshotId: 'unreviewed-temporary-contract',
+        previous: f.snapshot.snapshotId,
+      });
+      const root = object(object(amended.source).root);
+      const saved = object(
+        object(
+          yield* f.call({
+            ...f.base('authoring'),
+            command: 'save',
+            document: f.document,
+            ready: true,
+            uri: root.uri,
+            expectedRevision: root.revision,
+          }),
+        ).authoring,
+      );
+      const restored = object(
+        object(
+          yield* f.call({
+            ...f.base('authoring'),
+            command: 'export-dev-cycle',
+            uri: object(saved.root).uri,
+            delivery: 'pr',
+            bindings: {
+              one: {branch: 'feature/one', baseBranch: 'main'},
+              two: {branch: 'feature/two', baseBranch: 'feature/one'},
+            },
+          }),
+        ).authoring,
+      );
+      yield* f.mutate('reconcile', {
+        plan: restored,
+        reason: 'Restore the original material contract through a newly saved root.',
+      });
+      yield* f.mutate('resume-phase', {
+        phaseId: 'one',
+        reason: 'The restored contract still requires its latest snapshot review.',
+      });
+      const before = yield* f.fs.readFileString(f.statePath());
+      expect(
+        yield* f
+          .mutate('snapshot', {
+            phaseId: 'one',
+            snapshotId: 'invalid-same-ledger-contract',
+            previous: f.snapshot.snapshotId,
+            reason: 'Material differences in an intervening snapshot are insufficient.',
+          })
+          .pipe(Effect.result),
+      ).toMatchObject({failure: {code: 'review-history'}});
+      expect(yield* f.fs.readFileString(f.statePath())).toBe(before);
     }).pipe(run),
   );
 
@@ -866,8 +1182,11 @@ describe('native cycle lifecycle', () => {
             snapshotTree: snapshot.tree,
             status: 'complete',
             mode: previous ? 'incremental' : 'full',
-            selected: ['orchestrator'],
-            lanes: [{name: 'orchestrator', status: 'complete'}],
+            selected: ['orchestrator', 'simplicity'],
+            lanes: [
+              {name: 'orchestrator', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
             findings: [],
           },
         };
@@ -1271,8 +1590,11 @@ effectIt.effect(
             snapshotTree: snapshot.tree,
             status: 'complete',
             mode: 'full',
-            selected: ['orchestrator'],
-            lanes: [{name: 'orchestrator', status: 'complete'}],
+            selected: ['orchestrator', 'simplicity'],
+            lanes: [
+              {name: 'orchestrator', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
             findings: [],
           },
         })).status,

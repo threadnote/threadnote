@@ -101,6 +101,23 @@ it.effect('dispatches bounded cycle discovery and exact read checks through a re
         const inspected = yield* cycle('inspect');
         return yield* cycle(command, {expectedRevision: inspected.revision, ...fields});
       });
+    const reviewSchema = yield* f.call({
+      protocolVersion: 1,
+      executorVersion: 1,
+      action: 'request-schema',
+      topic: 'cycle-review',
+      maxBytes: 4096,
+    });
+    expect(reviewSchema).toMatchObject({
+      schemaKind: 'decoding-envelope',
+      runtimeValidationRequired: true,
+      semanticPrerequisites: {
+        requiredSelectedLanes: ['orchestrator', 'simplicity'],
+        requiredCompletedLanes: ['orchestrator', 'simplicity'],
+        specialistLanes: expect.stringContaining('optional'),
+      },
+    });
+    expect(new TextEncoder().encode(JSON.stringify(reviewSchema)).byteLength).toBeLessThanOrEqual(4096);
     const schema = yield* cycle('schema', {maxBytes: 8192});
     let schemaPage = object(schema.schemaPage);
     const schemaDigest = schemaPage.sourceDigest;
@@ -159,8 +176,11 @@ it.effect('dispatches bounded cycle discovery and exact read checks through a re
           snapshotTree: snapshot.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator'],
-          lanes: [{name: 'orchestrator', status: 'complete'}],
+          selected: ['orchestrator', 'simplicity'],
+          lanes: [
+            {name: 'orchestrator', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
           findings: [],
         },
       }),

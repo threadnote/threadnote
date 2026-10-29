@@ -3,6 +3,7 @@
  * Cloud acceptance uses actual bootstrap/publication against private bare Git.
  */
 import assert from 'node:assert/strict';
+import {String as EffectString} from 'effect';
 // Bun 1.4.2 compile cannot bundle the testing builtin export-star wrappers.
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- Independent checksum boundary in the compiled release controller.
 import {createHash} from 'node:crypto';
@@ -703,7 +704,12 @@ function runProfile(
     process.stderr.write(`NATIVE_PUBLICATION_DIAGNOSTICS ${marker}\n`);
     return diagnosticPath;
   }
-  function call(request: Json, expectedCode?: string): Json {
+  function call(
+    request: Json,
+    expectedCode?: string,
+    allowedStatuses: readonly string[] = ['ok'],
+    maxBytes?: number,
+  ): Json {
     const capture = request.action === 'closeout' && request.command === 'finish';
     delete environment.THREADNOTE_RELEASE_PUBLICATION_TRACE;
     let stdout = '',
@@ -754,6 +760,17 @@ function runProfile(
     } finally {
       delete environment.THREADNOTE_RELEASE_PUBLICATION_TRACE;
     }
+    if (maxBytes !== undefined && Buffer.byteLength(stdout, 'utf8') > maxBytes) {
+      records.push({
+        action: request.action ?? null,
+        command: request.command ?? null,
+        returncode: status,
+        status: 'response-too-large',
+        code: null,
+      });
+      save(join(fixture, 'receipts.json'), records);
+      throw new Error(`CLI response exceeded ${maxBytes} bytes for ${request.action}.`);
+    }
     let value: Json;
     try {
       value = JSON.parse(stdout);
@@ -773,7 +790,7 @@ function runProfile(
       assert(status !== 0 && value.code === expectedCode, JSON.stringify(value));
       return value;
     }
-    if (status !== 0 || !object(value) || value.status !== 'ok') {
+    if (status !== 0 || !object(value) || !allowedStatuses.includes(value.status)) {
       if (capture) {
         try {
           persistFinishPublicationDiagnostic(value);
@@ -1044,8 +1061,11 @@ function runProfile(
     snapshotTree: snapshot.tree,
     status: 'complete',
     mode: 'full',
-    selected: ['orchestrator'],
-    lanes: [{name: 'orchestrator', status: 'complete'}],
+    selected: ['orchestrator', 'simplicity'],
+    lanes: [
+      {name: 'orchestrator', status: 'complete'},
+      {name: 'simplicity', status: 'complete'},
+    ],
     findings: [],
   };
   mutateCycle('validate-review', {snapshotId: snapshot.snapshotId, attemptId: 'verify-read-review-1', report: review});
@@ -1256,6 +1276,136 @@ function runProfile(
   assert.equal(call({...common, action: 'closeout', command: 'finish'}).closeout.state, 'complete');
   assert(readFileSync(receiptPath).equals(receiptBytes));
   if (remote !== null) assert.equal(run(['git', '-C', remote, 'rev-parse', 'main']).trim(), remoteHead);
+  if (profile === 'desktop') {
+    const jobCommon = {protocolVersion: 1, executorVersion: 1, runId: 'extracted-job-smoke', generation};
+    const jobStates = ['accepted', 'running', 'completed', 'failed', 'blocked-with-progress', 'stopped-with-progress'];
+    const jobDocument = {
+      format: 'threadnote-native-authoring',
+      schemaVersion: 1,
+      kind: 'spec',
+      id: 'extracted-job-smoke',
+      project: 'release-fixture',
+      title: 'Extracted native job smoke',
+      objective: 'Save and independently read a complete draft through the detached executable.',
+      requirements: [{id: 'complete-read', behavior: 'Read the full saved document.'}],
+      context: {codeRefs: [], evidenceRefs: [], note: 'Private source-free release fixture.'},
+      source: null,
+      sourceFreeReason: 'This isolated job tests native execution without source references.',
+      actors: ['reader'],
+      inScope: ['Save and read the complete draft.'],
+      outOfScope: [],
+      constraints: [],
+      observations: [],
+      scenarios: [
+        {
+          id: 'read-draft',
+          requirementIds: ['complete-read'],
+          given: 'A clean committed private repository.',
+          when: 'The native worker saves a draft.',
+          then: 'The complete document is independently readable.',
+        },
+      ],
+      assumptions: [],
+      questions: [],
+      artifacts: [],
+      review: {required: true, reason: 'Verify the extracted worker boundary.'},
+    };
+    const work = {
+      ...jobCommon,
+      action: 'authoring',
+      command: 'save',
+      document: jobDocument,
+      ready: false,
+      expectedRevision: null,
+    };
+    call(
+      {...jobCommon, action: 'init', project: 'release-fixture', featureId: 'extracted-job-smoke', profile},
+      undefined,
+      ['ok'],
+      65_536,
+    );
+    let jobId: string | undefined;
+    let workerLock: string | undefined;
+    try {
+      const accepted = call({...jobCommon, action: 'job', command: 'submit', work}, undefined, ['accepted'], 65_536);
+      assert.equal(accepted.status, 'accepted');
+      jobId = accepted.jobId;
+      assert.match(jobId!, /^job-[a-f0-9]{48}$/u);
+      workerLock = join(
+        home,
+        'workflow-automations',
+        'native-v1',
+        'jobs',
+        jobCommon.runId,
+        jobId! + '.json.worker.lock',
+      );
+      let status = accepted;
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline && status.status !== 'completed') {
+        if (['failed', 'blocked-with-progress', 'stopped-with-progress'].includes(status.status))
+          throw new Error(`Extracted native worker stopped: ${JSON.stringify(status)}`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+        status = call({...jobCommon, action: 'job', command: 'status', jobId}, undefined, jobStates, 4096);
+        assert.equal(status.jobId, jobId);
+        assert(Buffer.byteLength(JSON.stringify(status)) < 4096);
+      }
+      assert.equal(status.status, 'completed', JSON.stringify(status));
+      const result = call({...jobCommon, action: 'job', command: 'result', jobId}, undefined, ['completed'], 65_536);
+      assert.equal(result.status, 'completed');
+      assert.equal(result.jobId, jobId);
+      assert.equal(result.result.status, 'ok');
+      const root = result.result.authoring.root;
+      assert(object(root) && typeof root.uri === 'string');
+      const loaded = call(
+        {...jobCommon, action: 'authoring', command: 'load', uri: root.uri, detail: 'document'},
+        undefined,
+        ['ok'],
+        1_048_576,
+      );
+      assert.deepEqual(loaded.authoring.document, jobDocument);
+      assert.deepEqual(loaded.authoring.root, root);
+      const artifact = call({...jobCommon, action: 'read', uri: root.uri}, undefined, ['ok'], 1_048_576).artifact;
+      assert.equal(artifact.uri, root.uri);
+      assert.equal(artifact.revision, root.revision);
+      const rootPayload = structuredDocument(artifact);
+      assert.equal(rootPayload.format, 'threadnote-native-authoring-root');
+      assert.equal(rootPayload.kind, jobDocument.kind);
+      assert.equal(rootPayload.featureId, jobDocument.id);
+      assert.equal(rootPayload.documentHash, result.result.authoring.documentHash);
+      assert.equal(rootPayload.readiness, 'draft');
+      assert(EffectString.startsWith(`# ${jobDocument.title}\n`)(artifact.body));
+      const retry = call({...jobCommon, action: 'job', command: 'submit', work}, undefined, ['completed'], 65_536);
+      assert.equal(retry.jobId, jobId);
+      assert.equal(retry.status, 'completed');
+      for (let attempt = 0; attempt < 40 && existsSync(workerLock); attempt++)
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      assert.equal(existsSync(workerLock), false, 'Detached worker lock must be released');
+    } catch (error) {
+      if (jobId) {
+        let active = workerLock !== undefined && existsSync(workerLock);
+        try {
+          const status = call({...jobCommon, action: 'job', command: 'status', jobId}, undefined, jobStates, 4096);
+          active ||= status.status === 'accepted' || status.status === 'running';
+        } catch {
+          active = true;
+        }
+        if (active) {
+          try {
+            call(
+              {...jobCommon, action: 'job', command: 'cancel', jobId},
+              undefined,
+              ['stopped-with-progress', 'completed'],
+              4096,
+            );
+          } catch {
+            /* Preserve the original smoke failure. */
+          }
+          save(join(fixture, 'active-job-fixture.json'), {jobId, workerLock, fixture});
+        }
+      }
+      throw error;
+    }
+  }
   const summary = {
     status: 'passed',
     operations: records.length,

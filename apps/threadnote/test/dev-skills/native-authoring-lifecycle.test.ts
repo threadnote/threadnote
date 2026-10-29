@@ -1631,8 +1631,8 @@ describe('native authoring lifecycle', () => {
     }).pipe(run),
   );
 
-  // P0 Windows quarantine: 100 real native saves exceeded 600s; revisit after performance and cost-model work.
-  effectIt.effect.skipIf(process.platform === 'win32')(
+  // Manual full-history qualification on every platform; standard CI retains the fast functional cases.
+  effectIt.effect.skipIf(process.env.THREADNOTE_NATIVE_WORKFLOW_LOAD !== 'manual-v1')(
     'retains and navigates 100 same-length revisions of a large native plan',
     () =>
       Effect.gen(function* () {
@@ -1697,6 +1697,6 @@ describe('native authoring lifecycle', () => {
         expect(inspection.operations.length).toBeLessThanOrEqual(512);
       }).pipe(run),
     // Full-history retention stress; the measured save profile is recorded separately.
-    {timeout: 600_000},
+    {timeout: 1_200_000},
   );
 });

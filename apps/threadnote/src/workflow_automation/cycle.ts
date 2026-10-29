@@ -1,4 +1,12 @@
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {
+  Array as EffectArray,
+  Option as EffectOption,
+  String as EffectString,
+  Effect,
+  FileSystem,
+  Path,
+  Schema,
+} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -502,10 +510,31 @@ export const runNativeCycle = <R>(
           const prior = request.previous
             ? runtime.snapshots.find(item => item.snapshot.snapshotId === request.previous)?.snapshot
             : undefined;
-          const last = runtime.snapshots.filter(item => item.snapshot.phaseId === selected.id).at(-1)?.snapshot;
-          if ((last && prior?.snapshotId !== last.snapshotId) || (!last && request.previous))
+          const phaseSnapshots = EffectArray.filter(runtime.snapshots, item => item.snapshot.phaseId === selected.id);
+          const last = phaseSnapshots.at(-1)?.snapshot;
+          const reviewed = new Set(EffectArray.map(runtime.reviews, item => item.snapshotId));
+          if (last && prior?.snapshotId !== last.snapshotId) {
+            const priorIndex = EffectOption.getOrElse(
+              EffectArray.findFirstIndex(phaseSnapshots, item => item.snapshot.snapshotId === prior?.snapshotId),
+              () => -1,
+            );
+            if (
+              !prior ||
+              priorIndex < 0 ||
+              !reviewed.has(prior.snapshotId) ||
+              prior.phaseHash === state.phases[selected.id].phaseHash ||
+              last.phaseHash === state.phases[selected.id].phaseHash ||
+              EffectArray.some(phaseSnapshots.slice(priorIndex + 1), item => reviewed.has(item.snapshot.snapshotId))
+            )
+              return yield* fail('review-history', 'Continue from this phase’s latest immutable snapshot.');
+            if (!EffectString.trim(request.reason ?? ''))
+              return yield* fail(
+                'review-history',
+                'Explain the material amendment before superseding unreviewed snapshots.',
+              );
+          } else if (!last && request.previous)
             return yield* fail('review-history', 'Continue from this phase’s latest immutable snapshot.');
-          if (prior && !runtime.reviews.some(item => item.snapshotId === prior.snapshotId))
+          if (prior && !reviewed.has(prior.snapshotId))
             return yield* fail('review-pending', 'Record the previous review before the next source iteration.');
           const baseline = runtime.baselines[selected.id];
           if (!baseline) return yield* fail('baseline-required', 'Run begin-phase before implementation.');
