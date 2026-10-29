@@ -472,13 +472,13 @@ describe('native closeout lifecycle', () => {
         let interrupted = false;
         let fenced = false;
         const renamed: string[] = [];
-        const controllerStateFile = f.statePath(f.controllerRunId);
+        const controllerStateFile = yield* f.fs.realPath(f.statePath(f.controllerRunId));
         const closeoutFile = controllerStateFile + '.closeout.json';
         const intercepted = {
           ...f.fs,
           rename: (from: string, to: string) =>
             Effect.gen(function* () {
-              renamed.push(to);
+              if (renamed.length < 8) renamed.push(to);
               if (to === closeoutFile) fenced = true;
               if (to === controllerStateFile && fenced && !interrupted) {
                 interrupted = true;
@@ -497,7 +497,9 @@ describe('native closeout lifecycle', () => {
           f.closeout('recover').pipe(Effect.provideService(FileSystem.FileSystem, intercepted)),
         );
         if (!Result.isFailure(interruptedResult))
-          throw new Error('Expected recovery release interruption; renamed: ' + EffectArray.join(renamed, ','));
+          throw new Error(
+            `Expected recovery release interruption; expected state=${controllerStateFile}; expected closeout=${closeoutFile}; observed=${EffectArray.join(renamed, ',')}.`,
+          );
         expect(interrupted).toBe(true);
         expect((yield* readNativeCloseoutJournal(f.config, f.controllerRunId, decodeJournal))?.state.status).toBe(
           'superseded',
@@ -586,10 +588,12 @@ describe('native closeout lifecycle', () => {
         expect(qualified?.state.cycle?.state.phases.one.status).toBe('merged');
         let lostAdmission = false;
         let admissionWrites = 0;
+        let observedAdmissionPath = '';
         const admissionFilesystem = {
           ...f.fs,
           rename: (from: string, to: string) =>
             Effect.gen(function* () {
+              if (EffectString.endsWith('.closeout.json')(to)) observedAdmissionPath = to;
               if (to === closeoutFile && ++admissionWrites >= 2) {
                 lostAdmission = true;
                 return yield* PlatformError.systemError({
@@ -609,6 +613,7 @@ describe('native closeout lifecycle', () => {
               f.closeout('prepare', {proposal}).pipe(Effect.provideService(FileSystem.FileSystem, admissionFilesystem)),
             ),
           ),
+          `Expected readmission interruption; expected closeout=${closeoutFile}; observed=${observedAdmissionPath}; matched writes=${admissionWrites}.`,
         ).toBe(true);
         expect(lostAdmission).toBe(true);
         expect((yield* readNativeCloseoutJournal(f.config, f.controllerRunId, decodeJournal))?.state.status).toBe(
@@ -622,6 +627,7 @@ describe('native closeout lifecycle', () => {
               f.closeout('prepare', {proposal}).pipe(Effect.provideService(FileSystem.FileSystem, admissionFilesystem)),
             ),
           ),
+          `Expected readmission interruption; expected closeout=${closeoutFile}; observed=${observedAdmissionPath}; matched writes=${admissionWrites}.`,
         ).toBe(true);
         expect((yield* readNativeWorkflowState(f.config, f.controllerRunId))?.state.closeoutSave).toEqual(stranded);
         const changedProposal = {
@@ -1021,16 +1027,18 @@ describe('native closeout lifecycle', () => {
       let observedReceiptRename = 0;
       let observedRename = 0;
       let closeoutPathMatched = false;
+      let observedReceiptPath = '';
       let finalWriteVerified = false;
       let behaviorRevisionChanged = false;
       let observedOperationSuffixes = '';
-      const receiptFile = f.statePath(f.controllerRunId) + '.closeout.json';
+      const receiptFile = yield* f.fs.realPath(f.statePath(f.controllerRunId) + '.closeout.json');
       const filesystem = f.fs;
       const interceptedFilesystem = {
         ...filesystem,
         rename: (from: string, to: string) =>
           Effect.gen(function* () {
             observedRename++;
+            if (EffectString.endsWith('.closeout.json')(to)) observedReceiptPath = to;
             closeoutPathMatched ||= to === receiptFile;
             if (to === receiptFile && !lost) {
               observedReceiptRename++;
@@ -1086,7 +1094,7 @@ describe('native closeout lifecycle', () => {
       );
       if (!lost)
         throw new Error(
-          `Receipt fault not reached: renames=${observedRename}, matched=${observedReceiptRename}, path=${closeoutPathMatched}, verified=${finalWriteVerified}, behaviorChanged=${behaviorRevisionChanged}, operations=${observedOperationSuffixes}.`,
+          `Receipt fault not reached: expected=${receiptFile}, observed=${observedReceiptPath}, renames=${observedRename}, matched=${observedReceiptRename}, path=${closeoutPathMatched}, verified=${finalWriteVerified}, behaviorChanged=${behaviorRevisionChanged}, operations=${observedOperationSuffixes}.`,
         );
       expect(Result.isFailure(first)).toBe(true);
       expect(lost).toBe(true);
@@ -1125,7 +1133,7 @@ describe('native closeout lifecycle', () => {
       expect(replay.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       expect(yield* f.fs.readFileString(receiptFile)).toBe(bytes);
     }).pipe(runCloseout),
-    windowsCloseoutTimeout,
+    {timeout: 120_000},
   );
 
   for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const)
