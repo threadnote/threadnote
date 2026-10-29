@@ -134,7 +134,7 @@ const smokeSelfContained = Effect.scoped(
     }
 
     const doctor = yield* run(['doctor', '--dry-run']);
-    if (!/bun runtime:\s+v1\.4\.2;\s+embedded/i.test(doctor) || /Node runtime/i.test(doctor)) {
+    if (!/bun runtime:\s+v1\.4\.4;\s+embedded/i.test(doctor) || /Node runtime/i.test(doctor)) {
       return yield* ScriptError.make({message: `Doctor did not report the embedded Bun runtime:\n${doctor}`});
     }
 

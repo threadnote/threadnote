@@ -8,7 +8,7 @@ import {answer} from '@threadnote/spike-library';
 
 effectIt.effect('runs Effect and Bun SQLite inside the declared source closure', () =>
   Effect.gen(function* () {
-    expect(Bun.version).toBe('1.4.2');
+    expect(Bun.version).toBe('1.4.4');
     expect(answer).toBe(42);
     expect(existsSync('src/code_graph')).toBe(false);
     expect(existsSync('packages/graph')).toBe(false);

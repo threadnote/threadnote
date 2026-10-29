@@ -80,17 +80,20 @@ Before opening a pull request, run:
 
 ```bash
 bun run lint
-bun run prettier:check
+bun run format:check
 bun run typecheck
 # Run only the focused Vitest or Bazel targets covering the change.
 ```
 
-`typecheck` intentionally uses TypeScript 7 for both source and test code.
+`typecheck` uses the pinned Bun runtime’s built-in checker for production, test, and website configurations.
+`format:check` and `format:write` use `bun fmt` with the existing Prettier-compatible configuration and ignore file.
+Effect diagnostics remain enforced by the patched Oxlint tools.
 
-Lint adopts new Effect and platform boundaries incrementally: existing files report the new rules as warnings, while
-files changed in the working tree are checked as errors. Pull-request CI applies the error policy to the complete PR
-diff using the base commit supplied by GitHub. The initial rollout is anchored to the pre-policy source commit, so code
-that was already on this development line is not misclassified as new during the adoption PR.
+The six newly adopted Effect rules (`map-map-error-to-map-both`, `prefer-effect-array`, `prefer-effect-record`,
+`prefer-effect-string`, `prefer-schema-tagged-error`, and `schema-class-missing-brand`) are errors in both lint configs.
+The repository gate enforces them, plus unsafe type assertions, on added or modified TypeScript lines against the target
+branch. Untracked files are entirely new. Editors show existing violations; their migration is separate work. All other
+rules retain full-repository enforcement, including rejection of warnings. Fetch the target branch before running lint.
 
 ### Bazel CI selection
 

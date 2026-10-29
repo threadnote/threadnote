@@ -145,7 +145,7 @@ describe('targeted code graph purge', () => {
               fs.stat(target).pipe(
                 Effect.map(info => ({
                   ...info,
-                  dev: Number.isSafeInteger(info.dev + 1) ? info.dev + 1 : info.dev,
+                  dev: info.dev + 1n,
                   ino: Option.none(),
                 })),
               ),

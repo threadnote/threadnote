@@ -1,4 +1,13 @@
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {
+  Array as EffectArray,
+  Record as EffectRecord,
+  String as EffectString,
+  Effect,
+  FileSystem,
+  Path,
+  Schema,
+  pipe,
+} from 'effect';
 import {checkNativeCycleScope} from '@threadnote/workflow-automations/cycle';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
@@ -94,7 +103,7 @@ export const freshCloseoutChangedPathCoverage = (
 ): string[] | undefined => {
   const covered = new Set<string>();
   for (const path of changed) {
-    const owners = phases.filter(phase => qualified.has(phase.id) && checkNativeCycleScope(phase, [path]));
+    const owners = EffectArray.filter(phases, phase => qualified.has(phase.id) && checkNativeCycleScope(phase, [path]));
     if (!owners.length) return undefined;
     for (const owner of owners) covered.add(owner.id);
   }
@@ -116,22 +125,25 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
       : previous.recovery;
   const oldAttempts = new Set(baseline.acceptedAttemptIds);
   const oldSnapshots = new Set(baseline.snapshotIds);
-  const snapshots = new Map(runtime.snapshots.map(entry => [entry.snapshot.snapshotId, entry.snapshot]));
+  const snapshots = new Map(EffectArray.map(runtime.snapshots, entry => [entry.snapshot.snapshotId, entry.snapshot]));
   const fresh = new Set(
-    runtime.attempts
-      .filter(
+    pipe(
+      runtime.attempts,
+      EffectArray.filter(
         item =>
           item.status === 'accepted' &&
           !oldAttempts.has(item.id) &&
           !oldSnapshots.has(item.snapshotId) &&
-          runtime.reviews.some(review => review.snapshotId === item.snapshotId),
-      )
-      .map(item => snapshots.get(item.snapshotId))
-      .filter((item): item is NonNullable<typeof item> => !!item && item.tree === source.tree)
-      .map(item => item.phaseId),
+          EffectArray.some(runtime.reviews, review => review.snapshotId === item.snapshotId),
+      ),
+      EffectArray.map(item => snapshots.get(item.snapshotId)),
+      EffectArray.filter((item): item is NonNullable<typeof item> => !!item && item.tree === source.tree),
+      EffectArray.map(item => item.phaseId),
+    ),
   );
   const qualified = new Set(
-    [...fresh].filter(
+    EffectArray.filter(
+      [...fresh],
       id =>
         runtime.state.phases[id]?.validation?.snapshotTree === source.tree &&
         runtime.state.phases[id]?.head === source.head,
@@ -142,23 +154,27 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
     const changed =
       source.head === previous.source.head
         ? []
-        : (yield* runCommandEffect(
-            'git',
-            [
-              '--no-optional-locks',
-              '-C',
-              source.repo,
-              'diff',
-              '--no-renames',
-              '--name-only',
-              '-z',
-              previous.source.head,
-              source.head,
-            ],
-            {timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024},
-          )).stdout
-            .split('\0')
-            .filter(Boolean);
+        : EffectArray.filter(
+            EffectString.split(
+              (yield* runCommandEffect(
+                'git',
+                [
+                  '--no-optional-locks',
+                  '-C',
+                  source.repo,
+                  'diff',
+                  '--no-renames',
+                  '--name-only',
+                  '-z',
+                  previous.source.head,
+                  source.head,
+                ],
+                {timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024},
+              )).stdout,
+              '\0',
+            ),
+            Boolean,
+          );
     if (changed.length) {
       const coverage = freshCloseoutChangedPathCoverage(changed, runtime.state.plan.phases, qualified);
       if (!coverage)
@@ -171,7 +187,7 @@ const freshReadmission = Effect.fn('workflowAutomation.closeout.freshReadmission
       for (const phase of runtime.state.plan.phases)
         if (hash(runtime.state.phases[phase.id]) !== hash(previous.cycle.phases[phase.id])) affected.add(phase.id);
   }
-  if (!affected.size || [...affected].some(id => !qualified.has(id)))
+  if (!affected.size || EffectArray.some([...affected], id => !qualified.has(id)))
     return yield* fail(
       'closeout-acceptance-stale',
       'Fresh affected-phase source review and cycle acceptance are required after the superseded admission.',
@@ -468,8 +484,8 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             return yield* fail('closeout-recovery', 'Only a pristine admission can be superseded.');
           if (journal.status === 'prepared' || journal.status === 'admitting') {
             if (
-              Object.keys(journal.outputs).length ||
-              Object.keys(journal.archives).length ||
+              EffectRecord.keys(journal.outputs).length ||
+              EffectRecord.keys(journal.archives).length ||
               journal.approvalDigest ||
               journal.decision ||
               journal.publication
@@ -491,7 +507,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               reservation?.operationIds ?? nativeCloseoutPlannedOperationIds(journal.transactionId, journal.documents);
             if (
               !reservation &&
-              controller.state.operations.some(item => operationIds.includes(item.intent.operationId))
+              EffectArray.some(controller.state.operations, item => operationIds.includes(item.intent.operationId))
             )
               return yield* fail('closeout-recovery', 'A lower closeout operation started without its reservation.');
             const fs = yield* FileSystem.FileSystem;
@@ -502,15 +518,20 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             );
             if (yield* fs.exists(publicationFile))
               return yield* fail('closeout-recovery', 'A publication journal exists; preserve the original admission.');
-            const bindings = new Set([journal.bindingId, ...journal.owned.map(item => item.bindingId)]);
+            const bindings = new Set([journal.bindingId, ...EffectArray.map(journal.owned, item => item.bindingId)]);
             for (const bindingId of bindings) {
               const lower = yield* withWorkflowLock(config, bindingId, inspectWorkflowJournal(config, bindingId));
-              if (journal.owned.some(item => item.bindingId === bindingId && lower.state.operations[item.operationId]))
+              if (
+                EffectArray.some(
+                  journal.owned,
+                  item => item.bindingId === bindingId && !!lower.state.operations[item.operationId],
+                )
+              )
                 return yield* fail(
                   'closeout-recovery',
                   'An archive lower operation started; preserve the original admission.',
                 );
-              if (bindingId === journal.bindingId && operationIds.some(id => lower.state.operations[id]))
+              if (bindingId === journal.bindingId && EffectArray.some(operationIds, id => !!lower.state.operations[id]))
                 return yield* fail(
                   'closeout-recovery',
                   'A final output lower operation started; preserve the original admission.',
@@ -568,10 +589,12 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
               status: 'superseded',
               recovery: {
                 reservation,
-                acceptedAttemptIds:
-                  controller.state.cycle?.attempts.filter(item => item.status === 'accepted').map(item => item.id) ??
-                  [],
-                snapshotIds: controller.state.cycle?.snapshots.map(item => item.snapshot.snapshotId) ?? [],
+                acceptedAttemptIds: pipe(
+                  controller.state.cycle?.attempts ?? [],
+                  EffectArray.filter(item => item.status === 'accepted'),
+                  EffectArray.map(item => item.id),
+                ),
+                snapshotIds: EffectArray.map(controller.state.cycle?.snapshots ?? [], item => item.snapshot.snapshotId),
                 ...(carried ? {carriedQualification: carried} : {}),
               },
             };

@@ -1,6 +1,7 @@
 import {it as effectIt} from '@effect/vitest';
-import {Database} from 'bun:sqlite';
-import {Effect, FileSystem, Path, Semaphore, SynchronizedRef} from 'effect';
+import {Database, SQLiteError} from 'bun:sqlite';
+import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
+import {Effect, Fiber, FileSystem, Path, Schedule, Schema, Semaphore, SynchronizedRef} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as FC from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -57,35 +58,75 @@ const fixture = Effect.gen(function* () {
   return {root, linked, home: join(parent, 'home')};
 });
 
-function storedCounts(databasePath: string) {
-  const db = new Database(databasePath, {readonly: true});
-  try {
-    const counts = db
-      .query(
-        `SELECT COUNT(*) AS snapshots, MAX(file_count) AS largest,
+class StoredCountsReadError extends Schema.TaggedError<StoredCountsReadError, {readonly brand: unique symbol}>()(
+  'StoredCountsReadError',
+  {message: Schema.String, cause: Schema.optionalKey(Schema.Defect())},
+) {}
+
+const storedCounts = (databasePath: string) =>
+  Effect.try({
+    try: () => {
+      const db = new Database(databasePath, {readonly: true});
+      try {
+        const counts = db
+          .query<{snapshots: number; largest: number; full: number}, [string]>(
+            `SELECT COUNT(*) AS snapshots, MAX(file_count) AS largest,
         SUM(CASE WHEN scope_id = ? THEN 1 ELSE 0 END) AS full FROM snapshots`,
-      )
-      .get(CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY) as {
-      snapshots: number;
-      largest: number;
-      full: number;
-    };
-    const files = db
-      .query(
-        `SELECT COUNT(*) AS fileRows,
-      SUM(CASE WHEN path LIKE 'apps/unrelated-%' THEN 1 ELSE 0 END) AS unrelatedRows FROM snapshot_files`,
-      )
-      .get() as {
-      fileRows: number;
-      unrelatedRows: number;
-    };
-    return {...counts, ...files};
-  } finally {
-    db.close(false);
-  }
-}
+          )
+          .get(CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY);
+        const files = db
+          .query<{fileRows: number; unrelatedRows: number}, []>(
+            `SELECT COUNT(*) AS fileRows,
+        SUM(CASE WHEN path LIKE 'apps/unrelated-%' THEN 1 ELSE 0 END) AS unrelatedRows FROM snapshot_files`,
+          )
+          .get();
+        if (!counts || !files) throw StoredCountsReadError.make({message: 'Expected aggregate count rows.'});
+        return {...counts, ...files};
+      } finally {
+        db.close(false);
+      }
+    },
+    catch: cause =>
+      Schema.is(StoredCountsReadError)(cause)
+        ? cause
+        : StoredCountsReadError.make({message: 'Unable to read stored graph counts.', cause}),
+  }).pipe(
+    Effect.retry({
+      while: error => error.cause instanceof SQLiteError && error.cause.code === 'SQLITE_BUSY',
+      times: 100,
+      schedule: Schedule.spaced('10 millis'),
+    }),
+  );
 
 describe('scoped reuse under bounded monorepo churn', () => {
+  effectIt.effect('waits for a transient writer lock before reading exact stored counts', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const parent = yield* makeIdempotentFixtureTempDirectoryScoped(fs, 'threadnote-counts-busy-');
+      const databasePath = join(parent, 'counts.sqlite');
+      const writer = yield* Effect.acquireRelease(
+        Effect.sync(() => new Database(databasePath, {create: true})),
+        db => Effect.sync(() => db.close(false)),
+      );
+      writer.exec(`CREATE TABLE snapshots(scope_id TEXT, file_count INTEGER);
+        CREATE TABLE snapshot_files(path TEXT);
+        INSERT INTO snapshots VALUES ('scoped', 7);
+        INSERT INTO snapshot_files VALUES ('apps/a/index.ts');
+        BEGIN EXCLUSIVE`);
+      const release = yield* Effect.forkChild(
+        Effect.sleep('30 millis').pipe(Effect.andThen(Effect.sync(() => writer.exec('COMMIT')))),
+      );
+      expect(yield* storedCounts(databasePath)).toEqual({
+        snapshots: 1,
+        largest: 7,
+        full: 0,
+        fileRows: 1,
+        unrelatedRows: 0,
+      });
+      yield* Fiber.join(release);
+    }).pipe(provideTestLayer(BunFileSystem.layer), TestClock.withLive),
+  );
+
   effectIt.effect(
     'coalesces parallel same-scope requests and reuses an equivalent linked worktree',
     () =>
@@ -126,7 +167,7 @@ describe('scoped reuse under bounded monorepo churn', () => {
         expect(
           (yield* store.readySnapshot(layout.databasePath, identity.worktreeId, results[0].snapshot.scopeId))?.id,
         ).toBe(results[0].snapshot.id);
-        expect(storedCounts(layout.databasePath)).toEqual({
+        expect(yield* storedCounts(layout.databasePath)).toEqual({
           snapshots: 1,
           largest: 7,
           full: 0,
@@ -213,7 +254,7 @@ describe('scoped reuse under bounded monorepo churn', () => {
         expect(
           graph.symbols.every(symbol => !symbol.path.startsWith('apps/b/') && !symbol.path.includes('unrelated-')),
         ).toBe(true);
-        const counts = storedCounts(layout.databasePath);
+        const counts = yield* storedCounts(layout.databasePath);
         expect(counts.full).toBe(0);
         expect(counts.largest).toBe(11);
         expect(counts.snapshots).toBeLessThanOrEqual(12);
@@ -310,7 +351,7 @@ describe('scoped reuse under bounded monorepo churn', () => {
           summary.identity.worktreeId,
           summary.snapshot.scopeId,
         );
-        expect(storedCounts(layout.databasePath)).toEqual({
+        expect(yield* storedCounts(layout.databasePath)).toEqual({
           snapshots: 1,
           largest: 7,
           full: 0,

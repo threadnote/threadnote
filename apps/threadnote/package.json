@@ -396,9 +396,9 @@
     "./workspace_component": "./src/workspace_component.ts"
   },
   "dependencies": {
-    "@effect/ai-openai-compat": "4.0.3",
-    "@effect/platform-bun": "4.0.3",
-    "@modelcontextprotocol/sdk": "1.32.1",
+    "@effect/ai-openai-compat": "4.0.7",
+    "@effect/platform-bun": "4.0.7",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@threadnote/context": "workspace:*",
     "@threadnote/evidence": "workspace:*",
     "@threadnote/graph": "workspace:*",
@@ -419,25 +419,25 @@
     "@threadnote/remote-memory": "workspace:*",
     "@threadnote/store": "workspace:*",
     "@threadnote/workspace": "workspace:*",
-    "effect": "4.0.3",
+    "effect": "4.0.7",
     "fflate": "0.8.3",
-    "jose": "6.2.12",
-    "js-yaml": "^5.4.3",
+    "jose": "6.2.13",
+    "js-yaml": "^5.5.0",
     "jsonc-parser": "3.3.1",
-    "pxpipe-proxy": "0.14.0",
+    "pxpipe-proxy": "0.15.1",
     "smol-toml": "1.9.1",
     "yaml": "^2.9.1",
     "@threadnote/workflow-automations": "workspace:*"
   },
   "devDependencies": {
-    "@effect/sql-sqlite-bun": "4.0.3",
-    "@effect/tsgo": "0.51.1",
-    "@effect/vitest": "4.0.3",
+    "@effect/sql-sqlite-bun": "4.0.7",
+    "@effect/tsgo": "0.63.0",
+    "@effect/vitest": "4.0.7",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.2",
     "postgres": "3.4.9",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "vitest": "5.0.5"
   }
 }

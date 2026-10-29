@@ -46,7 +46,7 @@ describe('standalone release workflows', () => {
       expect(workflow).toContain('name: Run release contract smokes');
       expect(workflow).toContain('run: bun run test:smoke:release');
       expect(workflow).not.toContain('- run: bun run lint');
-      expect(workflow).not.toContain('- run: bun run prettier:check');
+      expect(workflow).not.toContain('- run: bun run format:check');
       expect(workflow).not.toContain('- run: bun run typecheck');
       expect(workflow).not.toContain('- run: bun run test\n');
     }),
@@ -73,9 +73,9 @@ describe('standalone release workflows', () => {
       expect(workflow).toContain('bun-darwin-x64');
       expect(workflow).toContain('bun-darwin-arm64');
       expect(workflow).toContain('target: bun-windows-x64-baseline');
-      expect(workflow).toContain('BUN_VERSION: 1.4.2');
+      expect(workflow).toContain('BUN_VERSION: 1.4.4');
       expect(workflow).toContain('Preload checksum-pinned Bun baseline compiler backend');
-      expect(workflow).toContain('BUN_BASELINE_TARBALL_SHA512: 96af362ea563497031f603547226c275');
+      expect(workflow).toContain('BUN_BASELINE_TARBALL_SHA512: 73ed7af55fa895edbdb24e46a45ba1e');
       expect(workflow).toContain('bun-windows-x64-baseline-v$env:BUN_VERSION');
       expect(workflow).toContain('bun-windows-arm64');
       expect(workflow).toContain('windows-11-arm');
@@ -171,7 +171,7 @@ describe('standalone release workflows', () => {
         .map((step, index) => ({index, run: step.run ?? ''}))
         .filter(({run}) => /(?:^|[\s;&|])bun(?:\s|$)/.test(run));
 
-      expect(releaseWorkflow?.env?.BUN_VERSION).toBe('1.4.2');
+      expect(releaseWorkflow?.env?.BUN_VERSION).toBe('1.4.4');
       expect(job?.env?.BUN_VERSION).toBe(releaseWorkflow?.env?.BUN_VERSION);
       expect(setupIndex).toBeGreaterThanOrEqual(0);
       expect(steps[setupIndex]?.with).toEqual({'bun-version': '${{ env.BUN_VERSION }}'});

@@ -38,8 +38,8 @@ const STATUS_CACHE_LOCK_OPTIONS = {
 
 export interface CodeGraphGitStatusCacheReceipt {
   readonly indexBytes: number;
-  readonly sourceIndexDevice: number;
-  readonly sourceIndexInode: number;
+  readonly sourceIndexDevice: string;
+  readonly sourceIndexInode: string;
   readonly sourceIndexModifiedAtMilliseconds: number;
   readonly sourceIndexSemanticSha256?: string;
   readonly version: typeof CODE_GRAPH_GIT_STATUS_CACHE_RECEIPT_VERSION;
@@ -535,7 +535,7 @@ function privateRegularFileWithinBound(fs: FileSystem.FileSystem, file: string) 
     return (
       Option.isSome(info) &&
       info.value.type === 'File' &&
-      links === 1 &&
+      links === 1n &&
       Number(info.value.size) <= CODE_GRAPH_GIT_STATUS_CACHE_INDEX_BYTES_MAXIMUM
     );
   });
@@ -584,13 +584,15 @@ export function parseCodeGraphGitStatusCacheReceipt(value: string): CodeGraphGit
     const parsed: unknown = JSON.parse(value);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
     const candidate = parsed as Partial<CodeGraphGitStatusCacheReceipt>;
+    const device = parseIndexIdentity(candidate.sourceIndexDevice);
+    const inode = parseIndexIdentity(candidate.sourceIndexInode);
     if (
       candidate.version !== CODE_GRAPH_GIT_STATUS_CACHE_RECEIPT_VERSION ||
       !Number.isSafeInteger(candidate.indexBytes) ||
       candidate.indexBytes! < 0 ||
       candidate.indexBytes! > CODE_GRAPH_GIT_STATUS_CACHE_INDEX_BYTES_MAXIMUM ||
-      !validNonNegativeSafeInteger(candidate.sourceIndexDevice) ||
-      !validNonNegativeSafeInteger(candidate.sourceIndexInode) ||
+      device === undefined ||
+      inode === undefined ||
       !validNonNegativeSafeInteger(candidate.sourceIndexModifiedAtMilliseconds) ||
       (candidate.sourceIndexSemanticSha256 !== undefined &&
         (typeof candidate.sourceIndexSemanticSha256 !== 'string' ||
@@ -600,8 +602,8 @@ export function parseCodeGraphGitStatusCacheReceipt(value: string): CodeGraphGit
     }
     return {
       indexBytes: candidate.indexBytes!,
-      sourceIndexDevice: candidate.sourceIndexDevice,
-      sourceIndexInode: candidate.sourceIndexInode,
+      sourceIndexDevice: device,
+      sourceIndexInode: inode,
       sourceIndexModifiedAtMilliseconds: candidate.sourceIndexModifiedAtMilliseconds,
       ...(candidate.sourceIndexSemanticSha256 === undefined
         ? {}
@@ -621,16 +623,17 @@ function codeGraphGitIndexIdentity(info: FileSystem.File.Info): CodeGraphGitInde
   if (
     info.type !== 'File' ||
     !validNonNegativeSafeInteger(indexBytes) ||
-    !validNonNegativeSafeInteger(info.dev) ||
-    !validNonNegativeSafeInteger(sourceIndexInode) ||
+    info.dev < 0n ||
+    sourceIndexInode === undefined ||
+    sourceIndexInode < 0n ||
     !validNonNegativeSafeInteger(sourceIndexModifiedAtMilliseconds)
   ) {
     return undefined;
   }
   return {
     indexBytes,
-    sourceIndexDevice: info.dev,
-    sourceIndexInode,
+    sourceIndexDevice: info.dev.toString(),
+    sourceIndexInode: sourceIndexInode.toString(),
     sourceIndexModifiedAtMilliseconds,
   };
 }
@@ -646,4 +649,10 @@ function sameCodeGraphGitIndexIdentity(left: CodeGraphGitIndexIdentity, right: C
 
 function validNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Decimal strings retain exact bigint identity; safe numeric v3 receipts remain readable. */
+function parseIndexIdentity(value: unknown): string | undefined {
+  if (validNonNegativeSafeInteger(value)) return value.toString();
+  return typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value) ? value : undefined;
 }

@@ -3,8 +3,8 @@
     "architecture": "x64",
     "dirty": false,
     "fixtureHash": "generated-code-graph-production-v2-lexical:4926:110000:217000:5797:1612500:995:4:867:7:996:884:38:1000:2000:1:2999:64:4:1048576:262144:1048576",
-    "node": "bun/1.4.2",
-    "packageManager": "bun/1.4.2",
+    "node": "bun/1.4.4",
+    "packageManager": "bun/1.4.4",
     "runner": "threadnote-code-graph-e2e",
     "runnerVersion": "1"
   },
@@ -2851,7 +2851,7 @@
     "sameOverlayReferenceMaterializationMode": "full",
     "sameOverlayReferenceMaterializationStorageMode": "direct-persistent",
     "sqlitePageSizeBytes": 8192,
-    "sqliteVersion": "3.53.2",
+    "sqliteVersion": "3.53.4",
     "vectorEnabled": false
   },
   "suite": "code-graph-production-large-v2",

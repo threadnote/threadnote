@@ -70,7 +70,7 @@
   "dependencies": {
     "@lezer/highlight": "1.2.5",
     "@lezer/javascript": "1.5.6",
-    "@mdxeditor/editor": "^4.3.2",
+    "@mdxeditor/editor": "^4.3.4",
     "@threadnote/context": "workspace:*",
     "@threadnote/graph": "workspace:*",
     "@threadnote/integration-core": "workspace:*",
@@ -80,17 +80,17 @@
     "@threadnote/recall": "workspace:*",
     "@threadnote/workspace": "workspace:*",
     "dompurify": "3.4.17",
-    "effect": "4.0.3",
-    "lucide-react": "^1.55.0",
+    "effect": "4.0.7",
+    "lucide-react": "^1.63.0",
     "mermaid": "12.2.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "three": "^0.186.1"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.3",
+    "@effect/vitest": "4.0.7",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.2",
     "vitest": "5.0.5"

@@ -525,8 +525,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       entries: [],
       sourceRoots: ['apps/threadnote/src', ...packageDirectories.map(path => `${path}/src`)],
       data: ['tsconfig.json', 'package.json'],
-      npm: ['typescript', '@types/bun', '@types/react', '@types/react-dom', '@types/three'],
-      args: ['--bun', 'node_modules/typescript/bin/tsc', '--noEmit', '-p', 'tsconfig.json'],
+      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three'],
+      args: ['check', '-p', 'tsconfig.json'],
     },
     {
       package: '',
@@ -544,9 +544,9 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'tools/workspace',
       ],
       data: ['config/lint/threadnote-plugin.d.ts', 'tsconfig.json', 'tsconfig.test.json', 'package.json'],
-      npm: ['typescript', '@types/bun', '@types/react', '@types/react-dom', '@types/three'],
+      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three'],
       exclude: path => path.startsWith('apps/threadnote/test/evaluation/fixtures/') && path.includes('/repository/'),
-      args: ['--bun', 'node_modules/typescript/bin/tsc', '--noEmit', '-p', 'tsconfig.test.json'],
+      args: ['check', '-p', 'tsconfig.test.json'],
     },
     {
       package: '',
@@ -601,8 +601,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'tsconfig.test.json',
         'vitest.config.ts',
       ],
-      npm: ['prettier'],
-      args: ['--bun', 'node_modules/prettier/bin/prettier.cjs', '--check', '.', '--ignore-unknown'],
+      args: ['fmt', '--check', '.', '--ignore-unknown'],
     },
     {
       package: '',
@@ -691,8 +690,8 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       entries: ['apps/website/vite.config.ts'],
       sourceRoots: ['apps/website/src'],
       data: ['apps/website/tsconfig.json', 'apps/website/package.json'],
-      npm: ['typescript', '@types/bun', '@types/react', '@types/react-dom', '@types/three'],
-      args: ['--bun', 'node_modules/typescript/bin/tsc', '--noEmit', '-p', 'apps/website/tsconfig.json'],
+      npm: ['@types/bun', '@types/react', '@types/react-dom', '@types/three'],
+      args: ['check', '-p', 'apps/website/tsconfig.json'],
     },
     {
       package: 'apps/website',

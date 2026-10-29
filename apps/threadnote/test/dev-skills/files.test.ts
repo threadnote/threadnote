@@ -12,7 +12,7 @@ const info = (type: FileSystem.File.Type): FileSystem.File.Info => ({
   mtime: Option.none(),
   atime: Option.none(),
   birthtime: Option.none(),
-  dev: 1,
+  dev: 1n,
   ino: Option.none(),
   mode: 0o600,
   nlink: Option.none(),

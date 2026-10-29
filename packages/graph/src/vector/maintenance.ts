@@ -139,7 +139,7 @@ interface VectorDatabaseCandidate {
 }
 
 interface VectorDatabaseFileIdentity {
-  readonly dev: number;
+  readonly dev: string;
   readonly ino?: string;
 }
 
@@ -1849,7 +1849,7 @@ function removeExpectedVectorPointer(
 
 function vectorDatabaseFileIdentity(info: FileSystem.File.Info): VectorDatabaseFileIdentity {
   const ino = Option.getOrUndefined(info.ino);
-  return {dev: info.dev, ...(ino === undefined ? {} : {ino: String(ino)})};
+  return {dev: String(info.dev), ...(ino === undefined ? {} : {ino: String(ino)})};
 }
 
 function sameVectorDatabaseFileIdentity(

@@ -1,5 +1,14 @@
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, PlatformError, Result} from 'effect';
+import {
+  Array as EffectArray,
+  String as EffectString,
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  PlatformError,
+  Result,
+} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
@@ -141,7 +150,7 @@ describe('native closeout lifecycle', () => {
   it('covers every changed path with fresh phases despite overlapping merged owners', () => {
     const phase = {
       id: 'merged',
-      definitionHash: '1'.repeat(64),
+      definitionHash: EffectString.repeat(64)('1'),
       title: 'Owner',
       dependsOn: [],
       allowedPaths: ['source.ts'],
@@ -161,13 +170,15 @@ describe('native closeout lifecycle', () => {
         (paths, repairFresh, otherFresh) => {
           const qualified = new Set([...(repairFresh ? ['repair'] : []), ...(otherFresh ? ['other'] : [])]);
           const coverage = freshCloseoutChangedPathCoverage(paths, phases, qualified);
-          const complete = paths.every(path =>
+          const complete = EffectArray.every(paths, path =>
             path === 'source.ts' ? repairFresh : path === 'other.ts' ? otherFresh : false,
           );
           expect(coverage !== undefined).toBe(complete);
           if (coverage) {
             expect(coverage).not.toContain('merged');
-            expect(new Set(coverage)).toEqual(new Set(paths.map(path => (path === 'source.ts' ? 'repair' : 'other'))));
+            expect(new Set(coverage)).toEqual(
+              new Set(EffectArray.map(paths, path => (path === 'source.ts' ? 'repair' : 'other'))),
+            );
           }
         },
       ),
@@ -221,8 +232,12 @@ describe('native closeout lifecycle', () => {
         yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
         yield* runCommandEffect('git', ['-C', f.repo, 'commit', '-m', 'Repair merged source']);
         yield* f.call(f.base('graph-ready', 'plan-run'));
-        const changedHead = (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD'])).stdout.trim();
-        const changedTree = (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD^{tree}'])).stdout.trim();
+        const changedHead = EffectString.trim(
+          (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD'])).stdout,
+        );
+        const changedTree = EffectString.trim(
+          (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD^{tree}'])).stdout,
+        );
         expect(object(yield* f.closeout('recover')).closeout).toMatchObject({state: 'superseded'});
         if (f.plan.kind !== 'plan') throw new Error('Expected original ready plan.');
         const originalPhase = f.plan.phases[0];
@@ -236,7 +251,7 @@ describe('native closeout lifecycle', () => {
               title: 'Repair merged source',
               outcome: 'Return the repaired source result.',
               dependsOn: ['one'],
-              acceptance: originalPhase.acceptance.map(item => ({...item, id: 'repair-' + item.id})),
+              acceptance: EffectArray.map(originalPhase.acceptance, item => ({...item, id: 'repair-' + item.id})),
             },
           ],
         };
@@ -308,7 +323,7 @@ describe('native closeout lifecycle', () => {
             status: 'passed',
             productState: 'working',
             checks: [{command: 'Private repair check', result: 'passed', evidence: 'Read repaired source.'}],
-            acceptance: repairPhase.acceptanceCriteria.map(criterion => ({
+            acceptance: EffectArray.map(repairPhase.acceptanceCriteria, criterion => ({
               criterion,
               result: 'passed',
               evidence: 'Observed ' + criterion,
@@ -375,7 +390,9 @@ describe('native closeout lifecycle', () => {
         yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
         yield* runCommandEffect('git', ['-C', f.repo, 'commit', '-m', 'Change source after prepare precheck']);
         yield* f.call(f.base('graph-ready', 'plan-run'));
-        const changedHead = (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD'])).stdout.trim();
+        const changedHead = EffectString.trim(
+          (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD'])).stdout,
+        );
         expect(object(object(yield* f.closeout('validation-input')).source).head).toBe(changedHead);
         expect((yield* readNativeWorkflowState(f.config, f.controllerRunId))?.state.cycle).toEqual(before.state.cycle);
         yield* Deferred.succeed(released, undefined);
@@ -432,8 +449,10 @@ describe('native closeout lifecycle', () => {
         yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const result = {complete: true};\n');
         yield* runCommandEffect('git', ['-C', f.repo, 'add', 'source.ts']);
         yield* runCommandEffect('git', ['-C', f.repo, 'commit', '-m', 'Repair fixture source']);
-        const newHead = (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD'])).stdout.trim();
-        const newTree = (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD^{tree}'])).stdout.trim();
+        const newHead = EffectString.trim((yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD'])).stdout);
+        const newTree = EffectString.trim(
+          (yield* runCommandEffect('git', ['-C', f.repo, 'rev-parse', 'HEAD^{tree}'])).stdout,
+        );
         yield* f.call(f.base('graph-ready', 'plan-run'));
         const inspected = object(yield* f.closeout('inspect'));
         expect(inspected.drift).toMatchObject({source: true, cycle: false});
@@ -453,13 +472,15 @@ describe('native closeout lifecycle', () => {
         let interrupted = false;
         let fenced = false;
         const renamed: string[] = [];
+        const controllerStateFile = f.statePath(f.controllerRunId);
+        const closeoutFile = controllerStateFile + '.closeout.json';
         const intercepted = {
           ...f.fs,
           rename: (from: string, to: string) =>
             Effect.gen(function* () {
               renamed.push(to);
-              if (to.endsWith('/' + f.controllerRunId + '.json.closeout.json')) fenced = true;
-              if (to.endsWith('/' + f.controllerRunId + '.json') && fenced && !interrupted) {
+              if (to === closeoutFile) fenced = true;
+              if (to === controllerStateFile && fenced && !interrupted) {
                 interrupted = true;
                 return yield* PlatformError.systemError({
                   _tag: 'Unknown',
@@ -476,7 +497,7 @@ describe('native closeout lifecycle', () => {
           f.closeout('recover').pipe(Effect.provideService(FileSystem.FileSystem, intercepted)),
         );
         if (!Result.isFailure(interruptedResult))
-          throw new Error('Expected recovery release interruption; renamed: ' + renamed.join(','));
+          throw new Error('Expected recovery release interruption; renamed: ' + EffectArray.join(renamed, ','));
         expect(interrupted).toBe(true);
         expect((yield* readNativeCloseoutJournal(f.config, f.controllerRunId, decodeJournal))?.state.status).toBe(
           'superseded',
@@ -535,7 +556,7 @@ describe('native closeout lifecycle', () => {
             status: 'passed',
             productState: 'working',
             checks: [{command: 'Private fixture check', result: 'passed', evidence: 'Read repaired source.'}],
-            acceptance: before.state.cycle.state.plan.phases[0].acceptanceCriteria.map(criterion => ({
+            acceptance: EffectArray.map(before.state.cycle.state.plan.phases[0].acceptanceCriteria, criterion => ({
               criterion,
               result: 'passed',
               evidence: 'Observed ' + criterion,
@@ -569,7 +590,7 @@ describe('native closeout lifecycle', () => {
           ...f.fs,
           rename: (from: string, to: string) =>
             Effect.gen(function* () {
-              if (to.endsWith('/' + f.controllerRunId + '.json.closeout.json') && ++admissionWrites >= 2) {
+              if (to === closeoutFile && ++admissionWrites >= 2) {
                 lostAdmission = true;
                 return yield* PlatformError.systemError({
                   _tag: 'Unknown',
@@ -999,8 +1020,7 @@ describe('native closeout lifecycle', () => {
       let lost = false;
       let observedReceiptRename = 0;
       let observedRename = 0;
-      let closeoutSuffixRename = false;
-      let closeoutBasenameMatches = false;
+      let closeoutPathMatched = false;
       let finalWriteVerified = false;
       let behaviorRevisionChanged = false;
       let observedOperationSuffixes = '';
@@ -1011,9 +1031,8 @@ describe('native closeout lifecycle', () => {
         rename: (from: string, to: string) =>
           Effect.gen(function* () {
             observedRename++;
-            closeoutSuffixRename ||= to.endsWith('.closeout.json');
-            closeoutBasenameMatches ||= to.endsWith(`${f.controllerRunId}.json.closeout.json`);
-            if (to.endsWith(`${f.controllerRunId}.json.closeout.json`) && !lost) {
+            closeoutPathMatched ||= to === receiptFile;
+            if (to === receiptFile && !lost) {
               observedReceiptRename++;
               const decodeReceipt = (bytes: Uint8Array) =>
                 Effect.promise(async () => {
@@ -1067,7 +1086,7 @@ describe('native closeout lifecycle', () => {
       );
       if (!lost)
         throw new Error(
-          `Receipt fault not reached: renames=${observedRename}, matched=${observedReceiptRename}, suffix=${closeoutSuffixRename}, basename=${closeoutBasenameMatches}, verified=${finalWriteVerified}, behaviorChanged=${behaviorRevisionChanged}, operations=${observedOperationSuffixes}.`,
+          `Receipt fault not reached: renames=${observedRename}, matched=${observedReceiptRename}, path=${closeoutPathMatched}, verified=${finalWriteVerified}, behaviorChanged=${behaviorRevisionChanged}, operations=${observedOperationSuffixes}.`,
         );
       expect(Result.isFailure(first)).toBe(true);
       expect(lost).toBe(true);

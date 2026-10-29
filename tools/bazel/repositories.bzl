@@ -1,11 +1,11 @@
 """Pinned Bun toolchain and frozen installation from the single Bun lockfile."""
 
-_VERSION = "1.4.2"
+_VERSION = "1.4.4"
 _PLATFORMS = {
-    "darwin-arm64": ("darwin-aarch64", "90987a3a16d7db556d886ac3d551e7b6d3edf0a1cf43acaed622e8676be1d12f", "osx", "aarch64"),
-    "darwin-x86_64": ("darwin-x64", "80520d7e17526308c9185d261679ac6d27798d3803a0e9f7ff9121ab8affb012", "osx", "x86_64"),
-    "linux-arm64": ("linux-aarch64", "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7", "linux", "aarch64"),
-    "linux-x86_64": ("linux-x64", "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913", "linux", "x86_64"),
+    "darwin-arm64": ("darwin-aarch64", "c240d7f0ccb90c263a849fcdb09b7ee62630d921348ed6aafda86b9d577bc510", "osx", "aarch64"),
+    "darwin-x86_64": ("darwin-x64", "50a3491f73abc2fe81673171a85762d3bc2cc1680ccecadd983de99adf77977e", "osx", "x86_64"),
+    "linux-arm64": ("linux-aarch64", "baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e", "linux", "aarch64"),
+    "linux-x86_64": ("linux-x64", "bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c", "linux", "x86_64"),
 }
 
 def _host(ctx):

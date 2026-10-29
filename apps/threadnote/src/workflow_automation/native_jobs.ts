@@ -1,4 +1,15 @@
-import {Clock, Context, Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
+import {
+  String as EffectString,
+  Clock,
+  Context,
+  Crypto,
+  Effect,
+  FileSystem,
+  Option,
+  Path,
+  PlatformError,
+  Schema,
+} from 'effect';
 import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runBinaryCommandEffect, runCommandEffect, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -46,11 +57,12 @@ export const nativeJobRequestSchema = Schema.Struct({
   work: Schema.optionalKey(Schema.Unknown),
 });
 type Work = Readonly<Record<string, unknown>> & {
-  readonly action: 'authoring' | 'closeout';
-  readonly command: 'save' | 'prepare' | 'finish';
   readonly runId: string;
   readonly generation: string;
-};
+} & (
+    | {readonly action: 'authoring'; readonly command: 'save'}
+    | {readonly action: 'closeout'; readonly command: 'prepare' | 'finish'}
+  );
 
 interface RetainedObject {
   readonly id: string;
@@ -143,7 +155,8 @@ type Dispatch<R> = (work: unknown) => Effect.Effect<unknown, WorkflowAutomationE
 
 export function nativeJobId(bindingId: string, work: unknown, admissionEpoch?: string): string {
   return (
-    'job-' + sha256HexSync(stableJson({bindingId, work, ...(admissionEpoch ? {admissionEpoch} : {})})).slice(0, 48)
+    'job-' +
+    EffectString.slice(0, 48)(sha256HexSync(stableJson({bindingId, work, ...(admissionEpoch ? {admissionEpoch} : {})})))
   );
 }
 
@@ -775,12 +788,7 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
             return yield* fail('job-closeout-drift', 'The prepared closeout transaction changed since admission.');
         }
         if (work.action === 'closeout') {
-          const epoch = yield* readNativeCloseoutJobEpoch(
-            config,
-            runId,
-            generation,
-            work.command as 'prepare' | 'finish',
-          );
+          const epoch = yield* readNativeCloseoutJobEpoch(config, runId, generation, work.command);
           if (epoch !== view.closeoutAdmissionEpoch)
             return yield* fail('job-closeout-drift', 'The closeout admission changed since this job was accepted.');
         }
@@ -873,12 +881,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       return yield* fail('binding-drift', 'The original native run or generation changed.');
     const admissionEpoch =
       work.action === 'closeout'
-        ? yield* readNativeCloseoutJobEpoch(
-            config,
-            request.runId,
-            request.generation,
-            work.command as 'prepare' | 'finish',
-          )
+        ? yield* readNativeCloseoutJobEpoch(config, request.runId, request.generation, work.command)
         : undefined;
     const jobId = nativeJobId(stored.state.bindingId, work, admissionEpoch);
     if (request.jobId !== undefined && request.jobId !== jobId)

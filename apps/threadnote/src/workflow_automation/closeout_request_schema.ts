@@ -1,4 +1,4 @@
-import {Effect, Schema} from 'effect';
+import {Array as EffectArray, Record as EffectRecord, String as EffectString, Effect, Schema} from 'effect';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {NativeAuthoringDocumentSchema} from '@threadnote/workflow-automations/authoring';
 import {NativeCycleStateSchema} from '@threadnote/workflow-automations/cycle';
@@ -115,9 +115,10 @@ export const decodeJournal = (input: unknown): Journal => {
   if (value.status === 'admitting' && !value.cycleRuntimeDigest)
     throw fail('invalid-closeout-state', 'Readmission must retain its exact cycle runtime basis.');
   if (
-    new Set([value.transactionId, ...(value.history ?? []).map(item => item.transactionId)]).size !==
+    new Set([value.transactionId, ...EffectArray.map(value.history ?? [], item => item.transactionId)]).size !==
       1 + (value.history?.length ?? 0) ||
-    value.history?.some(
+    EffectArray.some(
+      value.history ?? [],
       item =>
         item.runId !== value.runId ||
         item.generation !== value.generation ||
@@ -140,18 +141,24 @@ export const decodeJournal = (input: unknown): Journal => {
           proposal: admission.proposal,
           ...(admission.admissionEpoch ? {admissionEpoch: admission.admissionEpoch} : {}),
         }) ||
-      admission.owned.some(item => !item.role.startsWith('authoring-') || item.sourceRunId !== item.runId)
+      EffectArray.some(
+        admission.owned,
+        item => !EffectString.startsWith('authoring-')(item.role) || item.sourceRunId !== item.runId,
+      )
     )
       throw fail('invalid-closeout-state', 'Closeout intent or authoring ownership changed.');
     if (
-      new Set(admission.owned.map(item => item.uri)).size !== admission.owned.length ||
-      Object.keys(admission.archives).some(uri => !admission.owned.some(item => item.uri === uri))
+      new Set(EffectArray.map(admission.owned, item => item.uri)).size !== admission.owned.length ||
+      EffectArray.some(
+        EffectRecord.keys(admission.archives),
+        uri => !EffectArray.some(admission.owned, item => item.uri === uri),
+      )
     )
       throw fail('invalid-closeout-state', 'Closeout history contains duplicate or unowned archives.');
     if (
       admission.status === 'superseded' &&
-      (Object.keys(admission.outputs).length ||
-        Object.keys(admission.archives).length ||
+      (EffectRecord.keys(admission.outputs).length ||
+        EffectRecord.keys(admission.archives).length ||
         admission.approvalDigest ||
         admission.decision ||
         admission.publication ||
@@ -166,8 +173,12 @@ export const decodeJournal = (input: unknown): Journal => {
         carried.cycleRuntimeDigest !== admission.cycleRuntimeDigest ||
         hash(carried.source) !== hash(admission.source) ||
         new Set(carried.affectedPhaseIds).size !== carried.affectedPhaseIds.length ||
-        carried.affectedPhaseIds.some(phaseId => !admission.cycle.plan.phases.some(phase => phase.id === phaseId)) ||
-        !value.history?.some(
+        EffectArray.some(
+          carried.affectedPhaseIds,
+          phaseId => !EffectArray.some(admission.cycle.plan.phases, phase => phase.id === phaseId),
+        ) ||
+        !EffectArray.some(
+          value.history ?? [],
           predecessor =>
             hash(predecessor.recovery.acceptedAttemptIds) === hash(carried.acceptedAttemptIds) &&
             hash(predecessor.recovery.snapshotIds) === hash(carried.snapshotIds),
@@ -176,8 +187,8 @@ export const decodeJournal = (input: unknown): Journal => {
       throw fail('invalid-closeout-state', 'Carried qualification differs from its retained admission basis.');
     if (
       admission.status === 'admitting' &&
-      (Object.keys(admission.outputs).length ||
-        Object.keys(admission.archives).length ||
+      (EffectRecord.keys(admission.outputs).length ||
+        EffectRecord.keys(admission.archives).length ||
         admission.approvalDigest ||
         admission.decision ||
         admission.publication)

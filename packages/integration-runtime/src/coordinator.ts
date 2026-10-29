@@ -141,7 +141,7 @@ export const assertCoordinatorFile = Effect.fn('source.assertCoordinatorFile')(f
   );
   if (!info) return;
   if (
-    Option.getOrUndefined(info.nlink) !== 1 ||
+    Option.getOrUndefined(info.nlink) !== 1n ||
     (system.platform !== 'win32' && (system.userId === undefined || Option.getOrUndefined(info.uid) !== system.userId))
   ) {
     return yield* fail();

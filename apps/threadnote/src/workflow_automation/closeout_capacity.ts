@@ -1,4 +1,4 @@
-import {Context, DateTime, Effect} from 'effect';
+import {Array as EffectArray, String as EffectString, Context, DateTime, Effect} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -39,16 +39,16 @@ export const pristineCloseoutOperationPrefix = (
   reservation: Pick<typeof NativeCloseoutSaveReservationSchema.Type, 'operationStart' | 'operationIds'>,
 ) =>
   operations.length === reservation.operationStart &&
-  operations.every(item => !reservation.operationIds.includes(item.intent.operationId));
+  EffectArray.every(operations, item => !reservation.operationIds.includes(item.intent.operationId));
 export const nativeCloseoutPlannedOperationIds = (
   transactionId: string,
   documents: readonly NativeCloseoutPlannedDocument[],
 ) => {
   const seen = new Set<string>();
-  return documents.map(document => {
+  return EffectArray.map(documents, document => {
     const repeated = seen.has(document.key);
     seen.add(document.key);
-    return 'closeout-' + transactionId.slice(0, 24) + '-' + document.key + (repeated ? '-final' : '');
+    return 'closeout-' + EffectString.slice(0, 24)(transactionId) + '-' + document.key + (repeated ? '-final' : '');
   });
 };
 
