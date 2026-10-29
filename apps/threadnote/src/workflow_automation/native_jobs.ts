@@ -1,4 +1,15 @@
-import {Clock, Context, Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
+import {
+  String as EffectString,
+  Clock,
+  Context,
+  Crypto,
+  Effect,
+  FileSystem,
+  Option,
+  Path,
+  PlatformError,
+  Schema,
+} from 'effect';
 import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runBinaryCommandEffect, runCommandEffect, runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -14,7 +25,11 @@ import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
 import {readNativeCycleTreeEntry, nativeCycleRelativePath} from './cycle_git.js';
 import {readNativeWorkflowState} from './store.js';
 import {nativeAuthoringRequestSchema} from './authoring_request_schema.js';
-import {nativeCloseoutRequestSchema, readNativeCloseoutJobBasis} from './closeout_request_schema.js';
+import {
+  nativeCloseoutRequestSchema,
+  readNativeCloseoutJobBasis,
+  readNativeCloseoutJobEpoch,
+} from './closeout_request_schema.js';
 import type {NativeWorkflowState} from '@threadnote/workflow-automations/native';
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -42,11 +57,12 @@ export const nativeJobRequestSchema = Schema.Struct({
   work: Schema.optionalKey(Schema.Unknown),
 });
 type Work = Readonly<Record<string, unknown>> & {
-  readonly action: 'authoring' | 'closeout';
-  readonly command: 'save' | 'prepare' | 'finish';
   readonly runId: string;
   readonly generation: string;
-};
+} & (
+    | {readonly action: 'authoring'; readonly command: 'save'}
+    | {readonly action: 'closeout'; readonly command: 'prepare' | 'finish'}
+  );
 
 interface RetainedObject {
   readonly id: string;
@@ -72,6 +88,7 @@ export interface NativeJobSourceView {
   readonly citationRefs: readonly string[];
   readonly cycleDigest?: string;
   readonly closeoutTransactionId?: string;
+  readonly closeoutAdmissionEpoch?: string;
   readonly targetRoot?: {readonly kind: 'spec' | 'plan'; readonly uri: string | null; readonly revision: string | null};
 }
 
@@ -88,6 +105,11 @@ export const CurrentNativeJobBoundary = Context.Reference<
   | Effect.Effect<void, WorkflowAutomationError | PlatformError.PlatformError, FileSystem.FileSystem | Path.Path>
   | undefined
 >('threadnote/NativeJobBoundary', {defaultValue: () => undefined});
+/** Test/embedded runner seam after all worker admission checks and before canonical dispatch. */
+export const CurrentNativeJobBeforeDispatch = Context.Reference<Effect.Effect<void> | undefined>(
+  'threadnote/NativeJobBeforeDispatch',
+  {defaultValue: () => undefined},
+);
 /** Narrow deterministic test/embedded runner seam; normal CLI submissions launch the same executable. */
 export const CurrentNativeJobAutoLaunch = Context.Reference<boolean>('threadnote/NativeJobAutoLaunch', {
   defaultValue: () => true,
@@ -131,8 +153,11 @@ const inputSchema = Schema.Struct({
 type JobInput = typeof inputSchema.Type;
 type Dispatch<R> = (work: unknown) => Effect.Effect<unknown, WorkflowAutomationError, R>;
 
-export function nativeJobId(bindingId: string, work: unknown): string {
-  return 'job-' + sha256HexSync(stableJson({bindingId, work})).slice(0, 48);
+export function nativeJobId(bindingId: string, work: unknown, admissionEpoch?: string): string {
+  return (
+    'job-' +
+    EffectString.slice(0, 48)(sha256HexSync(stableJson({bindingId, work, ...(admissionEpoch ? {admissionEpoch} : {})})))
+  );
 }
 
 export function nativeJobStatus(
@@ -223,6 +248,8 @@ function validWitness(value: unknown, bindingId: string): value is NativeJobSour
   if (witness.files.some(file => !nativeCycleRelativePath(file.path) || file.object.type !== 'blob')) return false;
   if (witness.cycleDigest !== undefined && !/^[a-f0-9]{64}$/u.test(witness.cycleDigest)) return false;
   if (witness.closeoutTransactionId !== undefined && !/^[a-f0-9]{64}$/u.test(witness.closeoutTransactionId))
+    return false;
+  if (witness.closeoutAdmissionEpoch !== undefined && !/^[a-f0-9]{64}$/u.test(witness.closeoutAdmissionEpoch))
     return false;
   if (
     witness.targetRoot &&
@@ -464,6 +491,7 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
   repo: string,
   project: string,
   work: Work,
+  admissionEpoch?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const root = yield* fs.realPath(repo);
@@ -572,6 +600,7 @@ const captureWitness = Effect.fn('nativeJobs.captureWitness')(function* (
     citationRefs: codeRefs,
     ...(state.cycle ? {cycleDigest: sha256HexSync(stableJson(state.cycle.state))} : {}),
     ...(closeout ? {closeoutTransactionId: closeout.transactionId} : {}),
+    ...(admissionEpoch ? {closeoutAdmissionEpoch: admissionEpoch} : {}),
     ...(document
       ? {
           targetRoot: (() => {
@@ -749,6 +778,7 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
           const basis = yield* readNativeCloseoutJobBasis(config, runId, generation);
           if (
             basis.transactionId !== view.closeoutTransactionId ||
+            basis.admissionEpoch !== view.closeoutAdmissionEpoch ||
             basis.bindingId !== view.bindingId ||
             basis.source.repo !== view.repo ||
             basis.source.head !== view.head ||
@@ -757,6 +787,13 @@ export const runNativeJobWorker = Effect.fn('nativeJobs.worker')(function* <R>(
           )
             return yield* fail('job-closeout-drift', 'The prepared closeout transaction changed since admission.');
         }
+        if (work.action === 'closeout') {
+          const epoch = yield* readNativeCloseoutJobEpoch(config, runId, generation, work.command);
+          if (epoch !== view.closeoutAdmissionEpoch)
+            return yield* fail('job-closeout-drift', 'The closeout admission changed since this job was accepted.');
+        }
+        const beforeDispatch = yield* CurrentNativeJobBeforeDispatch;
+        if (beforeDispatch) yield* beforeDispatch;
         const prepared = yield* dispatch(work);
         // A historical draft may materialize from the admitted witness, but
         // changed live source never makes the overall job completed in v1.
@@ -842,7 +879,11 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
     const stored = yield* readNativeWorkflowState(config, request.runId);
     if (!stored || stored.state.generation !== request.generation)
       return yield* fail('binding-drift', 'The original native run or generation changed.');
-    const jobId = nativeJobId(stored.state.bindingId, work);
+    const admissionEpoch =
+      work.action === 'closeout'
+        ? yield* readNativeCloseoutJobEpoch(config, request.runId, request.generation, work.command)
+        : undefined;
+    const jobId = nativeJobId(stored.state.bindingId, work, admissionEpoch);
     if (request.jobId !== undefined && request.jobId !== jobId)
       return yield* fail('job-identity-conflict', 'Submit must use the one derived identity for this exact work.');
     const existing = yield* read(config, request.runId, jobId);
@@ -869,6 +910,7 @@ export const runNativeJob = Effect.fn('nativeJobs.dispatch')(function* <R>(
       journal.state.binding.repo,
       journal.state.binding.project,
       work,
+      admissionEpoch,
     );
     const now = yield* Clock.currentTimeMillis;
     const envelope: Envelope = {

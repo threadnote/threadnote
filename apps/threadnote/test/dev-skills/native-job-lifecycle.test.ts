@@ -1,4 +1,4 @@
-import {Effect, Exit, FileSystem, Result} from 'effect';
+import {String as EffectString, Effect, Exit, FileSystem, Result} from 'effect';
 import {mkdtemp, mkdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {existsSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -110,6 +110,16 @@ describe('native private job lifecycle', () => {
         const right = {generation: 'g', runId: 'run', document: {b, a}, command: 'save', action: 'authoring'};
         expect(nativeJobId('0'.repeat(64), left)).toBe(nativeJobId('0'.repeat(64), right));
         expect(nativeJobId('0'.repeat(64), left)).toMatch(/^job-[a-f0-9]{48}$/u);
+        const firstEpoch = sha256HexSync(a);
+        const nextEpoch = sha256HexSync(b + '\0' + a);
+        if (firstEpoch !== nextEpoch) {
+          expect(nativeJobId(EffectString.repeat(64)('0'), left, firstEpoch)).not.toBe(
+            nativeJobId(EffectString.repeat(64)('0'), left, nextEpoch),
+          );
+          expect(nativeJobId(EffectString.repeat(64)('0'), left, firstEpoch)).toBe(
+            nativeJobId(EffectString.repeat(64)('0'), right, firstEpoch),
+          );
+        }
         const summary = nativeJobStatus({
           jobId: 'job',
           runId: 'run',

@@ -1,4 +1,4 @@
-import {Effect, Schema} from 'effect';
+import {Array as EffectArray, String as EffectString, Effect, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -10,6 +10,7 @@ import {
   decodeNativeCyclePlan,
   decodeNativeCycleState,
   initializeNativeCycle,
+  recordNativeCycleDelivery,
   validateNativeCyclePhase,
 } from '@threadnote/workflow-automations/cycle';
 import {persistCodexCloudProfile} from '../../src/codex/profile.js';
@@ -122,10 +123,16 @@ const loadedRootSchema = Schema.Struct({
   authoring: Schema.Struct({root: AuthoringReferenceSchema, readiness: Schema.Literal('ready')}),
 });
 
+const decodeExportedCyclePlan = (value: unknown) => {
+  if (!value || typeof value !== 'object' || !('authoring' in value)) throw new Error('Expected exported cycle plan.');
+  return decodeNativeCyclePlan(value.authoring);
+};
+
 const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
   withSpec = false,
   profile: CloseoutProfile = 'desktop',
   controllerRunId = 'controller',
+  cycleDelivery: 'local' | 'pr' = 'local',
 ) {
   const system = yield* SystemInfo;
   const environment = Object.fromEntries(
@@ -255,52 +262,71 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
   if (controllerRunId !== 'plan-run') yield* initRun(controllerRunId);
   const controller = yield* readNativeWorkflowState(config, controllerRunId);
   if (!controller) throw new Error('Expected controller state.');
-  const cyclePlan = decodeNativeCyclePlan({
-    format: 'threadnote-native-cycle-plan',
-    version: 1,
-    featureId: plan.id,
-    project: plan.project,
-    objective: plan.objective,
-    delivery: 'local',
-    source: {
-      root: planRoot,
-      binding: {
-        bindingId: planState.state.bindingId,
-        runId: 'plan-run',
-        generation,
-        profile,
-        ...(profile === 'desktop' ? {} : {team: 'default'}),
-      },
-      documentHash: nativeAuthoringDigest(plan),
-    },
-    completion: {},
-    phases: [
-      {
-        id: 'one',
-        definitionHash: '1'.repeat(64),
-        title: 'Reader behavior',
-        dependsOn: [],
-        allowedPaths: ['source.ts'],
-        acceptanceCriteria: plan.phases[0].acceptance.map(item => item.criterion),
-        safeToMergeReason: 'The fixture is independently verifiable.',
-        branch: 'fixture/reader',
-        baseBranch: 'main',
-        status: 'pending',
-        acceptanceRefs: plan.phases[0].acceptance.map(item => ({
-          id: item.id,
-          criterion: item.criterion,
-          requirements: item.requirementIds,
-          specScenarios: withSpec ? ['read'] : [],
-        })),
-      },
-    ],
-  });
-  const cycle = validateNativeCyclePhase(
+  const cyclePlan =
+    cycleDelivery === 'pr'
+      ? decodeExportedCyclePlan(
+          yield* call({
+            ...f.base('authoring', 'plan-run'),
+            command: 'export-dev-cycle',
+            uri: planRoot.uri,
+            delivery: 'pr',
+            bindings: {one: {branch: 'fixture/reader', baseBranch: 'main'}},
+          }),
+        )
+      : decodeNativeCyclePlan({
+          format: 'threadnote-native-cycle-plan',
+          version: 1,
+          featureId: plan.id,
+          project: plan.project,
+          objective: plan.objective,
+          delivery: cycleDelivery,
+          source: {
+            root: planRoot,
+            binding: {
+              bindingId: planState.state.bindingId,
+              runId: 'plan-run',
+              generation,
+              profile,
+              ...(profile === 'desktop' ? {} : {team: 'default'}),
+            },
+            documentHash: nativeAuthoringDigest(plan),
+          },
+          completion: {},
+          phases: [
+            {
+              id: 'one',
+              definitionHash: EffectString.repeat(64)('1'),
+              title: 'Reader behavior',
+              dependsOn: [],
+              allowedPaths: ['source.ts'],
+              acceptanceCriteria: EffectArray.map(plan.phases[0].acceptance, item => item.criterion),
+              safeToMergeReason: 'The fixture is independently verifiable.',
+              branch: 'fixture/reader',
+              baseBranch: 'main',
+              status: 'pending',
+              acceptanceRefs: EffectArray.map(plan.phases[0].acceptance, item => ({
+                id: item.id,
+                criterion: item.criterion,
+                requirements: item.requirementIds,
+                specScenarios: withSpec ? ['read'] : [],
+              })),
+            },
+          ],
+        });
+  const initialHead =
+    cycleDelivery === 'pr'
+      ? EffectString.trim((yield* git(f.repo, ['rev-parse', 'HEAD'])).stdout)
+      : EffectString.repeat(40)('a');
+  const initialTree =
+    cycleDelivery === 'pr'
+      ? EffectString.trim((yield* git(f.repo, ['rev-parse', 'HEAD^{tree}'])).stdout)
+      : EffectString.repeat(40)('b');
+  const validatedCycle = validateNativeCyclePhase(
     initializeNativeCycle(cyclePlan),
     'one',
-    {head: 'a'.repeat(40), tree: 'b'.repeat(40), files: ['source.ts']},
+    {head: initialHead, tree: initialTree, files: ['source.ts']},
     {
-      snapshotTree: 'b'.repeat(40),
+      snapshotTree: initialTree,
       status: 'passed',
       productState: 'working',
       checks: [{command: 'Private fixture check', result: 'passed', evidence: 'Observed the complete result.'}],
@@ -311,6 +337,33 @@ const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
       })),
     },
   );
+  const cycle =
+    cycleDelivery === 'pr'
+      ? recordNativeCycleDelivery(validatedCycle, 'one', {
+          phaseId: 'one',
+          phaseHash: validatedCycle.phases.one.phaseHash,
+          delivery: 'pr',
+          headSha: initialHead,
+          validatedTree: initialTree,
+          commitEvidence: 'Fixture predecessor delivery.',
+          pr: {
+            url: 'https://github.com/example/private-fixture/pull/1',
+            headSha: initialHead,
+            branch: 'fixture/reader',
+            baseBranch: 'main',
+            state: 'open',
+          },
+          watch: {
+            prUrl: 'https://github.com/example/private-fixture/pull/1',
+            headSha: initialHead,
+            state: 'active',
+            stateDir: f.path.join(f.root, 'watch'),
+            consumerKind: 'orchestrator',
+            consumerId: 'fixture',
+            evidence: 'Private predecessor fixture.',
+          },
+        })
+      : validatedCycle;
   yield* observeCloseoutStage(
     'controller-state',
     withNativeWorkflowLock(

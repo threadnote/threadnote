@@ -1,4 +1,4 @@
-import {Context, DateTime, Effect} from 'effect';
+import {Array as EffectArray, String as EffectString, Context, DateTime, Effect} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -30,7 +30,27 @@ import {
   withNativeWorkflowLock,
   writeNativeWorkflowState,
 } from './store.js';
+import {NativeCloseoutSaveReservationSchema} from '@threadnote/workflow-automations/native';
 import type {NativeCloseoutPlannedDocument} from './closeout_documents.js';
+
+/** A reservation can be abandoned only before any of its lower operation slots are consumed. */
+export const pristineCloseoutOperationPrefix = (
+  operations: readonly {readonly intent: {readonly operationId: string}}[],
+  reservation: Pick<typeof NativeCloseoutSaveReservationSchema.Type, 'operationStart' | 'operationIds'>,
+) =>
+  operations.length === reservation.operationStart &&
+  EffectArray.every(operations, item => !reservation.operationIds.includes(item.intent.operationId));
+export const nativeCloseoutPlannedOperationIds = (
+  transactionId: string,
+  documents: readonly NativeCloseoutPlannedDocument[],
+) => {
+  const seen = new Set<string>();
+  return EffectArray.map(documents, document => {
+    const repeated = seen.has(document.key);
+    seen.add(document.key);
+    return 'closeout-' + EffectString.slice(0, 24)(transactionId) + '-' + document.key + (repeated ? '-final' : '');
+  });
+};
 
 const fail = (message: string) => WorkflowAutomationError.make({code: 'closeout-capacity', message});
 const utf8 = new TextEncoder();
@@ -214,12 +234,7 @@ export const reserveNativeCloseoutCapacity = Effect.fn('workflowAutomation.reser
       if (!stored) return yield* fail('The original native controller is missing.');
       const state = stored.state;
       if (state.authoringSave) return yield* fail('Finish the admitted authoring save before closeout.');
-      const seen = new Set<string>();
-      const operationIds = plannedDocuments.map(document => {
-        const repeated = seen.has(document.key);
-        seen.add(document.key);
-        return 'closeout-' + transactionId.slice(0, 24) + '-' + document.key + (repeated ? '-final' : '');
-      });
+      const operationIds = nativeCloseoutPlannedOperationIds(transactionId, plannedDocuments);
       const intentDigest = sha256HexSync(stableJson({transactionId, plannedDocuments, codeRefs, owned}));
       const prior = state.closeoutSave;
       if (prior) {
@@ -358,3 +373,39 @@ export const clearNativeCloseoutCapacity = Effect.fn('workflowAutomation.clearNa
     }),
   ).pipe(Effect.mapError(nativeWorkflowError));
 });
+
+/** Read under the closeout lock. No native child from this reservation may have started. */
+export const inspectPristineNativeCloseoutCapacity = Effect.fn('workflowAutomation.inspectPristineCloseoutCapacity')(
+  function* (config: RuntimeConfig, runId: string, transactionId: string) {
+    const stored = yield* readNativeWorkflowState(config, runId);
+    const reservation = stored?.state.closeoutSave;
+    if (!stored || !reservation || reservation.transactionId !== transactionId || stored.state.authoringSave)
+      return yield* fail('The exact closeout reservation is unavailable for pristine recovery.');
+    if (!pristineCloseoutOperationPrefix(stored.state.operations, reservation))
+      return yield* fail('An admitted lower closeout operation has already started.');
+    return reservation;
+  },
+);
+
+/** CAS release of only the reservation fenced in the superseded closeout journal. */
+export const releasePristineNativeCloseoutCapacity = Effect.fn('workflowAutomation.releasePristineCloseoutCapacity')(
+  function* (config: RuntimeConfig, runId: string, expected: typeof NativeCloseoutSaveReservationSchema.Type) {
+    yield* withNativeWorkflowLock(
+      config,
+      runId,
+      false,
+      Effect.gen(function* () {
+        const stored = yield* readNativeWorkflowState(config, runId);
+        if (!stored) return yield* fail('The native controller disappeared during closeout recovery.');
+        if (!stored.state.closeoutSave) return;
+        if (
+          stableJson(stored.state.closeoutSave) !== stableJson(expected) ||
+          !pristineCloseoutOperationPrefix(stored.state.operations, expected)
+        )
+          return yield* fail('The exact reserved lower operations changed during recovery.');
+        const {closeoutSave: _reservation, ...state} = stored.state;
+        yield* writeNativeWorkflowState(config, state, stored.revision);
+      }),
+    ).pipe(Effect.mapError(nativeWorkflowError));
+  },
+);

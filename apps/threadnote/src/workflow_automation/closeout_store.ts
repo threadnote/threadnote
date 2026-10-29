@@ -57,12 +57,8 @@ export const readNativeCloseoutJournal = Effect.fn('workflowAutomation.readClose
   return {state, revision: sha256HexSync(bytes)};
 });
 
-/** Call under withNativeCloseoutLock; CAS and atomic replacement preserve failed preparations. */
-export const writeNativeCloseoutJournal = Effect.fn('workflowAutomation.writeCloseoutJournal')(function* <A>(
-  config: RuntimeConfig,
-  runId: string,
+const encodedJournal = Effect.fn('workflowAutomation.encodeCloseoutJournal')(function* <A>(
   state: A,
-  expectedRevision: string | null,
   decode: (value: unknown) => A,
 ) {
   const validated = yield* Effect.try({
@@ -77,6 +73,25 @@ export const writeNativeCloseoutJournal = Effect.fn('workflowAutomation.writeClo
         'Native closeout receipt reached its storage limit; existing receipts remain unchanged.',
       ),
   });
+  return {validated, serialized};
+});
+
+/** Check both admission images before any new reservation is installed. */
+export const assertNativeCloseoutJournalCapacity = Effect.fn('workflowAutomation.closeoutJournalCapacity')(function* <
+  A,
+>(state: A, decode: (value: unknown) => A) {
+  yield* encodedJournal(state, decode);
+});
+
+/** Call under withNativeCloseoutLock; CAS and atomic replacement preserve failed preparations. */
+export const writeNativeCloseoutJournal = Effect.fn('workflowAutomation.writeCloseoutJournal')(function* <A>(
+  config: RuntimeConfig,
+  runId: string,
+  state: A,
+  expectedRevision: string | null,
+  decode: (value: unknown) => A,
+) {
+  const {validated, serialized} = yield* encodedJournal(state, decode);
   const file = yield* nativeCloseoutJournalPath(config, runId);
   const fs = yield* FileSystem.FileSystem;
   const uuid = yield* (yield* Crypto.Crypto).randomUUIDv4();
