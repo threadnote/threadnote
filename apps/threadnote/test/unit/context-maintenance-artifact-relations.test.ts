@@ -1,5 +1,6 @@
 import {Array as EffectArray} from 'effect';
 import {pipe as EffectArrayPipe} from 'effect';
+import {setContextMaintenancePaused} from '../../src/memory/context/maintenance.js';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -72,6 +73,7 @@ function fixture(shared: boolean, relations: readonly MemoryRelation[]) {
       agentContextHome: home,
       manifestPath: path.join(home, 'threadnote.json'),
     };
+    yield* setContextMaintenancePaused(config, false);
     return {fs, path, home, root, file, record, config};
   });
 }

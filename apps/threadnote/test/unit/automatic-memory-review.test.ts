@@ -1,5 +1,6 @@
 import {pipe as EffectArrayPipe} from 'effect';
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {setContextMaintenancePaused} from '../../src/memory/context/maintenance.js';
 import {TestClock} from 'effect/testing';
 import {TestError} from '@threadnote/testing/test-error';
 import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
@@ -408,6 +409,7 @@ const fixture = Effect.fn('automaticReview.fixture')(function* (
     manifestPath: path.join(home, 'manifest.yaml'),
     user: 'tester',
   };
+  yield* setContextMaintenancePaused(config, false);
   yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
   const uri = `threadnote://user/tester/memories/${kind}/projects/fixture/target.md`;
   const sourceUri = 'threadnote://user/tester/memories/durable/projects/fixture/source.md';
@@ -489,6 +491,7 @@ const publicRelatedFixture = Effect.fn('automaticReview.publicRelatedFixture')(f
     user: 'tester',
     manifestPath: path.join(home, 'manifest.yaml'),
   };
+  yield* setContextMaintenancePaused(config, false);
   yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
   const server = new EffectMcpServerAdapter('automatic-related-review-test', '1.0.0', '');
   registerStoreTool(server, config, 'remember_context', 'Store memory.');

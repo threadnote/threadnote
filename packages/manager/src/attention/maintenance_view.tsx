@@ -36,6 +36,7 @@ import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
 interface Props {
+  readonly controlGeneration?: number;
   readonly project: string;
   readonly projects: readonly string[];
   readonly report: ManagerContextHealthResponseV1;
@@ -85,6 +86,12 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const [conflictSubjectUri, setConflictSubjectUri] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
+  const lastControlGeneration = useRef(props.controlGeneration);
+  useEffect(() => {
+    if (lastControlGeneration.current === props.controlGeneration) return;
+    lastControlGeneration.current = props.controlGeneration;
+    setRefresh(value => value + 1);
+  }, [props.controlGeneration]);
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [task, setTask] = useState('');
   const [inspectedCase, setInspectedCase] = useState<{
@@ -137,6 +144,8 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     };
   }, []);
   useEffect(() => {
+    setBusy(false);
+    actionBusy.current = false;
     setNotice('');
     setConflictSubjectUri(undefined);
     setSelected(undefined);
@@ -152,8 +161,6 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     if (!legacyStatus) return;
     let cancelled = false;
     let timer: number | undefined;
-    setBusy(false);
-    actionBusy.current = false;
     lastReportRevision.current = undefined;
     const poll = async () => {
       const epoch = mutationEpoch.current;
@@ -311,7 +318,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     setNotice('Change saved.');
   }
 
-  async function act(action: 'run-now' | 'pause' | 'resume' | 'undo', receiptId?: string) {
+  async function act(action: 'run-now' | 'undo', receiptId?: string) {
     if (actionBusy.current || statusUnconfirmed || props.healthLiveStale) return;
     const project = props.project;
     const epoch = projectEpoch.current;
@@ -338,7 +345,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       if ('version' in result) {
         setSnapshot({project, status: result});
         if (action === 'run-now') onChanged.current();
-        if (legacyStatus && (action === 'resume' || action === 'run-now')) setRefresh(value => value + 1);
+        if (legacyStatus && action === 'run-now') setRefresh(value => value + 1);
       } else if (result.status === 'conflict') {
         setError(maintenanceUndoConflictMessage(result.reason));
         setConflictSubjectUri(
@@ -629,59 +636,21 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           tone="neutral"
         />
       </div>
-      <section hidden={tab !== 'recovery'} className="attention-bulk-repair" aria-label="Maintenance controls">
+      <section hidden={tab !== 'recovery'} className="attention-bulk-repair" aria-label="Project maintenance actions">
         <div>
-          <div className="health-maintenance-heading">
-            <strong>Automatic maintenance</strong>
-            <span
-              className="health-status-badge"
-              data-tone={
-                status?.state === 'failed'
-                  ? 'danger'
-                  : status?.paused
-                    ? 'warning'
-                    : status?.state === 'running'
-                      ? 'info'
-                      : 'neutral'
-              }
-            >
-              {status?.paused
-                ? 'Paused'
-                : status?.state === 'failed'
-                  ? 'Stopped'
-                  : status?.state === 'running'
-                    ? 'Running'
-                    : status
-                      ? 'On'
-                      : 'Checking…'}
-            </span>
-          </div>
-          <p>Safe local work runs during normal use. Pausing applies to all projects.</p>
+          <strong>Run maintenance for this project</strong>
+          <p>Check this project now using the current automatic maintenance setting.</p>
         </div>
-        <div className="attention-bulk-repair-actions">
-          <button
-            type="button"
-            className="health-primary-action"
-            disabled={
-              busy ||
-              statusUnconfirmed ||
-              props.healthLiveStale ||
-              !status ||
-              status.paused ||
-              status.state === 'running'
-            }
-            onClick={() => void act('run-now')}
-          >
-            {busy ? 'Working…' : 'Run maintenance now'}
-          </button>
-          <button
-            type="button"
-            disabled={busy || statusUnconfirmed || props.healthLiveStale || !status}
-            onClick={() => void act(status?.paused ? 'resume' : 'pause')}
-          >
-            {status?.paused ? 'Resume automatic maintenance' : 'Pause automatic maintenance'}
-          </button>
-        </div>
+        <button
+          type="button"
+          className="health-primary-action"
+          disabled={
+            busy || statusUnconfirmed || props.healthLiveStale || !status || status.paused || status.state === 'running'
+          }
+          onClick={() => void act('run-now')}
+        >
+          {busy ? 'Working…' : 'Run maintenance now'}
+        </button>
       </section>
       <div className="health-refresh-status" style={{blockSize: '4.5rem', overflowY: 'auto'}}>
         {props.reportError ? (

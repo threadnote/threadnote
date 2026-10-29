@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {pipe as EffectArrayPipe} from 'effect';
 
+import {setContextMaintenancePaused} from '../../src/memory/context/maintenance.js';
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 import {it as effectIt} from '@effect/vitest';
@@ -101,6 +102,7 @@ describe('reviewed personal topic acceptance', () => {
             manifestPath: path.join(home, 'manifest.yaml'),
             user: 'tester',
           };
+          yield* setContextMaintenancePaused(config, false);
           yield* fs.writeFileString(
             config.manifestPath,
             `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,

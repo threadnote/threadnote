@@ -1,4 +1,5 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {setContextMaintenancePaused} from '../../src/memory/context/maintenance.js';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -41,6 +42,7 @@ function fixture(reverse = false) {
       manifestPath: path.join(home, 'manifest.yaml'),
       user: 'tester',
     };
+    yield* setContextMaintenancePaused(config, false);
     yield* fs.writeFileString(
       config.manifestPath,
       `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,

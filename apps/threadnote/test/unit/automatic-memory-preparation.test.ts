@@ -1,4 +1,5 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
+import {setContextMaintenancePaused} from '../../src/memory/context/maintenance.js';
 import {automaticReviewPacket} from '../../src/memory/context/maintenance_draft.js';
 import {automaticInactiveCodeRootIds} from '../../src/memory/context/maintenance_code_capture.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -117,6 +118,7 @@ const fixture = () =>
       agentContextHome: home,
       manifestPath: path.join(home, 'manifest.yaml'),
     };
+    yield* setContextMaintenancePaused(config, false);
     yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
     const location = {account: 'local', user: 'tester', home};
     const root = path.join(home, 'data', 'local', 'user', 'tester', 'memories');

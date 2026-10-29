@@ -28,6 +28,7 @@ import {
   reconcileAcceptedTopicMaintenanceCase,
   recordTopicMaintenanceReviewDecision,
   runContextMaintenance,
+  setContextMaintenancePaused,
   type ContextMaintenanceCaseV2,
   type MaintenanceState,
 } from '../../src/memory/context/maintenance.js';
@@ -140,6 +141,7 @@ const codeTopicFixture = Effect.gen(function* () {
     manifestPath: path.join(home, 'manifest.yaml'),
     user: 'tester',
   };
+  yield* setContextMaintenancePaused(config, false);
   yield* fs.writeFileString(
     config.manifestPath,
     `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,
@@ -769,6 +771,7 @@ describe('topic maintenance worker scheduling', () => {
           manifestPath: path.join(home, 'manifest.yaml'),
           user: 'tester',
         };
+        yield* setContextMaintenancePaused(config, false);
         const record = topic(1);
         const file = path.join(home, 'data/local/user/tester/memories/durable/projects/fixture/topic-1.md');
         yield* fs.makeDirectory(path.dirname(file), {recursive: true});

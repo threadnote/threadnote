@@ -1,6 +1,7 @@
 import {Array as EffectArray} from 'effect';
 import {pipe as EffectArrayPipe} from 'effect';
 
+import {setContextMaintenancePaused} from '../../src/memory/context/maintenance.js';
 import * as candidateGenerationModule from '@threadnote/memory/candidate-generation';
 import * as maintenanceModule from '../../src/memory/context/maintenance.js';
 import * as memoryModule from '../../src/mcp/server/memory.js';
@@ -373,6 +374,7 @@ describe('topic maintenance private draft generation', () => {
             manifestPath: path.join(home, 'manifest.yaml'),
             user: 'tester',
           };
+          yield* setContextMaintenancePaused(config, false);
           yield* fs.writeFileString(
             config.manifestPath,
             `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,

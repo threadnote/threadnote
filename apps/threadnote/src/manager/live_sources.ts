@@ -1,10 +1,22 @@
-import {Context, Crypto, Effect, FileSystem, Option, Path, PlatformError, Queue, Ref, Result, Stream} from 'effect';
+import {
+  Array as EffectArray,
+  Context,
+  Crypto,
+  Effect,
+  FileSystem,
+  Option,
+  Path,
+  PlatformError,
+  Queue,
+  Ref,
+  Result,
+  Stream,
+} from 'effect';
 import {resourceAccountMutationGenerationPath} from '@threadnote/store/resource/lock';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {readSettledCanonicalMutationGeneration} from '@threadnote/store/resource/settled_revision';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
-import {Array as EffectArray} from 'effect';
 
 export type ManagerObservedTopic = 'context-health' | 'context-maintenance';
 
@@ -103,6 +115,7 @@ export interface ManagerLiveSourcesOptions {
   readonly home: string;
   readonly account: string;
   readonly maintenanceStatePath: string;
+  readonly maintenanceControlPath?: string;
   readonly manifestPath?: string;
   readonly onScopeChange?: Effect.Effect<void, never>;
   readonly onInvalidate: (topics: readonly ManagerObservedTopic[], revision: string) => Effect.Effect<void, never>;
@@ -140,16 +153,22 @@ export const makeManagerLiveSources = Effect.fn('managerLive.makeSources')(funct
   const reconcileMaintenance = Effect.gen(function* () {
     // Atomic rename changes the inode even when payload size and timestamp
     // coincide. Missing files have a stable revision and are retried cheaply.
-    const stat = yield* fs.stat(options.maintenanceStatePath).pipe(
-      Effect.catchIf(
-        error => PlatformError.isPlatformError(error) && error.reason._tag === 'NotFound',
-        () => Effect.void,
-      ),
+    const identities = yield* Effect.forEach(
+      [options.maintenanceStatePath, ...(options.maintenanceControlPath ? [options.maintenanceControlPath] : [])],
+      file =>
+        fs.stat(file).pipe(
+          Effect.catchIf(
+            error => PlatformError.isPlatformError(error) && error.reason._tag === 'NotFound',
+            () => Effect.void,
+          ),
+          Effect.map(stat =>
+            stat !== undefined
+              ? `${Number(stat.size)}:${Option.getOrUndefined(stat.mtime)?.getTime() ?? ''}:${Option.getOrUndefined(stat.ino) ?? ''}`
+              : 'absent',
+          ),
+        ),
     );
-    const identity =
-      stat !== undefined
-        ? `${Number(stat.size)}:${Option.getOrUndefined(stat.mtime)?.getTime() ?? ''}:${Option.getOrUndefined(stat.ino) ?? ''}`
-        : 'absent';
+    const identity = EffectArray.join(identities, '|');
     const revision = EffectArray.join(
       Array.from(yield* crypto.digest('SHA-256', new TextEncoder().encode(identity)), byte =>
         Effect2.pipe(byte.toString(16), EffectString.padStart(2, '0')),
@@ -214,6 +233,8 @@ export const makeManagerLiveSources = Effect.fn('managerLive.makeSources')(funct
     );
   yield* observeDirectory(canonicalPath, hints.canonical).pipe(Effect.forkScoped);
   yield* observeDirectory(options.maintenanceStatePath, hints.maintenance).pipe(Effect.forkScoped);
+  if (options.maintenanceControlPath)
+    yield* observeDirectory(options.maintenanceControlPath, hints.maintenance).pipe(Effect.forkScoped);
   for (const source of metadataSources) yield* observeDirectory(source.file, signal).pipe(Effect.forkScoped);
   yield* Effect.forever(Effect.race(Queue.take(wake), Effect.sleep('2 seconds')).pipe(Effect.andThen(reconcile))).pipe(
     Effect.forkScoped,
