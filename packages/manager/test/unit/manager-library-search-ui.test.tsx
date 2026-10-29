@@ -4,7 +4,8 @@ import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {LibraryExplorer} from '../../src/library_explorer.js';
-import {useLibrarySearch} from '../../src/library_search.js';
+import {librarySearchInputValue, useLibrarySearch} from '../../src/library_search.js';
+import fc from 'fast-check';
 import type {LibraryScope} from '../../src/library_model.js';
 import type {TreeNode} from '../../src/ui/contracts.js';
 import * as EffectString from 'effect/String';
@@ -39,6 +40,21 @@ afterEach(async () => {
   host.remove();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+it('bounds arbitrary text input without changing recognized memory URIs', () => {
+  fc.assert(
+    fc.property(fc.oneof(fc.string({maxLength: 100}), fc.string({minLength: 1020, maxLength: 2048})), text => {
+      const input = 'query ' + text;
+      const result = librarySearchInputValue(input);
+      expect(result.length).toBeLessThanOrEqual(1024);
+      expect(Effect.pipe(input, EffectString.startsWith(result))).toBe(true);
+      expect(librarySearchInputValue(result)).toBe(result);
+      const uri = `${base}/durable/${encodeURIComponent(text || 'empty')}.md`;
+      expect(librarySearchInputValue(uri)).toBe(uri);
+    }),
+    {numRuns: 48},
+  );
 });
 
 it('reveals a recalled memory through every collapsed ancestor while folder selection includes hidden siblings', async () => {
@@ -138,4 +154,35 @@ it('debounces semantic recall, isolates scopes, ignores stale responses and clea
   await render('');
   expect(host.textContent).not.toContain('refreshed');
   expect(host.textContent).toContain('"pending":false');
+});
+
+it('cancels pending recall for a memory URI and resumes semantic search for ordinary text', async () => {
+  vi.useFakeTimers();
+  const pending: {signal?: AbortSignal | null; resolve: (response: Response) => void}[] = [];
+  vi.stubGlobal('fetch', (_input: RequestInfo | URL, init?: RequestInit) => {
+    const response = Promise.withResolvers<Response>();
+    pending.push({signal: init?.signal, resolve: response.resolve});
+    return response.promise;
+  });
+  function SearchState({query}: {query: string}) {
+    return <output>{JSON.stringify(useLibrarySearch(query, 'local', true, tree))}</output>;
+  }
+  const render = (query: string) => act(async () => root.render(<SearchState query={query} />));
+  await render('old meaning');
+  await act(async () => vi.advanceTimersByTimeAsync(250));
+  expect(pending).toHaveLength(1);
+  await render(`  ${match.uri}  `);
+  expect(pending[0].signal?.aborted).toBe(true);
+  expect(host.textContent).toBe('{"pending":false}');
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  await act(async () =>
+    pending[0].resolve(new Response(JSON.stringify({uris: ['obsolete'], semantic: 'available', warnings: []}))),
+  );
+  expect(host.textContent).not.toContain('obsolete');
+  await render('threadnote://memory/tn_target');
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  expect(pending).toHaveLength(1);
+  await render('new meaning');
+  await act(async () => vi.advanceTimersByTimeAsync(250));
+  expect(pending).toHaveLength(2);
 });

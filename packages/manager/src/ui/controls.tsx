@@ -6,6 +6,7 @@ import {ManagerAutocompleteInput} from '@threadnote/manager/dialog';
 import {isMemoryKind, isMemoryStatus} from './support.js';
 import type {MemoryMetadata, SelectId, TargetForm, TreeNode} from '@threadnote/manager/ui/contracts';
 import {MermaidBlock} from '../mermaid_block.js';
+import {isMemoryLink} from '../library_navigation.js';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
 
@@ -131,10 +132,6 @@ export function DropdownSelect(props: {
       ) : null}
     </div>
   );
-}
-
-function isMemoryLink(uri: string): boolean {
-  return /^threadnote:\/\/(?:memory\/[^/?#\s]+|user\/[^/?#\s]+\/memories\/[^?#\s]+)$/.test(uri);
 }
 
 export function MarkdownViewer(props: {

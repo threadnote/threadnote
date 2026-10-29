@@ -61,6 +61,7 @@ const latest = node('Latest');
 const slow = node('Slow');
 const alias = 'threadnote://memory/tn_shared';
 const missing = 'threadnote://memory/tn_missing';
+const longUri = base + '/durable/' + EffectString.repeat(80)('nested-directory/') + 'long.md';
 const markdown =
   'Source body\n\n**Artifacts**\n\n' +
   '- [current](' +
@@ -90,6 +91,7 @@ function json(body: unknown, status = 200) {
 }
 let host: HTMLDivElement;
 let requests: string[];
+let semanticQueries: string[];
 let showReview: boolean;
 let manualSupport: boolean;
 let reviewActions: Record<string, unknown>[];
@@ -105,6 +107,7 @@ beforeEach(() => {
     this.open = false;
   });
   requests = [];
+  semanticQueries = [];
   showReview = false;
   manualSupport = false;
   reviewActions = [];
@@ -343,6 +346,10 @@ beforeEach(() => {
             ]
           : [],
       });
+    if (url.pathname === '/api/library/search') {
+      semanticQueries.push(url.searchParams.get('query')!);
+      return json({uris: [], semantic: 'available', warnings: []});
+    }
     if (url.pathname === '/api/memory') {
       const uri = url.searchParams.get('uri')!;
       requests.push(uri);
@@ -354,6 +361,7 @@ beforeEach(() => {
           ),
         );
       if (uri === target.uri) return json(record(target, '# Target body'));
+      if (uri === longUri) return json(record({...target, uri: longUri}, '# Long URI target body'));
       if (uri === alias) return json(record(shared, '# Shared target body\n\n[self](<' + shared.uri + '>)'));
       if (uri === latest.uri) return json(record(latest, '# Latest body'));
       if (uri === slow.uri) {
@@ -412,6 +420,93 @@ async function link(label: string) {
   });
   expect(event.defaultPrevented).toBe(true);
 }
+
+const searchInput = () => host.querySelector<HTMLInputElement>('[aria-label="Search Library"]')!;
+async function setSearch(value: string) {
+  await act(async () => {
+    const input = searchInput();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+}
+async function enterSearch(isComposing = false) {
+  const event = new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true, isComposing});
+  await act(async () => searchInput().dispatchEvent(event));
+  return event;
+}
+
+it('opens entered canonical and shared alias URIs only on Enter through existing navigation', async () => {
+  await openSource();
+  await setSearch(`  ${target.uri}  `);
+  expect(requests).toEqual([source.uri]);
+  expect(host.textContent).toContain('Press Enter to open this memory.');
+  expect(host.textContent).not.toContain('Semantic search is unavailable.');
+  await enterSearch(true);
+  expect(requests).toEqual([source.uri]);
+  expect((await enterSearch()).defaultPrevented).toBe(true);
+  expect(requests).toEqual([source.uri, target.uri]);
+  expect(host.querySelector('.library-article')?.textContent).toContain('Target body');
+  await setSearch(alias);
+  await enterSearch();
+  expect(requests).toEqual([source.uri, target.uri, alias]);
+  expect(host.querySelector('.library-article')?.textContent).toContain('Shared target body');
+  expect(button('Team').getAttribute('aria-pressed')).toBe('true');
+  await act(async () => historyButton('Back').click());
+  expect(host.querySelector('.library-article')?.textContent).toContain('Target body');
+  expect(semanticQueries).toEqual([]);
+});
+
+it('accepts a memory URI longer than the text-query limit without truncating it', async () => {
+  await openSource();
+  expect(longUri.length).toBeGreaterThan(1024);
+  await setSearch(longUri);
+  expect(searchInput().value).toBe(longUri);
+  await enterSearch();
+  expect(requests).toEqual([source.uri, longUri]);
+  expect(host.querySelector('.library-article')?.textContent).toContain('Long URI target body');
+  expect(semanticQueries).toEqual([]);
+  await setSearch(EffectString.repeat(1025)('q'));
+  expect(searchInput().value).toHaveLength(1024);
+});
+
+it('preserves unsaved text when URI navigation is cancelled, then opens after discard', async () => {
+  await openSource();
+  await act(async () => button('Edit').click());
+  const editor = host.querySelector<HTMLTextAreaElement>('[aria-label="Test editor"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(editor, '# Unsaved source');
+    editor.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  await act(async () => button('Preview').click());
+  await setSearch(alias);
+  await enterSearch();
+  await act(async () => button('Cancel').click());
+  expect(requests).toEqual([source.uri]);
+  expect(searchInput().value).toBe(alias);
+  expect(host.querySelector('.library-article')?.textContent).toContain('Unsaved source');
+  await enterSearch();
+  await act(async () => button('Discard changes').click());
+  expect(requests).toEqual([source.uri, alias]);
+  expect(host.querySelector('.library-article')?.textContent).toContain('Shared target body');
+});
+
+it('clears unavailable URI content and fences a late URI response after a newer selection', async () => {
+  await openSource();
+  await setSearch(missing);
+  await enterSearch();
+  expect(host.textContent).toContain('Record unavailable until it loads.');
+  expect(host.querySelector('.library-article')).toBeNull();
+  await setSearch(slow.uri);
+  await enterSearch();
+  expect(finishSlow).toBeDefined();
+  await setSearch(latest.uri);
+  await enterSearch();
+  expect(host.querySelector('.library-article')?.textContent).toContain('Latest body');
+  await act(async () => finishSlow!(json(record(slow, '# Obsolete slow body'))));
+  expect(host.textContent).not.toContain('Obsolete slow body');
+  expect(requests).toEqual([source.uri, missing, slow.uri, latest.uri]);
+  expect(semanticQueries).toEqual([]);
+});
 
 it('opens canonical and shared alias links using the accepted node even outside the tree', async () => {
   await openSource();

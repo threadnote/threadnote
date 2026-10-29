@@ -7093,7 +7093,7 @@ h4 {
   min-width: 104px;
 }
 .library-search {
-  margin-left: auto;
+  flex: 1 1 16rem;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -7101,17 +7101,13 @@ h4 {
   border-radius: 6px;
   padding: 6px 9px;
   color: var(--muted);
-  width: 228px;
   max-width: 100%;
   min-width: 0;
-  flex-shrink: 1;
   transition:
-    width 160ms ease,
     border-color 160ms ease,
     box-shadow 160ms ease;
 }
 .library-search:focus-within {
-  width: 400px;
   border-color: var(--accent);
 }
 .library-history {
@@ -7125,6 +7121,7 @@ h4 {
   font-size: 11px;
 }
 .library-search input {
+  min-width: 0;
   padding: 0;
   min-height: 0;
   border: 0;
@@ -8263,10 +8260,6 @@ h4 {
   }
   .library-article {
     padding: 20px;
-  }
-  .library-search {
-    flex: 1;
-    min-width: 160px;
   }
   .is-authoring .content-grid {
     grid-template-columns: minmax(0, 1fr);
