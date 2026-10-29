@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
+import {Array as A, String as S} from 'effect';
 import {
   nativeCyclePacket,
   validateNativeCycleCapacityRecord,
@@ -18,6 +19,7 @@ import {
   type NativeCycleValidation,
   type NativeCycleState,
 } from '../src/cycle.js';
+import {decodeNativeCycleRuntime} from '../src/cycle_runtime.js';
 
 const gitSha = 'a'.repeat(40);
 const gitTree = 'b'.repeat(40);
@@ -124,6 +126,133 @@ const prDelivery = (state: 'open' | 'merged' = 'open') => ({
 });
 
 describe('native cycle pure domain', () => {
+  const before = {...decodeNativeCyclePlan(makePlan()).source, intentHash: digest};
+  const after = {
+    ...before,
+    root: {...before.root, revision: S.repeat(64)('d')},
+    documentHash: S.repeat(64)('e'),
+    intentHash: S.repeat(64)('f'),
+  };
+  const amendment = {
+    before,
+    after,
+    reason: 'Approved specification revision',
+    userAuthority: 'Human approved the revision',
+  };
+  const amendedState = () => ({
+    ...initializeNativeCycle(decodeNativeCyclePlan({...makePlan(), spec: after})),
+    specAmendments: [amendment],
+  });
+  const runtimeEnvelope = (state: NativeCycleState) => ({
+    state,
+    plans: [state.plan],
+    baselines: {},
+    reviewLimits: {},
+    reviewExpansions: [],
+    snapshots: [],
+    reviews: [],
+    attempts: [],
+  });
+
+  it('round-trips bounded retained amendment history through state and runtime envelopes without mutation', () => {
+    const without = initializeNativeCycle(decodeNativeCyclePlan(makePlan()));
+    expect(decodeNativeCycleState(JSON.parse(JSON.stringify(without)))).toEqual(without);
+    expect(decodeNativeCycleRuntime(JSON.parse(JSON.stringify(runtimeEnvelope(without))))).toEqual(
+      runtimeEnvelope(without),
+    );
+    expect('specAmendments' in decodeNativeCycleState(without)).toBe(false);
+    for (const count of [0, 1, 64]) {
+      const state = {...amendedState(), specAmendments: Array.from({length: count}, () => amendment)};
+      expect(decodeNativeCycleState(JSON.parse(JSON.stringify(state)))).toEqual(state);
+      expect(decodeNativeCycleRuntime(JSON.parse(JSON.stringify(runtimeEnvelope(state))))).toEqual(
+        runtimeEnvelope(state),
+      );
+    }
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            reason: fc.stringMatching(/^[A-Za-z][A-Za-z0-9 ._-]{0,63}$/u),
+            userAuthority: fc.stringMatching(/^[A-Za-z][A-Za-z0-9 ._-]{0,63}$/u),
+          }),
+          {maxLength: 64},
+        ),
+        entries => {
+          const state = {...amendedState(), specAmendments: A.map(entries, entry => ({before, after, ...entry}))};
+          const original = JSON.stringify(state);
+          const runtime = runtimeEnvelope(state);
+          expect(decodeNativeCycleState(JSON.parse(original))).toEqual(state);
+          expect(decodeNativeCycleRuntime(JSON.parse(JSON.stringify(runtime)))).toEqual(runtime);
+          expect(JSON.stringify(state)).toBe(original);
+          expect(nextNativeCycle(state)).toEqual(nextNativeCycle({...state, specAmendments: []}));
+        },
+      ),
+      {numRuns: 48},
+    );
+  });
+
+  it('preserves historical amendments in ordinary transitions while rejecting new specification changes', () => {
+    const state = amendedState();
+    const original = JSON.stringify(state);
+    const validated = validateNativeCyclePhase(state, 'one', snapshot(), validation);
+    expect(validated.specAmendments).toEqual(state.specAmendments);
+    expect(invalidateNativeCycle(validated, 'one', 'Source changed').specAmendments).toEqual(state.specAmendments);
+    const plan = decodeNativeCyclePlan({
+      ...state.plan,
+      phases: A.map(state.plan.phases, phase => (phase.id === 'two' ? {...phase, branch: 'feature/two-next'} : phase)),
+    });
+    expect(reconcileNativeCyclePlan(validated, plan, 'Branch metadata changed').state.specAmendments).toEqual(
+      state.specAmendments,
+    );
+    expect(() =>
+      reconcileNativeCyclePlan(
+        state,
+        decodeNativeCyclePlan({
+          ...state.plan,
+          spec: {...after, intentHash: digest},
+        }),
+        'Historical authority does not authorize a new amendment',
+      ),
+    ).toThrow('Plan reconciliation changes identity or spec.');
+    expect(JSON.stringify(state)).toBe(original);
+  });
+
+  it('rejects oversized or malformed amendment history and keeps its nested fields closed', () => {
+    const state = amendedState();
+    expect(() =>
+      decodeNativeCycleState({...state, specAmendments: Array.from({length: 65}, () => amendment)}),
+    ).toThrow();
+    for (const pin of [
+      {...before, root: {...before.root, revision: 'bad'}},
+      {...before, root: {...before.root, uri: 'file:///spec'}},
+      {...before, root: {...before.root, memoryId: 'bad'}},
+      {...before, binding: {...before.binding, bindingId: 'bad'}},
+      {...before, binding: {...before.binding, profile: 'unknown'}},
+      {...before, documentHash: 'bad'},
+      {...before, intentHash: 'bad'},
+      {...before, extra: true},
+    ]) {
+      expect(() => decodeNativeCycleState({...state, specAmendments: [{...amendment, before: pin}]})).toThrow();
+      expect(() => decodeNativeCycleState({...state, specAmendments: [{...amendment, after: pin}]})).toThrow();
+    }
+    expect(() => decodeNativeCycleState({...state, specAmendments: [{...amendment, extra: true}]})).toThrow();
+    for (const text of [
+      '',
+      '  ',
+      '\n',
+      'Reason\u0000',
+      'Reason\u007f',
+      'Reason\r',
+      S.repeat(4097)('a'),
+      S.repeat(1366)('界'),
+    ]) {
+      expect(() => decodeNativeCycleState({...state, specAmendments: [{...amendment, reason: text}]})).toThrow();
+      expect(() => decodeNativeCycleState({...state, specAmendments: [{...amendment, userAuthority: text}]})).toThrow();
+    }
+    const bounded = {...amendment, reason: S.repeat(1365)('界'), userAuthority: 'Retained\napproval'};
+    expect(decodeNativeCycleState({...state, specAmendments: [bounded]}).specAmendments).toEqual([bounded]);
+  });
+
   it('rejects unsupported formats, unsafe paths and reserved IDs without mutation', () => {
     const input = makePlan();
     expect(decodeNativeCyclePlan(input)).toEqual(input);

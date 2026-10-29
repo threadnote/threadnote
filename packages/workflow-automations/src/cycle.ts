@@ -130,11 +130,19 @@ const phaseStateSchema = Schema.Struct({
   reason: Schema.optionalKey(text()),
   history: Schema.optionalKey(Schema.Array(historySchema).check(Schema.isMaxLength(64))),
 });
+const specPinSchema = Schema.Struct({root, binding, documentHash: digest, intentHash: digest});
+const specAmendmentSchema = Schema.Struct({
+  before: specPinSchema,
+  after: specPinSchema,
+  reason: text(),
+  userAuthority: text(),
+});
 export const NativeCycleStateSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-cycle'),
   version: Schema.Literal(1),
   plan: NativeCyclePlanSchema,
   phases: Schema.Record(id, phaseStateSchema),
+  specAmendments: Schema.optionalKey(Schema.Array(specAmendmentSchema).check(Schema.isMaxLength(64))),
 });
 export type NativeCycleState = typeof NativeCycleStateSchema.Type;
 function err(message: string): never {
