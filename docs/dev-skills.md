@@ -11,7 +11,7 @@ Threadnote ships `dev-spec`, `dev-plan`, `dev-cycle` and the supporting `watch-p
 
 Invoke a skill using your agent host's skill picker or supported invocation syntax, for example `$dev-plan` in Codex. Installation makes the workflows available; it does not run them. Small tasks can use Threadnote's core context and memory skills directly.
 
-The dev-cycle orchestrator selects review lanes as needed. The optional simplicity lane checks duplication, unnecessary complexity and simpler equivalent designs.
+The dev-cycle orchestrator requires an independent background correctness review and a separate simplicity review by a distinct agent. The orchestrator does not count itself as a reviewer. Simplicity checks duplication, unnecessary complexity and simpler equivalent designs; additional specialist lanes depend on the change and its risks.
 
 ## Install and manage
 
