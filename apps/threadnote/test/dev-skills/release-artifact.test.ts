@@ -197,6 +197,8 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
 
 it('captures bounded closed producer diagnostics only when the compiled Git fixture opts in', async () => {
   const temporary = await mkdtemp(resolve(tmpdir(), 'threadnote-release-trace-'));
+  let bodyFailure: {readonly error: unknown} | undefined;
+  let cleanupFailure: {readonly error: unknown} | undefined;
   try {
     const nativeGit = Bun.which('git');
     if (!nativeGit) throw new Error('Git is required for the compiled fixture boundary.');
@@ -372,20 +374,42 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
         stderr: 'pipe',
         timeout: 15_000,
       });
-      const [status, stdout, stderr] = await Promise.all([
+      const settled = await Promise.allSettled([
         child.exited,
         new Response(child.stdout).arrayBuffer(),
         new Response(child.stderr).text(),
-      ]);
+      ] as const);
+      const failures = EffectArray.filter(settled, result => result.status === 'rejected');
+      if (failures.length)
+        throw new AggregateError(
+          EffectArray.map(failures, result => result.reason),
+          'Producer did not finish cleanly.',
+        );
+      const [exitResult, stdoutResult, stderrResult] = settled;
+      if (exitResult.status === 'rejected') throw exitResult.reason;
+      if (stdoutResult.status === 'rejected') throw stdoutResult.reason;
+      if (stderrResult.status === 'rejected') throw stderrResult.reason;
+      const [status, stdout, stderr] = [exitResult.value, stdoutResult.value, stderrResult.value];
       expect(status).toBe(0);
       expect(Buffer.from(stdout).equals(content)).toBe(true);
       expect(stderr).toBe('');
       return io(child.pid);
     };
+    const concurrentGroup = async () => {
+      const settled = await Promise.allSettled(Array.from({length: 4}, concurrent));
+      const failures = EffectArray.filter(settled, result => result.status === 'rejected');
+      if (failures.length)
+        throw new AggregateError(
+          EffectArray.map(failures, result => result.reason),
+          'Concurrent producers failed.',
+        );
+      return EffectArray.map(settled, result => {
+        if (result.status === 'rejected') throw result.reason;
+        return result.value;
+      });
+    };
     // Fresh processes observe the terminal claim once per event, with no opens.
-    expect(await Promise.all(Array.from({length: 4}, concurrent))).toEqual(
-      Array.from({length: 4}, () => ({checks: 3, opens: 0})),
-    );
+    expect(await concurrentGroup()).toEqual(Array.from({length: 4}, () => ({checks: 3, opens: 0})));
     const exhausted = invoke(`${sha}:${sentinel}`, true);
     expect(exhausted.status).toBe(0);
     expect(exhausted.stdout.equals(content)).toBe(true);
@@ -403,7 +427,7 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     await rm(trace, {recursive: true});
     await mkdir(trace);
     for (let slot = 0; slot < 124; slot++) await writeFile(resolve(trace, `${slot}.json`), saturated[slot] ?? '');
-    await Promise.all(Array.from({length: 4}, concurrent));
+    await concurrentGroup();
     expect(await readdir(trace)).toHaveLength(128);
     const raced = await snapshot();
     expect(raced.slice(0, 124)).toEqual(saturated.slice(0, 124));
@@ -418,9 +442,25 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     expect(unavailable.status).toBe(0);
     expect(unavailable.stdout.equals(content)).toBe(true);
     expect(unavailable.stderr.length).toBe(0);
+  } catch (error) {
+    bodyFailure = {error};
   } finally {
-    await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
+    try {
+      await rm(temporary, {recursive: true, force: true, maxRetries: 10, retryDelay: 50});
+    } catch (error) {
+      cleanupFailure = {error};
+    }
   }
+  if (bodyFailure && cleanupFailure)
+    throw new AggregateError(
+      [bodyFailure.error, cleanupFailure.error],
+      'Producer diagnostics and fixture cleanup both failed.',
+      {
+        cause: bodyFailure.error,
+      },
+    );
+  if (bodyFailure) throw bodyFailure.error;
+  if (cleanupFailure) throw cleanupFailure.error;
 }, 60_000);
 
 // Watch mutations return common health fields; only inspect/work return their detail arrays.
