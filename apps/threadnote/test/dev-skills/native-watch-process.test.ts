@@ -55,7 +55,11 @@ const controlBoundary = Schema.Struct(controlFields);
 const healthBoundary = Schema.Struct({
   ...controlFields,
   metrics: Schema.Struct({sweeps: Schema.Int}),
-  notification: Schema.Struct({notifiedThrough: Schema.Int}).pipe(Schema.NullOr, Schema.optionalKey),
+  notification: Schema.Struct({
+    notifiedThrough: Schema.Int,
+    status: Schema.String,
+    consumedThrough: Schema.NullOr(Schema.Int),
+  }).pipe(Schema.NullOr, Schema.optionalKey),
 });
 const workRecordBoundary = Schema.Struct({
   eventId: Schema.String,
@@ -254,6 +258,24 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
     expect(await hostCalls()).toHaveLength(count);
   };
   const consumer = {consumerId: 'test-consumer'};
+  const arriveNotice = async (index: number) => {
+    const notice = (await hostCalls())[index][4];
+    const locator = required(/^Threadnote watch event\. Route=(\{.*\})\./u.exec(notice)?.[1]);
+    const route = Schema.decodeUnknownSync(
+      Schema.Struct({
+        home: Schema.String,
+        watchId: Schema.String,
+        consumerId: Schema.String,
+        wakeupId: Schema.String,
+        eventKey: Schema.String,
+        attemptId: Schema.String,
+      }),
+    )(JSON.parse(locator));
+    expect(route.home).toBe(home);
+    expect(route.watchId).toBe(base.watchId);
+    const {home: _home, watchId: _watchId, ...claim} = route;
+    return (await cli('relay', claim)).result;
+  };
   try {
     const initial = (await cli('start', start)).result;
     if (terminal) {
@@ -272,6 +294,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
         await notified(1);
         expect((await hostCalls())[0][4]).toContain(JSON.stringify(home));
         expect((await hostCalls())[0][4]).toContain('fixture-watch:1:4');
+        expect((await arriveNotice(0)).pending).toBe(4);
       }
       const delivery = required((await cli('relay', consumer)).result.delivery);
       expect(EffectArray.map(delivery.events, event => event.kind).sort()).toEqual([
@@ -328,10 +351,10 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
     if (eventDriven) {
       await notified(1);
       const receiptDeadline = Date.now() + 10_000;
-      let notifiedThrough = (await cli('inspect')).result.notification?.notifiedThrough ?? 0;
-      while (notifiedThrough < 3 && Date.now() < receiptDeadline)
-        notifiedThrough = (await cli('inspect')).result.notification?.notifiedThrough ?? 0;
-      expect(notifiedThrough).toBe(3);
+      let notification = (await cli('inspect')).result.notification;
+      while (notification?.status !== 'queued' && Date.now() < receiptDeadline)
+        notification = (await cli('inspect')).result.notification;
+      expect(notification).toMatchObject({status: 'queued', notifiedThrough: 0, consumedThrough: 0});
     }
     process.kill(firstPid, 'SIGKILL');
     await dead(firstPid);
@@ -347,6 +370,7 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
     expect(sweep.metrics.sweeps).toBe(2);
     const restartRequests = await readFile(counter, 'utf8');
     expect((await cli('relay', consumer)).result.delivery).toEqual(delivery);
+    if (eventDriven) expect((await arriveNotice(0)).delivery).toEqual(delivery);
     const largeEvent = required(
       Fn.pipe(
         EffectArray.findFirst(delivery.events, event => event.kind === 'ci_error'),

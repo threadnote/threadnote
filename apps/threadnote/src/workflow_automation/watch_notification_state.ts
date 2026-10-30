@@ -53,6 +53,8 @@ export const nativeWatchNotificationSchema = Schema.Struct({
       collectorToken: Schema.optionalKey(uuid),
       status: Schema.Literals(['pending', 'sending', 'queued', 'completed', 'failed']),
       receipt: Schema.optionalKey(uuid),
+      // New Codex attempts start at zero; positive values claim the arriving notice's durable backlog.
+      consumedThrough: Schema.optionalKey(integer),
       error: Schema.optionalKey(
         Schema.Literals([
           'host-command-failed',
@@ -110,10 +112,41 @@ export function validateNativeWatchNotification(value: NativeWatchNotification, 
         (!pending.attemptId || !pending.collectorToken)) ||
       (pending.status === 'failed' && pending.attempts < 1) ||
       (pending.status === 'queued' && value.target.host !== 'codex') ||
+      (pending.consumedThrough !== undefined &&
+        (value.target.host !== 'codex' ||
+          (pending.consumedThrough !== 0 &&
+            (pending.attempts < 1 ||
+              pending.status === 'pending' ||
+              pending.consumedThrough < pending.last ||
+              pending.consumedThrough >= state.nextSequence)))) ||
       (pending.status === 'completed' &&
         (value.target.host !== 'cursor-cli' || pending.receipt !== value.target.sessionId)))
   )
     throw new Error('Notification outbox mismatch.');
+}
+
+/** A matching arriving notice claims its current backlog; it never disposes or acknowledges work. */
+export function consumeNativeWatchNotification(
+  value: NativeWatchNotification,
+  state: NativeWatchState,
+  route: {consumerId: string; wakeupId: string; eventKey: string; attemptId?: string},
+): NativeWatchNotification {
+  const pending = value.outbox;
+  if (
+    value.target.host !== 'codex' ||
+    value.consumerId !== route.consumerId ||
+    value.wakeupId !== route.wakeupId ||
+    state.consumer?.id !== route.consumerId ||
+    state.consumer.wakeupId !== route.wakeupId ||
+    !pending ||
+    pending.key !== route.eventKey ||
+    pending.attempts < 1 ||
+    pending.status === 'pending' ||
+    (pending.consumedThrough !== undefined && pending.consumedThrough !== 0) ||
+    (route.attemptId !== pending.attemptId && !(pending.consumedThrough === undefined && route.attemptId === undefined))
+  )
+    return value;
+  return {...value, outbox: {...pending, consumedThrough: state.nextSequence - 1}};
 }
 
 /** Only newly appended durable sequences create work; pending feedback and unresolved work do not. */
@@ -146,6 +179,7 @@ export function stageNativeWatchNotification(
       attempts: 0,
       nextAttemptAt: now,
       status: 'pending',
+      ...(value.target.host === 'codex' ? {consumedThrough: 0} : {}),
     },
   };
 }
@@ -154,8 +188,8 @@ export function nativeWatchNotice(
   route: {home: string; watchId: string; consumerId: string; wakeupId: string},
   value: NonNullable<NativeWatchNotification['outbox']>,
 ): string {
-  const locator = JSON.stringify({...route, eventKey: value.key});
+  const locator = JSON.stringify({...route, eventKey: value.key, attemptId: value.attemptId});
   if (new TextEncoder().encode(locator).byteLength > 6144)
     throw new Error('Host notification route exceeds its byte budget.');
-  return `Threadnote native watch event. Route=${locator}. Read this exact private home/watch using the owned consumer; inspect durable delivery/work and preserve disposition and ACK semantics. Use this home only for this watch command; preserve the caller workspace and default home.`;
+  return `Threadnote watch event. Route=${locator}. Relay this home/watch with consumerId, wakeupId, eventKey and attemptId to claim arrival. Inspect durable delivery/work; preserve disposition and ACK semantics. Scope this home to this watch; preserve caller workspace and default home.`;
 }

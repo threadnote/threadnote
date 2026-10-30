@@ -23,7 +23,7 @@ import {
 } from './files.js';
 import {consumerId, enrollmentContext, homeIndexPath, parseHomeIndex, readReceipt, receiptPath} from './registry.js';
 import {inspectOwned, verifyReceiptProjection} from './inspection.js';
-import {loadDevSkillsBundleAt, parseNativeRequirements} from './manifest.js';
+import {loadDevSkillsBundleAt, parseNativeRequirements, supportsNativeRequirements} from './manifest.js';
 import {installedSummary} from './capabilities.js';
 import {compareVersions} from '../release/version/compare.js';
 import {withRuntimeCoordinator} from './lease.js';
@@ -61,10 +61,7 @@ export const requirementsIssues = (
       !capabilities.manifestSchemas?.includes(2) ||
       !installed.nativeRequirements ||
       !capabilities.nativeFeatures ||
-      EffectArray.some(
-        EffectRecord.toEntries(installed.nativeRequirements),
-        ([key, required]) => capabilities.nativeFeatures?.[key] !== required,
-      ))) ||
+      !supportsNativeRequirements(installed.nativeRequirements, capabilities.nativeFeatures))) ||
   !capabilities.workflowProtocols.includes(installed.workflowProtocol) ||
   !capabilities.stateSchemas.includes(installed.stateSchema) ||
   compareVersions(capabilities.runtimeVersion, installed.minimumRuntime) < 0

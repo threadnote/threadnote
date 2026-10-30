@@ -28,7 +28,11 @@ import {
 } from './watch_store.js';
 import {launchNativeWatchProcess, nativeWatchCollectorAlive} from './watch_process.js';
 import {assertNativeWatchOutput, nativeWatchWorkList, nativeWatchWorkDetail} from './watch_output.js';
-import {nativeWatchWakeupSchema, type NativeWatchWakeup} from './watch_notification_state.js';
+import {
+  consumeNativeWatchNotification,
+  nativeWatchWakeupSchema,
+  type NativeWatchWakeup,
+} from './watch_notification_state.js';
 import {
   makeNativeWatchNotifier,
   maintainNativeWatchSubscription,
@@ -63,6 +67,12 @@ export const nativeWatchRequestSchema = Schema.Struct({
   wakeup: Schema.optionalKey(nativeWatchWakeupSchema),
   recoverWakeup: Schema.optionalKey(Schema.Boolean),
   deliveryId: Schema.optionalKey(text),
+  eventKey: Schema.optionalKey(
+    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[0-9]+:[0-9]+$/u)),
+  ),
+  attemptId: Schema.optionalKey(
+    Schema.String.check(Schema.isPattern(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu)),
+  ),
   dispositions: Schema.optionalKey(Schema.Array(Schema.Unknown).check(Schema.isMaxLength(32))),
   expectedRevision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   timeoutSeconds: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 55}))),
@@ -96,6 +106,7 @@ const health = Effect.fn('workflowWatch.health')(function* (
   const alive = yield* nativeWatchCollectorAlive(envelope.collector);
   const consumer = envelope.state.consumer;
   const consumerLive = consumer !== null && consumer.leaseUntil > now;
+  const receipt = envelope.notification?.outbox?.receipt ?? null;
   const sourceErrors = Array.flatMap(envelope.state.sources, source =>
     source.error ? [{source: source.source, ...source.error}] : [],
   );
@@ -120,7 +131,7 @@ const health = Effect.fn('workflowWatch.health')(function* (
       id: consumer?.id ?? null,
       wakeupId: consumer?.wakeupId ?? null,
       wakeupVerification: envelope.notification
-        ? envelope.notification.lastReceipt
+        ? envelope.notification.lastReceipt || receipt
           ? 'native-host-receipt-recorded'
           : 'native-host-delivery-pending'
         : 'external-host-receipt-required',
@@ -142,6 +153,9 @@ const health = Effect.fn('workflowWatch.health')(function* (
               ? 'ambiguous'
               : (envelope.notification.outbox?.status ?? 'idle'),
           key: envelope.notification.outbox?.key ?? null,
+          attemptId: envelope.notification.outbox?.attemptId ?? null,
+          receipt,
+          consumedThrough: envelope.notification.outbox?.consumedThrough ?? null,
           attempts: envelope.notification.outbox?.attempts ?? 0,
           nextAttemptAt: envelope.notification.outbox?.nextAttemptAt ?? null,
           error:
@@ -205,6 +219,11 @@ function attachNotification(
     previous.outbox &&
     previous.outbox.attempts > 0 &&
     !(previous.outbox.status === 'failed' && previous.outbox.error === 'host-session-owned');
+  if (rebind && previous?.target.host === 'codex' && previous.outbox && previous.outbox.attempts > 0)
+    throw fail(
+      'wakeup-recovery-required',
+      'Consume and acknowledge the original Codex notice, or explicitly recover its ambiguous attempt before rebinding.',
+    );
   if (rebind && retainedCursorAttempt)
     throw fail(
       'wakeup-recovery-required',
@@ -489,6 +508,11 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
   );
   if ((request.wakeup || request.recoverWakeup) && request.command !== 'start' && request.command !== 'consumer')
     return yield* fail('invalid-request', 'Host wake configuration requires explicit start or consumer attachment.');
+  if (
+    (request.eventKey !== undefined && (request.command !== 'relay' || request.wakeupId === undefined)) ||
+    (request.attemptId !== undefined && request.eventKey === undefined)
+  )
+    return yield* fail('invalid-request', 'Notice arrival requires relay with its owned wakeupId and eventKey.');
   const sameBinding = (envelope: NativeWatchEnvelope | undefined) =>
     envelope?.notification?.consumerId === request.consumerId &&
     envelope?.notification?.wakeupId === request.wakeupId &&
@@ -623,6 +647,16 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
               state: relay.state,
               metrics: {...envelope.metrics, consumerReads: envelope.metrics.consumerReads + 1},
             };
+            if (request.eventKey !== undefined && envelope.notification)
+              envelope = {
+                ...envelope,
+                notification: consumeNativeWatchNotification(envelope.notification, envelope.state, {
+                  consumerId,
+                  wakeupId: required(request.wakeupId, 'wakeupId'),
+                  eventKey: request.eventKey,
+                  ...(request.attemptId === undefined ? {} : {attemptId: request.attemptId}),
+                }),
+              };
             output = {delivery: relay.delivery};
           } else if (request.command === 'disposition')
             envelope = {

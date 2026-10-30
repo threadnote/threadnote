@@ -1,4 +1,4 @@
 interface:
   display_name: 'Watch PR'
-  short_description: 'Watch PRs and proactively fix CI and review issues'
-  default_prompt: 'Use $watch-pr to monitor this PR, fix actionable CI and review issues, validate and push scoped fixes, and keep watching.'
+  short_description: 'PR events with CI and review repair'
+  default_prompt: 'Use $watch-pr to arm PR monitoring, repair actionable CI and review events, and end the turn whenever idle.'
