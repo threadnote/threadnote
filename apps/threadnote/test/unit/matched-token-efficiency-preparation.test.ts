@@ -526,7 +526,10 @@ describe('matched token-efficiency study preparation', () => {
     const qualificationCheck = join(root, 'qualification-check');
     await writeFile(qualificationCheck, '#!/bin/sh\nexit 1\n');
     await chmod(qualificationCheck, 0o700);
-    const adapterExecutable = await realpath('/usr/bin/true');
+    const trueExecutable = join(root, 'true');
+    await writeFile(trueExecutable, '#!/bin/sh\nexit 0\n');
+    await chmod(trueExecutable, 0o700);
+    const adapterExecutable = await realpath(trueExecutable);
     const gitExecutable = await realpath('/usr/bin/git');
     const planPath = join(root, 'plan.json');
     await writeFile(
