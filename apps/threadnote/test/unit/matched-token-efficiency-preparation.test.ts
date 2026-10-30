@@ -516,6 +516,9 @@ describe('matched token-efficiency study preparation', () => {
     const qualificationCheck = join(root, 'qualification-check');
     await writeFile(qualificationCheck, '#!/bin/sh\nexit 1\n');
     await chmod(qualificationCheck, 0o700);
+    const trueExecutable = join(root, 'true');
+    await writeFile(trueExecutable, '#!/bin/sh\nexit 0\n');
+    await chmod(trueExecutable, 0o700);
     const planPath = join(root, 'plan.json');
     await writeFile(
       planPath,
@@ -534,12 +537,12 @@ describe('matched token-efficiency study preparation', () => {
             appServer: {
               argumentsAfterSubcommand: [],
               argumentsBeforeSubcommand: [],
-              executable: '/usr/bin/true',
+              executable: trueExecutable,
               version: 'fixture-app-server-v1',
             },
             authSourcePath: auth,
             contextBudgetTokens: 1_200,
-            executable: '/usr/bin/true',
+            executable: trueExecutable,
             gitExecutable: '/usr/bin/git',
             judgeModel: {
               id: 'judge-model',
@@ -548,7 +551,7 @@ describe('matched token-efficiency study preparation', () => {
             },
             model: {id: 'agent-model', provider: 'fixture', reasoningEffort: 'medium'},
             pricingMicrosPerMillionTokens: null,
-            safeBinaries: ['/usr/bin/true', qualificationCheck],
+            safeBinaries: [trueExecutable, qualificationCheck],
             safeExecutablePath: '/usr/bin:/bin',
             taskBudget: {steps: 100, tokens: 100_000},
             temporaryRoot: adapterTemporaryRoot,

@@ -47,7 +47,8 @@ export const managerLiveWebSocketOptions = {
   idleTimeout: 60,
 } as const;
 export const managerLiveHttpLayer = (port: number) =>
-  BunHttpServer.layer({hostname: '127.0.0.1', port, websocket: managerLiveWebSocketOptions});
+  // Slow library scans need an HTTP idle window independent of the WebSocket timeout.
+  BunHttpServer.layer({hostname: '127.0.0.1', idleTimeout: 60, port, websocket: managerLiveWebSocketOptions});
 const utf8 = new TextEncoder();
 const isSnapshotResource = Schema.is(ManagerLiveSnapshotResource);
 const decode = Schema.decodeUnknownEffect(ManagerLiveClientFrame, {onExcessProperty: 'error'});
