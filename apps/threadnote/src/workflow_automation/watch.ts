@@ -29,7 +29,11 @@ import {
 import {launchNativeWatchProcess, nativeWatchCollectorAlive} from './watch_process.js';
 import {assertNativeWatchOutput, nativeWatchWorkList, nativeWatchWorkDetail} from './watch_output.js';
 import {nativeWatchWakeupSchema, type NativeWatchWakeup} from './watch_notification_state.js';
-import {makeNativeWatchNotifier, maintainNativeWatchSubscription} from './watch_notification.js';
+import {
+  makeNativeWatchNotifier,
+  maintainNativeWatchSubscription,
+  preflightNativeWatchCodexQueue,
+} from './watch_notification.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 
 const id = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u));
@@ -485,6 +489,23 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
   );
   if ((request.wakeup || request.recoverWakeup) && request.command !== 'start' && request.command !== 'consumer')
     return yield* fail('invalid-request', 'Host wake configuration requires explicit start or consumer attachment.');
+  const sameBinding = (envelope: NativeWatchEnvelope | undefined) =>
+    envelope?.notification?.consumerId === request.consumerId &&
+    envelope?.notification?.wakeupId === request.wakeupId &&
+    stableJson(envelope?.notification?.target) === stableJson(request.wakeup);
+  let probedCodex = false;
+  if (request.wakeup?.host === 'codex') {
+    const existing = yield* readNativeWatch(config, request.watchId);
+    if (!sameBinding(existing?.envelope)) {
+      yield* preflightNativeWatchCodexQueue(request.wakeup.executable);
+      probedCodex = true;
+    }
+  }
+  // A skipped probe is valid only for the same subscription observed outside the lock.
+  const assertQualifiedBinding = (envelope: NativeWatchEnvelope | undefined) => {
+    if (request.wakeup?.host === 'codex' && !probedCodex && !sameBinding(envelope))
+      throw fail('watch-state-conflict', 'The host binding changed during admission; retry the explicit attachment.');
+  };
   const now = yield* Clock.currentTimeMillis;
   if (request.command === 'start') {
     const consumerId = required(request.consumerId, 'consumerId');
@@ -495,6 +516,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
       request.watchId,
       Effect.gen(function* () {
         const existing = yield* readNativeWatch(config, request.watchId);
+        yield* from(() => assertQualifiedBinding(existing?.envelope));
         if (existing && existing.envelope.state.pr !== pr)
           return yield* fail('watch-identity-conflict', 'This watch belongs to another PR.');
         let envelope =
@@ -572,6 +594,7 @@ const runNativeWatchCommand = Effect.fn('workflowWatch.run')(function* (config: 
         let output: Record<string, unknown> = {};
         if (request.command === 'stop') envelope = {...envelope, stopRequested: true};
         else if (request.command === 'consumer') {
+          yield* from(() => assertQualifiedBinding(envelope));
           if (
             request.recoverWakeup &&
             envelope.notification?.outbox?.status === 'sending' &&

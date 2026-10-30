@@ -1,18 +1,27 @@
 import {it as effectIt} from '@effect/vitest';
 import * as Array from 'effect/Array';
 import * as Clock from 'effect/Clock';
+import * as Crypto from 'effect/Crypto';
 import * as Deferred from 'effect/Deferred';
 import * as Effect from 'effect/Effect';
 import * as FileSystem from 'effect/FileSystem';
 import * as Layer from 'effect/Layer';
 import * as PlatformError from 'effect/PlatformError';
+import * as Path from 'effect/Path';
 import * as EffectString from 'effect/String';
 import {SystemInfo} from '@threadnote/platform/system';
 import * as TestClock from 'effect/testing/TestClock';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {CommandExecutor, type CommandOptions, type CommandResult} from '@threadnote/platform/command';
+import {
+  CommandExecutor,
+  CommandSpawnFailed,
+  CommandTimedOut,
+  type CommandExecutionError,
+  type CommandOptions,
+  type CommandResult,
+} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   acknowledgeNativeWatch,
@@ -49,6 +58,9 @@ const token = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
 const receipt = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb';
 const target = {host: 'codex' as const, executable: '/trusted/codex', threadId: 'cccccccc-cccc-4ccc-cccc-cccccccccccc'};
 const success = {exitCode: 0, stderr: '', stdout: `Queued message ${receipt} for thread ${target.threadId}.\n`};
+const queueHelp =
+  'Queue a message for an existing session\n\nUsage: codex queue [OPTIONS] --thread <THREAD> --message <TEXT>\n\nOptions:\n      --thread <THREAD>\n          Session UUID or exact session name\n      --message <TEXT>\n          Message text to queue\n';
+const capable = {exitCode: 0, stderr: '', stdout: queueHelp};
 const fixture = Effect.fn('test.watchNotification.fixture')(function* (events = 0, sharedUserHome?: string) {
   const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({prefix: 'native-watch-notification-'});
   const config: RuntimeConfig = {
@@ -128,6 +140,205 @@ const provide = <A, E, R>(body: Effect.Effect<A, E, R>) =>
     }),
     provideTestLayer(Layer.mergeAll(BunServices.layer, SystemInfo.layer)),
   );
+
+effectIt.effect('rejects unsupported Codex start and changed consumer bindings before any durable mutation', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(1);
+    const fs = yield* FileSystem.FileSystem;
+    const statePath = f.config.agentContextHome + '/workflow-automations/native-watch-v1/watch-1.json';
+    const original = yield* fs.readFileString(statePath);
+    const changed = {...target, executable: '/unsupported/codex'};
+    const failures: readonly Effect.Effect<CommandResult, CommandExecutionError>[] = [
+      Effect.succeed({exitCode: 1, stderr: "error: unrecognized subcommand 'queue'", stdout: ''}),
+      Effect.succeed({exitCode: 0, stderr: '', stdout: 'Usage: codex [OPTIONS] [PROMPT]\nCommands:\n  exec\n'}),
+      Effect.succeed({
+        ...capable,
+        stdout: EffectString.replaceAll('--thread <THREAD>', '--target <THREAD>')(queueHelp),
+      }),
+      Effect.succeed({...capable, stdout: EffectString.replaceAll('--message <TEXT>', '--text <TEXT>')(queueHelp)}),
+      Effect.fail(
+        CommandSpawnFailed.make({
+          executable: changed.executable,
+          args: ['queue', '--help'],
+          message: 'missing',
+          cause: 'ENOENT',
+        }),
+      ),
+      Effect.fail(
+        CommandTimedOut.make({
+          executable: changed.executable,
+          args: ['queue', '--help'],
+          message: 'timeout',
+          timeoutMs: 5000,
+        }),
+      ),
+    ];
+    for (const command of ['start', 'consumer'])
+      for (const response of failures) {
+        const watchId = command === 'start' ? 'new-watch' : 'watch-1';
+        let probes = 0;
+        const result = yield* runNativeWatch(f.config, {
+          protocolVersion: 1,
+          executorVersion: 1,
+          action: 'watch',
+          command,
+          watchId,
+          pr: f.envelope.state.pr,
+          consumerId: 'consumer',
+          wakeupId: 'wakeup',
+          wakeup: changed,
+        }).pipe(
+          Effect.provideService(CommandExecutor, {
+            execute: (executable, args, options) => {
+              probes++;
+              expect(executable).toBe(changed.executable);
+              expect(args).toEqual(['queue', '--help']);
+              expect(options).toEqual({allowFailure: true, timeoutMs: 5000, maxOutputBytes: 16384});
+              return response;
+            },
+            executeStreaming: () => Effect.die(new Error('Unexpected streaming command')),
+          }),
+          Effect.result,
+        );
+        expect(result).toMatchObject({
+          failure: {code: 'host-queue-incompatible', message: expect.stringContaining(changed.executable)},
+        });
+        expect(probes).toBe(1);
+        expect(yield* fs.readFileString(statePath)).toBe(original);
+        expect(yield* readNativeWatch(f.config, 'new-watch')).toBeUndefined();
+      }
+  }).pipe(provide),
+);
+
+effectIt.effect.prop(
+  'qualifies a changed Codex binding once across unchanged consumer renewals and relays',
+  {renewals: Schema.Array(Schema.Literals(['explicit', 'implicit', 'relay'])).check(Schema.isBetweenLength(1, 8))},
+  ({renewals}) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const stored = yield* f.read();
+      yield* writeNativeWatch(f.config, {...stored.envelope, collector: null}, stored.revision);
+      const changed = {...target, executable: '/capable/codex'};
+      const request = {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'consumer',
+        watchId: 'watch-1',
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+      };
+      let probes = 0;
+      const call = (fields: Record<string, unknown>) =>
+        runNativeWatch(f.config, {...request, ...fields}).pipe(
+          commandLayer((executable, args) => {
+            probes++;
+            expect(executable).toBe(changed.executable);
+            expect(args).toEqual(['queue', '--help']);
+            return Effect.succeed(capable);
+          }),
+        );
+      yield* call({wakeup: changed});
+      for (const kind of renewals) {
+        yield* TestClock.adjust(1);
+        yield* call(kind === 'explicit' ? {wakeup: changed} : kind === 'relay' ? {command: 'relay'} : {});
+      }
+      const after = yield* f.read();
+      expect(probes).toBe(1);
+      expect(after.envelope.notification?.target).toEqual(changed);
+      expect(after.envelope.collector).toBeNull();
+      expect(after.envelope.provider).toEqual(stored.envelope.provider);
+      expect(after.envelope.state.events).toEqual(stored.envelope.state.events);
+      expect(after.envelope.state.work).toEqual(stored.envelope.state.work);
+    }).pipe(provide),
+  {arbitrary: {runs: 20}},
+);
+
+effectIt.effect('checks new subscription owners and terminal starts but leaves Cursor admission unchanged', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    let stored = yield* f.read();
+    yield* writeNativeWatch(
+      f.config,
+      {...stored.envelope, collector: null, state: {...stored.envelope.state, prState: 'closed'}},
+      stored.revision,
+    );
+    const request = {
+      protocolVersion: 1,
+      executorVersion: 1,
+      action: 'watch',
+      command: 'start',
+      watchId: 'watch-1',
+      pr: f.envelope.state.pr,
+      consumerId: 'consumer',
+      wakeupId: 'new-wakeup',
+      wakeup: target,
+      takeover: true,
+    };
+    let probes = 0;
+    const commands = commandLayer((executable, args) => {
+      probes++;
+      expect(executable).toBe(target.executable);
+      expect(args).toEqual(['queue', '--help']);
+      return Effect.succeed(capable);
+    });
+    yield* runNativeWatch(f.config, request).pipe(commands);
+    expect(probes).toBe(1);
+    yield* runNativeWatch(f.config, request).pipe(commands);
+    expect(probes).toBe(1);
+    yield* runNativeWatch(f.config, {...request, wakeup: {...target, threadId: receipt}}).pipe(commands);
+    expect(probes).toBe(2);
+    stored = yield* f.read();
+    expect(stored.envelope.collector).toBeNull();
+    expect(stored.envelope.notification?.wakeupId).toBe('new-wakeup');
+    yield* runNativeWatch(f.config, {...request, command: 'consumer', wakeup: cursorTarget});
+    expect((yield* f.read()).envelope.notification?.target).toEqual(cursorTarget);
+  }).pipe(provide),
+);
+
+effectIt.effect('refuses a skipped-probe binding that changed concurrently before the control lock', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    const fs = yield* FileSystem.FileSystem;
+    const context = yield* Effect.context<Crypto.Crypto | Path.Path>();
+    const stored = yield* f.read();
+    const changed = {
+      ...stored.envelope,
+      notification: {...stored.envelope.notification!, target: {...target, threadId: receipt}},
+    };
+    let raced = false;
+    const intercepted = FileSystem.FileSystem.of({
+      ...fs,
+      readFileString: (path, options) =>
+        Effect.gen(function* () {
+          const bytes = yield* fs.readFileString(path, options);
+          if (!raced && EffectString.endsWith('/watch-1.json')(EffectString.replaceAll('\\', '/')(path))) {
+            raced = true;
+            yield* writeNativeWatch(f.config, changed, stored.revision).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provide(context),
+              Effect.orDie,
+            );
+          }
+          return bytes;
+        }),
+    });
+    expect(
+      yield* runNativeWatch(f.config, {
+        protocolVersion: 1,
+        executorVersion: 1,
+        action: 'watch',
+        command: 'consumer',
+        watchId: 'watch-1',
+        consumerId: 'consumer',
+        wakeupId: 'wakeup',
+        wakeup: target,
+      }).pipe(Effect.provideService(FileSystem.FileSystem, intercepted), Effect.result),
+    ).toMatchObject({failure: {code: 'watch-state-conflict'}});
+    expect(raced).toBe(true);
+    expect((yield* f.read()).envelope).toEqual(changed);
+  }).pipe(provide),
+);
 
 describe('native watch notification transport', () => {
   it('bounds ID-only messages and rejects executable injection configuration', () => {
