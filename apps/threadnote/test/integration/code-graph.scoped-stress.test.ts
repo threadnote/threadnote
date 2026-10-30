@@ -5,7 +5,7 @@ import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
 import {Effect, Fiber, FileSystem, Path, Schedule, Schema, Semaphore, SynchronizedRef} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as FC from 'fast-check';
-import {describe, expect} from 'vitest';
+import {describe, expect, vi} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '@threadnote/graph/index_scope';
 import {inventoryRepository} from '@threadnote/graph/inventory';
@@ -100,13 +100,65 @@ const storedCounts = (databasePath: string) =>
         : StoredCountsReadError.make({message: 'Unable to read stored graph counts.', cause}),
   }).pipe(
     Effect.retry({
-      while: error => error.cause instanceof SQLiteError && error.cause.code === 'SQLITE_BUSY',
+      while: error => error.cause instanceof SQLiteError && (error.cause.errno & 0xff) === 5,
       times: 100,
       schedule: Schedule.spaced('10 millis'),
     }),
   );
 
 describe('scoped reuse under bounded monorepo churn', () => {
+  effectIt.effect('retries extended busy reads and propagates unrelated SQLite errors', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const parent = yield* makeIdempotentFixtureTempDirectoryScoped(fs, 'threadnote-counts-recovery-');
+      const databasePath = join(parent, 'counts.sqlite');
+      const writer = yield* Effect.acquireRelease(
+        Effect.sync(() => new Database(databasePath, {create: true})),
+        db => Effect.sync(() => db.close(false)),
+      );
+      writer.exec(`CREATE TABLE snapshots(scope_id TEXT, file_count INTEGER);
+        CREATE TABLE snapshot_files(path TEXT);
+        INSERT INTO snapshots VALUES ('scoped', 7);
+        INSERT INTO snapshot_files VALUES ('apps/a/index.ts')`);
+      const invalidRead = yield* Effect.flip(
+        Effect.try({
+          try: () => writer.query('SELECT * FROM missing_table').get(),
+          catch: cause => StoredCountsReadError.make({message: 'Expected a native missing-table error.', cause}),
+        }),
+      );
+      const nativeError = invalidRead.cause;
+      if (!(nativeError instanceof SQLiteError)) return yield* Effect.die(nativeError);
+      const query = yield* Effect.acquireRelease(
+        Effect.sync(() => vi.spyOn(Database.prototype, 'query')),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+      for (const [errno, code] of [
+        [261, 'SQLITE_BUSY_RECOVERY'],
+        [517, 'SQLITE_BUSY_SNAPSHOT'],
+        [773, 'SQLITE_BUSY_TIMEOUT'],
+      ] as const) {
+        query.mockImplementationOnce(() => {
+          // Bun recognizes SQLite errors by name; its native constructor is private.
+          throw Object.assign(new Error('Controlled busy read'), {name: 'SQLiteError', errno, code});
+        });
+        expect(yield* storedCounts(databasePath)).toEqual({
+          snapshots: 1,
+          largest: 7,
+          full: 0,
+          fileRows: 1,
+          unrelatedRows: 0,
+        });
+        expect(query).toHaveBeenCalledTimes(3);
+        query.mockClear();
+      }
+      query.mockImplementationOnce(() => {
+        throw nativeError;
+      });
+      expect((yield* Effect.flip(storedCounts(databasePath))).cause).toBe(nativeError);
+      expect(query).toHaveBeenCalledTimes(1);
+    }).pipe(provideTestLayer(BunFileSystem.layer), TestClock.withLive),
+  );
+
   effectIt.effect('waits for a transient writer lock before reading exact stored counts', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
