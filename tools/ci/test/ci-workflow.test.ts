@@ -5,6 +5,7 @@ import {spawnSync} from '@threadnote/testing/node-child-process';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {parse} from 'yaml';
+import {AGENT_CATALOG} from '@threadnote/integrations/catalog';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect from 'effect';
@@ -31,7 +32,7 @@ interface Job {
   readonly 'timeout-minutes'?: number;
   readonly strategy?: {
     readonly 'fail-fast'?: boolean;
-    readonly matrix?: string | {readonly shard?: readonly string[]};
+    readonly matrix?: string | {readonly shard?: readonly string[]; readonly profile?: string};
   };
   readonly uses?: string;
   readonly with?: Readonly<Record<string, unknown>>;
@@ -68,7 +69,13 @@ const JobSchema = Schema.Struct({
     Schema.Struct({
       'fail-fast': Schema.optionalKey(Schema.Boolean),
       matrix: Schema.optionalKey(
-        Schema.Union([Schema.String, Schema.Struct({shard: Schema.optionalKey(Schema.Array(Schema.String))})]),
+        Schema.Union([
+          Schema.String,
+          Schema.Struct({
+            shard: Schema.optionalKey(Schema.Array(Schema.String)),
+            profile: Schema.optionalKey(Schema.String),
+          }),
+        ]),
       ),
     }),
   ),
@@ -155,6 +162,13 @@ it('routes platform and quality lanes from Bazel outputs', () => {
 });
 
 it('builds each native release once and fans its archive out to independent required consumers', () => {
+  for (const name of ['build', 'installed-e2e', 'extracted-workflows']) {
+    const checkout = EffectArray.findFirst(
+      releaseJobs[name]?.steps ?? [],
+      candidate => candidate.uses === 'actions/checkout@v7',
+    );
+    expect(EffectOption.getOrUndefined(checkout)?.with?.ref).toBe('${{ github.sha }}');
+  }
   expect(jobs['self-contained-distribution']?.uses).toBe('./.github/workflows/native-release-smoke.yml');
   expect(jobs['self-contained-distribution']?.with).toEqual({
     runner: '${{ matrix.os }}',
@@ -202,6 +216,20 @@ it('builds each native release once and fans its archive out to independent requ
   });
   expect(step(releaseJobs['extracted-workflows'], 'Workflow journal persistence smoke')?.if).toBe(
     "matrix.profile == 'all' || matrix.profile == 'desktop'",
+  );
+});
+
+it('partitions only catalog-supported macOS profiles while other platforms retain complete qualification', () => {
+  const cloudProfiles = EffectArray.flatMap(AGENT_CATALOG, entry => {
+    const skills = entry.devSkills;
+    return skills.status === 'managed' && skills.profile !== 'desktop' && skills.platforms.includes('darwin')
+      ? [skills.profile]
+      : [];
+  });
+  const profiles = ['desktop', ...new Set(cloudProfiles)];
+  const matrix = releaseJobs['extracted-workflows']?.strategy?.matrix;
+  expect(typeof matrix === 'object' ? matrix.profile : undefined).toBe(
+    "${{ fromJSON(inputs.runner == 'macos-15-intel' && '" + JSON.stringify(profiles) + "' || '[\"all\"]') }}",
   );
 });
 
