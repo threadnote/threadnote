@@ -5474,6 +5474,62 @@ describe('Threadnote MCP toolsets', () => {
     );
   });
 
+  it('requires the advertised recall feedback core inputs without recording rejected calls', async () => {
+    await withMcpClient(
+      async (client, fixture) => {
+        const tool = EffectOption.getOrUndefined(
+          EffectArray.findFirst((await client.listTools()).tools, tool => tool.name === 'recall_feedback'),
+        );
+        expect(tool?.inputSchema.required).toEqual(['action', 'query', 'uri']);
+        expect(tool?.inputSchema.properties).toMatchObject({
+          query: {type: 'string', minLength: 1},
+          uri: {type: 'string', minLength: 1},
+          project: {type: 'string'},
+        });
+
+        const query = 'sensitive fixture feedback query';
+        const uri = 'threadnote://user/test-user/memories/durable/projects/threadnote/feedback-input.md';
+        const feedbackPath = join(fixture.home, 'feedback', 'recall-events-v1.jsonl');
+        for (const arguments_ of [
+          {action: 'useful', uri},
+          {query, uri},
+          {action: 'useful', query},
+          {action: '', query, uri},
+          {action: 'useful', query: '', uri},
+          {action: 'useful', query, uri: ''},
+          {action: 'useful', query: '   ', uri},
+          {action: 'useful', query, uri: 'https://example.invalid/memory'},
+          {action: 'pin', query, uri},
+        ]) {
+          const rejected = await client.callTool({arguments: arguments_, name: 'recall_feedback'});
+          expect(rejected.isError).toBe(true);
+          expect(JSON.stringify(rejected)).not.toContain(query);
+          await expect(readFile(feedbackPath, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
+        }
+
+        const arguments_ = {action: 'useful', query, uri};
+        const recorded = await client.callTool({arguments: arguments_, name: 'recall_feedback'});
+        expect(recorded.isError).not.toBe(true);
+        const stored = await readFile(feedbackPath, 'utf8');
+        expect(stored).not.toContain(query);
+        expect(JSON.parse(Effect.pipe(stored, EffectString.trim))).toMatchObject({action: 'useful', uri});
+        const duplicate = await client.callTool({arguments: arguments_, name: 'recall_feedback'});
+        expect(duplicate.isError).not.toBe(true);
+        expect(await readFile(feedbackPath, 'utf8')).toBe(stored);
+
+        const pinned = await client.callTool({
+          arguments: {...arguments_, action: 'pin', project: 'threadnote'},
+          name: 'recall_feedback',
+        });
+        expect(pinned.isError).not.toBe(true);
+        const withPin = await readFile(feedbackPath, 'utf8');
+        expect(withPin).not.toContain(query);
+        expect(Effect.pipe(withPin, EffectString.trim, EffectString.split('\n'))).toHaveLength(2);
+      },
+      {toolset: 'full'},
+    );
+  });
+
   it('records applied recall feedback through the full MCP tool without persisting the raw query', async () => {
     await withMcpClient(
       async (client, fixture) => {

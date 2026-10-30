@@ -18,7 +18,7 @@ const sourceManifest = () => ({
     executorVersion: 1,
     authoringVersion: 1,
     cycleVersion: 1,
-    watchVersion: 1,
+    watchVersion: 2,
     closeoutVersion: 1,
   },
   workflowProtocol: 1,

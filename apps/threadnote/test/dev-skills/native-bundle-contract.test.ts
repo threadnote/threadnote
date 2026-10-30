@@ -6,13 +6,14 @@ import {Effect} from 'effect';
 import fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {buildDevSkillsManifest} from '../../../../scripts/build.js';
-import {installedSummary} from '../../src/dev_skills/capabilities.js';
+import {installedSummary, readDevSkillsRuntimeCapabilities} from '../../src/dev_skills/capabilities.js';
 import {hash} from '../../src/dev_skills/files.js';
 import {
   loadDevSkillsBundleAt,
   nativeRequirements,
   parseDevSkillsManifest,
   parseHistoricalDevSkillsManifest,
+  supportsNativeRequirements,
 } from '../../src/dev_skills/manifest.js';
 import {parseCapabilities} from '../../src/dev_skills/refresh_state.js';
 import {
@@ -66,12 +67,37 @@ it('rejects every missing native feature and unknown capability field', () => {
   expect(parseCapabilities(old)).toEqual(old);
 });
 
+it('admits only the explicit watch v1/v2 support matrix and exact other features', () => {
+  const admitted = new Set(['1:1', '1:2', '2:2']);
+  fc.assert(
+    fc.property(fc.integer({min: 1, max: 10}), fc.integer({min: 1, max: 10}), (required, supported) => {
+      expect(
+        supportsNativeRequirements(
+          {...nativeRequirements, watchVersion: required},
+          {...nativeRequirements, watchVersion: supported},
+        ),
+      ).toBe(admitted.has(`${required}:${supported}`));
+    }),
+    {numRuns: 40},
+  );
+  for (const key of EffectRecord.keys(nativeRequirements)) {
+    if (key === 'watchVersion') continue;
+    expect(
+      supportsNativeRequirements(
+        {...nativeRequirements, [key]: nativeRequirements[key] + 1},
+        {...nativeRequirements, [key]: nativeRequirements[key] + 1},
+      ),
+    ).toBe(false);
+  }
+});
+
 effectIt.effect('ships only native payload and matches the builder canonical contract', () =>
   Effect.gen(function* () {
     const bundle = yield* loadDevSkillsBundleAt(process.cwd(), '5.3.0-beta.7', false);
     expect(bundle.manifest.schemaVersion).toBe(2);
     expect(bundle.manifest.minimumRuntime).toBe('5.3.0-beta.7');
     expect(bundle.manifest.nativeRequirements).toEqual(nativeRequirements);
+    expect(bundle.manifest.nativeRequirements?.watchVersion).toBe(2);
     for (const malformed of [
       {...bundle.manifest, nativeRequirements: undefined},
       {...bundle.manifest, nativeRequirements: {...nativeRequirements, unknownVersion: 1}},
@@ -86,6 +112,52 @@ effectIt.effect('ships only native payload and matches the builder canonical con
     ).toBe(false);
     expect(yield* buildDevSkillsManifest(process.cwd(), '5.3.0-beta.7')).toEqual(bundle.manifest);
     expect(installedSummary(bundle.manifest)).toMatchObject({manifestSchema: 2, nativeRequirements});
+  }).pipe(provideTestLayer(devSkillsTestLayer)),
+);
+
+effectIt.effect('retains watch v1 generations while refusing same-version watch v1 candidates for the v2 bundle', () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    expect((yield* f.run(readDevSkillsRuntimeCapabilities())).nativeFeatures?.watchVersion).toBe(2);
+    yield* f.fs.writeFileString(
+      f.manifest,
+      JSON.stringify({...f.inventory, nativeRequirements: {...nativeRequirements, watchVersion: 1}}),
+    );
+    const installed = yield* f.run(applyDevSkills(f.config, 'install', {agent: 'amp'}));
+    const ownedPath = receiptPath(f.path, installed.target.skillRoot);
+    const oldReceipt = yield* f.fs.readFileString(ownedPath);
+    const historical = parseReceipt(JSON.parse(oldReceipt)).manifest;
+    expect(historical.schemaVersion).toBe(2);
+    expect(historical.nativeRequirements?.watchVersion).toBe(1);
+    expect(devSkillsCompatibility(historical, '5.3.0-beta.4')).toEqual([]);
+
+    yield* f.fs.writeFileString(f.manifest, JSON.stringify(f.inventory));
+    const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.4');
+    expect(release.bundle.manifest.nativeRequirements?.watchVersion).toBe(2);
+    const before = yield* snapshot(f.root);
+    const status = (yield* f.run(statusDevSkills(f.config, {agent: 'amp'}))).targets[0];
+    expect(status.installedDigest).toBe(historical.digest);
+    expect(status.installationState).toBe('update-available');
+    expect(EffectArray.some(status.issues, issue => issue.code === 'incompatible')).toBe(false);
+    const accepted = yield* f.run(previewDevSkillsRefresh(f.config, release));
+    expect(accepted.compatibility).toBe('compatible');
+    expect(yield* snapshot(f.root)).toEqual(before);
+    expect(yield* f.fs.readFileString(ownedPath)).toBe(oldReceipt);
+
+    const incapable = {
+      ...release,
+      capabilities: {...release.capabilities, nativeFeatures: {...nativeRequirements, watchVersion: 1}},
+    };
+    expect(incapable.capabilities.runtimeVersion).toBe(release.capabilities.runtimeVersion);
+    const rejected = yield* f.run(previewDevSkillsRefresh(f.config, incapable));
+    expect(rejected.compatibility).toBe('incompatible');
+    expect(
+      yield* f
+        .run(prepareDevSkillsRefresh(f.config, rejected, {expectedDigest: rejected.previewDigest}))
+        .pipe(Effect.result),
+    ).toMatchObject({_tag: 'Failure'});
+    expect(yield* snapshot(f.root)).toEqual(before);
+    expect(yield* f.fs.readFileString(ownedPath)).toBe(oldReceipt);
   }).pipe(provideTestLayer(devSkillsTestLayer)),
 );
 
@@ -114,7 +186,10 @@ effectIt.effect('rejects incomplete same-version native candidates before any wr
     const f = yield* fixture();
     const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.4');
     for (const key of EffectRecord.keys(nativeRequirements)) {
-      const capabilities = {...release.capabilities, nativeFeatures: {...nativeRequirements, [key]: 2}};
+      const capabilities = {
+        ...release.capabilities,
+        nativeFeatures: {...nativeRequirements, [key]: nativeRequirements[key] + 1},
+      };
       const before = yield* snapshot(f.root);
       const preview = yield* previewDevSkillsRefresh(f.config, {...release, capabilities}).pipe(f.run);
       expect(preview.compatibility).toBe('incompatible');
