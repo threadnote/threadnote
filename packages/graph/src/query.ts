@@ -263,12 +263,16 @@ export class CodeGraphQueryService extends Context.Service<
               (yield* codeGraphQueryScopeCurrent(projectScope, store, layout, readySnapshot, identity, languagePacks));
             return attachCodeGraphStatusObservation(
               {
-                semantic: yield* observeCodeGraphSemanticStatus({
-                  threadnoteHome,
-                  layout,
-                  snapshot: compatible ? readySnapshot || undefined : undefined,
-                  embedding,
-                }),
+                ...(options?.observeSemantic === false
+                  ? {}
+                  : {
+                      semantic: yield* observeCodeGraphSemanticStatus({
+                        threadnoteHome,
+                        layout,
+                        snapshot: compatible ? readySnapshot || undefined : undefined,
+                        embedding,
+                      }),
+                    }),
                 databasePath: layout.databasePath,
                 freshness: current ? 'current' : 'stale',
                 identity,
@@ -318,12 +322,16 @@ export class CodeGraphQueryService extends Context.Service<
             readySnapshot.commit !== identity.headCommit ||
             (overlay !== undefined && !snapshotMatches(readySnapshot, identity.headCommit, overlay));
           const status = {
-            semantic: yield* observeCodeGraphSemanticStatus({
-              threadnoteHome,
-              layout,
-              snapshot: readySnapshot || undefined,
-              embedding,
-            }),
+            ...(options?.observeSemantic === false
+              ? {}
+              : {
+                  semantic: yield* observeCodeGraphSemanticStatus({
+                    threadnoteHome,
+                    layout,
+                    snapshot: readySnapshot || undefined,
+                    embedding,
+                  }),
+                }),
             ...(projectScope === undefined
               ? {}
               : {

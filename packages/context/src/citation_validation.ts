@@ -882,6 +882,7 @@ function citationStatusOptions(config: RuntimeConfig, scope: ContextBriefScopeV1
     manifestPath: config.manifestPath,
     ...(scope.project === undefined ? {} : {project: scope.project}),
     observeWorktree: true,
+    observeSemantic: false,
     requestMaintenance: false,
   };
 }

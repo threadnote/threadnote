@@ -76,6 +76,8 @@ export interface CodeGraphStatusOptions {
     project?: CodeGraphQueryScope['project'],
   ) => Effect.Effect<void, unknown>;
   readonly observeWorktree?: boolean;
+  /** @internal Structural citation fences do not depend on semantic readiness. */
+  readonly observeSemantic?: boolean;
   /** @internal Evidence harnesses can isolate status work from the detached maintenance lane. */
   readonly requestMaintenance?: boolean;
   /** @internal Closed anonymous query-stage observer supplied only by reviewed request surfaces. */

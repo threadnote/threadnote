@@ -1,4 +1,9 @@
 import * as EffectStruct from 'effect/Struct';
+import * as EffectString from 'effect/String';
+import {
+  observeCodeGraphAdmissionEnvironment,
+  recordCodeGraphSnapshotAdmission,
+} from '@threadnote/graph/admission_freshness';
 import {Array as EffectArray} from 'effect';
 import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -7,7 +12,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {symlinkSync} from 'node:fs';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, FileSystem, Layer, Path} from 'effect';
+import {Crypto, Deferred, Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -18,9 +23,10 @@ import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import type {RepositoryIdentityExpectation} from '@threadnote/graph/types';
+import type {RepositoryIdentityExpectation, CodeGraphSemanticStatus, CodeGraphStatus} from '@threadnote/graph/types';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
 import {succeedUndefined} from '@threadnote/platform/optional';
+import type {SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor, CommandOutputLimitExceeded, runCommandEffect} from '@threadnote/platform/command';
 
@@ -48,6 +54,7 @@ const mutations = [
   'policy',
   'receipt',
   'provenance',
+  'snapshot',
 ] as const;
 type Mutation = (typeof mutations)[number] | 'none' | 'legacy-service' | 'no-ready';
 
@@ -57,12 +64,14 @@ const scenario = (
   overlapObservations = false,
   overlapIdentity = false,
   failInitialProbe = false,
+  semanticState?: CodeGraphSemanticStatus['state'],
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const store = yield* CodeGraphStore;
     const packs = yield* CodeGraphLanguagePackRegistry;
+    const fixtureContext = yield* Effect.context<FileSystem.FileSystem | Path.Path | Crypto.Crypto | SystemInfo>();
     const command = yield* CommandExecutor;
     const admissionStarted = yield* Deferred.make<void>();
     const overlayStarted = yield* Deferred.make<void>();
@@ -134,6 +143,30 @@ const scenario = (
       },
       1,
     );
+    const replacement = {...repository.status.readySnapshot, id: 'cgsn_1111111111111111111111111111111111111111'};
+    const layout = codeGraphLayout(path, home, repository.checkoutId, repository.worktreeId);
+    if (mutation === 'snapshot') {
+      yield* store.activate(
+        repository.databasePath,
+        repository.status.identity,
+        replacement,
+        [
+          {
+            blobId: EffectString.slice(0, 40)(sha256HexSync(SOURCE_PATH)),
+            contentHash: sha256HexSync(SOURCE_PATH),
+            language: 'typescript',
+            mode: '100644',
+            path: SOURCE_PATH,
+            size: new TextEncoder().encode(SOURCE_PATH).byteLength,
+            source: 'commit',
+          },
+        ],
+        [],
+        [],
+        [],
+      );
+      yield* store.promote(repository.databasePath, repository.status.identity, repository.snapshotId);
+    }
     const caller = path.join(root, 'caller');
     // A junction is also available without elevated symlink privileges on Windows.
     yield* directoryLink(repository.root, caller);
@@ -163,12 +196,25 @@ const scenario = (
       user: 'test',
     };
     let evidenceRead = false;
+    let evidenceBatches = 0;
+    let replacementReads = 0;
     let sessions = 0;
     let leases = 0;
     let expectedCalls = 0;
     let ordinaryFinalCalls = 0;
     const mutate = Effect.gen(function* () {
       evidenceRead = true;
+      evidenceBatches += 1;
+      if (mutation === 'snapshot') {
+        yield* store.promote(repository.databasePath, repository.status.identity, replacement.id);
+        yield* recordCodeGraphSnapshotAdmission(
+          layout,
+          replacement,
+          yield* observeCodeGraphAdmissionEnvironment(repository.status.identity),
+          packs,
+          false,
+        );
+      }
       if (mutation === 'worktree') yield* fs.writeFileString(path.join(repository.root, SOURCE_PATH), 'changed');
       if (mutation === 'head')
         yield* git(repository.root, [
@@ -206,7 +252,17 @@ const scenario = (
     });
     const observedStore = CodeGraphStore.of({
       ...store,
-      readySnapshot: (...args) => (mutation === 'no-ready' ? succeedUndefined : store.readySnapshot(...args)),
+      readySnapshot: (...args) =>
+        mutation === 'no-ready'
+          ? succeedUndefined
+          : store.readySnapshot(...args).pipe(
+              Effect.map(snapshot => {
+                if (mutation !== 'snapshot' || !evidenceRead || !snapshot) return snapshot;
+                replacementReads += 1;
+                expect(snapshot.id).toBe(replacement.id);
+                return snapshot;
+              }),
+            ),
       acquireSnapshotLease: (...args) =>
         store.acquireSnapshotLease(...args).pipe(
           Effect.tap(() =>
@@ -226,7 +282,15 @@ const scenario = (
       effectiveSnapshotCitationEvidence: (...args) =>
         store
           .effectiveSnapshotCitationEvidence(...args)
-          .pipe(Effect.tap(() => mutate.pipe(Effect.provideService(CommandExecutor, command), Effect.orDie))),
+          .pipe(
+            Effect.tap(() =>
+              mutate.pipe(
+                Effect.provideService(CommandExecutor, command),
+                Effect.provideContext(fixtureContext),
+                Effect.orDie,
+              ),
+            ),
+          ),
       snapshotPackProvenance: (...args) =>
         store
           .snapshotPackProvenance(...args)
@@ -236,7 +300,12 @@ const scenario = (
           sessions += 1;
         }).pipe(Effect.andThen(store.withSession(databasePath, effect, options))),
     });
+    let semanticChecks = 0;
     const unexpected = () => Effect.die(new Error('Citation validation must not index or maintain graphs.'));
+    const unexpectedSemantic = () =>
+      Effect.sync(() => {
+        semanticChecks += 1;
+      }).pipe(Effect.andThen(unexpected()));
     const dependencies = Layer.mergeAll(
       platformLayer,
       Layer.succeed(CommandExecutor, observedCommand),
@@ -255,18 +324,33 @@ const scenario = (
       ),
       Layer.succeed(
         CodeGraphEmbeddingIndex,
-        CodeGraphEmbeddingIndex.of({check: unexpected, ensure: unexpected, search: () => Effect.succeed(new Map())}),
+        CodeGraphEmbeddingIndex.of({
+          check: unexpectedSemantic,
+          ensure: unexpected,
+          search: () => Effect.succeed(new Map()),
+        }),
       ),
     );
     const validations = yield* Effect.gen(function* () {
       const query = yield* CodeGraphQueryService;
       const expected: RepositoryIdentityExpectation = repository.status.identity;
-      const observed = {
+      const retainSemanticState = (status: CodeGraphStatus) => {
+        expect(status.semantic).toBeUndefined();
+        if (mutation === 'snapshot' && evidenceRead) {
+          expect(status).toMatchObject({freshness: 'current', stale: false, readySnapshot: {id: replacement.id}});
+        }
+        return semanticState === undefined ? status : Object.assign(status, {semantic: {state: semanticState}});
+      };
+      const observed = CodeGraphQueryService.of({
         ...query,
+        withStatusSession: (home, cwd, expected, options, use) => {
+          expect(options.observeSemantic).toBe(false);
+          return query.withStatusSession!(home, cwd, expected, options, status => use(retainSemanticState(status)));
+        },
         status: (...args: Parameters<typeof query.status>) =>
           Effect.sync(() => {
             ordinaryFinalCalls += 1;
-          }).pipe(Effect.andThen(query.status(...args))),
+          }).pipe(Effect.andThen(query.status(...args).pipe(Effect.map(retainSemanticState)))),
         statusForPublishedIdentity: (...args: Parameters<typeof query.statusForPublishedIdentity>) =>
           Effect.sync(() => {
             expectedCalls += 1;
@@ -274,9 +358,9 @@ const scenario = (
             expect(leases).toBe(1);
             expect(args[1]).toBe(caller);
             expect(args[2]).toMatchObject(expected);
-            expect(args[3]).toMatchObject({observeWorktree: true, requestMaintenance: false});
-          }).pipe(Effect.andThen(query.statusForPublishedIdentity(...args))),
-      };
+            expect(args[3]).toMatchObject({observeWorktree: true, observeSemantic: false, requestMaintenance: false});
+          }).pipe(Effect.andThen(query.statusForPublishedIdentity(...args).pipe(Effect.map(retainSemanticState)))),
+      });
       const custom =
         mutation === 'legacy-service' ? EffectStruct.omit(observed, ['statusForPublishedIdentity']) : observed;
       return yield* validateContextBriefMemoryCitations(config, {callerCwd: caller, kind: 'repository'}, [
@@ -301,9 +385,15 @@ const scenario = (
     const exact = mutation === 'none' || mutation === 'legacy-service';
     expect(receipts[0].status).toBe(exact ? 'exact' : 'unknown');
     if (exact) expect(receipts[0].coverage).toBe('current-complete');
+    if (mutation === 'snapshot') {
+      expect(replacementReads).toBeGreaterThan(0);
+      expect(receipts[0].reason).toBe('graph-stale');
+    }
+    expect(evidenceBatches).toBe(mutation === 'no-ready' ? 0 : 1);
     expect(expectedCalls).toBe(mutation === 'legacy-service' || mutation === 'no-ready' ? 0 : 1);
     expect(ordinaryFinalCalls).toBe(mutation === 'legacy-service' ? 1 : 0);
     expect(sessions).toBe(1);
+    expect(semanticChecks).toBe(0);
     expect(leases).toBe(0);
     if (overlapIdentity) {
       expect(yield* Deferred.isDone(identityStarted)).toBe(true);
@@ -316,6 +406,32 @@ const scenario = (
   }).pipe(provideTestLayer(fixtureLayer), TestClock.withLive);
 
 describe('Context Brief local citation closing observation', () => {
+  const semanticStates = [
+    'not-requested',
+    'queued',
+    'embedding',
+    'ready',
+    'deferred',
+    'blocked',
+    'unavailable',
+  ] as const;
+  effectIt.effect('preserves structural receipts across every semantic readiness state', () =>
+    Effect.gen(function* () {
+      for (const state of semanticStates) yield* scenario('none', 0, false, false, false, state);
+    }),
+  );
+  fcEffectProp(
+    effectIt,
+    'keeps semantic readiness independent of between-observation source mutations',
+    {
+      state: fc.constantFrom(...semanticStates),
+      mutation: fc.constantFrom('none' as const, ...mutations),
+      suffix: fc.nat(100000),
+    },
+    ({state, mutation, suffix}) => scenario(mutation, suffix, false, false, false, state),
+    {fastCheck: {numRuns: 8}},
+  );
+
   effectIt.effect('returns unknown coverage for a missing ready snapshot when the optional probe is unavailable', () =>
     scenario('no-ready', 0, false, false, true),
   );
