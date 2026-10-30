@@ -399,6 +399,14 @@ function replaceSocialImageMetadata(html: string, socialImage: WebsiteSocialImag
   updated = replaceTagAttribute(updated, 'meta', 'property', 'og:image:height', 'content', String(socialImage.height));
   updated = replaceTagAttribute(updated, 'meta', 'property', 'og:image:alt', 'content', socialImage.alt);
   updated = replaceTagAttribute(updated, 'meta', 'name', 'twitter:image', 'content', socialImage.url);
+  updated = replaceTagAttribute(
+    updated,
+    'meta',
+    'name',
+    'twitter:card',
+    'content',
+    socialImage.width > socialImage.height ? 'summary_large_image' : 'summary',
+  );
   return replaceTagAttribute(updated, 'meta', 'name', 'twitter:image:alt', 'content', socialImage.alt);
 }
 

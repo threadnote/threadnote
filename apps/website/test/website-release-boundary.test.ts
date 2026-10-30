@@ -834,14 +834,18 @@ describe('website and standalone release boundary', () => {
   it('uses threadnote.io as the single public website origin', async () => {
     const origin = 'https://threadnote.io';
     const entries = [
-      ['index.html', '/', 'og.png'],
-      ['performance/index.html', '/performance/', 'og.png'],
-      ['performance/graphify/index.html', '/performance/graphify/', 'og.png'],
-      ['docs/index.html', '/docs/', 'og.png'],
-      ['agents/index.html', '/agents/', 'og.png'],
-      ['whats-new/index.html', '/whats-new/', 'og.png'],
-      ['pro-tips/index.html', '/pro-tips/', 'og.png'],
-      ['faq/index.html', '/faq/', 'og.png'],
+      ['index.html', '/', 'brand/avatars/threadnote-avatar-brand-dark-1024.png'],
+      ['performance/index.html', '/performance/', 'brand/avatars/threadnote-avatar-brand-dark-1024.png'],
+      [
+        'performance/graphify/index.html',
+        '/performance/graphify/',
+        'brand/avatars/threadnote-avatar-brand-dark-1024.png',
+      ],
+      ['docs/index.html', '/docs/', 'brand/avatars/threadnote-avatar-brand-dark-1024.png'],
+      ['agents/index.html', '/agents/', 'brand/avatars/threadnote-avatar-brand-dark-1024.png'],
+      ['whats-new/index.html', '/whats-new/', 'brand/avatars/threadnote-avatar-brand-dark-1024.png'],
+      ['pro-tips/index.html', '/pro-tips/', 'brand/avatars/threadnote-avatar-brand-dark-1024.png'],
+      ['faq/index.html', '/faq/', 'brand/avatars/threadnote-avatar-brand-dark-1024.png'],
     ] as const;
     const htmlDocuments = await Promise.all(
       EffectArray.map(entries, async ([entry, route, socialImage]) => ({
@@ -856,6 +860,12 @@ describe('website and standalone release boundary', () => {
       expect(html).toContain(`<meta property="og:url" content="${origin}${route}" />`);
       expect(html).toContain(`<meta property="og:image" content="${origin}/${socialImage}" />`);
       expect(html).toContain(`<meta name="twitter:image" content="${origin}/${socialImage}" />`);
+      expect(html).toContain('<meta property="og:image:width" content="1024" />');
+      expect(html).toContain('<meta property="og:image:height" content="1024" />');
+      expect(html).toContain('<meta name="twitter:card" content="summary" />');
+      const png = await readFile(join(root, 'apps', 'website', 'public', socialImage));
+      expect(png.readUInt32BE(16)).toBe(1024);
+      expect(png.readUInt32BE(20)).toBe(1024);
       expect(html).not.toContain('kashkovsky.github.io/threadnote');
     }
 

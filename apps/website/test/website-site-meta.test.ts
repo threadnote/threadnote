@@ -30,6 +30,7 @@ describe('website document metadata', () => {
       <meta property="og:image:height" content="630" />
       <meta property="og:image:alt" content="Threadnote — your team remembers" />
       <meta name="twitter:title" content="" />
+      <meta name="twitter:card" content="summary" />
       <meta name="twitter:description" content="" />
       <meta name="twitter:image" content="https://threadnote.io/og.png" />
       <meta name="twitter:image:alt" content="Threadnote — your team remembers" />
@@ -39,6 +40,7 @@ describe('website document metadata', () => {
   it('resets an article card when client navigation reaches a page without a custom image', () => {
     setDocumentMeta('Before You Rewrite It in Rust', 'Article summary.', articleImage);
     expect(metaContent('meta[property="og:image"]')).toBe(articleImage.url);
+    expect(metaContent('meta[name="twitter:card"]')).toBe('summary_large_image');
     expect(metaContent('meta[name="twitter:image:alt"]')).toBe(articleImage.alt);
 
     setDocumentMeta('Docs', 'Threadnote documentation.');
@@ -50,5 +52,6 @@ describe('website document metadata', () => {
     expect(metaContent('meta[property="og:image:alt"]')).toBe(websiteDefaultSiteSocialImage.alt);
     expect(metaContent('meta[name="twitter:image"]')).toBe(websiteDefaultSiteSocialImage.url);
     expect(metaContent('meta[name="twitter:image:alt"]')).toBe(websiteDefaultSiteSocialImage.alt);
+    expect(metaContent('meta[name="twitter:card"]')).toBe('summary');
   });
 });

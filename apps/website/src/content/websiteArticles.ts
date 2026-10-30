@@ -26,11 +26,11 @@ export interface WebsiteSocialImage {
 export const websiteArticleSocialImageWidth = 1200;
 export const websiteArticleSocialImageHeight = 630;
 export const websiteDefaultSiteSocialImage: WebsiteSocialImage = Object.freeze({
-  alt: 'Threadnote — your team remembers',
-  height: 630,
+  alt: 'Threadnote logo on a dark background',
+  height: 1024,
   type: 'image/png',
-  url: 'https://threadnote.io/og.png',
-  width: 1200,
+  url: 'https://threadnote.io/brand/avatars/threadnote-avatar-brand-dark-1024.png',
+  width: 1024,
 });
 
 export function websiteSocialImageForArticle(
