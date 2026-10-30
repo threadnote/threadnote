@@ -30,6 +30,11 @@ on:
         required: false
         type: boolean
         default: false
+      include_embedding_runtime_diagnostics:
+        description: Compare pinned embedding runtimes on one isolated macOS runner; diagnostic only
+        required: false
+        type: boolean
+        default: false
       include_code_memory_link_scale:
         description: Run the governed 100,000-memory code-to-memory inverse-selector gate
         required: false
@@ -638,6 +643,60 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  embedding-runtime-diagnostics:
+    name: Embedding runtime comparison · macOS ARM64 · diagnostic only
+    if: github.event_name == 'workflow_dispatch' && inputs.include_embedding_runtime_diagnostics
+    needs: prepare-code-graph-vector-model
+    runs-on: macos-15
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Download pinned graph model
+        uses: actions/download-artifact@v8
+        with:
+          name: code-graph-core-embedding-model
+          path: artifacts/code-graph-model-home/models/embedding/${{ env.CODE_GRAPH_EMBEDDING_MODEL_ID }}
+
+      - name: Prepare isolated pinned runtime distributions
+        run: |
+          diagnostic_root="${RUNNER_TEMP}/threadnote-embedding-runtime-diagnostic"
+          mkdir -p "${diagnostic_root}/old" "${diagnostic_root}/current" artifacts/embedding-runtime-diagnostics/dependencies
+          printf '%s\n' '{"name":"embedding-diagnostic-old","private":true,"dependencies":{"bun":"1.4.2","node-llama-cpp":"3.22.1"}}' > "${diagnostic_root}/old/package.json"
+          printf '%s\n' '{"name":"embedding-diagnostic-current","private":true,"dependencies":{"node-llama-cpp":"3.22.2"}}' > "${diagnostic_root}/current/package.json"
+          bun install --cwd "${diagnostic_root}/old" --ignore-scripts
+          bun install --cwd "${diagnostic_root}/current" --ignore-scripts
+          cp "${diagnostic_root}/old/bun.lock" artifacts/embedding-runtime-diagnostics/dependencies/old-bun.lock
+          cp "${diagnostic_root}/current/bun.lock" artifacts/embedding-runtime-diagnostics/dependencies/current-bun.lock
+          cp "${diagnostic_root}/old/package.json" artifacts/embedding-runtime-diagnostics/dependencies/old-package.json
+          cp "${diagnostic_root}/current/package.json" artifacts/embedding-runtime-diagnostics/dependencies/current-package.json
+
+      - name: Capture counterbalanced runtime observations on this runner
+        env:
+          THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-macos-15-ARM64
+          THREADNOTE_BENCHMARK_RUNNER_ID: ${{ runner.name }}
+        run: >-
+          bun scripts/benchmark-code-graph.ts
+          --embedding-runtime-diagnostics
+          --model-file artifacts/code-graph-model-home/models/embedding/${{ env.CODE_GRAPH_EMBEDDING_MODEL_ID }}/${{ env.CODE_GRAPH_EMBEDDING_MODEL_SHA256 }}.gguf
+          --runtime-root "${RUNNER_TEMP}/threadnote-embedding-runtime-diagnostic"
+          --output-dir artifacts/embedding-runtime-diagnostics
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: embedding-runtime-diagnostic-macOS-${{ runner.arch }}
+          path: artifacts/embedding-runtime-diagnostics/
+          if-no-files-found: error
+          retention-days: 30
+
   code-graph-vectors:
     name: Code graph pinned vectors · Linux
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -756,7 +815,7 @@ jobs:
     if: github.event_name == 'schedule' || inputs.include_100k
     needs: prepare-code-graph-vector-model
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 80
 
     steps:
       - uses: actions/checkout@v7
@@ -774,7 +833,9 @@ jobs:
           path: artifacts/code-graph-model-home/models/embedding/${{ env.CODE_GRAPH_EMBEDDING_MODEL_ID }}
 
       - name: Gate 100k production-vector activation and scans
-        timeout-minutes: 50
+        # Containment for two independent full embedding passes and final adjudication.
+        # The existing cold-index and all other performance gates remain unchanged.
+        timeout-minutes: 65
         env:
           THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-macos-15-ARM64
           THREADNOTE_BENCHMARK_RUNNER_ID: ${{ runner.name }}

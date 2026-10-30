@@ -1,5 +1,6 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
+import {succeedUndefined} from '@threadnote/platform/optional';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readFileSync} from '@threadnote/testing/node-fs';
@@ -7,10 +8,22 @@ import {it as effectIt} from '@effect/vitest';
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {ByteSize, Clock, DateTime, Effect, FileSystem, Option, Path, PlatformError, Schedule, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {Deferred, Fiber, Layer} from 'effect';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
   applyBenchmarkOverlay,
+  advanceCodeGraphBenchmarkRunCheckpoint,
+  BENCHMARK_CHECKPOINT_INDEX_PHASES,
+  initialCodeGraphBenchmarkRunCheckpoint,
+  benchmarkIndexCheckpointMeasurement,
+  makeBenchmarkRunCheckpoint,
+  parseCodeGraphBenchmarkRunCheckpoint,
+  embeddingRuntimeDiagnosticSchedule,
+  parseEmbeddingRuntimeDiagnosticObservation,
+  summarizeEmbeddingRuntimeDiagnostics,
   BenchmarkStageTimings,
   IndexPhaseTimeline,
   indexPhaseMeasurements,
@@ -53,7 +66,7 @@ import {codeGraphAnalysisLimitsForView} from '@threadnote/graph/analysis/render'
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {CodeGraphStoreBusyError, type CodeGraphQueryResult, type RepositoryIdentity} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
-import {benchmarkMeasurement, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
+import {benchmarkMeasurement, parseBenchmarkArtifactV1, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -1959,3 +1972,431 @@ function structuralDigestInterlockState(
     leaseRows: Number(state.lease_rows),
   };
 }
+
+describe('bound benchmark interruption checkpoints', () => {
+  const instant = '2026-10-30T12:00:00.000Z';
+  const provenance = {
+    architecture: 'arm64',
+    bunVersion: '1.4.4',
+    fixture: 'code-graph-polyglot-v1',
+    platform: 'darwin',
+    scaleSymbols: 100000,
+    sourceCommit: '1111111111111111111111111111111111111111',
+    vectors: true,
+  } as const;
+  const model = {
+    id: 'bge-small-en-v1.5-q8',
+    sha256: 'f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804',
+  };
+  const coreMeasurement = {
+    fileCount: 1000,
+    indexWallMilliseconds: 1234,
+    parentProcessCpuMilliseconds: 234,
+    snapshotId: 'cgsn_1111111111111111111111111111111111111111',
+    symbolCount: 100000,
+  };
+  const evidence = {
+    ...coreMeasurement,
+    processTreeCpuMilliseconds: 3456,
+    embeddingProcessCpuMilliseconds: 3000,
+    vectors: {
+      cpuMathCores: 3,
+      effectiveContexts: 2,
+      modelGpuLayers: 0,
+      requestedContexts: 8,
+      storedRows: 202006,
+      threadCounts: [2, 1],
+    },
+  };
+  const bound = () =>
+    advanceCodeGraphBenchmarkRunCheckpoint(
+      initialCodeGraphBenchmarkRunCheckpoint(provenance, instant),
+      {
+        type: 'bind',
+        fixtureHash: 'generated-code-graph-vectors-v2:100000',
+        model,
+      },
+      instant,
+    );
+
+  it('refuses lost measurements, forged completion, changed provenance and qualifying sidecars', () => {
+    const running = advanceCodeGraphBenchmarkRunCheckpoint(bound(), {type: 'mark', phase: 'cold-index'}, instant);
+    expect(() =>
+      advanceCodeGraphBenchmarkRunCheckpoint(running, {type: 'mark', phase: 'hot-query-and-mutation'}, instant),
+    ).toThrow('retain completed index measurements');
+    expect(() => advanceCodeGraphBenchmarkRunCheckpoint(running, {type: 'finish', state: 'complete'}, instant)).toThrow(
+      'checkpoint',
+    );
+    expect(() =>
+      advanceCodeGraphBenchmarkRunCheckpoint(running, {type: 'bind', fixtureHash: 'changed', model}, instant),
+    ).toThrow('before indexing');
+    expect(() =>
+      parseCodeGraphBenchmarkRunCheckpoint({
+        ...running,
+        diagnostics: {...running.diagnostics, releaseQualification: true},
+      }),
+    ).toThrow('checkpoint diagnostics');
+    expect(() => parseBenchmarkArtifactV1(running)).toThrow();
+    const measured = advanceCodeGraphBenchmarkRunCheckpoint(
+      running,
+      {
+        type: 'measure-index',
+        phase: 'cold-index',
+        measurement: coreMeasurement,
+      },
+      instant,
+    );
+    expect(() =>
+      advanceCodeGraphBenchmarkRunCheckpoint(
+        measured,
+        {
+          type: 'complete-index',
+          phase: 'cold-index',
+          evidence: {...evidence, indexWallMilliseconds: 1235},
+        },
+        instant,
+      ),
+    ).toThrow('measurement changed');
+    expect(() =>
+      parseCodeGraphBenchmarkRunCheckpoint({
+        ...bound(),
+        diagnostics: {
+          ...bound().diagnostics,
+          indexes: [
+            {phase: 'cold-index', state: 'pending', measurement: coreMeasurement},
+            {phase: 'incremental-index', state: 'pending'},
+            {phase: 'same-overlay-reference-index', state: 'pending'},
+          ],
+        },
+      }),
+    ).toThrow('index evidence');
+  });
+
+  it('retains completed evidence monotonically and round trips every bounded cancellation boundary', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 0, max: 3}), fc.boolean(), fc.nat(1000000), (completed, failed, wall) => {
+        let checkpoint = bound();
+        for (const phase of BENCHMARK_CHECKPOINT_INDEX_PHASES.slice(0, completed)) {
+          checkpoint = advanceCodeGraphBenchmarkRunCheckpoint(checkpoint, {type: 'mark', phase}, instant);
+          checkpoint = advanceCodeGraphBenchmarkRunCheckpoint(
+            checkpoint,
+            {
+              type: 'measure-index',
+              phase,
+              measurement: {...coreMeasurement, indexWallMilliseconds: wall},
+            },
+            instant,
+          );
+          checkpoint = advanceCodeGraphBenchmarkRunCheckpoint(
+            checkpoint,
+            {type: 'complete-index', phase, evidence: {...evidence, indexWallMilliseconds: wall}},
+            instant,
+          );
+        }
+        if (completed < 3)
+          checkpoint = advanceCodeGraphBenchmarkRunCheckpoint(
+            checkpoint,
+            {type: 'mark', phase: BENCHMARK_CHECKPOINT_INDEX_PHASES[completed]},
+            instant,
+          );
+        const before = JSON.stringify(checkpoint);
+        const state = failed || completed < 3 ? 'failed' : 'complete';
+        const final = advanceCodeGraphBenchmarkRunCheckpoint(checkpoint, {type: 'finish', state}, instant);
+        expect(JSON.stringify(checkpoint)).toBe(before);
+        expect(
+          final.diagnostics && EffectArray.filter(final.diagnostics.indexes, item => item.state === 'complete'),
+        ).toHaveLength(completed);
+        expect(parseCodeGraphBenchmarkRunCheckpoint(JSON.parse(JSON.stringify(final)))).toEqual(final);
+        expect(advanceCodeGraphBenchmarkRunCheckpoint(final, {type: 'finish', state}, instant)).toEqual(final);
+        expect(() =>
+          advanceCodeGraphBenchmarkRunCheckpoint(final, {type: 'mark', phase: 'cold-index'}, instant),
+        ).toThrow('terminal');
+        expect(() => parseBenchmarkArtifactV1(final)).toThrow();
+      }),
+      {numRuns: 40},
+    );
+  });
+
+  for (const fault of ['retention-interruption', 'storage-failure', 'sampler-stop-failure'] as const) {
+    effectIt.effect(`retains core measurements across ${fault} after successful indexing`, () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-checkpoint-boundary-'});
+        const output = path.join(root, 'capture.json.run.json');
+        const retaining = yield* Deferred.make<void>();
+        const releaseRetention = yield* Deferred.make<void>();
+        const program = Effect.gen(function* () {
+          const checkpoint = yield* Effect.acquireRelease(makeBenchmarkRunCheckpoint(output, provenance), value =>
+            value.finish('failed'),
+          );
+          yield* checkpoint.bind('generated-code-graph-vectors-v2:100000', model);
+          yield* checkpoint.mark('cold-index');
+          yield* measureSampledBenchmarkIndex(
+            fault === 'sampler-stop-failure'
+              ? Effect.succeed({
+                  mark: () => Effect.void,
+                  stop: () => Effect.fail(TestError.make({message: 'sampler stop failed'})),
+                })
+              : succeedUndefined,
+            () =>
+              TestClock.adjust(7).pipe(
+                Effect.as({snapshot: {id: evidence.snapshotId, fileCount: 1000, symbolCount: 100000}}),
+              ),
+            fault === 'storage-failure'
+              ? Effect.fail(TestError.make({message: 'storage observation failed'}))
+              : Effect.void,
+            undefined,
+            measured =>
+              Effect.gen(function* () {
+                const core = benchmarkIndexCheckpointMeasurement(measured);
+                const cpuBeforeRetention = core.parentProcessCpuMilliseconds;
+                yield* Deferred.succeed(retaining, undefined);
+                if (fault === 'retention-interruption') yield* Deferred.await(releaseRetention);
+                yield* TestClock.adjust(50);
+                yield* checkpoint.measureIndex('cold-index', core);
+                expect(benchmarkIndexCheckpointMeasurement(measured)).toEqual(core);
+                expect(core.indexWallMilliseconds).toBe(7);
+                expect(core.parentProcessCpuMilliseconds).toBe(cpuBeforeRetention);
+              }),
+          );
+        }).pipe(Effect.scoped);
+        if (fault === 'retention-interruption') {
+          const fiber = yield* program.pipe(Effect.forkChild);
+          yield* Deferred.await(retaining);
+          const interrupting = yield* Deferred.make<void>();
+          const interrupter = yield* Deferred.succeed(interrupting, undefined).pipe(
+            Effect.andThen(Fiber.interrupt(fiber)),
+            Effect.forkChild,
+          );
+          yield* Deferred.await(interrupting);
+          yield* Effect.yieldNow;
+          yield* Deferred.succeed(releaseRetention, undefined);
+          yield* Fiber.join(interrupter);
+        } else {
+          expect((yield* Effect.exit(program))._tag).toBe('Failure');
+        }
+        const retained = parseCodeGraphBenchmarkRunCheckpoint(JSON.parse(yield* fs.readFileString(output)));
+        expect(retained).toMatchObject({
+          state: 'failed',
+          phase: 'cold-index',
+          diagnostics: {
+            provenance: {...provenance, model},
+            indexes: [
+              {
+                state: 'incomplete',
+                measurement: {
+                  snapshotId: evidence.snapshotId,
+                  fileCount: 1000,
+                  symbolCount: 100000,
+                  indexWallMilliseconds: 7,
+                },
+              },
+              {state: 'pending'},
+              {state: 'pending'},
+            ],
+          },
+        });
+        expect(retained.diagnostics?.indexes[0].evidence).toBeUndefined();
+        expect(() => parseBenchmarkArtifactV1(retained)).toThrow();
+      }).pipe(provideTestLayer(TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer)))),
+    );
+  }
+
+  effectIt.effect('persists cold and incremental measurements when the independent reference is interrupted', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-checkpoint-cancellation-'});
+      const output = path.join(root, 'capture.json.run.json');
+      const ready = yield* Deferred.make<void>();
+      const fiber = yield* Effect.gen(function* () {
+        const checkpoint = yield* Effect.acquireRelease(makeBenchmarkRunCheckpoint(output, provenance), value =>
+          value.finish('failed'),
+        );
+        yield* checkpoint.bind('generated-code-graph-vectors-v2:100000', model);
+        for (const phase of BENCHMARK_CHECKPOINT_INDEX_PHASES.slice(0, 2)) {
+          yield* checkpoint.mark(phase);
+          yield* checkpoint.completeIndex(phase, evidence);
+        }
+        yield* checkpoint.mark('same-overlay-reference-index');
+        yield* Deferred.succeed(ready, undefined);
+        return yield* Effect.never;
+      }).pipe(Effect.scoped, Effect.forkChild);
+      yield* Deferred.await(ready);
+      yield* Fiber.interrupt(fiber);
+      const retained = parseCodeGraphBenchmarkRunCheckpoint(JSON.parse(yield* fs.readFileString(output)));
+      expect(retained).toMatchObject({
+        state: 'failed',
+        phase: 'same-overlay-reference-index',
+        diagnostics: {
+          releaseQualification: false,
+          provenance: {...provenance, model},
+          indexes: [
+            {phase: 'cold-index', state: 'complete', evidence},
+            {phase: 'incremental-index', state: 'complete', evidence},
+            {phase: 'same-overlay-reference-index', state: 'incomplete'},
+          ],
+        },
+      });
+      expect(() => parseBenchmarkArtifactV1(retained)).toThrow();
+    }).pipe(provideTestLayer(TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer)))),
+  );
+});
+
+describe('isolated embedding runtime diagnostics', () => {
+  const hash = (value: string) => EffectString.repeat(64)(value);
+  const observation = (
+    cell: ReturnType<typeof embeddingRuntimeDiagnosticSchedule>[number],
+    bunFactor = 3,
+    libraryFactor = 2,
+    roundScale = 1,
+  ) => {
+    const wall =
+      100 *
+      (cell.bunVersion === '1.4.4' ? bunFactor : 1) *
+      (cell.libraryVersion === '3.22.2' ? libraryFactor : 1) *
+      (1 + cell.round * roundScale);
+    return parseEmbeddingRuntimeDiagnosticObservation({
+      ...cell,
+      releaseQualification: false,
+      modelSha256: hash('a'),
+      inputSha256: hash('b'),
+      tokenSha256: hash('c'),
+      vectorSha256: hash('d'),
+      sourceCommit: EffectString.repeat(40)('1'),
+      sourceScriptSha256: hash('e'),
+      bunExecutableSha256: hash(cell.bunVersion === '1.4.4' ? '1' : '2'),
+      libraryPackageSha256: hash(cell.libraryVersion === '3.22.2' ? '3' : '4'),
+      dependencyLockSha256: hash(cell.libraryVersion === '3.22.2' ? '5' : '6'),
+      nativeBinaries: {'mac-arm64-metal/llama-addon.node': hash(cell.libraryVersion === '3.22.2' ? '7' : '8')},
+      inputCount: 2048,
+      vectorCount: 2048,
+      dimensions: 384,
+      tokenCount: 103212,
+      contextSize: 512,
+      cpuMathCores: 3,
+      effectiveContexts: 2,
+      requestedContexts: 8,
+      modelGpuLayers: 0,
+      threadCounts: [2, 1],
+      nativeBackend: 'metal',
+      buildType: 'prebuilt',
+      setupAndWarmupWallMilliseconds: 10,
+      inferenceWallMilliseconds: wall,
+      inferenceCpuMilliseconds: 2 * wall,
+      processCommandWallMilliseconds: wall + 100,
+      processPeakRssBytes: 100000000,
+      host: {
+        logicalCpus: 4,
+        totalMemoryBytes: 8000000000,
+        freeMemoryBytesBefore: 4000000000,
+        freeMemoryBytesAfter: 3900000000,
+        loadAverageBefore: [0, 0, 0],
+        loadAverageAfter: [2, 1, 1],
+        cpuBusyFraction: 0.75,
+      },
+    });
+  };
+
+  it('balances every runtime/library cell and position on one sixteen-process schedule', () => {
+    const schedule = embeddingRuntimeDiagnosticSchedule();
+    expect(schedule).toHaveLength(16);
+    for (let round = 1; round <= 4; round += 1) {
+      const cells = EffectArray.filter(schedule, cell => cell.round === round);
+      expect(new Set(EffectArray.map(cells, cell => `${cell.bunVersion}/${cell.libraryVersion}`)).size).toBe(4);
+      expect(EffectArray.map(cells, cell => cell.position)).toEqual([1, 2, 3, 4]);
+    }
+    for (let position = 1; position <= 4; position += 1) {
+      expect(
+        new Set(
+          EffectArray.map(
+            EffectArray.filter(schedule, cell => cell.position === position),
+            cell => `${cell.bunVersion}/${cell.libraryVersion}`,
+          ),
+        ).size,
+      ).toBe(4);
+    }
+  });
+
+  it('admits matched contrasts independently of common per-round scaling without mutating observations', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({min: 1, max: 4}),
+        fc.integer({min: 1, max: 4}),
+        fc.integer({min: 1, max: 20}),
+        (bunFactor, libraryFactor, scale) => {
+          const values = EffectArray.map(embeddingRuntimeDiagnosticSchedule(), cell =>
+            observation(cell, bunFactor, libraryFactor, scale),
+          );
+          const before = JSON.stringify(values);
+          const result = summarizeEmbeddingRuntimeDiagnostics(values, hash('a'));
+          expect(result.releaseQualification).toBe(false);
+          expect(
+            EffectArray.map(result.contrasts, item => [
+              item.factor,
+              item.pairs.length,
+              item.medianWallRatio,
+              item.medianCpuRatio,
+            ]),
+          ).toEqual([
+            ['bunVersion', 8, bunFactor, bunFactor],
+            ['libraryVersion', 8, libraryFactor, libraryFactor],
+          ]);
+          expect(JSON.stringify(values)).toBe(before);
+          expect(() => parseBenchmarkArtifactV1(result)).toThrow();
+        },
+      ),
+      {numRuns: 24},
+    );
+  });
+
+  it('rejects partial, reordered, changed-work and changed-capacity or binary comparisons', () => {
+    const values = EffectArray.map(embeddingRuntimeDiagnosticSchedule(), cell => observation(cell));
+    expect(() => summarizeEmbeddingRuntimeDiagnostics(values.slice(1), hash('a'))).toThrow('incomplete');
+    expect(() => summarizeEmbeddingRuntimeDiagnostics([values[1], values[0], ...values.slice(2)], hash('a'))).toThrow(
+      'schedule',
+    );
+    const changes = [
+      {modelSha256: hash('f')},
+      {inputSha256: hash('f')},
+      {tokenSha256: hash('f')},
+      {tokenCount: 103213},
+      {vectorSha256: hash('f')},
+      {sourceCommit: EffectString.repeat(40)('2')},
+      {sourceScriptSha256: hash('f')},
+      {bunExecutableSha256: hash('f')},
+      {libraryPackageSha256: hash('f')},
+      {dependencyLockSha256: hash('f')},
+      {nativeBinaries: {'mac-arm64-metal/llama-addon.node': hash('f')}},
+      {host: {...values[3].host, totalMemoryBytes: 16000000000}},
+      {effectiveContexts: 1},
+      {threadCounts: [1, 2]},
+      {releaseQualification: true},
+    ];
+    for (const change of changes)
+      expect(() =>
+        summarizeEmbeddingRuntimeDiagnostics(
+          [...values.slice(0, 3), {...values[3], ...change}, ...values.slice(4)],
+          hash('a'),
+        ),
+      ).toThrow();
+  });
+
+  it('keeps the hosted comparison manual-only and the 100k performance gate unchanged', () => {
+    const workflow = readFileSync(new URL('../../../../.github/workflows/benchmarks.yml', import.meta.url), 'utf8');
+    const diagnostic = EffectString.split('  code-graph-vectors:')(
+      EffectString.split('  embedding-runtime-diagnostics:')(workflow)[1],
+    )[0];
+    expect(diagnostic).toContain(
+      "if: github.event_name == 'workflow_dispatch' && inputs.include_embedding_runtime_diagnostics",
+    );
+    expect(diagnostic).toContain('runs-on: macos-15');
+    expect(diagnostic).toContain('--embedding-runtime-diagnostics');
+    expect(diagnostic).toContain('--ignore-scripts');
+    expect(diagnostic).not.toContain('--fail-on-budget');
+    expect(workflow).toContain('timeout-minutes: 65');
+    expect(workflow).toContain('--scale-symbols 100000');
+    expect(workflow).toContain('--fail-on-budget');
+  });
+});

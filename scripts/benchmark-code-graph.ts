@@ -2,6 +2,16 @@ import {Array as EffectArray} from 'effect';
 import {BenchmarkLeaseTrace} from './benchmark-lease-trace.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {ScriptCommandExecutorLayer, ScriptSystemInfoLayer} from './effect/system-layer.js';
+/* oxlint-disable threadnote/no-node-runtime -- This diagnostic boundary records whole-host CPU deltas and pressure outside inference clocks; Bun/SystemInfo have no equivalent CPU-delta API. */
+import {
+  cpus as diagnosticCpus,
+  freemem as diagnosticFreeMemory,
+  totalmem as diagnosticTotalMemory,
+  loadavg as diagnosticLoadAverage,
+} from 'node:os';
+/* oxlint-enable threadnote/no-node-runtime */
 import {Database, type SQLQueryBindings} from 'bun:sqlite';
 import {
   Clock,
@@ -11,6 +21,7 @@ import {
   Effect,
   Exit,
   FileSystem,
+  Layer,
   Option,
   Path,
   PlatformError,
@@ -45,6 +56,7 @@ import {
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import type {
   CodeGraphActivationActivity,
+  CodeGraphIndexSummary,
   CodeGraphMaterializationSubphaseMilliseconds,
   CodeGraphProgress,
   CodeGraphQueryResult,
@@ -59,19 +71,22 @@ import {
   managerGraphVisualization,
 } from '@threadnote/graph/visualization';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {ApplicationLayer, type ApplicationServices} from '@threadnote/threadnote/effect/runtime';
 import {
   THREADNOTE_EMBEDDING_CONTEXTS_ENV,
+  nodeLlamaCppEngineLayer,
+  type NodeLlamaCppLayerOptions,
   type EmbeddingContextPoolSize,
 } from '@threadnote/inference/engine/node-llama-cpp';
-import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
+import {LocalModelRuntime, localModelRuntimeLayer} from '@threadnote/inference/engine/local-model-runtime';
 import {
   processResourceUsageMaxRssBytes,
   SystemInfo,
   type ProcessResourceUsageRuntime,
 } from '@threadnote/platform/system';
-import {CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
+import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -599,10 +614,106 @@ export interface CodeGraphBenchmarkRunCheckpoint {
   readonly state: 'complete' | 'failed' | 'running';
   readonly updatedAt: string;
   readonly version: 1;
+  readonly diagnostics?: CodeGraphBenchmarkCheckpointDiagnostics;
 }
+
+export const BENCHMARK_CHECKPOINT_INDEX_PHASES = [
+  'cold-index',
+  'incremental-index',
+  'same-overlay-reference-index',
+] as const;
+type BenchmarkCheckpointIndexPhase = (typeof BENCHMARK_CHECKPOINT_INDEX_PHASES)[number];
+const checkpointCount = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const checkpointMilliseconds = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
+const checkpointText = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
+const checkpointProvenanceSchema = Schema.Struct({
+  architecture: checkpointText,
+  bunVersion: checkpointText,
+  fixture: checkpointText,
+  fixtureHash: Schema.optionalKey(checkpointText),
+  model: Schema.optionalKey(
+    Schema.Struct({
+      id: checkpointText,
+      sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+    }),
+  ),
+  platform: checkpointText,
+  scaleSymbols: Schema.optionalKey(checkpointCount),
+  sourceCommit: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u)),
+  vectors: Schema.Boolean,
+});
+const checkpointIndexMeasurementFields = {
+  fileCount: checkpointCount,
+  indexWallMilliseconds: checkpointMilliseconds,
+  parentProcessCpuMilliseconds: checkpointMilliseconds,
+  snapshotId: checkpointText,
+  symbolCount: checkpointCount,
+};
+const checkpointIndexMeasurementSchema = Schema.Struct(checkpointIndexMeasurementFields);
+export type CodeGraphBenchmarkCheckpointIndexMeasurement = typeof checkpointIndexMeasurementSchema.Type;
+const checkpointIndexEvidenceSchema = Schema.Struct({
+  ...checkpointIndexMeasurementFields,
+  processTreeCpuMilliseconds: Schema.optionalKey(checkpointMilliseconds),
+  embeddingProcessCpuMilliseconds: Schema.optionalKey(checkpointMilliseconds),
+  vectors: Schema.optionalKey(
+    Schema.Struct({
+      cpuMathCores: checkpointCount,
+      effectiveContexts: checkpointCount,
+      modelGpuLayers: Schema.optionalKey(checkpointCount),
+      requestedContexts: checkpointCount,
+      storedRows: checkpointCount,
+      threadCounts: Schema.Array(checkpointCount).check(Schema.isMaxLength(8)),
+    }),
+  ),
+});
+export type CodeGraphBenchmarkCheckpointIndexEvidence = typeof checkpointIndexEvidenceSchema.Type;
+const checkpointDiagnosticsSchema = Schema.Struct({
+  kind: Schema.Literal('code-graph-benchmark-checkpoint'),
+  releaseQualification: Schema.Literal(false),
+  provenance: checkpointProvenanceSchema,
+  indexes: Schema.Array(
+    Schema.Struct({
+      phase: Schema.Literals(BENCHMARK_CHECKPOINT_INDEX_PHASES),
+      state: Schema.Literals(['pending', 'running', 'complete', 'incomplete']),
+      measurement: Schema.optionalKey(checkpointIndexMeasurementSchema),
+      evidence: Schema.optionalKey(checkpointIndexEvidenceSchema),
+    }),
+  ).check(Schema.isBetweenLength(3, 3)),
+});
+export type CodeGraphBenchmarkCheckpointDiagnostics = typeof checkpointDiagnosticsSchema.Type;
+export type CodeGraphBenchmarkCheckpointEvent =
+  | {readonly type: 'mark'; readonly phase: string}
+  | {
+      readonly type: 'bind';
+      readonly fixtureHash: string;
+      readonly model?: {readonly id: string; readonly sha256: string};
+    }
+  | {
+      readonly type: 'measure-index';
+      readonly phase: BenchmarkCheckpointIndexPhase;
+      readonly measurement: CodeGraphBenchmarkCheckpointIndexMeasurement;
+    }
+  | {
+      readonly type: 'complete-index';
+      readonly phase: BenchmarkCheckpointIndexPhase;
+      readonly evidence: CodeGraphBenchmarkCheckpointIndexEvidence;
+    }
+  | {readonly type: 'finish'; readonly state: 'complete' | 'failed'};
 
 interface CodeGraphBenchmarkRunCheckpointHandle {
   readonly mark: (phase: string) => Effect.Effect<void, unknown>;
+  readonly bind: (
+    fixtureHash: string,
+    model?: {readonly id: string; readonly sha256: string},
+  ) => Effect.Effect<void, unknown>;
+  readonly completeIndex: (
+    phase: BenchmarkCheckpointIndexPhase,
+    evidence: CodeGraphBenchmarkCheckpointIndexEvidence,
+  ) => Effect.Effect<void, unknown>;
+  readonly measureIndex: (
+    phase: BenchmarkCheckpointIndexPhase,
+    measurement: CodeGraphBenchmarkCheckpointIndexMeasurement,
+  ) => Effect.Effect<void, unknown>;
   readonly finish: (state: 'complete' | 'failed') => Effect.Effect<void, never>;
 }
 
@@ -687,7 +798,15 @@ const benchmarkCodeGraph = Effect.scoped(
     const runCheckpoint =
       checkpointedEvidenceRun && options.outputPath
         ? yield* Effect.acquireRelease(
-            makeBenchmarkRunCheckpoint(`${options.outputPath}.run.json`),
+            makeBenchmarkRunCheckpoint(`${options.outputPath}.run.json`, {
+              architecture: system.architecture,
+              bunVersion: system.runtimeVersion,
+              fixture: options.fixture,
+              platform: system.platform,
+              ...(options.scaleSymbols === undefined ? {} : {scaleSymbols: options.scaleSymbols}),
+              sourceCommit: runtimeProvenance?.sourceCommit ?? '',
+              vectors: options.vectors,
+            }),
             (checkpoint, exit) => checkpoint.finish(Exit.isSuccess(exit) ? 'complete' : 'failed'),
           )
         : undefined;
@@ -739,9 +858,65 @@ const benchmarkCodeGraph = Effect.scoped(
     }
     yield* runCheckpoint?.mark('preparing-runtime') ?? Effect.void;
     yield* bootstrapSampler?.markPhase('preparing-runtime') ?? Effect.void;
-    const embeddingModelId = options.vectors
+    const embeddingModelManifest = options.vectors
       ? yield* prepareBenchmarkEmbedding(prepared.home, options.modelHome)
       : undefined;
+    const embeddingModelId = embeddingModelManifest?.id;
+    const fixtureHash =
+      prepared.fixtureIdentity !== undefined
+        ? prepared.fixtureIdentity
+        : prepared.profile !== undefined
+          ? productionProfileIdentity(prepared.profile, options.vectors)
+          : options.scaleSymbols === undefined
+            ? codeGraphEvaluationFixtureHash(fixture)
+            : `generated-code-graph-${options.vectors ? 'vectors-v2' : 'v1'}:${options.scaleSymbols}`;
+    yield* runCheckpoint?.bind(
+      fixtureHash,
+      embeddingModelManifest === undefined
+        ? undefined
+        : {
+            id: embeddingModelManifest.id,
+            sha256: embeddingModelManifest.sha256,
+          },
+    ) ?? Effect.void;
+    const retainIndexMeasurement =
+      (phase: BenchmarkCheckpointIndexPhase) => (measurement: BenchmarkIndexMeasurement<CodeGraphIndexSummary>) =>
+        runCheckpoint?.measureIndex(phase, benchmarkIndexCheckpointMeasurement(measurement)) ?? Effect.void;
+    const checkpointIndex = Effect.fn('benchmarkCodeGraph.checkpointIndex')(function* (
+      phase: BenchmarkCheckpointIndexPhase,
+      sampled: SampledBenchmarkIndexMeasurement<CodeGraphIndexSummary>,
+      vectorRoot: string,
+    ) {
+      if (!runCheckpoint) return;
+      const {measurement, telemetry} = sampled;
+      let vectors: CodeGraphBenchmarkCheckpointIndexEvidence['vectors'];
+      if (options.vectors) {
+        const runtime = yield* LocalModelRuntime;
+        const diagnostics = yield* runtime.diagnostics;
+        const plan = diagnostics.embeddingContextPlan;
+        if (!plan) return yield* ScriptError.make({message: 'Checkpoint lacks the effective embedding context plan.'});
+        vectors = {
+          ...plan,
+          cpuMathCores: diagnostics.cpuMathCores,
+          storedRows: yield* vectorRowCount(fs, path, vectorRoot),
+        };
+      }
+      const embeddingCpu = telemetry?.phases['embedding:progress']?.cpuMilliseconds;
+      yield* runCheckpoint.completeIndex(phase, {
+        ...benchmarkIndexCheckpointMeasurement(measurement),
+        ...(telemetry?.processTelemetry.availability === 'available'
+          ? {
+              processTreeCpuMilliseconds: EffectArray.reduce(
+                EffectRecord.values(telemetry.phases),
+                0,
+                (total, item) => total + (item.cpuMilliseconds ?? 0),
+              ),
+            }
+          : {}),
+        ...(embeddingCpu === undefined ? {} : {embeddingProcessCpuMilliseconds: embeddingCpu}),
+        ...(vectors === undefined ? {} : {vectors}),
+      });
+    });
     const queryText =
       options.queryText ??
       (options.vectors
@@ -822,6 +997,7 @@ const benchmarkCodeGraph = Effect.scoped(
         }),
       observeSqliteStoragePeak(fs, coldStoragePeak, benchmarkLayout.databasePath),
       coldRegistrationTracing,
+      retainIndexMeasurement('cold-index'),
     );
     const coldRegistrationDiagnostics = serializeBenchmarkRegistrationTracing(coldRegistrationTracing);
     const coldMeasurement = coldPhase.measurement;
@@ -856,6 +1032,7 @@ const benchmarkCodeGraph = Effect.scoped(
       }
       embeddingContextPlan = {...plan, cpuMathCores: diagnostics.cpuMathCores};
     }
+    yield* checkpointIndex('cold-index', coldPhase, benchmarkLayout.vectorRoot);
     const coldVectorMappingDigest = options.vectors
       ? yield* vectorMappingDigest(fs, path, benchmarkLayout.vectorRoot, benchmarkIdentity.worktreeId)
       : undefined;
@@ -1029,7 +1206,7 @@ const benchmarkCodeGraph = Effect.scoped(
       () =>
         Effect.gen(function* () {
           yield* runCheckpoint?.mark('incremental-index') ?? Effect.void;
-          return yield* measureSampledBenchmarkIndex(
+          const sampled = yield* measureSampledBenchmarkIndex(
             sampleProcessTree
               ? startExternalSampler(
                   fs,
@@ -1059,7 +1236,11 @@ const benchmarkCodeGraph = Effect.scoped(
                 threadnoteHome: prepared.home,
               }),
             observeSqliteStoragePeak(fs, incrementalStoragePeak, benchmarkLayout.databasePath),
+            undefined,
+            retainIndexMeasurement('incremental-index'),
           );
+          yield* checkpointIndex('incremental-index', sampled, benchmarkLayout.vectorRoot);
+          return sampled;
         }),
       () => restoreBenchmarkOverlay(fs, changedPath, benchmarkChangedBytes, originalChangedBytes),
     );
@@ -1217,8 +1398,11 @@ const benchmarkCodeGraph = Effect.scoped(
                     threadnoteHome: sameOverlayReferenceHome,
                   }),
                 observeSqliteStoragePeak(fs, sameOverlayReferenceStoragePeak, sameOverlayReferenceLayout.databasePath),
+                undefined,
+                retainIndexMeasurement('same-overlay-reference-index'),
               );
               const measurement = sampled.measurement;
+              yield* checkpointIndex('same-overlay-reference-index', sampled, sameOverlayReferenceLayout.vectorRoot);
               const summary = measurement.result;
               const controls = prepared.externalControls
                 ? yield* Effect.forEach(
@@ -1499,14 +1683,7 @@ const benchmarkCodeGraph = Effect.scoped(
         commit,
         cpu: hardware.cpuModel,
         dirty: dirty.length > 0,
-        fixtureHash:
-          prepared.fixtureIdentity !== undefined
-            ? prepared.fixtureIdentity
-            : prepared.profile !== undefined
-              ? productionProfileIdentity(prepared.profile, options.vectors)
-              : options.scaleSymbols === undefined
-                ? codeGraphEvaluationFixtureHash(fixture)
-                : `generated-code-graph-${options.vectors ? 'vectors-v2' : 'v1'}:${options.scaleSymbols}`,
+        fixtureHash,
         memoryBytes: hardware.memoryBytes,
         ...(embeddingModelId
           ? {model: {backend: 'node-llama-cpp', id: embeddingModelId, revision: 'builtin-pinned'}}
@@ -2951,20 +3128,42 @@ export interface SampledBenchmarkIndexMeasurement<A> {
   readonly telemetry?: CodeGraphBenchmarkSamplerArtifact;
 }
 
-export function measureBenchmarkIndex<A, E, R>(
+export function measureBenchmarkIndex<A, E, R, E2 = never, R2 = never>(
   run: (timeline: IndexPhaseTimeline) => Effect.Effect<A, E, R>,
   registrationTracing?: BenchmarkRegistrationTracing,
-): Effect.Effect<BenchmarkIndexMeasurement<A>, E, R> {
-  return Effect.gen(function* () {
-    const startedAt = yield* Clock.currentTimeNanos;
-    const processStarted = processTelemetry();
-    const timeline = new IndexPhaseTimeline(startedAt, processStarted, registrationTracing);
-    const result = yield* withBenchmarkRegistrationTracing(run(timeline), registrationTracing);
-    const finishedAt = yield* Clock.currentTimeNanos;
-    const processFinished = processTelemetry();
-    timeline.finish(finishedAt, processFinished);
-    return {finishedAt, processFinished, processStarted, result, startedAt, timeline};
-  });
+  onMeasured?: (measurement: BenchmarkIndexMeasurement<A>) => Effect.Effect<void, E2, R2>,
+): Effect.Effect<BenchmarkIndexMeasurement<A>, E | E2, R | R2> {
+  return Effect.uninterruptibleMask(restore =>
+    Effect.gen(function* () {
+      const startedAt = yield* Clock.currentTimeNanos;
+      const processStarted = processTelemetry();
+      const timeline = new IndexPhaseTimeline(startedAt, processStarted, registrationTracing);
+      const result = yield* restore(withBenchmarkRegistrationTracing(run(timeline), registrationTracing));
+      const finishedAt = yield* Clock.currentTimeNanos;
+      const processFinished = processTelemetry();
+      timeline.finish(finishedAt, processFinished);
+      const measurement = {finishedAt, processFinished, processStarted, result, startedAt, timeline};
+      yield* onMeasured?.(measurement) ?? Effect.void;
+      return measurement;
+    }),
+  );
+}
+
+export function benchmarkIndexCheckpointMeasurement(
+  measurement: BenchmarkIndexMeasurement<{
+    readonly snapshot: {readonly id: string; readonly fileCount: number; readonly symbolCount: number};
+  }>,
+): CodeGraphBenchmarkCheckpointIndexMeasurement {
+  return {
+    fileCount: measurement.result.snapshot.fileCount,
+    indexWallMilliseconds: Math.max(
+      0,
+      Number(measurement.finishedAt - measurement.startedAt) / NANOSECONDS_PER_MILLISECOND,
+    ),
+    parentProcessCpuMilliseconds: cpuMilliseconds(measurement.processStarted, measurement.processFinished).total,
+    snapshotId: measurement.result.snapshot.id,
+    symbolCount: measurement.result.snapshot.symbolCount,
+  };
 }
 
 /**
@@ -2978,6 +3177,7 @@ export function measureSampledBenchmarkIndex<A>(
   run: (timeline: IndexPhaseTimeline, sampler: BenchmarkIndexSamplerHandle | undefined) => Effect.Effect<A, unknown>,
   observeFinalStorage: Effect.Effect<void, unknown>,
   registrationTracing?: BenchmarkRegistrationTracing,
+  onMeasured?: (measurement: BenchmarkIndexMeasurement<A>) => Effect.Effect<void, unknown>,
 ): Effect.Effect<SampledBenchmarkIndexMeasurement<A>, unknown> {
   return Effect.scoped(
     Effect.gen(function* () {
@@ -2987,7 +3187,11 @@ export function measureSampledBenchmarkIndex<A>(
           ? handle.stop(Exit.isSuccess(exit) ? 'complete' : 'aborted').pipe(Effect.ignore)
           : succeedUndefined,
       );
-      const measurement = yield* measureBenchmarkIndex(timeline => run(timeline, sampler), registrationTracing);
+      const measurement = yield* measureBenchmarkIndex(
+        timeline => run(timeline, sampler),
+        registrationTracing,
+        onMeasured,
+      );
       yield* observeFinalStorage;
       const telemetry = sampler ? yield* sampler.stop('complete') : undefined;
       stopped = true;
@@ -3543,6 +3747,19 @@ interface ExternalSamplerHandle {
   readonly stop: (state?: 'aborted' | 'complete') => Effect.Effect<CodeGraphBenchmarkSamplerArtifact, Error | unknown>;
 }
 
+function checkpointMeasurementMatches(
+  measurement: CodeGraphBenchmarkCheckpointIndexMeasurement,
+  evidence: CodeGraphBenchmarkCheckpointIndexEvidence,
+): boolean {
+  return (
+    measurement.fileCount === evidence.fileCount &&
+    measurement.indexWallMilliseconds === evidence.indexWallMilliseconds &&
+    measurement.parentProcessCpuMilliseconds === evidence.parentProcessCpuMilliseconds &&
+    measurement.snapshotId === evidence.snapshotId &&
+    measurement.symbolCount === evidence.symbolCount
+  );
+}
+
 export function parseCodeGraphBenchmarkRunCheckpoint(value: unknown): CodeGraphBenchmarkRunCheckpoint {
   if (typeof value !== 'object' || value === null)
     throw ScriptError.make({message: 'Benchmark run checkpoint must be an object.'});
@@ -3558,35 +3775,170 @@ export function parseCodeGraphBenchmarkRunCheckpoint(value: unknown): CodeGraphB
   ) {
     throw ScriptError.make({message: 'Benchmark run checkpoint is invalid.'});
   }
+  let diagnostics: CodeGraphBenchmarkCheckpointDiagnostics | undefined;
+  if (checkpoint.diagnostics !== undefined) {
+    try {
+      diagnostics = Schema.decodeUnknownSync(checkpointDiagnosticsSchema, {onExcessProperty: 'error'})(
+        checkpoint.diagnostics,
+      );
+    } catch (cause) {
+      throw ScriptError.make({message: 'Benchmark run checkpoint diagnostics are invalid.', cause});
+    }
+    let unfinished = false;
+    for (const [index, item] of diagnostics.indexes.entries()) {
+      if (
+        item.phase !== BENCHMARK_CHECKPOINT_INDEX_PHASES[index] ||
+        (item.state === 'complete') !== (item.evidence !== undefined) ||
+        (item.state === 'pending' && item.measurement !== undefined)
+      )
+        throw ScriptError.make({message: 'Benchmark run checkpoint index evidence is inconsistent.'});
+      if (
+        (unfinished && item.state !== 'pending') ||
+        (item.state === 'running' && (state !== 'running' || phase !== item.phase)) ||
+        (item.state === 'incomplete' && (state !== 'failed' || phase !== item.phase))
+      )
+        throw ScriptError.make({message: 'Benchmark run checkpoint active index is inconsistent.'});
+      if (item.state === 'complete') {
+        if (
+          unfinished ||
+          !diagnostics.provenance.fixtureHash ||
+          (diagnostics.provenance.vectors && (!diagnostics.provenance.model || !item.evidence?.vectors))
+        )
+          throw ScriptError.make({message: 'Benchmark run checkpoint completion lacks bound provenance.'});
+      } else unfinished = true;
+      if (item.measurement) {
+        if (!diagnostics.provenance.fixtureHash || (diagnostics.provenance.vectors && !diagnostics.provenance.model))
+          throw ScriptError.make({message: 'Benchmark run checkpoint measurement lacks bound provenance.'});
+        if (item.evidence && !checkpointMeasurementMatches(item.measurement, item.evidence))
+          throw ScriptError.make({
+            message: 'Benchmark run checkpoint measurement changed during telemetry collection.',
+          });
+      }
+    }
+    if (
+      !diagnostics.provenance.vectors &&
+      (diagnostics.provenance.model ||
+        EffectArray.some(diagnostics.indexes, item => item.evidence?.vectors !== undefined))
+    )
+      throw ScriptError.make({message: 'Benchmark run checkpoint lexical provenance contains vector work.'});
+    if (state === 'complete' && (unfinished || phase !== 'finished'))
+      throw ScriptError.make({message: 'Benchmark run checkpoint cannot complete with unfinished indexes.'});
+  }
   return {
     phase,
     state,
     updatedAt,
     version: 1,
+    ...(diagnostics === undefined ? {} : {diagnostics}),
   };
 }
 
-const makeBenchmarkRunCheckpoint = Effect.fn('benchmarkCodeGraph.makeRunCheckpoint')(function* (outputPath: string) {
+export function initialCodeGraphBenchmarkRunCheckpoint(
+  provenance: CodeGraphBenchmarkCheckpointDiagnostics['provenance'],
+  updatedAt: string,
+): CodeGraphBenchmarkRunCheckpoint {
+  return parseCodeGraphBenchmarkRunCheckpoint({
+    phase: 'preparing-fixture',
+    state: 'running',
+    updatedAt,
+    version: 1,
+    diagnostics: {
+      kind: 'code-graph-benchmark-checkpoint',
+      releaseQualification: false,
+      provenance,
+      indexes: EffectArray.map(BENCHMARK_CHECKPOINT_INDEX_PHASES, phase => ({phase, state: 'pending'})),
+    },
+  });
+}
+
+export function advanceCodeGraphBenchmarkRunCheckpoint(
+  previous: CodeGraphBenchmarkRunCheckpoint,
+  event: CodeGraphBenchmarkCheckpointEvent,
+  updatedAt: string,
+): CodeGraphBenchmarkRunCheckpoint {
+  const current = parseCodeGraphBenchmarkRunCheckpoint(previous);
+  const diagnostics = current.diagnostics;
+  if (!diagnostics) throw ScriptError.make({message: 'Benchmark run checkpoint transition requires diagnostics.'});
+  if (current.state !== 'running') {
+    if (event.type === 'finish' && event.state === current.state) return current;
+    throw ScriptError.make({message: 'Benchmark run checkpoint is terminal.'});
+  }
+  let phase = current.phase;
+  let state: CodeGraphBenchmarkRunCheckpoint['state'] = current.state;
+  let provenance = diagnostics.provenance;
+  let indexes = diagnostics.indexes;
+  if (event.type === 'bind') {
+    if (EffectArray.some(indexes, item => item.state !== 'pending'))
+      throw ScriptError.make({message: 'Benchmark run checkpoint provenance must be bound before indexing.'});
+    provenance = {...provenance, fixtureHash: event.fixtureHash, ...(event.model ? {model: event.model} : {})};
+  } else if (event.type === 'mark') {
+    if (EffectArray.some(indexes, item => item.state === 'running'))
+      throw ScriptError.make({
+        message: 'Benchmark run checkpoint must retain completed index measurements before advancing.',
+      });
+    phase = event.phase;
+    indexes = EffectArray.map(indexes, (item, index) => {
+      if (item.phase !== phase) return item;
+      if (item.state !== 'pending' || EffectArray.some(indexes.slice(0, index), prior => prior.state !== 'complete'))
+        throw ScriptError.make({message: 'Benchmark run checkpoint index order is invalid.'});
+      return {...item, state: 'running' as const};
+    });
+  } else if (event.type === 'measure-index' || event.type === 'complete-index') {
+    indexes = EffectArray.map(indexes, item => {
+      if (item.phase !== event.phase) return item;
+      if (phase !== event.phase || item.state !== 'running')
+        throw ScriptError.make({message: 'Benchmark run checkpoint completion does not match its active index.'});
+      if (event.type === 'measure-index') {
+        if (item.measurement)
+          throw ScriptError.make({message: 'Benchmark run checkpoint measurement is already retained.'});
+        return {...item, measurement: event.measurement};
+      }
+      return {...item, state: 'complete' as const, evidence: event.evidence};
+    });
+  } else {
+    state = event.state;
+    if (state === 'complete') phase = 'finished';
+    else
+      indexes = EffectArray.map(indexes, item =>
+        item.state === 'running' ? {...item, state: 'incomplete' as const} : item,
+      );
+  }
+  return parseCodeGraphBenchmarkRunCheckpoint({
+    ...current,
+    phase,
+    state,
+    updatedAt,
+    diagnostics: {...diagnostics, provenance, indexes},
+  });
+}
+
+export const makeBenchmarkRunCheckpoint = Effect.fn('benchmarkCodeGraph.makeRunCheckpoint')(function* (
+  outputPath: string,
+  provenance: CodeGraphBenchmarkCheckpointDiagnostics['provenance'],
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const write = (phase: string, state: CodeGraphBenchmarkRunCheckpoint['state']) => {
-    const checkpoint = parseCodeGraphBenchmarkRunCheckpoint({
-      phase,
-      state,
-      updatedAt: new Date().toISOString(),
-      version: 1,
-    });
-    return atomicWrite(outputPath, `${JSON.stringify(checkpoint)}\n`).pipe(
+  let checkpoint = initialCodeGraphBenchmarkRunCheckpoint(provenance, DateTime.formatIso(yield* DateTime.now));
+  const persist = (value: CodeGraphBenchmarkRunCheckpoint) =>
+    atomicWrite(outputPath, `${JSON.stringify(value)}\n`).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
       Effect.provideService(SystemInfo, system),
     );
-  };
-  yield* write('preparing-fixture', 'running');
+  const write = (event: CodeGraphBenchmarkCheckpointEvent) =>
+    Effect.gen(function* () {
+      const next = advanceCodeGraphBenchmarkRunCheckpoint(checkpoint, event, DateTime.formatIso(yield* DateTime.now));
+      yield* persist(next);
+      checkpoint = next;
+    }).pipe(Effect.uninterruptible);
+  yield* persist(checkpoint);
   return {
-    finish: state => write('finished', state).pipe(Effect.ignore),
-    mark: phase => write(phase, 'running'),
+    bind: (fixtureHash, model) => write({type: 'bind', fixtureHash, ...(model ? {model} : {})}),
+    completeIndex: (phase, evidence) => write({type: 'complete-index', phase, evidence}),
+    measureIndex: (phase, measurement) => write({type: 'measure-index', phase, measurement}),
+    finish: state => write({type: 'finish', state}).pipe(Effect.ignore),
+    mark: phase => write({type: 'mark', phase}),
   } satisfies CodeGraphBenchmarkRunCheckpointHandle;
 });
 
@@ -8986,7 +9338,7 @@ const prepareBenchmarkEmbedding = Effect.fn('benchmarkCodeGraph.prepareEmbedding
     yield* fs.copy(installed.path, target, {overwrite: true});
   }
   yield* selectLocalModel(targetHome, catalog, 'embedding', manifest.id);
-  return manifest.id;
+  return manifest;
 });
 
 function integer(value: string | undefined, option: string, minimum: number): number {
@@ -9002,4 +9354,514 @@ function required(value: string | undefined, option: string): string {
   return value;
 }
 
-if (import.meta.main) BunRuntime.runMain(provideScriptLayer(benchmarkCodeGraph, ApplicationLayer));
+const EMBEDDING_DIAGNOSTIC_BUN_VERSIONS = ['1.4.2', '1.4.4'] as const;
+const EMBEDDING_DIAGNOSTIC_LIBRARY_VERSIONS = ['3.22.1', '3.22.2'] as const;
+const embeddingDiagnosticHash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
+const embeddingDiagnosticObservationSchema = Schema.Struct({
+  releaseQualification: Schema.Literal(false),
+  round: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 4})),
+  position: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 4})),
+  bunVersion: Schema.Literals(EMBEDDING_DIAGNOSTIC_BUN_VERSIONS),
+  libraryVersion: Schema.Literals(EMBEDDING_DIAGNOSTIC_LIBRARY_VERSIONS),
+  modelSha256: embeddingDiagnosticHash,
+  inputSha256: embeddingDiagnosticHash,
+  tokenSha256: embeddingDiagnosticHash,
+  vectorSha256: embeddingDiagnosticHash,
+  sourceCommit: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u)),
+  sourceScriptSha256: embeddingDiagnosticHash,
+  bunExecutableSha256: embeddingDiagnosticHash,
+  libraryPackageSha256: embeddingDiagnosticHash,
+  dependencyLockSha256: embeddingDiagnosticHash,
+  nativeBinaries: Schema.Record(checkpointText, embeddingDiagnosticHash),
+  inputCount: Schema.Literal(2048),
+  vectorCount: Schema.Literal(2048),
+  dimensions: Schema.Literal(384),
+  tokenCount: checkpointCount,
+  contextSize: Schema.Literal(512),
+  cpuMathCores: Schema.Literal(3),
+  effectiveContexts: Schema.Literal(2),
+  requestedContexts: Schema.Literal(8),
+  modelGpuLayers: Schema.Literal(0),
+  threadCounts: Schema.Array(Schema.Int).check(Schema.isBetweenLength(2, 2)),
+  nativeBackend: checkpointText,
+  buildType: Schema.Literal('prebuilt'),
+  setupAndWarmupWallMilliseconds: checkpointMilliseconds,
+  inferenceWallMilliseconds: checkpointMilliseconds,
+  inferenceCpuMilliseconds: checkpointMilliseconds,
+  processCommandWallMilliseconds: Schema.optionalKey(checkpointMilliseconds),
+  processPeakRssBytes: checkpointCount,
+  host: Schema.Struct({
+    logicalCpus: checkpointCount,
+    totalMemoryBytes: checkpointCount,
+    freeMemoryBytesBefore: checkpointCount,
+    freeMemoryBytesAfter: checkpointCount,
+    loadAverageBefore: Schema.Array(checkpointMilliseconds).check(Schema.isBetweenLength(3, 3)),
+    loadAverageAfter: Schema.Array(checkpointMilliseconds).check(Schema.isBetweenLength(3, 3)),
+    cpuBusyFraction: Schema.Finite.check(Schema.isBetween({minimum: 0, maximum: 1})),
+  }),
+});
+export type EmbeddingRuntimeDiagnosticObservation = typeof embeddingDiagnosticObservationSchema.Type;
+type EmbeddingRuntimeDiagnosticCell = Pick<
+  EmbeddingRuntimeDiagnosticObservation,
+  'round' | 'position' | 'bunVersion' | 'libraryVersion'
+>;
+
+/** A four-cell Williams schedule balances runtime/library and position on one host. */
+export function embeddingRuntimeDiagnosticSchedule(): readonly EmbeddingRuntimeDiagnosticCell[] {
+  const cells = EffectArray.flatMap(EMBEDDING_DIAGNOSTIC_BUN_VERSIONS, bunVersion =>
+    EffectArray.map(EMBEDDING_DIAGNOSTIC_LIBRARY_VERSIONS, libraryVersion => ({bunVersion, libraryVersion})),
+  );
+  return EffectArray.flatMap(
+    [
+      [0, 1, 3, 2],
+      [1, 2, 0, 3],
+      [2, 3, 1, 0],
+      [3, 0, 2, 1],
+    ],
+    (order, round) =>
+      EffectArray.map(order, (cell, position) => ({...cells[cell], round: round + 1, position: position + 1})),
+  );
+}
+
+export function parseEmbeddingRuntimeDiagnosticObservation(value: unknown): EmbeddingRuntimeDiagnosticObservation {
+  let observation: EmbeddingRuntimeDiagnosticObservation;
+  try {
+    observation = Schema.decodeUnknownSync(embeddingDiagnosticObservationSchema, {onExcessProperty: 'error'})(value);
+  } catch (cause) {
+    throw ScriptError.make({message: 'Embedding runtime diagnostic observation is invalid.', cause});
+  }
+  if (
+    observation.threadCounts[0] !== 2 ||
+    observation.threadCounts[1] !== 1 ||
+    observation.tokenCount < observation.inputCount ||
+    EffectRecord.keys(observation.nativeBinaries).length === 0 ||
+    EffectRecord.keys(observation.nativeBinaries).length > 64 ||
+    observation.inferenceWallMilliseconds <= 0 ||
+    observation.inferenceCpuMilliseconds <= 0
+  )
+    throw ScriptError.make({message: 'Embedding runtime diagnostic work or execution plan is invalid.'});
+  return observation;
+}
+
+export function summarizeEmbeddingRuntimeDiagnostics(values: readonly unknown[], expectedModelSha256: string) {
+  const schedule = embeddingRuntimeDiagnosticSchedule();
+  if (values.length !== schedule.length)
+    throw ScriptError.make({message: 'Embedding runtime diagnostic is incomplete.'});
+  const observations = EffectArray.map(values, parseEmbeddingRuntimeDiagnosticObservation);
+  const first = observations[0];
+  for (const [index, observation] of observations.entries()) {
+    const cell = schedule[index];
+    if (
+      observation.round !== cell.round ||
+      observation.position !== cell.position ||
+      observation.bunVersion !== cell.bunVersion ||
+      observation.libraryVersion !== cell.libraryVersion ||
+      observation.modelSha256 !== expectedModelSha256 ||
+      observation.processCommandWallMilliseconds === undefined
+    )
+      throw ScriptError.make({message: 'Embedding runtime diagnostic schedule or model binding changed.'});
+    for (const field of [
+      'sourceCommit',
+      'sourceScriptSha256',
+      'inputSha256',
+      'tokenSha256',
+      'tokenCount',
+      'vectorSha256',
+      'nativeBackend',
+    ] as const) {
+      if (observation[field] !== first[field])
+        throw ScriptError.make({
+          message: `Embedding runtime diagnostic changed ${field}; no matched comparison is admitted.`,
+        });
+    }
+    if (
+      observation.host.logicalCpus !== first.host.logicalCpus ||
+      observation.host.totalMemoryBytes !== first.host.totalMemoryBytes
+    )
+      throw ScriptError.make({message: 'Embedding runtime diagnostic host capacity changed.'});
+    const runtime = Option.getOrElse(
+      EffectArray.findFirst(observations, item => item.bunVersion === observation.bunVersion),
+      () => observation,
+    );
+    const library = Option.getOrElse(
+      EffectArray.findFirst(observations, item => item.libraryVersion === observation.libraryVersion),
+      () => observation,
+    );
+    if (
+      runtime.bunExecutableSha256 !== observation.bunExecutableSha256 ||
+      library.libraryPackageSha256 !== observation.libraryPackageSha256 ||
+      library.dependencyLockSha256 !== observation.dependencyLockSha256 ||
+      EffectRecord.keys(library.nativeBinaries).length !== EffectRecord.keys(observation.nativeBinaries).length ||
+      EffectArray.some(
+        EffectRecord.keys(library.nativeBinaries),
+        key => library.nativeBinaries[key] !== observation.nativeBinaries[key],
+      )
+    )
+      throw ScriptError.make({message: 'Embedding runtime diagnostic runtime or native binary identity changed.'});
+  }
+  const median = (values: readonly number[]) => benchmarkMeasurement('diagnostic', 'milliseconds', values).p50;
+  const ratios = (factor: 'bunVersion' | 'libraryVersion') => {
+    const held = factor === 'bunVersion' ? 'libraryVersion' : 'bunVersion';
+    const versions =
+      factor === 'bunVersion' ? EMBEDDING_DIAGNOSTIC_BUN_VERSIONS : EMBEDDING_DIAGNOSTIC_LIBRARY_VERSIONS;
+    const pairs = EffectArray.filter(observations, item => item[factor] === versions[0]);
+    return EffectArray.map(pairs, baseline => {
+      const candidate = Option.getOrElse(
+        EffectArray.findFirst(
+          observations,
+          item => item.round === baseline.round && item[held] === baseline[held] && item[factor] === versions[1],
+        ),
+        () => {
+          throw ScriptError.make({message: 'Embedding runtime diagnostic pair is missing.'});
+        },
+      );
+      return {
+        round: baseline.round,
+        heldVersion: baseline[held],
+        wallRatio: candidate.inferenceWallMilliseconds / baseline.inferenceWallMilliseconds,
+        cpuRatio: candidate.inferenceCpuMilliseconds / baseline.inferenceCpuMilliseconds,
+      };
+    });
+  };
+  const contrasts = EffectArray.map(['bunVersion', 'libraryVersion'] as const, factor => {
+    const pairs = ratios(factor);
+    return {
+      factor,
+      pairs,
+      medianWallRatio: median(EffectArray.map(pairs, pair => pair.wallRatio)),
+      medianCpuRatio: median(EffectArray.map(pairs, pair => pair.cpuRatio)),
+    };
+  });
+  return {releaseQualification: false as const, contrasts};
+}
+
+function embeddingDiagnosticInputs(): readonly string[] {
+  return EffectArray.map(
+    Array.from({length: 2048}, (_, index) => index),
+    index =>
+      `function fixture.Symbol${index}\nsignature: export function Symbol${index}(value: string): string\npackage: fixture\npath: src/fixture-${Math.floor(index / 16)}.ts\ndocumentation: Resolves the current repository context and returns its stable identity for citation validation.`,
+  );
+}
+
+function embeddingDiagnosticCpu() {
+  return EffectArray.reduce(diagnosticCpus(), {idle: 0, total: 0}, (sum, core) => ({
+    idle: sum.idle + core.times.idle,
+    total: sum.total + EffectArray.reduce(EffectRecord.values(core.times), 0, (total, value) => total + value),
+  }));
+}
+
+interface EmbeddingRuntimeDiagnosticChildOptions extends EmbeddingRuntimeDiagnosticCell {
+  readonly modelFile: string;
+  readonly moduleFile: string;
+}
+
+export const captureEmbeddingRuntimeDiagnosticObservation = Effect.fn(
+  'benchmarkCodeGraph.embeddingDiagnosticObservation',
+)(function* (options: EmbeddingRuntimeDiagnosticChildOptions) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const catalog = yield* LocalModelCatalog;
+  if (system.platform !== 'darwin' || system.architecture !== 'arm64' || system.runtimeVersion !== options.bunVersion)
+    return yield* ScriptError.make({
+      message: 'Embedding runtime diagnostic requires the declared macOS ARM64 Bun runtime.',
+    });
+  const manifest = yield* catalog.get(CORE_EMBEDDING_MODEL_ID);
+  const modelSha256 = yield* sha256FileHex(options.modelFile);
+  if (modelSha256 !== manifest.sha256)
+    return yield* ScriptError.make({message: 'Embedding runtime diagnostic model fingerprint changed.'});
+  const packageRoot = path.dirname(path.dirname(options.moduleFile));
+  const packageManifestPath = path.join(packageRoot, 'package.json');
+  const packageManifest = ratchetRecord(yield* readJsonFile(packageManifestPath), 'Diagnostic library package');
+  if (packageManifest.version !== options.libraryVersion)
+    return yield* ScriptError.make({message: 'Embedding runtime diagnostic library version changed.'});
+  const nativeRoot = path.join(path.dirname(packageRoot), '@node-llama-cpp');
+  const nativeBinaries: Record<string, string> = {};
+  for (const name of yield* fs.readDirectory(nativeRoot)) {
+    if (!/^mac-arm64(?:-|$)/u.test(name)) continue;
+    const directory = path.join(nativeRoot, name, 'bins', name);
+    if (!(yield* fs.exists(directory))) continue;
+    for (const file of yield* fs.readDirectory(directory)) {
+      if (!/\.(?:node|dylib|so|json)$/u.test(file)) continue;
+      nativeBinaries[`${name}/${file}`] = yield* sha256FileHex(path.join(directory, file));
+    }
+  }
+  const scriptPath = yield* path.fromFileUrl(new URL(import.meta.url));
+  const sourceRoot = path.dirname(path.dirname(scriptPath));
+  const source = {
+    sourceCommit: yield* threadnoteSourceGit(sourceRoot, ['rev-parse', 'HEAD']),
+    sourceScriptSha256: yield* sha256FileHex(scriptPath),
+    bunExecutableSha256: yield* sha256FileHex(system.executablePath),
+    libraryPackageSha256: yield* sha256FileHex(packageManifestPath),
+    dependencyLockSha256: yield* sha256FileHex(path.join(path.dirname(path.dirname(packageRoot)), 'bun.lock')),
+  };
+  type NativeModule = Awaited<ReturnType<NonNullable<NodeLlamaCppLayerOptions['loadModule']>>>;
+  let tokenize: ((input: string) => readonly number[]) | undefined;
+  let nativeBackend = 'unobserved';
+  const moduleUrl = yield* path.toFileUrl(options.moduleFile);
+  const loadModule = async (): Promise<NativeModule> => {
+    const module: NativeModule = await import(moduleUrl.href);
+    return {
+      ...module,
+      getLlama: async settings => {
+        const llama = await module.getLlama(settings);
+        nativeBackend = String(llama.gpu);
+        return {
+          buildType: llama.buildType,
+          cpuMathCores: llama.cpuMathCores,
+          gpu: llama.gpu,
+          get disposed() {
+            return llama.disposed;
+          },
+          dispose: () => llama.dispose(),
+          loadModel: async settings => {
+            const model = await llama.loadModel(settings);
+            tokenize = input => model.tokenize(input, false);
+            return model;
+          },
+        };
+      },
+    };
+  };
+  const runtimeLayer = localModelRuntimeLayer(
+    nodeLlamaCppEngineLayer({loadModule, embeddingGpuLayers: 0, embeddingContextPoolSize: 8}),
+  );
+  const setupStarted = yield* Clock.currentTimeNanos;
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const runtime = yield* LocalModelRuntime;
+      const initial = yield* runtime.diagnostics;
+      if (initial.cpuMathCores !== 3 || initial.buildType !== 'prebuilt')
+        return yield* ScriptError.make({
+          message: 'Embedding runtime diagnostic requires three math cores and prebuilt binaries.',
+        });
+      const inputs = embeddingDiagnosticInputs();
+      const request = {manifest, modelPath: options.modelFile, embeddingContextPoolSize: 8 as const};
+      yield* runtime.embedMany({...request, inputs: EffectArray.take(inputs, 64)});
+      const diagnostics = yield* runtime.diagnostics;
+      const plan = diagnostics.embeddingContextPlan;
+      if (
+        !plan ||
+        plan.effectiveContexts !== 2 ||
+        plan.requestedContexts !== 8 ||
+        plan.modelGpuLayers !== 0 ||
+        plan.threadCounts[0] !== 2 ||
+        plan.threadCounts[1] !== 1 ||
+        plan.threadCounts.length !== 2 ||
+        !tokenize
+      )
+        return yield* ScriptError.make({message: 'Embedding runtime diagnostic effective context plan changed.'});
+      const tokens = EffectArray.map(inputs, tokenize);
+      if (EffectArray.some(tokens, value => value.length < 1 || value.length >= 480))
+        return yield* ScriptError.make({
+          message: 'Embedding runtime diagnostic inputs must remain below the context-window boundary.',
+        });
+      const setupFinished = yield* Clock.currentTimeNanos;
+      const hostBefore = embeddingDiagnosticCpu();
+      const freeMemoryBytesBefore = diagnosticFreeMemory();
+      const loadAverageBefore = diagnosticLoadAverage();
+      const cpuBefore = processTelemetry();
+      const started = yield* Clock.currentTimeNanos;
+      const vectors = yield* runtime.embedMany({...request, inputs});
+      const finished = yield* Clock.currentTimeNanos;
+      const cpuAfter = processTelemetry();
+      const hostAfter = embeddingDiagnosticCpu();
+      if (
+        vectors.length !== inputs.length ||
+        EffectArray.some(
+          vectors,
+          vector =>
+            vector.length !== 384 ||
+            EffectArray.some(vector, value => !Number.isFinite(value)) ||
+            Math.abs(EffectArray.reduce(vector, 0, (sum, value) => sum + value * value) - 1) > 0.01,
+        )
+      )
+        return yield* ScriptError.make({
+          message: 'Embedding runtime diagnostic returned incomplete or invalid vectors.',
+        });
+      return parseEmbeddingRuntimeDiagnosticObservation({
+        round: options.round,
+        position: options.position,
+        bunVersion: options.bunVersion,
+        libraryVersion: options.libraryVersion,
+        ...source,
+        releaseQualification: false,
+        modelSha256,
+        nativeBinaries,
+        inputSha256: sha256HexSync(JSON.stringify(inputs)),
+        tokenSha256: sha256HexSync(JSON.stringify(tokens)),
+        vectorSha256: sha256HexSync(JSON.stringify(vectors)),
+        inputCount: inputs.length,
+        tokenCount: EffectArray.reduce(tokens, 0, (sum, value) => sum + value.length),
+        vectorCount: vectors.length,
+        dimensions: 384,
+        contextSize: manifest.contextLimit,
+        cpuMathCores: diagnostics.cpuMathCores,
+        ...plan,
+        buildType: diagnostics.buildType,
+        nativeBackend,
+        setupAndWarmupWallMilliseconds: Number(setupFinished - setupStarted) / NANOSECONDS_PER_MILLISECOND,
+        inferenceWallMilliseconds: Number(finished - started) / NANOSECONDS_PER_MILLISECOND,
+        inferenceCpuMilliseconds: cpuMilliseconds(cpuBefore, cpuAfter).total,
+        processPeakRssBytes: cpuAfter.peakRssBytes,
+        host: {
+          logicalCpus: diagnosticCpus().length,
+          totalMemoryBytes: diagnosticTotalMemory(),
+          freeMemoryBytesBefore,
+          freeMemoryBytesAfter: diagnosticFreeMemory(),
+          loadAverageBefore,
+          loadAverageAfter: diagnosticLoadAverage(),
+          cpuBusyFraction: Math.max(
+            0,
+            Math.min(1, 1 - (hostAfter.idle - hostBefore.idle) / Math.max(1, hostAfter.total - hostBefore.total)),
+          ),
+        },
+      });
+    }),
+  ).pipe(
+    // oxlint-disable-next-line effecttsgo/strict-effect-provide -- Each fresh diagnostic child owns this scoped script-entry runtime and disposes it before exiting.
+    Effect.provide(runtimeLayer),
+  );
+});
+
+const embeddingRuntimeDiagnosticProgram = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const args = yield* scriptArguments();
+  const values = new Map<string, string>();
+  const allowed = new Set([
+    '--model-file',
+    '--runtime-root',
+    '--output-dir',
+    '--module-file',
+    '--library-version',
+    '--bun-version',
+    '--round',
+    '--position',
+    '--output',
+  ]);
+  for (let index = 1; index < args.length; index += 2) {
+    const key = args[index],
+      value = args[index + 1];
+    if (!allowed.has(key) || !value || values.has(key))
+      return yield* ScriptError.make({message: 'Embedding runtime diagnostic arguments are invalid.'});
+    values.set(key, value);
+  }
+  const value = (key: string) => required(values.get(key), key);
+  const modelFile = path.resolve(value('--model-file'));
+  if (args[0] === '--embedding-runtime-diagnostic-child') {
+    const bunVersion = value('--bun-version');
+    const libraryVersion = value('--library-version');
+    if (
+      (bunVersion !== '1.4.2' && bunVersion !== '1.4.4') ||
+      (libraryVersion !== '3.22.1' && libraryVersion !== '3.22.2')
+    )
+      return yield* ScriptError.make({message: 'Embedding runtime diagnostic versions are unsupported.'});
+    const observation = yield* captureEmbeddingRuntimeDiagnosticObservation({
+      modelFile,
+      moduleFile: path.resolve(value('--module-file')),
+      bunVersion,
+      libraryVersion,
+      round: integer(value('--round'), '--round', 1),
+      position: integer(value('--position'), '--position', 1),
+    });
+    yield* atomicWrite(path.resolve(value('--output')), `${JSON.stringify(observation)}\n`);
+    return;
+  }
+  const scriptPath = yield* path.fromFileUrl(new URL(import.meta.url));
+  const sourceRoot = path.dirname(path.dirname(scriptPath));
+  const provenance = yield* validateBenchmarkRuntimeProvenance(sourceRoot);
+  if (
+    provenance.mode !== 'github-actions-clean-source' ||
+    provenance.runnerOperatingSystem !== 'macOS' ||
+    provenance.runnerArchitecture !== 'ARM64' ||
+    provenance.runnerEnvironment !== 'github-hosted'
+  )
+    return yield* ScriptError.make({
+      message: 'Embedding runtime diagnostic requires one isolated GitHub-hosted macOS ARM64 runner.',
+    });
+  const runtimeRoot = path.resolve(value('--runtime-root'));
+  const outputDirectory = path.resolve(value('--output-dir'));
+  yield* fs.makeDirectory(outputDirectory, {recursive: true});
+  const output = path.join(outputDirectory, 'comparison.json');
+  if (yield* fs.exists(output))
+    return yield* ScriptError.make({message: 'Embedding runtime diagnostic output already exists.'});
+  const modelSha256 = yield* sha256FileHex(modelFile);
+  const schedule = embeddingRuntimeDiagnosticSchedule();
+  const observations: EmbeddingRuntimeDiagnosticObservation[] = [];
+  let state: 'running' | 'complete' | 'failed' = 'running';
+  let active: EmbeddingRuntimeDiagnosticCell | undefined;
+  let summary: ReturnType<typeof summarizeEmbeddingRuntimeDiagnostics> | undefined;
+  const persist = () =>
+    atomicWrite(
+      output,
+      `${JSON.stringify({kind: 'embedding-runtime-diagnostic', version: 1, releaseQualification: false, state, sourceCommit: provenance.sourceCommit, modelSha256, schedule, active, observations, summary}, undefined, 2)}\n`,
+    );
+  yield* Effect.gen(function* () {
+    yield* persist();
+    for (const cell of schedule) {
+      active = cell;
+      yield* persist();
+      const directory = cell.libraryVersion === '3.22.1' ? 'old' : 'current';
+      const moduleFile = path.join(runtimeRoot, directory, 'node_modules', 'node-llama-cpp', 'dist', 'index.js');
+      const executable =
+        cell.bunVersion === '1.4.2'
+          ? path.join(runtimeRoot, 'old', 'node_modules', '@oven', 'bun-darwin-aarch64', 'bin', 'bun')
+          : system.executablePath;
+      const observationPath = path.join(outputDirectory, `round-${cell.round}-position-${cell.position}.json`);
+      const started = yield* Clock.currentTimeNanos;
+      yield* runCommandEffect(
+        executable,
+        [
+          scriptPath,
+          '--embedding-runtime-diagnostic-child',
+          '--model-file',
+          modelFile,
+          '--module-file',
+          moduleFile,
+          '--library-version',
+          cell.libraryVersion,
+          '--bun-version',
+          cell.bunVersion,
+          '--round',
+          String(cell.round),
+          '--position',
+          String(cell.position),
+          '--output',
+          observationPath,
+        ],
+        {cwd: sourceRoot, timeoutMs: 120000, maxOutputBytes: 8192},
+      );
+      const finished = yield* Clock.currentTimeNanos;
+      const observation = parseEmbeddingRuntimeDiagnosticObservation(yield* readJsonFile(observationPath));
+      observations.push({
+        ...observation,
+        processCommandWallMilliseconds: Number(finished - started) / NANOSECONDS_PER_MILLISECOND,
+      });
+      active = undefined;
+      yield* persist();
+    }
+    summary = summarizeEmbeddingRuntimeDiagnostics(observations, modelSha256);
+  }).pipe(
+    Effect.onExit(exit => {
+      state = Exit.isSuccess(exit) ? 'complete' : 'failed';
+      return persist().pipe(Effect.ignore);
+    }),
+  );
+});
+
+const embeddingRuntimeDiagnosticLayer = Layer.mergeAll(
+  ScriptSystemInfoLayer,
+  ScriptCommandExecutorLayer.pipe(Layer.provide(ScriptSystemInfoLayer)),
+  LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS),
+).pipe(Layer.provideMerge(BunServices.layer));
+
+if (import.meta.main) {
+  if (
+    process.argv[2] === '--embedding-runtime-diagnostics' ||
+    process.argv[2] === '--embedding-runtime-diagnostic-child'
+  )
+    BunRuntime.runMain(provideScriptLayer(embeddingRuntimeDiagnosticProgram, embeddingRuntimeDiagnosticLayer));
+  else BunRuntime.runMain(provideScriptLayer(benchmarkCodeGraph, ApplicationLayer));
+}
