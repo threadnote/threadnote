@@ -24,6 +24,7 @@ import {
   embeddingRuntimeDiagnosticSchedule,
   parseEmbeddingRuntimeDiagnosticObservation,
   summarizeEmbeddingRuntimeDiagnostics,
+  validateEmbeddingRuntimeDiagnosticVectors,
   BenchmarkStageTimings,
   IndexPhaseTimeline,
   indexPhaseMeasurements,
@@ -2245,6 +2246,40 @@ describe('bound benchmark interruption checkpoints', () => {
 });
 
 describe('isolated embedding runtime diagnostics', () => {
+  it('accepts raw production vectors without requiring unit magnitude or mutating output', () => {
+    const vector = EffectArray.makeBy(384, index => (index === 0 ? Math.sqrt(83.39542649339717) : 0));
+    const before = JSON.stringify(vector);
+    expect(() => validateEmbeddingRuntimeDiagnosticVectors([vector], 1)).not.toThrow();
+    expect(JSON.stringify(vector)).toBe(before);
+  });
+
+  it('rejects incomplete, wrong-dimensional, zero, non-finite and overflowing raw vectors', () => {
+    const vector = EffectArray.makeBy(384, index => (index === 0 ? 9 : 0));
+    expect(() => validateEmbeddingRuntimeDiagnosticVectors([vector], 2)).toThrow('incomplete or invalid');
+    expect(() => validateEmbeddingRuntimeDiagnosticVectors([EffectArray.take(vector, 383)], 1)).toThrow();
+    for (const component of [0, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_VALUE]) {
+      expect(() =>
+        validateEmbeddingRuntimeDiagnosticVectors([EffectArray.makeBy(384, index => (index === 0 ? component : 0))], 1),
+      ).toThrow();
+    }
+  });
+
+  it('preserves raw-vector admission under bounded nonzero scaling without changing compared vectors', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({min: -100, max: 100}), {minLength: 383, maxLength: 383}),
+        fc.integer({min: 2, max: 20}),
+        (tail, scale) => {
+          const vectors = [[1, ...tail], EffectArray.map([1, ...tail], value => value * scale)];
+          const before = JSON.stringify(vectors);
+          expect(() => validateEmbeddingRuntimeDiagnosticVectors(vectors, 2)).not.toThrow();
+          expect(JSON.stringify(vectors)).toBe(before);
+        },
+      ),
+      {numRuns: 24},
+    );
+  });
+
   const hash = (value: string) => EffectString.repeat(64)(value);
   const observation = (
     cell: ReturnType<typeof embeddingRuntimeDiagnosticSchedule>[number],

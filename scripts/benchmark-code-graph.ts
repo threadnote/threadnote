@@ -9555,6 +9555,21 @@ interface EmbeddingRuntimeDiagnosticChildOptions extends EmbeddingRuntimeDiagnos
   readonly moduleFile: string;
 }
 
+/** Runtime output is raw; graph storage applies L2 normalization after inference. */
+export function validateEmbeddingRuntimeDiagnosticVectors(
+  vectors: readonly (readonly number[])[],
+  inputCount: number,
+): void {
+  if (
+    vectors.length !== inputCount ||
+    EffectArray.some(vectors, vector => {
+      const squaredMagnitude = EffectArray.reduce(vector, 0, (sum, value) => sum + value * value);
+      return vector.length !== 384 || !Number.isFinite(squaredMagnitude) || squaredMagnitude <= 0;
+    })
+  )
+    throw ScriptError.make({message: 'Embedding runtime diagnostic returned incomplete or invalid vectors.'});
+}
+
 export const captureEmbeddingRuntimeDiagnosticObservation = Effect.fn(
   'benchmarkCodeGraph.embeddingDiagnosticObservation',
 )(function* (options: EmbeddingRuntimeDiagnosticChildOptions) {
@@ -9666,19 +9681,10 @@ export const captureEmbeddingRuntimeDiagnosticObservation = Effect.fn(
       const finished = yield* Clock.currentTimeNanos;
       const cpuAfter = processTelemetry();
       const hostAfter = embeddingDiagnosticCpu();
-      if (
-        vectors.length !== inputs.length ||
-        EffectArray.some(
-          vectors,
-          vector =>
-            vector.length !== 384 ||
-            EffectArray.some(vector, value => !Number.isFinite(value)) ||
-            Math.abs(EffectArray.reduce(vector, 0, (sum, value) => sum + value * value) - 1) > 0.01,
-        )
-      )
-        return yield* ScriptError.make({
-          message: 'Embedding runtime diagnostic returned incomplete or invalid vectors.',
-        });
+      yield* Effect.try({
+        try: () => validateEmbeddingRuntimeDiagnosticVectors(vectors, inputs.length),
+        catch: cause => scriptError(cause, 'Embedding runtime diagnostic vector validation failed.'),
+      });
       return parseEmbeddingRuntimeDiagnosticObservation({
         round: options.round,
         position: options.position,
