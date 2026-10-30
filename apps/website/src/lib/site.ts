@@ -61,6 +61,8 @@ export function setDocumentMeta(
   if (openGraphImageAlt) openGraphImageAlt.content = socialImage.alt;
   const twitterImage = document.querySelector<HTMLMetaElement>('meta[name="twitter:image"]');
   if (twitterImage) twitterImage.content = socialImage.url;
+  const twitterCard = document.querySelector<HTMLMetaElement>('meta[name="twitter:card"]');
+  if (twitterCard) twitterCard.content = socialImage.width > socialImage.height ? 'summary_large_image' : 'summary';
   const twitterImageAlt = document.querySelector<HTMLMetaElement>('meta[name="twitter:image:alt"]');
   if (twitterImageAlt) twitterImageAlt.content = socialImage.alt;
 }

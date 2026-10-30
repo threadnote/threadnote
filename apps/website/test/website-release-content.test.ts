@@ -153,6 +153,11 @@ Make the bottleneck observable.
       readFile(join(root, 'apps', 'website', 'public', 'sitemap.xml'), 'utf8'),
     ]);
     const renderedArticle = renderWebsitePostHtml(template, article);
+    const renderedDefaultArticle = renderWebsitePostHtml(template, {
+      ...article,
+      socialImage: undefined,
+      socialImageAlt: undefined,
+    });
     const renderedRelease = renderWebsitePostHtml(template, releasePost);
     const renderedIndex = renderWhatsNewIndexHtml(template, [releasePost, article]);
     const renderedSitemap = renderWebsitePostsSitemap(sitemap, [article, releasePost]);
@@ -167,6 +172,13 @@ Make the bottleneck observable.
     expect(renderedArticle).toContain(
       '<meta property="og:image" content="https://threadnote.io/evidence-before-rewrites-og.png" />',
     );
+    expect(renderedArticle).toContain('<meta name="twitter:card" content="summary_large_image" />');
+    expect(renderedDefaultArticle).toContain(
+      '<meta property="og:image" content="https://threadnote.io/brand/avatars/threadnote-avatar-brand-dark-1024.png" />',
+    );
+    expect(renderedDefaultArticle).toContain('<meta property="og:image:width" content="1024" />');
+    expect(renderedDefaultArticle).toContain('<meta property="og:image:height" content="1024" />');
+    expect(renderedDefaultArticle).toContain('<meta name="twitter:card" content="summary" />');
     expect(renderedArticle).toContain('<meta property="og:image:type" content="image/png" />');
     expect(renderedArticle).toContain('<meta property="og:image:width" content="1200" />');
     expect(renderedArticle).toContain('<meta property="og:image:height" content="630" />');
@@ -195,6 +207,7 @@ Make the bottleneck observable.
     const releaseSocialImage = websiteSocialImageForRelease(release);
     expect(renderedRelease).toContain(`<meta property="og:image" content="${releaseSocialImage.url}" />`);
     expect(renderedRelease).toContain(`<meta name="twitter:image" content="${releaseSocialImage.url}" />`);
+    expect(renderedRelease).toContain('<meta name="twitter:card" content="summary_large_image" />');
     expect(renderedRelease).toContain(`<meta property="og:image:alt" content="${releaseSocialImage.alt}" />`);
     expect(renderedRelease).toContain(`"image":"${releaseSocialImage.url}"`);
     expect(renderedRelease).not.toContain('whats-new-og.png');
