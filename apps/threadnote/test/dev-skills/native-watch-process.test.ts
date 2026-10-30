@@ -402,6 +402,17 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
         ),
       ).detail,
     );
+    if (eventDriven) {
+      await notified(1);
+      expect((await hostCalls())[0][4]).toContain(JSON.stringify(home));
+    }
+    await cli('stop');
+    await dead(nextPid);
+    owned.delete(nextPid);
+    const stopped = (await cli('inspect')).result;
+    expect(stopped.collector.alive).toBe(false);
+    expect(stopped.stopRequested).toBe(true);
+    if (eventDriven) await notified(2);
     const beforeDetail = (await cli('inspect')).result.revision;
     const wrong = await cli(
       'work-detail',
@@ -446,17 +457,6 @@ process.stdout.write('Queued message bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb for th
       true,
     );
     expect(await readFile(counter, 'utf8')).toBe(restartRequests);
-    if (eventDriven) {
-      await notified(1);
-      expect((await hostCalls())[0][4]).toContain(JSON.stringify(home));
-    }
-    await cli('stop');
-    await dead(nextPid);
-    owned.delete(nextPid);
-    const stopped = (await cli('inspect')).result;
-    expect(stopped.collector.alive).toBe(false);
-    expect(stopped.stopRequested).toBe(true);
-    if (eventDriven) await notified(2);
   } finally {
     // The private fixture state is also authoritative if startup failed after spawning.
     try {
