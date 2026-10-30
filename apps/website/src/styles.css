@@ -7410,3 +7410,34 @@ p {
     transform: none;
   }
 }
+
+.post-diagram {
+  margin: 2rem 0;
+  padding: clamp(0.8rem, 2vw, 1.5rem);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.post-diagram__image {
+  overflow-x: auto;
+}
+
+.post-diagram__image svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-inline: auto;
+}
+
+.post-diagram summary {
+  margin-top: 0.75rem;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.post-diagram pre {
+  white-space: pre;
+}

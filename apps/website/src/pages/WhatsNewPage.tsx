@@ -1,11 +1,10 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {useEffect} from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import articles from 'virtual:threadnote-articles';
 import releases from 'virtual:threadnote-release-notes';
 import {Icon} from '../components/Icons';
 import {PostShare} from '../components/PostShare';
+import {PostMarkdown} from '../components/PostMarkdown';
 import {SiteShell} from '../components/SiteShell';
 import {
   filterWebsiteUpdatesByKind,
@@ -125,7 +124,7 @@ function UpdateDetail({update}: {readonly update: WebsiteUpdate}) {
           ) : null}
         </header>
         <div className="post-detail__body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{update.body}</ReactMarkdown>
+          <PostMarkdown>{update.body}</PostMarkdown>
         </div>
         <PostShare title={update.title} url={update.canonicalUrl} />
       </article>

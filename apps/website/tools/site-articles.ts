@@ -3,9 +3,8 @@ import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {createElement} from 'react';
-import ReactMarkdown from 'react-markdown';
 import {renderToStaticMarkup} from 'react-dom/server';
-import remarkGfm from 'remark-gfm';
+import {PostMarkdown} from '../src/components/PostMarkdown.js';
 import {parse as parseYaml} from 'yaml';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {loadLatestMajorWebsiteReleases, type WebsiteRelease} from './site-release-notes.js';
@@ -407,7 +406,7 @@ function crawlerFallback(post: WebsitePost): string {
   const details = postDetails(post);
   const shareText = encodeURIComponent(post.title);
   const shareUrl = encodeURIComponent(details.canonicalUrl);
-  const markdown = renderToStaticMarkup(createElement(ReactMarkdown, {remarkPlugins: [remarkGfm]}, details.body));
+  const markdown = renderToStaticMarkup(createElement(PostMarkdown, {children: details.body}));
   return EffectArray.join(
     [
       '<main class="crawler-post">',

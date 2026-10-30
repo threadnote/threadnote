@@ -681,7 +681,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'assets/brand',
       ],
       data: ['apps/website/vite.config.ts', 'apps/website/index.html', 'README.md', 'docs/troubleshooting.md'],
-      npm: ['happy-dom', '@expo-google-fonts/spline-sans'],
+      npm: ['happy-dom', 'jsdom', '@expo-google-fonts/spline-sans'],
     },
     {
       package: 'apps/website',
