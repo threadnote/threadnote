@@ -828,7 +828,12 @@ describe('platform benchmark workflow', () => {
       name: 'code-graph-core-embedding-model',
     });
 
-    for (const jobName of ['code-graph-vectors', 'code-graph-vectors-10k', 'code-graph-vectors-100k']) {
+    for (const jobName of [
+      'embedding-runtime-diagnostics',
+      'code-graph-vectors',
+      'code-graph-vectors-10k',
+      'code-graph-vectors-100k',
+    ]) {
       const job = workflow.jobs[jobName];
       expect(job.needs).toBe('prepare-code-graph-vector-model');
       const download = Option.getOrUndefined(
@@ -882,9 +887,13 @@ describe('platform benchmark workflow', () => {
       ),
     );
     expect(vector100k['runs-on']).toBe('macos-15');
-    expect(vector100k['timeout-minutes']).toBe(60);
+    expect(vector100k['timeout-minutes']).toBe(80);
     expect(vector100k.env).toBeUndefined();
-    expect(vector100kCapture?.['timeout-minutes']).toBe(50);
+    expect(vector100kCapture?.['timeout-minutes']).toBe(65);
+    expect(vector100kCommand).toContain('--vectors');
+    expect(vector100kCommand).toContain('--fail-on-budget');
+    expect(vector100kCommand).toContain('--samples 3');
+    expect(vector100kCommand).toContain('--warmups 1');
     expect(vector100kCapture?.env).toEqual({
       THREADNOTE_BENCHMARK_RUNNER_CLASS: 'github-hosted-macos-15-ARM64',
       THREADNOTE_BENCHMARK_RUNNER_ID: '${{ runner.name }}',
