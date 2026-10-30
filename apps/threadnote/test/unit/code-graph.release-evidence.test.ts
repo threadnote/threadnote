@@ -1851,6 +1851,182 @@ describe('code graph release evidence', () => {
       ),
     });
 
+    const transactionElapsedName = 'cold-reference-resolution-transactions-n1';
+    const resolutionObservations = [
+      [transactionElapsedName, 'milliseconds', 10_971],
+      ['cold-reference-resolution-process-cpu-n1', 'milliseconds', 15_416],
+      ['cold-reference-resolution-transaction-stage-writing-edges-n1', 'milliseconds', 3_639],
+      ['cold-reference-resolution-pages-n1', 'count', 21],
+      ['cold-reference-resolution-passes-n1', 'count', 1],
+      ['cold-reference-resolution-references-examined-n1', 'count', 103_996],
+      ['cold-reference-resolution-resolved-n1', 'count', 103_996],
+      ['cold-reference-resolution-aliases-discovered-n1', 'count', 0],
+    ] as const;
+    const resolutionNames = new Set<string>(EffectArray.map(resolutionObservations, ([name]) => name));
+    const withResolution = (
+      artifact: BenchmarkArtifactV1,
+      elapsed: number,
+      overrides: Readonly<Record<string, number>> = {},
+    ): BenchmarkArtifactV1 => ({
+      ...artifact,
+      measurements: [
+        ...EffectArray.filter(artifact.measurements, measurement => !resolutionNames.has(measurement.name)),
+        ...EffectArray.map(resolutionObservations, ([name, unit, value]) =>
+          benchmarkMeasurement(name, unit, [name === transactionElapsedName ? elapsed : (overrides[name] ?? value)]),
+        ),
+      ],
+    });
+    const transactionRatchet = createCodeGraphProductionRatchet(
+      EffectArray.map(githubHostedArtifacts, artifact => withResolution(artifact, 10_971)),
+    );
+    expect(transactionRatchet.measurements[transactionElapsedName].p95Maximum).toBe(19_200);
+    const transactionCandidate = (elapsed: number, overrides: Readonly<Record<string, number>> = {}) =>
+      withResolution(sandwichCandidate(overrides), elapsed, overrides);
+    const transactionEvidence = (
+      initial: number,
+      control: number,
+      initialOverrides: Readonly<Record<string, number>> = {},
+    ) => {
+      const evidence = sandwichEvidence(initialOverrides, sandwichControl({}));
+      return {
+        ...evidence,
+        artifact: withResolution(evidence.artifact, control),
+        initialCandidateArtifact: withResolution(evidence.initialCandidateArtifact, initial, initialOverrides),
+      };
+    };
+    const transactionPair = transactionEvidence(21_227, 17_002);
+    const transactionRepeat = transactionCandidate(17_042);
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(transactionPair.initialCandidateArtifact, transactionRatchet),
+    ).toThrow(/cold-reference-resolution-transactions-n1 p95/u);
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(transactionRepeat, transactionRatchet, transactionPair),
+    ).not.toThrow();
+    // Existing detailed-timer dispersion is ceil(max(17042 * 1.75, 17042 + 300)) = 29824.
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(transactionRepeat, transactionRatchet, transactionEvidence(29_824, 17_002)),
+    ).not.toThrow();
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(transactionRepeat, transactionRatchet, transactionEvidence(29_825, 17_002)),
+    ).toThrow(/initial candidate cold-reference-resolution-transactions-n1/u);
+    fc.assert(
+      fc.property(fc.integer({min: 19_201, max: 35_000}), initial => {
+        const enforce = () =>
+          enforceCodeGraphBenchmarkRatchet(transactionRepeat, transactionRatchet, transactionEvidence(initial, 17_002));
+        if (initial <= 29_824) expect(enforce).not.toThrow();
+        else expect(enforce).toThrow(/initial candidate cold-reference-resolution-transactions-n1/u);
+      }),
+      {numRuns: 40},
+    );
+    for (const [base, repeat] of [
+      [19_200.001, 17_042],
+      [17_002, 19_200.001],
+      [21_227, 21_227],
+    ]) {
+      expect(() =>
+        enforceCodeGraphBenchmarkRatchet(
+          transactionCandidate(repeat),
+          transactionRatchet,
+          transactionEvidence(21_227, base),
+        ),
+      ).toThrow(/candidate cold-reference-resolution-transactions-n1/u);
+    }
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(
+        transactionRepeat,
+        {
+          ...transactionRatchet,
+          measurements: {
+            ...transactionRatchet.measurements,
+            [transactionElapsedName]: {...transactionRatchet.measurements[transactionElapsedName], maximum: 30_000},
+          },
+        },
+        transactionPair,
+      ),
+    ).toThrow(/initial candidate cold-reference-resolution-transactions-n1/u);
+    for (const role of ['artifact', 'initialCandidateArtifact'] as const) {
+      const observation = transactionPair[role];
+      for (const mutated of [
+        {...observation, metadata: {...observation.metadata, runnerIdentity: 'another-runner'}},
+        {...observation, environment: {...observation.environment, fixtureHash: 'another-fixture'}},
+        {
+          ...observation,
+          environment: {...observation.environment, commit: Effect.pipe('c', EffectString.repeat(40))},
+          metadata: {...observation.metadata, benchmarkMeasuredSourceCommit: Effect.pipe('c', EffectString.repeat(40))},
+        },
+      ]) {
+        expect(() =>
+          enforceCodeGraphBenchmarkRatchet(transactionRepeat, transactionRatchet, {
+            ...transactionPair,
+            [role]: mutated,
+          }),
+        ).toThrow(/runnerIdentity|fixtureHash|candidate commit|control commit/u);
+      }
+    }
+    const transactionGuardNames = [
+      ...EffectArray.map(resolutionObservations.slice(1), ([name]) => name),
+      'cold-sqlite-wal-peak-observed',
+      'structural-graph-digest-parity',
+    ];
+    for (const name of transactionGuardNames) {
+      const limit = transactionRatchet.measurements[name];
+      const regression = (limit.maximum ?? limit.p95Maximum!) + 1;
+      for (const role of ['initial', 'repeat'] as const) {
+        expect(() =>
+          enforceCodeGraphBenchmarkRatchet(
+            transactionCandidate(17_042, role === 'repeat' ? {[name]: regression} : {}),
+            transactionRatchet,
+            transactionEvidence(21_227, 17_002, role === 'initial' ? {[name]: regression} : {}),
+          ),
+        ).toThrow(new RegExp(name, 'u'));
+      }
+    }
+    for (const name of ['structural-graph-digest-parity', 'primary-query-structural-parity']) {
+      const brokenParity = (artifact: BenchmarkArtifactV1): BenchmarkArtifactV1 => ({
+        ...artifact,
+        measurements: EffectArray.map(artifact.measurements, measurement =>
+          measurement.name === name ? benchmarkMeasurement(name, 'count', [0]) : measurement,
+        ),
+      });
+      for (const role of ['repeat', 'artifact', 'initialCandidateArtifact'] as const) {
+        expect(() =>
+          enforceCodeGraphBenchmarkRatchet(
+            role === 'repeat' ? brokenParity(transactionRepeat) : transactionRepeat,
+            transactionRatchet,
+            role === 'repeat' ? transactionPair : {...transactionPair, [role]: brokenParity(transactionPair[role])},
+          ),
+        ).toThrow(new RegExp(name, 'u'));
+      }
+    }
+    for (const unknownName of [
+      'cold-reference-resolution-future-elapsed-n1',
+      'cold-reference-resolution-transactions-wall-n1',
+      'one-file-reindex-reference-resolution-transactions-n1',
+    ]) {
+      const renameElapsed = (artifact: BenchmarkArtifactV1): BenchmarkArtifactV1 => ({
+        ...artifact,
+        measurements: EffectArray.map(artifact.measurements, measurement =>
+          measurement.name === transactionElapsedName ? {...measurement, name: unknownName} : measurement,
+        ),
+      });
+      const unknownRatchet = {
+        ...transactionRatchet,
+        measurements: EffectRecord.fromEntries(
+          EffectArray.map(EffectRecord.toEntries(transactionRatchet.measurements), ([name, limit]) => [
+            name === transactionElapsedName ? unknownName : name,
+            limit,
+          ]),
+        ),
+      };
+      expect(() =>
+        enforceCodeGraphBenchmarkRatchet(renameElapsed(transactionRepeat), unknownRatchet, {
+          ...transactionPair,
+          artifact: renameElapsed(transactionPair.artifact),
+          initialCandidateArtifact: renameElapsed(transactionPair.initialCandidateArtifact),
+        }),
+      ).toThrow(new RegExp(`initial candidate ${unknownName}`, 'u'));
+    }
+
     expect(() => enforceCodeGraphBenchmarkRatchet(noisyCandidate, githubHostedRatchet)).toThrow(/cold-index/u);
     expect(() => enforceCodeGraphBenchmarkRatchet(noisyCandidate, githubHostedRatchet, pairedControl)).not.toThrow();
     expect(() =>

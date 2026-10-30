@@ -4,7 +4,13 @@ import {Context, Effect, FileSystem, Option, Path} from 'effect';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {getThreadnoteVersion, isStandaloneThreadnoteBuild} from '@threadnote/workspace/runtime-version';
 import {compareVersions} from '../release/version/compare.js';
-import type {DevSkillMember, DevSkillsBundle, DevSkillsIssue, DevSkillsManifest} from './contract.js';
+import type {
+  DevSkillMember,
+  DevSkillsBundle,
+  DevSkillsIssue,
+  DevSkillsManifest,
+  NativeWorkflowRequirements,
+} from './contract.js';
 import {decode, enumerateFiles, fail, hash, isRecord, readOptional, requireValue} from './files.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -13,6 +19,17 @@ import * as Effect2 from 'effect';
 const version = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 const historicalPrerequisites = {python: '>=3.10', commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']};
 export const nativeRequirements = nativeWorkflowFeatureVersions;
+/** Watch v2 retains v1 commands/generations; no other feature or future version is implicitly compatible. */
+export const supportsNativeRequirements = (
+  required: NativeWorkflowRequirements,
+  supported: NativeWorkflowRequirements,
+): boolean =>
+  EffectArray.every(EffectRecord.toEntries(nativeRequirements), ([key, current]) =>
+    key === 'watchVersion'
+      ? (required[key] === 1 && (supported[key] === 1 || supported[key] === 2)) ||
+        (required[key] === 2 && supported[key] === 2)
+      : required[key] === current && supported[key] === current,
+  );
 const prerequisites = {commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']};
 export function parseNativeRequirements(value: unknown) {
   requireValue(
@@ -271,13 +288,7 @@ export function devSkillsCompatibility(manifest: DevSkillsManifest, runtimeVersi
     return [
       {code: 'incompatible', message: 'Installed development workflows require an unsupported runtime protocol.'},
     ];
-  if (
-    !manifest.nativeRequirements ||
-    EffectArray.some(
-      EffectRecord.toEntries(nativeRequirements),
-      ([key, supported]) => manifest.nativeRequirements?.[key] !== supported,
-    )
-  )
+  if (!manifest.nativeRequirements || !supportsNativeRequirements(manifest.nativeRequirements, nativeRequirements))
     return [
       {code: 'incompatible', message: 'Installed development workflows require unsupported native workflow features.'},
     ];

@@ -155,6 +155,12 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         let notification = stored.envelope.notification;
         let pending = notification.outbox;
         if (pending?.status === 'queued' || pending?.status === 'completed') {
+          // Queue acceptance is not notice arrival. ACK by an already-active consumer cannot release this gate.
+          if (
+            pending.status === 'queued' &&
+            (!pending.consumedThrough || stored.envelope.state.acknowledged < pending.consumedThrough)
+          )
+            return;
           if (notification.target.host === 'cursor-cli')
             yield* releaseNativeWatchHostSession(userHome, hostClaim(config, notification), true);
           notification = {
@@ -185,7 +191,15 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
           notification = {
             ...notification,
             recoveryRequested: false,
-            outbox: pending ? {...pending, attempts: 0, status: 'pending', nextAttemptAt: now} : null,
+            outbox: pending
+              ? {
+                  ...pending,
+                  attempts: 0,
+                  status: 'pending',
+                  nextAttemptAt: now,
+                  ...(notification.target.host === 'codex' ? {consumedThrough: 0} : {}),
+                }
+              : null,
           };
           stored = yield* writeNativeWatch(config, {...stored.envelope, notification}, stored.revision);
         }
@@ -200,7 +214,15 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
         const attemptId = yield* (yield* Crypto.Crypto).randomUUIDv4();
         notification = {
           ...notification,
-          outbox: {...pending, attempts: 1, attemptId, collectorToken, status: 'sending', nextAttemptAt: now},
+          outbox: {
+            ...pending,
+            attempts: 1,
+            attemptId,
+            collectorToken,
+            status: 'sending',
+            nextAttemptAt: now,
+            ...(notification.target.host === 'codex' ? {consumedThrough: 0} : {}),
+          },
         };
         const saved = yield* writeNativeWatch(config, {...stored.envelope, notification}, stored.revision);
         return {notification: saved.envelope.notification!, attemptId};
@@ -306,6 +328,8 @@ export const makeNativeWatchNotifier = Effect.fn('nativeWatch.notifier')(functio
       const stored = yield* readNativeWatch(config, watchId);
       const notification = stored?.envelope.notification;
       if (!stored || stored.envelope.collector?.token !== collectorToken || !notification) return;
+      // The host queue owns the wait for arrival/ACK; terminal collection must also return without polling it.
+      if (notification.target.host === 'codex' && notification.outbox?.status === 'queued') return;
       if ((notification.outbox?.status === 'failed' && !owned) || (stored.envelope.stopRequested && owned)) return;
       if (!notification.outbox && notification.notifiedThrough === stored.envelope.state.nextSequence - 1) return;
       if (owned) yield* Effect.sleep(100);
