@@ -65,6 +65,7 @@ const scenario = (
   overlapIdentity = false,
   failInitialProbe = false,
   semanticState?: CodeGraphSemanticStatus['state'],
+  explicitProject = false,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -123,7 +124,10 @@ const scenario = (
         command.executeBytes === undefined
           ? undefined
           : (executable, args, options) =>
-              overlapIdentityReads(args).pipe(Effect.andThen(command.executeBytes!(executable, args, options))),
+              Effect.gen(function* () {
+                yield* overlapIdentityReads(args);
+                return yield* command.executeBytes!(executable, args, options);
+              }),
     });
     const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-citation-local-fence-'});
     const home = path.join(root, 'home');
@@ -195,6 +199,21 @@ const scenario = (
       manifestPath: path.join(home, 'manifest.yaml'),
       user: 'test',
     };
+    if (explicitProject)
+      yield* fs.writeFileString(
+        config.manifestPath,
+        JSON.stringify({
+          version: 1,
+          projects: [
+            {
+              name: repository.name,
+              path: caller,
+              seed: [],
+              uri: `threadnote://resources/repos/${repository.name}`,
+            },
+          ],
+        }),
+      );
     let evidenceRead = false;
     let evidenceBatches = 0;
     let replacementReads = 0;
@@ -363,16 +382,24 @@ const scenario = (
       });
       const custom =
         mutation === 'legacy-service' ? EffectStruct.omit(observed, ['statusForPublishedIdentity']) : observed;
-      return yield* validateContextBriefMemoryCitations(config, {callerCwd: caller, kind: 'repository'}, [
+      return yield* validateContextBriefMemoryCitations(
+        config,
         {
-          citationErrorCount: 0,
-          codeCitations: [citation],
-          excerpt: 'fixture',
-          kind: 'durable',
-          rank: 0,
-          uri: `threadnote://user/test/memories/durable/projects/fixture/${mutation}-${suffix}.md`,
+          callerCwd: caller,
+          kind: 'repository',
+          ...(explicitProject ? {project: repository.name} : {}),
         },
-      ]).pipe(
+        [
+          {
+            citationErrorCount: 0,
+            codeCitations: [citation],
+            excerpt: 'fixture',
+            kind: 'durable',
+            rank: 0,
+            uri: `threadnote://user/test/memories/durable/projects/fixture/${mutation}-${suffix}.md`,
+          },
+        ],
+      ).pipe(
         Effect.provideService(
           CodeGraphQueryService,
           // @ts-expect-error This fixture models a legacy service that predates statusForPublishedIdentity.
@@ -406,6 +433,11 @@ const scenario = (
   }).pipe(provideTestLayer(fixtureLayer), TestClock.withLive);
 
 describe('Context Brief local citation closing observation', () => {
+  for (const mutation of ['none' as const, ...mutations]) {
+    effectIt.effect(`preserves the explicit identical-path project fence for ${mutation}`, () =>
+      scenario(mutation, 0, false, false, false, undefined, true),
+    );
+  }
   const semanticStates = [
     'not-requested',
     'queued',
