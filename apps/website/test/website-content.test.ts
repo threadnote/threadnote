@@ -963,8 +963,8 @@ The body remains ordinary **Markdown**.
       ),
     );
     expect(workflowIndex).toBe((connectIndex ?? -2) + 1);
-    expect(JSON.stringify(journey)).toContain('Optional: share the proof with a team');
-    expect(JSON.stringify(journey)).toContain('coding-agent environment');
+    expect(JSON.stringify(journey)).toContain('6. Connect a team');
+    expect(JSON.stringify(journey)).toContain('2. Connect your agent through MCP');
     expect(firstWorkflow?.body).toContainEqual(
       expect.objectContaining({
         type: 'code',
@@ -1151,24 +1151,47 @@ The body remains ordinary **Markdown**.
     expect(content).not.toContain('Relocate all Threadnote-owned state');
   });
 
-  it('explains the first-agent setup and the optional two-agent journey in plain language', () => {
+  it('guides a first session from installation to shared memory and continuity', () => {
     const articles = EffectArray.flatMap(docsSections, section => section.articles);
     const connectAgent = JSON.stringify(
       EffectOption.getOrUndefined(EffectArray.findFirst(articles, article => article.id === 'connect-an-agent')),
     );
-    const journey = JSON.stringify(
-      EffectOption.getOrUndefined(EffectArray.findFirst(articles, article => article.id === 'threadnote-5-journey')),
+    const quickstart = EffectOption.getOrUndefined(
+      EffectArray.findFirst(articles, article => article.id === 'threadnote-5-journey'),
     );
+    const content = JSON.stringify(quickstart);
 
     expect(connectAgent).toContain('What setup does');
     expect(connectAgent).toContain('Why not install only the MCP connection?');
     expect(connectAgent).toContain('Neither command prepares the current repository');
     expect(connectAgent).toContain('A hand-written MCP entry');
-    expect(journey).toContain('A Context Brief is the short, cited briefing');
-    expect(journey).toContain('A Knowledge Delta is the short, reviewable list');
-    expect(journey).toContain('You do not need two agents or a team share to get started');
-    expect(journey).toContain('a “surface” simply means a coding agent or agent environment');
-    expect(journey).toContain('It is not required for normal use');
+    expect(quickstart?.title).toBe('Quick-start');
+    expect(
+      EffectArray.map(
+        EffectArray.filter(quickstart?.body ?? [], block => block.type === 'heading'),
+        block => block.text,
+      ),
+    ).toEqual([
+      '1. Install Threadnote',
+      '2. Connect your agent through MCP',
+      '3. Index your repository’s code graph',
+      '4. Work as usual',
+      '5. See what was remembered in Manager',
+      '6. Connect a team',
+      '7. Share one useful memory',
+      '8. Start a new session and see the continuity',
+      'For larger tasks: spec → plan → cycle',
+    ]);
+    expect(content).toContain('/docs/graph-monorepos/');
+    expect(content).toContain('reducing indexing work and irrelevant results');
+    expect(content).toContain('threadnote agents install codex --apply');
+    expect(content).toContain('threadnote graph index');
+    expect(content).toContain('threadnote manage');
+    expect(content).toContain('threadnote share publish <memory-uri> --preview');
+    expect(content).toContain('handoffs stay private');
+    expect(content).toContain('without you pasting the old conversation');
+    expect(content).toContain('/docs/development-workflows/');
+    expect(content).not.toContain('threadnote activate start');
   });
 
   it('gives existing 4.x users a safe, optional path into the 5.0 workflow', () => {
@@ -1742,8 +1765,8 @@ The body remains ordinary **Markdown**.
     expect(docs).toContain('A Context Brief is the bounded starting package for one task');
     expect(docs).toContain('A Knowledge Delta is a reviewable summary of what the task learned');
     expect(docs).toContain('Schema v5 is the compatibility foundation for the Threadnote 5 lifecycle');
-    expect(docs).toContain('review and merge the local proposal');
-    expect(docs).toContain('second agent retrieves the shared decision itself');
+    expect(docs).toContain('review the exact content and destination');
+    expect(docs).toContain('Their agent can retrieve the shared decision');
     expect(docs).toContain('stable Threadnote 5 operator surface');
     expect(docs).not.toContain('stable 4.1 operator surface');
     expect(tips).toContain('codeRefs');
@@ -3472,15 +3495,16 @@ Measure the system before changing its implementation language.
     expect(styles).toMatch(/\.post-detail__body table\s*{[^}]*overflow-x: auto;/s);
   });
 
-  it('keeps every explicit site text size at or above the shared 12px minimum', async () => {
+  it('keeps site text at least 16px and docs prose at 18px', async () => {
     const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
     const explicitPixelSizes = EffectArray.map(
       [...Effect.pipe(styles, EffectString.matchAll(/(?:font-size:\s*|font:\s*)(\d+(?:\.\d+)?)px/g))],
       match => Number(match[1]),
     );
 
-    expect(styles).toContain('--font-size-min: 12px;');
-    expect(EffectArray.filter(explicitPixelSizes, size => size < 12)).toEqual([]);
+    expect(styles).toContain('--font-size-min: 16px;');
+    expect(styles).toMatch(/\.docs-prose\s*{[^}]*font-size: 18px;/s);
+    expect(EffectArray.filter(explicitPixelSizes, size => size < 16)).toEqual([]);
   });
 
   it('stacks the worktree-readiness evidence without connector overflow on mobile', async () => {

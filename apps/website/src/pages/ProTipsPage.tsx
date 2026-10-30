@@ -156,7 +156,7 @@ export default function ProTipsPage() {
             Git-backed context lifecycle without product-specific forks.
           </p>
           <a className="button" href={docsArticleHref('threadnote-5-journey')}>
-            Follow the Threadnote 5 journey
+            Follow the quick-start
             <Icon name="arrow" aria-hidden="true" />
           </a>
         </div>
