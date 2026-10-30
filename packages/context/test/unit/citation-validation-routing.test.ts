@@ -172,6 +172,7 @@ const scenario = (options: {
       manifestPath,
       ...(options.project === undefined ? {} : {project: options.project}),
       observeWorktree: true,
+      observeSemantic: false,
       requestMaintenance: false,
     });
     expect(observations[1]).toEqual(observations[0]);
