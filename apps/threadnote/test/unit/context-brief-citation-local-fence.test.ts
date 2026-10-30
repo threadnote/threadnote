@@ -206,9 +206,7 @@ const scenario = (
       evidenceRead = true;
       evidenceBatches += 1;
       if (mutation === 'snapshot') {
-        yield* store
-          .promote(repository.databasePath, repository.status.identity, replacement.id)
-          .pipe(Effect.provideContext(fixtureContext));
+        yield* store.promote(repository.databasePath, repository.status.identity, replacement.id);
         yield* recordCodeGraphSnapshotAdmission(
           layout,
           replacement,
