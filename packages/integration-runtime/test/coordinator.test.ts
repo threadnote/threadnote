@@ -14,6 +14,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   SourceCoordinatorError,
+  SourceHttpAdmission,
   type SourceWorkDescriptor,
   type SourceWorkRegistration,
 } from '@threadnote/integration-core/source-coordinator';
@@ -89,6 +90,252 @@ it('never prints arbitrary startup errors through the worker console projection'
 });
 
 effectLayer(base)('durable integration coordinator', effectIt => {
+  effectIt.effect('keeps required provider retry when completion outlasts the admission cooldown', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const source = descriptor('completion-cooldown');
+      const store = yield* openCoordinatorStore(current);
+      const [ticket] = yield* store.enqueue(current, [source], 'automatic');
+      const entered = yield* Deferred.make<void>();
+      const engine = yield* makeCoordinatorEngine({
+        store,
+        registrations: [
+          {
+            ...registration([source], () =>
+              Effect.gen(function* () {
+                const service = EffectOption.getOrThrow(yield* Effect.serviceOption(SourceHttpAdmission));
+                const request = {
+                  config: current,
+                  provider: source.provider,
+                  accountKey: source.accountKey,
+                  method: 'GET',
+                };
+                yield* service.admit(request);
+                expect((yield* service.admit(request).pipe(Effect.result))._tag).toBe('Failure');
+                return {sourceId: source.sourceId, syncedDocuments: [], warnings: [], more: false};
+              }),
+            ),
+            admission: {limit: 1, windowMs: 10_000},
+            completion: {
+              deferredWarning: 'completion deferred',
+              run: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.sleep(15_000)), Effect.as([])),
+            },
+          },
+        ],
+      });
+      yield* engine.dispatch;
+      const consuming = yield* Effect.forkScoped(engine.consume);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(15_000);
+      yield* Fiber.join(consuming);
+      expect((yield* store.receipt(ticket))?.failed).toBe(false);
+      const pending = yield* store.pending;
+      expect(pending).toHaveLength(1);
+      expect(pending[0].not_before).toBe(10_000);
+      yield* engine.dispatch;
+      expect(engine.activeCount()).toBe(1);
+    }),
+  );
+
+  effectIt.effect('preserves completed provider success when completion reaches the original deadline', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const source = descriptor('completion-deadline');
+      const store = yield* openCoordinatorStore(current);
+      const [ticket] = yield* store.enqueue(current, [source], 'explicit');
+      const calls = yield* Ref.make(0);
+      const started = yield* Deferred.make<void>();
+      const entered = yield* Deferred.make<void>();
+      const value = {opaque: 'preserved'};
+      const engine = yield* makeCoordinatorEngine({
+        store,
+        quantumTimeoutMs: 100,
+        registrations: [
+          {
+            ...registration([source], () =>
+              Ref.update(calls, n => n + 1).pipe(
+                Effect.andThen(Deferred.succeed(started, undefined)),
+                Effect.andThen(Effect.sleep(90)),
+                Effect.as({sourceId: source.sourceId, syncedDocuments: ['saved'], warnings: ['provider'], value}),
+              ),
+            ),
+            completion: {
+              deferredWarning: 'completion deferred',
+              run: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+            },
+          },
+        ],
+      });
+      yield* engine.dispatch;
+      const consuming = yield* Effect.forkScoped(engine.consume);
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(90);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(10);
+      yield* Fiber.join(consuming);
+      expect(engine.result(ticket)).toMatchObject({
+        warnings: ['provider', 'completion deferred'],
+        syncedDocuments: ['saved'],
+      });
+      expect(engine.result(ticket)?.value).toBe(value);
+      expect((yield* store.receipt(ticket))?.failed).toBe(false);
+      expect(yield* store.pending).toEqual([]);
+      yield* engine.dispatch;
+      expect(engine.activeCount()).toBe(0);
+      expect(yield* Ref.get(calls)).toBe(1);
+    }),
+  );
+
+  effectIt.effect('skips completion after the provider consumes its quantum and retains the failure policy', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const source = descriptor('completion-exhausted');
+      const store = yield* openCoordinatorStore(current);
+      const [ticket] = yield* store.enqueue(current, [source], 'automatic');
+      const completed = yield* Ref.make(false);
+      const started = yield* Deferred.make<void>();
+      const engine = yield* makeCoordinatorEngine({
+        store,
+        quantumTimeoutMs: 100,
+        registrations: [
+          {
+            ...registration([source], () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never))),
+            completion: {
+              deferredWarning: 'completion deferred',
+              run: () => Ref.set(completed, true).pipe(Effect.as([])),
+            },
+          },
+        ],
+      });
+      yield* engine.dispatch;
+      const consuming = yield* Effect.forkScoped(engine.consume);
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(100);
+      yield* Fiber.join(consuming);
+      expect(yield* Ref.get(completed)).toBe(false);
+      expect((yield* store.receipt(ticket))?.failed).toBe(true);
+      expect((yield* store.pending).length).toBe(1);
+    }),
+  );
+
+  for (const failure of ['ordinary', 'defect'] as const) {
+    effectIt.effect(`preserves provider values and scheduling after a completion ${failure}`, () =>
+      Effect.gen(function* () {
+        const current = yield* config;
+        const source = descriptor(`completion-${failure}`);
+        const store = yield* openCoordinatorStore(current);
+        const [ticket] = yield* store.enqueue(current, [source], 'explicit');
+        const value = {unchanged: true};
+        const engine = yield* makeCoordinatorEngine({
+          store,
+          registrations: [
+            {
+              ...registration([source], () =>
+                Effect.succeed({
+                  sourceId: source.sourceId,
+                  syncedDocuments: [],
+                  warnings: [],
+                  more: true,
+                  nextAttemptAt: 50_000,
+                  value,
+                }),
+              ),
+              completion: {
+                deferredWarning: 'completion deferred',
+                run: () => (failure === 'ordinary' ? Effect.fail('private failure') : Effect.die('private defect')),
+              },
+            },
+          ],
+        });
+        yield* engine.dispatch;
+        yield* engine.consume;
+        expect(engine.result(ticket)).toEqual({
+          sourceId: source.sourceId,
+          syncedDocuments: [],
+          warnings: ['completion deferred'],
+          more: true,
+          nextAttemptAt: 50_000,
+          value,
+        });
+        expect(engine.result(ticket)?.value).toBe(value);
+        expect((yield* store.receipt(ticket))?.failed).toBe(false);
+      }),
+    );
+  }
+
+  effectIt.effect('runs completion after provider scope release without changing a provider failure', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const source = descriptor('partial-failure');
+      const store = yield* openCoordinatorStore(current);
+      const [ticket] = yield* store.enqueue(current, [source], 'explicit');
+      const locked = yield* Ref.make(false);
+      const completed = yield* Ref.make(false);
+      const engine = yield* makeCoordinatorEngine({
+        store,
+        registrations: [
+          {
+            ...registration([source], () =>
+              Effect.acquireUseRelease(
+                Ref.set(locked, true),
+                () => Effect.fail('original provider failure'),
+                () => Ref.set(locked, false),
+              ),
+            ),
+            completion: {
+              deferredWarning: 'completion deferred',
+              run: () =>
+                Effect.gen(function* () {
+                  expect(yield* Ref.get(locked)).toBe(false);
+                  yield* Ref.set(completed, true);
+                  return [];
+                }),
+            },
+          },
+        ],
+      });
+      yield* engine.dispatch;
+      yield* engine.consume;
+      expect(yield* Ref.get(completed)).toBe(true);
+      expect((yield* store.receipt(ticket))?.failed).toBe(true);
+      expect((yield* store.pending).length).toBe(1);
+    }),
+  );
+
+  effectIt.effect('propagates caller interruption through completion without publishing success', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const source = descriptor('completion-interruption');
+      const store = yield* openCoordinatorStore(current);
+      const [ticket] = yield* store.enqueue(current, [source], 'automatic');
+      const entered = yield* Deferred.make<void>();
+      const released = yield* Ref.make(false);
+      const engine = yield* makeCoordinatorEngine({
+        store,
+        registrations: [
+          {
+            ...registration([source]),
+            completion: {
+              deferredWarning: 'completion deferred',
+              run: () =>
+                Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.ensuring(Ref.set(released, true)),
+                ),
+            },
+          },
+        ],
+      });
+      yield* engine.dispatch;
+      const consuming = yield* Effect.forkScoped(engine.consume);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(consuming);
+      expect(yield* Ref.get(released)).toBe(true);
+      expect(engine.result(ticket)).toBeUndefined();
+      expect(yield* store.receipt(ticket)).toBeUndefined();
+    }),
+  );
+
   effectIt.effect('runs startup cleanup repeatedly without removing pending work', () =>
     Effect.gen(function* () {
       const current = yield* config;

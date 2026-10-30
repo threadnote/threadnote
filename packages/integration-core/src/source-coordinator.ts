@@ -42,6 +42,11 @@ export interface SourceWorkRegistration<R = never> {
     sourceId: string,
     options: SourceWorkOptions,
   ) => Effect.Effect<SourceWorkResult, unknown, R>;
+  /** Optional derived work after provider locks return, within the original quantum deadline. */
+  readonly completion?: {
+    readonly run: (config: RuntimeConfig) => Effect.Effect<readonly string[], unknown, R>;
+    readonly deferredWarning: string;
+  };
 }
 
 export interface SourceAdmissionRequest {
