@@ -1,6 +1,18 @@
 import {Array as EffectArray} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Clock, Duration, Effect, FileSystem, Layer, Option, PartitionedSemaphore, Path, Schedule, Schema} from 'effect';
+import {
+  Cause,
+  Clock,
+  Duration,
+  Effect,
+  FileSystem,
+  Layer,
+  Option,
+  PartitionedSemaphore,
+  Path,
+  Schedule,
+  Schema,
+} from 'effect';
 import * as PersistedQueue from 'effect/persistence/PersistedQueue';
 import * as RateLimiter from 'effect/persistence/RateLimiter';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -777,16 +789,36 @@ export const makeCoordinatorEngine = Effect.fn('source.makeCoordinatorEngine')(f
             Effect.provide(context),
             Effect.timeout(options.quantumTimeoutMs ?? 30_000),
           );
+          const workStartedAt = yield* Clock.currentTimeMillis;
           const outcome = yield* work.pipe(Effect.result);
           const now = yield* Clock.currentTimeMillis;
+          const completion = registration?.completion;
+          let completionWarnings: readonly string[] = [];
+          if (completion) {
+            const remaining = (options.quantumTimeoutMs ?? 30_000) - ((yield* Clock.currentTimeMillis) - workStartedAt);
+            completionWarnings =
+              remaining <= 0
+                ? [completion.deferredWarning]
+                : yield* Effect.suspend(() => completion.run(config)).pipe(
+                    Effect.provide(context),
+                    Effect.timeout(remaining),
+                    Effect.catchCauseIf(
+                      cause => !Cause.hasInterrupts(cause),
+                      () => Effect.succeed([completion.deferredWarning]),
+                    ),
+                  );
+          }
           const succeeded = outcome._tag === 'Success';
-          const result: SourceWorkResult = succeeded
+          const providerResult: SourceWorkResult = succeeded
             ? outcome.success
             : {
                 sourceId: descriptor.sourceId,
                 syncedDocuments: [],
                 warnings: ['Source refresh failed. Retry explicit sync for details.'],
               };
+          const result = completionWarnings.length
+            ? {...providerResult, warnings: [...providerResult.warnings, ...completionWarnings]}
+            : providerResult;
           // Do not persist provider values, Console output, fetched text, or errors.
           const receipt: SourceWorkResult = {
             sourceId: descriptor.sourceId,
