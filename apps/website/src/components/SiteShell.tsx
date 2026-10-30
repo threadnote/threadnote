@@ -12,7 +12,6 @@ const navItems: Array<{activePages: readonly SitePage[]; label: string; href: st
   {activePages: ['agents'], label: 'Agents', href: 'agents/'},
   {activePages: ['whats-new'], label: "What's new", href: 'whats-new/'},
   {activePages: ['pro-tips'], label: 'Pro tips', href: 'pro-tips/'},
-  {activePages: ['manager-demo'], label: 'Manager demo', href: 'manager-demo/'},
   {activePages: ['faq'], label: 'FAQ', href: 'faq/'},
 ];
 

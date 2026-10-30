@@ -56,7 +56,6 @@ const pageLoaders: Readonly<Record<SitePage, () => Promise<PageModule>>> = {
   agents: () => import('./pages/AgentsPage'),
   'whats-new': () => import('./pages/WhatsNewPage'),
   'pro-tips': () => import('./pages/ProTipsPage'),
-  'manager-demo': () => import('./pages/ManagerDemoPage'),
   faq: () => import('./pages/FaqPage'),
 };
 
@@ -78,8 +77,6 @@ function declaredInitialPage(): SitePage {
     case 'whats-new':
       return page;
     case 'pro-tips':
-      return page;
-    case 'manager-demo':
       return page;
     case 'faq':
       return page;

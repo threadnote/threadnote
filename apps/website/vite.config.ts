@@ -126,7 +126,6 @@ export default defineConfig({
         agents: `${siteRoot}/agents/index.html`,
         whatsNew: `${siteRoot}/whats-new/index.html`,
         proTips: `${siteRoot}/pro-tips/index.html`,
-        managerDemo: `${siteRoot}/manager-demo/index.html`,
         faq: `${siteRoot}/faq/index.html`,
       },
     },

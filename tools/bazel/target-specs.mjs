@@ -681,7 +681,6 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'apps/website/agents',
         'apps/website/whats-new',
         'apps/website/pro-tips',
-        'apps/website/manager-demo',
         'apps/website/faq',
         'assets/brand',
       ],
@@ -704,7 +703,6 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'apps/website/agents',
         'apps/website/whats-new',
         'apps/website/pro-tips',
-        'apps/website/manager-demo',
         'apps/website/faq',
         'assets/brand',
         'config/agent-profiles/cursor-cloud-personal',
@@ -754,7 +752,6 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'apps/website/agents',
         'apps/website/whats-new',
         'apps/website/pro-tips',
-        'apps/website/manager-demo',
         'apps/website/faq',
       ],
       data: [

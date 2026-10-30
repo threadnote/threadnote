@@ -162,8 +162,8 @@ export default function FaqPage() {
             <a className="button" href={docsArticleHref('installation')}>
               Install guide
             </a>
-            <a className="button button--ghost" href={siteHref('manager-demo/')}>
-              Manager demo
+            <a className="button button--ghost" href={docsArticleHref('manager')}>
+              Manager guide
             </a>
           </div>
         </div>

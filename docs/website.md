@@ -17,7 +17,6 @@ The site uses independent HTML entry points so every public route has a real doc
 - `/docs/` — searchable 4.0 documentation; every article also has a crawler-visible `/docs/<article>/` URL
 - `/whats-new/` — stable releases from the latest major version
 - `/pro-tips/` — animated workflow simulations
-- `/manager-demo/` — an interactive Manager using synthetic data only
 - `/faq/` — product questions and comparisons
 
 Run the website checks and a production build with:
@@ -99,7 +98,7 @@ scope and deliberate deferrals.
 - The landing-page graph showcase keeps both MCP flows visible and uses fictional repository names, symbols, paths,
   topology signals, and Manager data.
 - Publishing simulations show the preview and explicit approval boundary.
-- The Manager demo must always say that it uses mock data and does not read local files.
+- The home-page Manager recording must come from the real Manager with isolated example data. Keep its still image and pause control in sync, and exclude loading screens, private data, local paths, and session tokens from every frame.
 - Keep useful content in the DOM when animation is disabled. Honor reduced motion and keep canvas scenes decorative.
 
 ## GitHub Pages
@@ -128,7 +127,7 @@ Perform the control-plane changes in this order to avoid domain takeover and cer
 6. Optionally add GitHub's four IPv6 `AAAA` records: `2606:50c0:8000::153`, `2606:50c0:8001::153`,
    `2606:50c0:8002::153`, and `2606:50c0:8003::153`.
 7. After DNS propagation and certificate provisioning, enable **Enforce HTTPS**, dispatch the Website workflow, and
-   verify `/`, `/performance/`, `/docs/`, `/whats-new/`, `/pro-tips/`, `/manager-demo/`, `/faq/`, `/robots.txt`, and
+   verify `/`, `/performance/`, `/docs/`, `/whats-new/`, `/pro-tips/`, `/faq/`, `/robots.txt`, and
    `/sitemap.xml`.
 
 After cutover, set the repository About homepage to `https://threadnote.io/` and submit
