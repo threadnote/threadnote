@@ -865,7 +865,7 @@ async function nativeWatchChecks(root: string, binary: string, environment: Node
   }
 }
 
-export async function execute(root: string, checkout: string, enforced: boolean) {
+export async function execute(root: string, checkout: string, enforced: boolean, profile = 'all') {
   const releaseRoot = join(root, 'runtime/versions/payload');
   const release = parseRelease(readJson(join(releaseRoot, 'release.json')));
   const binary = join(releaseRoot, release.executable);
@@ -942,7 +942,7 @@ export async function execute(root: string, checkout: string, enforced: boolean)
         'Idempotent action changed files',
       );
     await managerChecks(root, binary, environment, checks);
-    result.nativeWorkflows = await runNativeWorkflows(root, binary, environment, installed.bundleDigest);
+    result.nativeWorkflows = await runNativeWorkflows(root, binary, environment, installed.bundleDigest, profile);
     checks.push(await nativeWatchChecks(root, binary, environment));
     requireCondition(
       parseJsonArray(readJson(join(root, 'interpreter-attempts.json')), 'Interpreter attempts').length === 0,
@@ -977,6 +977,7 @@ export interface StageArguments {
   report: string;
   tools: string;
   functionalOnly?: boolean;
+  profile?: string;
 }
 export interface StageDependencies {
   platform?: NodeJS.Platform;
@@ -1046,6 +1047,7 @@ export async function stage(arguments_: StageArguments, dependencies: StageDepen
     fs.copyFileSync(process.execPath, harness);
     fs.chmodSync(harness, fs.statSync(process.execPath).mode);
     let command = [harness, '--execute', root, '--checkout', checkout];
+    if (arguments_.profile) command.push('--profile', arguments_.profile);
     if (platform === 'darwin') {
       const policy =
         '(version 1)(allow default)(deny network*)' +
@@ -1164,7 +1166,9 @@ async function main(args: string[]): Promise<void> {
       continue;
     }
     requireCondition(
-      ['--archive', '--checkout', '--report', '--execute', '--tools', '--hold-account-lock'].includes(flag),
+      ['--archive', '--checkout', '--report', '--execute', '--tools', '--hold-account-lock', '--profile'].includes(
+        flag,
+      ),
       `Unknown argument: ${flag}`,
     );
     const value = args[++index];
@@ -1175,13 +1179,13 @@ async function main(args: string[]): Promise<void> {
   const checkout = values.get('--checkout');
   requireCondition(checkout, '--checkout is required');
   if (values.has('--execute')) {
-    await execute(resolve(values.get('--execute')!), resolve(checkout), !functionalOnly);
+    await execute(resolve(values.get('--execute')!), resolve(checkout), !functionalOnly, values.get('--profile'));
     return;
   }
   const archive = values.get('--archive');
   const report = values.get('--report');
   const tools = values.get('--tools');
   requireCondition(archive && report && tools, 'Staging requires --archive, --report and --tools');
-  await stage({archive, checkout, report, tools, functionalOnly});
+  await stage({archive, checkout, report, tools, functionalOnly, profile: values.get('--profile')});
 }
 if (import.meta.main) await main(process.argv.slice(2));

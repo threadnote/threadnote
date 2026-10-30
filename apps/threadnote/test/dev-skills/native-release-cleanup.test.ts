@@ -207,9 +207,20 @@ it('copies provenance and raw logs before cleanup; cleanup and workflow failures
     const tool = join(base, 'tool');
     fs.writeFileSync(tool, 'host fixture placeholder');
     const report = join(base, 'result.json');
-    const arguments_: StageArguments = {checkout, archive, report, tools: tool, functionalOnly: true};
+    const arguments_: StageArguments = {
+      checkout,
+      archive,
+      report,
+      tools: tool,
+      functionalOnly: true,
+      profile: 'desktop',
+    };
     const roots: string[] = [];
     const executeFixture: NonNullable<StageDependencies['run']> = (_command, _environment, root) => {
+      expect(_command.slice(_command.indexOf('--profile'), _command.indexOf('--profile') + 2)).toEqual([
+        '--profile',
+        'desktop',
+      ]);
       fs.writeFileSync(
         join(root, 'result.json'),
         JSON.stringify({status: 'functional-passed-isolation-pending', isolation: {enforced: false}}),

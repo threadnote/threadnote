@@ -133,6 +133,16 @@ describe('generated Bazel test contracts', () => {
   });
 
   it.each([
+    'apps/threadnote/test/dev-skills/native-closeout-lifecycle-fixture.ts',
+    'apps/threadnote/test/dev-skills/native-cycle-lifecycle-fixture.ts',
+  ])('preserves Windows smoke selection for extracted lifecycle helper %s', file => {
+    expect(target('//:windows_smoke_inputs').inputs).toContain(file);
+    const selection = selectForChangedInput(file);
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toContain('//:windows_smoke');
+  });
+
+  it.each([
     'apps/threadnote/test/dev-skills/native-authoring-lifecycle.test.ts',
     'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts',
     'apps/threadnote/test/dev-skills/native-closeout-recall-batch.test.ts',
