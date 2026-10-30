@@ -134,7 +134,7 @@ threadnote setup <surface> --apply`,
     },
     {
       type: 'note',
-      text: 'The optional two-agent journey is still optional. It is a proof that one supported agent can reuse an approved decision from another, not a required migration step. See [How Threadnote helps on a real task](threadnote-5-journey/) for the normal one-agent path.',
+      text: 'The optional two-agent journey is still optional. It is a proof that one supported agent can reuse an approved decision from another, not a required migration step. See [Quick-start](threadnote-5-journey/) for the normal one-agent path.',
     },
   ],
 };

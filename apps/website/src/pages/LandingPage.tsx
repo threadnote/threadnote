@@ -207,7 +207,7 @@ export default function LandingPage() {
               <Icon name="arrow" aria-hidden="true" />
             </a>
             <a className="button button--ghost" href={docsArticleHref('threadnote-5-journey')}>
-              See how it works
+              Follow the quick-start
             </a>
           </div>
           <div className="hero__install">

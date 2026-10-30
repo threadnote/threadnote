@@ -2,119 +2,126 @@ import type {DocsArticle, DocsSection} from './docsTypes.js';
 
 export const threadnote5JourneyDocsArticle: DocsArticle = {
   id: 'threadnote-5-journey',
-  title: 'How Threadnote helps on a real task',
-  summary: 'Give a coding agent useful context before it starts, then save the decisions worth keeping.',
-  keywords: [
-    'guided activation',
-    'two agent workflow',
-    'source-verifiable context',
-    'knowledge delta',
-    'second agent reuse',
-  ],
+  title: 'Quick-start',
+  summary: 'Connect your agent, work on your repo, and carry useful context into the next session.',
+  keywords: ['quick start', 'installation', 'MCP', 'graph scope', 'manager', 'team sharing', 'continuity'],
   body: [
     {
       type: 'paragraph',
-      text: 'Coding agents can read your code, but they do not automatically know why earlier decisions were made, what another agent already tried, or which notes are still current. A coding-agent environment is the editor, CLI, or hosted integration where an agent works; the catalog calls that declared integration a surface. Start with one environment: Threadnote installs concise lifecycle guidance so the agent loads a short, cited briefing before work and lets you review the useful lessons it leaves behind.',
+      text: 'Start with one repository and your usual coding agent. Work a small task, inspect what Threadnote remembers, then reuse that context in a fresh session.',
+    },
+    {type: 'heading', text: '1. Install Threadnote'},
+    {type: 'paragraph', text: 'On macOS or Linux, run:'},
+    {
+      type: 'code',
+      language: 'sh',
+      code: 'curl -fsSL https://raw.githubusercontent.com/threadnote/threadnote/main/scripts/install.sh | sh',
+    },
+    {type: 'paragraph', text: 'On Windows, use PowerShell:'},
+    {
+      type: 'code',
+      language: 'powershell',
+      code: 'irm https://raw.githubusercontent.com/threadnote/threadnote/main/scripts/install.ps1 | iex',
     },
     {
-      type: 'heading',
-      text: 'What you get',
+      type: 'paragraph',
+      text: 'Run `threadnote doctor` to check the installation. If your terminal cannot find the command, follow the PATH instructions printed by the installer. See [installation details](/docs/installation/) if needed.',
+    },
+    {type: 'heading', text: '2. Connect your agent through MCP'},
+    {
+      type: 'paragraph',
+      text: 'Open a terminal in your repository. List the supported agents, then preview and apply the connection. This example uses Codex; replace `codex` with your agent’s ID from the list.',
     },
     {
-      type: 'list',
-      items: [
-        'A faster start: the agent sees relevant decisions, current task state, and the parts of the code connected to the work.',
-        'Fewer repeated explanations: approved decisions can be reused in later sessions and in other supported coding agents.',
-        'Safer memory: Threadnote shows where information came from and when the code has changed since it was written.',
-        'Human control: imported notes, new lessons, and team sharing all stay behind an explicit review.',
-      ],
+      type: 'code',
+      language: 'sh',
+      code: `cd /path/to/your/repo
+threadnote agents list
+threadnote agents install codex
+threadnote agents install codex --apply`,
+    },
+    {
+      type: 'paragraph',
+      text: 'This installs the managed MCP connection, Threadnote instructions, and skills. Restart your coding agent so it loads them, and check that Threadnote appears in its MCP tools. See [Connect a coding agent](/docs/connect-an-agent/) for other environments and setup options.',
+    },
+    {type: 'heading', text: '3. Index your repository’s code graph'},
+    {
+      type: 'paragraph',
+      text: 'The graph maps symbols, imports, and dependencies so your agent can find related code and check whether saved decisions still match the source. Build it once from your repository before starting work:',
     },
     {
       type: 'note',
-      text: 'A Context Brief is the short, cited briefing an agent gets before a task. A Knowledge Delta is the short, reviewable list of decisions, constraints, checks, outdated information, and open risks learned during the task.',
-    },
-    {
-      type: 'heading',
-      text: 'The everyday workflow',
-    },
-    {
-      type: 'list',
-      items: [
-        'Connect one [supported coding agent](/agents/) to the repository.',
-        'Give the connected agent a normal task. Its installed Threadnote guidance automatically compiles a Context Brief with only the decisions and current code evidence that look useful.',
-        'Work normally. The repository and your current local files remain the source of truth.',
-        'At meaningful closeout, the agent writes a private handoff and, when the task produced reusable knowledge, presents an optional Knowledge Delta. Approve, edit, defer, or reject each suggested lesson.',
-        'Keep approved decisions local and review their citations, dates, and contradictions as the project changes.',
-      ],
-    },
-    {
-      type: 'heading',
-      text: 'Start with one agent',
-    },
-    {
-      type: 'paragraph',
-      text: 'You do not need two agents or a team share to get started. [Connect your first agent](/docs/connect-an-agent/) and Threadnote will prepare the current repository, build its code map, check the installation, and produce a real Context Brief. After restart, just give the agent a normal task; the installed lifecycle guidance handles the brief and closeout. On a new project, the first brief may contain mostly current code and repository guidance. Its value grows as you approve decisions and handoffs over time.',
-    },
-    {
-      type: 'heading',
-      text: 'If the repository is a large monorepo',
-    },
-    {
-      type: 'paragraph',
-      text: 'Before the first graph build, define a [graph scope](/docs/graph-monorepos/) for the application or library roots you work on. Threadnote follows their declared dependencies, keeps unrelated packages out of that project graph, and shows the selection for review. A scope is different from a Workset: scope narrows one monorepo graph, while a Workset deliberately combines prepared projects or repositories for one cross-project task.',
+      text: 'Working in a large monorepo? Choose a [graph scope](/docs/graph-monorepos/) before indexing. A scope selects the app or library roots you work on and includes their declared dependencies. This keeps unrelated packages out, reducing indexing work and irrelevant results. Without a scope, Threadnote indexes the full repository.',
     },
     {
       type: 'code',
       language: 'sh',
-      code: `threadnote agents list
-threadnote setup <surface>
-threadnote setup <surface> --apply`,
-    },
-    {
-      type: 'heading',
-      text: 'Optional: share the proof with a team',
-    },
-    {
-      type: 'list',
-      items: [
-        'Import selected repository guidance or ADRs into review; imported text never becomes trusted knowledge automatically.',
-        'Keep approved context private, publish one reviewed decision, or materialize a provider-neutral Git proposal for normal team review.',
-        'Retrieve the approved decision from a second coding-agent environment only when you want to prove portable reuse.',
-      ],
-    },
-    {
-      type: 'heading',
-      text: 'Optional: try the guided two-agent journey',
+      code: `threadnote graph index
+threadnote graph status`,
     },
     {
       type: 'paragraph',
-      text: 'In Threadnote, a “surface” simply means a coding agent or agent environment. The optional two-agent journey is an end-to-end test for teams that want proof that context is portable: one agent starts with a brief and records a reviewed decision; a different agent then finds that exact shared decision. It is useful after the one-agent setup works and you have configured a Git-backed team share. It is not required for normal use.',
+      text: 'Wait for indexing to finish and check that status reports a ready graph. If you configured several project scopes, select the intended one with `--project <name>`.',
+    },
+    {type: 'heading', text: '4. Work as usual'},
+    {
+      type: 'paragraph',
+      text: 'Give your agent a normal task, such as “Fix the checkout retry bug and run the relevant tests.” Its installed guidance loads relevant memories and code context before non-trivial work. On the first task, there may be no memories yet; those build up as you work.',
     },
     {
-      type: 'list',
-      items: [
-        'Connects two supported coding agents without relying on a product-name allowlist.',
-        'Lets you review selected repository guidance before Threadnote treats it as reusable knowledge.',
-        'Stops for approval before saving or sharing a decision.',
-        'Finishes only after the second agent retrieves the shared decision itself.',
-        'Can resume after interruption without repeating completed steps.',
-      ],
+      type: 'paragraph',
+      text: 'When you finish, let the agent close out the task before ending the session. It saves a private handoff with the status, checks, and next step. If it proposes a reusable decision or lesson, review and approve what you want to keep.',
+    },
+    {type: 'heading', text: '5. See what was remembered in Manager'},
+    {type: 'code', language: 'sh', code: 'threadnote manage'},
+    {
+      type: 'paragraph',
+      text: 'Manager opens in your browser. Find the memories from your repository and open the handoff from the task you just completed. Check its result, tests, and next step; inspect any durable decisions you approved too. You can see exactly what a future session will be able to retrieve.',
+    },
+    {type: 'heading', text: '6. Connect a team'},
+    {
+      type: 'paragraph',
+      text: 'To reuse decisions with teammates, connect a Git repository dedicated to shared memories. Create one on your Git host or use your team’s existing memory repository. Replace the example URL with a repository you can access:',
     },
     {
       type: 'code',
       language: 'sh',
-      code: `cp docs/examples/threadnote-activation-request.json /tmp/threadnote-activation.json
-# Add two agent IDs, the repository path, the task, and any guidance you want to review.
-threadnote activate start --request /tmp/threadnote-activation.json
-threadnote activate start --request /tmp/threadnote-activation.json --apply`,
+      code: `threadnote share init git@github.com:your-org/team-memories.git
+threadnote share status`,
     },
     {
       type: 'paragraph',
-      text: 'Each apply run stops at the next approval. Review the preview, approve it with the token Threadnote prints, and continue with the same request. `threadnote activate status --activation-id <activation-id>` shows where the journey paused.',
+      text: 'Teammates connect the same repository to receive shared context, even if they use another coding agent. See [Configure a team](/docs/sharing-setup/) for more options. You can also continue using Threadnote on your own without a team.',
+    },
+    {type: 'heading', text: '7. Share one useful memory'},
+    {
+      type: 'paragraph',
+      text: 'Choose a durable decision you approved in step 4 and copy its Threadnote URI from Manager. Ask your agent to preview sharing that memory with your team, review the exact content and destination, then confirm publication. Or use the CLI, replacing `<memory-uri>` with that URI:',
     },
     {
-      type: 'warning',
-      text: 'Threadnote never shares a decision automatically. If you choose Git proposal mode, review and merge the local proposal, then sync it before asking the second agent to find the decision.',
+      type: 'code',
+      language: 'sh',
+      code: `threadnote share publish <memory-uri> --preview
+# After reviewing the preview:
+threadnote share publish <memory-uri>`,
+    },
+    {
+      type: 'paragraph',
+      text: 'Only active durable memories can be shared; handoffs stay private. If the task produced only a handoff, keep it for the next session and try sharing after a task produces a reusable decision. See [Publish a memory](/docs/publish-memory/).',
+    },
+    {type: 'heading', text: '8. Start a new session and see the continuity'},
+    {
+      type: 'paragraph',
+      text: 'Open a fresh chat in the same repository and ask: “Continue the checkout retry work. Load the previous handoff and relevant decisions, summarize where we left off, and take the next step.” The agent should retrieve saved context through Threadnote. Check that it names the previous result and next step without you pasting the old conversation.',
+    },
+    {
+      type: 'paragraph',
+      text: 'After sharing, ask a teammate connected to the same memory repository to start a related task. Their agent can retrieve the shared decision; your private handoff stays with you.',
+    },
+    {type: 'heading', text: 'For larger tasks: spec → plan → cycle'},
+    {
+      type: 'paragraph',
+      text: 'Standard setup installs the built-in development skills on supported agents. Use `dev-spec` to agree on behavior and acceptance criteria, `dev-plan` to turn that into implementation phases grounded in your code, and `dev-cycle` to implement, review, and verify those phases. Choose them in your agent’s skill picker; in Codex, invoke `$dev-spec`, `$dev-plan`, then `$dev-cycle`. See [Development workflows](/docs/development-workflows/) for supported environments and `watch-pr` for CI and review follow-up.',
     },
   ],
 };
