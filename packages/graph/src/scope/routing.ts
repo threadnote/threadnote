@@ -103,10 +103,11 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
       });
     }
     const root = yield* expandPath(project.path);
-    const [callerIdentity, projectIdentity] = yield* Effect.all([
-      resolveRepositoryIdentity(caller),
-      resolveRepositoryIdentity(root).pipe(Effect.option),
-    ]);
+    // Share only identical path strings within this fresh decision. Normalizing
+    // other spellings could change Git's interpretation of symlink/.. paths.
+    const [callerIdentity, projectIdentity] = yield* root === caller
+      ? resolveRepositoryIdentity(caller).pipe(Effect.map(identity => [identity, Option.some(identity)] as const))
+      : Effect.all([resolveRepositoryIdentity(caller), resolveRepositoryIdentity(root).pipe(Effect.option)]);
     if (!sameCheckoutRepository(callerIdentity, projectIdentity)) {
       return yield* CodeGraphScopeRoutingError.make({
         message: `Configured project "${project.name}" is outside this cwd. Choose a project in this repository.`,
