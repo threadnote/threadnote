@@ -11,7 +11,6 @@ export const sitePagePaths = {
   agents: 'agents',
   'whats-new': 'whats-new',
   'pro-tips': 'pro-tips',
-  'manager-demo': 'manager-demo',
   faq: 'faq',
 } as const;
 

@@ -673,7 +673,7 @@ export default function PerformancePage() {
             <a className="button" href={docsArticleHref('installation')}>
               Install Threadnote
             </a>
-            <a className="button button--ghost" href={siteHref('manager-demo/')}>
+            <a className="button button--ghost" href={docsArticleHref('manager')}>
               Explore Manager
             </a>
           </div>
