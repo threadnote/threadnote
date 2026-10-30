@@ -1,6 +1,16 @@
 import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {createHash} from '@threadnote/testing/node-crypto';
-import {chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from '@threadnote/testing/node-fs-promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -516,6 +526,8 @@ describe('matched token-efficiency study preparation', () => {
     const qualificationCheck = join(root, 'qualification-check');
     await writeFile(qualificationCheck, '#!/bin/sh\nexit 1\n');
     await chmod(qualificationCheck, 0o700);
+    const adapterExecutable = await realpath('/usr/bin/true');
+    const gitExecutable = await realpath('/usr/bin/git');
     const planPath = join(root, 'plan.json');
     await writeFile(
       planPath,
@@ -534,13 +546,13 @@ describe('matched token-efficiency study preparation', () => {
             appServer: {
               argumentsAfterSubcommand: [],
               argumentsBeforeSubcommand: [],
-              executable: '/usr/bin/true',
+              executable: adapterExecutable,
               version: 'fixture-app-server-v1',
             },
             authSourcePath: auth,
             contextBudgetTokens: 1_200,
-            executable: '/usr/bin/true',
-            gitExecutable: '/usr/bin/git',
+            executable: adapterExecutable,
+            gitExecutable,
             judgeModel: {
               id: 'judge-model',
               provider: 'fixture',
@@ -548,7 +560,7 @@ describe('matched token-efficiency study preparation', () => {
             },
             model: {id: 'agent-model', provider: 'fixture', reasoningEffort: 'medium'},
             pricingMicrosPerMillionTokens: null,
-            safeBinaries: ['/usr/bin/true', qualificationCheck],
+            safeBinaries: [adapterExecutable, qualificationCheck],
             safeExecutablePath: '/usr/bin:/bin',
             taskBudget: {steps: 100, tokens: 100_000},
             temporaryRoot: adapterTemporaryRoot,
@@ -617,6 +629,28 @@ describe('matched token-efficiency study preparation', () => {
       )}\n`,
     );
     const outputRoot = join(contextRoot, 'prepared-study');
+
+    const canonicalPlan = await readFile(planPath);
+    const executableAlias = join(root, 'adapter-alias');
+    await symlink(adapterExecutable, executableAlias);
+    const aliasedPlan = requiredObject(JSON.parse(canonicalPlan.toString('utf8')), 'preparation plan');
+    await writeFile(
+      planPath,
+      JSON.stringify({
+        ...aliasedPlan,
+        adapter: {
+          ...requiredObject(aliasedPlan.adapter, 'adapter'),
+          executable: executableAlias,
+        },
+      }),
+    );
+    await expect(
+      prepareMatchedTokenEfficiencyStudyV1(
+        {corpusPath, outputRoot, planPath},
+        {readAgentContextBrief: readFixtureAgentContextBrief},
+      ),
+    ).rejects.toThrow('adapter executable must be one canonical regular file.');
+    await writeFile(planPath, canonicalPlan);
 
     await expect(
       prepareMatchedTokenEfficiencyStudyV1(

@@ -1750,10 +1750,10 @@ export function registerRecallFeedbackTool(server: EffectMcpServerAdapter, confi
       description:
         'Record bounded local feedback for one recall result. Applied means the item materially informed a plan or change and is distinct from useful. Stores a query fingerprint, never the full query. Feedback cannot bypass topical relevance and decays over time.',
       inputSchema: {
-        action: McpInput.literals(['dismiss', 'pin', 'useful', 'wrong', 'applied']),
+        action: McpInput.requiredLiterals(['dismiss', 'pin', 'useful', 'wrong', 'applied']),
         project: McpInput.string('Optional project scope; pin is never global'),
-        query: McpInput.string('The recall query; only its SHA-256 fingerprint is stored'),
-        uri: McpInput.string('The threadnote:// result URI receiving feedback'),
+        query: McpInput.requiredString('The recall query; only its SHA-256 fingerprint is stored'),
+        uri: McpInput.requiredString('The threadnote:// result URI receiving feedback'),
       },
     },
     ({action, project, query, uri}) => {
