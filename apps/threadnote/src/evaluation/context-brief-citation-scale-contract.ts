@@ -12,6 +12,19 @@ export const CONTEXT_BRIEF_CITATION_SCALE_RELEASE_RUNNER_CLASS = 'github-hosted-
 export const CONTEXT_BRIEF_CITATION_SCALE_RELEASE_RUNTIME = 'bun/1.3.14' as const;
 export const CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SOURCE_VERSION = 'threadnote-4.6.0' as const;
 export const CONTEXT_BRIEF_CITATION_SCALE_ARTIFACT_SUITE = 'context-brief-citations-scale-v2' as const;
+export const CONTEXT_BRIEF_CITATION_FORBIDDEN_GRAPH_WORK = [
+  'cold indexing',
+  'embedding generation',
+  'embedding readiness scan',
+  'embedding search',
+  'maintenance',
+] as const;
+export type ContextBriefCitationForbiddenGraphWork = (typeof CONTEXT_BRIEF_CITATION_FORBIDDEN_GRAPH_WORK)[number];
+export function contextBriefCitationForbiddenWorkFailures(
+  work: readonly ContextBriefCitationForbiddenGraphWork[],
+): readonly string[] {
+  return EffectArray.map([...new Set(work)].sort(), operation => `forbidden graph work: ${operation}`);
+}
 export const CONTEXT_BRIEF_CITATION_SCALE_RELEASE_SAMPLES = 100 as const;
 export const CONTEXT_BRIEF_CITATION_SCALE_RELEASE_WARMUPS = 5 as const;
 export const CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2 = {
@@ -484,6 +497,7 @@ export interface ContextBriefCitationScaleMemoryObserverV2 {
 }
 
 export interface ContextBriefCitationScaleArtifactV2 {
+  readonly forbiddenGraphWork?: readonly ContextBriefCitationForbiddenGraphWork[];
   readonly createdAt: string;
   readonly evidenceClass: ContextBriefCitationScaleEvidenceClass;
   readonly environment: ContextBriefCitationScaleEnvironmentV2;
@@ -692,6 +706,7 @@ export function parseContextBriefCitationScaleArtifactV2(
   const budget = parseContextBriefCitationScaleBudgetV1(budgetInput);
   const artifact = record(value, 'scale artifact');
   exactKeys(artifact, [
+    ...(artifact.forbiddenGraphWork === undefined ? [] : ['forbiddenGraphWork']),
     'createdAt',
     'environment',
     'evidenceClass',
@@ -717,6 +732,8 @@ export function parseContextBriefCitationScaleArtifactV2(
   const memoryObserver = parseArtifactMemoryObserver(artifact.memoryObserver);
   const samples = positiveInteger(artifact.samples, 'artifact samples');
   const warmups = nonNegativeSafeInteger(artifact.warmups, 'artifact warmups');
+  const forbiddenGraphWork =
+    artifact.forbiddenGraphWork === undefined ? undefined : parseForbiddenGraphWork(artifact.forbiddenGraphWork);
   if (evidenceClass === 'release-scale') {
     const reviewedFixture = contextBriefCitationScaleReviewedFixtureIdentity(budget, samples, warmups);
     if (reviewedFixture.hash !== CONTEXT_BRIEF_CITATION_SCALE_REVIEWED_FIXTURE_IDENTITY_HASH) {
@@ -748,22 +765,26 @@ export function parseContextBriefCitationScaleArtifactV2(
   }
   validateMemoryObserverSummary(memoryObserver, profiles);
   const claimedGate = parseArtifactGate(artifact.gate);
-  const failures = rederiveArtifactFailures({
-    budget,
-    candidate,
-    environment,
-    evidenceClass,
-    execution,
-    fixture,
-    memoryObserver,
-    profileFailures: EffectArray.flatMap(evaluatedProfiles, evaluated => evaluated.failures),
-    profiles,
-    samples,
-    warmups,
-  });
+  const failures = [
+    ...rederiveArtifactFailures({
+      budget,
+      candidate,
+      environment,
+      evidenceClass,
+      execution,
+      fixture,
+      memoryObserver,
+      profileFailures: EffectArray.flatMap(evaluatedProfiles, evaluated => evaluated.failures),
+      profiles,
+      samples,
+      warmups,
+    }),
+  ];
+  failures.push(...contextBriefCitationForbiddenWorkFailures(forbiddenGraphWork ?? []));
   const expectedGate = contextBriefCitationScaleGate(failures);
   if (!sameJson(claimedGate, expectedGate)) invalid('artifact gate does not match the retained evidence');
   return {
+    ...(forbiddenGraphWork === undefined ? {} : {forbiddenGraphWork}),
     createdAt,
     environment,
     evidenceClass,
@@ -777,6 +798,24 @@ export function parseContextBriefCitationScaleArtifactV2(
     version: 2,
     warmups,
   };
+}
+
+function parseForbiddenGraphWork(value: unknown): readonly ContextBriefCitationForbiddenGraphWork[] {
+  if (
+    !EffectArray.isArray(value) ||
+    value.length === 0 ||
+    value.length > CONTEXT_BRIEF_CITATION_FORBIDDEN_GRAPH_WORK.length
+  )
+    return invalid('forbidden graph work must be a nonempty bounded list');
+  const parsed = EffectArray.map(value, operation => {
+    const match = EffectOption.getOrUndefined(
+      EffectArray.findFirst(CONTEXT_BRIEF_CITATION_FORBIDDEN_GRAPH_WORK, allowed => allowed === operation),
+    );
+    if (match === undefined) return invalid('unsupported forbidden graph work');
+    return match;
+  });
+  if (!sameJson(parsed, [...new Set(parsed)].sort())) return invalid('forbidden graph work must be sorted and unique');
+  return parsed;
 }
 
 function parseEvidenceClass(value: unknown): ContextBriefCitationScaleEvidenceClass {

@@ -18,11 +18,14 @@ import {
   ContextBriefCitationScaleGraphInstrumentation,
   evaluateContextBriefCitationScale,
   makeContextBriefCitationScaleGraphInstrumentation,
+  makeContextBriefCitationScaleEmbeddingIndex,
   type ContextBriefCitationScaleObservationWrapper,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale';
 import {
   CONTEXT_BRIEF_CITATION_SCALE_PROFILE_IDS,
   parseContextBriefCitationScaleBudgetV1,
+  contextBriefCitationForbiddenWorkFailures,
+  type ContextBriefCitationScaleArtifactV2,
   type ContextBriefCitationScaleObservationV2,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale-contract';
 import {ScriptSystemInfoLayer, ScriptCommandExecutorLayer} from '../../scripts/effect/system-layer.js';
@@ -46,6 +49,13 @@ import {
   parseDiagnosticArguments,
   type ObservationMarker,
 } from './citation-phase-contract.js';
+
+export function citationPhaseProvenanceIssues(artifact: ContextBriefCitationScaleArtifactV2): readonly string[] {
+  return [
+    ...(artifact.evidenceClass !== 'development-smoke' || artifact.gate.passed ? ['diagnostic-provenance'] : []),
+    ...contextBriefCitationForbiddenWorkFailures(artifact.forbiddenGraphWork ?? []),
+  ];
+}
 
 function isContextBriefCitationScaleObservation(value: unknown): value is ContextBriefCitationScaleObservationV2 {
   if (typeof value !== 'object' || value === null || EffectArray.isArray(value)) return false;
@@ -151,7 +161,15 @@ const store = Layer.effect(
   CodeGraphStore,
   Effect.map(CodeGraphStore, original => CodeGraphStore.of(collector.store(graph.instrumentStore(original)))),
 ).pipe(Layer.provide(CodeGraphStore.layer.pipe(Layer.provideMerge(platform))));
-const unexpected = () => Effect.die(new Error('Diagnostic must not start graph indexing or maintenance.'));
+const unexpected = () =>
+  graph.recordColdGraphBuild.pipe(
+    Effect.andThen(Effect.die(new Error('Diagnostic must not start graph indexing or maintenance.'))),
+  );
+const unexpectedMaintenance = () =>
+  graph.recordMaintenanceRequest.pipe(
+    Effect.andThen(Effect.die(new Error('Diagnostic must not start graph maintenance.'))),
+  );
+const embedding = makeContextBriefCitationScaleEmbeddingIndex(graph);
 const dependencies = Layer.mergeAll(
   platform,
   store,
@@ -161,16 +179,19 @@ const dependencies = Layer.mergeAll(
   Layer.succeed(
     CodeGraphMaintenanceCoordinator,
     CodeGraphMaintenanceCoordinator.of({
-      kickOrdinary: unexpected,
-      kickReconciliation: unexpected,
-      kickResidual: unexpected,
-      request: unexpected,
-      tick: unexpected,
+      kickOrdinary: unexpectedMaintenance,
+      kickReconciliation: unexpectedMaintenance,
+      kickResidual: unexpectedMaintenance,
+      request: unexpectedMaintenance,
+      tick: unexpectedMaintenance,
     }),
   ),
   Layer.succeed(
     CodeGraphEmbeddingIndex,
-    CodeGraphEmbeddingIndex.of({check: unexpected, ensure: unexpected, search: () => Effect.succeed(new Map())}),
+    CodeGraphEmbeddingIndex.of({
+      ...embedding,
+      check: (...args) => collector.measure('semantic', 'metadata-check', embedding.check(...args)),
+    }),
   ),
 );
 const query = Layer.effect(
@@ -323,7 +344,7 @@ const program = Effect.scoped(
       observeObservation: makeObservationWrapper(fs),
     });
     evidence = diagnosticEvidence(artifact);
-    if (artifact.evidenceClass !== 'development-smoke' || artifact.gate.passed) issues.push('diagnostic-provenance');
+    issues.push(...citationPhaseProvenanceIssues(artifact));
     const coverage = observationCoverage(markers, DIAGNOSTIC_SAMPLES, DIAGNOSTIC_WARMUPS);
     if (
       !coverage.complete ||
@@ -411,6 +432,7 @@ const writeReport = (exit: Exit.Exit<unknown, unknown>) =>
         'Two canonical-index proof reads occur outside observation clocks, but alter file-cache history; wrappers/clock calls alter scheduling.',
         'Process exit and spawn spans include delivery/scheduling delay and do not prove OS CPU/run-queue time.',
         'File service spans cannot observe Git internal scans or native SQLite I/O; store session is inclusive.',
+        'Semantic metadata-check spans cover the fixture check only; graph metadata opens and activation fencing are outside those spans.',
         'File/store bookkeeping after all observations is reported separately as teardown; invocation child/process overrun invalidates coverage.',
         'No Trace2 override, no raw command arguments/output, file paths or file contents are retained.',
       ],

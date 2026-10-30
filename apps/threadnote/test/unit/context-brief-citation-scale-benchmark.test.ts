@@ -3,7 +3,10 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as yaml from 'js-yaml';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Option, Schema} from 'effect';
+import {Effect, Option, Schema, FileSystem, Path, Layer} from 'effect';
+import {TestClock} from 'effect/testing';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from 'vitest';
 import {benchmarkMeasurement} from '@threadnote/evidence/benchmark';
 import {
@@ -37,6 +40,23 @@ import {
   type ContextBriefCitationScaleReleaseIdentityV1,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale-contract';
 import {parseContextBriefCitationScaleBenchmarkArguments} from '../../../../scripts/benchmark-context-brief-citations-target.js';
+import {
+  retainContextBriefCitationForbiddenWork,
+  makeContextBriefCitationScaleEmbeddingIndex,
+  makeContextBriefCitationScaleGraphInstrumentation,
+} from '@threadnote/threadnote/evaluation/context-brief-citation-scale';
+import type {CodeGraphLayout} from '@threadnote/graph/layout';
+import {codeGraphLayout} from '@threadnote/graph/layout';
+import type {CodeGraphSnapshot} from '@threadnote/graph/types';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {CodeGraphEmbeddingIndex, type CodeGraphEmbeddingIndexShape} from '@threadnote/graph/embedding';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
+import {CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
+import {TestSystemInfoLayer, TestCommandExecutorLayer} from '../helpers/system-layer.js';
+import {prepareContextBriefCitationScaleRepositories} from '@threadnote/threadnote/evaluation/context-brief-citation-scale-fixture';
+import {citationPhaseProvenanceIssues} from '../../../../tools/diagnostics/citation-phase-diagnostic.js';
 import {CONTEXT_BRIEF_CITATION_RSS_MAXIMUM_OBSERVATIONS} from '../../../../scripts/context-brief-citation-rss-observer.js';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -189,6 +209,131 @@ const releaseGuide = await Bun.file('docs/releasing.md').text();
 const scaleEvaluationSource = await Bun.file('apps/threadnote/src/evaluation/context-brief-citation-scale.ts').text();
 
 describe('Context Brief citation scale benchmark', () => {
+  const snapshot: CodeGraphSnapshot = {
+    id: `cgsn_${Effect2.pipe('1', EffectString.repeat(40))}`,
+    worktreeId: Effect2.pipe('b', EffectString.repeat(64)),
+    commit: Effect2.pipe('c', EffectString.repeat(40)),
+    dirty: false,
+    edgeCount: 0,
+    fileCount: 1,
+    symbolCount: 3,
+    extractorSet: 'fixture',
+    repositoryId: 'repository',
+    state: 'ready',
+  };
+  const layout: CodeGraphLayout = {
+    checkoutId: 'checkout',
+    databasePath: '/fixture/graph.sqlite',
+    databaseWriteLockPath: '/fixture/write.lock',
+    lockPath: '/fixture/graph.lock',
+    repositoryRoot: '/fixture',
+    staleMarkerPath: '/fixture/stale',
+    vectorRoot: '/fixture/vectors',
+    worktreeLockRoot: '/fixture/worktrees',
+    worktreeId: 'worktree',
+  };
+
+  effectIt.effect('accepts metadata-only semantic status without requesting embeddings', () =>
+    Effect.gen(function* () {
+      const graph = makeContextBriefCitationScaleGraphInstrumentation();
+      const embedding = makeContextBriefCitationScaleEmbeddingIndex(graph);
+      expect(yield* embedding.check('/fixture', layout, 'snapshot', {metadataOnly: true})).toMatchObject({
+        state: 'unavailable',
+      });
+      expect(graph.forbiddenWorkFailures()).toEqual([]);
+    }),
+  );
+
+  effectIt.effect('retains a forbidden embedding attempt even when its defect is caught and counters reset', () =>
+    Effect.gen(function* () {
+      const graph = makeContextBriefCitationScaleGraphInstrumentation();
+      const embedding = makeContextBriefCitationScaleEmbeddingIndex(graph);
+      yield* Effect.exit(embedding.check('/fixture', layout, 'snapshot'));
+      graph.reset();
+      expect(graph.forbiddenWorkFailures()).toEqual(['forbidden graph work: embedding readiness scan']);
+      yield* embedding.check('/fixture', layout, 'snapshot', {metadataOnly: true});
+      expect(graph.forbiddenWorkFailures()).toHaveLength(1);
+    }),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'never forgets caught forbidden work across observation resets',
+    {
+      actions: fc.array(fc.constantFrom('reset', 'check', 'search', 'generation', 'cold', 'maintenance'), {
+        maxLength: 30,
+      }),
+    },
+    ({actions}) =>
+      Effect.gen(function* () {
+        const graph = makeContextBriefCitationScaleGraphInstrumentation();
+        const embedding = makeContextBriefCitationScaleEmbeddingIndex(graph);
+        const expected = new Set<string>();
+        for (const action of actions) {
+          if (action === 'reset') graph.reset();
+          else if (action === 'check') {
+            expected.add('forbidden graph work: embedding readiness scan');
+            yield* Effect.exit(embedding.check('/fixture', layout, 'snapshot'));
+          } else if (action === 'search') {
+            expected.add('forbidden graph work: embedding search');
+            yield* Effect.exit(embedding.search('/fixture', layout, 'snapshot', 'task', 1));
+          } else if (action === 'generation') {
+            expected.add('forbidden graph work: embedding generation');
+            yield* Effect.exit(embedding.ensure('/fixture', layout, snapshot, []));
+          } else if (action === 'cold') {
+            expected.add('forbidden graph work: cold indexing');
+            yield* graph.recordColdGraphBuild;
+          } else {
+            expected.add('forbidden graph work: maintenance');
+            yield* graph.recordMaintenanceRequest;
+          }
+          expect(graph.forbiddenWorkFailures()).toEqual([...expected].sort());
+        }
+      }),
+    {fastCheck: {numRuns: 40}},
+  );
+
+  effectIt.effect('retains caught observer failures through serialization and diagnostic adjudication', () =>
+    Effect.gen(function* () {
+      const graph = makeContextBriefCitationScaleGraphInstrumentation();
+      const embedding = makeContextBriefCitationScaleEmbeddingIndex(graph);
+      const fixture = yield* semanticFixture({
+        ...embedding,
+        check: () => embedding.ensure('/fixture', layout, snapshot, []).pipe(Effect.andThen(Effect.die('unreachable'))),
+      });
+      const observed = yield* fixture.observe;
+      expect(observed.semantic).toMatchObject({state: 'unavailable', reason: 'semantic-metadata-unavailable'});
+      graph.reset();
+      const base = scaleArtifact();
+      const artifact = retainContextBriefCitationForbiddenWork(base, graph.forbiddenWork());
+      const retained = parseContextBriefCitationScaleArtifactV2(JSON.parse(JSON.stringify(artifact)), budget);
+      expect(retained).toEqual(artifact);
+      expect(retained.gate.failures).toContain('forbidden graph work: embedding generation');
+      expect(citationPhaseProvenanceIssues(retained)).toContain('forbidden graph work: embedding generation');
+      const {forbiddenGraphWork: _work, ...withoutEvidence} = artifact;
+      expect(() => parseContextBriefCitationScaleArtifactV2(withoutEvidence, budget)).toThrow();
+      expect(() => parseContextBriefCitationScaleArtifactV2({...artifact, gate: base.gate}, budget)).toThrow();
+    }).pipe(TestClock.withLive, provideTestLayer(BunServices.layer)),
+  );
+
+  effectIt.effect('supports not-requested and ready metadata without inference or graph mutation', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      for (const metadata of [
+        {state: 'unavailable' as const, reason: 'no selected model'},
+        {state: 'ready' as const, modelId: 'fixture-model', reused: 3},
+      ]) {
+        const graph = makeContextBriefCitationScaleGraphInstrumentation();
+        const fixture = yield* semanticFixture(makeContextBriefCitationScaleEmbeddingIndex(graph, metadata));
+        const before = yield* fs.readFile(fixture.databasePath);
+        const result = yield* fixture.observe;
+        expect(result.semantic?.state).toBe(metadata.state === 'ready' ? 'ready' : 'not-requested');
+        expect(graph.forbiddenWorkFailures()).toEqual([]);
+        expect(yield* fs.readFile(fixture.databasePath)).toEqual(before);
+      }
+    }).pipe(TestClock.withLive, provideTestLayer(BunServices.layer)),
+  );
+
   it('rederives observer capacity from the complete release schedule and retains the failed prospective provenance', () => {
     const {correction, failure, prospectiveRun} = rssObserverCapacityCalibration;
     expect(prospectiveRun.invocation.profiles * prospectiveRun.invocation.samplesPerProfile).toBe(
@@ -1403,4 +1548,56 @@ function scaleObservation(
     },
     memoryWorkload: timing,
   };
+}
+
+function semanticFixture(embedding: CodeGraphEmbeddingIndexShape) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({prefix: 'citation-semantic-fixture-'});
+    const home = path.join(root, 'home');
+    const system = TestSystemInfoLayer;
+    const platform = Layer.mergeAll(system, TestCommandExecutorLayer.pipe(Layer.provide(system))).pipe(
+      Layer.provideMerge(BunServices.layer),
+    );
+    const unexpected = () => Effect.die(new Error('Unexpected indexing or maintenance in citation fixture.'));
+    const dependencies = Layer.mergeAll(
+      platform,
+      CodeGraphStore.layer.pipe(Layer.provideMerge(platform)),
+      Layer.succeed(CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry([])),
+      Layer.succeed(CodeGraphEmbeddingIndex, embedding),
+      Layer.succeed(CodeGraphIndexer, CodeGraphIndexer.of({ensureCommit: unexpected, index: unexpected})),
+      Layer.succeed(
+        CodeGraphMaintenanceCoordinator,
+        CodeGraphMaintenanceCoordinator.of({
+          kickOrdinary: unexpected,
+          kickReconciliation: unexpected,
+          kickResidual: unexpected,
+          request: unexpected,
+          tick: unexpected,
+        }),
+      ),
+    );
+    const context = yield* Layer.build(CodeGraphQueryService.layer.pipe(Layer.provideMerge(dependencies)));
+    const profile = budget.profiles[0];
+    const repositories = yield* prepareContextBriefCitationScaleRepositories(fs, path, home, root, profile, 1).pipe(
+      Effect.provide(context),
+    );
+    const repository = repositories[0];
+    const query = yield* CodeGraphQueryService.pipe(Effect.provide(context));
+    const layout = codeGraphLayout(path, home, repository.checkoutId, repository.worktreeId);
+    return {
+      databasePath: layout.databasePath,
+      observe: query.statusForPublishedIdentity(
+        home,
+        repository.root,
+        {
+          checkoutId: repository.checkoutId,
+          repositoryId: repository.repositoryId,
+          worktreeId: repository.worktreeId,
+        },
+        {observeWorktree: true, requestMaintenance: false},
+      ),
+    };
+  });
 }

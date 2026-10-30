@@ -29,6 +29,7 @@ import {
   ContextBriefCitationScaleGraphInstrumentation,
   evaluateContextBriefCitationScale,
   makeContextBriefCitationScaleGraphInstrumentation,
+  makeContextBriefCitationScaleEmbeddingIndex,
   type ContextBriefCitationScaleRssObserver,
 } from '@threadnote/threadnote/evaluation/context-brief-citation-scale';
 import {
@@ -592,6 +593,10 @@ const instrumentedStoreLayer = Layer.effect(
     return CodeGraphStore.of(graphInstrumentation.instrumentStore(store));
   }),
 ).pipe(Layer.provide(realStoreLayer));
+const forbiddenMaintenance = () =>
+  graphInstrumentation.recordMaintenanceRequest.pipe(
+    Effect.andThen(Effect.die(new Error('Scale benchmark must not run graph maintenance.'))),
+  );
 const queryDependencies = Layer.mergeAll(
   platformLayer,
   graphInstrumentationLayer,
@@ -613,21 +618,14 @@ const queryDependencies = Layer.mergeAll(
   Layer.succeed(
     CodeGraphMaintenanceCoordinator,
     CodeGraphMaintenanceCoordinator.of({
-      kickOrdinary: () => Effect.die(new Error('Scale benchmark must not run ordinary graph maintenance.')),
-      kickReconciliation: () => Effect.die(new Error('Scale benchmark must not run graph reconciliation maintenance.')),
-      kickResidual: () => Effect.die(new Error('Scale benchmark must not run residual graph maintenance.')),
+      kickOrdinary: forbiddenMaintenance,
+      kickReconciliation: forbiddenMaintenance,
+      kickResidual: forbiddenMaintenance,
       request: () => graphInstrumentation.recordMaintenanceRequest,
-      tick: () => Effect.die(new Error('Scale benchmark must not tick graph maintenance.')),
+      tick: forbiddenMaintenance,
     }),
   ),
-  Layer.succeed(
-    CodeGraphEmbeddingIndex,
-    CodeGraphEmbeddingIndex.of({
-      check: () => Effect.die(new Error('Scale benchmark must not check graph embeddings.')),
-      ensure: () => Effect.die(new Error('Scale benchmark must not build graph embeddings.')),
-      search: () => Effect.succeed(new Map()),
-    }),
-  ),
+  Layer.succeed(CodeGraphEmbeddingIndex, makeContextBriefCitationScaleEmbeddingIndex(graphInstrumentation)),
 );
 const targetLayer = CodeGraphQueryService.layer.pipe(Layer.provideMerge(queryDependencies));
 
