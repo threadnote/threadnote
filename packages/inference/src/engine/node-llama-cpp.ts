@@ -393,13 +393,18 @@ export function nativeEmbeddingContextPlan(options: {
   readonly modelGpuLayers: number | undefined;
   readonly requestedContexts: EmbeddingContextPoolSize;
 }): {
-  readonly contexts: EmbeddingContextPoolSize;
+  readonly contexts: number;
   readonly threadCounts: readonly (number | undefined)[];
 } {
   if (options.modelGpuLayers !== 0 || options.requestedContexts === 1) {
     return {contexts: 1, threadCounts: [undefined]};
   }
   const availableCores = Math.max(1, Math.floor(options.cpuMathCores));
+  // Three single-thread contexts avoid the measured 2+1 partition overhead
+  // without changing the requested cap or planning on other CPU capacities.
+  if (availableCores === 3 && options.requestedContexts >= 4) {
+    return {contexts: 3, threadCounts: [1, 1, 1]};
+  }
   const contexts = EffectOption.getOrUndefined(
     EffectArray.findFirst(
       [...EMBEDDING_CONTEXT_POOL_SIZES].reverse(),

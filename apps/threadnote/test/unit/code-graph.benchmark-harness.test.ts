@@ -2418,6 +2418,27 @@ describe('isolated embedding runtime diagnostics', () => {
       ).toThrow();
   });
 
+  it('retains legacy plans and admits matched three-context diagnostics without mixing plans', () => {
+    const legacy = EffectArray.map(embeddingRuntimeDiagnosticSchedule(), cell => observation(cell));
+    const current = EffectArray.map(legacy, cell => ({
+      ...cell,
+      effectiveContexts: 3,
+      threadCounts: [1, 1, 1],
+    }));
+    expect(() => summarizeEmbeddingRuntimeDiagnostics(legacy, hash('a'))).not.toThrow();
+    expect(() => summarizeEmbeddingRuntimeDiagnostics(current, hash('a'))).not.toThrow();
+    expect(() => summarizeEmbeddingRuntimeDiagnostics([current[0], ...legacy.slice(1)], hash('a'))).toThrow(
+      'effectiveContexts',
+    );
+    for (const threadCounts of [
+      [2, 1],
+      [2, 1, 1],
+      [1, 1, 0],
+    ]) {
+      expect(() => parseEmbeddingRuntimeDiagnosticObservation({...current[0], threadCounts})).toThrow();
+    }
+  });
+
   it('keeps the hosted comparison manual-only and the 100k performance gate unchanged', () => {
     const workflow = readFileSync(new URL('../../../../.github/workflows/benchmarks.yml', import.meta.url), 'utf8');
     const diagnostic = EffectString.split('  code-graph-vectors:')(

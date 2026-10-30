@@ -9379,10 +9379,10 @@ const embeddingDiagnosticObservationSchema = Schema.Struct({
   tokenCount: checkpointCount,
   contextSize: Schema.Literal(512),
   cpuMathCores: Schema.Literal(3),
-  effectiveContexts: Schema.Literal(2),
+  effectiveContexts: Schema.Literals([2, 3]),
   requestedContexts: Schema.Literal(8),
   modelGpuLayers: Schema.Literal(0),
-  threadCounts: Schema.Array(Schema.Int).check(Schema.isBetweenLength(2, 2)),
+  threadCounts: Schema.Array(Schema.Int).check(Schema.isBetweenLength(2, 3)),
   nativeBackend: checkpointText,
   buildType: Schema.Literal('prebuilt'),
   setupAndWarmupWallMilliseconds: checkpointMilliseconds,
@@ -9430,9 +9430,16 @@ export function parseEmbeddingRuntimeDiagnosticObservation(value: unknown): Embe
   } catch (cause) {
     throw ScriptError.make({message: 'Embedding runtime diagnostic observation is invalid.', cause});
   }
+  const validContextPlan =
+    (observation.effectiveContexts === 2 &&
+      observation.threadCounts.length === 2 &&
+      observation.threadCounts[0] === 2 &&
+      observation.threadCounts[1] === 1) ||
+    (observation.effectiveContexts === 3 &&
+      observation.threadCounts.length === 3 &&
+      EffectArray.every(observation.threadCounts, threads => threads === 1));
   if (
-    observation.threadCounts[0] !== 2 ||
-    observation.threadCounts[1] !== 1 ||
+    !validContextPlan ||
     observation.tokenCount < observation.inputCount ||
     EffectRecord.keys(observation.nativeBinaries).length === 0 ||
     EffectRecord.keys(observation.nativeBinaries).length > 64 ||
@@ -9468,6 +9475,7 @@ export function summarizeEmbeddingRuntimeDiagnostics(values: readonly unknown[],
       'tokenCount',
       'vectorSha256',
       'nativeBackend',
+      'effectiveContexts',
     ] as const) {
       if (observation[field] !== first[field])
         throw ScriptError.make({
@@ -9657,12 +9665,11 @@ export const captureEmbeddingRuntimeDiagnosticObservation = Effect.fn(
       const plan = diagnostics.embeddingContextPlan;
       if (
         !plan ||
-        plan.effectiveContexts !== 2 ||
+        plan.effectiveContexts !== 3 ||
         plan.requestedContexts !== 8 ||
         plan.modelGpuLayers !== 0 ||
-        plan.threadCounts[0] !== 2 ||
-        plan.threadCounts[1] !== 1 ||
-        plan.threadCounts.length !== 2 ||
+        plan.threadCounts.length !== 3 ||
+        EffectArray.some(plan.threadCounts, threads => threads !== 1) ||
         !tokenize
       )
         return yield* ScriptError.make({message: 'Embedding runtime diagnostic effective context plan changed.'});
