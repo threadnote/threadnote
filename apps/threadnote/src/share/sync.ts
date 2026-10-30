@@ -39,6 +39,7 @@ import {
   SHARE_FETCH_RECEIPT_VERSION,
   SHARE_FETCH_WARNING_MAXIMUM_LENGTH,
   SHAREABLE_MEMORY_KIND_DIRS,
+  SHAREABLE_ARTIFACT_DIR,
   ShareOperationError,
   assertSafeShareRelativePath,
   autoShareState,
@@ -46,24 +47,28 @@ import {
   ensureSharedDirectoryChain,
   ensureSharedGitignore,
   isRegularFileNoSymlink,
+  isSharedArtifactUri,
   loadPendingReindexes,
   mkdir,
   pathDirname,
   pathJoin,
+  pathRelative,
+  pathSeparator,
   prepareSharedInboundContentEffect,
-  readMemoryContent,
   readSharedInboundFileContent,
   readTeamsFile,
   removeMemoryUri,
   rename,
   resolveTeam,
   resourceExistsStrict,
+  resourceStoreLocation,
   rm,
   sharedMemoryIdentityContinuityIssue,
   shareTeamAccess,
   sharedMemoryContentsEquivalent,
   verifySharedMemoryContentUnchanged,
   verifySharedMemoryIdentityContinuity,
+  walkMemoryFiles,
   workfileToResourceUri,
   writeFile,
   writeMemoryFileChecked,
@@ -83,6 +88,7 @@ import {
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
+import {ResourceStore} from '@threadnote/store/resource-store';
 
 export const refreshSharedReposInBackground = Effect.fn('share.refreshSharedReposInBackground')(function* (
   config: ShareRuntime,
@@ -522,7 +528,8 @@ const runShareSyncForTeam = Effect.fn('share.runShareSyncForTeam')(function* (
     const previouslyPending = state.pendingReindexes.get(team.name) ?? [];
     const newChanges =
       beforeRev && afterRev && beforeRev !== afterRev ? yield* listChangedFiles(worktree, beforeRev, afterRev) : [];
-    const combined = mergeChanges(previouslyPending, newChanges);
+    const missing = yield* sharedWorktreeChanges(config, team.config, true);
+    const combined = mergeChanges(missing, previouslyPending, newChanges);
     if (combined.length === 0) {
       yield* Console.log('No upstream changes to reindex.');
     } else {
@@ -679,7 +686,10 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
   const failed: ChangedFile[] = [];
   const invalidatedUris = new Set<string>();
   for (const change of changes) {
-    if (!isShareableMemoryChange(change)) {
+    const artifact =
+      Effect2.pipe(change.relativePath, EffectString.startsWith(`${SHAREABLE_ARTIFACT_DIR}/`)) &&
+      Effect2.pipe(change.relativePath, EffectString.endsWith('.md'));
+    if (!artifact && !isShareableMemoryChange(change)) {
       continue;
     }
     let normalizedChange = change;
@@ -720,7 +730,9 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
             const currentContent = yield* readExistingMemoryContent(config, ov, uri);
             let restoredIdentity = false;
             if (currentContent !== undefined) {
-              const identityIssue = sharedMemoryIdentityContinuityIssue(uri, currentContent, content);
+              const identityIssue = artifact
+                ? undefined
+                : sharedMemoryIdentityContinuityIssue(uri, currentContent, content);
               if (identityIssue !== undefined) {
                 if (
                   identityLockPlan.currentContent === undefined ||
@@ -743,8 +755,10 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
                 yield* assertRestoredSharedMemoryIdentityAvailable(config, team, uri, content);
               }
               if (
-                sharedMemoryContentsEquivalent(currentContent, content) &&
-                countManagedMemoryFieldsTrailers(currentContent) <= 1
+                artifact
+                  ? currentContent === content
+                  : sharedMemoryContentsEquivalent(currentContent, content) &&
+                    countManagedMemoryFieldsTrailers(currentContent) <= 1
               ) {
                 return;
               }
@@ -756,8 +770,9 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
             }
             yield* ensureSharedDirectoryChain(config, ov, uri, false, options);
             const writeMode: 'create' | 'replace' = currentContent !== undefined ? 'replace' : 'create';
-            const writeCheck =
-              restoredIdentity && currentContent !== undefined
+            const writeCheck = artifact
+              ? Effect.void
+              : restoredIdentity && currentContent !== undefined
                 ? verifySharedMemoryContentUnchanged(config, uri, currentContent)
                 : verifySharedMemoryIdentityContinuity(config, uri, content);
             yield* writeMemoryFileChecked(config, ov, uri, content, writeMode, false, writeCheck, {
@@ -788,7 +803,7 @@ const sharedIdentityLockPlan = Effect.fn('share.identityLockPlan')(function* (
   uri: string,
   change: ChangedFile,
 ) {
-  if (change.status === 'removed' || !(yield* isRegularFileNoSymlink(change.path))) {
+  if (isSharedArtifactUri(uri) || change.status === 'removed' || !(yield* isRegularFileNoSymlink(change.path))) {
     return {currentContent: undefined, incomingContent: undefined, lockKeys: [] as string[]};
   }
   const incomingContent = yield* readSharedInboundFileContent(uri, change.path);
@@ -942,7 +957,8 @@ const readExistingMemoryContent = Effect.fn('share.readExistingMemoryContent')(f
   if (!(yield* resourceExistsStrict(ov, config, uri))) {
     return undefined;
   }
-  return yield* readMemoryContent(config, ov, uri, false);
+  const store = yield* ResourceStore;
+  return yield* store.read(resourceStoreLocation(config), uri);
 });
 
 const applyAndPersistChanges = Effect.fn('share.applyAndPersistChanges')(function* (
@@ -981,6 +997,45 @@ const applyAndPersistChanges = Effect.fn('share.applyAndPersistChanges')(functio
         ]
       : [];
   return {failed: result.failed, warnings};
+});
+
+const sharedWorktreeChanges = Effect.fn('share.worktreeChanges')(function* (
+  config: ShareRuntime,
+  team: ShareTeamConfig,
+  missingOnly: boolean,
+) {
+  const changes: ChangedFile[] = [];
+  for (const file of yield* walkMemoryFiles(team.worktree)) {
+    const uri = yield* workfileToResourceUri(config, team, file);
+    if (missingOnly) {
+      const exists = yield* Effect.result(resourceExistsStrict(NATIVE_RESOURCE_BACKEND, config, uri));
+      if (Result.isSuccess(exists) && exists.success) continue;
+    }
+    // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The platform separator is not proven nonempty; preserve native split semantics.
+    const relativePath = EffectArray.join((yield* pathRelative(team.worktree, file)).split(yield* pathSeparator), '/');
+    changes.push({path: file, relativePath, status: 'added'});
+  }
+  return changes;
+});
+
+export const ingestSharedWorktree = Effect.fn('share.ingestSharedWorktree')(function* (
+  config: ShareRuntime,
+  team: ShareTeamConfig,
+) {
+  const state = autoShareState(config);
+  yield* loadPendingReindexes(config, state);
+  const changes = mergeChanges(
+    state.pendingReindexes.get(team.name) ?? [],
+    yield* sharedWorktreeChanges(config, team, false),
+  );
+  const result = yield* applyAndPersistChanges(config, team, state, changes);
+  for (const warning of result.warnings) yield* Console.warn(warning);
+  if (result.failed.length > 0) {
+    return yield* ShareOperationError.make({
+      message: `Shared import preserved ${changes.length - result.failed.length} file(s); ${result.failed.length} file(s) remain pending. Run threadnote share sync --team ${team.name} to retry.`,
+    });
+  }
+  return changes.length;
 });
 
 const materializePreviousContentForPendingConflict = Effect.fn('share.materializePreviousContentForPendingConflict')(
