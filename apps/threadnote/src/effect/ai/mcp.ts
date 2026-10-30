@@ -1215,6 +1215,7 @@ export const McpInput = {
     ),
   number: (description?: string, options: {readonly maximum?: number; readonly minimum?: number} = {}) =>
     Schema.optionalKey(numberSchema(description, options)),
+  requiredString: (description?: string) => annotate(Schema.String.check(Schema.isMinLength(1)), description),
   string: (description?: string) => Schema.optionalKey(annotate(Schema.String, description)),
   stringOrStrings: (description?: string, options: {readonly maximumItems?: number} = {}) =>
     Schema.optionalKey(
