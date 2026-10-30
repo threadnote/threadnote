@@ -22,7 +22,7 @@
   "dependencies": {
     "@threadnote/platform": "workspace:*",
     "effect": "4.0.7",
-    "node-llama-cpp": "3.22.2"
+    "node-llama-cpp": "3.22.1"
   },
   "devDependencies": {
     "@effect/platform-bun": "4.0.7",
