@@ -1748,7 +1748,7 @@ export function registerRecallFeedbackTool(server: EffectMcpServerAdapter, confi
     {
       annotations: {readOnlyHint: false, destructiveHint: false},
       description:
-        'Record bounded local feedback for one recall result. Applied means the item materially informed a plan or change and is distinct from useful. Stores a query fingerprint, never the full query. Feedback cannot bypass topical relevance and decays over time.',
+        'Record bounded local recall feedback. Applied means material use in a plan or change, beyond useful. Stores only a query fingerprint, never the query. Topical relevance and time decay still apply.',
       inputSchema: {
         action: McpInput.requiredLiterals(['dismiss', 'pin', 'useful', 'wrong', 'applied']),
         project: McpInput.string('Optional project scope; pin is never global'),
