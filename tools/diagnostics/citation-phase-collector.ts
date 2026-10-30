@@ -20,7 +20,7 @@ const CurrentFrame = Context.Reference<Frame | undefined>('citationDiagnostic/fr
 export interface Event {
   readonly sample: number;
   readonly phase: Phase;
-  readonly kind: 'command' | 'spawn' | 'child-exit' | 'file' | 'store' | 'phase';
+  readonly kind: 'command' | 'spawn' | 'child-exit' | 'file' | 'store' | 'phase' | 'semantic';
   readonly operation: string;
   readonly commandId?: number;
   readonly start: number;
@@ -289,7 +289,10 @@ export function summarize(events: readonly Event[]) {
   const command = EffectArray.filter(events, event => event.kind === 'command');
   const files = EffectArray.filter(events, event => event.kind === 'file');
   const store = EffectArray.filter(events, event => event.kind === 'store' && event.operation !== 'withSession');
+  const semantic = EffectArray.filter(events, event => event.kind === 'semantic');
   return {
+    semanticMetadataChecks: semantic.length,
+    semanticMetadataCheckWallUnion: intervalUnion(semantic),
     commandWallUnion: intervalUnion(command),
     fileWallUnion: intervalUnion(files),
     storeLeafWallUnion: intervalUnion(store),

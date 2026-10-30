@@ -1,6 +1,11 @@
 import {Array as EffectArray} from 'effect';
 import {Clock, Context, DateTime, Effect, FileSystem, Scope} from 'effect';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import {
+  CodeGraphEmbeddingIndex,
+  type CodeGraphEmbeddingIndexShape,
+  type CodeGraphEmbeddingCheck,
+} from '@threadnote/graph/embedding';
 import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
 import {SystemInfo} from '@threadnote/platform/system';
 import {compileContextBriefWith} from '@threadnote/context/compiler';
@@ -20,6 +25,8 @@ import {
   CONTEXT_BRIEF_CITATION_SCALE_RELEASE_WARMUPS,
   contextBriefCitationRssSampleGapFailures,
   contextBriefCitationScaleGate,
+  contextBriefCitationForbiddenWorkFailures,
+  type ContextBriefCitationForbiddenGraphWork,
   contextBriefCitationScaleRetainedRootRssGrowthBytes,
   contextBriefCitationScaleReleaseIdentityFailures,
   evaluateContextBriefCitationScaleProfile,
@@ -130,6 +137,7 @@ export interface ContextBriefCitationScaleRssObserver {
 }
 
 export interface ContextBriefCitationScaleArtifactV2 {
+  readonly forbiddenGraphWork?: readonly ContextBriefCitationForbiddenGraphWork[];
   readonly createdAt: string;
   readonly evidenceClass: 'development-smoke' | 'release-scale';
   readonly environment: {
@@ -372,57 +380,76 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
       );
     }
   }
-  return {
-    createdAt: DateTime.formatIso(yield* DateTime.now),
-    evidenceClass: options.invocationMode,
-    environment,
-    execution: {
-      builtArtifactSha256: options.builtArtifactSha256,
-      ...CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2,
-    },
-    fixture: {
-      hash: fixture.fixtureHash,
-      indexedMemoryCandidates: fixture.indexedMemoryCandidates,
-      legacyV1MemoryCandidates: fixture.legacyV1MemoryCandidates,
-      readyGraphSetupMilliseconds: fixture.readyGraphSetupMilliseconds,
-      recallIndexBuildMilliseconds: fixture.recallIndexBuildMilliseconds,
-      requestedMemoryCandidates: options.memoryCandidates,
-      worksetGenerationDigests: [
-        fixture.profiles.get('workset-50')!.generation!.digest,
-        fixture.profiles.get('workset-128')!.generation!.digest,
-      ],
-      worksetRepositoryIdentities: [50, 128],
-    },
-    gate: contextBriefCitationScaleGate(failures),
-    memoryObserver: {
-      finalSample: rssEvidence.finalSample,
-      intervalMilliseconds: rssEvidence.intervalMilliseconds,
-      maximumConsecutiveSampleGapBreaches: rssEvidence.maximumConsecutiveSampleGapBreaches,
-      maximumSampleGapMilliseconds: rssEvidence.maximumSampleGapMilliseconds,
-      observationCount: rssEvidence.observations.length,
-      observerExcluded: rssEvidence.observerExcluded,
-      processCountPeakObserved: rssEvidence.processCountPeakObserved,
-      rootIdentityValidation: rssEvidence.rootIdentityValidation,
-      rootStartIdentity: rssEvidence.rootStartIdentity,
-      retainedRootRssGrowthBytes,
-      sampleGapBreachCount: rssEvidence.sampleGapBreachCount,
-      sampleGapBreachRate: rssEvidence.sampleGapBreachRate,
-      sampleGapPolicy: rssEvidence.sampleGapPolicy,
-      sampleAttempts: rssEvidence.sampleAttempts,
-      sampleFailures: rssEvidence.sampleFailures,
-      scope: rssEvidence.scope,
-      samplingSchedule: rssEvidence.samplingSchedule,
-      source: rssEvidence.source,
-      successfulSamples: rssEvidence.successfulSamples,
-      version: rssEvidence.version,
-    },
-    profiles: profileResults,
-    samples: options.samples,
-    suite: 'context-brief-citations-scale-v2',
-    version: 2,
-    warmups: options.warmups,
-  } satisfies ContextBriefCitationScaleArtifactV2;
+  return retainContextBriefCitationForbiddenWork(
+    {
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+      evidenceClass: options.invocationMode,
+      environment,
+      execution: {
+        builtArtifactSha256: options.builtArtifactSha256,
+        ...CONTEXT_BRIEF_CITATION_SCALE_EXECUTION_V2,
+      },
+      fixture: {
+        hash: fixture.fixtureHash,
+        indexedMemoryCandidates: fixture.indexedMemoryCandidates,
+        legacyV1MemoryCandidates: fixture.legacyV1MemoryCandidates,
+        readyGraphSetupMilliseconds: fixture.readyGraphSetupMilliseconds,
+        recallIndexBuildMilliseconds: fixture.recallIndexBuildMilliseconds,
+        requestedMemoryCandidates: options.memoryCandidates,
+        worksetGenerationDigests: [
+          fixture.profiles.get('workset-50')!.generation!.digest,
+          fixture.profiles.get('workset-128')!.generation!.digest,
+        ],
+        worksetRepositoryIdentities: [50, 128],
+      },
+      gate: contextBriefCitationScaleGate(failures),
+      memoryObserver: {
+        finalSample: rssEvidence.finalSample,
+        intervalMilliseconds: rssEvidence.intervalMilliseconds,
+        maximumConsecutiveSampleGapBreaches: rssEvidence.maximumConsecutiveSampleGapBreaches,
+        maximumSampleGapMilliseconds: rssEvidence.maximumSampleGapMilliseconds,
+        observationCount: rssEvidence.observations.length,
+        observerExcluded: rssEvidence.observerExcluded,
+        processCountPeakObserved: rssEvidence.processCountPeakObserved,
+        rootIdentityValidation: rssEvidence.rootIdentityValidation,
+        rootStartIdentity: rssEvidence.rootStartIdentity,
+        retainedRootRssGrowthBytes,
+        sampleGapBreachCount: rssEvidence.sampleGapBreachCount,
+        sampleGapBreachRate: rssEvidence.sampleGapBreachRate,
+        sampleGapPolicy: rssEvidence.sampleGapPolicy,
+        sampleAttempts: rssEvidence.sampleAttempts,
+        sampleFailures: rssEvidence.sampleFailures,
+        scope: rssEvidence.scope,
+        samplingSchedule: rssEvidence.samplingSchedule,
+        source: rssEvidence.source,
+        successfulSamples: rssEvidence.successfulSamples,
+        version: rssEvidence.version,
+      },
+      profiles: profileResults,
+      samples: options.samples,
+      suite: 'context-brief-citations-scale-v2',
+      version: 2,
+      warmups: options.warmups,
+    } satisfies ContextBriefCitationScaleArtifactV2,
+    graph.forbiddenWork(),
+  );
 });
+
+/** Keep failure evidence and its strict replay decision together. */
+export function retainContextBriefCitationForbiddenWork<Artifact extends ContextBriefCitationScaleArtifactV2>(
+  artifact: Artifact,
+  attempted: readonly ContextBriefCitationForbiddenGraphWork[],
+) {
+  const work = [...new Set([...(artifact.forbiddenGraphWork ?? []), ...attempted])].sort();
+  return {
+    ...artifact,
+    ...(work.length === 0 ? {} : {forbiddenGraphWork: work}),
+    gate: contextBriefCitationScaleGate([
+      ...artifact.gate.failures,
+      ...contextBriefCitationForbiddenWorkFailures(work),
+    ]),
+  };
+}
 
 const runObservation = Effect.fn('evaluation.contextBriefCitationScaleObservation')(function* (
   fixture: ContextBriefCitationScalePreparedFixture,
@@ -583,8 +610,13 @@ interface MutableCounters {
   statusObservations: number;
 }
 
+type ForbiddenEmbeddingWork = 'embedding readiness scan' | 'embedding generation' | 'embedding search';
+
 export interface ContextBriefCitationScaleGraphInstrumentationShape {
+  readonly forbiddenWork: () => readonly ContextBriefCitationForbiddenGraphWork[];
+  readonly forbiddenWorkFailures: () => readonly string[];
   readonly instrumentStore: (store: CodeGraphStoreShape) => CodeGraphStoreShape;
+  readonly recordForbiddenWork: (operation: ForbiddenEmbeddingWork) => Effect.Effect<void>;
   readonly recordColdGraphBuild: Effect.Effect<void>;
   readonly recordMaintenanceRequest: Effect.Effect<void>;
   readonly reset: () => void;
@@ -599,6 +631,7 @@ export class ContextBriefCitationScaleGraphInstrumentation extends Context.Servi
 /** Instrument the real graph store boundary without replacing any SQLite behavior. */
 export function makeContextBriefCitationScaleGraphInstrumentation(): ContextBriefCitationScaleGraphInstrumentationShape {
   let counters = emptyCounters();
+  const forbiddenWork = new Set<ContextBriefCitationForbiddenGraphWork>();
   const observeDatabasePath = (databasePath: string) => {
     counters.databasePaths.add(databasePath);
   };
@@ -662,11 +695,19 @@ export function makeContextBriefCitationScaleGraphInstrumentation(): ContextBrie
     statusObservations: counters.statusObservations,
   });
   return {
+    forbiddenWork: () => [...forbiddenWork].sort(),
+    forbiddenWorkFailures: () => contextBriefCitationForbiddenWorkFailures([...forbiddenWork]),
     instrumentStore,
+    recordForbiddenWork: operation =>
+      Effect.sync(() => {
+        forbiddenWork.add(operation);
+      }),
     recordColdGraphBuild: Effect.sync(() => {
+      forbiddenWork.add('cold indexing');
       counters.coldGraphBuilds += 1;
     }),
     recordMaintenanceRequest: Effect.sync(() => {
+      forbiddenWork.add('maintenance');
       counters.maintenanceRequests += 1;
     }),
     reset: () => {
@@ -674,6 +715,26 @@ export function makeContextBriefCitationScaleGraphInstrumentation(): ContextBrie
     },
     snapshot,
   };
+}
+
+/** The ready structural fixture has no selected model; metadata checks are valid, inference is not. */
+export function makeContextBriefCitationScaleEmbeddingIndex(
+  graph: ContextBriefCitationScaleGraphInstrumentationShape,
+  metadata: CodeGraphEmbeddingCheck = {
+    state: 'unavailable',
+    reason: 'Structural citation fixture has no selected embedding model.',
+  },
+): CodeGraphEmbeddingIndexShape {
+  const forbidden = (operation: ForbiddenEmbeddingWork) =>
+    graph
+      .recordForbiddenWork(operation)
+      .pipe(Effect.andThen(Effect.die(new Error(`Scale benchmark must not perform ${operation}.`))));
+  return CodeGraphEmbeddingIndex.of({
+    check: (_home, _layout, _snapshot, options) =>
+      options?.metadataOnly === true ? Effect.succeed(metadata) : forbidden('embedding readiness scan'),
+    ensure: () => forbidden('embedding generation'),
+    search: () => forbidden('embedding search'),
+  });
 }
 
 function scaleGraphEvidence(prepared: ContextBriefCitationScalePreparedProfile): ContextBriefGraphEvidenceV1 {
