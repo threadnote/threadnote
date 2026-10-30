@@ -9,6 +9,7 @@ import {
 } from '../src/cycle_packet.js';
 import {
   decodeNativeCyclePlan,
+  checkNativeCycleScope,
   nativeCycleHasControl,
   decodeNativeCycleState,
   initializeNativeCycle,
@@ -130,6 +131,35 @@ const prDelivery = (state: 'open' | 'merged' = 'open') => ({
 });
 
 describe('native cycle pure domain', () => {
+  it('admits zero-write phases while retaining the path cardinality and text bounds', () => {
+    const input = makePlan();
+    const withPaths = (allowedPaths: string[]) => decodeNativeCyclePlan(makePlan([{...input.phases[0], allowedPaths}]));
+    const plan = withPaths([]);
+    expect(plan.phases[0].allowedPaths).toEqual([]);
+    const state = initializeNativeCycle(plan);
+    expect(decodeNativeCycleState(JSON.parse(JSON.stringify(state)))).toEqual(state);
+    expect(checkNativeCycleScope(plan.phases[0], [])).toBe(true);
+    expect(checkNativeCycleScope(plan.phases[0], ['src/a.ts'])).toBe(false);
+    expect(validateNativeCyclePhase(state, 'one', snapshot([]), validation).phases.one.status).toBe('validated');
+    expect(() => validateNativeCyclePhase(state, 'one', snapshot(['src/a.ts']), validation)).toThrow();
+    expect(
+      withPaths(Array.from({length: 128}, (_, index) => `src/file-${index}.ts`)).phases[0].allowedPaths,
+    ).toHaveLength(128);
+    expect(() => withPaths(Array.from({length: 129}, (_, index) => `src/file-${index}.ts`))).toThrow();
+    expect(() => withPaths([''])).toThrow();
+  });
+
+  it('permits a change set under empty scope exactly when the change set is empty', () => {
+    const input = makePlan();
+    const phase = decodeNativeCyclePlan(makePlan([{...input.phases[0], allowedPaths: []}])).phases[0];
+    fc.assert(
+      fc.property(fc.array(fc.string({maxLength: 64}), {maxLength: 16}), files => {
+        expect(checkNativeCycleScope(phase, files)).toBe(files.length === 0);
+      }),
+      {numRuns: 100},
+    );
+  });
+
   it('matches the prior control-character policy for arbitrary UTF-16 strings', () => {
     fc.assert(
       fc.property(fc.array(fc.integer({min: 0, max: 0xffff}), {maxLength: 256}), codeUnits => {
