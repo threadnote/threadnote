@@ -32,7 +32,6 @@ import {
   graphifySharedCapabilities,
   graphifyVerifiedDifferences,
 } from '../src/content/graphifyComparison.js';
-import {managerDemoShares, managerDemoTabs} from '../src/content/managerDemo.js';
 import {
   createDocsSearchIndex,
   DOCS_SEARCH_MAXIMUM_LENGTH,
@@ -498,22 +497,12 @@ describe('Threadnote website content', () => {
       'agents/index.html',
       'whats-new/index.html',
       'pro-tips/index.html',
-      'manager-demo/index.html',
       'faq/index.html',
     ];
 
     await Promise.all(EffectArray.map(routes, route => access(join(root, 'apps', 'website', route))));
     const config = await readFile(join(root, 'apps', 'website', 'vite.config.ts'), 'utf8');
-    for (const route of [
-      'performance',
-      'performanceGraphify',
-      'docs',
-      'agents',
-      'whatsNew',
-      'proTips',
-      'managerDemo',
-      'faq',
-    ]) {
+    for (const route of ['performance', 'performanceGraphify', 'docs', 'agents', 'whatsNew', 'proTips', 'faq']) {
       expect(config).toContain(`${route}:`);
     }
   });
@@ -530,7 +519,6 @@ describe('Threadnote website content', () => {
           'pages/AgentsPage.tsx',
           'pages/WhatsNewPage.tsx',
           'pages/ProTipsPage.tsx',
-          'pages/ManagerDemoPage.tsx',
           'pages/FaqPage.tsx',
         ],
         path => readFile(join(root, 'apps', 'website', 'src', path), 'utf8'),
@@ -963,8 +951,8 @@ The body remains ordinary **Markdown**.
       ),
     );
     expect(workflowIndex).toBe((connectIndex ?? -2) + 1);
-    expect(JSON.stringify(journey)).toContain('Optional: share the proof with a team');
-    expect(JSON.stringify(journey)).toContain('coding-agent environment');
+    expect(JSON.stringify(journey)).toContain('6. Connect a team');
+    expect(JSON.stringify(journey)).toContain('2. Connect your agent through MCP');
     expect(firstWorkflow?.body).toContainEqual(
       expect.objectContaining({
         type: 'code',
@@ -1151,24 +1139,47 @@ The body remains ordinary **Markdown**.
     expect(content).not.toContain('Relocate all Threadnote-owned state');
   });
 
-  it('explains the first-agent setup and the optional two-agent journey in plain language', () => {
+  it('guides a first session from installation to shared memory and continuity', () => {
     const articles = EffectArray.flatMap(docsSections, section => section.articles);
     const connectAgent = JSON.stringify(
       EffectOption.getOrUndefined(EffectArray.findFirst(articles, article => article.id === 'connect-an-agent')),
     );
-    const journey = JSON.stringify(
-      EffectOption.getOrUndefined(EffectArray.findFirst(articles, article => article.id === 'threadnote-5-journey')),
+    const quickstart = EffectOption.getOrUndefined(
+      EffectArray.findFirst(articles, article => article.id === 'threadnote-5-journey'),
     );
+    const content = JSON.stringify(quickstart);
 
     expect(connectAgent).toContain('What setup does');
     expect(connectAgent).toContain('Why not install only the MCP connection?');
     expect(connectAgent).toContain('Neither command prepares the current repository');
     expect(connectAgent).toContain('A hand-written MCP entry');
-    expect(journey).toContain('A Context Brief is the short, cited briefing');
-    expect(journey).toContain('A Knowledge Delta is the short, reviewable list');
-    expect(journey).toContain('You do not need two agents or a team share to get started');
-    expect(journey).toContain('a “surface” simply means a coding agent or agent environment');
-    expect(journey).toContain('It is not required for normal use');
+    expect(quickstart?.title).toBe('Quick-start');
+    expect(
+      EffectArray.map(
+        EffectArray.filter(quickstart?.body ?? [], block => block.type === 'heading'),
+        block => block.text,
+      ),
+    ).toEqual([
+      '1. Install Threadnote',
+      '2. Connect your agent through MCP',
+      '3. Index your repository’s code graph',
+      '4. Work as usual',
+      '5. See what was remembered in Manager',
+      '6. Connect a team',
+      '7. Share one useful memory',
+      '8. Start a new session and see the continuity',
+      'For larger tasks: spec → plan → cycle',
+    ]);
+    expect(content).toContain('/docs/graph-monorepos/');
+    expect(content).toContain('reducing indexing work and irrelevant results');
+    expect(content).toContain('threadnote agents install codex --apply');
+    expect(content).toContain('threadnote graph index');
+    expect(content).toContain('threadnote manage');
+    expect(content).toContain('threadnote share publish <memory-uri> --preview');
+    expect(content).toContain('handoffs stay private');
+    expect(content).toContain('without you pasting the old conversation');
+    expect(content).toContain('/docs/development-workflows/');
+    expect(content).not.toContain('threadnote activate start');
   });
 
   it('gives existing 4.x users a safe, optional path into the 5.0 workflow', () => {
@@ -1514,7 +1525,7 @@ The body remains ordinary **Markdown**.
 
   it('uses fictional, generic examples in public graph simulations', async () => {
     const publicExamples = await Promise.all(
-      EffectArray.map(['content/landing.ts', 'content/proTips.ts', 'content/managerDemo.ts'], path =>
+      EffectArray.map(['content/landing.ts', 'content/proTips.ts'], path =>
         readFile(join(root, 'apps', 'website', 'src', path), 'utf8'),
       ),
     ).then(sources => EffectArray.join(sources, '\n'));
@@ -1742,8 +1753,8 @@ The body remains ordinary **Markdown**.
     expect(docs).toContain('A Context Brief is the bounded starting package for one task');
     expect(docs).toContain('A Knowledge Delta is a reviewable summary of what the task learned');
     expect(docs).toContain('Schema v5 is the compatibility foundation for the Threadnote 5 lifecycle');
-    expect(docs).toContain('review and merge the local proposal');
-    expect(docs).toContain('second agent retrieves the shared decision itself');
+    expect(docs).toContain('review the exact content and destination');
+    expect(docs).toContain('Their agent can retrieve the shared decision');
     expect(docs).toContain('stable Threadnote 5 operator surface');
     expect(docs).not.toContain('stable 4.1 operator surface');
     expect(tips).toContain('codeRefs');
@@ -2067,7 +2078,6 @@ The body remains ordinary **Markdown**.
       ['agents', 'agents'],
       ['whats-new', 'whats-new'],
       ['pro-tips', 'pro-tips'],
-      ['manager-demo', 'manager-demo'],
       ['faq', 'faq'],
     ] as const;
 
@@ -2364,17 +2374,7 @@ Measure the system before changing its implementation language.
     });
     const loaders = EffectRecord.fromEntries(
       EffectArray.map(
-        [
-          'home',
-          'performance',
-          'performance-graphify',
-          'docs',
-          'agents',
-          'whats-new',
-          'pro-tips',
-          'manager-demo',
-          'faq',
-        ] as const,
+        ['home', 'performance', 'performance-graphify', 'docs', 'agents', 'whats-new', 'pro-tips', 'faq'] as const,
         page => [page, page === 'docs' ? () => deferredDocs : async () => page],
       ),
     ) as Record<SitePage, () => Promise<string>>;
@@ -3204,28 +3204,8 @@ Measure the system before changing its implementation language.
     expect(cursor).not.toContain('three Agent Skills');
   });
 
-  it('uses the real Manager labels and share status fields in the mock data', () => {
-    expect(EffectArray.map(managerDemoTabs, tab => tab.label)).toEqual([
-      'Graph',
-      'Library',
-      'Sharing',
-      'Health',
-      'Tools',
-    ]);
-    for (const share of managerDemoShares) {
-      expect(share.name).toBe(share.label);
-      expect(share.remote).not.toBe('');
-      expect(share.worktree).not.toBe('');
-      expect(share.gitdir).not.toBe('');
-      expect(typeof share.default).toBe('boolean');
-      expect(typeof share.dirty).toBe('boolean');
-      expect(['two-way', 'publish', 'read-only']).not.toContain(share.direction);
-    }
-  });
-
-  it('labels synthetic Manager data and publishes a parity-first Graphify performance subpage', async () => {
+  it('publishes a parity-first Graphify performance subpage', async () => {
     const [
-      managerSource,
       faqSource,
       graphifyPage,
       graphifyHtml,
@@ -3235,7 +3215,6 @@ Measure the system before changing its implementation language.
       evidenceSource,
       addressedEvidenceSource,
     ] = await Promise.all([
-      readFile(join(root, 'apps', 'website', 'src', 'components', 'ManagerMock.tsx'), 'utf8'),
       readFile(join(root, 'apps', 'website', 'src', 'pages', 'FaqPage.tsx'), 'utf8'),
       readFile(join(root, 'apps', 'website', 'src', 'pages', 'GraphifyPerformancePage.tsx'), 'utf8'),
       readFile(join(root, 'apps', 'website', 'performance', 'graphify', 'index.html'), 'utf8'),
@@ -3257,7 +3236,6 @@ Measure the system before changing its implementation language.
     const sharedCopy = Effect.pipe(JSON.stringify(graphifySharedCapabilities), EffectString.toLowerCase);
     const differenceCopy = Effect.pipe(JSON.stringify(graphifyVerifiedDifferences), EffectString.toLowerCase);
 
-    expect(managerSource).toContain('Mock data — no local files read');
     expect(faqSource).not.toMatch(/Graphify|SHOW_GRAPHIFY_COMPARISON|comparisonOnly/);
     expect(faqSource).toContain('Will every new worktree rebuild its graph from scratch?');
     expect(faqSource).toContain('Agents never query partial rows from an unpromoted snapshot');
@@ -3412,13 +3390,24 @@ Measure the system before changing its implementation language.
     );
   });
 
-  it('pins the Manager canvas to its stage without a resize feedback loop', async () => {
-    const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
-
-    expect(styles).toMatch(/\.manager-demo-graph-stage\s*{[^}]*min-height: 480px;/s);
-    expect(styles).toMatch(/\.manager-demo-scene\s*{[^}]*position: absolute;[^}]*inset: 0;/s);
-    expect(styles).toMatch(/\.manager-demo-scene-canvas\s*{[^}]*display: block;[^}]*height: 100%;/s);
-    expect(styles).not.toContain('.manager-demo-graph-stage > div:first-child');
+  it('shows a real Manager recording with playback and reduced-motion alternatives', async () => {
+    const [landing, shell, styles, gif] = await Promise.all([
+      readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8'),
+      readFile(join(root, 'apps', 'website', 'src', 'components', 'SiteShell.tsx'), 'utf8'),
+      readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8'),
+      readFile(join(root, 'apps', 'website', 'public', 'manager', 'manager-overview.gif')),
+    ]);
+    expect(landing).toContain('manager/manager-overview.gif');
+    expect(landing).toContain('manager/manager-overview.webp');
+    expect(landing).toContain('prefers-reduced-motion: reduce');
+    expect(landing).toContain('Pause preview');
+    expect(landing).toContain('Play preview');
+    expect(landing).toContain('Recorded in Threadnote Manager with example data.');
+    expect(shell).not.toContain('manager-demo');
+    expect(styles).not.toContain('.manager-demo');
+    expect(gif.subarray(0, 6).toString()).toMatch(/^GIF8[79]a$/);
+    expect(sitePageForPathname('/manager-demo/', '/')).toBeUndefined();
+    await access(join(root, 'apps', 'website', 'public', 'manager', 'manager-overview.webp'));
   });
 
   it('contains the landing hero and install command at narrow mobile widths', async () => {
@@ -3472,15 +3461,16 @@ Measure the system before changing its implementation language.
     expect(styles).toMatch(/\.post-detail__body table\s*{[^}]*overflow-x: auto;/s);
   });
 
-  it('keeps every explicit site text size at or above the shared 12px minimum', async () => {
+  it('keeps site text at least 16px and docs prose at 18px', async () => {
     const styles = await readFile(join(root, 'apps', 'website', 'src', 'styles.css'), 'utf8');
     const explicitPixelSizes = EffectArray.map(
       [...Effect.pipe(styles, EffectString.matchAll(/(?:font-size:\s*|font:\s*)(\d+(?:\.\d+)?)px/g))],
       match => Number(match[1]),
     );
 
-    expect(styles).toContain('--font-size-min: 12px;');
-    expect(EffectArray.filter(explicitPixelSizes, size => size < 12)).toEqual([]);
+    expect(styles).toContain('--font-size-min: 16px;');
+    expect(styles).toMatch(/\.docs-prose\s*{[^}]*font-size: 18px;/s);
+    expect(EffectArray.filter(explicitPixelSizes, size => size < 16)).toEqual([]);
   });
 
   it('stacks the worktree-readiness evidence without connector overflow on mobile', async () => {

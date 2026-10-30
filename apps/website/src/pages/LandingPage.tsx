@@ -1,5 +1,5 @@
 import {Array as EffectArray} from 'effect';
-import {lazy, Suspense} from 'react';
+import {lazy, Suspense, useState} from 'react';
 import articles from 'virtual:threadnote-articles';
 import latestRelease from 'virtual:threadnote-latest-release';
 import {AgentTrace} from '../components/AgentTrace';
@@ -157,6 +157,7 @@ function GraphSearchShowcase() {
 
 export default function LandingPage() {
   const latestArticle = articles[0];
+  const [managerPreviewPaused, setManagerPreviewPaused] = useState(false);
   setDocumentMeta(
     'Shared context for coding agents',
     'Give coding agents the decisions and current code they need, then review what they leave for the next task.',
@@ -207,7 +208,7 @@ export default function LandingPage() {
               <Icon name="arrow" aria-hidden="true" />
             </a>
             <a className="button button--ghost" href={docsArticleHref('threadnote-5-journey')}>
-              See how it works
+              Follow the quick-start
             </a>
           </div>
           <div className="hero__install">
@@ -406,74 +407,35 @@ export default function LandingPage() {
             Browse saved decisions, check team shares and agent guidance, explore the current code map, and see which
             context is current, outdated, or waiting for review.
           </p>
-          <a className="button button--light" href={siteHref('manager-demo/')}>
-            Open interactive demo
+          <a className="button button--light" href={docsArticleHref('manager')}>
+            Open Manager guide
             <Icon name="arrow" aria-hidden="true" />
           </a>
         </div>
-        <div className="manager-teaser__window">
-          <div className="manager-teaser__chrome">
-            <span />
-            <span />
-            <span />
-            <code>localhost · Manager</code>
-          </div>
-          <div className="manager-teaser__app">
-            <aside>
-              <img alt="Threadnote" className="manager-teaser__brand" src={siteHref('threadnote-logo.svg')} />
-              <span className="is-active">Graph</span>
-              <span>Memory</span>
-              <span>Shares</span>
-              <span>Doctor</span>
-            </aside>
-            <div className="manager-teaser__canvas">
-              <svg viewBox="0 0 620 300" aria-hidden="true">
-                <g className="preview-lines">
-                  <path d="M90 150 220 82 330 152 475 70" />
-                  <path d="M90 150 215 245 330 152 500 226" />
-                  <path d="M220 82 325 45 475 70" />
-                  <path d="M215 245 360 255 500 226" />
-                </g>
-                <g className="preview-nodes">
-                  <circle cx="90" cy="150" r="13" />
-                  <circle cx="220" cy="82" r="10" />
-                  <circle cx="215" cy="245" r="11" />
-                  <circle cx="330" cy="152" r="16" />
-                  <circle cx="325" cy="45" r="8" />
-                  <circle cx="475" cy="70" r="12" />
-                  <circle cx="360" cy="255" r="9" />
-                  <circle cx="500" cy="226" r="13" />
-                </g>
-              </svg>
-              <div className="manager-teaser__legend">
-                <span>
-                  <i className="dot dot--ts" /> TypeScript
-                </span>
-                <span>
-                  <i className="dot dot--kt" /> Kotlin
-                </span>
-                <span>
-                  <i className="dot dot--swift" /> Swift
-                </span>
-              </div>
-            </div>
-            <div className="manager-teaser__detail">
-              <span>SYMBOL</span>
-              <h3>AuthSession</h3>
-              <code>libs/auth/session.ts:18</code>
-              <dl>
-                <div>
-                  <dt>Inbound</dt>
-                  <dd>7</dd>
-                </div>
-                <div>
-                  <dt>Outbound</dt>
-                  <dd>5</dd>
-                </div>
-              </dl>
-            </div>
-          </div>
-        </div>
+        <figure className="manager-teaser__recording">
+          <picture>
+            <source media="(prefers-reduced-motion: reduce)" srcSet={siteHref('manager/manager-overview.webp')} />
+            <img
+              alt="The real Threadnote Manager showing a project overview, code graph, and source relationships."
+              src={siteHref(managerPreviewPaused ? 'manager/manager-overview.webp' : 'manager/manager-overview.gif')}
+              width={1280}
+              height={800}
+              loading="lazy"
+              decoding="async"
+            />
+          </picture>
+          <figcaption>
+            <span>Recorded in Threadnote Manager with example data.</span>
+            <button
+              className="button button--ghost manager-teaser__playback"
+              type="button"
+              aria-pressed={managerPreviewPaused}
+              onClick={() => setManagerPreviewPaused(paused => !paused)}
+            >
+              {managerPreviewPaused ? 'Play preview' : 'Pause preview'}
+            </button>
+          </figcaption>
+        </figure>
       </section>
 
       <section className="content-section content-section--cta">

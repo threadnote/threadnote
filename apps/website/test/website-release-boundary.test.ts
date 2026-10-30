@@ -144,7 +144,6 @@ describe('website and standalone release boundary', () => {
       'agents/index.html',
       'whats-new/index.html',
       'pro-tips/index.html',
-      'manager-demo/index.html',
       'faq/index.html',
     ]) {
       const html = await readFile(join(root, 'apps', 'website', entry), 'utf8');
@@ -842,7 +841,6 @@ describe('website and standalone release boundary', () => {
       ['agents/index.html', '/agents/', 'og.png'],
       ['whats-new/index.html', '/whats-new/', 'og.png'],
       ['pro-tips/index.html', '/pro-tips/', 'og.png'],
-      ['manager-demo/index.html', '/manager-demo/', 'og.png'],
       ['faq/index.html', '/faq/', 'og.png'],
     ] as const;
     const htmlDocuments = await Promise.all(
