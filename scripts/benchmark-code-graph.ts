@@ -7574,6 +7574,10 @@ const PRODUCTION_RATCHET_SANDWICH_MAXIMUM_SPAN_MILLISECONDS = 40 * 60_000;
 // and storage remain strict.
 const PRODUCTION_RATCHET_CONFIRMATORY_WALL_TAIL_RELATIVE_TOLERANCE = 0.01;
 const PRODUCTION_RATCHET_CONFIRMATORY_WALL_TAIL_ABSOLUTE_TOLERANCE_MILLISECONDS = 5;
+// This outer elapsed interval includes capacity protection, writer-gate waits,
+// bookkeeping and yields. Its SQL stages and CPU/work remain independently
+// static. Only a bounded screening miss may clear; base and repeat must pass.
+const PRODUCTION_RATCHET_SCREENING_REFERENCE_TRANSACTION_ELAPSED = 'cold-reference-resolution-transactions-n1';
 // The bootstrap sampler covers fixture construction and Git setup before the
 // product index begins. A short-lived helper can overlap only the screening
 // observation even when the exact-base control and immediate candidate repeat
@@ -8178,6 +8182,18 @@ export function enforceCodeGraphBenchmarkRatchet(
       if (staticFailures.length === 0 && initialStaticFailures.length === 0) continue;
     }
     if (
+      productionScreeningReferenceTransactionElapsedAccepted(
+        name,
+        initialMeasurement,
+        controlMeasurement,
+        measurement,
+        limit,
+        initialStaticFailures,
+        staticFailures,
+      )
+    )
+      continue;
+    if (
       !productionHostSensitiveWallMeasurement(name, limit) ||
       limit.p95Maximum === undefined ||
       !candidateHasOnlyStaticP95Failure(initialMeasurement, limit, initialStaticFailures) ||
@@ -8268,13 +8284,48 @@ const PRODUCTION_PAIRED_WALL_MEASUREMENT_PATTERNS = [
   /^mcp-(?:explain|impact|neighbors|node|path|query)-duration$/u,
 ] as const;
 
-function productionHostSensitiveWallMeasurement(name: string, limit: CodeGraphBenchmarkMeasurementRatchetV1): boolean {
+function productionP95OnlyWallLimit(limit: CodeGraphBenchmarkMeasurementRatchetV1): boolean {
   return (
     limit.unit === 'milliseconds' &&
     limit.samplesMinimum === 1 &&
     limit.p95Maximum !== undefined &&
     // oxlint-disable-next-line effecttsgo/prefer-effect-record -- This value is not a total homogeneous readonly record accepted by Effect Record.
-    EffectArray.every(Object.keys(limit), key => key === 'p95Maximum' || key === 'samplesMinimum' || key === 'unit') &&
+    EffectArray.every(Object.keys(limit), key => key === 'p95Maximum' || key === 'samplesMinimum' || key === 'unit')
+  );
+}
+
+function productionScreeningReferenceTransactionElapsedAccepted(
+  name: string,
+  initialCandidate: BenchmarkArtifactV1['measurements'][number],
+  control: BenchmarkArtifactV1['measurements'][number],
+  remeasuredCandidate: BenchmarkArtifactV1['measurements'][number],
+  limit: CodeGraphBenchmarkMeasurementRatchetV1,
+  initialStaticFailures: readonly string[],
+  remeasuredStaticFailures: readonly string[],
+): boolean {
+  if (
+    name !== PRODUCTION_RATCHET_SCREENING_REFERENCE_TRANSACTION_ELAPSED ||
+    !productionP95OnlyWallLimit(limit) ||
+    !candidateHasOnlyStaticP95Failure(initialCandidate, limit, initialStaticFailures) ||
+    remeasuredStaticFailures.length !== 0 ||
+    codeGraphBenchmarkMeasurementRatchetFailures(name, control, limit).length !== 0
+  )
+    return false;
+  const dispersionLimit = productionMeasurementRatchet(name, limit.unit, [
+    Math.min(initialCandidate.p95, remeasuredCandidate.p95),
+  ]);
+  return (
+    codeGraphBenchmarkMeasurementRatchetFailures(
+      name,
+      benchmarkMeasurement(name, limit.unit, [Math.max(initialCandidate.p95, remeasuredCandidate.p95)]),
+      dispersionLimit,
+    ).length === 0
+  );
+}
+
+function productionHostSensitiveWallMeasurement(name: string, limit: CodeGraphBenchmarkMeasurementRatchetV1): boolean {
+  return (
+    productionP95OnlyWallLimit(limit) &&
     // Default every new millisecond metric to the static ratchet. Only
     // explicitly reviewed elapsed intervals may use a same-runner control;
     // cumulative parser, serialization, transaction, and general stage or
