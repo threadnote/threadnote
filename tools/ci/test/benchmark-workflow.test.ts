@@ -526,9 +526,18 @@ describe('platform benchmark workflow', () => {
     expect(windowsGate.name).toBe('Code graph · windows-latest');
     expect(windowsGate.needs).toBe('code-graph-windows-replicas');
     expect(windowsGate.if).toContain('always()');
-    expect(windowsDownload?.with?.pattern).toContain(
-      'Windows-X64-replica-*-${{ github.run_id }}-${{ github.run_attempt }}',
+    expect(windowsUpload?.name).toBe('Upload fixed native graph replica');
+    const windowsSelection = Option.getOrUndefined(
+      EffectArray.findFirst(windowsGate.steps ?? [], step => step.id === 'windows-replica-artifacts'),
     );
+    expect(windowsSelection?.run).toBe('bun tools/ci/select-windows-replica-artifacts.ts');
+    expect(windowsSelection?.env).toEqual({GH_TOKEN: '${{ github.token }}'});
+    expect(windowsGate.permissions).toEqual({actions: 'read', contents: 'read'});
+    expect(windowsDownload?.with?.pattern).toBeUndefined();
+    expect(windowsDownload?.with?.['artifact-ids']).toBe('${{ steps.windows-replica-artifacts.outputs.artifact-ids }}');
+    expect(windowsDownload?.with?.['github-token']).toBe('${{ github.token }}');
+    expect(windowsDownload?.with?.['run-id']).toBe('${{ github.run_id }}');
+    expect(windowsDownload?.with?.['digest-mismatch']).toBe('error');
     expect(windowsDownload?.with?.['merge-multiple']).toBe(true);
     expect(windowsAdjudication?.run).toContain('gate:code-graph:windows-replicas');
     expect(windowsAdjudication?.run).toContain('--expected-commit "${{ github.sha }}"');

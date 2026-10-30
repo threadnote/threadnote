@@ -175,7 +175,7 @@
     "jose": "6.2.13",
     "js-yaml": "^5.5.0",
     "jsonc-parser": "3.3.1",
-    "node-llama-cpp": "3.22.2",
+    "node-llama-cpp": "3.22.1",
     "postgres": "3.4.9",
     "pxpipe-proxy": "0.15.1",
     "react-markdown": "^10.1.0",

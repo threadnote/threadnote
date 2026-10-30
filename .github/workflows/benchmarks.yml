@@ -274,7 +274,8 @@ jobs:
           --warmups 5
           --output artifacts/code-graph-${{ runner.os }}-${{ runner.arch }}-replica-${{ matrix.replica }}.json
 
-      - uses: actions/upload-artifact@v7
+      - name: Upload fixed native graph replica
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: code-graph-benchmarks-${{ runner.os }}-${{ runner.arch }}-replica-${{ matrix.replica }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -288,6 +289,9 @@ jobs:
     if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
 
     steps:
       - uses: actions/checkout@v7
@@ -301,9 +305,18 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: Select artifacts from successful replica executions
+        id: windows-replica-artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun tools/ci/select-windows-replica-artifacts.ts
+
       - uses: actions/download-artifact@v8
         with:
-          pattern: code-graph-benchmarks-Windows-X64-replica-*-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-ids: ${{ steps.windows-replica-artifacts.outputs.artifact-ids }}
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          digest-mismatch: error
           path: artifacts/windows-replicas
           merge-multiple: true
 
@@ -319,7 +332,9 @@ jobs:
         if: always()
         with:
           name: code-graph-windows-replica-gate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/code-graph-windows-replica-gate-*.json
+          path: |
+            artifacts/code-graph-windows-replica-gate-*.json
+            artifacts/windows-replica-selection.json
           if-no-files-found: error
           retention-days: 90
 
