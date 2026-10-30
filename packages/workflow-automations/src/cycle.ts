@@ -59,7 +59,7 @@ const phaseSchema = Schema.Struct({
   definitionHash: digest,
   title: text(256),
   dependsOn: refs,
-  allowedPaths: Schema.Array(text()).check(Schema.isBetweenLength(1, 128)),
+  allowedPaths: Schema.Array(text()).check(Schema.isMaxLength(128)),
   acceptanceCriteria: Schema.Array(text()).check(Schema.isBetweenLength(1, 128)),
   safeToMergeReason: text(),
   branch: text(256),

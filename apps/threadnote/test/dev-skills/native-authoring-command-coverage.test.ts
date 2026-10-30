@@ -4,6 +4,7 @@ import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
+import {decodeNativeCyclePlan} from '@threadnote/workflow-automations/cycle';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {isJsonObject} from '@threadnote/platform/json';
 import * as EffectString from 'effect/String';
@@ -66,6 +67,58 @@ const plan = (objective = 'Preserve a small native draft across exact reads.') =
   if (document.kind !== 'plan') throw new Error('Expected a native plan');
   return document;
 };
+
+it.effect('exports a ready no-code phase to a decodable zero-write cycle plan', () =>
+  Effect.gen(function* () {
+    const f = yield* nativeFixture();
+    yield* f.init();
+    const original = plan();
+    const document = {
+      ...original,
+      phases: EffectArray.map(original.phases, phase => ({...phase, affectedPaths: [], newPaths: []})),
+      decisions: [
+        {
+          id: 'zero-write',
+          question: 'Which paths may the verification phase change?',
+          selection: 'retain',
+          selected: 'Keep both path lists empty.',
+          alternatives: [],
+          rationale: 'This phase only verifies saved data and has no source write authority.',
+          affectedPhases: ['read'],
+          authority: 'orchestrator',
+        } as const,
+      ],
+    };
+    const saved = object(
+      object(yield* f.call({...f.base('authoring'), command: 'save', document, ready: true, expectedRevision: null}))
+        .authoring,
+    );
+    expect(saved).toMatchObject({readiness: 'ready', readinessBlockers: []});
+    const exported = object(
+      object(
+        yield* f.call({
+          ...f.base('authoring'),
+          command: 'export-dev-cycle',
+          uri: object(saved.root).uri,
+          delivery: 'local',
+          bindings: {read: {branch: 'feature/read', baseBranch: 'main'}},
+        }),
+      ).authoring,
+    );
+    const before = JSON.stringify(exported);
+    const decoded = decodeNativeCyclePlan(JSON.parse(before));
+    expect(decoded).toEqual(exported);
+    expect(decoded.phases[0]).toMatchObject({
+      allowedPaths: [],
+      acceptanceCriteria: [document.phases[0].acceptance[0].criterion],
+      acceptanceRefs: [{requirements: ['req-read']}],
+      branch: 'feature/read',
+      baseBranch: 'main',
+    });
+    expect(decoded.source).toMatchObject({root: saved.root, documentHash: saved.documentHash});
+    expect(JSON.stringify(exported)).toBe(before);
+  }).pipe(TestClock.withLive, provideNative),
+);
 
 it.effect('dispatches source-free authoring views, pins and exact recovery without rewriting saved bytes', () =>
   Effect.gen(function* () {
