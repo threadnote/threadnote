@@ -480,7 +480,12 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       package: '',
       name: 'windows_smoke_inputs',
       kind: 'library',
-      entries: windowsSmokeEntries,
+      entries: [
+        ...windowsSmokeEntries,
+        'tools/ci/windows-smoke.config.ts',
+        'apps/threadnote/test/dev-skills/native-closeout-lifecycle.test.ts',
+        'apps/threadnote/test/dev-skills/native-cycle-lifecycle.test.ts',
+      ],
       data: ['package.json', 'vitest.config.ts'],
     },
     {
@@ -920,7 +925,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
       kind: 'ci',
       lane: 'release_matrix',
       dependsOn: ['//:release_check', '//:threadnote_build', '//:release_smoke_inputs'],
-      inputs: ['.github/workflows/ci.yml'],
+      inputs: ['.github/workflows/ci.yml', '.github/workflows/native-release-smoke.yml'],
     },
   ];
 

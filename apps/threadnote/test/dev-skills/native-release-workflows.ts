@@ -33,6 +33,7 @@ import {
 } from './native-release-process.js';
 import * as EffectRecord from 'effect/Record';
 import * as Effect from 'effect';
+import {selectNativeReleaseProfiles} from './native-release-profiles.js';
 
 // JSON documents are native protocol fixtures; assertions below validate their readbacks.
 // oxlint-disable-next-line typescript/no-explicit-any -- Native JSON fixture fields are checked by the protocol and explicit readback assertions.
@@ -96,6 +97,7 @@ export async function runNativeWorkflows(
   binary: string,
   environment: NodeJS.ProcessEnv,
   generation: string,
+  selectedProfile = 'all',
 ) {
   root = canonical(root);
   binary = canonical(binary);
@@ -122,9 +124,11 @@ export async function runNativeWorkflows(
       ([name]) => name,
     ),
   ];
-  const results = EffectArray.map(profiles, profile =>
-    runProfile(join(root, profile), binary, environment, generation, profile),
-  );
+  const results = EffectArray.map(selectNativeReleaseProfiles(profiles, selectedProfile), profile => {
+    const started = performance.now();
+    const result = runProfile(join(root, profile), binary, environment, generation, profile);
+    return {...result, elapsedMs: Math.round(performance.now() - started)};
+  });
   const rejected = [];
   for (const [name, surface] of EffectRecord.toEntries(surfaces)) {
     if (surface.platforms.includes(process.platform)) continue;

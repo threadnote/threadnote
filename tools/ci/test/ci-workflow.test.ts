@@ -18,6 +18,7 @@ interface Step {
   readonly shell?: string;
   readonly 'timeout-minutes'?: number;
   readonly uses?: string;
+  readonly with?: Readonly<Record<string, unknown>>;
 }
 
 interface Job {
@@ -33,6 +34,7 @@ interface Job {
     readonly matrix?: string | {readonly shard?: readonly string[]};
   };
   readonly uses?: string;
+  readonly with?: Readonly<Record<string, unknown>>;
 }
 
 interface Workflow {
@@ -52,6 +54,7 @@ const StepSchema = Schema.Struct({
   shell: Schema.optionalKey(Schema.String),
   'timeout-minutes': Schema.optionalKey(Schema.Finite),
   uses: Schema.optionalKey(Schema.String),
+  with: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 });
 const JobSchema = Schema.Struct({
   name: Schema.optionalKey(Schema.String),
@@ -70,6 +73,7 @@ const JobSchema = Schema.Struct({
     }),
   ),
   uses: Schema.optionalKey(Schema.String),
+  with: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 });
 const WorkflowSchema = Schema.Struct({
   jobs: Schema.optionalKey(Schema.Record(Schema.String, JobSchema)),
@@ -85,6 +89,10 @@ const rawWorkflow: unknown = parse(readFileSync(workflowPath, 'utf8'));
 if (!Schema.is(WorkflowSchema)(rawWorkflow)) throw new Error('Invalid CI workflow.');
 const workflow: Workflow = rawWorkflow;
 const jobs = workflow.jobs ?? {};
+const releaseWorkflowPath = '.github/workflows/native-release-smoke.yml';
+const rawReleaseWorkflow: unknown = parse(readFileSync(releaseWorkflowPath, 'utf8'));
+if (!Schema.is(WorkflowSchema)(rawReleaseWorkflow)) throw new Error('Invalid native release workflow.');
+const releaseJobs = rawReleaseWorkflow.jobs ?? {};
 
 function step(job: Job | undefined, name: string): Step | undefined {
   return EffectOption.getOrUndefined(
@@ -144,6 +152,57 @@ it('routes platform and quality lanes from Bazel outputs', () => {
   expect(jobs['windows-smoke']?.if).toBe("needs.bazel-plan.outputs.windows_smoke == 'true'");
   expect(jobs['standalone-targets']?.if).toBe("needs.bazel-plan.outputs.compile_targets == 'true'");
   expect(jobs['self-contained-distribution']?.if).toBe("needs.bazel-plan.outputs.release_matrix == 'true'");
+});
+
+it('builds each native release once and fans its archive out to independent required consumers', () => {
+  expect(jobs['self-contained-distribution']?.uses).toBe('./.github/workflows/native-release-smoke.yml');
+  expect(jobs['self-contained-distribution']?.with).toEqual({
+    runner: '${{ matrix.os }}',
+    target: '${{ matrix.target }}',
+  });
+  const builds = EffectArray.filter(
+    EffectArray.flatMap(EffectRecord.values(releaseJobs), job => job.steps ?? []),
+    candidate => candidate.run === 'bun run build',
+  );
+  expect(builds).toHaveLength(1);
+  expect(step(releaseJobs.build, 'Self-contained native smoke')?.run).toBe('bun scripts/smoke-self-contained.ts');
+  expect(step(releaseJobs.build, 'Archive the native release')?.env).toEqual({
+    THREADNOTE_RELEASE_TARGET: '${{ inputs.target }}',
+  });
+  for (const name of ['installed-e2e', 'extracted-workflows']) {
+    const consumer = releaseJobs[name];
+    expect(consumer?.needs).toBe('build');
+    expect(consumer?.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          uses: 'actions/download-artifact@v8',
+          with: {
+            name: 'native-release-${{ inputs.target }}',
+            path: 'artifacts',
+          },
+        }),
+      ]),
+    );
+    expect(step(consumer, 'Restore the verified native payload')?.run).toContain(
+      'tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist',
+    );
+    expect(
+      EffectArray.some(consumer?.steps ?? [], candidate =>
+        /bun run (?:build|test:e2e:local-bins|test:smoke:self-contained)/u.test(candidate.run ?? ''),
+      ),
+    ).toBe(false);
+  }
+  expect(step(releaseJobs['installed-e2e'], 'Installed release E2E')?.run).toContain('--config vitest.e2e.config.ts');
+  expect(step(releaseJobs['installed-e2e'], 'Real predecessor upgrade and model setup admission')?.if).toBe(
+    "inputs.runner == 'macos-15'",
+  );
+  expect(step(releaseJobs['extracted-workflows'], 'Extracted release and installed workflow lifecycle')?.env).toEqual({
+    THREADNOTE_RELEASE_ARCHIVE: 'artifacts/threadnote-${{ inputs.target }}.tar.gz',
+    THREADNOTE_RELEASE_PROFILE: '${{ matrix.profile }}',
+  });
+  expect(step(releaseJobs['extracted-workflows'], 'Workflow journal persistence smoke')?.if).toBe(
+    "matrix.profile == 'all' || matrix.profile == 'desktop'",
+  );
 });
 
 it('keeps the stable aggregate check and requires the planner plus every selected shard', () => {
@@ -230,11 +289,11 @@ it('requires compile and release results independently for every lane-selection 
   }
 });
 
-it('partitions the complete serialized Windows inventory with two native shards and its job limit', () => {
+it('partitions the complete serialized Windows inventory with four balanced shards and its job limit', () => {
   const windows = jobs['windows-smoke'];
   expect(windows?.name).toBe('Bun unit smoke · Windows · ${{ matrix.shard }}');
   expect(windows?.['timeout-minutes']).toBe(60);
-  expect(windows?.strategy).toEqual({'fail-fast': false, matrix: {shard: ['1/2', '2/2']}});
+  expect(windows?.strategy).toEqual({'fail-fast': false, matrix: {shard: ['1/4', '2/4', '3/4', '4/4']}});
   const steps = windows?.steps;
   const runs = steps
     ? EffectArray.filter(
@@ -269,6 +328,10 @@ it('partitions the complete serialized Windows inventory with two native shards 
     '--shard=${{',
     'matrix.shard',
     '}}',
+    '--config=tools/ci/windows-smoke.config.ts',
+    '--reporter=default',
+    '--reporter=json',
+    '--outputFile=.context/windows-smoke/results.json',
     'apps/threadnote/test/unit/windows-support.test.ts',
     'apps/threadnote/test/unit/command-shim.test.ts',
     'apps/threadnote/test/unit/effect-command.test.ts',
@@ -288,13 +351,13 @@ it('runs the original graph repair smoke exactly once without sharding or changi
   const quarantine = step(jobs['windows-smoke'], 'Graph repair quarantine smoke');
   expect(quarantine).toEqual({
     name: 'Graph repair quarantine smoke',
-    if: "matrix.shard == '1/2'",
+    if: "matrix.shard == '1/4'",
     run: 'bun --bun vitest run apps/threadnote/test/unit/code-graph.maintenance-bounded.test.ts -t "removes a database-less orphan spool"',
   });
   const matrix = jobs['windows-smoke']?.strategy?.matrix;
   const shards = typeof matrix === 'object' ? matrix.shard : undefined;
   expect(
-    shards ? EffectArray.filter(shards, (shard, index) => index in shards && shard === '1/2') : undefined,
+    shards ? EffectArray.filter(shards, (shard, index) => index in shards && shard === '1/4') : undefined,
   ).toHaveLength(1);
 });
 
@@ -326,10 +389,10 @@ it.each(['success', 'failure', 'cancelled', 'skipped'])(
 
 const prerequisite = step(jobs['bazel-shards'], 'Install workflow inspection prerequisite');
 
-it.each(['windows-smoke', 'self-contained-distribution'])(
+it.each(['windows-smoke', 'build', 'installed-e2e', 'extracted-workflows'])(
   'admits %s through the verified Windows prerequisite',
   name => {
-    const job = jobs[name];
+    const job = name === 'windows-smoke' ? jobs[name] : releaseJobs[name];
     const setup = step(
       job,
       name === 'windows-smoke' ? 'Install workflow inspection prerequisite' : 'Windows workflow prerequisites',
@@ -353,7 +416,7 @@ it.each(['windows-smoke', 'self-contained-distribution'])(
       ),
     );
     expect(job?.['timeout-minutes']).toBe(name === 'windows-smoke' ? 60 : 45);
-    expect(job?.strategy?.['fail-fast']).toBe(false);
+    if (job?.strategy) expect(job.strategy['fail-fast']).toBe(false);
   },
 );
 

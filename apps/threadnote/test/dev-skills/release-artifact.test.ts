@@ -46,6 +46,7 @@ it.skipIf(!archive)(
           resolve(process.env.THREADNOTE_RELEASE_REPORT ?? '.context/release-artifact/result.json'),
           '--tools',
           tools,
+          ...(process.env.THREADNOTE_RELEASE_PROFILE ? ['--profile', process.env.THREADNOTE_RELEASE_PROFILE] : []),
           ...(process.platform === 'win32' ? ['--functional-only'] : []),
         ],
         {encoding: 'utf8', timeout: 1_850_000},

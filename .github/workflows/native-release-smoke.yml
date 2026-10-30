@@ -1,0 +1,198 @@
+name: Native release smoke
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.4.4
+
+jobs:
+  build:
+    name: Build native payload
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Linux workflow prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: macOS workflow prerequisites
+        if: runner.os == 'macOS'
+        run: command -v rg || brew install ripgrep
+      - name: Windows workflow prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: bun tools/ci/windows-workflow-prerequisites.ts
+      - run: bun run check:self-contained
+      - name: Platform process identity smoke
+        run: bun --bun vitest run apps/threadnote/test/unit/effect-system.test.ts
+      - name: Native workflow foundation smoke
+        run: >-
+          bun --bun vitest run
+          packages/workflow-automations/test/inventory.test.ts
+          packages/workflow-automations/test/baseline.test.ts
+      - name: Build native payload
+        run: bun run build
+      - name: Self-contained native smoke
+        run: bun scripts/smoke-self-contained.ts
+      - name: Archive the native release
+        run: bun run archive:release
+        env:
+          THREADNOTE_RELEASE_TARGET: ${{ inputs.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-release-${{ inputs.target }}
+          path: artifacts/threadnote-${{ inputs.target }}.tar.gz*
+          if-no-files-found: error
+
+  installed-e2e:
+    name: Installed release E2E
+    needs: build
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Linux workflow prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: macOS workflow prerequisites
+        if: runner.os == 'macOS'
+        run: command -v rg || brew install ripgrep
+      - name: Windows workflow prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: bun tools/ci/windows-workflow-prerequisites.ts
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-release-${{ inputs.target }}
+          path: artifacts
+      - name: Restore the verified native payload
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist
+      - name: Real predecessor upgrade and model setup admission
+        if: inputs.runner == 'macos-15'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          THREADNOTE_QUALIFY_OLD_UPGRADE: ephemeral-macos-real-predecessor
+          THREADNOTE_UPGRADE_RECEIPT_DIR: ${{ runner.temp }}/threadnote-upgrade-receipts
+        run: |
+          test "$THREADNOTE_QUALIFY_OLD_UPGRADE" = ephemeral-macos-real-predecessor
+          predecessor_root="$(mktemp -d "$RUNNER_TEMP/threadnote-beta4.XXXXXX")"
+          chmod 700 "$predecessor_root"
+          mkdir -p "$THREADNOTE_UPGRADE_RECEIPT_DIR"
+          gh api repos/threadnote/threadnote/releases/tags/v5.3.0-beta.4 > "$THREADNOTE_UPGRADE_RECEIPT_DIR/predecessor-release-api.json"
+          jq -e '.immutable == true and .draft == false and .tag_name == "v5.3.0-beta.4"' "$THREADNOTE_UPGRADE_RECEIPT_DIR/predecessor-release-api.json"
+          gh release download v5.3.0-beta.4 --repo threadnote/threadnote --pattern threadnote-darwin-arm64.tar.gz --dir "$predecessor_root"
+          THREADNOTE_OLD_RELEASE_ARCHIVE="$predecessor_root/threadnote-darwin-arm64.tar.gz" \
+          THREADNOTE_OLD_RELEASE_METADATA="$THREADNOTE_UPGRADE_RECEIPT_DIR/predecessor-release-api.json" \
+            bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/model-setup-upgrade.e2e.ts
+      - name: Preserve predecessor upgrade receipts
+        if: always() && inputs.runner == 'macos-15'
+        uses: actions/upload-artifact@v7
+        with:
+          name: model-setup-predecessor-upgrade
+          path: ${{ runner.temp }}/threadnote-upgrade-receipts
+          if-no-files-found: error
+      - name: Installed release E2E
+        run: >-
+          bun --bun vitest run --config vitest.e2e.config.ts
+          --reporter=default --reporter=json --outputFile=.context/installed-e2e/results.json
+      - name: Preserve installed E2E timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: installed-e2e-${{ inputs.target }}
+          path: .context/installed-e2e/
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  extracted-workflows:
+    name: Extracted workflows · ${{ matrix.profile }}
+    needs: build
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(inputs.runner == 'macos-15-intel' && '["desktop","codex-cloud-personal","cursor-cloud-personal"]' || '["all"]') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Linux workflow prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: macOS workflow prerequisites
+        if: runner.os == 'macOS'
+        run: command -v rg || brew install ripgrep
+      - name: Windows workflow prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: bun tools/ci/windows-workflow-prerequisites.ts
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-release-${{ inputs.target }}
+          path: artifacts
+      - name: Restore the verified native payload
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -xzf artifacts/threadnote-${{ inputs.target }}.tar.gz -C dist
+      - name: Extracted release and installed workflow lifecycle
+        run: >-
+          bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts
+          --reporter=default --reporter=json --outputFile=.context/release-artifact/timings.json
+        env:
+          THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ inputs.target }}.tar.gz
+          THREADNOTE_RELEASE_PROFILE: ${{ matrix.profile }}
+      - name: Workflow journal persistence smoke
+        if: matrix.profile == 'all' || matrix.profile == 'desktop'
+        run: bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts
+      - name: Preserve bounded release evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-skills-release-${{ inputs.target }}-${{ matrix.profile }}
+          path: .context/release-artifact/
+          include-hidden-files: true
+          if-no-files-found: ignore
