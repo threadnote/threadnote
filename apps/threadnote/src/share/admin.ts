@@ -41,9 +41,7 @@ import {
   assertSafeShareRelativePath,
   assertShareTeamWritable,
   assertWorktreeUsable,
-  ensureSharedDirectoryChain,
   ensureSharedGitignore,
-  ingestSingleFile,
   isInTeamNamespace,
   mkdir,
   normalizeTeamName,
@@ -70,13 +68,13 @@ import {
   teamWorktreePath,
   teamsFilePath,
   walkMemoryFiles,
-  workfileToResourceUri,
   writeFile,
   writeMemoryFile,
   writeTeamsFile,
 } from './core.js';
 
 import {gitOutput, publishShareGitChange} from './git.js';
+import {ingestSharedWorktree} from './sync.js';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -148,7 +146,7 @@ export const runShareInit = Effect.fn('share.runShareInit')(function* (
     if (shareTeamAccess(newConfig) === 'read-write') {
       yield* ensureSharedGitignore(worktree, git, options.push !== false);
     }
-    const ingested = yield* ingestWorktreeFiles(config, newConfig, 'create');
+    const ingested = yield* ingestSharedWorktree(config, newConfig);
     yield* Console.log(`Ingested ${ingested} shared file(s) into native canonical store.`);
   }
 });
@@ -244,7 +242,7 @@ export const recoverShareInit = Effect.fn('share.recoverShareInit')(function* (
     version: TEAMS_FILE_VERSION,
   });
   yield* ensureSharedGitignore(worktree, git, options.push !== false);
-  const ingested = yield* ingestWorktreeFiles(config, newConfig, 'create');
+  const ingested = yield* ingestSharedWorktree(config, newConfig);
   yield* Console.log(`Recovered shared team "${teamName}" and ingested ${ingested} shared file(s).`);
   return true;
 });
@@ -582,7 +580,7 @@ export const runShareRename = Effect.fn('share.runShareRename')(function* (
   const ov = NATIVE_RESOURCE_BACKEND;
   const oldSharedRoot = `threadnote://user/${uriSegment(config.user)}/memories/${SHARED_SEGMENT}/${oldTeam.name}`;
   yield* Console.log(`Renamed shared team "${oldTeam.name}" -> "${newName}".`);
-  const ingestResult = yield* Effect.result(ingestWorktreeFiles(config, updatedTeam, 'replace'));
+  const ingestResult = yield* Effect.result(ingestSharedWorktree(config, updatedTeam));
   if (Result.isFailure(ingestResult)) {
     yield* Console.warn(
       `The rename is committed, but shared-context reindex did not complete. The old namespace was retained. Retry: threadnote share sync --team ${newName}`,
@@ -794,19 +792,4 @@ const ensurePersonalDirectoryChain = Effect.fn('share.ensurePersonalDirectoryCha
     const uri = `${prefix}${EffectArray.join(parts.slice(0, index), '/')}`;
     yield* store.makeDirectory(resourceStoreLocation(config), uri);
   }
-});
-
-const ingestWorktreeFiles = Effect.fn('share.ingestWorktreeFiles')(function* (
-  config: ShareRuntime,
-  team: ShareTeamConfig,
-  initialMode: 'create' | 'replace',
-) {
-  const ov = NATIVE_RESOURCE_BACKEND;
-  const files = yield* walkMemoryFiles(team.worktree);
-  for (const file of files) {
-    const uri = yield* workfileToResourceUri(config, team, file);
-    yield* ensureSharedDirectoryChain(config, ov, uri, false);
-    yield* ingestSingleFile(ov, config, uri, file, initialMode);
-  }
-  return files.length;
 });

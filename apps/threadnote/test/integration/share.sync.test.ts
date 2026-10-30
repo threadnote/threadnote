@@ -928,25 +928,192 @@ describe('share sync git handling', () => {
     await expect(readFile(pendingPath, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
   });
 
-  it('does not ingest shared agent artifacts as memory conflicts', async () => {
-    const {config, home, root, seed} = await makeShareRepo();
-    const {store} = await nativeStoreFixture(root);
-    const relativePath = 'agent-artifacts/skills/codex/reviewer/SKILL.md';
-    const uri = 'threadnote://user/denys/memories/shared/default/agent-artifacts/skills/codex/reviewer/SKILL.md';
-    await mkdir(dirname(join(seed, relativePath)), {recursive: true});
-    await writeFile(join(seed, relativePath), '# Reviewer\n\nReview pull requests.\n', 'utf8');
-    await git(['add', relativePath], seed);
-    await git(['commit', '-m', 'add shared skill'], seed);
-    await git(['push', 'origin', 'main'], seed);
+  effectIt.effect('syncs artifact additions, edits, blank text and removals without memory conflicts', () =>
+    Effect.gen(function* () {
+      const {config, home, seed} = yield* Effect.promise(makeShareRepo);
+      const relativePath = 'agent-artifacts/skills/claude/coda-pr-review/SKILL.md';
+      const uri = 'threadnote://user/denys/memories/shared/default/' + relativePath;
+      const content = '# Reviewer\n\nUse /tmp/pr<N>.patch.\n';
+      yield* Effect.promise(async () => {
+        await mkdir(dirname(join(seed, relativePath)), {recursive: true});
+        await writeFile(join(seed, relativePath), content, 'utf8');
+        await git(['add', relativePath], seed);
+        await git(['commit', '-m', 'add shared skill'], seed);
+        await git(['push', 'origin', 'main'], seed);
+      });
 
-    await runShareSync(config, {push: false});
+      yield* runShareSyncEffect(config, {push: false});
 
-    await expect(readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8')).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
-    await expect(readFile(canonicalResourceFile(store, uri), 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
-    await expect(runEffect(listShareConflicts(config, {team: 'default'}))).resolves.toEqual([]);
-  });
+      expect(yield* Effect.promise(() => readFile(canonicalResourceFile(home, uri), 'utf8'))).toBe(content);
+      for (const updated of [
+        'MEMORY\nkind: durable\nmemory_id: tn_skill_example\n\n/tmp/pr<N>.patch\n',
+        ' \r\n \t\n',
+        '# Edited reviewer\n\nUse /tmp/review.patch.\n',
+      ]) {
+        yield* Effect.promise(async () => {
+          await writeFile(join(seed, relativePath), updated, 'utf8');
+          await git(['add', relativePath], seed);
+          await git(['commit', '-m', 'edit shared skill'], seed);
+          await git(['push', 'origin', 'main'], seed);
+        });
+        yield* runShareSyncEffect(config, {push: false});
+        expect(yield* Effect.promise(() => readFile(canonicalResourceFile(home, uri), 'utf8'))).toBe(updated);
+      }
+      yield* Effect.promise(async () => {
+        await git(['rm', relativePath], seed);
+        await git(['commit', '-m', 'remove shared skill'], seed);
+        await git(['push', 'origin', 'main'], seed);
+      });
+      yield* runShareSyncEffect(config, {push: false});
+      yield* Effect.promise(() =>
+        expect(readFile(canonicalResourceFile(home, uri), 'utf8')).rejects.toMatchObject({code: 'ENOENT'}),
+      );
+      expect(yield* listShareConflicts(config, {team: 'default'})).toEqual([]);
+      yield* Effect.promise(() =>
+        expect(readFile(join(home, 'share', 'auto-sync-pending-reindexes.json'), 'utf8')).rejects.toMatchObject({
+          code: 'ENOENT',
+        }),
+      );
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('isolates reconciliation failures so upstream edits remain retryable', () =>
+    Effect.gen(function* () {
+      const {config, home, seed} = yield* Effect.promise(makeShareRepo);
+      const good = 'agent-artifacts/skills/claude/reviewer/SKILL.md';
+      const bad = 'agent-artifacts/skills/claude/reviewer/bad?.md';
+      const target = canonicalResourceFile(home, 'threadnote://user/denys/memories/shared/default/' + good);
+      yield* Effect.promise(async () => {
+        await mkdir(dirname(join(seed, good)), {recursive: true});
+        await writeFile(join(seed, good), '# Original reviewer\n', 'utf8');
+        await git(['add', '.'], seed);
+        await git(['commit', '-m', 'seed reviewer'], seed);
+        await git(['push', 'origin', 'main'], seed);
+      });
+      yield* runShareSyncEffect(config, {push: false});
+      yield* Effect.promise(async () => {
+        await writeFile(join(seed, good), '# Updated reviewer\n', 'utf8');
+        await writeFile(join(seed, bad), '# Unsupported resource name\n', 'utf8');
+        await git(['add', '.'], seed);
+        await git(['commit', '-m', 'update reviewer with invalid companion URI'], seed);
+        await git(['push', 'origin', 'main'], seed);
+      });
+      yield* runShareSyncEffect(config, {push: false});
+      expect(yield* Effect.promise(() => readFile(target, 'utf8'))).toBe('# Updated reviewer\n');
+      const pending = join(home, 'share', 'auto-sync-pending-reindexes.json');
+      expect(yield* Effect.promise(() => readFile(pending, 'utf8'))).toContain(bad);
+      clearAutoShareStateForTest();
+      yield* runShareSyncEffect(config, {push: false});
+      expect(yield* Effect.promise(() => readFile(target, 'utf8'))).toBe('# Updated reviewer\n');
+      expect(yield* Effect.promise(() => readFile(pending, 'utf8'))).toContain(bad);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('initializes a read-only cloud share containing skill examples and following durable notes', () =>
+    Effect.gen(function* () {
+      const {config, root, remote, seed} = yield* Effect.promise(makeShareRepo);
+      const skill = 'agent-artifacts/skills/claude/coda-pr-review/SKILL.md';
+      const memory = 'durable/projects/test/admin-ui.md';
+      const skillContent = '# Review\n\nUse /tmp/pr<N>.patch and /home/agent/work.\n';
+      yield* Effect.promise(async () => {
+        for (const [relativePath, content] of [
+          [skill, skillContent],
+          [memory, 'MEMORY\nkind: durable\nstatus: active\n\nAdmin import notes.\n'],
+        ]) {
+          await mkdir(dirname(join(seed, relativePath)), {recursive: true});
+          await writeFile(join(seed, relativePath), content, 'utf8');
+        }
+        await git(['add', '.'], seed);
+        await git(['commit', '-m', 'seed cloud share'], seed);
+        await git(['push', 'origin', 'main'], seed);
+      });
+      const subscriber = {...config, agentContextHome: join(root, 'cloud-home')};
+      yield* runShareInitEffect(subscriber, remote, {push: false, readOnly: true, team: 'docs-connections'});
+      const uri = (relativePath: string) => 'threadnote://user/denys/memories/shared/docs-connections/' + relativePath;
+      expect(
+        yield* Effect.promise(() => readFile(canonicalResourceFile(subscriber.agentContextHome, uri(skill)), 'utf8')),
+      ).toBe(skillContent);
+      expect(
+        yield* Effect.promise(() => readFile(canonicalResourceFile(subscriber.agentContextHome, uri(memory)), 'utf8')),
+      ).toContain('Admin import notes.');
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('repairs an old partial import without upstream changes and leaves it stable on repeat sync', () =>
+    Effect.gen(function* () {
+      const {config, home, seed, worktree} = yield* Effect.promise(makeShareRepo);
+      const skill = 'agent-artifacts/skills/claude/coda-pr-review/SKILL.md';
+      const memory = 'durable/projects/test/admin-ui.md';
+      const uri = (relativePath: string) => 'threadnote://user/denys/memories/shared/default/' + relativePath;
+      yield* Effect.promise(async () => {
+        for (const [relativePath, content] of [
+          [skill, '# Review\n\nUse /tmp/pr<N>.patch.\n'],
+          [memory, 'MEMORY\nkind: durable\nstatus: active\n\nPreviously omitted note.\n'],
+        ]) {
+          await mkdir(dirname(join(seed, relativePath)), {recursive: true});
+          await writeFile(join(seed, relativePath), content, 'utf8');
+        }
+        await git(['add', '.'], seed);
+        await git(['commit', '-m', 'seed legacy partial import'], seed);
+        await git(['push', 'origin', 'main'], seed);
+        await git(['pull', '--ff-only'], worktree);
+        await mkdir(dirname(canonicalResourceFile(home, uri(skill))), {recursive: true});
+      });
+      const fs = yield* FileSystem.FileSystem;
+      const teamsPath = join(home, 'share', 'teams.json');
+      const teams = decodeShareTeamsFile(yield* fs.readFileString(teamsPath));
+      yield* fs.writeFileString(
+        teamsPath,
+        JSON.stringify({
+          ...teams,
+          teams: {...teams.teams, default: {...teams.teams.default, access: 'read-only'}},
+        }),
+      );
+      const head = yield* Effect.promise(() => gitOutput(['rev-parse', 'HEAD'], worktree));
+      yield* runShareSyncEffect(config, {push: false});
+      const skillContent = yield* Effect.promise(() => readFile(canonicalResourceFile(home, uri(skill)), 'utf8'));
+      const memoryContent = yield* Effect.promise(() => readFile(canonicalResourceFile(home, uri(memory)), 'utf8'));
+      expect(skillContent).toBe('# Review\n\nUse /tmp/pr<N>.patch.\n');
+      expect(memoryContent).toContain('Previously omitted note.');
+      const before = yield* fs.stat(canonicalResourceFile(home, uri(memory)));
+      yield* runShareSyncEffect(config, {push: false});
+      expect(yield* fs.stat(canonicalResourceFile(home, uri(memory)))).toEqual(before);
+      expect(yield* Effect.promise(() => gitOutput(['rev-parse', 'HEAD'], worktree))).toBe(head);
+      expect(yield* Effect.promise(() => readFile(canonicalResourceFile(home, uri(skill)), 'utf8'))).toBe(skillContent);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('persists initial import failures while continuing later valid files', () =>
+    Effect.gen(function* () {
+      const {config, root, seed, remote} = yield* Effect.promise(makeShareRepo);
+      const bad = 'durable/projects/test/a-blocked.md';
+      const good = 'durable/projects/test/z-valid.md';
+      yield* Effect.promise(async () => {
+        for (const [relativePath, content] of [
+          [bad, 'MEMORY\nkind: durable\nstatus: active\n\n/tmp/private-note.txt\n'],
+          [good, 'MEMORY\nkind: durable\nstatus: active\n\nValid later note.\n'],
+        ]) {
+          await mkdir(dirname(join(seed, relativePath)), {recursive: true});
+          await writeFile(join(seed, relativePath), content, 'utf8');
+        }
+        await git(['add', '.'], seed);
+        await git(['commit', '-m', 'seed mixed admission'], seed);
+        await git(['push', 'origin', 'main'], seed);
+      });
+      const subscriber = {...config, agentContextHome: join(root, 'partial-home')};
+      const error = yield* runShareInitEffect(subscriber, remote, {push: false, readOnly: true, team: 'default'}).pipe(
+        Effect.flip,
+      );
+      expect(String(error)).toContain('1 file(s) remain pending');
+      const target = canonicalResourceFile(
+        subscriber.agentContextHome,
+        'threadnote://user/denys/memories/shared/default/' + good,
+      );
+      expect(yield* Effect.promise(() => readFile(target, 'utf8'))).toContain('Valid later note.');
+      const pending = join(subscriber.agentContextHome, 'share', 'auto-sync-pending-reindexes.json');
+      expect(yield* Effect.promise(() => readFile(pending, 'utf8'))).toContain(bad);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
 
   it('replaces a divergent native canonical store resource when replaying a pending added reindex', async () => {
     const {config, home, root, seed, worktree} = await makeShareRepo();

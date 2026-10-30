@@ -1162,6 +1162,9 @@ const prepareSharedInboundContentEffect = Effect.fn('share.prepareSharedInboundC
 });
 
 function prepareSharedInboundContent(uri: string, rawContent: string): string {
+  // Agent artifacts are executable text, not memory documents. Match publication's
+  // byte-preserving policy before applying any memory-specific transformation.
+  if (isSharedArtifactUri(uri)) return rawContent;
   const canonical = canonicalMemoryDocumentContent(rawContent);
   const enrolled = declaresTopicMaintenanceHeader(canonical);
   const reviewed = declaresReviewedSupportHeader(canonical);
@@ -1207,6 +1210,12 @@ function prepareSharedInboundContent(uri: string, rawContent: string): string {
   return scrub.cleaned;
 }
 
+export function isSharedArtifactUri(uri: string): boolean {
+  return /^threadnote:\/\/user\/[^/]+\/memories\/shared\/[^/]+\/agent-artifacts\//.test(
+    canonicalResourceInput(uri) ?? '',
+  );
+}
+
 export const removeMemoryUri = Effect.fn('share.removeMemoryUri')(function* (
   config: ShareRuntime,
   _ov: string,
@@ -1247,6 +1256,7 @@ const resourceExistsStrict = Effect.fn('share.resourceExistsStrict')(function* (
   config: ShareRuntime,
   uri: string,
 ) {
+  yield* Effect.try({try: () => parseResourceId(uri), catch: shareOperationError});
   const store = yield* ResourceStore;
   return yield* store.stat(resourceStoreLocation(config), uri).pipe(
     Effect.as(true),
