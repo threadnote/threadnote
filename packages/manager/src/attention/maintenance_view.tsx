@@ -580,35 +580,6 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           ),
         )}
       </div>
-      <AutomaticMemoryPanel
-        onOpenMemory={props.onOpenLibrary}
-        key={props.project}
-        project={props.project}
-        onChanged={props.onChanged}
-        onReview={reviewId => {
-          automaticObservation.current = {
-            project: props.project,
-            reviewId,
-            cases: structuredClone(status?.cases ?? []),
-            report: structuredClone(report),
-          };
-        }}
-        onApplied={result => {
-          const observed = automaticObservation.current;
-          if (
-            !mounted.current ||
-            activeProject.current !== result.project ||
-            observed?.project !== result.project ||
-            observed.reviewId !== result.reviewId
-          )
-            return;
-          const receipts = automaticReviewMaintenanceReceipts(result, observed.cases, observed.report);
-          mutationEpoch.current += 1;
-          setAppliedCases(previous => [...previous, ...receipts]);
-          setRefresh(value => value + 1);
-        }}
-        onSummaryChange={(project, summary) => setAutomatic(summary ? {project, ...summary} : undefined)}
-      />
       <p role="status" aria-live="polite" className="workspace-note">
         <ShieldCheck />
         {maintenanceStatusLabel({
@@ -1213,6 +1184,35 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           </div>
         </section>
       ) : null}
+      <AutomaticMemoryPanel
+        onOpenMemory={props.onOpenLibrary}
+        key={props.project}
+        project={props.project}
+        onChanged={props.onChanged}
+        onReview={reviewId => {
+          automaticObservation.current = {
+            project: props.project,
+            reviewId,
+            cases: structuredClone(status?.cases ?? []),
+            report: structuredClone(report),
+          };
+        }}
+        onApplied={result => {
+          const observed = automaticObservation.current;
+          if (
+            !mounted.current ||
+            activeProject.current !== result.project ||
+            observed?.project !== result.project ||
+            observed.reviewId !== result.reviewId
+          )
+            return;
+          const receipts = automaticReviewMaintenanceReceipts(result, observed.cases, observed.report);
+          mutationEpoch.current += 1;
+          setAppliedCases(previous => [...previous, ...receipts]);
+          setRefresh(value => value + 1);
+        }}
+        onSummaryChange={(project, summary) => setAutomatic(summary ? {project, ...summary} : undefined)}
+      />
       {inspectedCase ? (
         <MaintenanceCaseDialog
           key={`case:${props.project}`}
