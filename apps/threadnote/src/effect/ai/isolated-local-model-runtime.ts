@@ -286,7 +286,10 @@ export function serveWorker(
         Effect.tryPromise({
           try: () => io.writeLine(JSON.stringify(response)),
           catch: cause =>
-            LocalModelWorkerServerError.make({cause, message: 'Could not write local model worker response.'}),
+            LocalModelWorkerServerError.make({
+              cause,
+              message: 'Could not write local model worker response.',
+            }),
         }),
       ),
     );
@@ -307,7 +310,10 @@ export function serveWorker(
       }
     });
   return Stream.fromAsyncIterable(io.input, cause =>
-    LocalModelWorkerServerError.make({cause, message: 'Could not read local model worker input.'}),
+    LocalModelWorkerServerError.make({
+      cause,
+      message: 'Could not read local model worker input.',
+    }),
   ).pipe(
     Stream.runForEach(consumeChunk),
     Effect.andThen(
@@ -972,7 +978,10 @@ function decodeEmbeddingContextPlanDiagnostics(
   if (
     !Predicate.isObject(value) ||
     !isEmbeddingContextCount(value.requestedContexts) ||
-    !isEmbeddingContextCount(value.effectiveContexts) ||
+    typeof value.effectiveContexts !== 'number' ||
+    !Number.isSafeInteger(value.effectiveContexts) ||
+    value.effectiveContexts < 1 ||
+    value.effectiveContexts > value.requestedContexts ||
     (value.modelGpuLayers !== undefined &&
       (typeof value.modelGpuLayers !== 'number' ||
         !Number.isSafeInteger(value.modelGpuLayers) ||
@@ -985,6 +994,9 @@ function decodeEmbeddingContextPlanDiagnostics(
   for (const threads of value.threadCounts) {
     if (typeof threads !== 'number' || !Number.isSafeInteger(threads) || threads <= 0) return Option.none();
     threadCounts.push(threads);
+  }
+  if (threadCounts.length !== value.effectiveContexts && (value.effectiveContexts !== 1 || threadCounts.length !== 0)) {
+    return Option.none();
   }
   return Option.some({
     effectiveContexts: value.effectiveContexts,

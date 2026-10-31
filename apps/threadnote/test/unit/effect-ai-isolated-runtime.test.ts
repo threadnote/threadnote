@@ -2,7 +2,7 @@ import {Array as EffectArray, Option as EffectOption} from 'effect';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {expect, it} from '@effect/vitest';
+import {expect, it as effectIt} from '@effect/vitest';
 import {Cause, Effect, Exit, Fiber, Layer, Schema} from 'effect';
 import {describe} from 'vitest';
 import {
@@ -33,7 +33,7 @@ const generationManifest = EffectOption.getOrUndefined(
 )!;
 
 describe('isolated local model runtime', () => {
-  it.effect('round-trips the effective native embedding context plan in diagnostics', () => {
+  effectIt.effect('round-trips the effective native embedding context plan in diagnostics', () => {
     const spawn: LocalModelWorkerSpawner = () => {
       const worker = new FakeWorkerProcess(request => {
         worker.respond(request, {
@@ -67,7 +67,58 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn)));
   });
 
-  it.effect('boots the standalone source worker when called from a Bun development script', () =>
+  effectIt.effect('round-trips three effective contexts under the existing requested cap', () => {
+    const expected = {
+      backend: 'metal',
+      buildType: 'prebuilt',
+      cpuMathCores: 3,
+      embeddingContextPlan: {
+        effectiveContexts: 3,
+        modelGpuLayers: 0,
+        requestedContexts: 8,
+        threadCounts: [1, 1, 1],
+      },
+    };
+    const spawn: LocalModelWorkerSpawner = () => {
+      const worker = new FakeWorkerProcess(request => worker.respond(request, expected));
+      return worker;
+    };
+    return Effect.gen(function* () {
+      const runtime = yield* LocalModelRuntime;
+      expect(yield* runtime.diagnostics).toEqual(expected);
+    }).pipe(provideTestLayer(runtimeLayer(spawn)));
+  });
+
+  for (const plan of [
+    {effectiveContexts: 3, requestedContexts: 3, threadCounts: [1, 1, 1]},
+    {effectiveContexts: 3, requestedContexts: 2, threadCounts: [1, 1, 1]},
+    {effectiveContexts: 3, requestedContexts: 8, threadCounts: [1, 1]},
+    {effectiveContexts: 3, requestedContexts: 8, threadCounts: []},
+    {effectiveContexts: 3, requestedContexts: 8, threadCounts: [1, 1, 0]},
+    {effectiveContexts: 0, requestedContexts: 8, threadCounts: []},
+    {effectiveContexts: 2.5, requestedContexts: 8, threadCounts: [1, 1]},
+    {effectiveContexts: 9, requestedContexts: 8, threadCounts: [1, 1, 1]},
+  ]) {
+    effectIt.effect(`rejects invalid effective context diagnostics ${JSON.stringify(plan)}`, () => {
+      const spawn: LocalModelWorkerSpawner = () => {
+        const worker = new FakeWorkerProcess(request =>
+          worker.respond(request, {
+            backend: 'metal',
+            buildType: 'prebuilt',
+            cpuMathCores: 3,
+            embeddingContextPlan: {...plan, modelGpuLayers: 0},
+          }),
+        );
+        return worker;
+      };
+      return Effect.gen(function* () {
+        const runtime = yield* LocalModelRuntime;
+        expect(Exit.isFailure(yield* Effect.exit(runtime.diagnostics))).toBe(true);
+      }).pipe(provideTestLayer(runtimeLayer(spawn)));
+    });
+  }
+
+  effectIt.effect('boots the standalone source worker when called from a Bun development script', () =>
     Effect.gen(function* () {
       const system = yield* SystemInfo;
       const options = localModelWorkerSpawnOptions({
@@ -96,7 +147,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(TestSystemInfoLayer)),
   );
 
-  it.effect('contains repeated fatal generation-child crashes as a typed failure', () => {
+  effectIt.effect('contains repeated fatal generation-child crashes as a typed failure', () => {
     const fatalWorker = fatalLocalModelWorkerHarness();
 
     return Effect.gen(function* () {
@@ -127,7 +178,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(fatalWorker.spawnWorker)));
   });
 
-  it.effect('kills a crash-banner worker, restarts it, and retries the current request once', () => {
+  effectIt.effect('kills a crash-banner worker, restarts it, and retries the current request once', () => {
     const processes: FakeWorkerProcess[] = [];
     const spawn: LocalModelWorkerSpawner = () => {
       const worker = new FakeWorkerProcess(request => {
@@ -160,7 +211,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn)));
   });
 
-  it.effect('retries one transient worker spawn failure', () => {
+  effectIt.effect('retries one transient worker spawn failure', () => {
     const processes: FakeWorkerProcess[] = [];
     let attempts = 0;
     const spawn: LocalModelWorkerSpawner = () => {
@@ -190,7 +241,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn)));
   });
 
-  it.effect(
+  effectIt.effect(
     'applies the deadline to each attempt, kills both hung workers, and returns a sanitized typed error',
     () => {
       const processes: FakeWorkerProcess[] = [];
@@ -221,7 +272,7 @@ describe('isolated local model runtime', () => {
     },
   );
 
-  it.effect('bounds a worker write whose pipe never settles', () => {
+  effectIt.effect('bounds a worker write whose pipe never settles', () => {
     const processes: FakeWorkerProcess[] = [];
     const spawn: LocalModelWorkerSpawner = () => {
       const worker = new FakeWorkerProcess(
@@ -247,7 +298,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn, 10)));
   });
 
-  it.effect('kills and retries a worker whose protocol line exceeds the response budget', () => {
+  effectIt.effect('kills and retries a worker whose protocol line exceeds the response budget', () => {
     const processes: FakeWorkerProcess[] = [];
     const spawn: LocalModelWorkerSpawner = () => {
       const worker = new FakeWorkerProcess(() => {
@@ -273,7 +324,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn, 1_000, 64)));
   });
 
-  it.effect('reuses one worker across embedding batches and subsequent calls', () => {
+  effectIt.effect('reuses one worker across embedding batches and subsequent calls', () => {
     const processes: FakeWorkerProcess[] = [];
     const spawn: LocalModelWorkerSpawner = (_options: LocalModelWorkerSpawnOptions) => {
       const worker = new FakeWorkerProcess(request => {
@@ -314,7 +365,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn)));
   });
 
-  it.effect('evicts an idle worker and lazily respawns exactly one worker for concurrent requests', () => {
+  effectIt.effect('evicts an idle worker and lazily respawns exactly one worker for concurrent requests', () => {
     const processes: FakeWorkerProcess[] = [];
     const spawn: LocalModelWorkerSpawner = () => {
       const generation = processes.length + 1;
@@ -358,7 +409,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn, 1_000, 1_024, 10)));
   });
 
-  it.effect('waits for idle eviction to release native resources before spawning a replacement', () => {
+  effectIt.effect('waits for idle eviction to release native resources before spawning a replacement', () => {
     const processes: FakeWorkerProcess[] = [];
     let releaseEviction = () => {};
     const evictionGate = new Promise<void>(resolve => {
@@ -406,7 +457,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn, 1_000, 1_024, 10)));
   });
 
-  it.effect('serializes concurrent operations through the persistent worker', () => {
+  effectIt.effect('serializes concurrent operations through the persistent worker', () => {
     const processes: FakeWorkerProcess[] = [];
     let active = 0;
     let maximumActive = 0;
@@ -444,7 +495,7 @@ describe('isolated local model runtime', () => {
     }).pipe(provideTestLayer(runtimeLayer(spawn)));
   });
 
-  it.effect('gracefully closes the persistent worker when its layer scope ends', () => {
+  effectIt.effect('gracefully closes the persistent worker when its layer scope ends', () => {
     const processes: FakeWorkerProcess[] = [];
     const spawn: LocalModelWorkerSpawner = () => {
       const worker = new FakeWorkerProcess(request => {
@@ -473,7 +524,7 @@ describe('isolated local model runtime', () => {
     });
   });
 
-  it.effect('contains a synchronous broken-pipe error while closing a worker', () => {
+  effectIt.effect('contains a synchronous broken-pipe error while closing a worker', () => {
     const processes: FakeWorkerProcess[] = [];
     const spawn: LocalModelWorkerSpawner = () => {
       const worker = new FakeWorkerProcess(
@@ -507,7 +558,7 @@ describe('isolated local model runtime', () => {
     });
   });
 
-  it.effect('serves JSON-lines failures as tags without exposing native errors or request payloads', () =>
+  effectIt.effect('serves JSON-lines failures as tags without exposing native errors or request payloads', () =>
     Effect.gen(function* () {
       const input = new AsyncFeed<string | Uint8Array>();
       const output: string[] = [];
@@ -529,7 +580,11 @@ describe('isolated local model runtime', () => {
 
       yield* serveWorker(
         LocalModelRuntime.of({
-          diagnostics: Effect.succeed({backend: 'fake', buildType: 'prebuilt', cpuMathCores: 4}),
+          diagnostics: Effect.succeed({
+            backend: 'fake',
+            buildType: 'prebuilt',
+            cpuMathCores: 4,
+          }),
           embedMany: request =>
             Effect.sync(() => expect(request.embeddingContextPoolSize).toBe(8)).pipe(
               Effect.andThen(
