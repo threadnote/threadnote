@@ -1,0 +1,1311 @@
+/* oxlint-disable effecttsgo/strict-effect-provide -- Focused filesystem and deterministic clock tests, without application services. */
+import {it as effectIt} from '@effect/vitest';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import * as EffectArray from 'effect/Array';
+import * as EffectRecord from 'effect/Record';
+import * as EffectString from 'effect/String';
+import {Cause, Deferred, Effect, Exit, Fiber, FileSystem, Option, Path, Queue, Schema, Scope, Stream} from 'effect';
+import {TestClock} from 'effect/testing';
+import {describe, expect, vi} from 'vitest';
+import * as fingerprints from '../../src/semantic/fingerprint.js';
+import {LspFault, makeLspClient, type LspWire} from '../../src/semantic/lsp_transport.js';
+import * as javaRuntime from '../../src/semantic/providers/java_runtime.js';
+import {
+  finishJavaPreparation,
+  javaRuntimeQualification,
+  makeJavaRuntime,
+  makeJavaWorkspace,
+  materializeJavaRuntimeConfiguration,
+  type JavaRuntimeCandidate,
+} from '../../src/semantic/providers/java_runtime.js';
+import {semanticSdkDigest, semanticTreeDigest} from '../../src/semantic/fingerprint.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  JavaPreparedModel,
+  JavaPreparedObservation,
+  copyJavaPreparationInputs,
+  consumeJavaPreparationConnection,
+  javaPreparedModelCommand,
+  javaPreparedModelJson,
+  observeJavaPreparedImport,
+  sealJavaPreparedModel,
+  verifyJavaPreparationInputs,
+} from '../../src/semantic/providers/java_preparation.js';
+
+const candidate = (): JavaRuntimeCandidate => ({
+  serverDirectory: '/host/jdtls',
+  serverTreeDigest: javaRuntimeQualification.serverTreeDigest,
+  runtimeJavaHome: '/host/jdk25',
+  runtimeSdkDigest: javaRuntimeQualification.runtimeSdkDigest,
+  projectJavaHome: '/host/jdk21',
+  projectSdkDigest: javaRuntimeQualification.projectSdkDigest,
+});
+const macEffect = process.platform === 'darwin' && process.arch === 'arm64' ? effectIt.effect : effectIt.effect.skip;
+
+const modelFixture = Effect.fn('test.javaPreparedModelFixture')(function* (
+  control: {
+    readonly deferImport?: boolean;
+    readonly failure?: 'initialize' | 'status' | 'token' | 'missing-ready' | 'late-status';
+    readonly changeSecondModel?: boolean;
+    readonly afterSecondModel?: Effect.Effect<void>;
+    readonly hostVerify?: Effect.Effect<void, LspFault>;
+    readonly observerGate?: {readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void>};
+  } = {},
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-seal-'}));
+  const project = path.join(parent, 'original');
+  const artifactDirectory = path.join(parent, 'artifacts');
+  const javaHome = path.join(parent, 'jdk');
+  for (const directory of [project, artifactDirectory, javaHome]) yield* fs.makeDirectory(directory, {mode: 0o700});
+  const uri = (file: string) => path.toFileUrl(file).pipe(Effect.map(url => url.href));
+  for (const root of [project]) {
+    yield* fs.makeDirectory(path.join(root, 'src/main/java'), {recursive: true});
+    yield* fs.writeFileString(path.join(root, 'src/main/java/Main.java'), 'class Main {}\n');
+  }
+  yield* fs.writeFileString(path.join(project, 'pom.xml'), '<project>captured build configuration</project>');
+  for (const relative of ['settings.gradle', 'build.gradle', 'gradle.properties', '.mvn/maven.config', '.project']) {
+    yield* fs.makeDirectory(path.dirname(path.join(project, relative)), {recursive: true});
+    yield* fs.writeFileString(path.join(project, relative), 'captured input: ' + relative);
+  }
+  const workspace = yield* makeJavaWorkspace(parent);
+  const inputs = yield* copyJavaPreparationInputs({project, worktree: project, workspace, build: 'maven'});
+  const copiedProject = inputs.copiedProject;
+  const runtimeDirectory = path.join(workspace.directory, 'jdt-fixture');
+  yield* fs.makeDirectory(runtimeDirectory, {mode: 0o700});
+  yield* fs.makeDirectory(path.join(javaHome, 'lib'));
+  const jrt = path.join(javaHome, 'lib/jrt-fs.jar');
+  yield* fs.writeFileString(jrt, 'synthetic SDK artifact');
+  yield* fs.makeDirectory(path.join(runtimeDirectory, 'm2'), {mode: 0o700});
+  const jar = path.join(runtimeDirectory, 'm2/library.jar');
+  const jarText = 'synthetic pinned library';
+  yield* fs.writeFileString(jar, jarText);
+  const common = {
+    exported: false,
+    combineAccessRules: false,
+    inclusions: [],
+    exclusions: [],
+    attributes: [],
+    accessRules: [],
+  };
+  const source = {
+    ...common,
+    kind: 3,
+    contentKind: 1,
+    path: '/fixture/src/main/java',
+    exists: true,
+    uri: yield* uri(path.join(copiedProject, 'src/main/java')),
+    outputUri: yield* uri(path.join(copiedProject, 'target/classes')),
+    inclusions: ['**/*.java'],
+    exclusions: ['**/Excluded.java'],
+    attributes: [{name: 'optional', value: 'true'}],
+  };
+  const absent = {
+    ...source,
+    path: '/fixture/src/test/java',
+    exists: false,
+    uri: yield* uri(path.join(copiedProject, 'src/test/java')),
+    outputUri: yield* uri(path.join(copiedProject, 'target/test-classes')),
+    attributes: [
+      {name: 'optional', value: 'true'},
+      {name: 'test', value: 'true'},
+    ],
+  };
+  const jrePath =
+    'org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-21';
+  const observation = yield* Schema.decodeUnknownEffect(JavaPreparedObservation)({
+    protocolVersion: 1,
+    requestToken: 'fixture',
+    status: 'observed-cached',
+    vm: {
+      type: 'org.eclipse.jdt.internal.launching.macosx.MacOSXType',
+      id: 'fixture',
+      name: 'JavaSE-21',
+      javaHomeUri: yield* uri(javaHome),
+    },
+    libraries: [{uri: yield* uri(jar), bytes: jarText.length, sha256: sha256HexSync(jarText)}],
+    model: {
+      projectUri: yield* uri(copiedProject),
+      build: 'maven',
+      projectCharset: 'UTF-8',
+      rawTimestamp: 1,
+      natures: ['org.eclipse.jdt.core.javanature', 'org.eclipse.m2e.core.maven2Nature'],
+      cachedOptionsSha256: sha256HexSync('fixture'),
+      compilerOptions: {
+        'org.eclipse.jdt.core.compiler.compliance': '21',
+        'org.eclipse.jdt.core.compiler.source': '21',
+        'org.eclipse.jdt.core.compiler.codegen.targetPlatform': '21',
+        'org.eclipse.jdt.core.compiler.release': 'enabled',
+        'org.eclipse.jdt.core.compiler.processAnnotations': 'disabled',
+        'org.eclipse.jdt.core.compiler.problem.unusedImport': 'error',
+      },
+      outputUri: yield* uri(path.join(copiedProject, 'target/classes')),
+      resourceFilters: [
+        {
+          id: '123',
+          path: '',
+          type: 30,
+          matcherId: 'org.eclipse.core.resources.regexFilterMatcher',
+          arguments: 'node_modules|\\.git|__CREATED_BY_JAVA_LANGUAGE_SERVER__',
+        },
+      ],
+      rawClasspath: [
+        source,
+        {...common, kind: 5, contentKind: 1, path: jrePath},
+        {...common, kind: 5, contentKind: 1, path: 'org.eclipse.m2e.MAVEN2_CLASSPATH_CONTAINER'},
+        absent,
+      ],
+      resolvedClasspath: [
+        source,
+        {...common, kind: 1, contentKind: 2, path: jrt, uri: yield* uri(jrt)},
+        {
+          ...common,
+          kind: 1,
+          contentKind: 2,
+          path: jar,
+          uri: yield* uri(jar),
+          attributes: [{name: 'maven.version', value: '1.0'}],
+        },
+        absent,
+      ],
+    },
+  });
+  const messages = yield* Queue.unbounded<Record<string, unknown>, Cause.Done>();
+  const methods: string[] = [];
+  let stopped = false;
+  let observations = 0;
+  const wire: LspWire = {
+    pid: 4242,
+    messages: Stream.fromQueue(messages),
+    failure: () => (stopped ? LspFault.make({code: 'exit'}) : undefined),
+    beginClosing: Effect.void,
+    finish: Effect.sync(() => {
+      stopped = true;
+    }).pipe(
+      Effect.andThen(Queue.end(messages)),
+      Effect.as({code: 0, drained: true, forced: false, stdioClosed: true, fault: undefined}),
+    ),
+    send: message =>
+      Effect.gen(function* () {
+        if (typeof message.method === 'string') methods.push(message.method);
+        if (message.method === 'initialize') {
+          if (control.failure === 'initialize') {
+            yield* Queue.offer(messages, {
+              jsonrpc: '2.0',
+              id: message.id,
+              error: {code: -32603, message: 'synthetic initialization failure'},
+            });
+            return;
+          }
+          yield* fs.writeFileString(path.join(copiedProject, '.classpath'), '<classpath>mock SDK output</classpath>');
+          yield* Queue.offer(messages, {
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {capabilities: {executeCommandProvider: {commands: [javaPreparedModelCommand]}}},
+          });
+        } else if (message.method === 'initialized') {
+          if (control.failure === 'missing-ready') return;
+          yield* Queue.offer(messages, {
+            jsonrpc: '2.0',
+            method: 'language/status',
+            params: {type: control.failure === 'status' ? 'Error' : 'ServiceReady'},
+          });
+        } else if (message.method === 'workspace/executeCommand') {
+          observations++;
+          const request = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              command: Schema.Literal(javaPreparedModelCommand),
+              arguments: Schema.Tuple([
+                Schema.Struct({protocolVersion: Schema.Literal(1), requestToken: Schema.String}),
+              ]),
+            }),
+          )(message.params).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'})));
+          if (control.observerGate) {
+            yield* Deferred.succeed(control.observerGate.entered, undefined);
+            yield* Deferred.await(control.observerGate.release);
+          }
+          if (control.failure === 'late-status')
+            yield* Queue.offer(messages, {jsonrpc: '2.0', method: 'language/status', params: {type: 'Error'}});
+          if (observations === 2 && control.afterSecondModel) yield* control.afterSecondModel;
+          yield* Queue.offer(messages, {
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              ...observation,
+              model: {
+                ...observation.model,
+                rawTimestamp: control.changeSecondModel && observations > 1 ? 2 : observation.model.rawTimestamp,
+              },
+              requestToken: control.failure === 'token' ? 'wrong-token' : request.arguments[0].requestToken,
+            },
+          });
+        } else if (message.method === 'shutdown') {
+          yield* Queue.offer(messages, {jsonrpc: '2.0', id: message.id, result: null});
+        } else if (message.method === 'exit') yield* Queue.end(messages);
+      }).pipe(Effect.mapError(() => LspFault.make({code: 'protocol'}))),
+  };
+  const runtime = Object.freeze({
+    pid: wire.pid,
+    finish: wire.finish,
+    directory: runtimeDirectory,
+    verify: control.hostVerify ?? Effect.void,
+    inputs,
+    projectJavaHome: javaHome,
+  });
+  let deliverStatus: (method: string, params: unknown) => void = () => {};
+  // This protocol fixture replaces only the qualified-process boundary; real SDK/process qualification uses native probes.
+  const observe = Effect.suspend(() => {
+    const runtimeGuard = vi
+      .spyOn(javaRuntime, 'isJavaPreparationRuntime')
+      .mockImplementation(value => value === runtime);
+    const connect = vi
+      .spyOn(javaRuntime, 'makeJavaPreparationClient')
+      .mockImplementation((owned, admission, onNotification, settings) =>
+        consumeJavaPreparationConnection(owned, admission).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              deliverStatus = onNotification;
+            }),
+          ),
+          Effect.andThen(makeLspClient(wire, onNotification, settings)),
+        ),
+      );
+    return observeJavaPreparedImport({runtime}).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          runtimeGuard.mockRestore();
+          connect.mockRestore();
+        }),
+      ),
+    );
+  });
+  const imported = control.deferImport ? observation : yield* observe;
+  const options = {
+    requestToken: imported.requestToken,
+    build: 'maven' as const,
+    inputs,
+    runtimeDirectory,
+    artifactDirectory,
+    javaHome,
+    javaSdkDigest: yield* semanticSdkDigest(javaHome),
+    verify: Effect.void,
+  };
+  return {
+    fs,
+    path,
+    project,
+    copiedProject,
+    runtimeDirectory,
+    artifactDirectory,
+    javaHome,
+    jar,
+    jarText,
+    observation: imported,
+    options,
+    runtime,
+    wire,
+    workspace,
+    emitError: Effect.sync(() => deliverStatus('language/status', {type: 'Error'})),
+    observe,
+    methods,
+  };
+});
+
+describe('Java prepared model sealing', () => {
+  effectIt.effect('refuses SDK drift during the final native observation before issuing a witness', () =>
+    Effect.gen(function* () {
+      let sdkIntact = true;
+      const f = yield* modelFixture({
+        deferImport: true,
+        hostVerify: Effect.suspend(() => (sdkIntact ? Effect.void : LspFault.make({code: 'prerequisite'}))),
+        afterSecondModel: Effect.sync(() => {
+          sdkIntact = false;
+        }),
+      });
+      expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+      expect(EffectArray.filter(f.methods, method => method === 'workspace/executeCommand')).toHaveLength(2);
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('authenticates the copy receipt and cleanup owner before preparation admission', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true});
+      const expected = {
+        workspace: f.workspace,
+        build: 'maven' as const,
+        project: f.copiedProject,
+        worktree: f.project,
+      };
+      yield* verifyJavaPreparationInputs(f.options.inputs, expected);
+      for (const [inputs, binding] of [
+        [{...f.options.inputs, verify: Effect.void}, expected],
+        [f.options.inputs, {...expected, workspace: {...f.workspace}}],
+        [f.options.inputs, {...expected, build: 'gradle' as const}],
+        [f.options.inputs, {...expected, worktree: f.copiedProject}],
+      ] as const)
+        expect(yield* Effect.flip(verifyJavaPreparationInputs(inputs, binding))).toMatchObject({
+          _tag: 'LspFault',
+          code: 'prerequisite',
+        });
+      expect(yield* Effect.flip(consumeJavaPreparationConnection(f.runtime, {}))).toMatchObject({
+        _tag: 'LspFault',
+        code: 'prerequisite',
+      });
+      expect(f.methods).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('refuses a model paired with copied metadata changed during its observation', () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const f = yield* modelFixture({deferImport: true, observerGate: {entered, release}});
+      const observing = yield* Effect.forkChild(Effect.exit(f.observe));
+      yield* Deferred.await(entered);
+      yield* f.fs.writeFileString(
+        f.path.join(f.copiedProject, '.classpath'),
+        '<classpath>different generation</classpath>',
+      );
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(observing))._tag).toBe('Failure');
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('refuses a changed cached model even when copied output bytes stay unchanged', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true, changeSecondModel: true});
+      expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('retains an Error received after ServiceReady during the native observation', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true, failure: 'late-status'});
+      expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('retires a completed observation when a later setup Error arrives before sealing', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      yield* f.emitError;
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('keeps a missing readiness signal bounded and prevents a raw report from completing setup', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true, failure: 'missing-ready'});
+      const initialized = yield* Deferred.make<void>();
+      // The fixed transport writes this notification before waiting for the readiness signal.
+      const writing = f.wire.send;
+      const spy = vi
+        .spyOn(f.wire, 'send')
+        .mockImplementation(message =>
+          writing(message).pipe(
+            Effect.andThen(message.method === 'initialized' ? Deferred.succeed(initialized, undefined) : Effect.void),
+          ),
+        );
+      yield* Effect.gen(function* () {
+        const observing = yield* Effect.forkChild(f.observe);
+        yield* Deferred.await(initialized);
+        yield* TestClock.adjust(45001);
+        expect(yield* Effect.flip(Fiber.join(observing))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
+      }).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())));
+      expect(EffectArray.contains(f.methods, 'workspace/executeCommand')).toBe(false);
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('does not mix completed reports from two independent input proofs', () =>
+    Effect.gen(function* () {
+      const first = yield* modelFixture();
+      const second = yield* modelFixture();
+      expect((yield* Effect.exit(sealJavaPreparedModel(first.observation, second.options)))._tag).toBe('Failure');
+      expect((yield* Effect.exit(sealJavaPreparedModel(second.observation, first.options)))._tag).toBe('Failure');
+      expect(yield* first.fs.readDirectory(first.artifactDirectory)).toEqual([]);
+      expect(yield* second.fs.readDirectory(second.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('requires a genuine setup runtime and preserves a completed observation after rejected reuse', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true});
+      expect((yield* Effect.exit(observeJavaPreparedImport({runtime: {...f.runtime}})))._tag).toBe('Failure');
+      expect(f.methods).toEqual([]);
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      const observed = yield* f.observe;
+      expect(f.methods).toEqual([
+        'initialize',
+        'initialized',
+        'workspace/didChangeConfiguration',
+        'workspace/executeCommand',
+        'workspace/executeCommand',
+      ]);
+      expect(yield* Effect.flip(f.observe)).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+      const sealed = yield* sealJavaPreparedModel(observed, {...f.options, requestToken: observed.requestToken});
+      expect(sealed.model.sourceDigest).toBe(f.options.inputs.sourceDigest);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('does not initialize or issue a model witness after a pre-import metadata insertion', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture({deferImport: true});
+      yield* f.fs.writeFileString(
+        f.path.join(f.copiedProject, '.classpath'),
+        '<classpath>inserted before import</classpath>',
+      );
+      expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+      expect(f.methods).toEqual([]);
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('never upgrades initialization, readiness or observation-token failures into sealable outputs', () =>
+    Effect.gen(function* () {
+      for (const failure of ['initialize', 'status', 'token'] as const) {
+        const f = yield* modelFixture({deferImport: true, failure});
+        expect((yield* Effect.exit(f.observe))._tag).toBe('Failure');
+        expect(yield* Effect.flip(f.observe)).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+        expect(EffectArray.filter(f.methods, method => method === 'initialize')).toHaveLength(1);
+        expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('cancels a pending native observation without issuing a completed setup witness', () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const f = yield* modelFixture({deferImport: true, observerGate: {entered, release}});
+      const observing = yield* Effect.forkChild(f.observe);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(observing).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+      expect(yield* Effect.flip(f.observe)).toMatchObject({_tag: 'LspFault', code: 'prerequisite'});
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('rejects a copied-only Gradle script before import even when it is inside the project cache', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const script = "if (file('.gradle/extra.gradle').exists()) { apply from: '.gradle/extra.gradle' }\n";
+      yield* f.fs.writeFileString(f.path.join(f.project, 'build.gradle'), script);
+      const workspace = yield* makeJavaWorkspace(f.path.dirname(f.project));
+      const inputs = yield* copyJavaPreparationInputs({
+        project: f.project,
+        worktree: f.project,
+        workspace,
+        build: 'gradle',
+      });
+      yield* f.fs.makeDirectory(f.path.join(inputs.copiedProject, '.gradle'));
+      yield* f.fs.writeFileString(
+        f.path.join(inputs.copiedProject, '.gradle/extra.gradle'),
+        'ext.changedModel = true\n',
+      );
+      expect((yield* Effect.exit(inputs.verify))._tag).toBe('Failure');
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('refuses named metadata inserted during copying before issuing the initial proof', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const workspace = yield* makeJavaWorkspace(f.path.dirname(f.project));
+      const copied = f.path.join(workspace.directory, 'source');
+      const result = yield* copyJavaPreparationInputs({
+        project: f.project,
+        worktree: f.project,
+        workspace,
+        build: 'maven',
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...f.fs,
+          writeFile: (file, bytes, options) =>
+            f.fs
+              .writeFile(file, bytes, options)
+              .pipe(
+                Effect.andThen(
+                  f.fs.writeFileString(f.path.join(copied, '.classpath'), '<classpath>unadmitted input</classpath>'),
+                ),
+              ),
+        }),
+        Effect.exit,
+      );
+      expect(result._tag).toBe('Failure');
+      expect(yield* f.fs.readFileString(f.path.join(f.project, 'pom.xml'))).toBe(
+        '<project>captured build configuration</project>',
+      );
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('rejects newly added copied build configuration outside the closed importer-output policy', () =>
+    Effect.gen(function* () {
+      for (const relative of [
+        'settings.gradle.kts',
+        '.mvn/extensions.xml',
+        '.mvn/jvm.config',
+        'new-module/build.gradle',
+      ]) {
+        const f = yield* modelFixture();
+        const file = f.path.join(f.copiedProject, relative);
+        yield* f.fs.makeDirectory(f.path.dirname(file), {recursive: true});
+        yield* f.fs.writeFileString(file, 'new unadmitted build input');
+        expect((yield* Effect.exit(f.options.inputs.verify))._tag).toBe('Failure');
+        expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('uses only proof-owned source identities when a host options object retains extra fields', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      let hostGuards = 0;
+      const retainedOptions = {
+        ...f.options,
+        project: '/wrong-project',
+        worktree: '/wrong-worktree',
+        copiedProject: '/wrong-copy',
+        copiedWorktree: '/wrong-copy',
+        sourceDigest: sha256HexSync('wrong'),
+        verify: Effect.sync(() => {
+          hostGuards++;
+        }),
+      };
+      const sealed = yield* sealJavaPreparedModel(f.observation, retainedOptions);
+      expect(sealed.model.project).toBe(f.project);
+      expect(sealed.model.sourceDigest).toBe(f.options.inputs.sourceDigest);
+      expect(hostGuards).toBeGreaterThanOrEqual(3);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('bounds ownership acquisition and cleanup even inside masked resource lifecycle steps', () =>
+    Effect.gen(function* () {
+      for (const phase of ['acquire', 'release'] as const) {
+        const f = yield* modelFixture();
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const completed = yield* Deferred.make<void>();
+        let cleanup = false;
+        let calls = 0;
+        const verify = Effect.suspend(() => {
+          if (phase === 'release' && ++calls === 2) {
+            cleanup = true;
+            return LspFault.make({code: 'rejected'});
+          }
+          return Effect.void;
+        });
+        const sealing = yield* Effect.forkChild(
+          sealJavaPreparedModel(f.observation, {...f.options, verify}).pipe(
+            Effect.provideService(FileSystem.FileSystem, {
+              ...f.fs,
+              realPath: file =>
+                EffectString.startsWith(f.artifactDirectory + f.path.sep + 'prepared-java-')(file) &&
+                (phase === 'acquire' || cleanup)
+                  ? Deferred.succeed(entered, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                      Effect.andThen(f.fs.realPath(file)),
+                    )
+                  : f.fs.realPath(file),
+            }),
+            Effect.onExit(() => Deferred.succeed(completed, undefined)),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          yield* Deferred.await(entered);
+          yield* TestClock.adjust(phase === 'acquire' ? 45001 : 30001);
+          yield* Effect.yieldNow;
+          expect(Option.isSome(yield* Deferred.poll(completed))).toBe(true);
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(release, undefined)),
+          Effect.ensuring(Fiber.await(sealing).pipe(Effect.asVoid)),
+        );
+        expect((yield* Fiber.await(sealing))._tag).toBe('Failure');
+        expect((yield* f.fs.readDirectory(f.artifactDirectory)).length).toBe(1);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('bounds copied-input acquisition when canonical filesystem inspection stalls', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const workspace = yield* makeJavaWorkspace(f.path.dirname(f.project));
+      const entered = yield* Deferred.make<void>();
+      const copy = yield* Effect.forkChild(
+        copyJavaPreparationInputs({project: f.project, worktree: f.project, workspace, build: 'maven'}).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...f.fs,
+            realPath: file =>
+              file === f.project
+                ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+                : f.fs.realPath(file),
+          }),
+        ),
+      );
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(45001);
+      expect(yield* Effect.flip(Fiber.join(copy))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
+      expect(yield* f.fs.readDirectory(workspace.directory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect.prop(
+    'binds every copied original build input, including metadata and nested configuration',
+    [
+      Schema.Literals([
+        'pom.xml',
+        'settings.gradle',
+        'build.gradle',
+        'gradle.properties',
+        '.mvn/maven.config',
+        '.project',
+      ]),
+    ],
+    ([relative]) =>
+      Effect.gen(function* () {
+        const f = yield* modelFixture();
+        yield* f.fs.writeFileString(f.path.join(f.copiedProject, relative), 'different imported build input');
+        expect((yield* Effect.exit(f.options.inputs.verify))._tag).toBe('Failure');
+        expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+        expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 16}},
+  );
+  effectIt.effect('rejects forged proofs and keeps generated metadata outside the strict input image', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const forged = {...f.options.inputs, verify: Effect.void};
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, {...f.options, inputs: forged})))._tag).toBe(
+        'Failure',
+      );
+      yield* f.fs.writeFileString(f.path.join(f.copiedProject, '.classpath'), '<classpath/>');
+      expect((yield* Effect.exit(f.options.inputs.verify))._tag).toBe('Failure');
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('retains replaced artifact parents and children instead of deleting another directory', () =>
+    Effect.gen(function* () {
+      for (const [replaceParent, injectFailure] of [
+        [false, false],
+        [false, true],
+        [true, false],
+        [true, true],
+      ] as const) {
+        const f = yield* modelFixture();
+        let calls = 0;
+        let replaced = '';
+        let retained = '';
+        const result = yield* sealJavaPreparedModel(f.observation, {
+          ...f.options,
+          verify: Effect.suspend(() => {
+            if (++calls !== 2) return Effect.void;
+            return Effect.gen(function* () {
+              replaced = replaceParent
+                ? f.artifactDirectory
+                : f.path.join(f.artifactDirectory, (yield* f.fs.readDirectory(f.artifactDirectory))[0]);
+              retained = replaced + '-retained';
+              yield* f.fs.rename(replaced, retained);
+              yield* f.fs.makeDirectory(replaced, {mode: 0o700});
+              yield* f.fs.writeFileString(f.path.join(replaced, 'unowned-sentinel'), 'preserve replacement');
+              if (injectFailure) return yield* LspFault.make({code: 'rejected'});
+            });
+          }),
+        }).pipe(Effect.exit);
+        expect(result._tag).toBe('Failure');
+        expect(yield* f.fs.readFileString(f.path.join(replaced, 'unowned-sentinel'))).toBe('preserve replacement');
+        expect(yield* f.fs.exists(retained)).toBe(true);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('rejects sealed JAR or metadata mutations during the last publication awaits', () =>
+    Effect.gen(function* () {
+      for (const target of ['jar', 'metadata'] as const) {
+        const f = yield* modelFixture();
+        let calls = 0;
+        const result = yield* sealJavaPreparedModel(f.observation, {
+          ...f.options,
+          verify: Effect.suspend(() => {
+            if (++calls !== 3) return Effect.void;
+            return Effect.gen(function* () {
+              const root = f.path.join(f.artifactDirectory, (yield* f.fs.readDirectory(f.artifactDirectory))[0]);
+              const name =
+                target === 'metadata'
+                  ? 'model.json'
+                  : EffectArray.filter(yield* f.fs.readDirectory(root), name => EffectString.endsWith('.jar')(name))[0];
+              yield* f.fs.writeFileString(f.path.join(root, name), 'changed after earlier digest');
+            });
+          }),
+        }).pipe(Effect.exit);
+        expect(result._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      }
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('refuses an aliased cache ancestor before calling the bounded content reader', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const outside = f.path.join(f.path.dirname(f.project), 'outside-cache');
+      const cache = f.path.join(f.runtimeDirectory, 'm2');
+      yield* f.fs.rename(cache, outside);
+      yield* f.fs.symlink(outside, cache);
+      const actualRead = fingerprints.readBounded;
+      let aliasReads = 0;
+      const spy = vi.spyOn(fingerprints, 'readBounded').mockImplementation((file, maximum) => {
+        if (file === f.jar) aliasReads++;
+        return actualRead(file, maximum);
+      });
+      const result = yield* sealJavaPreparedModel(f.observation, f.options).pipe(
+        Effect.exit,
+        Effect.ensuring(Effect.sync(() => spy.mockRestore())),
+      );
+      expect(result._tag).toBe('Failure');
+      expect(aliasReads).toBe(0);
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      expect(yield* f.fs.readFileString(f.path.join(outside, 'library.jar'))).toBe(f.jarText);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('preserves compiler and ordered classpath facts after the setup workspace is removed', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const before = structuredClone(f.observation);
+      const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+      expect(f.observation).toEqual(before);
+      expect(sealed.model.compilerOptions).toEqual(f.observation.model.compilerOptions);
+      expect(sealed.model.resourceFilters).toEqual(f.observation.model.resourceFilters);
+      expect(EffectArray.map(sealed.model.rawClasspath, entry => entry.kind)).toEqual([3, 5, 5, 3]);
+      expect(EffectArray.map(sealed.model.resolvedClasspath, entry => entry.kind)).toEqual([3, 1, 1, 3]);
+      expect(sealed.model.resolvedClasspath[0]).toMatchObject({
+        path: 'src/main/java',
+        output: 'target/classes',
+        inclusions: ['**/*.java'],
+        exclusions: ['**/Excluded.java'],
+        attributes: [{name: 'optional', value: 'true'}],
+      });
+      expect(sealed.model.resolvedClasspath[3]).toMatchObject({
+        path: 'src/test/java',
+        exists: false,
+        output: 'target/test-classes',
+        attributes: [
+          {name: 'optional', value: 'true'},
+          {name: 'test', value: 'true'},
+        ],
+      });
+      yield* f.fs.remove(f.copiedProject, {recursive: true});
+      yield* f.fs.remove(f.runtimeDirectory, {recursive: true});
+      const stored = yield* f.fs.readFileString(sealed.metadataFile);
+      expect(sha256HexSync(stored)).toBe(sealed.metadataDigest);
+      expect(yield* Schema.decodeUnknownEffect(JavaPreparedModel)(JSON.parse(stored))).toEqual(sealed.model);
+      expect(EffectString.includes(f.copiedProject)(stored)).toBe(false);
+      expect(EffectString.includes(f.runtimeDirectory)(stored)).toBe(false);
+      expect(yield* f.fs.readFileString(sealed.model.libraries[0].file)).toBe(f.jarText);
+      expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('refuses unknown wire fields, authority selectors, conflicting roots and changed dependencies', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const invalid = [
+        {...f.observation, command: 'arbitrary'},
+        {...f.observation, requestToken: 'other'},
+        {...f.observation, model: {...f.observation.model, build: 'gradle'}},
+        {...f.observation, model: {...f.observation.model, projectUri: 'file:///outside'}},
+        {
+          ...f.observation,
+          model: {
+            ...f.observation.model,
+            compilerOptions: {
+              ...f.observation.model.compilerOptions,
+              'org.eclipse.jdt.core.compiler.release': 'disabled',
+            },
+          },
+        },
+        {
+          ...f.observation,
+          model: {
+            ...f.observation.model,
+            resolvedClasspath: EffectArray.map(f.observation.model.resolvedClasspath, (entry, i) =>
+              i === 0 ? {...entry, path: '/different/src/main/java/extra'} : entry,
+            ),
+          },
+        },
+        {
+          ...f.observation,
+          model: {
+            ...f.observation.model,
+            resourceFilters: [{...f.observation.model.resourceFilters[0], arguments: '.*'}],
+          },
+        },
+        {...f.observation, libraries: [{...f.observation.libraries[0], sha256: sha256HexSync('changed')}]},
+      ];
+      for (const value of invalid) {
+        expect((yield* Effect.exit(sealJavaPreparedModel(value, f.options)))._tag).toBe('Failure');
+        expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      }
+      yield* f.fs.writeFileString(f.jar, 'changed dependency');
+      expect((yield* Effect.exit(sealJavaPreparedModel(f.observation, f.options)))._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('captures the observation before an asynchronous host guard and removes canceled output', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let calls = 0;
+      const input = structuredClone(f.observation);
+      const options = {
+        ...f.options,
+        verify: Effect.suspend(() =>
+          ++calls === 1
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+            : Effect.void,
+        ),
+      };
+      const fiber = yield* Effect.forkChild(sealJavaPreparedModel(input, options));
+      yield* Deferred.await(entered);
+      // The caller still owns this object; modifying it cannot replace the captured compiler settings.
+      const changed = {...input.model.compilerOptions, 'org.eclipse.jdt.core.compiler.problem.unusedImport': 'ignore'};
+      Object.assign(input.model, {compilerOptions: changed});
+      yield* Deferred.succeed(release, undefined);
+      const sealed = yield* Fiber.join(fiber);
+      expect(sealed.model.compilerOptions['org.eclipse.jdt.core.compiler.problem.unusedImport']).toBe('error');
+      yield* f.fs.remove(sealed.directory, {recursive: true});
+      const writing = yield* Deferred.make<void>();
+      const canceled = yield* Effect.forkChild(
+        sealJavaPreparedModel(f.observation, f.options).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...f.fs,
+            writeFileString: (file, content, writeOptions) =>
+              f.fs
+                .writeFileString(file, content, writeOptions)
+                .pipe(Effect.andThen(Deferred.succeed(writing, undefined).pipe(Effect.andThen(Effect.never)))),
+          }),
+        ),
+      );
+      yield* Deferred.await(writing);
+      yield* Fiber.interrupt(canceled);
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect('removes sealed output when a copied source changes during metadata publication', () =>
+    Effect.gen(function* () {
+      const f = yield* modelFixture();
+      const copiedSource = f.path.join(f.copiedProject, 'src/main/java/Main.java');
+      const result = yield* sealJavaPreparedModel(f.observation, f.options).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...f.fs,
+          writeFileString: (file, content, options) =>
+            f.fs
+              .writeFileString(file, content, options)
+              .pipe(Effect.andThen(f.fs.writeFileString(copiedSource, 'class ChangedDuringSeal {}\n'))),
+        }),
+        Effect.exit,
+      );
+      expect(result._tag).toBe('Failure');
+      expect(yield* f.fs.readDirectory(f.artifactDirectory)).toEqual([]);
+      expect(yield* semanticTreeDigest(f.project)).toBe(f.options.inputs.sourceDigest);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect.prop(
+    'canonical metadata round trips without losing classpath order or depending on object-key order',
+    [
+      Schema.Array(
+        Schema.Array(Schema.Literals(['é', '😀', '\\', ':', '=', '"', '<', 'A'])).check(Schema.isMaxLength(24)),
+      ).check(Schema.isMaxLength(12)),
+    ],
+    ([values]) =>
+      Effect.gen(function* () {
+        const f = yield* modelFixture();
+        const sealed = yield* sealJavaPreparedModel(f.observation, f.options);
+        const compiler = EffectRecord.fromEntries(
+          EffectArray.map(
+            values,
+            (value, i) => ['org.eclipse.jdt.core.compiler.fixture' + i, EffectArray.join(value, '')] as const,
+          ),
+        );
+        const model = {...sealed.model, compilerOptions: {...sealed.model.compilerOptions, ...compiler}};
+        const reversedKeys = {
+          ...model,
+          compilerOptions: EffectRecord.fromEntries(EffectRecord.toEntries(model.compilerOptions).reverse()),
+        };
+        const encoded = javaPreparedModelJson(model);
+        expect(javaPreparedModelJson(reversedKeys)).toBe(encoded);
+        expect(javaPreparedModelJson(yield* Schema.decodeUnknownEffect(JavaPreparedModel)(JSON.parse(encoded)))).toBe(
+          encoded,
+        );
+        expect(JSON.parse(encoded).resolvedClasspath).toEqual(model.resolvedClasspath);
+        expect(model.compilerOptions).toEqual({...sealed.model.compilerOptions, ...compiler});
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 16}},
+  );
+});
+
+describe('Java pinned runtime and preparation boundary', () => {
+  effectIt.effect('closes process admission before awaiting workspace cleanup verification', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-close-claim-'}));
+      const ownerScope = yield* Scope.make();
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const gate = {directory: '', armed: false};
+      const workspace = yield* makeJavaWorkspace(parent).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          realPath: file =>
+            fs.realPath(file).pipe(
+              Effect.tap(() => {
+                if (file !== gate.directory || !gate.armed) return Effect.void;
+                gate.armed = false;
+                return Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)));
+              }),
+            ),
+        }),
+        Effect.provideService(Scope.Scope, ownerScope),
+      );
+      gate.directory = workspace.directory;
+      gate.armed = true;
+      const closing = yield* Effect.forkChild(Scope.close(ownerScope, Exit.void));
+      yield* Deferred.await(entered);
+      const claim = yield* Effect.exit(workspace.hold);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(closing);
+      expect(claim._tag).toBe('Failure');
+      expect(yield* fs.exists(workspace.directory)).toBe(false);
+      expect((yield* Effect.exit(workspace.confirmDrained({drained: true, stdioClosed: true})))._tag).toBe('Failure');
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect(
+    'rejects an unqualified captured configuration image before any private write or downstream launch',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const writes: string[] = [];
+        let launched = false;
+        const captured = new TextEncoder().encode('osgi.bundles=unqualified-transient-image');
+        const before = Array.from(captured);
+        const result = yield* materializeJavaRuntimeConfiguration(captured, '/private/configuration').pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              launched = true;
+            }),
+          ),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            writeFile: file =>
+              Effect.sync(() => {
+                writes.push(file);
+              }),
+          }),
+          Effect.exit,
+        );
+        expect(result._tag).toBe('Failure');
+        expect(writes).toEqual([]);
+        expect(launched).toBe(false);
+        expect(Array.from(captured)).toEqual(before);
+      }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect.prop(
+    'retains the entire workspace through finalizer failure until a complete drain receipt exists',
+    [Schema.Array(Schema.Struct({drained: Schema.Boolean, stdioClosed: Schema.Boolean})).check(Schema.isMaxLength(8))],
+    ([receipts]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-owner-'}));
+        const ownerScope = yield* Scope.make();
+        const workspace = yield* makeJavaWorkspace(parent).pipe(Effect.provideService(Scope.Scope, ownerScope));
+        const marker = path.join(workspace.directory, 'project-and-runtime-evidence');
+        yield* fs.writeFileString(marker, 'synthetic retained diagnostics');
+        yield* workspace.hold;
+        for (const receipt of receipts) yield* Effect.exit(workspace.confirmDrained(receipt));
+        yield* Effect.addFinalizer(() => Effect.die('Synthetic later finalizer failure')).pipe(
+          Effect.provideService(Scope.Scope, ownerScope),
+        );
+        expect((yield* Effect.exit(Scope.close(ownerScope, Exit.void)))._tag).toBe('Failure');
+        expect(yield* fs.exists(marker)).toBe(
+          !EffectArray.some(receipts, receipt => receipt.drained && receipt.stdioClosed),
+        );
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 32}},
+  );
+  effectIt.effect('cleans an unused workspace and refuses a second provider claim', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-owner-'}));
+      const unusedScope = yield* Scope.make();
+      const unused = yield* makeJavaWorkspace(parent).pipe(Effect.provideService(Scope.Scope, unusedScope));
+      yield* Scope.close(unusedScope, Exit.void);
+      expect(yield* fs.exists(unused.directory)).toBe(false);
+      const usedScope = yield* Scope.make();
+      const used = yield* makeJavaWorkspace(parent).pipe(Effect.provideService(Scope.Scope, usedScope));
+      yield* used.hold;
+      expect((yield* Effect.exit(used.hold))._tag).toBe('Failure');
+      yield* used.confirmDrained({drained: true, stdioClosed: true});
+      yield* Scope.close(usedScope, Exit.void);
+      expect(yield* fs.exists(used.directory)).toBe(false);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect.prop(
+    'requires independent positive provider and build drains before deleting a preparation workspace',
+    [
+      Schema.Struct({
+        provider: Schema.Literals(['receipt', 'failure', 'defect']),
+        build: Schema.Literals(['receipt', 'failure', 'defect']),
+        providerDrained: Schema.Boolean,
+        stdioClosed: Schema.Boolean,
+        buildDrained: Schema.Boolean,
+      }),
+    ],
+    ([input]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-dual-drain-'}));
+        const owner = yield* Scope.make();
+        const workspace = yield* makeJavaWorkspace(parent).pipe(Effect.provideService(Scope.Scope, owner));
+        yield* workspace.hold;
+        const attempts: string[] = [];
+        const provider = Effect.suspend(() => {
+          attempts.push('provider');
+          if (input.provider === 'failure') return LspFault.make({code: 'exit'});
+          if (input.provider === 'defect') return Effect.die('Synthetic provider drain defect');
+          return Effect.succeed({
+            code: 0,
+            forced: false,
+            drained: input.providerDrained,
+            stdioClosed: input.stdioClosed,
+            fault: undefined,
+          });
+        });
+        const build = Effect.suspend(() => {
+          attempts.push('build');
+          if (input.build === 'failure') return LspFault.make({code: 'exit'});
+          if (input.build === 'defect') return Effect.die('Synthetic build drain defect');
+          return Effect.succeed({drained: input.buildDrained});
+        });
+        yield* Effect.addFinalizer(() => finishJavaPreparation(workspace, provider, build).pipe(Effect.orDie)).pipe(
+          Effect.provideService(Scope.Scope, owner),
+        );
+        const closed = yield* Effect.exit(Scope.close(owner, Exit.void));
+        const complete =
+          input.provider === 'receipt' &&
+          input.providerDrained &&
+          input.stdioClosed &&
+          input.build === 'receipt' &&
+          input.buildDrained;
+        expect(attempts).toEqual(['provider', 'build']);
+        expect(Exit.isSuccess(closed)).toBe(complete);
+        expect(yield* fs.exists(workspace.directory)).toBe(!complete);
+        if (input.provider === 'defect' && input.build === 'defect' && Exit.isFailure(closed)) {
+          expect(Cause.pretty(closed.cause)).toContain('Synthetic provider drain defect');
+          expect(Cause.pretty(closed.cause)).toContain('Synthetic build drain defect');
+        }
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 64}},
+  );
+  effectIt.effect(
+    'interrupts a stalled build drain during uninterruptible scope finalization and retains evidence',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-drain-timeout-'}));
+        const owner = yield* Scope.make();
+        const workspace = yield* makeJavaWorkspace(parent).pipe(Effect.provideService(Scope.Scope, owner));
+        yield* workspace.hold;
+        const entered = yield* Deferred.make<void>();
+        let interrupted = false;
+        const build = Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true;
+            }),
+          ),
+        );
+        yield* Effect.addFinalizer(() =>
+          finishJavaPreparation(
+            workspace,
+            Effect.succeed({code: 0, forced: false, drained: true, stdioClosed: true, fault: undefined}),
+            build,
+          ).pipe(Effect.orDie),
+        ).pipe(Effect.provideService(Scope.Scope, owner));
+        const closing = yield* Effect.forkChild(Effect.exit(Scope.close(owner, Exit.void)));
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust(30001);
+        expect((yield* Fiber.join(closing))._tag).toBe('Failure');
+        expect(interrupted).toBe(true);
+        expect(yield* fs.exists(workspace.directory)).toBe(true);
+      }).pipe(Effect.provide(BunServices.layer)),
+  );
+  effectIt.effect.prop(
+    'attempts detached build cleanup when the preparation program was already interrupted',
+    [Schema.Boolean],
+    ([buildDrained]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const parent = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-canceled-drain-'}));
+        const ready = yield* Deferred.make<void>();
+        const attempts: string[] = [];
+        let directory = '';
+        const program = Effect.scoped(
+          Effect.gen(function* () {
+            const workspace = yield* makeJavaWorkspace(parent);
+            directory = workspace.directory;
+            yield* workspace.hold;
+            yield* Effect.addFinalizer(() =>
+              finishJavaPreparation(
+                workspace,
+                Effect.sync(() => {
+                  attempts.push('provider');
+                  return {code: 0, forced: false, drained: true, stdioClosed: true, fault: undefined};
+                }),
+                Effect.sync(() => {
+                  attempts.push('build');
+                  return {drained: buildDrained};
+                }),
+              ).pipe(Effect.orDie),
+            );
+            yield* Deferred.succeed(ready, undefined);
+            return yield* Effect.never;
+          }),
+        );
+        const preparation = yield* Effect.forkChild(program);
+        yield* Deferred.await(ready);
+        yield* Fiber.interrupt(preparation);
+        expect(attempts).toEqual(['provider', 'build']);
+        expect(yield* fs.exists(directory)).toBe(!buildDrained);
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 16}},
+  );
+  effectIt.effect('reports missing host setup with exact server and separate project/runtime prerequisites', () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(makeJavaRuntime(undefined));
+      expect(error).toMatchObject({
+        _tag: 'SemanticSetupFault',
+        providerId: 'jdtls',
+        component: 'provider',
+        reason: 'missing',
+        requiredVersion: '1.63.0-202610191322',
+        requiredSdkVersion: '25.0.5+8',
+      });
+      expect(error).toHaveProperty('nextAction', expect.stringContaining('21.0.13+9'));
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  effectIt.effect('rejects caller-selected JVM arguments before touching any host SDK', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const reads: string[] = [];
+      const malicious = {...candidate(), jvmArguments: ['-Dthreadnote.java.preparation=true']};
+      const before = JSON.stringify(malicious);
+      const error = yield* makeJavaRuntime(malicious).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: file =>
+            Effect.sync(() => {
+              reads.push(file);
+              return false;
+            }),
+        }),
+        Effect.flip,
+      );
+      expect(error).toMatchObject({_tag: 'SemanticSetupFault', reason: 'incompatible'});
+      expect(reads).toEqual([]);
+      expect(JSON.stringify(malicious)).toBe(before);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  effectIt.effect.prop(
+    'rejects every unqualified SDK digest before SDK access without mutating host configuration',
+    [
+      Schema.Literals(['serverTreeDigest', 'runtimeSdkDigest', 'projectSdkDigest']),
+      Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 63})),
+      Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 15})),
+    ],
+    ([key, position, increment]) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const selected = candidate();
+        const digest = selected[key];
+        const replacement = ((Number.parseInt(digest[position], 16) + increment) % 16).toString(16);
+        const changed = {
+          ...selected,
+          [key]: EffectString.slice(0, position)(digest) + replacement + EffectString.slice(position + 1)(digest),
+        };
+        const before = JSON.stringify(changed);
+        const reads: string[] = [];
+        const error = yield* makeJavaRuntime(changed).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: file =>
+              Effect.sync(() => {
+                reads.push(file);
+                return false;
+              }),
+          }),
+          Effect.flip,
+        );
+        expect(error).toMatchObject({_tag: 'SemanticSetupFault', reason: 'incompatible'});
+        expect(reads).toEqual([]);
+        expect(JSON.stringify(changed)).toBe(before);
+      }).pipe(Effect.provide(BunServices.layer)),
+    {arbitrary: {runs: 32}},
+  );
+
+  macEffect('rejects a relative SDK path before filesystem access', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const reads: string[] = [];
+      const error = yield* makeJavaRuntime({...candidate(), runtimeJavaHome: '../jdk25'}).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: file =>
+            Effect.sync(() => {
+              reads.push(file);
+              return false;
+            }),
+        }),
+        Effect.flip,
+      );
+      expect(error).toMatchObject({_tag: 'SemanticSetupFault', component: 'sdk', reason: 'incompatible'});
+      expect(reads).toEqual([]);
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  macEffect('refuses an aliased SDK root and changed SDK contents', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'tn-java-runtime-'}));
+      const sdk = path.join(root, 'sdk');
+      const alias = path.join(root, 'alias');
+      yield* fs.makeDirectory(sdk);
+      yield* fs.writeFileString(path.join(sdk, 'server.jar'), 'unqualified replacement');
+      yield* fs.symlink(sdk, alias);
+      for (const serverDirectory of [alias, sdk]) {
+        const error = yield* Effect.flip(makeJavaRuntime({...candidate(), serverDirectory}));
+        expect(error).toMatchObject({
+          _tag: 'SemanticSetupFault',
+          providerId: 'jdtls',
+          reason: 'incompatible',
+          component: 'provider',
+        });
+      }
+      expect(yield* fs.readFileString(path.join(sdk, 'server.jar'))).toBe('unqualified replacement');
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+
+  macEffect('bounds the entire SDK preflight even when host filesystem access stalls', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const entered = yield* Deferred.make<void>();
+      const fiber = yield* Effect.forkChild(
+        makeJavaRuntime(candidate()).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+          }),
+        ),
+      );
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(45001);
+      expect(yield* Effect.flip(Fiber.join(fiber))).toMatchObject({_tag: 'LspFault', code: 'timeout'});
+    }).pipe(Effect.provide(BunServices.layer)),
+  );
+});

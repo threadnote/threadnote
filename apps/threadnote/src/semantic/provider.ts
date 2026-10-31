@@ -36,7 +36,7 @@ export interface SdkHostCandidate {
 export class SemanticSetupFault extends Schema.TaggedError<SemanticSetupFault, {readonly brand: unique symbol}>()(
   'SemanticSetupFault',
   {
-    providerId: Schema.Literals(['gopls', 'rust-analyzer']),
+    providerId: Schema.Literals(['gopls', 'rust-analyzer', 'jdtls']),
     reason: Schema.Literals(['missing', 'incompatible', 'unavailable']),
     component: Schema.Literals(['provider', 'sdk']),
     requiredVersion: Schema.String,
@@ -147,7 +147,7 @@ const invalid = () => SemanticSessionFault.make({reason: 'invalid'});
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, value: unknown) =>
   Schema.decodeUnknownEffect(schema)(value).pipe(Effect.mapError(invalid));
 const compare = (a: Position, b: Position) => a.line - b.line || a.character - b.character;
-const validRange = (text: string, range: typeof Range.Type) =>
+export const validRange = (text: string, range: typeof Range.Type) =>
   validTextPosition(text, range.start) && validTextPosition(text, range.end) && compare(range.start, range.end) <= 0;
 const TextEdit = Schema.Struct({range: Range, newText: Schema.String});
 const CompletionItem = Schema.Struct({
@@ -218,9 +218,14 @@ interface Document {
   wake: Deferred.Deferred<void>;
   diagnosticRequest: number;
 }
+export interface LspDiagnosticRequest {
+  readonly requestToken: string;
+  readonly target: {readonly uri: string; readonly text: string};
+  readonly inputs: readonly {readonly uri: string; readonly text: string}[];
+}
 /** Backend-owned policy; never decoded from repository requests. */
 export interface LspSessionPolicy {
-  readonly language: 'python' | 'go' | 'rust';
+  readonly language: 'python' | 'go' | 'rust' | 'java';
   readonly workspaceName: string;
   readonly acceptsServer: (
     server:
@@ -234,6 +239,17 @@ export interface LspSessionPolicy {
   readonly initializationOptions?: Schema.Json;
   readonly experimentalCapabilities?: Schema.Json;
   readonly receive?: (method: string, params: unknown) => void;
+  readonly initializationRoot?: string;
+  readonly requiredCommands?: readonly string[];
+  readonly requestDiagnostics?: (
+    request: LspDiagnosticRequest,
+    milliseconds: number,
+  ) => Effect.Effect<readonly Schema.Json[], unknown>;
+  readonly requestTypeDefinition?: (
+    request: LspDiagnosticRequest,
+    position: Position,
+    milliseconds: number,
+  ) => Effect.Effect<Schema.Json, unknown>;
   readonly resolveCodeActions?: boolean;
   /** A qualified backend's explicit unknown-version sentinel, only for documents this session never opened. */
   readonly unopenedDocumentVersion?: 0;
@@ -249,9 +265,13 @@ export interface LspSessionOptions {
   readonly policy: LspSessionPolicy;
   readonly startupMilliseconds: number;
 }
+/** A backend may reject an unqualified source target before the shared session consumes its response. */
+export type LspSessionClient = Omit<LspClient, 'request'> & {
+  readonly request: (...args: Parameters<LspClient['request']>) => Effect.Effect<Schema.Json, unknown>;
+};
 /** One project/environment/view. Reads and preparation only; no command or apply-edit entry point exists. */
 export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
-  client: LspClient,
+  client: LspSessionClient,
   options: LspSessionOptions,
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -259,12 +279,14 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
   const basis = structuredClone(yield* decode(Observation, options.basis));
   const worktree = yield* path.fromFileUrl(new URL(basis.worktree));
   const allowedRoots = [worktree, ...options.roots];
+  options.notifications.subscribe((method, params) => options.policy.receive?.(method, params));
+  const initializationRoot = options.policy.initializationRoot ?? basis.project;
   const initialized = yield* client.request(
     'initialize',
     {
       processId: null,
-      rootUri: basis.project,
-      workspaceFolders: [{uri: basis.project, name: options.policy.workspaceName}],
+      rootUri: initializationRoot,
+      workspaceFolders: [{uri: initializationRoot, name: options.policy.workspaceName}],
       capabilities: {
         general: {positionEncodings: ['utf-16']},
         ...(options.policy.experimentalCapabilities === undefined
@@ -308,6 +330,7 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
         callHierarchyProvider: Schema.optional(Schema.Unknown),
         typeHierarchyProvider: Schema.optional(Schema.Unknown),
         diagnosticProvider: Schema.optional(Schema.Unknown),
+        executeCommandProvider: Schema.optional(Schema.Unknown),
       }),
       serverInfo: Schema.optional(Schema.Struct({name: Schema.String, version: Schema.String})),
     }),
@@ -319,6 +342,15 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
   )
     return yield* SemanticSessionFault.make({reason: 'provider'});
   const capabilities = init.capabilities;
+  if (options.policy.requiredCommands) {
+    const descriptor = capabilities.executeCommandProvider;
+    const commandProvider = Schema.Struct({commands: Schema.Array(Schema.String).check(Schema.isMaxLength(1024))});
+    if (
+      !Schema.is(commandProvider)(descriptor) ||
+      EffectArray.some(options.policy.requiredCommands, command => !descriptor.commands.includes(command))
+    )
+      return yield* SemanticSessionFault.make({reason: 'provider'});
+  }
   const mutations = yield* Semaphore.make(1);
   const documents = new Map<string, Document>();
   let invalidated = false;
@@ -351,14 +383,22 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       items.set(id, {id, range: structuredClone(diagnostic.range), code, category, message: diagnostic.message});
     }
     document.published = {observation: structuredClone(document.observation), items: [...items.values()]};
-    if (options.policy.resolveCodeActions && Schema.is(Schema.Array(Schema.Json))(params.diagnostics))
+    if (
+      (options.policy.resolveCodeActions || options.policy.requestDiagnostics) &&
+      Schema.is(Schema.Array(Schema.Json))(params.diagnostics)
+    )
       document.nativeDiagnostics = structuredClone(params.diagnostics);
     Deferred.doneUnsafe(document.wake, Effect.void);
     return true;
   };
   options.notifications.subscribe((method, params) => {
     options.policy.receive?.(method, params);
-    if (!options.policy.pullDiagnostics && method === 'textDocument/publishDiagnostics' && Schema.is(Published)(params))
+    if (
+      !options.policy.pullDiagnostics &&
+      !options.policy.requestDiagnostics &&
+      method === 'textDocument/publishDiagnostics' &&
+      Schema.is(Published)(params)
+    )
       ingestDiagnostics(params);
   });
   yield* client.notify('initialized', {});
@@ -469,6 +509,18 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
     reason: 'Source view or analysis basis changed',
     evidence: null,
   });
+  let snapshotSequence = 0;
+  const captureSnapshot = (fixed: Observation, document: Document) =>
+    Effect.gen(function* () {
+      if (++snapshotSequence >= Number.MAX_SAFE_INTEGER) return yield* LspFault.make({code: 'capacity'});
+      return Object.freeze({
+        requestToken: sha256HexSync(JSON.stringify([observationKey(fixed), snapshotSequence])),
+        target: Object.freeze({uri: fixed.uri, text: document.text}),
+        inputs: Object.freeze(
+          EffectArray.map([...documents], ([uri, entry]) => Object.freeze({uri, text: entry.text})),
+        ),
+      }) satisfies LspDiagnosticRequest;
+    });
   const source = (uri: string, editsOnly = false) =>
     Effect.gen(function* () {
       if (!Schema.is(FileUri)(uri)) return yield* invalid();
@@ -630,15 +682,21 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
           'call-hierarchy': 'prepareCallHierarchy',
           'type-hierarchy': 'prepareTypeHierarchy',
         }[operation] ?? operation;
-      const response = yield* client.request(
-        'textDocument/' + method,
-        {
-          textDocument: {uri: fixed.uri},
-          ...(position ? {position} : {}),
-          ...(operation === 'references' ? {context: {includeDeclaration: true}} : {}),
-        },
-        milliseconds,
-      );
+      const response = yield* operation === 'type-definition' && options.policy.requestTypeDefinition
+        ? options.policy.requestTypeDefinition(
+            yield* captureSnapshot(fixed, document),
+            Object.freeze({line: position!.line, character: position!.character}),
+            milliseconds,
+          )
+        : client.request(
+            'textDocument/' + method,
+            {
+              textDocument: {uri: fixed.uri},
+              ...(position ? {position} : {}),
+              ...(operation === 'references' ? {context: {includeDeclaration: true}} : {}),
+            },
+            milliseconds,
+          );
       if (!current(fixed)) return stale();
       let items: Schema.Json[];
       if (['definition', 'references', 'implementation', 'type-definition'].includes(operation))
@@ -691,7 +749,16 @@ export const makeLspSession = Effect.fn('semantic.makeLspSession')(function* (
       const document = current(fixed);
       if (!document) return yield* SemanticSessionFault.make({reason: 'stale'});
       const sequence = ++document.diagnosticRequest;
-      if (options.policy.pullDiagnostics) {
+      if (options.policy.requestDiagnostics) {
+        const wireVersion = document.wireVersion;
+        const request = yield* captureSnapshot(fixed, document);
+        const items = yield* options.policy.requestDiagnostics(request, milliseconds);
+        if (!current(fixed) || document.diagnosticRequest !== sequence)
+          return yield* SemanticSessionFault.make({reason: 'stale'});
+        const publication = {uri: fixed.uri, version: wireVersion, diagnostics: items};
+        if (!Schema.is(Published)(publication) || !ingestDiagnostics(publication))
+          return yield* SemanticSessionFault.make({reason: 'provider'});
+      } else if (options.policy.pullDiagnostics) {
         const descriptor = capabilities.diagnosticProvider;
         if (!Schema.is(DiagnosticProvider)(descriptor)) return yield* SemanticSessionFault.make({reason: 'provider'});
         const wireVersion = document.wireVersion;
