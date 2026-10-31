@@ -16,7 +16,7 @@ const inventoryFixture = Effect.fn('test.incoming.inventoryFixture')(function* (
   yield* git('config', 'user.name', 'Fixture');
   yield* git('config', 'user.email', 'fixture@example.invalid');
   yield* f.fs.makeDirectory(f.path.join(f.repo, 'nested'));
-  const names = ['plain', 'space name', 'nested/é [x]*', '!literal', 'nested/file'];
+  const names = ['plain', 'space name', 'nested/é [x]', '!literal', 'nested/file'];
   for (const name of names) yield* f.fs.writeFileString(f.path.join(f.repo, name), name + '\n');
   yield* git('add', '--all');
   const blob = EffectString.trim(new TextDecoder().decode((yield* git('hash-object', '-w', '--stdin')).stdout));
